@@ -1220,6 +1220,56 @@ def test_ensure_change_ids_succeeds_with_commits_and_clean_tree(tmp_path: Path) 
     jd.ensure_change_ids(repo, base_ref=base)
 
 
+# OP-842: ensure_change_ids must filter the OP-836 workspace-safety
+# sentinel from the dirty-paths list. Without these tests the regression
+# (which wedged OP-840 in production on 2026-05-11) can silently return.
+
+
+def test_ensure_change_ids_skips_when_only_dirty_path_is_sentinel(tmp_path: Path) -> None:
+    """``.runner-cwd-sentinel`` alone in the dirty list MUST be filtered out
+    so ``ensure_change_ids`` proceeds to rebase. The sentinel is OP-836's
+    intentionally-untracked tamper-detection marker — its whole purpose is
+    to live in the worktree during the CLI session."""
+    repo = _init_worktree(tmp_path)
+    base = _head_sha(repo)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.py"], cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feature"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    # Drop the sentinel exactly as runner_workspace_safety would.
+    (repo / ".runner-cwd-sentinel").write_text(
+        '{"ticket_key": "OP-TEST", "head_sha": "abc"}', encoding="utf-8",
+    )
+    # Should NOT raise — sentinel is filtered out, no other dirty paths.
+    jd.ensure_change_ids(repo, base_ref=base)
+
+
+def test_ensure_change_ids_raises_when_sentinel_plus_other_dirty(tmp_path: Path) -> None:
+    """Sentinel + actual uncommitted user files → still raises but the
+    ``dirty_files`` list excludes the sentinel (so the diagnostic message
+    points at the real user-side problem, not at our own marker file)."""
+    repo = _init_worktree(tmp_path)
+    base = _head_sha(repo)
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.py"], cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "feature"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    (repo / ".runner-cwd-sentinel").write_text("{}", encoding="utf-8")
+    (repo / "uncommitted.py").write_text("y = 2\n", encoding="utf-8")
+    with pytest.raises(jd.WorktreeDirtyError) as ei:
+        jd.ensure_change_ids(repo, base_ref=base)
+    assert "uncommitted.py" in ei.value.dirty_files
+    assert ".runner-cwd-sentinel" not in ei.value.dirty_files
+
+
 def test_ensure_change_ids_no_commits_error_carries_diagnostic_text() -> None:
     """Exception message includes a hint pointing at the CLI as cause."""
     err = jd.NoCommitsOnBranchError(base_ref="abc123def456", head="abc123def456")

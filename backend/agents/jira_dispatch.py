@@ -844,11 +844,25 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
     # Precondition 2: worktree has no uncommitted paths. ``git rebase``
     # refuses on a dirty worktree with a non-deterministic error message,
     # so we shape the diagnostic ourselves.
+    #
+    # OP-842 fix: exclude the OP-836 workspace-safety sentinel
+    # (``.runner-cwd-sentinel``) from the dirty check. The sentinel is
+    # written by ``runner_workspace_safety.write_workspace_sentinel``
+    # pre-CLI as an intentionally-untracked tamper-detection marker.
+    # OP-836 documented the intent to add it to ``.git/info/exclude``
+    # but the implementation was never written; this filter is the
+    # smaller, layered fix — the sentinel's ENTIRE purpose is to be
+    # detectable by us, but it has a known fixed filename so
+    # ``ensure_change_ids`` can recognise + skip it cleanly. Without
+    # this filter, every Phase 3+ ticket that runs through OP-836's
+    # write_workspace_sentinel would wedge here (OP-840 was the first
+    # ticket to surface the bug in production).
     status = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=worktree_path, check=True, capture_output=True, text=True,
     )
     dirty = [line[3:] for line in status.stdout.splitlines() if line.strip()]
+    dirty = [f for f in dirty if f != ".runner-cwd-sentinel"]
     if dirty:
         raise WorktreeDirtyError(dirty_files=dirty)
 
