@@ -1,0 +1,29 @@
+; [OP-873] systemd unit -- daily JIRA stale-ticket audit.
+;
+; Runs scripts/jira_stale_audit.py once. Triggered by the matching
+; .timer at 07:30 UTC each day. Writes the markdown report under
+; docs/audit/ and comments on To Do tickets aged 60d or more.
+;
+; Install (user-level -- shares JIRA credentials with the runner):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/jira-stale-audit.service ~/.config/systemd/user/
+;   cp deploy/systemd/jira-stale-audit.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now jira-stale-audit.timer
+
+[Unit]
+Description=OmniSight daily JIRA stale-ticket audit (OP-873)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/jira_stale_audit.py
+StandardOutput=append:%h/work/sora/logs/jira-stale-audit/run.log
+StandardError=append:%h/work/sora/logs/jira-stale-audit/run.log
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target
