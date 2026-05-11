@@ -119,7 +119,6 @@ from backend.agents.critic_agent import (
 )
 from backend.agents.loop_detector import (
     LoopDetector,
-    OutcomesConfig,
     OutcomesGraderUnavailable,
     OutcomesVerdict,
     load_outcomes_config,
@@ -131,6 +130,7 @@ from backend.agents.reflection_loop import (
     ReflectionInput,
     build_lint_reflection_input,
     build_test_reflection_input,
+)
 from backend.agents.runner_handlers import make_runner_dispatcher
 from backend.agents.skills_loader import (
     SkillRegistry,
