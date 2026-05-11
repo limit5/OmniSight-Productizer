@@ -1,0 +1,48 @@
+# Cognee drift-detector per-entity allowlist (OP-907 F9).
+#
+# Suppresses individual drift items that the detector would otherwise
+# flag every day until they get human attention. Used for known
+# false-positives — e.g. an entity that the ECL pipeline cannot easily
+# produce because the source path moves frequently, or a class that
+# Cognee adds as a framework artefact.
+#
+# Schema per entry:
+#   kind:  one of "stale" | "missing" | "schema"
+#   class: KG entity-class name (PascalCase, must match the label
+#          Cognee writes — same set as cognee_entity_classes.yaml).
+#   key:   For stale/missing — the entity key (dotted module path,
+#          JIRA issue key, etc.). For schema — the class name (i.e.
+#          ``key`` equals ``class``).
+#   rationale: REQUIRED free-text comment explaining WHY this is a
+#          false-positive. Entries without a rationale are auto-rejected
+#          in code review per the §3 DoD discipline.
+#
+# Detector behaviour:
+#   * Read fresh every run; no restart needed.
+#   * Missing/empty file → empty allowlist (no suppression).
+#   * Suppressed items are dropped silently from the audit report AND
+#     from the >7-day escalation count, so allowlisting fully retires
+#     an alert. Operator-review the file at least once per quarter to
+#     avoid silent rot.
+
+version: 1
+last_reviewed: 2026-05-11
+
+ignore: []
+  # Example entries (commented — uncomment + adapt as needed):
+  #
+  # - kind: schema
+  #   class: DocumentChunk
+  #   key: DocumentChunk
+  #   rationale: |
+  #     Cognee SDK writes :DocumentChunk on every node for internal
+  #     indexing; not part of the OmniSight ontology. The detector
+  #     already filters the canonical internal labels, but flag here
+  #     if a vendor renames it and we want to suppress quickly.
+  #
+  # - kind: stale
+  #   class: PythonModule
+  #   key: backend.agents.experiment_only
+  #   rationale: |
+  #     Spike module retained in KG for tracking even after file deletion;
+  #     pending OP-NNNN to formalise the experiment metadata table.

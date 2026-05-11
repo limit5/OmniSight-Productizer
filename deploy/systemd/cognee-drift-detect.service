@@ -1,0 +1,37 @@
+; [OP-907] Daily Cognee KG ontology drift detection.
+;
+; Install:
+;   sudo cp deploy/systemd/cognee-drift-detect.service /etc/systemd/system/
+;   sudo cp deploy/systemd/cognee-drift-detect.timer   /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now cognee-drift-detect.timer
+;
+; Runs read-only against Cognee/Neo4j; safe to rerun (output is an
+; idempotent dated Markdown report under docs/audit/). Exit codes:
+;   0 = drift report written (drift may or may not exist)
+;   1 = unexpected fatal error (stack trace in StandardError log)
+;   2 = KG unreachable; cron retries tomorrow per error catalog
+;
+; The 04:00 UTC trigger is intentionally one hour after the 03:00 UTC
+; nightly KG full-rebuild (cognee-nightly-rebuild.timer) so the drift
+; detector observes a freshly rebuilt KG and does not race the writer.
+
+[Unit]
+Description=OmniSight Cognee ontology drift detect (OP-907)
+After=network-online.target docker.service cognee-nightly-rebuild.service
+Wants=network-online.target
+ConditionPathExists=/opt/omnisight
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/omnisight
+EnvironmentFile=-/etc/omnisight/cognee.env
+EnvironmentFile=-/etc/omnisight/notifier.env
+Environment=PYTHONPATH=/opt/omnisight
+ExecStart=/usr/bin/python3 -m scripts.cognee_drift_detect --repo-root /opt/omnisight
+StandardOutput=append:/var/log/omnisight/cognee-drift-detect.log
+StandardError=append:/var/log/omnisight/cognee-drift-detect.log
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

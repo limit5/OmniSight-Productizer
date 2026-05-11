@@ -1,0 +1,19 @@
+; [OP-907] Daily 04:00 UTC trigger for cognee-drift-detect.service.
+;
+; 04:00 UTC = nightly rebuild (03:00 UTC) + 1h slack. The drift
+; detector reads from the rebuilt KG so the comparison reflects the
+; true post-ECL state. AccuracySec=1min keeps the firing window tight
+; and Persistent=true means a host that was off at 04:00 still runs
+; the audit on next boot.
+
+[Unit]
+Description=Daily trigger for OmniSight Cognee drift detect (OP-907)
+
+[Timer]
+Unit=cognee-drift-detect.service
+OnCalendar=*-*-* 04:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
