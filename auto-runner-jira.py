@@ -46,6 +46,7 @@ sys.path.insert(0, str(REPO))
 from backend.agents import (
     capability_matrix,
     circuit_breaker,
+    failure_graph,
     outcomes_consumer,
     jira_dispatch,
     orphan_salvage,
@@ -65,6 +66,14 @@ AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "default"
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
+
+# OP-858 (C8): pickup-time failure-graph context injection. Until C2's
+# runner_incidents Postgres table ships, the runner reads a JSON fixture
+# pointed at by OMNISIGHT_FAILURE_GRAPH_FIXTURE so the wiring is
+# exercisable end-to-end. Unset = no injection (zero-impact default).
+FAILURE_GRAPH_FIXTURE = os.environ.get(
+    "OMNISIGHT_FAILURE_GRAPH_FIXTURE", ""
+).strip()
 
 # Recognised JIRA `area:<X>` label values. Exported so other tooling
 # (seed scripts, label linters) can introspect the exact same set used
@@ -273,11 +282,6 @@ def _resolve_runner_capabilities(
         return matrix.resolve_for_areas(
             ticket_type, declared_areas, tier, labels=labels,
         )
-    # No declared area: deliberately ask for an unmapped key so the
-    # matrix returns the read-only safe-default + emits the missing-entry
-    # warning. Operator should fix the labels rather than relying on the
-    # default; the runner still works because read-only-only means the
-    # ticket can't push to Gerrit unless an explicit override is added.
     return matrix.resolve(ticket_type, "<no-area>", tier, labels=labels)
 
 
@@ -287,13 +291,7 @@ def _require_runner_capability(
     enabled: frozenset[str],
     capability: str,
 ) -> bool:
-    """Enforce a capability before the runner performs a sensitive op.
-
-    Returns True if permitted. On refusal, posts a `[runner-capability-blocked]`
-    comment + reverts the ticket to TODO so an operator can either extend the
-    matrix or add `capability:enable=<cap>` before re-pickup. Never raises —
-    the runner main-loop continues so cleanup can finish.
-    """
+    """Enforce a capability before the runner performs a sensitive op."""
     try:
         capability_matrix.require_capability(enabled, capability)
         return True
@@ -324,6 +322,48 @@ def _require_runner_capability(
         return False
 
 
+def _load_failure_graph_for_pickup() -> failure_graph.FailureGraph | None:
+    """Return a FailureGraph rebuilt from the operator-supplied fixture.
+
+    OP-858 wiring point. Returns None when the fixture isn't configured
+    or fails to load — pickup must remain functional even when the
+    failure-graph layer is offline (the AC §error-catalog degrade path).
+    """
+    if not FAILURE_GRAPH_FIXTURE:
+        return None
+    fixture_path = Path(FAILURE_GRAPH_FIXTURE)
+    if not fixture_path.is_file():
+        print(
+            f"[runner] failure_graph.fixture_missing path={fixture_path}",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        import json as _json
+        rows = _json.loads(fixture_path.read_text())
+        from datetime import datetime as _dt
+        incidents = [
+            failure_graph.RunnerIncident(
+                incident_id=row["incident_id"],
+                ticket_key=row["ticket_key"],
+                failure_class=row["failure_class"],
+                mutex_label=row.get("mutex_label"),
+                occurred_at=_dt.fromisoformat(
+                    row["occurred_at"].replace("Z", "+00:00")
+                ),
+                summary=row.get("summary", ""),
+            )
+            for row in rows
+        ]
+        return failure_graph.FailureGraph.build(incidents)
+    except Exception as e:  # noqa: BLE001 — degrade on any parse error
+        print(
+            f"[runner] failure_graph.fixture_load_failed err={e}",
+            file=sys.stderr,
+        )
+        return None
+
+
 def _build_prompt(
     client: jira_dispatch.DispatchClient,
     key: str,
@@ -334,8 +374,10 @@ def _build_prompt(
     Side effect (OP-855): resolves the capability matrix for this ticket
     and stashes the result in :data:`_LAST_RESOLVED_CAPABILITIES` so
     ``main()`` can gate sensitive runner operations without a second
-    issue fetch. The prompt itself ends with a `# Enabled capabilities`
-    section listing the permitted operations.
+    issue fetch.
+
+    OP-858: when failure-graph fixture is configured, injects neighbour
+    incident context into the prompt before AC.
     """
     issue = jira_dispatch._request(
         client, "GET", f"/issue/{key}?fields=summary,labels,components,issuetype",
@@ -373,6 +415,16 @@ def _build_prompt(
         f"  - {cap_lines}\n"
     )
 
+    # OP-858 (C8) — inject failure-graph context for prior failed attempts on
+    # this ticket. The block is empty when the ticket has no prior incidents
+    # or when the fixture/Cognee source is offline (degrade path).
+    fg_block = ""
+    fg = _load_failure_graph_for_pickup()
+    if fg is not None:
+        rendered = failure_graph.render_pickup_context(fg, key)
+        if rendered:
+            fg_block = "\n\n" + rendered + "\n"
+
     return f"""You are working on JIRA ticket {key}.
 
 Component: {component_label}
@@ -387,7 +439,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-{capabilities_block}
+{capabilities_block}{fg_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
