@@ -28,6 +28,8 @@ Type=exec
 User=USERNAME
 WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
 EnvironmentFile=/home/USER_HOME/work/sora/OmniSight-Productizer/.env
+Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
+Environment=OMNISIGHT_MEMORY_TOOL_CAP_MB=100
 ExecStart=/bin/sh -c '\
     WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c "import os; print(max(2, os.cpu_count() // 2))")}; \
     exec python3 -m uvicorn backend.main:app \
@@ -47,6 +49,7 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/data
 ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/workspaces
+ReadWritePaths=/var/omnisight/memory
 PrivateTmp=yes
 
 [Install]

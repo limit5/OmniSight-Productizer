@@ -95,6 +95,8 @@ Failure modes (AC error catalog)
 ================================
 * :class:`MemoryToolNotStandalone` — Anthropic refused the call without
   Managed Agents runtime (spike abort).
+* :class:`MemoryDirNotWritable` — storage root is missing or not writable
+  at backend start; fix provisioning before retrying.
 * :class:`MemoryStorageFull` — single-file write exceeds the cap.
 * :class:`MemoryCorrupted` — index unreadable; caller restores from
   daily backup.
@@ -167,6 +169,7 @@ AUDIT_TYPE = "memory_tool"
 # Error catalog codes (AC #2 — Error catalog block).
 ERR_NOT_STANDALONE = "memory_tool_not_standalone"
 ERR_STORAGE_FULL = "memory_storage_full"
+ERR_DIR_NOT_WRITABLE = "memory_dir_not_writable"
 ERR_CORRUPTED = "memory_corrupted"
 ERR_TIER_VIOLATION = "tier_violation_unauthorized_recall"
 ERR_UNAVAILABLE = "memory_tool_unavailable"
@@ -198,6 +201,12 @@ class MemoryToolNotStandalone(MemoryToolError):
     """Anthropic refused the call without a Managed Agents runtime."""
 
     error_code = ERR_NOT_STANDALONE
+
+
+class MemoryDirNotWritable(MemoryToolError):
+    """Storage root missing or not writable at backend start."""
+
+    error_code = ERR_DIR_NOT_WRITABLE
 
 
 class MemoryStorageFull(MemoryToolError):
@@ -413,7 +422,16 @@ class MemoryToolHandler:
 
     def __init__(self, config: MemoryToolConfig) -> None:
         self.config = config
-        self.config.storage_root.mkdir(parents=True, exist_ok=True)
+        try:
+            self.config.storage_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise MemoryDirNotWritable(
+                f"memory storage root is not creatable: {self.config.storage_root}"
+            ) from exc
+        if not os.access(self.config.storage_root, os.W_OK | os.X_OK):
+            raise MemoryDirNotWritable(
+                f"memory storage root is not writable: {self.config.storage_root}"
+            )
 
     # — Public surface —
 
@@ -656,15 +674,30 @@ class MemoryToolHandler:
         used = self._current_bytes()
         if used + incoming_bytes <= cap_bytes:
             return
+        self._audit(
+            op="MemoryCapExceeded",
+            key=f"{MEMORY_PATH_PREFIX}/",
+            extra={
+                "used_bytes": used,
+                "incoming_bytes": incoming_bytes,
+                "cap_bytes": cap_bytes,
+            },
+        )
         # Oldest-first eviction.
         candidates = sorted(
-            (p for p in self.config.storage_root.rglob("*") if p.is_file()),
+            (
+                p for p in self.config.storage_root.rglob("*")
+                if p.is_file() and p != exclude
+            ),
             key=lambda p: p.stat().st_mtime,
         )
+        # The incoming/rewritten file becomes part of the final newest-3
+        # safety floor, so protect the newest two existing files.
+        protected = set(candidates[-2:])
         for victim in candidates:
             if used + incoming_bytes <= cap_bytes:
                 break
-            if victim == exclude:
+            if victim in protected:
                 continue
             try:
                 size = victim.stat().st_size
@@ -688,7 +721,8 @@ class MemoryToolHandler:
         if used + incoming_bytes > cap_bytes:
             raise MemoryStorageFull(
                 f"unable to free enough space — used={used}B, "
-                f"incoming={incoming_bytes}B, cap={cap_bytes}B"
+                f"incoming={incoming_bytes}B, cap={cap_bytes}B; "
+                "newest 3 files preserved"
             )
 
     # — Audit log (AC #5) —

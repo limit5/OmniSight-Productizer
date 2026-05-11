@@ -1,0 +1,15 @@
+; OP-900: hourly Memory Tool fleet disk usage report.
+
+[Unit]
+Description=OmniSight Memory Tool storage usage report
+After=local-fs.target
+
+[Service]
+Type=oneshot
+Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
+Environment=OMNISIGHT_MEMORY_TOOL_FLEETS=claude codex merger
+Environment=OMNISIGHT_MEMORY_TOOL_USAGE_REPORT=/var/omnisight/memory/usage.jsonl
+ExecStart=/bin/sh -c 'set -eu; root="$${OMNISIGHT_MEMORY_TOOL_ROOT:-/var/omnisight/memory}"; fleets="$${OMNISIGHT_MEMORY_TOOL_FLEETS:-claude codex merger}"; report="$${OMNISIGHT_MEMORY_TOOL_USAGE_REPORT:-/var/omnisight/memory/usage.jsonl}"; mkdir -p "$$(dirname "$$report")"; ts="$$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)"; for fleet in $$fleets; do dir="$$root/$$fleet"; if [ -d "$$dir" ]; then human="$$(du -sh "$$dir" | awk '"'"'{print $$1}'"'"')"; bytes="$$(du -sb "$$dir" | awk '"'"'{print $$1}'"'"')"; else human="missing"; bytes=0; fi; printf '"'"'{"type":"memory_tool_storage","op":"du","fleet":"%s","path":"%s","human":"%s","bytes":%s,"timestamp":"%s"}\n'"'"' "$$fleet" "$$dir" "$$human" "$$bytes" "$$ts"; done >> "$$report"'
+
+[Install]
+WantedBy=multi-user.target
