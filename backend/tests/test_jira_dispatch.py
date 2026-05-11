@@ -1022,7 +1022,7 @@ def test_post_runner_pushed_comment_does_not_call_transitions(monkeypatch) -> No
     helper must NOT POST /transitions — that's now a separate concern."""
     transition_calls: list = []
 
-    def fake_request(client, method, path, body=None):
+    def fake_request(client, method, path, body=None, idem_key=None):
         if "/transitions" in path:
             transition_calls.append((method, path))
         return {}
@@ -1056,7 +1056,7 @@ def test_transition_to_under_review_if_needed_transitions_when_in_progress(monke
 
     monkeypatch.setattr(jd, "get_issue_status", lambda c, k: "In Progress")
 
-    def fake_request(client, method, path, body=None):
+    def fake_request(client, method, path, body=None, idem_key=None):
         if "/transitions" in path:
             transition_calls.append((method, path, body))
         return {}
@@ -1093,9 +1093,9 @@ def test_transition_to_under_review_wrapper_posts_comment_and_transitions_in_pro
     monkeypatch.setattr(jd, "get_issue_status", lambda c, k: "In Progress")
     calls: list = []
     monkeypatch.setattr(jd, "post_runner_pushed_comment",
-                        lambda c, k, url: calls.append(("comment", k, url)))
+                        lambda c, k, url, idem_key=None: calls.append(("comment", k, url)))
     monkeypatch.setattr(jd, "transition_to_under_review_if_needed",
-                        lambda c, k: calls.append(("transition", k)) or True)
+                        lambda c, k, idem_key=None: calls.append(("transition", k)) or True)
 
     jd.transition_to_under_review(_fake_dispatch_client(), "OP-691",
                                   "https://sora.services:29420/c/x/+/42")
