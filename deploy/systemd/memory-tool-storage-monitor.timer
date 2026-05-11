@@ -1,0 +1,12 @@
+; OP-900: run Memory Tool storage usage report hourly.
+
+[Unit]
+Description=Hourly OmniSight Memory Tool storage usage report
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=memory-tool-storage-monitor.service
+
+[Install]
+WantedBy=timers.target

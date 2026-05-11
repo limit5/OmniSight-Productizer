@@ -38,6 +38,8 @@ WorkingDirectory=%h/work/sora/OmniSight-Productizer
 Environment=PYTHONUNBUFFERED=1
 Environment=OMNISIGHT_RUNNER_CLASS=subscription-codex
 Environment=OMNISIGHT_RUNNER_INSTANCE_ID=%i
+Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
+Environment=OMNISIGHT_MEMORY_TOOL_CAP_MB=100
 ; Per-instance idempotency DB so two instances don't dedup each other's
 ; JIRA mutations against shared rows. Default-instance setups can leave
 ; this unset and the runner falls back to ~/.config/omnisight/idem-keys.db.

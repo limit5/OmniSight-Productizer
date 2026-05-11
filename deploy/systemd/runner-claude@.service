@@ -21,6 +21,8 @@ WorkingDirectory=%h/work/sora/OmniSight-Productizer
 Environment=PYTHONUNBUFFERED=1
 Environment=OMNISIGHT_RUNNER_CLASS=subscription-claude
 Environment=OMNISIGHT_RUNNER_INSTANCE_ID=%i
+Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
+Environment=OMNISIGHT_MEMORY_TOOL_CAP_MB=100
 Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-claude-bot-%i.db
 ; OP-845: bubblewrap sandbox wrapper for CLI invocations.
 ;
