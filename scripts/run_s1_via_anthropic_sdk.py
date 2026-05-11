@@ -112,7 +112,13 @@ from backend.agents.critic_agent import (
     resolve_critic_model,
     review_with_dissent_protocol,
 )
-from backend.agents.loop_detector import LoopDetector
+from backend.agents.loop_detector import (
+    LoopDetector,
+    OutcomesConfig,
+    OutcomesGraderUnavailable,
+    OutcomesVerdict,
+    load_outcomes_config,
+)
 from backend.agents.runner_handlers import make_runner_dispatcher
 from backend.agents.skills_loader import (
     SkillRegistry,
@@ -182,6 +188,21 @@ NON_RETRYABLE_STOP_REASONS: frozenset[str] = frozenset({
     "max_tokens", "max_iterations_exceeded",
 })
 STRUCTURAL_ESCALATION_STOP_REASONS = NON_RETRYABLE_STOP_REASONS
+
+# B16 (OP-847) — grader prompt header. The Haiku grader receives this
+# preamble + the rubric + the runner's final assistant text, and is
+# asked to emit a single JSON line. The shape mirrors the reconstructed
+# Anthropic Outcomes beta response shape from the OP-843 spike §1
+# (``verdict``, ``grader_reasoning``) — see docs/research/b3-outcomes-spike-2026-05.md.
+OUTCOMES_GRADER_PROMPT_TEMPLATE = (
+    "You are an Outcomes grader for an autonomous code-implementation runner. "
+    "Apply the rubric below to the runner's final assistant turn (no tools, "
+    "no follow-up). Reply with ONE LINE of JSON containing keys "
+    '"verdict" ("pass" | "fail") and "grader_reasoning" (≤200 chars). '
+    "No prose outside the JSON.\n\n"
+    "=== Rubric ===\n{rubric}\n\n"
+    "=== Runner final text ===\n{final_text}\n"
+)
 
 # Pickup JQL — only refined Story tickets in S1 (placeholders are explicitly
 # excluded by ``labels not in ("runner-needs-refinement")``).
@@ -543,6 +564,84 @@ def _build_system_prompt(ticket_key: str, ticket_summary: str) -> str:
     )
 
 
+def _make_outcomes_grader(
+    client: AnthropicClient | _DryRunClient,
+    *,
+    grader_model: str,
+):
+    """B16 (OP-847) — construct the grader callable for ``run_with_resets``.
+
+    The grader issues one ``client.simple`` Haiku call, parses the JSON
+    verdict line, and surfaces ``usage.input_tokens`` /
+    ``usage.output_tokens`` so the orchestrator can thread the grader's
+    cost through ``_post_call_cost_record`` (AC #4). Any parse / API
+    failure raises ``OutcomesGraderUnavailable`` so the orchestrator
+    degrades to pure B3 acceptance for that attempt (AC #1 error catalog).
+    """
+
+    async def _grade(rubric: str, result: RunResult) -> OutcomesVerdict:
+        prompt = OUTCOMES_GRADER_PROMPT_TEMPLATE.format(
+            rubric=rubric,
+            final_text=(result.final_text or "")[:8000],
+        )
+        try:
+            text, usage = await asyncio.to_thread(
+                client.simple,  # type: ignore[union-attr]
+                prompt=prompt,
+                model=grader_model,
+                temperature=0.0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise OutcomesGraderUnavailable(
+                f"grader API call failed: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        verdict_str, reasoning = _parse_grader_verdict(text)
+        return OutcomesVerdict(
+            verdict=verdict_str,
+            grader_reasoning=reasoning,
+            grader_input_tokens=usage.input_tokens,
+            grader_output_tokens=usage.output_tokens,
+        )
+
+    return _grade
+
+
+def _parse_grader_verdict(text: str) -> tuple[str, str]:
+    """Extract ``{"verdict": ..., "grader_reasoning": ...}`` from a
+    grader response. Tolerant of leading/trailing whitespace + extra
+    text around the JSON line (some Haiku replies prepend a brief
+    explanation despite the prompt). Returns
+    ``(verdict, grader_reasoning)``; raises
+    :class:`OutcomesGraderUnavailable` on any parse failure so the
+    orchestrator falls back to pure B3 acceptance.
+    """
+    candidate = text.strip()
+    payload: dict[str, Any] | None = None
+    try:
+        payload = json.loads(candidate)
+    except json.JSONDecodeError:
+        # Take the first {...} JSON object found by brace matching.
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if 0 <= start < end:
+            try:
+                payload = json.loads(candidate[start:end + 1])
+            except json.JSONDecodeError:
+                payload = None
+    if not isinstance(payload, dict):
+        raise OutcomesGraderUnavailable(
+            f"grader response did not contain JSON: {text[:200]!r}"
+        )
+    verdict = str(payload.get("verdict", "")).lower().strip()
+    if verdict not in {"pass", "fail"}:
+        raise OutcomesGraderUnavailable(
+            f"grader verdict not in pass/fail: {verdict!r} (raw {text[:200]!r})"
+        )
+    reasoning = str(payload.get("grader_reasoning", ""))[:500]
+    return verdict, reasoning
+
+
 def _build_user_prompt(ticket_key: str, ticket_description: str) -> str:
     return (
         f"Implement JIRA ticket {ticket_key}.\n\n"
@@ -740,6 +839,25 @@ async def process_ticket_full(
             inner=inner_dispatcher, detector=b3_detector,
         )
 
+    # OP-847 (B16) — load Outcomes config per-ticket. When the env flag
+    # is unset (default) this returns ``enabled=False`` and the
+    # orchestrator runs as pure B3. When set, the rubric is derived
+    # from the JIRA ticket's ``## Acceptance criteria`` section (with
+    # Goodhart guards in ``loop_detector.load_outcomes_config``).
+    outcomes_config = load_outcomes_config(
+        ticket_description=ticket_description,
+    )
+    outcomes_grader = (
+        _make_outcomes_grader(client, grader_model=outcomes_config.grader_model)
+        if outcomes_config.enabled else None
+    )
+    if outcomes_config.enabled:
+        print(
+            f"  [{ticket_key}] B16 outcomes-final-attempt ON "
+            f"(grader={outcomes_config.grader_model}, "
+            f"warnings={len(outcomes_config.rubric_warnings)})"
+        )
+
     last_attempt_cost_usd = 0.0
 
     async def _record_attempt_usage(usage: TokenUsage) -> None:
@@ -774,6 +892,8 @@ async def process_ticket_full(
                         scratchpad=b3_scratchpad,
                         first_user_message=user_prompt,
                         on_attempt_usage=_record_attempt_usage,
+                        outcomes_config=outcomes_config,
+                        outcomes_grader=outcomes_grader,
                     )
                 except Exception as exc:
                     return _abort_and_log(

@@ -23,15 +23,30 @@ the rare ``args_hash_collision`` case (see error catalog).
 Reset upper bound (per AC #5, FSM critical decision Q1): N=3. After 3
 resets, the orchestrator must abort with ``loop_aborted_terminal``.
 Total raw attempts ≤ 9 (3 attempts × 3 resets).
+
+B16 — Outcomes-graded final attempt (OP-847, operator-opt-in).
+The ``OutcomesConfig`` block (plus ``build_outcomes_rubric`` /
+``load_outcomes_config`` / ``detect_rubric_goodhart_warnings``) is the
+config surface for B16: when ``OMNISIGHT_OUTCOMES_FINAL_ATTEMPT=1`` the
+context-reset orchestrator wraps the LAST allowed attempt in an
+Outcomes (rubric + Haiku grader) envelope. B3 reset semantics for the
+first 2 attempts remain unchanged. See ``docs/research/b3-outcomes-spike-2026-05.md``
+for the disjoint-failure-mode analysis that motivated B16.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # AC #2 / Q1 constants. These are sprint-charter constants, not per-ticket
 # knobs (the spec is explicit: "Not configurable per-ticket").
@@ -277,3 +292,189 @@ class LoopDetector:
             if self._log[idx].signature.tool_name == RESET_BOUNDARY_TOOL:
                 return self._log[idx + 1:]
         return list(self._log)
+
+
+# ── B16 — Outcomes-graded final attempt (OP-847) ──────────────────────
+
+
+OUTCOMES_FINAL_ATTEMPT_ENV: str = "OMNISIGHT_OUTCOMES_FINAL_ATTEMPT"
+OUTCOMES_GRADER_MODEL_ENV: str = "OMNISIGHT_OUTCOMES_GRADER_MODEL"
+DEFAULT_GRADER_MODEL: str = "claude-haiku-4-5"
+
+# Per AC #5: phrases in the AC that historically correlate with grader
+# Goodhart-failures. Matched as whole words (so "simplify" doesn't trip
+# on "simply"). Char limit catches under-specified one-liner ACs.
+GOODHART_TRIGGER_PHRASES: tuple[str, ...] = (
+    "just", "simply", "trivial", "obvious",
+)
+GOODHART_THIN_AC_CHAR_LIMIT: int = 30
+OUTCOMES_RUBRIC_THIN_LOG_TAG: str = "[outcomes-rubric-thin]"
+
+# Per AC #2: templated rubric wrapper for non-empty AC sections.
+OUTCOMES_RUBRIC_WRAPPER: str = (
+    "PASS iff each of the following AC items is verifiable in the diff "
+    "or test output:\n\n{ac_text}"
+)
+
+# Per AC #2: fallback rubric when AC section is missing / freeform / empty.
+OUTCOMES_FALLBACK_RUBRIC: str = (
+    "PASS iff the worktree HEAD's tests pass and the AC verification "
+    "comment was posted."
+)
+
+# Pattern for extracting the JIRA `## Acceptance criteria` block. Case-
+# insensitive; matches the canonical markdown header form first, then
+# stops at the next ``##`` section or EOF. Bare ``Acceptance criteria``
+# (no header marker) is intentionally NOT matched here — it falls into
+# the freeform path so the fallback rubric kicks in.
+_AC_SECTION_RE = re.compile(
+    r"^\s*##\s+acceptance\s+criteria\s*\n(?P<body>.*?)(?=^\s*##\s|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+
+
+class OutcomesGraderUnavailable(RuntimeError):
+    """Grader call refused (beta header rejected / network / config gap).
+
+    The orchestrator catches this on the final attempt and falls back
+    to pure B3 hard-reset semantics — i.e. the runner's result is
+    accepted as-is and the rest of the pipeline (critic, push, JIRA
+    walk) proceeds. Per AC #1 error catalog.
+    """
+
+
+@dataclass(frozen=True)
+class OutcomesVerdict:
+    """Verdict returned by the Outcomes grader call.
+
+    ``grader_input_tokens`` / ``grader_output_tokens`` MUST be populated
+    so the orchestrator can thread the grader's cost through
+    ``_post_call_cost_record`` (AC #4). A grader that does not surface
+    a ``usage`` object is treated as ``OutcomesGraderUnavailable``.
+    """
+
+    verdict: str  # "pass" | "fail"
+    grader_reasoning: str
+    grader_input_tokens: int
+    grader_output_tokens: int
+
+    @property
+    def passed(self) -> bool:
+        return self.verdict == "pass"
+
+
+@dataclass(frozen=True)
+class OutcomesConfig:
+    """Operator-opt-in config for B16 (OP-847).
+
+    ``enabled=False`` is the production default — caller behaviour is
+    identical to pure B3 (AC #7 rollback property). ``rubric_warnings``
+    surfaces the Goodhart-guard hits from AC #5 so the orchestrator
+    can attach them to telemetry / operator notifications without
+    re-scanning the rubric text.
+    """
+
+    enabled: bool
+    rubric: str
+    grader_model: str = DEFAULT_GRADER_MODEL
+    rubric_warnings: tuple[str, ...] = ()
+
+
+def extract_acceptance_criteria_section(ticket_description: str) -> str:
+    """Pull the verbatim ``## Acceptance criteria`` body from a JIRA
+    ticket description. Returns the inner body stripped of surrounding
+    whitespace. Returns empty string when no canonical section is
+    present (caller should fall back to the templated rubric, AC #2).
+
+    Matches only the markdown-header form ``## Acceptance criteria``
+    (case-insensitive). Plain-text headers like ``Acceptance criteria:``
+    are intentionally NOT matched — those tickets are typically the
+    freeform / under-specified ones the fallback rubric is for.
+    """
+    match = _AC_SECTION_RE.search(ticket_description or "")
+    if match is None:
+        return ""
+    return match.group("body").strip()
+
+
+def detect_rubric_goodhart_warnings(ac_text: str) -> list[str]:
+    """Per AC #5: scan AC text for grader-failure-prone phrases /
+    under-specified one-liners. Returns a list of human-readable
+    warning strings (empty list = no Goodhart risk detected).
+
+    Warnings DO NOT block the rubric — the orchestrator still runs the
+    grader. They are surfaced so the operator can correct the rubric
+    in a follow-up if grader hallucination rates spike.
+    """
+    warnings: list[str] = []
+    if not ac_text:
+        return warnings
+    lowered = ac_text.lower()
+    for phrase in GOODHART_TRIGGER_PHRASES:
+        if re.search(rf"\b{re.escape(phrase)}\b", lowered):
+            warnings.append(
+                f"AC contains grader-failure-prone phrase '{phrase}' — "
+                f"rubric may train surface signal over outcome"
+            )
+    # Per-line thin-AC check: any non-blank line ≤ char limit looks
+    # under-specified. Most well-formed ACs are paragraph-length; the
+    # short ones are the ones graders over-fit to.
+    for raw_line in ac_text.splitlines():
+        line = raw_line.strip(" \t-*0123456789.").strip()
+        if 0 < len(line) <= GOODHART_THIN_AC_CHAR_LIMIT:
+            warnings.append(
+                f"AC line under-specified ({len(line)} ≤ "
+                f"{GOODHART_THIN_AC_CHAR_LIMIT} chars): {line!r}"
+            )
+    return warnings
+
+
+def build_outcomes_rubric(ac_text: str) -> tuple[str, list[str]]:
+    """Per AC #2 + #5: build a rubric (templated wrapper or fallback)
+    and return the Goodhart-guard warnings alongside.
+
+    The fallback rubric is used when ``ac_text`` is empty / whitespace.
+    Warnings are computed over the verbatim AC text (not the wrapper),
+    since the wrapper itself is fixed and never matches a Goodhart
+    phrase.
+    """
+    stripped = (ac_text or "").strip()
+    if not stripped:
+        return OUTCOMES_FALLBACK_RUBRIC, []
+    rubric = OUTCOMES_RUBRIC_WRAPPER.format(ac_text=stripped)
+    warnings = detect_rubric_goodhart_warnings(stripped)
+    return rubric, warnings
+
+
+def load_outcomes_config(
+    *,
+    ticket_description: str,
+    env: Mapping[str, str] | None = None,
+) -> OutcomesConfig:
+    """Build an ``OutcomesConfig`` from env + ticket description.
+
+    Per AC #1: ``OMNISIGHT_OUTCOMES_FINAL_ATTEMPT=1`` enables B16.
+    Per AC #3: ``OMNISIGHT_OUTCOMES_GRADER_MODEL`` overrides the
+    default grader model (``claude-haiku-4-5``).
+    Per AC #5: any rubric warnings are logged with the
+    ``[outcomes-rubric-thin]`` tag (operator-warn, still run).
+    Per AC #7: flag=0 returns a disabled config — caller's existing
+    code path (pure B3) is preserved bit-for-bit.
+    """
+    env = env if env is not None else os.environ
+    enabled = env.get(OUTCOMES_FINAL_ATTEMPT_ENV, "0") == "1"
+    grader_model = env.get(OUTCOMES_GRADER_MODEL_ENV, DEFAULT_GRADER_MODEL)
+    if not enabled:
+        return OutcomesConfig(
+            enabled=False, rubric="", grader_model=grader_model,
+        )
+    ac_text = extract_acceptance_criteria_section(ticket_description)
+    rubric, warnings = build_outcomes_rubric(ac_text)
+    for warning in warnings:
+        logger.warning("%s %s", OUTCOMES_RUBRIC_THIN_LOG_TAG, warning)
+    return OutcomesConfig(
+        enabled=True,
+        rubric=rubric,
+        grader_model=grader_model,
+        rubric_warnings=tuple(warnings),
+    )
