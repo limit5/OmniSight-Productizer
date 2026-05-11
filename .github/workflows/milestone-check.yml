@@ -1,0 +1,96 @@
+name: Milestone Acceptance Check
+
+# OP-868: nightly fixVersion milestone readiness check. The job is
+# inert unless the deployment secrets are configured, which keeps forks
+# and local mirrors from failing on missing JIRA/Gerrit credentials.
+
+on:
+  schedule:
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: milestone-acceptance-check
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.12"
+
+jobs:
+  milestone-check:
+    name: current + next milestone
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      OMNISIGHT_DATABASE_URL: ${{ secrets.OMNISIGHT_DATABASE_URL }}
+      OMNISIGHT_JIRA_SITE_URL: ${{ secrets.OMNISIGHT_JIRA_SITE_URL }}
+      OMNISIGHT_JIRA_CODEX_EMAIL: ${{ secrets.OMNISIGHT_JIRA_CODEX_EMAIL }}
+      OMNISIGHT_JIRA_CODEX_TOKEN: ${{ secrets.OMNISIGHT_JIRA_CODEX_TOKEN }}
+      OMNISIGHT_GERRIT_SSH_KEY: ${{ secrets.OMNISIGHT_GERRIT_SSH_KEY }}
+      OMNISIGHT_GERRIT_SSH_HOST: ${{ secrets.OMNISIGHT_GERRIT_SSH_HOST }}
+      OMNISIGHT_GERRIT_SSH_PORT: ${{ secrets.OMNISIGHT_GERRIT_SSH_PORT }}
+      OMNISIGHT_GERRIT_PROJECT: ${{ secrets.OMNISIGHT_GERRIT_PROJECT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Check required secrets
+        id: secrets
+        run: |
+          set -eu
+          if [ -z "${OMNISIGHT_DATABASE_URL:-}" ] || \
+             [ -z "${OMNISIGHT_JIRA_SITE_URL:-}" ] || \
+             [ -z "${OMNISIGHT_JIRA_CODEX_EMAIL:-}" ] || \
+             [ -z "${OMNISIGHT_JIRA_CODEX_TOKEN:-}" ] || \
+             [ -z "${OMNISIGHT_GERRIT_SSH_KEY:-}" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Milestone acceptance check skipped: required secrets are absent."
+            exit 0
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Install backend dependencies
+        if: steps.secrets.outputs.configured == 'true'
+        working-directory: backend
+        run: |
+          set -eu
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure JIRA and Gerrit credentials
+        if: steps.secrets.outputs.configured == 'true'
+        run: |
+          set -eu
+          mkdir -p ~/.config/omnisight
+          {
+            echo "OMNISIGHT_JIRA_SITE_URL=${OMNISIGHT_JIRA_SITE_URL}"
+            echo "OMNISIGHT_JIRA_CODEX_EMAIL=${OMNISIGHT_JIRA_CODEX_EMAIL}"
+            echo "OMNISIGHT_JIRA_PROJECT_KEY=OP"
+          } > ~/.config/omnisight/jira-codex.env
+          printf '%s' "${OMNISIGHT_JIRA_CODEX_TOKEN}" > ~/.config/omnisight/jira-codex-token
+          printf '%s\n' "${OMNISIGHT_GERRIT_SSH_KEY}" > ~/.config/omnisight/gerrit-codex-bot-ed25519
+          chmod 0600 ~/.config/omnisight/gerrit-codex-bot-ed25519
+          echo "OMNISIGHT_GIT_SSH_KEY_PATH=$HOME/.config/omnisight/gerrit-codex-bot-ed25519" >> "$GITHUB_ENV"
+
+      - name: Check current and next milestones
+        if: steps.secrets.outputs.configured == 'true'
+        run: |
+          set -eu
+          mkdir -p milestone-reports
+          python3 scripts/milestone_check.py \
+            --nightly \
+            --out milestone-reports/nightly.json \
+            --meta-ticket OP-761
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.secrets.outputs.configured == 'true'
+        with:
+          name: milestone-nightly-report
+          path: milestone-reports/nightly.json
