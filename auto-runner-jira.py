@@ -47,6 +47,7 @@ from backend.agents import (
     capability_matrix,
     circuit_breaker,
     failure_graph,
+    memory_writeback,
     outcomes_consumer,
     jira_dispatch,
     orphan_salvage,
@@ -649,6 +650,66 @@ def _finalize_under_review(
               f"comment posted, transition skipped")
 
 
+def _run_memory_writeback(
+    client: "jira_dispatch.DispatchClient",
+    ticket_key: str,
+    *,
+    outcome: str,
+    summary: str = "",
+    failure_class: str | None = None,
+    raw_traceback: str = "",
+    mutex_label: str | None = None,
+    area: str | None = None,
+) -> None:
+    """OP-906 (F8) — fan write-back across Memory Tool / incidents / Cognee.
+
+    Idempotent on ``(ticket_key, attempt_n)`` where attempt_n is the
+    count of prior writebacks for this ticket plus one. Per AC #3 a
+    backing-store outage logs + continues; this helper never raises.
+    """
+    try:
+        attempt_n = len(memory_writeback.get_writebacks_for(ticket_key)) + 1
+        request = memory_writeback.WritebackRequest(
+            ticket_key=ticket_key,
+            attempt_n=attempt_n,
+            outcome=outcome,
+            summary=summary,
+            failure_class=failure_class,
+            raw_traceback=raw_traceback,
+            mutex_label=mutex_label,
+            area=area,
+            runner_class=AGENT_CLASS,
+        )
+        result = memory_writeback.MemoryWriteback().write(request)
+    except Exception as exc:  # noqa: BLE001 — writeback is fail-open per AC #3
+        print(
+            f"[runner] memory_writeback unexpected error ticket={ticket_key} "
+            f"err={type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    if result.idempotent_skip:
+        return
+    if result.memory_tool_lesson_id:
+        try:
+            jira_dispatch.add_comment(
+                client,
+                ticket_key,
+                f"[memory-writeback] lesson={result.memory_tool_lesson_id}",
+            )
+        except Exception as exc:  # noqa: BLE001 — comment-post is informational
+            print(
+                f"[runner] memory_writeback comment failed ticket={ticket_key} "
+                f"err={type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    if result.stores_failed:
+        print(
+            f"[runner] memory_writeback partial ticket={ticket_key} "
+            f"stores_failed={list(result.stores_failed)}"
+        )
+
+
 def _handle_gerrit_push_failure(
     client: "jira_dispatch.DispatchClient",
     key: str,
@@ -1186,6 +1247,14 @@ def main() -> int:
             outcome="failure",
             started_at=metric_started_at,
         )
+        _run_memory_writeback(
+            client,
+            snapshot.key,
+            outcome=memory_writeback.OUTCOME_FAILURE,
+            summary="workspace tampered post-CLI",
+            failure_class="WORKTREE_DIRTY",
+            area=metric_meta.get("area"),
+        )
         return 1
     runner_metrics_recorder.record_completion_sync(
         metric_id=metric_id,
@@ -1285,8 +1354,23 @@ def main() -> int:
                 return 1
             if outcomes_status == "fail":
                 print(f"[runner] {snapshot.key} Outcomes grader failed; ticket reopened")
+                _run_memory_writeback(
+                    client,
+                    snapshot.key,
+                    outcome=memory_writeback.OUTCOME_FAILURE,
+                    summary="outcomes-grader refused",
+                    failure_class="OUTCOMES_GRADER_REFUSED",
+                    area=metric_meta.get("area"),
+                )
                 return 0
             _finalize_under_review(client, snapshot.key, push_result.change_url)
+            _run_memory_writeback(
+                client,
+                snapshot.key,
+                outcome=memory_writeback.OUTCOME_SUCCESS,
+                summary=f"runner_pushed_gerrit change={push_result.change_number}",
+                area=metric_meta.get("area"),
+            )
         else:
             print(f"[runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
             _handle_gerrit_push_failure(
@@ -1302,6 +1386,13 @@ def main() -> int:
     else:
         print(f"[runner] {snapshot.key} CLI failed rc={rc}; reverting ticket")
         jira_dispatch.transition_back_to_todo(client, snapshot.key, f"CLI exited {rc}; needs operator review.")
+        _run_memory_writeback(
+            client,
+            snapshot.key,
+            outcome=memory_writeback.OUTCOME_FAILURE,
+            summary=f"CLI exited rc={rc}",
+            area=metric_meta.get("area"),
+        )
     return rc
 
 
