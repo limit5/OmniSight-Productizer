@@ -47,6 +47,7 @@ from backend.agents import (
     capability_matrix,
     circuit_breaker,
     failure_graph,
+    feature_flags as agent_feature_flags,
     memory_writeback,
     outcomes_consumer,
     jira_dispatch,
@@ -325,6 +326,113 @@ def _require_runner_capability(
         return False
 
 
+# OP-905 (F7) — runner-side project-state injection knobs.
+#
+# Backend base URL: defaults to the local backend so the runner can reach
+# the aggregator without a deploy-specific knob; operators override via
+# ``OMNISIGHT_BACKEND_URL`` in the systemd unit when the backend lives
+# elsewhere (e.g. a different host inside the same VPC).
+PROJECT_STATE_BACKEND_URL = os.environ.get(
+    "OMNISIGHT_BACKEND_URL", "http://localhost:8000"
+).rstrip("/")
+
+# 3 s budget per AC #3 — 1 s margin over the API's 2 s total budget so a
+# backend that hugs its own ceiling never hangs the runner.
+PROJECT_STATE_FETCH_TIMEOUT_S = 3.0
+
+# Operator override label (AC #5). When present on a ticket, the runner
+# skips injection for that pickup even if the feature flag is enabled.
+PROJECT_STATE_SKIP_LABEL = "project-state:skip"
+
+
+def _fetch_project_state(key: str) -> dict | None:
+    """Call ``GET /api/v1/project-state?ticket=<key>`` with a hard 3 s timeout.
+
+    Returns the parsed payload on success or ``None`` on any failure
+    (unreachable / timeout / non-200 / malformed JSON). The error catalog
+    in the AC says every failure mode degrades to "no injection + log",
+    so we collapse them into one ``None`` return and let the caller emit
+    the appropriate marker.
+    """
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    url = (
+        f"{PROJECT_STATE_BACKEND_URL}/api/v1/project-state"
+        f"?ticket={urllib.parse.quote(key)}"
+    )
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=PROJECT_STATE_FETCH_TIMEOUT_S) as resp:
+            raw = resp.read().decode("utf-8")
+    except (TimeoutError, urllib.error.URLError, OSError) as exc:
+        # ProjectStateAPIUnreachable / ProjectStateAPITimeout — same
+        # degrade path per AC error catalog.
+        print(
+            f"[runner] project_state.fetch_failed key={key} err={exc!r}",
+            file=sys.stderr,
+        )
+        return None
+
+    try:
+        parsed = json.loads(raw) if raw else None
+    except json.JSONDecodeError as exc:
+        print(
+            f"[runner] project_state.malformed_response key={key} err={exc!r}",
+            file=sys.stderr,
+        )
+        return None
+    if not isinstance(parsed, dict):
+        # ProjectStateMalformedResponse — defensive against API drift.
+        print(
+            f"[runner] project_state.malformed_response key={key} "
+            f"type={type(parsed).__name__}",
+            file=sys.stderr,
+        )
+        return None
+    return parsed
+
+
+def _render_project_state_block(payload: dict) -> str:
+    """Format the aggregator payload into the prompt's ``# Project context`` block.
+
+    The aggregator already shapes the three-axis dict; we serialise it as
+    indented JSON so the downstream CLI sees stable, copy-pasteable
+    context rather than a flattened bullet list that loses field names.
+    """
+    rendered = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+    return (
+        "\n# Project context (OP-905 cross-task awareness)\n\n"
+        "The /api/v1/project-state aggregator returned the following payload\n"
+        "for this ticket at pickup time. Treat null axes as 'no context'.\n\n"
+        f"```json\n{rendered}\n```\n"
+    )
+
+
+def _build_project_state_block(key: str, labels: list[str]) -> str:
+    """Resolve flag + label override and return the prompt block (or '').
+
+    AC #4: flag default-off — when disabled, we never call the API.
+    AC #5: ``project-state:skip`` label on the ticket disables injection
+    for that pickup even when the flag is on.
+    AC error catalog: any fetch failure degrades to an empty block + log.
+    """
+    if not agent_feature_flags.is_project_state_inject_enabled_sync():
+        return ""
+    if PROJECT_STATE_SKIP_LABEL in labels:
+        print(
+            f"[runner] project_state.skipped_by_label key={key} "
+            f"label={PROJECT_STATE_SKIP_LABEL}",
+            file=sys.stderr,
+        )
+        return ""
+    payload = _fetch_project_state(key)
+    if payload is None:
+        return ""
+    return _render_project_state_block(payload)
+
+
 def _load_failure_graph_for_pickup() -> failure_graph.FailureGraph | None:
     """Return a FailureGraph rebuilt from the operator-supplied fixture.
 
@@ -433,6 +541,11 @@ def _build_prompt(
         if rendered:
             fg_block = "\n\n" + rendered + "\n"
 
+    # OP-905 (F7) — inject cross-task awareness payload from the
+    # /api/v1/project-state aggregator. Gated by the feature flag + skip
+    # label; any fetch failure degrades silently to an empty block.
+    ps_block = _build_project_state_block(key, list(labels))
+
     return f"""You are working on JIRA ticket {key}.
 
 Component: {component_label}
@@ -447,7 +560,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-{capabilities_block}{fg_block}
+{capabilities_block}{fg_block}{ps_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.

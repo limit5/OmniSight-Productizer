@@ -175,3 +175,144 @@ def test_seed_script_create_issue_rejects_unknown_area(runner, monkeypatch):
     with pytest.raises(runner.UnknownAreaLabelError) as exc_info:
         seed_module._validate_area_labels(["area:bogus", "tier:M"])
     assert exc_info.value.unknown == ["bogus"]
+
+
+# ── OP-905 (F7): project-state injection at pickup ──
+#
+# Four cases pinned by the AC test-plan: flag-on injects, flag-off omits,
+# API timeout proceeds without injection, malformed response proceeds
+# without injection. A fifth case covers the operator override label.
+
+
+_PROJECT_CONTEXT_HEADER = "# Project context"
+
+
+@pytest.fixture
+def fake_project_state_payload():
+    """Realistic-shaped aggregator payload used by injection tests."""
+    return {
+        "ticket": "OP-1234",
+        "develop_sha": "deadbeef",
+        "structural": {"blockers": ["OP-1"], "parent": "OP-META"},
+        "temporal": {"recent_failures": []},
+        "causal": None,
+        "generated_at": "2026-05-11T00:00:00+00:00",
+    }
+
+
+def test_project_state_inject_flag_on_emits_block(
+    runner, fake_client, monkeypatch, fake_project_state_payload
+):
+    """AC #1 + #2 + #6 — flag enabled → prompt contains the `# Project context` block."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.setenv("OMNISIGHT_PROJECT_STATE_INJECT", "1")
+    monkeypatch.setattr(
+        runner, "_fetch_project_state", lambda key: fake_project_state_payload,
+    )
+    prompt = runner._build_prompt(fake_client, "OP-1234", "stub body")
+    assert _PROJECT_CONTEXT_HEADER in prompt
+    # AC #2 — block must appear before the AC verification section so the
+    # downstream CLI sees context before it is told to satisfy the AC.
+    ac_marker = "# Acceptance Criteria verification"
+    assert ac_marker in prompt
+    assert prompt.index(_PROJECT_CONTEXT_HEADER) < prompt.index(ac_marker)
+    # The payload itself must be embedded so the CLI can act on it.
+    assert "OP-META" in prompt
+    assert "deadbeef" in prompt
+
+
+def test_project_state_inject_flag_off_omits_block(
+    runner, fake_client, monkeypatch, fake_project_state_payload
+):
+    """AC #4 — flag default-off → block absent, fetcher never invoked."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.delenv("OMNISIGHT_PROJECT_STATE_INJECT", raising=False)
+
+    calls: list[str] = []
+
+    def _should_not_be_called(key: str):  # noqa: ARG001
+        calls.append(key)
+        return fake_project_state_payload
+
+    monkeypatch.setattr(runner, "_fetch_project_state", _should_not_be_called)
+    prompt = runner._build_prompt(fake_client, "OP-1234", "stub body")
+    assert _PROJECT_CONTEXT_HEADER not in prompt
+    assert calls == [], "fetcher must short-circuit on flag-off"
+
+
+def test_project_state_inject_api_timeout_proceeds_without_block(
+    runner, fake_client, monkeypatch
+):
+    """AC #3 + error catalog — timeout degrades to empty block + log, prompt still builds."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.setenv("OMNISIGHT_PROJECT_STATE_INJECT", "1")
+
+    def _raise_timeout(key: str):  # noqa: ARG001
+        raise TimeoutError("simulated 3s budget exceeded")
+
+    # Drive the real _fetch_project_state path so the except branch runs.
+    import urllib.request
+
+    def _urlopen_timeout(*args, **kwargs):  # noqa: ARG001
+        raise TimeoutError("simulated 3s budget exceeded")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_timeout)
+    prompt = runner._build_prompt(fake_client, "OP-1234", "stub body")
+    assert _PROJECT_CONTEXT_HEADER not in prompt
+    # Prompt must still contain the rest of the structure — the degrade
+    # path is "proceed without injection", not "fail the pickup".
+    assert "OP-1234" in prompt
+    assert "stub body" in prompt
+
+
+def test_project_state_inject_malformed_response_proceeds_without_block(
+    runner, fake_client, monkeypatch
+):
+    """Error catalog — malformed JSON degrades to empty block + log."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.setenv("OMNISIGHT_PROJECT_STATE_INJECT", "1")
+
+    class _FakeResp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _urlopen_garbage(*args, **kwargs):  # noqa: ARG001
+        return _FakeResp(b"not json at all <<<")
+
+    import urllib.request
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_garbage)
+    prompt = runner._build_prompt(fake_client, "OP-1234", "stub body")
+    assert _PROJECT_CONTEXT_HEADER not in prompt
+    assert "OP-1234" in prompt
+
+
+def test_project_state_skip_label_disables_injection_per_ticket(
+    runner, fake_client, monkeypatch, fake_project_state_payload
+):
+    """AC #5 — `project-state:skip` label disables injection for this pickup only."""
+    _patch_issue(
+        monkeypatch,
+        labels=["area:backend", "tier:M", runner.PROJECT_STATE_SKIP_LABEL],
+    )
+    monkeypatch.setenv("OMNISIGHT_PROJECT_STATE_INJECT", "1")
+
+    calls: list[str] = []
+
+    def _should_not_be_called(key: str):  # noqa: ARG001
+        calls.append(key)
+        return fake_project_state_payload
+
+    monkeypatch.setattr(runner, "_fetch_project_state", _should_not_be_called)
+    prompt = runner._build_prompt(fake_client, "OP-1234", "stub body")
+    assert _PROJECT_CONTEXT_HEADER not in prompt
+    assert calls == [], "label override must short-circuit before any fetch"
