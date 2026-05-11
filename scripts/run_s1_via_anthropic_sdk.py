@@ -79,6 +79,11 @@ sys.path.insert(0, str(REPO))
 # Imports from the existing fleet — no new infra is added by this launcher;
 # every dependency below is shipped in develop.
 from backend.agents import jira_dispatch
+from backend.agents.lesson_retrieval import (
+    build_index as build_lesson_index,
+    build_lessons_system_message,
+    retrieve_lessons,
+)
 from backend.agents.tdd_applicability import (
     TDDApplicability,
     fetch_for_ticket as fetch_tdd_applicability,
@@ -642,6 +647,17 @@ def _parse_grader_verdict(text: str) -> tuple[str, str]:
     return verdict, reasoning
 
 
+def _build_lesson_system_prompt(ticket_summary: str, ticket_description: str) -> str:
+    """Build the OP-848 prior-lessons system-message block."""
+    lessons = retrieve_lessons(
+        WORKTREE_PATH / "docs" / "sop" / "lessons",
+        ticket_title=ticket_summary,
+        acceptance_criteria=ticket_description,
+        top_k=3,
+    )
+    return build_lessons_system_message(lessons)
+
+
 def _build_user_prompt(ticket_key: str, ticket_description: str) -> str:
     return (
         f"Implement JIRA ticket {ticket_key}.\n\n"
@@ -816,6 +832,10 @@ async def process_ticket_full(
         applicability=applicability,
     )
     system_prompt = _build_system_prompt(ticket_key, ticket_summary)
+    lesson_system_prompt = _build_lesson_system_prompt(ticket_summary, ticket_description)
+    if lesson_system_prompt:
+        print(f"  [{ticket_key}] injecting system message: ## Relevant prior lessons")
+        system_prompt = f"{system_prompt}\n\n{lesson_system_prompt}\n"
     user_prompt = _build_user_prompt(ticket_key, ticket_description)
     attempt_model = model
     attempt_max_iterations = max_iterations
@@ -1364,6 +1384,7 @@ def parse_args() -> argparse.Namespace:
 async def main_async(args: argparse.Namespace) -> int:
     guard = CostGuard(store=InMemoryCostStore())
     await install_global_cap(guard, args.max_spend)
+    build_lesson_index(WORKTREE_PATH / "docs" / "sop" / "lessons")
 
     log_path = REPO / "data" / "sdk-launcher" / f"run-{int(_dt.datetime.now().timestamp())}.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
