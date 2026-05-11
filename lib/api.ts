@@ -3085,7 +3085,13 @@ export interface FeatureFlagRow {
   state: FeatureFlagState
   expires_at: string | null
   owner: string
+  // OP-884: per-tenant rollout controls. Older backends that pre-date
+  // alembic 0225 may omit these; callers treat the missing value as
+  // ``rollout_pct = 100`` and ``allowed_tenants = []`` (legacy on/off).
+  rollout_pct?: number
+  allowed_tenants?: string[]
   created_at: string
+  updated_at?: string | null
 }
 
 export interface FeatureFlagListResponse {
@@ -3101,15 +3107,26 @@ export interface PatchFeatureFlagResponse {
   feature_flag: FeatureFlagRow
 }
 
+export interface PatchFeatureFlagPayload {
+  state?: FeatureFlagState
+  rollout_pct?: number
+  allowed_tenants?: string[]
+}
+
 export async function patchFeatureFlag(
   flagName: string,
-  state: FeatureFlagState,
+  patch: FeatureFlagState | PatchFeatureFlagPayload,
 ): Promise<PatchFeatureFlagResponse> {
+  // OP-884: accept either the legacy ``FeatureFlagState`` literal (used
+  // by the WP.7.8 toggle page) or the full PatchFeatureFlagPayload that
+  // the FeatureFlagsPanel sends when adjusting rollout / allow-list.
+  const body =
+    typeof patch === "string" ? { state: patch } : patch
   return request<PatchFeatureFlagResponse>(
     `/feature-flags/${encodeURIComponent(flagName)}`,
     {
       method: "PATCH",
-      body: JSON.stringify({ state }),
+      body: JSON.stringify(body),
     },
   )
 }
