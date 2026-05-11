@@ -1036,6 +1036,114 @@ META  Process / retrospective / lessons-learned / governance / tooling / onboard
 
 ---
 
+## §19 Wiring blockedBy links correctly (OP-874)
+
+### Background
+
+Gerrit #387 (OP-858, 2026-05-11) surfaced a class of latent operator
+bug: every wire script that talked to ``POST /issueLink`` directly had
+to pick a value for ``inwardIssue`` / ``outwardIssue``, and the names
+read both ways:
+
+* "*inward* = the issue going inward to the relation" → inward = blocked
+* "*inward* = the issue described by the inward direction name (``is
+  blocked by``)" → inward = blocker
+
+The second reading is the Atlassian-documented one — POST
+``{inwardIssue: A, outwardIssue: B, type: Blocks}`` creates the link
+``A blocks B`` — but the first reading is the one the wire scripts in
+``/tmp/wire_phase24.py`` and ``/tmp/wire_sprint_c.py`` actually used.
+With the link inverted, ``has_unresolved_blockedby`` saw the still-stale
+blocker as a blockee, the pre-pickup gate silently passed, and the
+runner produced a stale-base merge conflict. Five tickets carried the
+inverted direction at incident time (OP-852/856/858/866/867).
+
+See lesson **L-OP-874** for the full anatomy of the trap.
+
+### Required helper
+
+For all operator code (wire scripts, sprint orchestrators, retro
+fillers, manual fixes), use the intent-named helper:
+
+```python
+from backend.agents.file_coordinator import add_blocked_by
+
+add_blocked_by(
+    client,
+    blocked_key="OP-866",         # ticket whose pickup must wait
+    blocker_key="OP-858",         # ticket that must publish first
+    reason="C7 depends on C8 schema landing",  # optional, lands as
+                                               # [blocked-by-link] comment
+)
+```
+
+The helper is idempotent (returns ``False`` on the second call), raises
+``BlockedByLinkSelfReference`` on ``add_blocked_by(X, X)``, and emits a
+``[blocked-by-link]`` comment that the audit script uses to verify
+direction against operator intent. ``add_blocked_by`` wraps the
+low-level ``jira_create_issue_link`` with ``inward=blocker_key,
+outward=blocked_key`` so there is exactly one place in the codebase
+that has to spell the raw direction out — and that place ships with
+tests pinning the spelling.
+
+### Anti-pattern (do not do this)
+
+```python
+# BAD — the parameter names look semantic but they aren't.
+jira_dispatch._request_idempotent(
+    client, "POST", "/issueLink",
+    {
+        "type": {"name": "Blocks"},
+        "inwardIssue": {"key": "OP-866"},   # WRONG: this is the blocked
+        "outwardIssue": {"key": "OP-858"},  # WRONG: this is the blocker
+    },
+    "...",
+)
+```
+
+Even ``jira_create_issue_link(client, inward=..., outward=...)`` —
+which has the correct semantics in its docstring — is officially
+*deprecated* for new operator code because its parameter names
+recreate the ambiguity at call-time. ``scripts/check_issuelink_post_callers.py``
+is the CI drift guard: it fails the build when any new code outside
+``backend/agents/file_coordinator.py`` POSTs ``/issueLink`` directly,
+and the fixture allow-marker is documented in the script.
+
+### Audit + repair
+
+Periodically (or after any operator script that wires blockedBy links
+without the helper) run:
+
+```
+python3 scripts/audit_blockedby_directions.py            # report only
+python3 scripts/audit_blockedby_directions.py --fix      # delete + recreate
+                                                         # inverted links
+```
+
+The report lands at ``docs/audit/blockedby-direction-audit-<date>.md``.
+With ``--fix``, a rollback record is written to
+``docs/audit/.audit-rollback-<date>.json`` so the operator can mirror-
+restore the original (wrong) direction if anything downstream depended
+on it.
+
+### Fail-closed env knob
+
+Set ``OMNISIGHT_BLOCKEDBY_FAIL_CLOSED=1`` to flip
+``has_unresolved_blockedby`` from the default fail-open behaviour
+(``(False, "skipped")`` when JIRA errors out, so pickups still happen)
+to fail-closed (``(True, "skipped")`` — block pickup until JIRA
+stabilises). Default OFF for now so prod behaviour is unchanged; flip
+on in environments where a wedged JIRA must not silently bypass the
+gate.
+
+### Reference
+
+* Anti-pattern catalog L-OP-874 — full anatomy of the trap
+* Atlassian docs: REST API ``POST /rest/api/3/issueLink`` semantics
+* ``backend/agents/file_coordinator.py`` — canonical helper + raw caller
+
+---
+
 ## Appendix A — Worked example: MP.W1.1 in JIRA
 
 ```
