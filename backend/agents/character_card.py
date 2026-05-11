@@ -111,11 +111,28 @@ class CharacterCard:
 
 
 @dataclass(frozen=True)
+class CharacterSkillEntry:
+    """One W12 skill row as exposed on Character Card reads."""
+
+    skill_id: str
+    level: int
+    xp: int
+    next_level_xp: int
+    branch_choice: str | None
+    last_active_at: datetime
+    branch_choice_required: bool
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "last_active_at", _utc(self.last_active_at))
+
+
+@dataclass(frozen=True)
 class CharacterCardRosterEntry:
     """Guild Hall roster row with activity metadata for sorting/display."""
 
     card: CharacterCard
     last_activity_at: datetime
+    skills: tuple[CharacterSkillEntry, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "last_activity_at", _utc(self.last_activity_at))
@@ -470,6 +487,42 @@ class CharacterCardRegistry:
         first_task: FirstTaskCharacterCard,
     ) -> CharacterCard:
         return await self.store.ensure_card_for_first_task(first_task)
+
+
+async def fetch_skill_entries(
+    skill_store: "Any",
+    agent_id: str,
+) -> tuple[CharacterSkillEntry, ...]:
+    """W12 helper: read ``agent_skill_state`` rows for the Character Card.
+
+    ``skill_store`` is any object with the
+    ``backend.agents.skill_leveling.SkillStateStore`` shape. The helper
+    is intentionally framework-agnostic so the router layer can wire it
+    against the Postgres or in-memory store without dragging the
+    skill-state import surface into the character-card module
+    unconditionally.
+    """
+
+    from backend.agents.skill_leveling import (
+        BRANCH_LOCK_LEVEL,
+        next_level_threshold,
+    )
+
+    rows = await skill_store.list_states(_required("agent_id", agent_id))
+    return tuple(
+        CharacterSkillEntry(
+            skill_id=row.skill_id,
+            level=row.level,
+            xp=row.xp,
+            next_level_xp=next_level_threshold(row.level),
+            branch_choice=row.branch_choice,
+            last_active_at=row.last_active_at,
+            branch_choice_required=(
+                row.level >= BRANCH_LOCK_LEVEL and row.branch_choice is None
+            ),
+        )
+        for row in rows
+    )
 
 
 @asynccontextmanager

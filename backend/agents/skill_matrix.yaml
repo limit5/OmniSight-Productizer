@@ -4,40 +4,124 @@ skills:
     - skill_id: barcode_scanner
       display_name: Barcode Scanner
       summary: Barcode detection, decode validation, and HIL scanner recipes.
+      branches:
+        - branch_id: decode_accuracy
+          display_name: Decode Accuracy
+          summary: Bias toward decode precision and recall over throughput.
+        - branch_id: throughput_optimized
+          display_name: Throughput Optimized
+          summary: Bias toward frame-rate and parallel scan throughput.
     - skill_id: depth_sensing
       display_name: Depth Sensing
       summary: Depth-camera capture, validation, and range pipeline work.
+      branches:
+        - branch_id: precision_focused
+          display_name: Precision Focused
+          summary: Bias toward sub-millimetre range accuracy at short distance.
+        - branch_id: range_extension
+          display_name: Range Extension
+          summary: Bias toward long-range depth recovery and noise floor.
   backend:
     - skill_id: enterprise_web
       display_name: Enterprise Web
       summary: Backend-facing enterprise web, workflow, auth, and RBAC support.
+      branches:
+        - branch_id: perf_tuning
+          display_name: Performance Tuning
+          summary: Bias toward query plans, caching, and tail-latency reduction.
+        - branch_id: type_correctness
+          display_name: Type Correctness
+          summary: Bias toward schema rigour, contract tests, and type safety.
   bsp:
     - skill_id: connectivity-5g
       display_name: 5G Connectivity
       summary: Cellular modem bring-up and validation.
+      branches:
+        - branch_id: low_latency
+          display_name: Low Latency
+          summary: Bias toward URLLC-style low-latency tuning.
+        - branch_id: throughput
+          display_name: Throughput
+          summary: Bias toward eMBB-style aggregate throughput tuning.
     - skill_id: connectivity-ethernet
       display_name: Ethernet Connectivity
       summary: Ethernet, VLAN, PoE, and wired-network validation.
+      branches:
+        - branch_id: vlan_focus
+          display_name: VLAN Focus
+          summary: Bias toward VLAN, trunking, and tag-aware validation.
+        - branch_id: poe_focus
+          display_name: PoE Focus
+          summary: Bias toward Power-over-Ethernet budgeting and validation.
   hal:
     - skill_id: connectivity-ble
       display_name: BLE Connectivity
       summary: Bluetooth LE GATT and device connectivity support.
+      branches:
+        - branch_id: gatt_server
+          display_name: GATT Server
+          summary: Bias toward peripheral / server-side GATT integration.
+        - branch_id: gatt_client
+          display_name: GATT Client
+          summary: Bias toward central / client-side GATT scanning and read.
     - skill_id: connectivity-can
       display_name: CAN Connectivity
       summary: CAN bus integration and SocketCAN validation.
+      branches:
+        - branch_id: socketcan_native
+          display_name: SocketCAN Native
+          summary: Bias toward kernel SocketCAN interfaces and tooling.
+        - branch_id: gateway_bridging
+          display_name: Gateway Bridging
+          summary: Bias toward CAN-to-IP gateway bridging and protocol translation.
     - skill_id: connectivity-modbus
       display_name: Modbus Connectivity
       summary: Modbus RTU/TCP integration and validation.
+      branches:
+        - branch_id: rtu_serial
+          display_name: RTU Serial
+          summary: Bias toward serial RTU framing and timing.
+        - branch_id: tcp_gateway
+          display_name: TCP Gateway
+          summary: Bias toward Modbus/TCP gateway and proxy work.
     - skill_id: connectivity-opcua
       display_name: OPC UA Connectivity
       summary: OPC UA server, namespace, and node validation.
+      branches:
+        - branch_id: server_authoring
+          display_name: Server Authoring
+          summary: Bias toward authoring OPC UA server namespaces.
+        - branch_id: client_consumer
+          display_name: Client Consumer
+          summary: Bias toward consuming OPC UA nodes from existing servers.
     - skill_id: connectivity-wifi
       display_name: Wi-Fi Connectivity
       summary: Wi-Fi station/AP integration and validation.
+      branches:
+        - branch_id: station_mode
+          display_name: Station Mode
+          summary: Bias toward Wi-Fi station / supplicant integration.
+        - branch_id: ap_mode
+          display_name: AP Mode
+          summary: Bias toward Wi-Fi AP / hostapd integration.
   isp:
     - skill_id: ipcam
       display_name: IP Camera
       summary: RTSP, ONVIF, and camera pipeline integration.
+      branches:
+        - branch_id: rtsp_focus
+          display_name: RTSP Focus
+          summary: Bias toward RTSP stream negotiation and resilience.
+        - branch_id: onvif_focus
+          display_name: ONVIF Focus
+          summary: Bias toward ONVIF discovery and device-management surfaces.
     - skill_id: uvc
       display_name: UVC
       summary: USB video class device integration and validation.
+      branches:
+        - branch_id: capture_focus
+          display_name: Capture Focus
+          summary: Bias toward UVC capture format negotiation and bandwidth.
+        - branch_id: control_focus
+          display_name: Control Focus
+          summary: Bias toward UVC control / extension-unit work.

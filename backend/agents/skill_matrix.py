@@ -38,6 +38,15 @@ class SkillMatrixDriftError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SkillBranchDefinition:
+    """One Lv-3 fork option for a base skill (RPG.W12)."""
+
+    branch_id: str
+    display_name: str
+    summary: str
+
+
+@dataclass(frozen=True)
 class SkillDefinition:
     """One canonical RPG skill axis."""
 
@@ -45,6 +54,7 @@ class SkillDefinition:
     skill_id: str
     display_name: str
     summary: str
+    branches: tuple[SkillBranchDefinition, ...] = ()
 
 
 def load_skill_matrix(
@@ -92,6 +102,7 @@ def load_skill_matrix(
                         "display_name",
                     ),
                     summary=_required_text(entry.get("summary"), "summary"),
+                    branches=_parse_branches(entry.get("branches"), skill_id),
                 )
             )
         rows[guild] = tuple(parsed)
@@ -109,6 +120,52 @@ def canonical_skill_ids(
         for definitions in load_skill_matrix(path).values()
         for skill in definitions
     )
+
+
+def canonical_branches_for_skill(
+    skill_id: str,
+    *,
+    path: Path | str = SKILL_MATRIX_PATH,
+) -> tuple[SkillBranchDefinition, ...]:
+    """Return the canonical Lv-3 branches for ``skill_id`` (W12)."""
+
+    skill_id = _clean_skill_id(skill_id)
+    for definitions in load_skill_matrix(path).values():
+        for skill in definitions:
+            if skill.skill_id == skill_id:
+                return skill.branches
+    raise SkillMatrixDriftError(
+        f"RPG skill_id {skill_id!r} is not declared in the canonical skill matrix"
+    )
+
+
+def assert_branch_choice_in_matrix(
+    skill_id: str,
+    branch_id: str,
+    *,
+    path: Path | str = SKILL_MATRIX_PATH,
+) -> None:
+    """Raise if ``branch_id`` is not a declared Lv-3 fork of ``skill_id``.
+
+    The drift guard supports W12's invariant that
+    ``agent_skill_state.branch_choice`` is bounded by the canonical
+    ``skill_matrix.yaml`` branches list. The base skill must already
+    exist in the matrix (otherwise this raises with the same
+    :class:`SkillMatrixDriftError` the legacy guard uses).
+    """
+
+    branches = canonical_branches_for_skill(skill_id, path=path)
+    if not branches:
+        raise SkillMatrixDriftError(
+            f"RPG skill_id {skill_id!r} has no branches declared in the matrix"
+        )
+    clean = _clean_branch_id(branch_id)
+    allowed = {branch.branch_id for branch in branches}
+    if clean not in allowed:
+        raise SkillMatrixDriftError(
+            f"RPG branch_choice {branch_id!r} for skill {skill_id!r} is not in "
+            f"the canonical matrix; expected one of {sorted(allowed)}"
+        )
 
 
 def discover_declared_skill_ids(
@@ -201,6 +258,53 @@ def _clean_skill_id(value: Any) -> str:
     return skill_id
 
 
+def _clean_branch_id(value: Any) -> str:
+    if not isinstance(value, str):
+        raise SkillMatrixError("RPG branch_id must be a string")
+    branch_id = value.strip()
+    if not _SKILL_ID_RE.match(branch_id):
+        raise SkillMatrixError(
+            f"RPG branch_id {value!r} must match {_SKILL_ID_RE.pattern}"
+        )
+    return branch_id
+
+
+def _parse_branches(
+    value: Any,
+    skill_id: str,
+) -> tuple[SkillBranchDefinition, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not value:
+        raise SkillMatrixError(
+            f"RPG skill {skill_id!r} branches must be a non-empty list when present"
+        )
+    seen: set[str] = set()
+    parsed: list[SkillBranchDefinition] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            raise SkillMatrixError(
+                f"RPG skill {skill_id!r} branch entry must be a mapping"
+            )
+        branch_id = _clean_branch_id(entry.get("branch_id"))
+        if branch_id in seen:
+            raise SkillMatrixError(
+                f"duplicate branch_id {branch_id!r} for skill {skill_id!r}"
+            )
+        seen.add(branch_id)
+        parsed.append(
+            SkillBranchDefinition(
+                branch_id=branch_id,
+                display_name=_required_text(
+                    entry.get("display_name"),
+                    "branch display_name",
+                ),
+                summary=_required_text(entry.get("summary"), "branch summary"),
+            )
+        )
+    return tuple(parsed)
+
+
 def _required_text(value: Any, field: str) -> str:
     if not isinstance(value, str):
         raise SkillMatrixError(f"RPG skill matrix {field} must be a string")
@@ -216,10 +320,13 @@ assert_skill_id_space_within_matrix()
 __all__ = [
     "DEFAULT_SKILL_ID_SCAN_ROOTS",
     "SKILL_MATRIX_PATH",
+    "SkillBranchDefinition",
     "SkillDefinition",
     "SkillMatrixDriftError",
     "SkillMatrixError",
+    "assert_branch_choice_in_matrix",
     "assert_skill_id_space_within_matrix",
+    "canonical_branches_for_skill",
     "canonical_skill_ids",
     "discover_declared_skill_ids",
     "load_skill_matrix",

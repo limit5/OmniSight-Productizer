@@ -1,0 +1,18 @@
+; [OP-217] Weekly 03:30 UTC trigger for rpg-skill-decay.service.
+;
+; Cadence: Mondays at 03:30 UTC. Persistent=true so a host that was
+; offline at the scheduled tick fires immediately on resume rather
+; than waiting another full week — missing a decay sweep would let
+; an idle skill row drift further from its floor than intended.
+
+[Unit]
+Description=Weekly 03:30 UTC trigger for rpg-skill-decay.service (OP-217)
+
+[Timer]
+Unit=rpg-skill-decay.service
+OnCalendar=Mon *-*-* 03:30:00 UTC
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

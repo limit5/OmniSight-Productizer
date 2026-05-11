@@ -373,6 +373,28 @@ def _effective_debuff_ids(outcome: TaskOutcome) -> tuple[str, ...]:
     return tuple(dict.fromkeys(explicit + inferred))
 
 
+def skill_xp_delta_for(task_outcome: TaskOutcome | Mapping[str, Any] | Any) -> int:
+    """RPG.W12 -- compute the per-skill XP delta for ``task_outcome``.
+
+    Bridges the W4.1 outcome shape into the W12 ``award_skill_xp`` call
+    site. Reads the same outcome / Tier-L+ / first-time-skill /
+    anti-grind flags but ignores the W4.1-only buff/debuff multipliers
+    (W12 skill XP is intentionally simpler — see ADR-0008
+    §"Skill leveling (W12)"). Buff/debuff still apply to the W4.1
+    character-level XP path returned by :func:`award_xp`.
+    """
+    from backend.agents.skill_leveling import compute_xp_delta
+
+    outcome = _normalise_task_outcome(task_outcome)
+    return compute_xp_delta(
+        outcome.base_xp,
+        outcome.status,
+        tier_l_plus=outcome.tier_l_plus,
+        first_time_skill_use=outcome.first_time_skill_use,
+        same_task_hash_within_24h=outcome.duplicate_task_within_24h,
+    )
+
+
 __all__ = [
     "BASE_TASK_XP",
     "ClassXpTarget",
@@ -392,4 +414,5 @@ __all__ = [
     "level_for_xp",
     "level_threshold",
     "secondary_class_xp_multiplier",
+    "skill_xp_delta_for",
 ]

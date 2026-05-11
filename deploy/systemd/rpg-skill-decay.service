@@ -1,0 +1,32 @@
+; [OP-217] systemd unit -- weekly RPG.W12 skill XP decay sweep.
+;
+; Wraps scripts/rpg_skill_decay_weekly.sh. Triggered by the matching
+; .timer at 03:30 UTC every Monday. The Python entrypoint is the
+; idempotent path: re-running mid-week is safe because decay is
+; quantised by week and only rows that should change get a write.
+;
+; Install (user-level — same identity as the backend it observes, so
+; the same OMNISIGHT_DATABASE_URL env wiring applies):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/rpg-skill-decay.service ~/.config/systemd/user/
+;   cp deploy/systemd/rpg-skill-decay.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now rpg-skill-decay.timer
+
+[Unit]
+Description=OmniSight weekly RPG.W12 skill XP decay sweep (OP-217)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_SKILL_DECAY_LOG_DIR=%h/work/sora/logs/rpg-skill-decay
+ExecStart=%h/work/sora/OmniSight-claude-worktree/scripts/rpg_skill_decay_weekly.sh
+StandardOutput=append:%h/work/sora/logs/rpg-skill-decay/run.log
+StandardError=append:%h/work/sora/logs/rpg-skill-decay/run.log
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

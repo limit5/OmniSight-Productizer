@@ -56,6 +56,26 @@ export interface CharacterCardProps {
   styleFingerprint?: string | null
   buffs?: readonly CharacterBuff[]
   badges?: readonly CharacterBadge[]
+  skills?: readonly CharacterSkill[]
+  onLockBranch?: (skillId: string, branchId: string) => void
+}
+
+export interface CharacterSkillBranchOption {
+  branchId: string
+  displayName: string
+  summary?: string | null
+}
+
+export interface CharacterSkill {
+  skillId: string
+  displayName?: string | null
+  level: number
+  xp: number
+  nextLevelXp: number
+  branchChoice?: string | null
+  branchChoiceRequired?: boolean | null
+  branchOptions?: readonly CharacterSkillBranchOption[]
+  lastActiveAt?: string | null
 }
 
 export type CharacterBuffKind =
@@ -323,12 +343,15 @@ export function CharacterCard({
   styleFingerprint,
   buffs = [],
   badges = [],
+  skills = [],
+  onLockBranch,
 }: CharacterCardProps): ReactElement {
   const visual = GUILD_VISUALS[guild] ?? GUILD_VISUALS.generalist
   const progress = getLevelProgressPercent(xp, nextLevelXp)
   const GuildIcon = visual.Icon
   const activeBuffs = buffs.filter((buff) => buff && BUFF_VISUALS[buff.kind])
   const visibleBadges = badges.filter((badge) => badge && BADGE_VISUALS[badge.kind])
+  const visibleSkills = skills.filter((skill) => skill && skill.skillId)
 
   return (
     <article
@@ -483,6 +506,89 @@ export function CharacterCard({
                 <span className="font-mono text-foreground">{styleFingerprint}</span>
               </span>
             </div>
+          ) : null}
+
+          {visibleSkills.length > 0 ? (
+            <section
+              aria-label="Agent skill tree"
+              className="rounded-md border bg-background/50 p-3"
+              data-testid="character-card-skills"
+            >
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground">
+                <GraduationCap className="size-3.5 text-emerald-500" aria-hidden="true" />
+                Skills
+              </div>
+              <ul className="flex flex-col gap-2">
+                {visibleSkills.map((skill) => {
+                  const skillProgress = getLevelProgressPercent(skill.xp, skill.nextLevelXp)
+                  const branchLocked = Boolean(skill.branchChoice)
+                  const needsBranch = Boolean(skill.branchChoiceRequired) && !branchLocked
+                  return (
+                    <li
+                      key={skill.skillId}
+                      className="rounded-md border bg-background/40 p-2"
+                      data-skill-id={skill.skillId}
+                      data-skill-level={skill.level}
+                      data-skill-branch={skill.branchChoice ?? ""}
+                      data-testid="character-card-skill"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span className="font-mono text-xs font-semibold">
+                          {skill.displayName?.trim() || skill.skillId}
+                        </span>
+                        <span className="font-mono text-[10px] text-muted-foreground">
+                          Lv {Math.max(1, Math.trunc(skill.level))} · {Math.max(0, Math.trunc(skill.xp)).toLocaleString()} /{" "}
+                          {Math.max(0, Math.trunc(skill.nextLevelXp)).toLocaleString()} XP
+                        </span>
+                      </div>
+                      <div
+                        aria-label={`Skill ${skill.skillId} progress ${Math.round(skillProgress)} percent`}
+                        className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted"
+                        role="progressbar"
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={Math.round(skillProgress)}
+                      >
+                        <div
+                          className={cn("h-full rounded-full transition-all", visual.barClass)}
+                          style={{ width: `${skillProgress}%` }}
+                        />
+                      </div>
+                      {branchLocked ? (
+                        <p
+                          className="mt-1 text-[10px] text-muted-foreground"
+                          data-testid="character-card-skill-branch-locked"
+                        >
+                          Branch: <span className="font-mono text-foreground">{skill.branchChoice}</span> (locked)
+                        </p>
+                      ) : needsBranch ? (
+                        <div
+                          className="mt-1 flex flex-wrap items-center gap-1.5"
+                          data-testid="character-card-skill-branch-picker"
+                        >
+                          <span className="text-[10px] font-medium text-amber-700 dark:text-amber-300">
+                            Pick a branch:
+                          </span>
+                          {(skill.branchOptions ?? []).map((option) => (
+                            <button
+                              key={option.branchId}
+                              type="button"
+                              onClick={() => onLockBranch?.(skill.skillId, option.branchId)}
+                              className="rounded border bg-background px-2 py-0.5 text-[10px] font-mono hover:bg-muted"
+                              data-testid="character-card-skill-branch-option"
+                              data-branch-id={option.branchId}
+                              title={option.summary ?? option.displayName}
+                            >
+                              {option.displayName}
+                            </button>
+                          ))}
+                        </div>
+                      ) : null}
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
           ) : null}
 
           {visibleBadges.length > 0 ? (
