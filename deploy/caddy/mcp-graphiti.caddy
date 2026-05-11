@@ -1,0 +1,35 @@
+# OP-901 — Graphiti MCP public ingress.
+#
+# Install this snippet into the host Caddy ingress and reload Caddy after
+# DNS for mcp-graphiti.sora.services points at the host. Caddy obtains
+# and renews the public TLS certificate automatically.
+
+mcp-graphiti.sora.services {
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/mcp-graphiti-access.log
+		format json
+	}
+
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	@health path /api/v1/health
+	handle @health {
+		reverse_proxy {$OMNISIGHT_GRAPHITI_UPSTREAM:127.0.0.1:8003}
+	}
+
+	handle {
+		reverse_proxy {$OMNISIGHT_GRAPHITI_UPSTREAM:127.0.0.1:8003} {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			flush_interval -1
+		}
+	}
+}

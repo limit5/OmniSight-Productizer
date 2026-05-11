@@ -143,3 +143,31 @@ services:
     # nodes.
     mem_limit: 3g
     mem_reservation: 1g
+
+  # ──────────────────────────────────────────────────────────────
+  # OP-901 (F3): Graphiti temporal-memory MCP service.
+  # Bring up with: docker compose --profile graphiti up -d graphiti
+  # Caddy exposes it at mcp-graphiti.sora.services; ingestion bridges
+  # authenticate to /ingest/* with OMNISIGHT_MCP_GRAPHITI_TOKEN.
+  # ──────────────────────────────────────────────────────────────
+  graphiti:
+    image: getzep/graphiti:latest
+    profiles: ["graphiti"]
+    ports:
+      - "${OMNISIGHT_GRAPHITI_PORT:-8003}:8000"
+    environment:
+      - PORT=8000
+      - GRAPHITI_TELEMETRY_ENABLED=${GRAPHITI_TELEMETRY_ENABLED:-false}
+      - OMNISIGHT_MCP_GRAPHITI_TOKEN=${OMNISIGHT_MCP_GRAPHITI_TOKEN:?set OMNISIGHT_MCP_GRAPHITI_TOKEN}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    mem_limit: 2g
+    mem_reservation: 512m
