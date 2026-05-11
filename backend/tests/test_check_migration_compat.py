@@ -99,8 +99,15 @@ def test_override_audit_log_records_ticket_and_migrations(tmp_path: Path) -> Non
 
 
 def test_migration_template_requires_backwards_compat_docstring() -> None:
+    """OP-865 D4 redefined the tag vocabulary; the mako template was
+    updated in lockstep so newly-generated migrations always render with
+    the placeholder that ``parse_compat_tag`` knows how to detect.
+    """
     template = (
         cmc.REPO_ROOT / "backend" / "alembic" / "script.py.mako"
     ).read_text(encoding="utf-8")
 
-    assert "Backwards-compat: <safe|requires-coordinated-deploy>" in template
+    assert (
+        "backwards-compat: <safe|breaking|"
+        "deprecation-window-1of2|deprecation-window-2of2>"
+    ) in template
