@@ -1399,6 +1399,114 @@ def force_walk_to_published(
     return True
 
 
+# ── OP-956 — runner ops-only ticket type ─────────────────────────
+#
+# Ops-only tickets describe operator/automation runbooks where the
+# expected CLI output is reports + audit comments, not commits.
+# Without the label, the OP-827 ``[runner-no-commits-from-cli]``
+# safety check reverts the ticket every time the CLI exits cleanly
+# with 0 commits, forcing the operator to hand-walk the workflow
+# (To Do → In Progress → Under Review → Approved → Published) for
+# every ops-only ticket — see OP-923 incident 2026-05-12.
+
+OPS_ONLY_LABEL = "runner:no-commits-expected"
+
+
+class WorkflowTransitionPermissionRefused(RuntimeError):
+    """Raised by :func:`forward_transition_ops_only` when JIRA refuses a
+    workflow transition (HTTP 403). The runner catches this and falls
+    back to operator notification per OP-956 AC error catalog.
+    """
+
+    def __init__(self, key: str, transition_name: str, detail: str) -> None:
+        super().__init__(
+            f"{key}: workflow transition {transition_name!r} refused: {detail}"
+        )
+        self.key = key
+        self.transition_name = transition_name
+        self.detail = detail
+
+
+def has_ops_only_label(labels: Iterable[str]) -> bool:
+    """Return True if the ops-only sigil label is in ``labels``.
+
+    Defensive against ``LabelInjectionAttack`` per OP-956 error catalog:
+    we match the exact sigil string and never interpret label values.
+    """
+    return OPS_ONLY_LABEL in set(labels)
+
+
+def forward_transition_ops_only(
+    client: "DispatchClient",
+    key: str,
+    idem_key: str | None = None,
+) -> None:
+    """Walk an ops-only ticket from current status to 公開済み (Published).
+
+    OP-956 AC #2: ``runner:no-commits-expected`` tickets do not produce
+    commits, so the OP-827 revert-on-zero-commits path is wrong for them.
+    Instead we forward-transition via the workflow's Submit-for-Review →
+    Approve → Deploy chain (transition ids 3 → 4 → 7 in the OP project
+    workflow) and post a ``[runner-ops-only-transition]`` audit comment
+    per transition step.
+
+    Idempotent: status is re-read between steps so a partial walk (e.g.
+    a previous tick crashed mid-walk) can resume cleanly. Already-
+    Published tickets are a no-op.
+
+    Raises :class:`WorkflowTransitionPermissionRefused` if any transition
+    POST returns 403 — the caller is expected to log + notify the
+    operator and leave the ticket in its current state.
+    """
+    status = get_issue_status(client, key)
+    if status in PUBLISHED_STATUS_NAMES:
+        return
+    if status in ARCHIVED_STATUS_NAMES:
+        raise RuntimeError(f"{key} is archived; refusing to ops-forward")
+
+    if status in IN_PROGRESS_STATUS_NAMES:
+        steps = ("to_under_review", "to_approved", "to_published")
+    elif status in UNDER_REVIEW_STATUS_NAMES:
+        steps = ("to_approved", "to_published")
+    elif status in APPROVED_STATUS_NAMES:
+        steps = ("to_published",)
+    else:
+        raise RuntimeError(
+            f"{key} has unsupported status for ops-only forward: {status!r}"
+        )
+
+    base_key = idem_key or f"ops-only-fwd-{key}-{uuid.uuid4().hex[:12]}"
+    for idx, transition_name in enumerate(steps, start=1):
+        try:
+            _request_idempotent(
+                client,
+                "POST",
+                f"/issue/{key}/transitions",
+                {"transition": {"id": TRANSITION_IDS[transition_name]}},
+                f"{base_key}-{idx}-{transition_name}",
+            )
+        except RuntimeError as exc:
+            # The transport raises `RuntimeError("POST ... → 403: ...")`
+            # for HTTP errors — sniff the 403 prefix on the formatted
+            # message rather than introducing a new exception type at
+            # the transport layer.
+            if " → 403:" in str(exc):
+                raise WorkflowTransitionPermissionRefused(
+                    key, transition_name, str(exc)
+                ) from exc
+            raise
+        add_comment(
+            client,
+            key,
+            (
+                f"[runner-ops-only-transition] CLI exit=0 + 0 commits + "
+                f"ticket-label={OPS_ONLY_LABEL} → auto-forward "
+                f"({transition_name})"
+            ),
+            idem_key=f"{base_key}-{idx}-{transition_name}-comment",
+        )
+
+
 def transition_to_in_progress(client: DispatchClient, key: str, idem_key: str | None = None) -> None:
     """Set assignee = bot, transition TODO → In Progress, add pickup comment."""
     base_key = idem_key or f"transition-{key}-in-progress-{uuid.uuid4().hex[:12]}"

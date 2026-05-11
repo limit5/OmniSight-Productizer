@@ -1282,3 +1282,155 @@ This document is **Draft** as of 2026-05-06. Acceptance requires:
 8. `docs/sop/lessons/` populated with seed entries (lesson #1-6 from governance migration plan) and indexed by the generated lesson index
 
 After acceptance, status transitions to `Accepted`. Future amendments require META `meta:governance` ticket per §17.
+
+---
+
+## §20 Ops-only ticket type (`runner:no-commits-expected`)
+
+> AC §18 in OP-956 used the working name "§18" before this section
+> landed. The doc already carried §17 META and §18 Component-list at
+> time of authoring, so this section is appended as §20 to preserve
+> the existing numbering (no cross-references to §18/§19 need to be
+> touched). Logical content is identical to the §18 placeholder the
+> OP-956 ticket described.
+
+### Background
+
+The runner enforces a safety check known as ``[runner-no-commits-from-cli]``
+(post-mortem: OP-827). When the CLI exits cleanly but produced 0 commits,
+the runner reverts the ticket to To Do for fresh re-pickup. This is the
+correct behaviour for *code-producing* tickets where 0 commits means the
+CLI lost work or wedged silently.
+
+It is the **wrong** behaviour for *ops-only* tickets where the expected
+output is reports + audit comments, not commits — for example:
+
+* RELEASE chain children that run an external attestation tool
+  (``OP-868 milestone_check.py``) and post the result.
+* Staging deploy / smoke-compare / canary tickets whose acceptance is
+  measured by a query against the live system rather than a code diff.
+* SLO-observe tickets that compare metrics over a time window.
+
+OP-923 (R1 D1 acceptance) on 2026-05-12 was the first ticket where this
+mismatch surfaced: claude correctly executed the runbook, posted the AC
+verification comment, exited cleanly, and was promptly reverted by the
+runner. The operator had to hand-walk the 4-step transition path. The
+RELEASE-v0.5.0-rc1 chain has at least 6 more ops-only children
+(R3/R5/R6/R9/R10/R11/R12) that would hit the same wall.
+
+### The sigil
+
+Add the label ``runner:no-commits-expected`` to any ticket whose AC is
+"runbook execution + report posting + clean exit, no commits".
+
+```yaml
+labels:
+  - class:subscription-claude
+  - tier:M
+  - area:devops
+  - area:docs
+  - runner:no-commits-expected   # <— sigil
+  - RELEASE-v0.5.0-rc1
+```
+
+### Runner behaviour (OP-956)
+
+```
+post-CLI rc=0 & 0 commits:
+  if `runner:no-commits-expected` ∈ ticket.labels:
+    skip OP-827 revert path
+    forward-walk: Submit-for-Review (id=3) → Approve (id=4) → Deploy (id=7)
+    post [runner-ops-only-transition] audit comment per step
+    return SUCCESS
+  else:
+    post [runner-no-commits-from-cli] comment + revert to To Do (existing path)
+
+post-CLI rc=0 & N commits & `runner:no-commits-expected` ∈ labels:
+  log [runner-ops-only-unexpected-commits] (possible mis-classification)
+  push commits to Gerrit + transition Under Review (existing path)
+  THEN forward-walk Approve → Deploy
+
+post-CLI rc≠0 & any labels:
+  revert to To Do with diagnostic (existing behaviour; safety preserved)
+```
+
+### CLI-side prompt update
+
+When the label is present, the prompt-builder in ``auto-runner-jira.py``
+(``_build_prompt``) injects an "Ops-only ticket" block that tells the CLI
+explicitly:
+
+> This ticket expects ZERO commits — your job is to execute the
+> runbook, post AC verification + any audit/report comments via
+> ``backend/agents/jira_dispatch.add_comment``, then EXIT 0.
+>
+> Do NOT fabricate a placeholder commit to satisfy the runner's
+> zero-commit revert path.
+
+Without that explicit instruction, claude/codex sometimes "self-corrects"
+by inventing a marker commit — which then trips the OP-827 safety check
+in the opposite direction (commit produced, but Gerrit rejects the
+empty-content patchset).
+
+### When to apply
+
+Apply ``runner:no-commits-expected`` whenever the AC reads "no code
+changes". Examples in the RELEASE-v0.5.0-rc1 chain:
+
+| Ticket | Role | Why ops-only |
+|---|---|---|
+| OP-925 | R3 — develop→main fast-forward | git ops, no commit on the ticket branch |
+| OP-927 | R5 — staging blue-green deploy | API/CLI call against staging |
+| OP-928 | R6 — smoke + metric baseline | post measurement results |
+| OP-931 | R9 — prod orchestrator → canary 5% | API call, no commits |
+| OP-932 | R10 — canary 25% | bump traffic split |
+| OP-933 | R11 — canary 100% | promote canary |
+| OP-934 | R12 — SLO observe | post observation window result |
+
+### When NOT to apply
+
+Do **not** apply when the AC contains *any* expected code output:
+
+* Test additions (even a single test counts as a commit).
+* Doc additions (still a commit).
+* Helper scripts.
+
+Mis-classification surfaces as a ``[runner-ops-only-unexpected-commits]``
+comment + the operator should either remove the label and re-pickup, or
+confirm the commit was intentional and add the missing AC entry.
+
+### Recovery / escape hatches
+
+* **Per-ticket revert**: remove the label. The next pickup behaves
+  exactly like a non-ops-only ticket (OP-827 revert path applies).
+* **Per-runner kill switch**: set
+  ``OMNISIGHT_RUNNER_OPS_ONLY_DISABLED=1`` in the runner systemd unit.
+  The feature is disabled globally and the OP-827 path is the only path
+  again. Use only while debugging label-misuse incidents.
+* **Permission-refused fallback**: if claude-bot lacks the Approve
+  transition (workflow permission drift), the runner posts
+  ``[runner-ops-only-permission-refused]`` and leaves the ticket in its
+  current workflow state; the operator completes the walk by hand. No
+  work is lost.
+
+### Workaround prior to OP-956
+
+Until OP-956 landed (2026-05-12) operators had to hand-walk every ops-
+only ticket through 4 transitions per child. The pattern still works as
+a fallback when the env-knob is on or the label is forgotten:
+
+```
+To Do → 進行中 (assign self) → Under Review (Submit for Review) →
+承認済み (Approve) → 公開済み (Deploy)
+```
+
+This is documented for archaeology purposes; new ops-only tickets must
+carry the label.
+
+### References
+
+* OP-956 — feature implementation
+* OP-827 — original ``[runner-no-commits-from-cli]`` safety mechanism
+* OP-923 — R1 D1 incident that surfaced the gap on 2026-05-12
+* L-OP-870 / L-OP-922 — sibling discipline lessons
+

@@ -81,6 +81,14 @@ FAILURE_GRAPH_FIXTURE = os.environ.get(
     "OMNISIGHT_FAILURE_GRAPH_FIXTURE", ""
 ).strip()
 
+# OP-956 — global kill-switch for the ops-only forward-transition path.
+# When set to "1", the runner ignores the ``runner:no-commits-expected``
+# label entirely and falls back to the OP-827 always-revert behaviour
+# (per AC §recovery / rollback). Default off so the feature stays on.
+OPS_ONLY_DISABLED = (
+    os.environ.get("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", "0").strip() == "1"
+)
+
 # Recognised JIRA `area:<X>` label values. Exported so other tooling
 # (seed scripts, label linters) can introspect the exact same set used
 # by the prompt-builder. Drift between this and the seed-script copy is
@@ -600,6 +608,25 @@ def _build_prompt(
     # label; any fetch failure degrades silently to an empty block.
     ps_block = _build_project_state_block(key, list(labels))
 
+    # OP-956 — when the ticket carries the `runner:no-commits-expected`
+    # sigil, tell the CLI it MUST exit with 0 commits. Without this hint
+    # the model often "self-corrects" by inventing a marker commit just
+    # to satisfy the OP-827 zero-commit revert path — which is exactly
+    # the wedge OP-956 fixes.
+    ops_only_block = ""
+    if jira_dispatch.has_ops_only_label(labels) and not OPS_ONLY_DISABLED:
+        ops_only_block = (
+            "\n# Ops-only ticket (OP-956)\n\n"
+            "This ticket carries the `runner:no-commits-expected` label.\n"
+            "It expects ZERO commits — your job is to execute the runbook,\n"
+            "post AC verification + any audit/report comments via\n"
+            "`backend/agents/jira_dispatch.add_comment`, then EXIT 0.\n\n"
+            "Do NOT fabricate a placeholder commit to satisfy the runner's\n"
+            "zero-commit revert path. The runner detects this label and\n"
+            "forward-transitions Submit-for-Review → Approve → Deploy on\n"
+            "your behalf when the CLI exits cleanly with no commits.\n"
+        )
+
     return f"""You are working on JIRA ticket {key}.
 
 Component: {component_label}
@@ -614,7 +641,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-{capabilities_block}{fg_block}{ps_block}
+{capabilities_block}{fg_block}{ps_block}{ops_only_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
@@ -875,6 +902,99 @@ def _run_memory_writeback(
             f"[runner] memory_writeback partial ticket={ticket_key} "
             f"stores_failed={list(result.stores_failed)}"
         )
+
+
+def _ops_only_active_for(snapshot: "scheduler.TicketSnapshot") -> bool:
+    """Return True if the OP-956 ops-only forward-transition path applies.
+
+    Two gates: (1) the global ``OMNISIGHT_RUNNER_OPS_ONLY_DISABLED`` env
+    knob is not set (AC §recovery — operator escape hatch), and (2) the
+    ticket carries the ``runner:no-commits-expected`` sigil label.
+    """
+    if OPS_ONLY_DISABLED:
+        return False
+    return jira_dispatch.has_ops_only_label(getattr(snapshot, "labels", ()))
+
+
+def _handle_ops_only_forward_transition(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    *,
+    unexpected_commits: int = 0,
+) -> int:
+    """Forward-walk an ops-only ticket to 公開済み + post audit comment.
+
+    Returns the runner exit code (0 on success, 1 on permission-refused
+    / unexpected JIRA failure — per AC #2 the latter degrades to operator
+    notification with the ticket left in its current workflow state so
+    no work is lost).
+
+    OP-956 AC #2: skips the OP-827 ``[runner-no-commits-from-cli]``
+    revert path entirely and walks the workflow Submit-for-Review →
+    Approve → Deploy (ids 3 → 4 → 7).
+
+    When ``unexpected_commits`` is non-zero, the caller already pushed
+    the commits via the normal Gerrit path; we simply continue forward
+    from Under Review to Published and emit the
+    ``OpsLabelButCommitsProduced`` diagnostic comment.
+    """
+    if unexpected_commits > 0:
+        jira_dispatch.add_comment(
+            client, key,
+            (
+                f"[runner-ops-only-unexpected-commits] CLI exited 0 with "
+                f"{unexpected_commits} commit(s) despite ops-only label "
+                f"`{jira_dispatch.OPS_ONLY_LABEL}` — pushing commits AND "
+                f"forward-transitioning (possible mis-classification; "
+                f"operator: confirm the label still applies)."
+            ),
+        )
+    try:
+        jira_dispatch.forward_transition_ops_only(client, key)
+    except jira_dispatch.WorkflowTransitionPermissionRefused as e:
+        print(
+            f"[runner] ops-only forward refused for {key}: {e}",
+            file=sys.stderr,
+        )
+        try:
+            jira_dispatch.add_comment(
+                client, key,
+                (
+                    f"[runner-ops-only-permission-refused] JIRA refused "
+                    f"transition {e.transition_name!r} (HTTP 403). "
+                    f"Ticket left in current workflow state; operator "
+                    f"must complete the forward walk manually.\n\n"
+                    f"Detail: {e.detail}"
+                ),
+            )
+        except Exception as inner:  # noqa: BLE001 — informational
+            print(
+                f"[runner] could not post ops-only refusal comment: {inner}",
+                file=sys.stderr,
+            )
+        return 1
+    except Exception as e:  # noqa: BLE001 — unknown JIRA fault
+        print(
+            f"[runner] ops-only forward failed for {key}: "
+            f"{type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        try:
+            jira_dispatch.add_comment(
+                client, key,
+                (
+                    f"[runner-ops-only-fail]\n\n{type(e).__name__}: {e}\n\n"
+                    f"Operator: complete the forward walk manually."
+                ),
+            )
+        except Exception as inner:  # noqa: BLE001 — informational
+            print(
+                f"[runner] could not post ops-only fail comment: {inner}",
+                file=sys.stderr,
+            )
+        return 1
+    print(f"[runner] {key} ops-only forward-transition complete → 公開済み")
+    return 0
 
 
 def _handle_gerrit_push_failure(
@@ -1451,6 +1571,33 @@ def main() -> int:
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
             )
         except jira_dispatch.NoCommitsOnBranchError as e:
+            # OP-956: ops-only ticket-type path. When the operator has
+            # tagged the ticket as `runner:no-commits-expected`, the
+            # zero-commits-from-CLI signal is the EXPECTED outcome
+            # (operator/automation runbooks produce reports + audit
+            # comments, not commits). Skip OP-827's always-revert path
+            # entirely and forward-walk Submit → Approve → Deploy.
+            if _ops_only_active_for(snapshot):
+                print(
+                    f"[runner] {snapshot.key} CLI produced 0 commits + "
+                    f"ops-only label present → forward-transitioning to 公開済み"
+                )
+                rc_fwd = _handle_ops_only_forward_transition(
+                    client, snapshot.key,
+                )
+                _run_memory_writeback(
+                    client,
+                    snapshot.key,
+                    outcome=(
+                        memory_writeback.OUTCOME_SUCCESS
+                        if rc_fwd == 0
+                        else memory_writeback.OUTCOME_FAILURE
+                    ),
+                    summary="ops-only forward-transition (0 commits, label-tagged)",
+                    failure_class=None if rc_fwd == 0 else "OPS_ONLY_TRANSITION_REFUSED",
+                    area=metric_meta.get("area"),
+                )
+                return rc_fwd
             # OP-827 fix: claude/codex CLI exited without committing. Posting AC
             # and exiting bypasses the commit, so there is nothing to push and
             # the right move is to revert to To Do for fresh re-pickup. Leaving
@@ -1531,6 +1678,17 @@ def main() -> int:
                 )
                 return 0
             _finalize_under_review(client, snapshot.key, push_result.change_url)
+            # OP-956: OpsLabelButCommitsProduced — CLI was tagged ops-only
+            # but produced commits anyway. AC error catalog says "Log
+            # warning + still push the commits (don't lose work) +
+            # forward-transition". The push above already landed the
+            # commits and walked the ticket to Under Review; continue
+            # the forward walk from there to 公開済み.
+            if _ops_only_active_for(snapshot):
+                push_count = max(1, len(getattr(push_result, "change_numbers", []) or [push_result.change_number]))
+                _handle_ops_only_forward_transition(
+                    client, snapshot.key, unexpected_commits=push_count,
+                )
             _run_memory_writeback(
                 client,
                 snapshot.key,
