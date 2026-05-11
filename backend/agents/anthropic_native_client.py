@@ -212,6 +212,71 @@ def _apply_cache_control(
     return new_system, new_tools
 
 
+def _apply_message_cache_control(
+    messages: list[dict[str, Any]], enable_cache: bool,
+) -> list[dict[str, Any]]:
+    """Mark the last two messages as Anthropic ephemeral cache breakpoints."""
+    if not enable_cache:
+        return messages
+
+    cached = [dict(message) for message in messages]
+    start = max(0, len(cached) - 2)
+    for idx in range(start, len(cached)):
+        message = cached[idx]
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = [
+                {
+                    "type": "text",
+                    "text": content,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ]
+        elif isinstance(content, list) and content:
+            blocks = list(content)
+            last = dict(blocks[-1])
+            last["cache_control"] = {"type": "ephemeral"}
+            blocks[-1] = last
+            message["content"] = blocks
+        cached[idx] = message
+    return cached
+
+
+def _strip_cache_control(value: Any) -> Any:
+    """Remove Anthropic cache_control keys from a request payload."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_cache_control(item)
+            for key, item in value.items()
+            if key != "cache_control"
+        }
+    if isinstance(value, list):
+        return [_strip_cache_control(item) for item in value]
+    return value
+
+
+def _is_cache_control_rejection(exc: Exception) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    if status_code is not None and int(status_code) != 400:
+        return False
+
+    body = getattr(exc, "body", None)
+    text = f"{body} {exc}".lower()
+    return "cache_control" in text or "cache breakpoint" in text
+
+
+def _create_message_with_cache_fallback(client: Any, kwargs: dict[str, Any]) -> Any:
+    try:
+        return client.messages.create(**kwargs)
+    except Exception as exc:
+        if not _is_cache_control_rejection(exc):
+            raise
+        logger.warning(
+            "cache_breakpoint_rejected_by_api; retrying Anthropic call without cache_control"
+        )
+        return client.messages.create(**_strip_cache_control(kwargs))
+
+
 class AnthropicClient:
     """Direct Anthropic SDK client with tool-use loop + prompt caching."""
 
@@ -262,12 +327,14 @@ class AnthropicClient:
             "model": model or self.default_model,
             "max_tokens": max_tokens or self.max_tokens_default,
             "temperature": temperature,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": _apply_message_cache_control(
+                [{"role": "user", "content": prompt}], True
+            ),
         }
         if system:
             kwargs["system"] = system
 
-        response = self._client.messages.create(**kwargs)
+        response = _create_message_with_cache_fallback(self._client, kwargs)
         text = _content_to_text(response.content)
         usage = _extract_usage(getattr(response, "usage", None))
         return text, usage
@@ -387,7 +454,7 @@ class AnthropicClient:
                 "model": model or self.default_model,
                 "max_tokens": max_tokens or self.max_tokens_default,
                 "temperature": temperature,
-                "messages": messages,
+                "messages": _apply_message_cache_control(messages, enable_cache),
             }
             if sys_blocks is not None:
                 kwargs["system"] = sys_blocks
@@ -396,7 +463,7 @@ class AnthropicClient:
             if mcp_servers:
                 kwargs["mcp_servers"] = mcp_servers
 
-            response = self._client.messages.create(**kwargs)
+            response = _create_message_with_cache_fallback(self._client, kwargs)
             content = _content_to_dict(response.content)
             stop_reason = getattr(response, "stop_reason", "unknown") or "unknown"
             total_usage = total_usage + _extract_usage(getattr(response, "usage", None))

@@ -16,8 +16,10 @@ the test does not depend on the script being installed on PYTHONPATH.
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +32,7 @@ from backend.agents.cost_guard import (
     CostGuard,
     InMemoryCostStore,
 )
+from backend.agents.tool_dispatcher import ToolDispatcher
 
 
 def _load_launcher() -> Any:
@@ -66,6 +69,156 @@ class _StubClient:
             iterations=1,
             tool_calls=[],
         )
+
+
+class _CacheControlRejected(Exception):
+    status_code = 400
+    body = {"error": {"message": "cache_control is not accepted here"}}
+
+
+def _install_anthropic_sdk_stub(
+    monkeypatch: pytest.MonkeyPatch, responses: list[Any],
+) -> None:
+    import copy
+    import types
+
+    class _Messages:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self._responses = iter(responses)
+
+        def create(self, **kwargs: Any) -> Any:
+            self.calls.append(copy.deepcopy(kwargs))
+            item = next(self._responses)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    class _Client:
+        def __init__(self, **_kwargs: Any) -> None:
+            self.messages = _Messages()
+
+    fake = types.ModuleType("anthropic")
+    fake.Anthropic = _Client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "anthropic", fake)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stub")
+
+
+def _last_content_block(message: dict[str, Any]) -> dict[str, Any]:
+    content = message["content"]
+    assert isinstance(content, list)
+    return content[-1]
+
+
+def _block(type: str, **kwargs: Any) -> SimpleNamespace:
+    return SimpleNamespace(type=type, **kwargs)
+
+
+def _usage(**kwargs: int) -> SimpleNamespace:
+    return SimpleNamespace(
+        input_tokens=kwargs.get("input_tokens", 0),
+        output_tokens=kwargs.get("output_tokens", 0),
+        cache_read_input_tokens=kwargs.get("cache_read_input_tokens", 0),
+        cache_creation_input_tokens=kwargs.get("cache_creation_input_tokens", 0),
+    )
+
+
+def _response(
+    content: list[SimpleNamespace],
+    stop_reason: str,
+    usage: SimpleNamespace | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=content, stop_reason=stop_reason, usage=usage or _usage()
+    )
+
+
+@pytest.mark.asyncio
+async def test_s1_sdk_request_marks_last_two_messages_and_counts_cache_hits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B11: launcher-shaped calls mark the last 2 messages and preserve
+    cache-read usage returned by Anthropic after the first iteration.
+    """
+    mod = _load_launcher()
+    _install_anthropic_sdk_stub(
+        monkeypatch,
+        [
+            _response(
+                [_block("tool_use", id="toolu_1", name="bash", input={"cmd": "true"})],
+                "tool_use",
+                _usage(input_tokens=10, output_tokens=2),
+            ),
+            _response(
+                [_block("text", text="done")],
+                "end_turn",
+                _usage(input_tokens=5, output_tokens=1, cache_read_input_tokens=25),
+            ),
+        ],
+    )
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    client = AnthropicClient(dispatcher=ToolDispatcher())
+    result = await client.run_with_tools(
+        prompt="Implement JIRA ticket OP-849.",
+        raw_tools=mod.BUILT_IN_TOOLS_SPEC,
+        system="system",
+        model="claude-sonnet-4-6",
+        max_iterations=2,
+        enable_cache=True,
+    )
+
+    calls = client._client.messages.calls  # type: ignore[attr-defined]
+    assert len(calls) == 2
+    assert _last_content_block(calls[0]["messages"][-1])["cache_control"] == {
+        "type": "ephemeral",
+    }
+    second_messages = calls[1]["messages"]
+    assert _last_content_block(second_messages[-2])["cache_control"] == {
+        "type": "ephemeral",
+    }
+    assert _last_content_block(second_messages[-1])["cache_control"] == {
+        "type": "ephemeral",
+    }
+    assert result.usage.cache_read_input_tokens == 25
+
+
+@pytest.mark.asyncio
+async def test_s1_sdk_cache_breakpoint_rejection_falls_back_without_cache(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """B11: Anthropic 400 on cache_control is retried once without cache marks."""
+    _install_anthropic_sdk_stub(
+        monkeypatch,
+        [
+            _CacheControlRejected("cache_control rejected"),
+            _response(
+                [_block("text", text="done")],
+                "end_turn",
+                _usage(input_tokens=5, output_tokens=1),
+            ),
+        ],
+    )
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    caplog.set_level(logging.WARNING, logger="backend.agents.anthropic_native_client")
+    client = AnthropicClient(dispatcher=ToolDispatcher())
+    result = await client.run_with_tools(
+        prompt="Implement JIRA ticket OP-849.",
+        tools=None,
+        model="claude-sonnet-4-6",
+        max_iterations=1,
+        enable_cache=True,
+    )
+
+    calls = client._client.messages.calls  # type: ignore[attr-defined]
+    assert len(calls) == 2
+    assert _last_content_block(calls[0]["messages"][-1])["cache_control"] == {
+        "type": "ephemeral",
+    }
+    assert "cache_control" not in _last_content_block(calls[1]["messages"][-1])
+    assert result.final_text == "done"
+    assert "cache_breakpoint_rejected_by_api" in caplog.text
 
 
 @pytest.mark.asyncio
