@@ -63,9 +63,30 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
+
+
+# OP-905 (F7) — operator-controllable env knob for the runner prompt-builder's
+# project-state injection. Default-off; flipped on per fleet via D12 OP-884
+# (the admin UI writes the env into the runner systemd unit).
+OMNISIGHT_PROJECT_STATE_INJECT = "OMNISIGHT_PROJECT_STATE_INJECT"
+
+_TRUTHY_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def is_project_state_inject_enabled_sync() -> bool:
+    """Sync env-backed gate for the runner's project-state injection (OP-905).
+
+    The runner is a sync process; the async ``is_enabled`` resolver above
+    requires an event loop + DB pool that the runner does not own. Reading
+    the env directly keeps the runner self-contained while D12 OP-884
+    pushes the canonical state into the systemd unit.
+    """
+    raw = os.environ.get(OMNISIGHT_PROJECT_STATE_INJECT, "").strip().lower()
+    return raw in _TRUTHY_ENV_VALUES
 
 
 _BUCKET_SALT = "op-884"
@@ -241,6 +262,8 @@ async def is_enabled(
 __all__ = [
     "FlagDecisionTimeout",
     "FlagNotDefined",
+    "OMNISIGHT_PROJECT_STATE_INJECT",
     "bucket_for_tenant",
     "is_enabled",
+    "is_project_state_inject_enabled_sync",
 ]
