@@ -329,6 +329,21 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         # the dev DB is per-test ephemeral so seeded rows go through
         # the AS-aware INSERT path (auth.py::_create_user_impl).
         ("users", sa.Column("auth_methods", _t(), nullable=False, server_default="[]")),
+        # OP-884 (alembic 0225): partial / per-tenant feature flag controls.
+        # ``rollout_pct`` defaults to 100 so existing rows keep the WP.7.8
+        # "global on/off" semantics; ``allowed_tenants`` defaults to an
+        # empty JSON array so the SDK falls through to the percent gate
+        # unless the operator explicitly seeds an allow-list. ``updated_at``
+        # is added nullable because SQLite forbids non-constant defaults
+        # on ``ADD COLUMN``; fresh-DB CREATE TABLE in ``_SCHEMA`` carries
+        # the proper ``DEFAULT CURRENT_TIMESTAMP`` already.
+        ("feature_flags", sa.Column(
+            "rollout_pct", _i(), nullable=False, server_default=_txt("100"),
+        )),
+        ("feature_flags", sa.Column(
+            "allowed_tenants", _t(), nullable=False, server_default="[]",
+        )),
+        ("feature_flags", sa.Column("updated_at", _t())),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
@@ -575,17 +590,24 @@ CREATE TABLE IF NOT EXISTS tenants (
 );
 
 -- WP.7.1 (alembic 0194): tiered feature flag registry.
--- Runtime writers must audit changes through audit_log with
--- entity_kind='feature_flag'; this table is the durable source of truth.
+-- OP-884 (alembic 0225): added rollout_pct + allowed_tenants + updated_at
+-- so the registry expresses partial / per-tenant enablement instead of
+-- just on/off. Runtime writers must audit changes through audit_log
+-- with entity_kind='feature_flag'; this table is the durable source
+-- of truth.
 CREATE TABLE IF NOT EXISTS feature_flags (
-    flag_name  TEXT PRIMARY KEY,
-    tier       TEXT NOT NULL
-               CHECK (tier IN ('debug','dogfood','preview','release','runtime')),
-    state      TEXT NOT NULL DEFAULT 'disabled'
-               CHECK (state IN ('disabled','enabled')),
-    expires_at TEXT,
-    owner      TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    flag_name       TEXT PRIMARY KEY,
+    tier            TEXT NOT NULL
+                    CHECK (tier IN ('debug','dogfood','preview','release','runtime')),
+    state           TEXT NOT NULL DEFAULT 'disabled'
+                    CHECK (state IN ('disabled','enabled')),
+    expires_at      TEXT,
+    owner           TEXT NOT NULL DEFAULT '',
+    rollout_pct     INTEGER NOT NULL DEFAULT 100
+                    CHECK (rollout_pct BETWEEN 0 AND 100),
+    allowed_tenants TEXT NOT NULL DEFAULT '[]',
+    created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_feature_flags_tier_state
     ON feature_flags(tier, state);

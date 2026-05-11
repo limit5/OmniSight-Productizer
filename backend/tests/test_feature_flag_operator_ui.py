@@ -46,7 +46,10 @@ class _FakeConn:
                 "state": "disabled",
                 "expires_at": None,
                 "owner": "wp",
+                "rollout_pct": 100,
+                "allowed_tenants": "[]",
                 "created_at": "2026-05-05 00:00:00",
+                "updated_at": "2026-05-05 00:00:00",
             },
         }
 
@@ -56,11 +59,19 @@ class _FakeConn:
     async def fetch(self, _sql):
         return list(self.rows.values())
 
-    async def fetchrow(self, sql, flag_name, state=None):
+    async def fetchrow(self, sql, *args):
         if "FOR UPDATE" in sql:
+            flag_name = args[0]
             return self.rows.get(flag_name)
         if "UPDATE feature_flags" in sql:
-            self.rows[flag_name] = {**self.rows[flag_name], "state": state}
+            # OP-884: (flag_name, state, rollout_pct, allowed_tenants_json)
+            flag_name, state, rollout_pct, allowed_tenants_json = args
+            self.rows[flag_name] = {
+                **self.rows[flag_name],
+                "state": state,
+                "rollout_pct": rollout_pct,
+                "allowed_tenants": allowed_tenants_json,
+            }
             return self.rows[flag_name]
         raise AssertionError(f"unexpected SQL: {sql}")
 
