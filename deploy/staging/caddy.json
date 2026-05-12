@@ -8,7 +8,7 @@
             {
               "match": [
                 {
-                  "path": ["/api/*", "/readyz", "/healthz", "/health"]
+                  "path": ["/api/*", "/audit/*", "/readyz", "/healthz", "/health"]
                 }
               ],
               "handle": [
@@ -25,15 +25,6 @@
                     {"dial": "backend-a:8000"},
                     {"dial": "backend-b:8001"}
                   ]
-                }
-              ]
-            },
-            {
-              "match": [{"host": ["staging.sora.services"]}],
-              "handle": [
-                {
-                  "handler": "reverse_proxy",
-                  "upstreams": [{"dial": "frontend:3000"}]
                 }
               ]
             }
