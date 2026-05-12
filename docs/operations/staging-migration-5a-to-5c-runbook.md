@@ -36,6 +36,10 @@ What this runbook does **not** cover:
 
 Related runbooks / docs:
 
+* [`../sop/cross-host-portability-staging.md`](../sop/cross-host-portability-staging.md)
+  — the *standing* SOP version of this runbook's §1 portability audit,
+  plus the AUDIT-29d "address staging by a port, not a `staging.sora.services`
+  subdomain" rule. Read it before adding any new staging artifact.
 * [`staging-environment-runbook.md`](staging-environment-runbook.md) — the
   5a systemd-wrapped stack (what we are migrating *from*).
 * [`staging-environment.md`](staging-environment.md) — OP-767 stack
