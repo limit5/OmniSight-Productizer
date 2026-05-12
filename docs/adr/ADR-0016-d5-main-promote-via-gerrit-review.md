@@ -1,9 +1,11 @@
 # ADR-0016 — D5 develop→main promotion via Gerrit review change, not direct push
 
-- **Status**: Accepted
+- **Status**: **Superseded by [ADR-0020](ADR-0020-release-cut-as-single-merge-change.md) (2026-05-12).** Retained for historical context. The `refs/for/main` *bulk-chain* mechanism this ADR specified (one Gerrit change per intervening `main..develop` commit) was fundamentally wrong for release-cut semantics — every release after the first hits Gerrit's "no new changes" rejection (the develop commits already carry Change-Ids) and/or `receive.maxBatchChanges`. ADR-0020 replaces it with a **single merge change** on `refs/for/main` + `submit-type: MERGE_ALWAYS` + a quad-keyed `release-cut-promote` conditional submit-requirement. The only piece carried forward is the `milestone:R3-fastforward` hashtag — ADR-0016's "path C" forward-compat hook is the seam ADR-0020 builds on. (Status flip done by AUDIT-26f / OP-985, which owns the AUDIT-13/13a/13b cleanup pass.)
+- **Original status**: Accepted
 - **Date**: 2026-05-12
+- **Superseded**: 2026-05-12 by ADR-0020 (AUDIT-26 — OP-979)
 - **Deciders**: operator (`nanakusa sora`), claude-bot (implementation), codex-bot (R3 failure evidence)
-- **Tickets**: OP-960 (AUDIT-13 implementation), OP-925 (R3 failure that surfaced this), OP-958 (AUDIT-11), OP-959 (AUDIT-12)
+- **Tickets**: OP-960 (AUDIT-13 implementation), OP-925 (R3 failure that surfaced this), OP-958 (AUDIT-11), OP-959 (AUDIT-12); superseded by OP-982 (AUDIT-26c — ADR-0020) / OP-985 (AUDIT-26f — this status flip)
 
 ## Context
 
