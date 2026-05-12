@@ -1,0 +1,21 @@
+; [OP-965] AUDIT-17 — OnFailure handler for the staging gate emitters.
+;
+; Fires only when scripts/staging_gate.py exits non-zero
+; (rc=2 = suite red, rc=3 = config/env error). Re-emits a single
+; structured-log line to the journal so the T1 alerter (OP-722) can route
+; it to the operator alert channel. Shared by staging-gate-canary.service
+; and staging-gate-smoke.service.
+;
+; Intentionally tiny — it does not retry, page, or transition tickets.
+; A red gate already wrote a red JSONL line, so the milestone checker will
+; emit ``milestone_blocked``; the operator can still ship via the
+; ``release:force-promote`` override (ADR-0019 / AUDIT-18, OP-966).
+
+[Unit]
+Description=OnFailure alert hook for the OmniSight staging gate emitters (OP-965 -> T1 OP-722)
+
+[Service]
+Type=oneshot
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/staging-gate-alert.log
+StandardError=append:/home/user/work/sora/logs/release-milestone/staging-gate-alert.log
+ExecStart=/bin/sh -c 'printf "{\\"timestamp\\":\\"%%s\\",\\"level\\":\\"DEGRADED\\",\\"event\\":\\"staging_gate_alert\\",\\"source\\":\\"staging-gate\\"}\\n" "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)"'
