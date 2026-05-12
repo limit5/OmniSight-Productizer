@@ -31,3 +31,9 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: omnisight-jira-ticket-spec-devops-activation
+        name: OmniSight JIRA ticket specs require devops activation AC
+        entry: python3 scripts/lint-jira-ticket-spec.py
+        language: system
+        files: ^(scripts/.*jira.*ticket.*\.py|.*jira.*ticket.*\.(md|txt)|.*ticket.*spec.*\.(md|txt))$
+        pass_filenames: true
