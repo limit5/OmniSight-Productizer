@@ -19,6 +19,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
+try:
+    from jira_label_validator import validate
+except ModuleNotFoundError:  # pragma: no cover - import path used by tests
+    from scripts.jira_label_validator import validate
+
 
 DEVOPS_LABEL = "area:devops"
 ACTIVATION_RE = re.compile(r"\bactivation\b", re.IGNORECASE)
@@ -74,6 +81,7 @@ def _lint_python_ticket_specs(path: Path, text: str) -> list[LintFinding]:
             continue
         keywords = _keyword_map(node)
         labels = _literal_string_list(keywords.get("labels"))
+        findings.extend(_lint_label_set(path, node.lineno, labels, _description_from_keywords(keywords)))
         if DEVOPS_LABEL not in labels:
             continue
 
@@ -99,6 +107,42 @@ def _lint_python_ticket_specs(path: Path, text: str) -> list[LintFinding]:
     return findings
 
 
+def _description_from_keywords(keywords: dict[str, ast.AST]) -> str:
+    parts: list[str] = []
+    scope_node = keywords.get("scope_text")
+    if scope_node is not None:
+        value = ast.literal_eval(scope_node)
+        if isinstance(value, str):
+            parts.append(value)
+    for key in AC_KEYWORDS:
+        parts.extend(_literal_string_list(keywords.get(key)))
+    return "\n".join(parts)
+
+
+def _lint_label_set(path: Path, line: int, labels: list[str], description: str) -> list[LintFinding]:
+    findings: list[LintFinding] = []
+    for issue in validate(labels, description):
+        if issue.severity != "error":
+            continue
+        findings.append(LintFinding(path, line, f"{issue.rule}: {issue.message}"))
+    return findings
+
+
+def _lint_yaml_ticket_spec(path: Path, text: str) -> list[LintFinding]:
+    try:
+        payload = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        line = getattr(getattr(exc, "problem_mark", None), "line", 0) + 1
+        return [LintFinding(path, line, f"cannot parse YAML file: {exc}")]
+    if not isinstance(payload, dict):
+        return []
+    labels = payload.get("labels")
+    if not isinstance(labels, list) or not all(isinstance(label, str) for label in labels):
+        return []
+    description = str(payload.get("description") or payload.get("scope") or "")
+    return _lint_label_set(path, 1, labels, description)
+
+
 def _lint_text_ticket_description(path: Path, text: str) -> list[LintFinding]:
     if DEVOPS_LABEL not in text:
         return []
@@ -121,6 +165,8 @@ def lint_path(path: Path) -> list[LintFinding]:
 
     if path.suffix == ".py":
         return _lint_python_ticket_specs(path, text)
+    if path.suffix in {".yaml", ".yml"}:
+        return _lint_yaml_ticket_spec(path, text)
     return _lint_text_ticket_description(path, text)
 
 

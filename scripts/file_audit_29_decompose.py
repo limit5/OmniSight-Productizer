@@ -42,6 +42,11 @@ from pathlib import Path
 from typing import Any
 from dataclasses import dataclass, field
 
+try:
+    from jira_label_validator import format_issues, validate
+except ModuleNotFoundError:  # pragma: no cover - import path used by tests
+    from scripts.jira_label_validator import format_issues, validate
+
 CRED_DIR = Path("~/.config/omnisight").expanduser()
 PARENT_STATE = Path("~/.cache/omnisight/audit-29-bootstrap-state.json").expanduser()
 STATE_FILE = Path("~/.cache/omnisight/audit-29-decompose-state.json").expanduser()
@@ -518,15 +523,15 @@ SUBMETA_LABEL_UPDATES = {
     # 29c/29d/29e/29g: no class:* was added, so nothing to remove. Keep type:meta + priority:meta.
     # single-phase sub-METAs: REMOVE type:meta + priority:meta, ADD class:* + missing area
     "29h": {"remove": ["type:meta", "priority:meta"],
-            "add": ["class:subscription-codex", "type:feature", "priority:audit-29", "area:docs"]},  # AC mentions docs/sop/release-lifecycle-states.md
+            "add": ["class:subscription-codex", "type:feature", "area:docs"]},  # AC mentions docs/sop/release-lifecycle-states.md
     "29i": {"remove": ["type:meta", "priority:meta"],
-            "add": ["class:subscription-codex", "type:feature", "priority:audit-29", "area:tooling", "area:docs",
+            "add": ["class:subscription-codex", "type:feature", "area:tooling", "area:docs",
                     "capability:enable=gerrit_push", "capability:enable=code_edit", "capability:enable=jira_update", "capability:enable=run_lint", "capability:enable=run_tests"]},
     "29j": {"remove": ["type:meta", "priority:meta"],
-            "add": ["class:subscription-codex", "type:feature", "priority:audit-29",
+            "add": ["class:subscription-codex", "type:feature",
                     "capability:enable=gerrit_push", "capability:enable=code_edit", "capability:enable=jira_update", "capability:enable=run_lint", "capability:enable=run_tests"]},
     "29k": {"remove": ["type:meta", "priority:meta"],
-            "add": ["class:subscription-claude", "type:feature", "priority:audit-29",
+            "add": ["class:subscription-claude", "type:feature",
                     "capability:enable=gerrit_push", "capability:enable=code_edit", "capability:enable=jira_update"]},
 }
 
@@ -637,7 +642,7 @@ def print_plan() -> None:
         print(f"  {alias} ({parents.get(alias, '?')}): remove={upd['remove']}  add={upd['add']}")
 
 
-def execute() -> int:
+def execute(force: bool = False) -> int:
     children = all_children()
     links = all_links()
     parents = load_parent_keys()
@@ -665,11 +670,12 @@ def execute() -> int:
             f"class:{c.runner_class}",
             f"tier:{c.tier}",
             "agent:auto",
-            "priority:audit-29",
             "type:feature",
             f"phase:audit-{c.parent_alias}",
             "scope:pre-rc2",
         ] + [f"area:{a}" for a in c.areas] + c.extra_caps
+        if not _validate_labels_or_exit(c.alias, labels, build_description(c, psum), force=force):
+            return 2
         body = {"fields": {
             "project": {"key": project},
             "summary": c.summary,
@@ -769,11 +775,40 @@ def main(argv: list[str]) -> int:
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--dry-run", action="store_true")
     g.add_argument("--execute", action="store_true")
+    p.add_argument("--force", action="store_true", help="bypass label validation errors")
     args = p.parse_args(argv)
     if args.dry_run:
+        _validate_all_children_or_exit(force=args.force)
         print_plan()
         return 0
-    return execute()
+    return execute(force=args.force)
+
+
+def _child_labels(c: ChildSpec) -> list[str]:
+    return [
+        f"class:{c.runner_class}",
+        f"tier:{c.tier}",
+        "agent:auto",
+        "type:feature",
+        f"phase:audit-{c.parent_alias}",
+        "scope:pre-rc2",
+    ] + [f"area:{area}" for area in c.areas] + c.extra_caps
+
+
+def _validate_labels_or_exit(alias: str, labels: list[str], description: str, force: bool) -> bool:
+    issues = validate(labels, description)
+    for line in format_issues(issues):
+        print(f"{alias}: {line}", file=sys.stderr)
+    return force or not any(issue.is_error for issue in issues)
+
+
+def _validate_all_children_or_exit(force: bool) -> None:
+    failed = False
+    for child in all_children():
+        ok = _validate_labels_or_exit(child.alias, _child_labels(child), build_description(child, child.parent_alias), force)
+        failed = failed or not ok
+    if failed:
+        raise SystemExit("aborting; pass --force to skip label validation errors")
 
 
 if __name__ == "__main__":
