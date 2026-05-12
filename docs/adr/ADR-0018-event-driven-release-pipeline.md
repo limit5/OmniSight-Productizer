@@ -91,6 +91,9 @@ load-bearing reference to "ADR-0018" outside this document yet, so the
 rename is local. Future references in H2/H3/H4 will pin to whatever
 number lands.
 
+H9 rechecked `docs/adr/` before finalizing the ADR. ADR-0018 remains unique,
+so `ADRNumberCollision` did not fire during OP-954.
+
 ### Decision criteria
 
 1. **Tier-M LOC budget (~700 LOC) for design only** — no implementation
