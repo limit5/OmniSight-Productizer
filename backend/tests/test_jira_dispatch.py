@@ -270,6 +270,58 @@ def test_gerrit_push_result_success_shape() -> None:
     assert "/+/42" in result.change_url
 
 
+def test_push_to_gerrit_for_review_runs_pre_review_self_fix(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Successful runner pushes must verify Gerrit mergeability before review."""
+
+    from backend.agents import auto_rebase, pre_review_self_fix
+
+    key = tmp_path / "ssh-key"
+    key.write_text("placeholder", encoding="utf-8")
+    calls: dict[str, object] = {}
+
+    def fake_breaker_call(fn, args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="",
+            stderr=(
+                "remote:   https://sora.services:29420/c/"
+                "omnisight/OmniSight-Productizer/+/42 subject\n"
+            ),
+        )
+
+    def fake_self_fix(**kwargs):
+        calls.update(kwargs)
+        return pre_review_self_fix.SelfFixResult(
+            mergeable=True,
+            attempts=1,
+            rebased=True,
+            force_pushed=True,
+        )
+
+    monkeypatch.setattr(
+        jd,
+        "_gerrit_auth_for_instance",
+        lambda agent_class, instance_id=None: ("codex-bot", key),
+    )
+    monkeypatch.setattr(jd, "_head_change_id", lambda worktree_path: None)
+    monkeypatch.setattr(jd.BREAKERS["gerrit_ssh"], "call", fake_breaker_call)
+    monkeypatch.setattr(auto_rebase, "load_owner_http_password", lambda user: "secret")
+    monkeypatch.setattr(pre_review_self_fix, "self_fix_mergeability", fake_self_fix)
+
+    result = jd.push_to_gerrit_for_review(tmp_path, "subscription-codex")
+
+    assert result.success is True
+    assert result.change_number == 42
+    assert calls["change_number"] == 42
+    assert calls["username"] == "codex-bot"
+    assert calls["http_password"] == "secret"
+    assert calls["target"] == "develop"
+    assert "Pre-review self-fix rebased and force-pushed" in result.recovery_note
+
+
 def test_transition_ids_includes_under_review() -> None:
     """OP-247 Phase 1 added to_under_review = '3' per §10 mapping."""
     assert jd.TRANSITION_IDS["to_under_review"] == "3"

@@ -1101,7 +1101,7 @@ def push_to_gerrit_for_review(
     import os
     import subprocess
     try:
-        _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+        bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
     except ValueError as exc:
         return GerritPushResult(False, None, None, str(exc))
     if not ssh_key.exists():
@@ -1179,11 +1179,48 @@ def push_to_gerrit_for_review(
     if not m:
         return GerritPushResult(False, None, None, f"push succeeded but Change URL not parsed:\n{blob[-1500:]}")
 
+    change_number = int(m.group(2))
+    change_url = m.group(1)
+    try:
+        from backend.agents import auto_rebase, pre_review_self_fix
+
+        self_fix = pre_review_self_fix.self_fix_mergeability(
+            worktree_path=worktree_path,
+            change_number=change_number,
+            gerrit_ssh_url=_gerrit_ssh_url(agent_class, instance_id),
+            rest_base_url=GERRIT_HOOK_URL.rsplit("/tools/", 1)[0],
+            username=bot_username,
+            http_password=auto_rebase.load_owner_http_password(bot_username),
+            target=target,
+        )
+    except Exception as exc:  # noqa: BLE001 - keep original push result diagnosable
+        return GerritPushResult(
+            False,
+            change_number,
+            change_url,
+            f"pre-review mergeability self-fix failed: {type(exc).__name__}: {exc}",
+        )
+    if not self_fix.mergeable:
+        return GerritPushResult(
+            False,
+            change_number,
+            change_url,
+            f"pre-review mergeability self-fix did not produce a mergeable patchset: {self_fix.detail}",
+        )
+
+    recovery_note = ""
+    if self_fix.force_pushed:
+        recovery_note = (
+            "Pre-review self-fix rebased and force-pushed replacement "
+            f"patchset after mergeable=false ({self_fix.attempts} attempt(s))."
+        )
+
     return GerritPushResult(
         success=True,
-        change_number=int(m.group(2)),
-        change_url=m.group(1),
+        change_number=change_number,
+        change_url=change_url,
         detail=blob[-1500:],
+        recovery_note=recovery_note,
     )
 
 
