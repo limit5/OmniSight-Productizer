@@ -1,0 +1,33 @@
+; [OP-1025] systemd user unit -- claude-bot-2 runner.
+;
+; Install:
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/runner-claude-bot@worker2.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now runner-claude-bot@worker2.service
+;   loginctl enable-linger "$USER"
+
+[Unit]
+Description=OmniSight Claude Runner claude-bot-2 (OP-1025)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_RUNNER_CLASS=subscription-claude
+Environment=OMNISIGHT_RUNNER_INSTANCE_ID=2
+Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
+Environment=OMNISIGHT_MEMORY_TOOL_CAP_MB=100
+Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-claude-bot-2.db
+ExecStart=%h/work/sora/OmniSight-Productizer/deploy/runner-wrappers/runner-claude.sh 2
+Restart=on-failure
+RestartSec=90
+KillSignal=SIGTERM
+TimeoutStopSec=60
+StandardOutput=append:%h/work/sora/logs/runner/claude-bot-2.log
+StandardError=append:%h/work/sora/logs/runner/claude-bot-2.log
+
+[Install]
+WantedBy=default.target
