@@ -1,0 +1,335 @@
+# JIRA label schema — OP project.
+#
+# Machine-parseable mirror of docs/sop/jira-label-conventions.md (same
+# namespaces, values, retired list, forbidden-combinations). If this file and
+# that doc disagree, THIS FILE WINS and the doc is the bug.
+#
+# Origin:   OP-1041 (AUDIT-29 housekeeping) — lifts the in-code registry
+#           (CANONICAL_PREFIXES / CANONICAL_PREFIX_VALUES / CANONICAL_BARE in
+#           scripts/jira-label-migrate.py, shipped by OP-1013) into doc + YAML.
+# Consumed by (OP-LABEL-LINT-HOOK / OP-1042 scope):
+#   - scripts/file_jira_ticket.py        — filing-time label validation
+#   - scripts/file_audit_29_tickets.py   — read labels from here, not hard-coded
+# In-code mirror: scripts/jira-label-migrate.py:is_canonical_label()
+#   (kept in sync by tests/test_jira_label_schema.py once OP-1042 lands).
+
+schema_version: 1
+ticket: OP-1041
+human_doc: docs/sop/jira-label-conventions.md
+in_code_mirror: scripts/jira-label-migrate.py        # is_canonical_label()
+
+# A label is one of:
+#   - prefixed: "<namespace>:<value>"  — namespace must appear in `namespaces`
+#   - bare:     a token from `bare_labels` (no colon), plus the colon-bearing
+#               markers explicitly listed there.
+# Canonical iff: bare-and-allowlisted, OR prefixed-with-known-namespace and
+# (if namespace.value is an enum) value in that enum, AND not matched by
+# `retired` / `legacy_rewrites` / `promote_to_field` / `promote_to_issuelink`.
+
+# ── routing — required on every ticket ───────────────────────────────────
+namespaces:
+  class:
+    group: routing
+    required: true
+    multi: false
+    value: free                       # class:api-anthropic, class:subscription-codex, ...
+    side_effects:
+      - "Runner JQL pickup filter (jira-ticket-conventions §16): a runner picks up only tickets whose class: matches its configured agent class."
+      - "A sub-task split cannot change it (jira-ticket-conventions §6) — class assignment is intentional."
+    docs: [jira-ticket-conventions.md#2, jira-ticket-conventions.md#16]
+
+  tier:
+    group: routing
+    required: true
+    multi: false
+    value:
+      enum: [S, M, L, X]
+    hour_bands: {S: "1-3h", M: "4-12h", L: "1-3d", X: ">3d"}
+    side_effects:
+      - "Authority gate (ADR-0005): tier:X must be split before pickup or human-assigned first; tier:L requires +1 human pre-merge."
+      - "Drift detector (jira-ticket-conventions §14) computes actual/target_upper per tier."
+    docs: [jira-ticket-conventions.md#3]
+
+  area:
+    group: routing
+    required: true
+    multi: true
+    value:
+      enum: [backend, frontend, devops, tests, db, docs, security, embedded, tooling]
+    side_effects:
+      - "Prompt injection (jira-ticket-conventions §5): runner injects 'Areas: ...' plus the negation list (full area taxonomy minus declared areas); the agent is told to stay inside declared areas and to surrender the ticket (jira-ticket-conventions §11) if the work needs an out-of-area domain."
+    docs: [jira-ticket-conventions.md#5]
+
+# ── capability — operator escape hatch on the OP-855 matrix ──────────────
+  capability:
+    group: capability
+    required: false
+    multi: true
+    value_forms:
+      - "capability:enable=<cap>"      # add a capability the (type x area x tier) matrix denies
+      - "capability:disable=<cap>"     # remove a capability the matrix grants
+    capability_enum: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, run_migration, deploy_action, run_outcomes_grader]
+    coord_override: true               # changes what the runner may do — operator-gated (AI proposes, human confirms)
+    side_effects:
+      - "backend/agents/capability_matrix.apply_label_overrides() mutates the resolved capability set at pickup time."
+    capability_vocabulary_owner: config/capability_matrix.yaml   # `capabilities:` block; also backend/agents/capability_matrix.CAPABILITIES
+    docs: [capability_matrix.py, jira-ticket-conventions.md#9, jira-ticket-conventions.md#11, jira-ticket-conventions.md#16]
+
+# ── taxonomy — why this exists / where it sits ───────────────────────────
+  sprint:    {group: taxonomy, required: false, multi: false, value: free}                       # sprint:G, sprint:H
+  phase:     {group: taxonomy, required: false, multi: false, value: free}                       # phase:audit-29f
+  scope:     {group: taxonomy, required: false, multi: true,  value: free}                        # scope:pre-rc2, scope:adr, scope:audit, scope:label-hygiene
+  meta:                                                                                          # meta:audit-29, meta:retrospective, meta:wave-retrospective, meta:governance
+    group: taxonomy
+    required: false
+    multi: true
+    value: free
+    requires:
+      component: META                  # meta:* attaches only to Component=META (jira-ticket-conventions §17)
+    note: "meta:* (a sub-type marker) is NOT the same as type:meta (a routing hint with side-effects) — see forbidden_combinations.meta-type-with-implementation."
+    docs: [jira-ticket-conventions.md#17]
+  adr:       {group: taxonomy, required: false, multi: true,  value: {pattern: '^[0-9]{4}$'}}     # adr:0021
+  epic:      {group: taxonomy, required: false, multi: false, value: free}                        # epic:<slug>
+  audit:     {group: taxonomy, required: false, multi: true,  value: {pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'}}   # audit:2026-05-12
+  incident:  {group: taxonomy, required: false, multi: true,  value: {pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}-.+$'}} # incident:2026-05-06-oauth-401
+  tech-debt: {group: taxonomy, required: false, multi: true,  value: free}                        # tech-debt:q2-2026
+  compliance: {group: taxonomy, required: false, multi: true, value: free}                        # compliance:soc2-cc6.1
+  drift:
+    group: taxonomy
+    required: false
+    multi: true
+    value: {enum: [over-run, over-tier]}
+    auto_applied_by: scripts/jira-drift-detector  # do not hand-add (jira-ticket-conventions §14)
+  wave:
+    group: taxonomy
+    required: false
+    multi: false
+    value: {enum: [complete-pending-retro]}
+    auto_applied_by: scripts/jira_epic_lifecycle.py   # Epics only (jira-ticket-conventions §10a) — do not hand-add
+  mutex:
+    group: taxonomy
+    required: false
+    multi: true
+    value: free                        # mutex:<resource-id>
+    coord_override: true               # changes other tickets' pickup eligibility (jira-ticket-conventions §8 type-c) — operator-gated
+    docs: [jira-ticket-conventions.md#8]
+  agent:     {group: taxonomy, required: false, multi: false, value: {enum: [auto]}, set_by: scripts/file_jira_ticket.py}
+  type:                                                                                          # type:story, type:bug, type:cleanup, type:feature, type:meta
+    group: taxonomy
+    required: false
+    multi: false
+    value: free
+    set_by: scripts/file_jira_ticket.py
+    note: "type:meta carries side-effects — routes the ticket through the runner's META roll-up path (read-only capability default). See forbidden_combinations.meta-type-with-implementation."
+  release:                                                                                       # release:v0.5.0-rc2 — transitional
+    group: taxonomy
+    required: false
+    multi: false
+    value: {pattern: '^v[0-9].*'}
+    transitional: true
+    prefer_instead: "JIRA fixVersion field"
+  label:     {group: taxonomy, required: false, multi: true,  value: free}                        # label:cleanup (LABEL-CLEANUP family)
+  priority:                                                                                       # priority:meta is the ONLY surviving priority:* LABEL
+    group: taxonomy
+    required: false
+    multi: false
+    value: {enum: [meta]}              # everything else under priority:* is retired or promoted (see retired / promote_to_field)
+    note: "priority:meta is a portfolio-META marker, NOT a severity. All priority:<severity> labels promote to the JIRA Priority field; all priority:*-track buckets are retired."
+
+# ── state — transient runner bookkeeping (not hand-authored) ─────────────
+  claim:
+    group: state
+    required: false
+    multi: true
+    value: {pattern: '^[A-Za-z0-9_.-]+:[0-9]{16}-[0-9a-f]{8}$'}   # claim:{instance}:{epoch_us:016d}-{uuid8}
+    owner: backend/agents/jira_dispatch.claim_ticket_atomic        # AUDIT-24 / OP-977
+    legacy_form: 'claim:{instance}'    # OP-838, SUPERSEDED — treated as expired, swept on next claim
+    docs: [runner-pickup-mutex.md]
+  runner-blocked:
+    group: state
+    required: false
+    multi: true
+    value: {pattern: '^waiting-OP-[0-9]+$'}                        # runner-blocked:waiting-OP-927
+    owner: backend/agents/jira_dispatch                            # DEPENDENCY_WAITING_LABEL_PREFIX = "runner-blocked:waiting-"
+  runner:
+    group: state
+    required: false
+    multi: true
+    value: free                        # runner:no-commits-expected, runner:atomic-claim, ...
+    coord_override_adjacent: true       # runner:no-commits-expected changes the post-CLI success contract — operator-set
+    docs: [jira-ticket-conventions.md]
+
+# ── bare / marker labels (no colon, allowlisted) ─────────────────────────
+bare_labels:
+  - {name: migrated-from-todo,      group: origin,  note: "imported from legacy TODO.md dump (OP-1014 triage)"}
+  - {name: migrated-from-todo-bulk, group: origin,  note: "bulk variant"}
+  - {name: rc-blocker,              group: marker,  note: "must land before the current rc cut"}
+  - {name: good-first-ticket,       group: marker,  note: "low-context starter ticket"}
+  - {name: needs-operator-input,    group: marker,  note: "parked pending an operator decision"}
+  - {name: "priority:meta",         group: marker,  note: "portfolio-META marker — colon-bearing but NOT a severity; the lone surviving priority:* label (also under namespaces.priority)"}
+
+# ── retired / legacy — NOT canonical; lint hook rejects new use ──────────
+legacy_rewrites:                       # legacy form -> canonical label (scripts/jira-label-migrate.py LABEL_RENAMES / PREFIX_RENAMES / COMPLEXITY_TO_TIER)
+  tier-s: tier:S
+  tier-m: tier:M
+  tier-l: tier:L
+  tier-x: tier:X
+  tier-S: tier:S
+  tier-M: tier:M
+  tier-L: tier:L
+  tier-X: tier:X
+  "agent-class:*": "class:*"           # prefix rename
+  complexity:trivial:   tier:S
+  complexity:low:       tier:S
+  complexity:small:     tier:S
+  complexity:medium:    tier:M
+  complexity:moderate:  tier:M
+  complexity:high:      tier:L
+  complexity:large:     tier:L
+  complexity:very-high: tier:X
+  complexity:xl:        tier:X
+  complexity:extreme:   tier:X
+
+promote_to_field:                      # label -> first-class JIRA field; label dropped (PRIORITY_LABEL_TO_FIELD / RELEASE_LABEL_TO_FIXVERSION)
+  priority:critical: {field: Priority,   value: Highest}
+  priority:high:     {field: Priority,   value: High}
+  priority:medium:   {field: Priority,   value: Medium}
+  priority:normal:   {field: Priority,   value: Medium}
+  priority:low:      {field: Priority,   value: Low}
+  priority:lowest:   {field: Priority,   value: Lowest}
+  priority:trivial:  {field: Priority,   value: Lowest}
+  release:v0.5.0-rc1: {field: fixVersion, value: v0.5.0-rc1}
+  release:v0.5.0-rc2: {field: fixVersion, value: v0.5.0-rc2}
+  release:v0.5.0:     {field: fixVersion, value: v0.5.0}
+  # NOTE: the `release:` NAMESPACE stays valid-but-transitional (see namespaces.release);
+  # only these specific historical values are auto-promoted by the migration tool.
+
+promote_to_issuelink:                  # label -> Blocks issuelink; label dropped. Atlassian: inwardIssue = blocker, outwardIssue = blocked (OP-874 trap, jira-ticket-conventions §19)
+  "parent:OP-N":      {link: Blocks, direction: "parent -> child"}    # parent:OP-N on K  =>  OP-N blocks K
+  "blocked-by:OP-N":  {link: Blocks, direction: "OP-N -> this"}       # blocked-by:OP-N on K  =>  OP-N blocks K
+  "blockedby:OP-N":   {link: Blocks, direction: "OP-N -> this"}
+  "blocks:OP-N":      {link: Blocks, direction: "this -> OP-N"}       # blocks:OP-N on K  =>  K blocks OP-N
+
+retired:                               # dropped, no replacement (RETIRE_EXACT / RETIRE_PATTERNS)
+  exact:
+    - priority:hd-track
+    - priority:mp-track
+    - priority:rpg-track
+    - priority:cl-track
+    - priority:l4-track
+    - priority:l5-track
+    - priority:bp-track
+    - priority:he-track
+    - priority:fx-track
+    - priority:fx2-track
+    - priority:wp-track
+    - refined-by:claude-direct
+  patterns:
+    - '^priority:[a-z0-9]+-track$'      # any future portfolio-bucket label
+    - '^runner-blocked:waiting-OP-92[0-9]$'   # the rc1 waiting chain (OP-920..929)
+  oneoff_sweep:
+    flag: "--retire-oneoffs"
+    threshold_flag: "--oneoff-threshold"       # default 5; labels used by <= threshold tickets and not on the canonical allowlist
+
+# ── forbidden combinations — checked across the whole label set ──────────
+forbidden_combinations:
+  - id: meta-type-with-implementation
+    severity: reject
+    when:
+      all_of:
+        - "labels contains type:meta"
+        - "description references implementation paths (scripts/* OR backend/* OR deploy/* OR frontend/* OR db/*)"
+        - "issuelinks: ticket is NOT the outwardIssue of any Blocks link (i.e. has no children)"
+    action: reject_at_filing
+    case_study: audit-29-988
+    rationale: >-
+      type:meta (and the priority:meta companion) routes the ticket through the
+      runner's META roll-up path. On that path the OP-855 capability-matrix
+      lookup resolves to read_only_default = [mcp_search, memory_recall] only —
+      correct for a true roll-up, fatal for an implementation ticket. Observed
+      twice on OP-988 (AUDIT-29a sub-META, 2026-05-13): runner picked it up,
+      tried gerrit_push, hit CapabilityNotPermitted, reverted to To Do, and
+      left a stale claim:default:* label each time. Same failure family as
+      OP-986 (localized issuetype name) and OP-874 (blockedBy direction): a
+      field/label with implicit downstream behavior, easy to set wrong, only
+      a filing-time gate prevents it. Akin to architecture-anti-patterns.md #13.
+    fix: >-
+      Decompose the implementation work into runner-pickable children (children
+      carry routing labels and NO type:meta/priority:meta; the parent keeps
+      type:meta because it now genuinely rolls up) — OR drop type:meta/
+      priority:meta and give it a normal issuetype hint + routing labels.
+      Reference: AUDIT-29 batch decompose, Gerrit #500, 2026-05-13.
+      Machine-enforced in scripts/file_jira_ticket.py once OP-1042 lands.
+
+  - id: priority-track-retired
+    severity: reject
+    when: {any_of: ["label matches ^priority:[a-z0-9]+-track$"]}
+    action: reject_at_filing
+    rationale: "Portfolio priority:*-track buckets retired by OP-1013 — use the JIRA Priority field (+ Component for the portfolio bucket)."
+
+  - id: legacy-tier-hyphen
+    severity: reject
+    when: {any_of: ["label matches ^tier-[smlxSMLX]$"]}
+    action: rewrite_on_migrate
+    rewrite_via: legacy_rewrites
+    rationale: "Hyphen-form tiers predate the colon convention."
+
+  - id: legacy-agent-class-prefix
+    severity: reject
+    when: {any_of: ["label starts with agent-class:"]}
+    action: rewrite_on_migrate
+    rewrite_via: legacy_rewrites
+    rationale: "Folded into class: by OP-855."
+
+  - id: complexity-folded-into-tier
+    severity: reject
+    when: {any_of: ["label starts with complexity:"]}
+    action: rewrite_on_migrate
+    rewrite_via: legacy_rewrites
+    rationale: "Folded into the tier: scale."
+
+  - id: link-label-not-a-label
+    severity: reject
+    when: {any_of: ["label is parent:OP-N", "label is blocked-by:OP-N", "label is blockedby:OP-N", "label is blocks:OP-N"]}
+    action: promote_to_issuelink_on_migrate
+    rewrite_via: promote_to_issuelink
+    rationale: "Dependency direction belongs in a Blocks issuelink, not a label (jira-ticket-conventions §19)."
+
+  - id: release-label-redundant-with-fixversion
+    severity: warn
+    when: {all_of: ["label starts with release:", "ticket has a fixVersion"]}
+    action: warn
+    rationale: "release: label is transitional; with a fixVersion set it is redundant — prefer the field."
+
+  - id: single-valued-namespace-repeated
+    severity: reject
+    when: {any_of: ["more than one class:* label", "more than one tier:* label", "more than one type:* label"]}
+    action: reject_at_filing
+    rationale: "class, tier, type are single-valued."
+
+  - id: meta-subtype-without-meta-component
+    severity: reject
+    when: {all_of: ["labels contains a meta:* label", "Component != META"]}
+    action: reject_at_filing
+    rationale: "meta:* sub-types attach only to META-component tickets (jira-ticket-conventions §17). Not the same as type:meta."
+
+  - id: ai-added-coord-override
+    severity: reject
+    when:
+      all_of:
+        - "labels contains a coord-override label (capability:enable=* OR capability:disable=* OR mutex:* OR runner:no-commits-expected)"
+        - "the label was added by an AI agent without an operator-approval comment"
+    action: reject_at_filing
+    rationale: "Coord-override labels change execution semantics / other tickets' pickup logic — AI may propose, human confirms (jira-ticket-conventions §9, §11)."
+
+# ── case studies referenced above ────────────────────────────────────────
+case_studies:
+  audit-29-988:
+    title: "type:meta on an implementation sub-META → runner read-only fallback → pickup/revert loop"
+    ticket: OP-988
+    family: "AUDIT-29 (OP-987..OP-1043)"
+    observed: 2026-05-13
+    symptom: "Runner picked up OP-988, capability_matrix resolved to [mcp_search, memory_recall], gerrit_push refused, ticket reverted to To Do — twice; stale claim:default:* labels left behind."
+    root_cause: "type:meta + priority:meta route through the META roll-up path whose capability default is read-only; the ticket had real implementation AC."
+    fix: "AUDIT-29 batch decompose (Gerrit #500): single-phase sub-METAs split into children that carry NO type:meta/priority:meta; type:meta kept only on parents that genuinely have children."
+    see_also: [jira-ticket-conventions.md#17, architecture-anti-patterns.md, runner-pickup-mutex.md, "OP-986 (localized issuetype)", "OP-874 (blockedBy direction)"]
