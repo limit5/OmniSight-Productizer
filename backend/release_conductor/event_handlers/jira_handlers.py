@@ -96,7 +96,7 @@ def on_issue_updated(event: dict[str, Any]) -> dict[str, Any]:
             from_status,
             to_status,
         )
-        notification = release_notifications.notify_jira_transition(event)
+        notification = release_notifications.notify_release_event(event)
         return {
             "outcome": "advance_next",
             "issue_key": issue_key,
