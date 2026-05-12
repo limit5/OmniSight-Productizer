@@ -30,6 +30,16 @@ is still treated as an operator alert, not as a merge. A develop tip more
 than :data:`DEFAULT_MAX_PROMOTE_BATCH` commits ahead of ``main`` is
 refused (Gerrit ``receive.maxBatchChanges``) so an operator does a manual
 catch-up merge first.
+
+OP-968 (AUDIT-18c) wires the ``release:force-promote`` operator override
+(ADR-0019): the milestone checker may emit ``milestone_force_promoted``
+in place of ``milestone_blocked`` when the operator has set the override
+label. This module now treats that event as a green-equivalent
+authorization (:func:`is_promotion_authorized_event`), prepends an
+``OPERATOR FORCE-PROMOTE WARNING:`` block (naming the bypassed gates) to
+the Gerrit auto-promote change description, and records the activation in
+the audit row with ``outcome=force_promoted`` so it is queryable distinct
+from a genuine ``milestone_ready`` promotion.
 """
 from __future__ import annotations
 
@@ -51,11 +61,28 @@ from backend.agents import jira_dispatch
 log = logging.getLogger(__name__)
 
 EVENT_MILESTONE_READY = "milestone_ready"
+# ADR-0019 / OP-968: the operator ``release:force-promote`` override event,
+# emitted by ``release_milestone_checker.py`` in place of
+# ``milestone_blocked`` when the override fixVersion label is present. It
+# authorizes a promotion exactly like ``milestone_ready`` but rides a
+# permanent warning block + a distinct audit outcome.
+EVENT_MILESTONE_FORCE_PROMOTED = "milestone_force_promoted"
 EVENT_MAIN_PROMOTED = "main_promoted"
 EVENT_MAIN_PROMOTE_CHANGE_CREATED = "main_promote_change_created"
 AUDIT_ACTION_MAIN_PROMOTED = "release.main_promoted"
 AUDIT_ACTION_MAIN_PROMOTE_CHANGE_CREATED = "release.main_promote_change_created"
 AUDIT_ACTION_MAIN_PROMOTE_BLOCKED = "release.main_promote_blocked"
+
+# ``release_audit.outcome`` values. A clean ``milestone_ready`` promotion
+# is ``success``; one driven by the ``release:force-promote`` override is
+# ``force_promoted`` so dashboards / queries can tell them apart (ADR-0019
+# frozen wire contract).
+PROMOTE_OUTCOME_SUCCESS = "success"
+PROMOTE_OUTCOME_FORCE_PROMOTED = "force_promoted"
+
+# Frozen artifact warning prefix (ADR-0019). Prepended to the Gerrit
+# auto-promote change description when a force-promote override is active.
+FORCE_PROMOTE_WARNING_PREFIX = "OPERATOR FORCE-PROMOTE WARNING:"
 
 # Hashtags + topic attached to the develop -> main review change(s).
 # ``auto-promote`` marks the source; ``milestone:R3-fastforward`` is the
@@ -154,21 +181,28 @@ def _push_for_review(
     target_branch: str,
     hashtags: tuple[str, ...] = PROMOTE_HASHTAGS,
     topic: str = PROMOTE_TOPIC,
+    change_description: str = "",
     timeout: int = 120,
 ) -> PushOutcome:
     """Push ``source_branch`` to ``refs/for/<target_branch>`` as review change(s).
 
     Hashtags + topic go via ``git push -o`` push options (robust for
     values containing ``:`` like ``milestone:R3-fastforward``, which the
-    ``%``-refspec form can't carry). Returns a :class:`PushOutcome`
-    instead of raising so a Gerrit ACL refusal is handled gracefully (the
-    OP-766 direct-push form let a ``CalledProcessError`` escape).
+    ``%``-refspec form can't carry). ``change_description``, when set, is
+    forwarded as the Gerrit ``message`` push option so it lands on the
+    created change(s); the force-promote override (ADR-0019) uses it to
+    carry the ``OPERATOR FORCE-PROMOTE WARNING:`` block. Returns a
+    :class:`PushOutcome` instead of raising so a Gerrit ACL refusal is
+    handled gracefully (the OP-766 direct-push form let a
+    ``CalledProcessError`` escape).
     """
     cmd = ["git", "push"]
     for tag in hashtags:
         cmd += ["-o", f"hashtag={tag}"]
     if topic:
         cmd += ["-o", f"topic={topic}"]
+    if change_description:
+        cmd += ["-o", f"message={change_description}"]
     cmd += [remote, f"{source_branch}:refs/for/{target_branch}"]
     proc = subprocess.run(
         cmd,
@@ -213,6 +247,35 @@ def _default_notify(channel: str, severity: str, detail: str) -> None:
     jira_dispatch.notify_operator(channel=channel, severity=severity, detail=detail)
 
 
+def is_promotion_authorized_event(rec: dict[str, Any]) -> bool:
+    """True if ``rec`` is an event that authorizes a develop -> main promotion.
+
+    Both the normal ``milestone_ready`` and the ADR-0019 operator override
+    ``milestone_force_promoted`` qualify; every other record is ignored.
+    """
+    return rec.get("event") in (EVENT_MILESTONE_READY, EVENT_MILESTONE_FORCE_PROMOTED)
+
+
+def _force_promote_reasons(event: dict[str, Any]) -> str:
+    """Render the bypassed-gate reasons carried by a force-promote event.
+
+    Consumes the ``reasons`` field the milestone checker copies from the
+    ``milestone_blocked`` shape it would otherwise have emitted; tolerates
+    a list, a scalar, or nothing.
+    """
+    reasons = event.get("reasons")
+    if isinstance(reasons, (list, tuple)):
+        joined = ", ".join(str(r).strip() for r in reasons if str(r).strip())
+        return joined or "(unspecified)"
+    text = str(reasons).strip() if reasons not in (None, "") else ""
+    return text or "(unspecified)"
+
+
+def force_promote_warning_block(reasons: str) -> str:
+    """The ADR-0019 ``OPERATOR FORCE-PROMOTE WARNING:`` block for ``reasons``."""
+    return f"{FORCE_PROMOTE_WARNING_PREFIX} gates {reasons}"
+
+
 def evaluate_fast_forward(
     *,
     repo: Path,
@@ -254,17 +317,27 @@ def promote_on_milestone_ready(
 ) -> PromotionResult:
     """Handle one release event.
 
-    Only ``milestone_ready`` records trigger git writes, and the write is
-    never a direct push to ``refs/heads/<target>`` (Gerrit ACL refuses
-    bot direct push to ``main`` — by design). When the develop tip is a
-    clean fast-forward over ``main`` we push ``develop`` to
+    Only authorized records (``milestone_ready`` or the ADR-0019 operator
+    override ``milestone_force_promoted``) trigger git writes, and the
+    write is never a direct push to ``refs/heads/<target>`` (Gerrit ACL
+    refuses bot direct push to ``main`` — by design). When the develop tip
+    is a clean fast-forward over ``main`` we push ``develop`` to
     ``refs/for/<target>`` so ``main`` advances through Gerrit Code
     Review; submitting the resulting change(s) stays an operator / future
-    merger-bot action (see module docstring).
+    merger-bot action (see module docstring). A force-promoted event
+    additionally carries the ``OPERATOR FORCE-PROMOTE WARNING:`` block
+    into the change description and an ``outcome=force_promoted`` audit
+    row.
     """
-    if event.get("event") != EVENT_MILESTONE_READY:
+    if not is_promotion_authorized_event(event):
         return PromotionResult("ignored", "", "", "", (), ())
 
+    force_promoted = event.get("event") == EVENT_MILESTONE_FORCE_PROMOTED
+    force_reasons = _force_promote_reasons(event) if force_promoted else ""
+    warning_block = force_promote_warning_block(force_reasons) if force_promoted else ""
+    outcome = (
+        PROMOTE_OUTCOME_FORCE_PROMOTED if force_promoted else PROMOTE_OUTCOME_SUCCESS
+    )
     version = str(event.get("fixVersion") or "")
     check = evaluate_fast_forward(
         repo=repo,
@@ -338,6 +411,7 @@ def promote_on_milestone_ready(
         target_branch=target_branch,
         hashtags=hashtags,
         topic=topic,
+        change_description=warning_block,
     )
     review_ref = f"{source_branch}:refs/for/{target_branch}"
     if not push.ok:
@@ -358,7 +432,8 @@ def promote_on_milestone_ready(
 
     created = list(push.change_urls)
     detail = (
-        f"develop -> main promotion change(s) created for {version or 'unknown version'} "
+        (f"{warning_block}\n" if warning_block else "")
+        + f"develop -> main promotion change(s) created for {version or 'unknown version'} "
         f"on {review_ref}"
         + (f": {', '.join(created)}" if created else " (see Gerrit)")
         + f"; hashtags={list(hashtags)}, topic={topic!r}. main advances through Gerrit "
@@ -372,12 +447,25 @@ def promote_on_milestone_ready(
         "topic": topic,
         "created_changes": created,
     }
+    if force_promoted:
+        payload["force_promoted"] = True
+        payload["force_promote_reasons"] = force_reasons
+        payload["change_description"] = warning_block
+    after = {
+        "status": "change_created",
+        "outcome": outcome,
+        "created_changes": created,
+        "hashtags": list(hashtags),
+    }
+    if force_promoted:
+        after["force_promote_reasons"] = force_reasons
+        after["change_description"] = warning_block
     notify("release-auto-promote", "warning", detail)
     event_sink(EVENT_MAIN_PROMOTE_CHANGE_CREATED, payload)
     audit_sink(AUDIT_ACTION_MAIN_PROMOTE_CHANGE_CREATED, {
         **payload,
         "before": {"main_tip": check.main_tip},
-        "after": {"status": "change_created", "created_changes": created, "hashtags": list(hashtags)},
+        "after": after,
     })
     return PromotionResult(
         "change_created", version, check.develop_tip, check.main_tip,

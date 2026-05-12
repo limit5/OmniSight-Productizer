@@ -289,7 +289,7 @@ def test_noop_when_main_already_at_develop(tmp_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Non-milestone_ready records are ignored
+# Non-authorizing records are ignored (no event, blocked, ...)
 # ─────────────────────────────────────────────────────────────────────
 
 
@@ -304,6 +304,236 @@ def test_non_milestone_ready_event_is_ignored(tmp_path: Path) -> None:
     )
 
     assert result.status == "ignored"
+
+
+def test_missing_event_field_is_noop(tmp_path: Path) -> None:
+    repo, remote = _repo_with_remote(tmp_path)
+    main_before = _git(remote, "rev-parse", "main")
+    _commit_file(repo, "feature.txt", "ready\n")
+    audits: list[tuple[str, dict]] = []
+
+    result = apm.promote_on_milestone_ready(
+        {"fixVersion": "v9.99.0"},  # no "event" key at all
+        repo=repo,
+        audit_sink=lambda action, payload: audits.append((action, payload)),
+        push_for_review=_boom,
+    )
+
+    assert result.status == "ignored"
+    assert audits == []
+    # main untouched, exactly as before AUDIT-18c.
+    assert _git(remote, "rev-parse", "main") == main_before
+
+
+def test_is_promotion_authorized_event_accepts_both_event_types() -> None:
+    assert apm.is_promotion_authorized_event({"event": "milestone_ready"})
+    assert apm.is_promotion_authorized_event({"event": "milestone_force_promoted"})
+    assert not apm.is_promotion_authorized_event({"event": "milestone_blocked"})
+    assert not apm.is_promotion_authorized_event({})
+    assert apm.EVENT_MILESTONE_FORCE_PROMOTED == "milestone_force_promoted"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# AUDIT-18c — release:force-promote operator override (ADR-0019)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_force_promoted_event_pushes_with_warning_prefix(tmp_path: Path) -> None:
+    repo, remote = _repo_with_remote(tmp_path)
+    main_before = _git(remote, "rev-parse", "main")
+    develop_tip = _commit_file(repo, "feature.txt", "ready\n")
+    pusher = _RecordingPusher(
+        apm.PushOutcome(ok=True, change_urls=("https://gerrit.example/c/sora-bridge/+/7777",))
+    )
+    alerts: list[tuple[str, str, str]] = []
+    events: list[tuple[str, dict]] = []
+    audits: list[tuple[str, dict]] = []
+
+    result = apm.promote_on_milestone_ready(
+        {
+            "event": "milestone_force_promoted",
+            "fixVersion": "v9.99.0",
+            "reasons": ["staging-canary red", "smoke-suite timed out"],
+        },
+        repo=repo,
+        remote="gerrit",
+        notify=lambda channel, severity, detail: alerts.append((channel, severity, detail)),
+        event_sink=lambda event, payload: events.append((event, payload)),
+        audit_sink=lambda action, payload: audits.append((action, payload)),
+        push_for_review=pusher,
+    )
+
+    assert result.status == "change_created"
+    assert result.develop_tip == develop_tip
+    # main on the remote must NOT have advanced — it still moves through review.
+    assert _git(remote, "rev-parse", "main") == main_before
+
+    # The push carried the OPERATOR FORCE-PROMOTE WARNING block as the
+    # Gerrit change description, naming the bypassed gates (catches
+    # ``WarningPrefixMissing``).
+    assert len(pusher.calls) == 1
+    desc = pusher.calls[0]["change_description"]
+    assert desc.startswith("OPERATOR FORCE-PROMOTE WARNING: gates ")
+    assert "staging-canary red" in desc
+    assert "smoke-suite timed out" in desc
+
+    # Audit row records ``force_promoted`` (not ``success``) and preserves
+    # the original blocker reasons.
+    assert audits[0][0] == apm.AUDIT_ACTION_MAIN_PROMOTE_CHANGE_CREATED
+    after = audits[0][1]["after"]
+    assert after["status"] == "change_created"
+    assert after["outcome"] == apm.PROMOTE_OUTCOME_FORCE_PROMOTED == "force_promoted"
+    assert "staging-canary red" in after["force_promote_reasons"]
+    assert "smoke-suite timed out" in after["force_promote_reasons"]
+
+    # Operator notification leads with the warning block.
+    assert len(alerts) == 1
+    assert alerts[0][2].startswith("OPERATOR FORCE-PROMOTE WARNING: gates ")
+    # Event payload flags the override.
+    assert events[0][0] == apm.EVENT_MAIN_PROMOTE_CHANGE_CREATED
+    assert events[0][1]["force_promoted"] is True
+
+
+def test_milestone_ready_push_carries_no_warning_prefix(tmp_path: Path) -> None:
+    repo, _remote = _repo_with_remote(tmp_path)
+    _commit_file(repo, "feature.txt", "ready\n")
+    pusher = _RecordingPusher(apm.PushOutcome(ok=True, change_urls=()))
+    audits: list[tuple[str, dict]] = []
+
+    result = apm.promote_on_milestone_ready(
+        {"event": "milestone_ready", "fixVersion": "v9.99.0"},
+        repo=repo,
+        remote="gerrit",
+        notify=lambda *a: None,
+        event_sink=lambda _e, _p: None,
+        audit_sink=lambda action, payload: audits.append((action, payload)),
+        push_for_review=pusher,
+    )
+
+    assert result.status == "change_created"
+    # No force-promote warning rides a genuine ready promotion.
+    assert pusher.calls[0]["change_description"] == ""
+    after = audits[0][1]["after"]
+    assert after["outcome"] == apm.PROMOTE_OUTCOME_SUCCESS == "success"
+    assert "force_promote_reasons" not in after
+    assert "force_promoted" not in audits[0][1]
+
+
+def test_audit_outcome_distinguishes_force_promoted_from_success(tmp_path: Path) -> None:
+    """``AuditOutcomeAmbiguous`` guard: the two paths must be queryable apart."""
+    repo, _remote = _repo_with_remote(tmp_path)
+    _commit_file(repo, "feature.txt", "ready\n")
+    pusher = _RecordingPusher(apm.PushOutcome(ok=True, change_urls=()))
+    ready_audits: list[tuple[str, dict]] = []
+    forced_audits: list[tuple[str, dict]] = []
+
+    apm.promote_on_milestone_ready(
+        {"event": "milestone_ready", "fixVersion": "v9.99.0"},
+        repo=repo,
+        remote="gerrit",
+        notify=lambda *a: None,
+        event_sink=lambda _e, _p: None,
+        audit_sink=lambda action, payload: ready_audits.append((action, payload)),
+        push_for_review=pusher,
+    )
+    apm.promote_on_milestone_ready(
+        {"event": "milestone_force_promoted", "fixVersion": "v9.99.0", "reasons": ["gate X"]},
+        repo=repo,
+        remote="gerrit",
+        notify=lambda *a: None,
+        event_sink=lambda _e, _p: None,
+        audit_sink=lambda action, payload: forced_audits.append((action, payload)),
+        push_for_review=pusher,
+    )
+
+    ready_outcome = ready_audits[0][1]["after"]["outcome"]
+    forced_outcome = forced_audits[0][1]["after"]["outcome"]
+    assert ready_outcome == "success"
+    assert forced_outcome == "force_promoted"
+    assert ready_outcome != forced_outcome
+
+
+def test_force_promoted_event_with_no_reasons_still_warns(tmp_path: Path) -> None:
+    repo, _remote = _repo_with_remote(tmp_path)
+    _commit_file(repo, "feature.txt", "ready\n")
+    pusher = _RecordingPusher(apm.PushOutcome(ok=True, change_urls=()))
+
+    result = apm.promote_on_milestone_ready(
+        {"event": "milestone_force_promoted", "fixVersion": "v9.99.0"},
+        repo=repo,
+        remote="gerrit",
+        notify=lambda *a: None,
+        event_sink=lambda _e, _p: None,
+        audit_sink=lambda _a, _p: None,
+        push_for_review=pusher,
+    )
+
+    assert result.status == "change_created"
+    assert pusher.calls[0]["change_description"] == (
+        "OPERATOR FORCE-PROMOTE WARNING: gates (unspecified)"
+    )
+
+
+def test_force_promoted_event_via_run_once(tmp_path: Path) -> None:
+    repo, remote = _repo_with_remote(tmp_path)
+    main_before = _git(remote, "rev-parse", "main")
+    _commit_file(repo, "feature.txt", "ready\n")
+    event_log = tmp_path / "systemd.log"
+    cursor = tmp_path / "cursor"
+    event_log.write_text(
+        json.dumps(
+            {
+                "event": "milestone_force_promoted",
+                "fixVersion": "v9.99.0",
+                "reasons": ["gate Y"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    pusher = _RecordingPusher(apm.PushOutcome(ok=True, change_urls=()))
+    audits: list[tuple[str, dict]] = []
+
+    results = apm.run_once(
+        event_log=event_log,
+        cursor=cursor,
+        repo=repo,
+        remote="gerrit",
+        source_branch="develop",
+        target_branch="main",
+        notify=lambda *a: None,
+        event_sink=lambda _e, _p: None,
+        audit_sink=lambda action, payload: audits.append((action, payload)),
+        push_for_review=pusher,
+    )
+
+    assert [r.status for r in results] == ["change_created"]
+    assert _git(remote, "rev-parse", "main") == main_before
+    assert pusher.calls[0]["change_description"].startswith(
+        "OPERATOR FORCE-PROMOTE WARNING: gates "
+    )
+    assert audits[0][1]["after"]["outcome"] == "force_promoted"
+
+
+def test_default_push_for_review_forwards_change_description(tmp_path: Path) -> None:
+    repo, remote = _repo_with_remote(tmp_path)
+    develop_tip = _commit_file(repo, "feature.txt", "ready\n")
+    main_before = _git(remote, "rev-parse", "main")
+
+    outcome = apm._push_for_review(
+        repo=repo,
+        remote="gerrit",
+        source_branch="develop",
+        target_branch="main",
+        change_description="OPERATOR FORCE-PROMOTE WARNING: gates gate Z",
+    )
+
+    # A plain bare repo just ignores the unknown ``message`` push option;
+    # the push itself still lands under refs/for/main and never touches
+    # refs/heads/main.
+    assert outcome.ok is True
+    assert _git(remote, "rev-parse", "refs/for/main") == develop_tip
+    assert _git(remote, "rev-parse", "refs/heads/main") == main_before
 
 
 # ─────────────────────────────────────────────────────────────────────
