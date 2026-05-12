@@ -14,6 +14,19 @@ If you recognise one, follow the Cure section's recipe and reference the
 existing tickets in your new ticket's Spec References section. Don't redesign
 the fix from scratch — these patterns have already been costed.
 
+**Auto-injection (AUDIT-29b-6 / OP-1024)**: each pattern carries a
+`**Domains**:` line listing the OmniSight `area:` labels it is relevant to.
+The runner's `_build_prompt` (when the `antipattern_inject` flag is on) parses
+this file via `backend.agents.cognee_integration.parse_antipatterns`, ranks
+the patterns by Cognee similarity to the ticket (keyword-overlap fallback when
+the KG is offline), biases the result toward patterns whose `Domains` intersect
+the ticket's `area:` labels, and injects the top-N as an "Anti-patterns matching
+this ticket" block. Keep the `**Domains**:` line accurate when you add a pattern;
+the parser falls back to keyword inference if it is missing, but explicit is
+better. The per-file lessons under `docs/sop/lessons/` are surfaced the same way
+(`cognee_recall` flag → "Relevant lessons" block). Bootstrap the knowledge graph
+with `python3 scripts/cognee-ingest-lessons.py`.
+
 ---
 
 ## Index
@@ -38,6 +51,8 @@ the fix from scratch — these patterns have already been costed.
 ---
 
 ## 1. Numbered flat-file registry
+
+**Domains**: docs, backend, tooling
 
 **Symptom**: Single mutable file (e.g. `lessons-learned.md`, `docs/adr/ADR-0010-*.md`,
 `backend/main.py` router list, `lib/api.ts` exports) with sequential identifiers
@@ -75,6 +90,8 @@ as the template when applying this cure to a new resource.
 
 ## 2. Shared mutable git config across worktrees
 
+**Domains**: backend, tooling, devops
+
 **Symptom**: Two sibling workers (e.g. claude-bot and codex-bot runners) both
 write `git config user.email` to satisfy their bot identity. The last one to
 write wins. The other runner subsequently commits with the wrong author and
@@ -104,6 +121,8 @@ from. All sibling worktrees see the same value.
 ---
 
 ## 3. Idempotency-blind external mutation
+
+**Domains**: backend, db
 
 **Symptom**: When an external API call (JIRA `add_comment`, audit log insert,
 notification send) is retried after a transient failure, duplicate side
@@ -135,6 +154,8 @@ exponential backoff helpers) do not add idempotency keys by default.
 
 ## 4. Push without commit
 
+**Domains**: backend, tooling
+
 **Symptom**: `git push` returns `! [remote rejected] HEAD -> refs/for/develop (no new changes)`. Runner posts a `[runner-gerrit-push-fail]` comment and exits rc=1, leaving the JIRA ticket stuck at 進行中 forever.
 
 **Root cause**: CLI completed (rc=0) but did not actually create a commit
@@ -158,6 +179,8 @@ attempted push because the gate was "rc==0" not "rc==0 AND HEAD moved".
 ---
 
 ## 5. Daemon without event cursor
+
+**Domains**: backend, devops
 
 **Symptom**: Long-running event-stream daemon (gerrit-jira-bridge,
 notification consumer, etc.) crashes or reconnects. Events that occurred
@@ -188,6 +211,8 @@ last successfully-processed event. There is no cursor; replay is impossible.
 ---
 
 ## 6. Strict state machine on terminal events
+
+**Domains**: backend
 
 **Symptom**: Event handler ignores a terminal event because the entity is in
 an "unexpected" predecessor state. The work that triggered the event still
@@ -220,6 +245,8 @@ for intermediate in path_from(state, TERMINAL):
 
 ## 7. Synchronous external call without circuit breaker
 
+**Domains**: backend, devops
+
 **Symptom**: External service is unreachable. Code retries every tick (cron / loop) at full rate, generating noise without progress. When the service recovers, all retries succeed simultaneously, creating a thundering herd.
 
 **Root cause**: No circuit breaker. No backoff. No notion that "if 5 calls in a row failed, the service is probably down — stop trying for a minute."
@@ -239,6 +266,8 @@ for intermediate in path_from(state, TERMINAL):
 ---
 
 ## 8. Worktree state-leak across ticks
+
+**Domains**: backend, tooling
 
 **Symptom**: Subsequent runner tick fails with "cannot switch branch while rebasing" / "cherry-pick in progress" / "merge conflict not resolved". The current tick did nothing wrong; the leak came from a previous tick that crashed mid-operation.
 
@@ -262,6 +291,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 ## 9. Auto-resolver brittle to nested markers
 
+**Domains**: backend, tooling
+
 **Symptom**: An automated conflict resolver "successfully" resolves a conflict, commits, pushes — but the resulting PS has unresolved conflict markers (`<<<<<<<` / `=======` / `>>>>>>>`) embedded as literal text in a tracked file. Subsequent rebase attempts fail because git reads the markers as text.
 
 **Root cause**: Resolver uses `re.search` (returns first match) and assumes exactly one conflict region per file. When a file has nested or sequential conflicts (e.g. from prior failed rebases), the resolver misses the outer markers.
@@ -280,6 +311,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 ---
 
 ## 10. Migration ticket fighting in-flight tickets
+
+**Domains**: backend, db, docs
 
 **Symptom**: A structural / migration ticket (e.g. "split lessons-learned.md into per-file") merges into develop. Within minutes, multiple in-flight PSes that wrote to the OLD format hit conflict, requiring each to be reformatted.
 
@@ -301,6 +334,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 
 ## 11. Self-referential text-match false positive
+
+**Domains**: tooling, backend, docs
 
 **Symptom**: A bulk-action filter that uses full-text search to identify tickets matching pattern X (e.g. `text ~ "refine before pickup"`) accidentally matches the META ticket *about* pattern X. The meta-ticket gets the bulk action applied to itself, often disabling its own ability to ship the fix.
 
@@ -327,6 +362,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 ## 12. Spike + final-version add/add scaffold race
 
+**Domains**: backend, frontend, tests, tooling
+
 **Symptom**: A sprint splits "validate framework choice" into one ticket (E1: spike + ADR) and "build the proper scaffold" into a sibling ticket (E2). The spike ticket ships an *entire* working scaffold (mkdocs.yml, requirements.txt, docs/, theme files) instead of the minimum proof-of-concept it was scoped for. E2 is then written against a clean base, ADDs the same files, and `git merge` reports `add/add` conflicts on every shared scaffold file once E1 merges first.
 
 **Root cause**: "Spike to validate" and "build the thing" overlap unbounded. The spike implementer doesn't know which exact files they shouldn't write — and from inside the spike, writing the full scaffold is the *easiest* way to demonstrate the framework works end-to-end. The sprint planner's intent ("E1 = throwaway, E2 = canonical") never becomes a code-level constraint, only a Goal-section english sentence.
@@ -350,6 +387,8 @@ Add/add is structurally different from edit/edit: there is no shared base for gi
 ---
 
 ## 13. Shipped-but-not-deployed
+
+**Domains**: devops, backend, db
 
 **Symptom**: A ticket's code merges to `develop`, the ticket moves to 公開済み /
 Published, and everyone moves on — but the artefact it produced (a systemd
@@ -427,6 +466,8 @@ owns, not an implicit "someone will run it".
 ---
 
 ## 14. Bulk import without refinement creates dead inventory
+
+**Domains**: tooling, backend, docs
 
 **Symptom**: A migration / planning exercise dumps a large list (a `TODO.md`, a spreadsheet, an old tracker) into JIRA as hundreds of standalone tickets — summary only, no `area:` / `tier:` / `class:` labels, no fixVersion, no assignee, no AC section. The runner JQL can't pick a single one (it filters on the runner-pickability labels). But every project-wide query — `project = OP`, sprint review, "how big is the backlog?" — counts all of them, so the *visible* backlog is 3–5× the *actionable* backlog. The promise was "we'll refine these later"; nobody ever does, because there is no forcing function and the items are individually low-context.
 

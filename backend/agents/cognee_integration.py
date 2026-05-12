@@ -46,6 +46,7 @@ import importlib
 import inspect
 import logging
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,6 +76,7 @@ DEFAULT_NEO4J_PASSWORD = ""
 DEFAULT_TENANT_ID = "t-default"
 DEFAULT_REPO_MAP_TOP_N = 50
 DEFAULT_LESSON_TOP_K = 3
+DEFAULT_ANTIPATTERN_TOP_K = 2
 DEFAULT_REPO_MAP_TOKEN_BUDGET = 1000
 
 # ECL source kinds (AC #2). Each kind maps to its own dataset namespace
@@ -84,6 +86,12 @@ SOURCE_KIND_CODE = "code"
 SOURCE_KIND_JIRA = "jira"
 SOURCE_KIND_GERRIT = "gerrit"
 SOURCE_KIND_LESSON = "lesson"
+# AUDIT-29b-6 (OP-1024) — per-pattern chunks of
+# ``docs/sop/architecture-anti-patterns.md`` land in their own dataset so a
+# ``retrieve_lessons_via_cognee`` (kind=lesson) query never mixes them in
+# with the L-*.md lessons; they are retrieved explicitly by
+# :func:`retrieve_antipatterns_via_cognee`.
+SOURCE_KIND_ANTIPATTERN = "antipattern"
 ALL_SOURCE_KINDS: tuple[str, ...] = (
     SOURCE_KIND_CODE,
     SOURCE_KIND_JIRA,
@@ -189,6 +197,36 @@ class CogneeQueryResult:
     score: float
     kind: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class AntipatternRecord:
+    """One ``## N. Title`` section of the anti-patterns cookbook.
+
+    ``domains`` is the set of OmniSight ``area:`` names this pattern is
+    relevant to — parsed from a ``**Domains**:`` line when present, else
+    inferred from the section text. ``anchor`` is the GitHub-style heading
+    slug, used to build a stable Cognee ``identifier``.
+    """
+
+    pattern_id: str
+    title: str
+    domains: tuple[str, ...]
+    text: str
+    anchor: str
+
+    @property
+    def identifier(self) -> str:
+        return f"antipattern-{self.pattern_id}-{self.anchor}"
+
+
+@dataclass(frozen=True)
+class AntipatternMatch:
+    """A cookbook pattern selected for a ticket, with provenance."""
+
+    record: AntipatternRecord
+    score: float
+    matched_domains: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -401,6 +439,144 @@ def collect_lesson_sources(lessons_dir: Path) -> list[IngestSource]:
     return sources
 
 
+# AUDIT-29b-6 (OP-1024) — anti-pattern cookbook parsing + ingestion.
+
+_ANTIPATTERN_HEADING_RE = re.compile(r"^##\s+(\d+)\.\s+(.+?)\s*$")
+_ANTIPATTERN_DOMAINS_RE = re.compile(
+    r"^\*\*Domains?\*\*:\s*(.+?)\s*$", re.IGNORECASE | re.MULTILINE
+)
+_ANTIPATTERN_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "backend": (
+        "runner", "daemon", "jira", "gerrit", "circuit breaker", "state machine",
+        "bridge", "auto_promote", "webhook", "api ", "event",
+    ),
+    "frontend": ("frontend", "react", "component", "lib/api.ts", "dashboard"),
+    "devops": ("systemd", "compose", "docker", "deploy", "timer", "cron", "prod", "staging"),
+    "tests": ("test fixture", "pytest", "fixtures/", "/tests/"),
+    "db": ("alembic", "migration", "postgres", "schema", "audit row", "table"),
+    "docs": ("docs/sop", "adr", "lessons-learned", "retrospective", "convention", "cookbook"),
+    "security": ("secret", "token", "credential", " auth ", "signing key"),
+    "embedded": ("soc", "toolchain", "sysroot", "firmware", "camera"),
+    "tooling": ("script", "scripts/", "build script", "index file", "resolver", "bulk-action", "triage", "linter"),
+}
+_ANTIPATTERN_NON_PATTERN_HEADINGS = frozenset(
+    {"index", "cross-cutting principles", "see also"}
+)
+
+
+def _antipattern_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def _split_domain_list(raw: str) -> tuple[str, ...]:
+    seen: list[str] = []
+    for part in re.split(r"[,/|]", raw):
+        token = part.strip().lower()
+        token = re.sub(r"^`|`$", "", token).strip()
+        if token and token not in seen:
+            seen.append(token)
+    return tuple(seen)
+
+
+def _infer_antipattern_domains(text: str) -> tuple[str, ...]:
+    low = text.lower()
+    hits = [
+        domain
+        for domain, keywords in _ANTIPATTERN_DOMAIN_KEYWORDS.items()
+        if any(keyword in low for keyword in keywords)
+    ]
+    return tuple(hits) if hits else ("backend",)
+
+
+def parse_antipatterns(doc_path: Path) -> list[AntipatternRecord]:
+    """Split ``architecture-anti-patterns.md`` into per-pattern records.
+
+    Each ``## N. Title`` section becomes one :class:`AntipatternRecord`.
+    A ``**Domains**:`` line (comma/slash-separated ``area:`` names) is read
+    when present; otherwise the domains are inferred from the section body.
+    Non-pattern headings (Index / Cross-cutting principles / See also) and
+    everything before pattern #1 are ignored. Returns ``[]`` on read error
+    so callers degrade to an empty block.
+    """
+    try:
+        raw = doc_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    records: list[AntipatternRecord] = []
+    cur_id: str | None = None
+    cur_title: str = ""
+    body: list[str] = []
+
+    def _flush() -> None:
+        nonlocal cur_id, cur_title, body
+        if cur_id is None:
+            return
+        # Drop the trailing ``---`` horizontal rule that separates patterns.
+        section = re.sub(r"\n*-{3,}\s*$", "", "\n".join(body)).strip()
+        domains_match = _ANTIPATTERN_DOMAINS_RE.search(section)
+        if domains_match:
+            domains = _split_domain_list(domains_match.group(1))
+        else:
+            domains = _infer_antipattern_domains(cur_title + "\n" + section)
+        rendered = f"## {cur_id}. {cur_title}\n\n{section}".strip()
+        records.append(
+            AntipatternRecord(
+                pattern_id=cur_id,
+                title=cur_title,
+                domains=domains,
+                text=rendered,
+                anchor=_antipattern_slug(cur_title),
+            )
+        )
+        cur_id = None
+        cur_title = ""
+        body = []
+
+    for line in raw.splitlines():
+        heading = _ANTIPATTERN_HEADING_RE.match(line)
+        if heading:
+            _flush()
+            cur_id = heading.group(1)
+            cur_title = heading.group(2).strip()
+            body = []
+            continue
+        if line.startswith("## ") and cur_id is not None:
+            # A non-numbered ``## Heading`` (Index / See also / …) ends the
+            # current pattern section.
+            _flush()
+            continue
+        if cur_id is not None:
+            body.append(line)
+    _flush()
+    return records
+
+
+def collect_antipattern_sources(doc_path: Path) -> list[IngestSource]:
+    """Collect per-pattern chunks of the anti-patterns cookbook for ECL.
+
+    Each pattern becomes its own :class:`IngestSource` with
+    ``kind=SOURCE_KIND_ANTIPATTERN`` and a stable identifier
+    (``antipattern-<id>-<slug>``) so re-ingestion replaces rather than
+    duplicates. Used by ``scripts/cognee-ingest-lessons.py``.
+    """
+    sources: list[IngestSource] = []
+    for record in parse_antipatterns(doc_path):
+        sources.append(
+            IngestSource(
+                kind=SOURCE_KIND_ANTIPATTERN,
+                identifier=record.identifier,
+                content=record.text,
+                metadata={
+                    "pattern_id": record.pattern_id,
+                    "title": record.title,
+                    "domains": list(record.domains),
+                    "path": str(doc_path),
+                },
+            )
+        )
+    return sources
+
+
 def collect_jira_sources(snapshots: Iterable[Any]) -> list[IngestSource]:
     """Build JIRA ingestion sources from TicketSnapshot-shaped objects."""
     sources: list[IngestSource] = []
@@ -541,6 +717,99 @@ def retrieve_lessons_via_cognee(
         )
         for hit in hits
     )
+
+
+# ── Anti-pattern recall (AUDIT-29b-6 / OP-1024) ────────────────────────
+
+
+def retrieve_antipatterns_via_cognee(
+    doc_path: Path,
+    *,
+    ticket_title: str,
+    acceptance_criteria: str,
+    declared_areas: Sequence[str] = (),
+    top_k: int = DEFAULT_ANTIPATTERN_TOP_K,
+    adapter: CogneeAdapter | None = None,
+) -> tuple[AntipatternMatch, ...]:
+    """Return the cookbook anti-patterns most relevant to a ticket.
+
+    Ordering is Cognee top-N semantic similarity over the ``antipattern``
+    dataset when the KG is reachable; otherwise a deterministic
+    keyword-overlap fallback over the locally-parsed cookbook (so the
+    block is shape-stable whether or not Cognee is up). In both cases the
+    result is biased toward patterns whose ``Domains`` intersect the
+    ticket's declared ``area:`` labels — that is the AC §3 "anti-pattern
+    auto-injected when ticket area matches pattern's domain" behaviour.
+    """
+    records = parse_antipatterns(doc_path)
+    if not records:
+        return ()
+    by_identifier = {record.identifier: record for record in records}
+    declared = {area.strip().lower() for area in declared_areas if area and area.strip()}
+    query = f"{ticket_title}\n\n{acceptance_criteria}".strip()
+
+    ranked: list[AntipatternRecord] = []
+    if query:
+        try:
+            adapter = adapter or CogneeAdapter.from_env()
+            hits = _run_async(
+                adapter.search(
+                    query,
+                    kinds=[SOURCE_KIND_ANTIPATTERN],
+                    top_k=max(top_k * 4, top_k),
+                )
+            )
+            for hit in hits:
+                record = by_identifier.get(hit.identifier)
+                if record is not None and record not in ranked:
+                    ranked.append(record)
+        except (
+            CogneeNotInstalled,
+            CogneeNeo4jUnavailable,
+            CogneeQueryTimeout,
+            CogneeIndexCorruption,
+        ) as exc:
+            log.info("cognee_antipatterns_fallback: %s", exc)
+            ranked = []
+    if not ranked:
+        ranked = _antipatterns_keyword_rank(records, query)
+
+    def _overlap(record: AntipatternRecord) -> tuple[str, ...]:
+        return tuple(domain for domain in record.domains if domain in declared)
+
+    if declared:
+        matched = [record for record in ranked if _overlap(record)]
+        rest = [record for record in ranked if not _overlap(record)]
+        ranked = matched + rest
+
+    selected = ranked[:top_k] if top_k > 0 else ranked
+    total = len(ranked)
+    return tuple(
+        AntipatternMatch(
+            record=record,
+            score=float(total - index),
+            matched_domains=_overlap(record),
+        )
+        for index, record in enumerate(selected)
+    )
+
+
+def _antipatterns_keyword_rank(
+    records: Sequence[AntipatternRecord], query: str
+) -> list[AntipatternRecord]:
+    query_terms = set(re.findall(r"[a-z0-9_]+", query.lower()))
+    if not query_terms:
+        return list(records)
+    scored: list[tuple[int, int, AntipatternRecord]] = []
+    for record in records:
+        terms = set(re.findall(r"[a-z0-9_]+", f"{record.title}\n{record.text}".lower()))
+        try:
+            pattern_ordinal = int(record.pattern_id)
+        except ValueError:
+            pattern_ordinal = 1 << 30
+        scored.append((-len(query_terms & terms), pattern_ordinal, record))
+    scored.sort(key=lambda triple: (triple[0], triple[1]))
+    return [record for _, _, record in scored]
 
 
 # ── ECL pipeline orchestration (AC #2 + #7) ────────────────────────────
