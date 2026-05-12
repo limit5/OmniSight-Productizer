@@ -1,0 +1,16 @@
+; [OP-939] Daily 03:00 UTC trigger for release-conductor-cron.service.
+;
+; Persistent=true catches up once after host downtime so a release
+; milestone is not silently skipped for a full day.
+
+[Unit]
+Description=Daily 03:00 UTC trigger for release-conductor-cron.service (OP-939)
+
+[Timer]
+Unit=release-conductor-cron.service
+OnCalendar=*-*-* 03:00:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
