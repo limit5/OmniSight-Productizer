@@ -32,6 +32,7 @@ the fix from scratch — these patterns have already been costed.
 | 10 | [Migration ticket fighting in-flight tickets](#10-migration-ticket-fighting-in-flight-tickets) | Structural ticket lands while siblings still write old format |
 | 11 | [Self-referential text-match false positive](#11-self-referential-text-match-false-positive) | Bulk-action filter matches the meta-document about pattern X (which mentions X by name) |
 | 12 | [Spike + final-version add/add scaffold race](#12-spike--final-version-addadd-scaffold-race) | "Validate framework" spike ships full scaffold; sibling "initial scaffold" PR add/add conflicts on every shared file |
+| 13 | [Bulk import without refinement creates dead inventory](#13-bulk-import-without-refinement-creates-dead-inventory) | Hundreds of summary-only tickets imported "to refine later" — invisible to automation, but they dominate every human backlog query |
 
 ---
 
@@ -347,9 +348,30 @@ Add/add is structurally different from edit/edit: there is no shared base for gi
 
 ---
 
+## 13. Bulk import without refinement creates dead inventory
+
+**Symptom**: A migration / planning exercise dumps a large list (a `TODO.md`, a spreadsheet, an old tracker) into JIRA as hundreds of standalone tickets — summary only, no `area:` / `tier:` / `class:` labels, no fixVersion, no assignee, no AC section. The runner JQL can't pick a single one (it filters on the runner-pickability labels). But every project-wide query — `project = OP`, sprint review, "how big is the backlog?" — counts all of them, so the *visible* backlog is 3–5× the *actionable* backlog. The promise was "we'll refine these later"; nobody ever does, because there is no forcing function and the items are individually low-context.
+
+**Root cause**: Tickets are created at a granularity and quality below what makes them actionable, on the theory that refinement is a separable later step. It isn't: the moment they exist they are simultaneously invisible to automation and maximally visible to humans doing capacity planning. The bulk-import operation optimised for "capture everything" and externalised the cost onto every future planning query.
+
+**Cure**:
+1. **Don't create the inventory.** A ticket without the runner-pickability invariants (issuetype the runner JQL filters for + `area:` labels covering every domain the AC touches — see L-OP-737) and a real AC section is dead on arrival. The 4-AC discipline already says a Code-AC-only ticket is shipped-but-not-deployed *by design*; a summary-only ticket is un-pickable by design. Stage planning notes in a planning doc or an Epic, not as hundreds of `タスク`.
+2. **If it already happened, triage it with a heuristic, not by hand.** `scripts/jira-todo-backlog-triage.py` classifies each legacy-label ticket as `keep` (has a live signal: started / assigned / has fixVersion / non-bot comment / recently updated / too young to call dead), `abandon` (old + cold + never started → Won't Do / Archived) or `duplicate` (shares a normalised summary with an older sibling → human confirms). `triage` is read-only (writes a Markdown report + a JSONL decision file); `apply` runs the bulk Won't Do transition from an operator-reviewed decision file and defaults to dry-run. Manual triage of 500 items never finishes — the script does.
+3. **Don't over-correct either.** Mass-archiving a week-old import is the same mistake in reverse. The abandon heuristic has an age gate (default 30d) precisely so a fresh dump isn't auto-closed before anyone has had a chance to refine the survivors. Re-run `triage` once the window matures; a deliberate "the import was a mistake, revert it" is an operator policy call, recorded as such, not a heuristic sweep.
+
+**Examples**:
+- 2026-05 governance migration: `TODO.md` imported as ~530 open OP tickets tagged `runner-needs-refinement` / `migrated-from-todo-bulk` / `migrated-from-todo` — all `To Do`, unassigned, no fixVersion, no comments. ~half of all open OP tickets. OP-1014 built the triage tooling + `docs/audit/2026-05-13-todo-backlog-triage.md`; the report's honest finding was that the dump was only ~1 week old so 0 tickets were archive-eligible *yet* (window opens ~2026-06-05) — i.e. it will not self-clear; the survivors need real refinement or the import needs reverting.
+- General: any "import everything from the old system, we'll triage later" migration; any sprint that files sub-task fragments as standalone tickets "for visibility".
+
+**Reference tickets**: OP-1014 (triage tooling + report + this pattern), and the 2026-05 governance-migration tickets that produced the dump. See lesson `L-OP-1014` and L-OP-737 (runner-pickability invariants at file time).
+
+**Generalisation**: Creating a tracker item is cheap; refining it is expensive; and an unrefined item costs every future planning pass. Either pay the refinement cost at creation time or don't create the item — there is no free "capture now, refine later" tier. When a bulk import already exists, the cleanup is a first-class ticket with a heuristic-driven script and an operator-reviewed decision file, not a hand sweep and not a reflexive mass-close.
+
+---
+
 ## Cross-cutting principles
 
-After 12 patterns, common threads:
+After 13 patterns, common threads:
 
 1. **Idempotency is non-negotiable** for any retry-eligible operation.
 2. **Convergence over correctness-of-predecessor** for terminal events.
@@ -360,8 +382,9 @@ After 12 patterns, common threads:
 7. **Migration is a state, not a moment** — has a beginning, freeze period, and end.
 8. **Filters cannot distinguish "uses X" from "discusses X"** — exclude documentation + META + test paths from content-pattern bulk actions. (Pattern #11.)
 9. **Two tickets writing to the same final file path cannot run in parallel without a chosen winner** — merge the tickets or scope one to a non-canonical output path with an explicit promotion step. (Pattern #12; "spike" is not orthogonal to "implementation" at the filesystem level.)
+10. **A tracker item below actionable quality is pure cost** — invisible to automation, visible to every human planning pass. Pay the refinement cost at creation time or don't create the item; there is no "capture now, refine later" tier. (Pattern #13.)
 
-If you see a new symptom not in this cookbook, file it as the 13th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
+If you see a new symptom not in this cookbook, file it as the 14th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
 
 ---
 
