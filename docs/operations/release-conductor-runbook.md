@@ -256,7 +256,67 @@ Operational check for R8: after the approval child reaches
 channel and includes the `RELEASE-vX.Y.Z` version, the `R8` child
 summary, and the META ticket URL.
 
-## 11. References
+## 11. Audit DB connectivity smoke test (D5 / OP-964 AUDIT-16)
+
+The D5 develop→main auto-promote
+(`scripts/auto_promote_develop_to_main.sh` →
+`backend.agents.auto_promote_main`) writes exactly one `release_audit`
+row per run — the durable forensic trail for "did `main` move, and
+why". The audit sink connects through `backend.audit`, i.e. via
+`OMNISIGHT_DATABASE_URL`. A systemd unit does **not** inherit the login
+shell environment, so the cron reads the DSN from
+`/home/user/.config/omnisight/release-audit.env`
+(`EnvironmentFile=-` in `deploy/systemd/auto-promote-develop.service`).
+If that file is absent or the DSN is wrong, the sink silently falls
+back to the local SQLite default and the pg-primary `release_audit`
+table never gets the row — the OP-925 R3 failure mode.
+
+Run this smoke test on the runner host after provisioning, after
+rotating the Postgres credentials, and as the first triage step when an
+R3 attempt reports a missing audit row:
+
+```bash
+# 1) psql present? scripts/setup-dev-env.sh installs `postgresql-client`.
+which psql || sudo apt-get install -y postgresql-client
+
+# 2) DSN configured for the cron?
+test -f /home/user/.config/omnisight/release-audit.env \
+  && grep -q '^OMNISIGHT_DATABASE_URL=' /home/user/.config/omnisight/release-audit.env \
+  || echo "MISSING: create release-audit.env with OMNISIGHT_DATABASE_URL=postgresql+asyncpg://..."
+
+# 3) Reachable + table exists? (load the same env the cron uses)
+set -a; . /home/user/.config/omnisight/release-audit.env; set +a
+# psql wants the libpq URL form, not the SQLAlchemy +asyncpg form:
+PSQL_URL="${OMNISIGHT_DATABASE_URL/+asyncpg/}"
+psql "$PSQL_URL" -c 'SELECT 1'
+psql "$PSQL_URL" -tAc \
+  "SELECT outcome, ts FROM release_audit ORDER BY ts DESC LIMIT 1"
+
+# 4) Async-driver path the cron actually uses:
+python3 -c "import asyncpg, asyncio, os; \
+  asyncio.run(asyncpg.connect(os.environ['OMNISIGHT_DATABASE_URL'].replace('+asyncpg','')))" \
+  && echo "asyncpg OK"
+```
+
+Expected: step 3 prints `1` and the most-recent `release_audit` row;
+step 4 prints `asyncpg OK`. Failure modes and fixes:
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `psql: command not found` | `postgresql-client` not installed | `sudo apt-get install -y postgresql-client` (now in `scripts/setup-dev-env.sh`) |
+| `MISSING: create release-audit.env …` | cron has no DSN → writes to local SQLite | create `/home/user/.config/omnisight/release-audit.env` (mode 0600) with `OMNISIGHT_DATABASE_URL=postgresql+asyncpg://…@pg-primary:5432/omnisight` |
+| `could not connect to server` / asyncpg timeout | wrong host/port/creds, or pg-primary unreachable from the runner net | verify the DSN against `git_accounts` / the pgvector primary; check firewall between runner host and pg-primary |
+| `relation "release_audit" does not exist` | alembic not applied on the target DB | run `alembic upgrade head` (migration `0207_release_audit`) against that DB |
+
+After a green smoke test, re-run the D5 step (`systemctl --user start
+auto-promote-develop.service` or `bash scripts/auto_promote_develop_to_main.sh`)
+and confirm a new `release_audit` row whose `outcome` reflects the run
+result — see the `release_audit_outcome_chk` enum in
+`backend/alembic/versions/0207_release_audit.py`
+(`promoted` / `noop` / `milestone_not_accepted` / `ff_not_possible` /
+`push_rejected`).
+
+## 12. References
 
 - `scripts/instantiate_release_meta.py` (this script)
 - `config/release_template.yaml` (per-child template)
