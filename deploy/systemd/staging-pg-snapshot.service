@@ -16,8 +16,8 @@
 ; This unit pairs with deploy/systemd/omnisight-staging-compose.service
 ; (OP-971 AUDIT-19a): that one owns the staging stack's lifecycle on the
 ; co-tenanted 5a host; this one refreshes its database. The two are
-; independent — the snapshot script talks to the staging PG over its host
-; port (STAGING_PG_PORT, default 55432) and to prod via `docker exec`.
+; independent — the snapshot script talks to both prod and staging Postgres
+; through `docker exec`, so the runner host does not need a local psql client.
 ;
 ; Exit codes -> systemd unit result:
 ;   0  restored ok        2  SchemaDrift (refused)     3  AnonymizeMissedField (refused)
@@ -36,7 +36,7 @@
 ;     OMNISIGHT_DATABASE_URL=postgresql+asyncpg://USER:PW@PG_PRIMARY:5432/omnisight
 ; and /home/user/.config/omnisight/staging-pg-snapshot.env (mode 0600) with
 ; the staging-side knobs if the defaults don't fit, e.g.:
-;     STAGING_PG_PORT=55432
+;     STAGING_PG_CONTAINER=staging-postgres-1
 ;     STAGING_PG_DB=omnisight_staging
 ;     STAGING_PG_SUPERUSER=omnisight
 ;     STAGING_PG_PASSWORD=...        # the staging Postgres superuser password
@@ -53,7 +53,7 @@
 ;   systemctl --user list-timers staging-pg-snapshot.timer
 ;   systemctl --user start staging-pg-snapshot.service   # run one cycle now
 ;   journalctl --user -u staging-pg-snapshot -n 50
-;   psql -h 127.0.0.1 -p 55432 -U omnisight -d postgres -c '\l'   # see omnisight_staging[_prev]
+;   docker exec staging-postgres-1 psql -U omnisight -d postgres -c '\l'   # see omnisight_staging[_prev]
 
 [Unit]
 Description=OmniSight staging PG — daily anonymized snapshot restore from prod (OP-972)
@@ -73,7 +73,7 @@ Environment=PYTHONUNBUFFERED=1
 Environment=PROD_PG_CONTAINER=omnisight-pg-primary
 Environment=PROD_PG_USER=omnisight
 Environment=PROD_PG_DB=omnisight
-Environment=STAGING_PG_HOST=127.0.0.1
+Environment=STAGING_PG_CONTAINER=staging-postgres-1
 Environment=STAGING_PG_PORT=55432
 Environment=STAGING_PG_SUPERUSER=omnisight
 Environment=STAGING_PG_DB=omnisight_staging

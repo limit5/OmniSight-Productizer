@@ -26,7 +26,7 @@
 #          DROP DATABASE  IF EXISTS  ${STAGING_DB}_prev          (previous gen)
 #          ALTER DATABASE $STAGING_DB RENAME TO ${STAGING_DB}_prev  (if it exists)
 #          CREATE DATABASE $STAGING_DB
-#          psql -d $STAGING_DB -v ON_ERROR_STOP=1 -f anon.sql       (the load)
+#          docker exec staging-postgres-1 psql ... < anon.sql        (the load)
 #      On a load failure => RestoreInterrupted (exit 4):
 #          DROP DATABASE IF EXISTS $STAGING_DB
 #          ALTER DATABASE ${STAGING_DB}_prev RENAME TO $STAGING_DB  (revert)
@@ -69,26 +69,26 @@
 #   PROD_PG_CONTAINER       prod PG container name           (omnisight-pg-primary)
 #   PROD_PG_USER            superuser inside that container  (omnisight)
 #   PROD_PG_DB              prod database to snapshot        (omnisight)
-#   STAGING_PG_HOST         staging PG host                  (127.0.0.1)
-#   STAGING_PG_PORT         staging PG host port             (55432  — AUDIT-19a)
+#   STAGING_PG_CONTAINER    staging PG container name        (staging-postgres-1)
+#   STAGING_PG_PORT         legacy AUDIT-19a host port       (55432; not used by restore)
 #   STAGING_PG_SUPERUSER    staging PG superuser             (omnisight)
 #   STAGING_PG_DB           staging database to (re)create   (omnisight_staging)
 #   STAGING_PG_PASSWORD     staging superuser password       (falls back to $PGPASSWORD)
 #   OMNISIGHT_DATABASE_URL  release-audit DSN for the `release_audit` row
 #                           (a SQLAlchemy URL is fine — a `+driver` suffix is
-#                           stripped for psql); absent => audit row skipped
+#                           stripped for container psql); absent => audit row skipped
 #                           (logged), the restore still runs.
 #   SNAPSHOT_WORKDIR        scratch parent dir               (/var/tmp/omnisight-staging-snapshot)
 #   SNAPSHOT_KEEP_DUMP      "1" => keep $RUN_DIR after the run (DEBUG ONLY —
 #                           leaves real PII on disk; a loud warning is logged)
-#   DOCKER_BIN / PSQL_BIN   binary overrides                 (docker / psql)
+#   DOCKER_BIN              binary override                  (docker)
 #
 # Exit codes (== the systemd unit's result):
 #   0  restored ok
 #   2  SchemaDrift           — staging schema != prod; refused (alert logged)
 #   3  AnonymizeMissedField  — uncovered PII-shaped column; refused (alert logged)
 #   4  RestoreInterrupted    — load failed; staging reverted to the previous snapshot
-#   5  PrereqFailed          — docker / pg_dump / psql missing, or prod/staging unreachable
+#   5  PrereqFailed          — docker / container pg_dump / container psql missing, or prod/staging unreachable
 
 set -euo pipefail
 
@@ -98,14 +98,12 @@ START_TS="$(date +%s)"
 PROD_PG_CONTAINER="${PROD_PG_CONTAINER:-omnisight-pg-primary}"
 PROD_PG_USER="${PROD_PG_USER:-omnisight}"
 PROD_PG_DB="${PROD_PG_DB:-omnisight}"
-STAGING_PG_HOST="${STAGING_PG_HOST:-127.0.0.1}"
-STAGING_PG_PORT="${STAGING_PG_PORT:-55432}"
+STAGING_PG_CONTAINER="${STAGING_PG_CONTAINER:-staging-postgres-1}"
 STAGING_PG_SUPERUSER="${STAGING_PG_SUPERUSER:-omnisight}"
 STAGING_PG_DB="${STAGING_PG_DB:-omnisight_staging}"
 STAGING_PG_PASSWORD="${STAGING_PG_PASSWORD:-${PGPASSWORD:-}}"
 SNAPSHOT_WORKDIR="${SNAPSHOT_WORKDIR:-/var/tmp/omnisight-staging-snapshot}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
-PSQL_BIN="${PSQL_BIN:-psql}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANONYMIZE_SH="${ANONYMIZE_SH:-$SCRIPT_DIR/anonymize.sh}"
@@ -122,9 +120,8 @@ prod_psql() {  # $1 = SQL ; runs inside the prod PG container
 	"$DOCKER_BIN" exec -i "$PROD_PG_CONTAINER" psql -U "$PROD_PG_USER" -d "$PROD_PG_DB" -tAqc "$1"
 }
 staging_psql() {  # $1 = target db ; $2 = SQL
-	PGPASSWORD="$STAGING_PG_PASSWORD" "$PSQL_BIN" \
-		-h "$STAGING_PG_HOST" -p "$STAGING_PG_PORT" -U "$STAGING_PG_SUPERUSER" \
-		-d "$1" -v ON_ERROR_STOP=1 -tAqc "$2"
+	"$DOCKER_BIN" exec -i -e "PGPASSWORD=$STAGING_PG_PASSWORD" "$STAGING_PG_CONTAINER" \
+		psql -U "$STAGING_PG_SUPERUSER" -d "$1" -v ON_ERROR_STOP=1 -tAqc "$2"
 }
 staging_db_exists() {
 	local n
@@ -162,7 +159,7 @@ PY
 	# SQLAlchemy URL -> libpq URL (strip a `+driver` suffix on the scheme).
 	dsn="${dsn/+asyncpg/}"; dsn="${dsn/+psycopg2/}"; dsn="${dsn/+psycopg/}"; dsn="${dsn/+pg8000/}"
 	local detail_sql="${detail//\'/\'\'}"   # SQL-escape single quotes (JSON has none here, but be safe)
-	if "$PSQL_BIN" "$dsn" -v ON_ERROR_STOP=1 -qc \
+	if "$DOCKER_BIN" exec -i "$PROD_PG_CONTAINER" psql "$dsn" -v ON_ERROR_STOP=1 -qc \
 		"INSERT INTO release_audit (outcome, fix_version, detail) VALUES ('noop', NULL, '$detail_sql')" \
 		>/dev/null 2>&1
 	then
@@ -194,15 +191,14 @@ trap 'finish $?' EXIT
 
 # ── 0. Prerequisites ────────────────────────────────────────────────────────
 command -v "$DOCKER_BIN" >/dev/null 2>&1 || { alert "docker not found ($DOCKER_BIN) — cannot snapshot prod"; exit 5; }
-command -v "$PSQL_BIN"   >/dev/null 2>&1 || { alert "psql not found ($PSQL_BIN) — install postgresql-client"; exit 5; }
 command -v python3       >/dev/null 2>&1 || { alert "python3 not found"; exit 5; }
 [[ -x "$ANONYMIZE_SH" || -f "$ANONYMIZE_SH" ]] || { alert "anonymizer not found: $ANONYMIZE_SH"; exit 5; }
 "$DOCKER_BIN" exec "$PROD_PG_CONTAINER" pg_isready -U "$PROD_PG_USER" -d "$PROD_PG_DB" >/dev/null 2>&1 \
 	|| { alert "prod PG container '$PROD_PG_CONTAINER' not ready (pg_isready failed)"; exit 5; }
-PGPASSWORD="$STAGING_PG_PASSWORD" "$PSQL_BIN" -h "$STAGING_PG_HOST" -p "$STAGING_PG_PORT" \
-	-U "$STAGING_PG_SUPERUSER" -d postgres -tAqc 'SELECT 1' >/dev/null 2>&1 \
-	|| { alert "staging PG unreachable at ${STAGING_PG_HOST}:${STAGING_PG_PORT} as ${STAGING_PG_SUPERUSER}"; exit 5; }
-log "prereqs ok — prod=${PROD_PG_CONTAINER}/${PROD_PG_DB}  staging=${STAGING_PG_HOST}:${STAGING_PG_PORT}/${STAGING_PG_DB}"
+"$DOCKER_BIN" exec -i -e "PGPASSWORD=$STAGING_PG_PASSWORD" "$STAGING_PG_CONTAINER" \
+	psql -U "$STAGING_PG_SUPERUSER" -d postgres -v ON_ERROR_STOP=1 -tAqc 'SELECT 1' >/dev/null 2>&1 \
+	|| { alert "staging PG container '$STAGING_PG_CONTAINER' not ready or psql failed"; exit 5; }
+log "prereqs ok — prod=${PROD_PG_CONTAINER}/${PROD_PG_DB}  staging=${STAGING_PG_CONTAINER}/${STAGING_PG_DB}"
 
 # scratch dir (mode 0700; per-run subdir; wiped by the EXIT trap)
 mkdir -p "$SNAPSHOT_WORKDIR"
@@ -303,9 +299,8 @@ if ! staging_psql postgres "CREATE DATABASE \"${STAGING_PG_DB}\"" >/dev/null; th
 fi
 
 log "step 4/4: loading anonymized dump into '${STAGING_PG_DB}'"
-if ! PGPASSWORD="$STAGING_PG_PASSWORD" "$PSQL_BIN" \
-	-h "$STAGING_PG_HOST" -p "$STAGING_PG_PORT" -U "$STAGING_PG_SUPERUSER" \
-	-d "$STAGING_PG_DB" -v ON_ERROR_STOP=1 -q -f "$ANON_DUMP"
+if ! "$DOCKER_BIN" exec -i -e "PGPASSWORD=$STAGING_PG_PASSWORD" "$STAGING_PG_CONTAINER" \
+	psql -U "$STAGING_PG_SUPERUSER" -d "$STAGING_PG_DB" -v ON_ERROR_STOP=1 -q <"$ANON_DUMP"
 then
 	EXIT_STATUS_NAME="restore_interrupted"
 	alert "RestoreInterrupted — loading the anonymized dump failed mid-way (disk full / connection drop?)."
