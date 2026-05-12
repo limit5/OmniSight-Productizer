@@ -1,0 +1,19 @@
+; [OP-965] AUDIT-17 — 30-minute trigger for staging-gate-smoke.service.
+;
+; Cadence: every 30 min. release_milestone_checker treats a smoke record
+; older than 4h as a blocked gate (``status_too_old``), so 30 min leaves
+; a wide margin even if a few ticks are missed. Persistent=true catches
+; up once after host downtime.
+
+[Unit]
+Description=30-minute trigger for staging-gate-smoke.service (OP-965)
+
+[Timer]
+Unit=staging-gate-smoke.service
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
