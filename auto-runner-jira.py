@@ -941,6 +941,37 @@ def _ops_only_active_for(
     return jira_dispatch.has_ops_only_label(labels)
 
 
+def _cli_self_reverted_to_todo(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+) -> bool:
+    """Return True when ``key`` is already back in To Do post-CLI.
+
+    OP-963 (AUDIT-15): the codex/claude CLI may itself transition the
+    ticket back to To Do mid-run — the §11 discovered-dependency
+    protocol does exactly that (it posts a ``[runner-discovered-
+    dependency]`` comment and calls ``transition_back_to_todo`` before
+    exiting 0). When that happened the post-CLI ``NoCommitsOnBranchError``
+    handler must NOT pile on a second ``[runner-no-commits-from-cli]``
+    revert — nor an ops-only forward-walk that would 400 from To Do —
+    because the ticket is already in the desired state. That dual-revert
+    was the OP-925 R3 11:05 noise. A live status re-read is the
+    authoritative signal; a re-read fault degrades to ``False`` — i.e.
+    the standard no-commits handler runs, never worse than before.
+    """
+    try:
+        status = jira_dispatch.get_issue_status(client, key)
+    except Exception as exc:  # noqa: BLE001 — degrade to standard handler
+        print(
+            f"[runner] {key}: could not re-read status to check for a "
+            f"CLI self-revert ({type(exc).__name__}: {exc}); proceeding "
+            f"with the standard no-commits handler",
+            file=sys.stderr,
+        )
+        return False
+    return status in jira_dispatch.TODO_STATUS_NAMES
+
+
 def _handle_ops_only_forward_transition(
     client: "jira_dispatch.DispatchClient",
     key: str,
@@ -1596,6 +1627,23 @@ def main() -> int:
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
             )
         except jira_dispatch.NoCommitsOnBranchError as e:
+            # OP-963 (AUDIT-15): re-fetch the live ticket state before
+            # deciding anything. The CLI may have already bounced this
+            # ticket back to To Do itself — the §11 discovered-dependency
+            # protocol does precisely that (and leaves its own
+            # `[runner-discovered-dependency]` comment). If the ticket is
+            # already in To Do there is nothing left to revert: a second
+            # `[runner-no-commits-from-cli]` revert — or an ops-only
+            # forward-walk that would 400 from To Do — is pure noise
+            # (the OP-925 R3 11:05 dual-revert). Emit one coherent log
+            # line and exit clean; the codex comment already explains why.
+            if _cli_self_reverted_to_todo(client, snapshot.key):
+                print(
+                    f"[runner] {snapshot.key} already in To Do — CLI "
+                    f"self-reverted (discovered-dependency / §11); "
+                    f"no additional comment, exiting 0."
+                )
+                return 0
             # OP-956: ops-only ticket-type path. When the operator has
             # tagged the ticket as `runner:no-commits-expected`, the
             # zero-commits-from-CLI signal is the EXPECTED outcome
