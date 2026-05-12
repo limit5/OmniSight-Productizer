@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable
 
-from . import canary_handlers, gerrit_handlers, jira_handlers, slo_handlers
+from . import canary_handlers, gerrit_handlers, hotfix_label, jira_handlers, slo_handlers
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,7 @@ HANDLER_TABLE: dict[tuple[str, str], HandlerCallable] = {
     ("gerrit", "change-merged"): gerrit_handlers.on_change_merged,
     # ADR-0018 rows 3 / 4 — Gerrit label-added (CR+2 and topic).
     ("gerrit", "label-added"): gerrit_handlers.on_label_added,
+    ("gerrit", "hotfix-label-added"): hotfix_label.on_hotfix_label_added,
     # ─── External: JIRA ─────────────────────────────────────────────
     # ADR-0018 rows 5 / 6 — issue_updated covers both 公開済み and
     # 進行中 transitions; the handler reads the changelog and picks
