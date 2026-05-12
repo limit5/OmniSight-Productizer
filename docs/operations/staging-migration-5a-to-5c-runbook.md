@@ -89,24 +89,35 @@ DoD gate — **the audit must return 0 hits**.
 
 ### 1.1 Run it
 
-The audit is encoded as a pytest so it runs in CI on every change to the
-staging artifacts (it cannot silently rot):
+The audit exists in two forms — pick whichever fits your context (§1.4
+explains when to reach for which); both check the **same four facets** and
+must agree (`tests/test_portability_audit_sh.py` enforces that):
 
 ```bash
+# canonical, CI-enforced (pytest):
 pytest -q tests/test_staging_migration_5a_to_5c.py -k portability
+
+# standalone shell CLI — same checks, exit-code contract, no pytest:
+scripts/portability-audit.sh            # human report; exit 0/1/2
+scripts/portability-audit.sh --json     # one JSON object for CI gates
 ```
 
-It scans `infra/staging/`, `deploy/staging/`, and the staging
-`deploy/systemd/*` units for the four anti-patterns below and asserts none
-are present. A green run == "0 hits" == this AC item satisfied.
+Both scan `infra/staging/`, `deploy/staging/`, and the staging
+`deploy/systemd/*` units for the four anti-patterns below and assert none
+are present. A green pytest run / a `scripts/portability-audit.sh` exit `0`
+== "0 hits" == this AC item satisfied.
 
-> **Why a test, not a `scripts/portability-audit.sh`?** The original
-> ticket sketched a standalone shell script under `scripts/`. `scripts/`
-> is `area:tooling`; this ticket is scoped to `area:docs` + `area:tests`.
-> The audit logic landed as a `tests/` module instead — same coverage,
-> CI-enforced, and in-area. If a future change *does* want a CLI wrapper,
-> it is a thin `scripts/` shim over the same assertions (one `area:tooling`
-> follow-up, not a blocker for this migration).
+> **Source of truth.** `tests/test_staging_migration_5a_to_5c.py` is the
+> canonical definition of "what counts as a 5a→5c portability hit" — it
+> runs in CI on every change to the staging artifacts, so it cannot
+> silently rot. `scripts/portability-audit.sh` (salvaged from the
+> abandoned Gerrit #487 under OP-978 / AUDIT-25) **mirrors** that
+> definition for operators / CI tooling / pre-commit hooks that want a
+> single executable with exit codes rather than a `pytest` invocation. The
+> `ScriptDriftsFromPytest` guard in `tests/test_portability_audit_sh.py`
+> fails if the two ever disagree on a clean repo, which forces them back
+> into sync. There is no separate `infra/staging/portability-rules.yaml` —
+> the pytest module is the rules.
 
 ### 1.2 What the audit checks (and the current verdict)
 
@@ -155,6 +166,42 @@ port, an absolute bind mount, a non-`%` cgroup limit, or a divergent
 systemd path prefix), fixing it is an `area:devops` change on the
 offending artifact — file it as a blocker on the migration ticket and
 re-run the audit before proceeding.
+
+### 1.4 Standalone shell audit — `scripts/portability-audit.sh`
+
+`scripts/portability-audit.sh` is the same audit as §1.1's pytest, packaged
+as a single dependency-free bash executable (salvaged from the abandoned
+Gerrit #487 under OP-978 / AUDIT-25). It resolves the repo root from its own
+path, reads tracked files only — no docker / systemd / network — and exits:
+
+| exit | meaning |
+|---|---|
+| `0` | clean — 0 portability hits (the DoD gate) |
+| `1` | ≥1 portability finding (see stdout / `findings[]`) |
+| `2` | usage error, or a declared staging artifact is missing |
+
+Flags: `--verbose` (also echo the `${VAR:-…}` defaults / port mappings it
+*accepted*), `--json` (emit one machine-readable object — `hits`, `exit`,
+`findings[]`, `operator_edit_points[]` — and nothing else on stdout),
+`--help`.
+
+**Use the shell CLI when** —
+
+* **CI tooling / release gates** want one executable with a clean exit code,
+  not a `pytest` process: `scripts/portability-audit.sh --json | jq .hits`.
+* **on-call / operators** want a fast check during the 5c bring-up
+  (runbook §4, §7) without spinning up the Python test env.
+* **a pre-commit hook** should reject a bare host path / unparameterised
+  port in a staging artifact (it's far lighter than invoking pytest).
+* **editor integration** — a VS Code task / IntelliJ run config is trivial
+  to point at a shell script.
+
+**Use the pytest (§1.1) when** — you want the *canonical* answer, the one
+CI enforces on every change. The pytest module is the source of truth; the
+shell CLI mirrors it, and `tests/test_portability_audit_sh.py`'s
+`ScriptDriftsFromPytest` guard fails the build if they ever disagree on a
+clean repo. If you change one definition, change the other in the same
+patch and let that guard confirm they still agree.
 
 ---
 
@@ -521,6 +568,7 @@ suites and the bring-up checklists on 5c, get the same outcomes as 5a.**
 | AUDIT-19b — snapshot/anonymize pipeline | `pytest -q backend/tests/test_staging_snapshot_restore.py` | all green |
 | AUDIT-19c — develop→staging sync | `pytest -q backend/tests/test_staging_sync.py` | all green |
 | AUDIT-19d — portability audit + runbook coverage | `pytest -q tests/test_staging_migration_5a_to_5c.py` | all green, **0 portability hits** |
+| AUDIT-25 — standalone shell audit CLI | `scripts/portability-audit.sh && pytest -q tests/test_portability_audit_sh.py` | shell CLI exits `0` (0 hits); tests green (incl. the `ScriptDriftsFromPytest` guard) |
 | (sanity) staging gate producers | `pytest -q backend/tests/test_staging_gate.py` | all green |
 
 These are pure-Python/bash, no docker/systemd needed — they should be
@@ -691,15 +739,18 @@ nothing.
 ## 7. Quick reference — the audit + verification commands
 
 ```bash
-# Portability audit (DoD gate — must be 0 hits):
-pytest -q tests/test_staging_migration_5a_to_5c.py -k portability
+# Portability audit (DoD gate — must be 0 hits). Either form works:
+pytest -q tests/test_staging_migration_5a_to_5c.py -k portability   # canonical / CI
+scripts/portability-audit.sh                                        # standalone CLI; exit 0/1/2
+scripts/portability-audit.sh --json | jq '.hits, .findings'         # for CI gates
 
 # Full AUDIT-19 regression on 5c:
 pytest -q tests/test_staging_compose_unit.py \
           backend/tests/test_staging_snapshot_restore.py \
           backend/tests/test_staging_sync.py \
           backend/tests/test_staging_gate.py \
-          tests/test_staging_migration_5a_to_5c.py
+          tests/test_staging_migration_5a_to_5c.py \
+          tests/test_portability_audit_sh.py
 
 # Live bring-up (on 5c):
 systemctl --user is-active omnisight-staging-compose.service
@@ -720,3 +771,4 @@ systemctl --user start release-milestone-checker.service && \
 | Date | Ticket | Change |
 |---|---|---|
 | 2026-05-12 | OP-974 | Initial 5a → 5c migration runbook + portability audit (`tests/test_staging_migration_5a_to_5c.py`). |
+| 2026-05-12 | OP-978 | AUDIT-25 — added `scripts/portability-audit.sh` (standalone shell CLI, salvaged from abandoned Gerrit #487) + `tests/test_portability_audit_sh.py`; documented the pytest-vs-CLI choice in §1.1 / §1.4 (pytest = source of truth, CLI mirrors it, `ScriptDriftsFromPytest` guard keeps them in sync). |
