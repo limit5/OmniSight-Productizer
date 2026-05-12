@@ -196,10 +196,37 @@ The operator's daily loop on a live release:
 4. The retrospective (per R13 AC) lands under
    `docs/retrospectives/<date>-vX.Y.Z.md` and the release closes.
 
-## 10. References
+## 10. Transition Notifications
+
+Every release child transition into Published / `公開済み` is matched by
+the JIRA/SSE event handler and passed to
+`backend.agents.release_notifications`. The helper renders a payload
+with the release version, child name, and META link, then reuses the
+OP-721 notification bridge for immediate Slack + email fan-out.
+
+Routing lives in `config/release_notification_routing.yaml`:
+
+- `prod` releases route to `#releases-prod` and
+  `releases@sora.services`.
+- `rc` releases route to `#releases-rc` and
+  `releases@sora.services`.
+- If the routing file is missing or unreadable, the handler logs
+  `RoutingConfigMissing` and falls back to `#omnisight-releases`.
+
+Bridge failures are fire-and-forget by design. The handler logs
+`NotificationBridgeDown`, records `notification.outcome=bridge_down`
+in the release event result, and does not block the state transition.
+
+Operational check for R8: after the approval child reaches
+`公開済み`, confirm a Slack message appears in the configured release
+channel and includes the `RELEASE-vX.Y.Z` version, the `R8` child
+summary, and the META ticket URL.
+
+## 11. References
 
 - `scripts/instantiate_release_meta.py` (this script)
 - `config/release_template.yaml` (per-child template)
+- `config/release_notification_routing.yaml` (Slack/email routing)
 - `config/release_meta_description.md.template` (META description template)
 - `docs/sop/lessons/L-OP-874-jira-blockedby-direction-trap.md`
 - `docs/operations/release-cut-runbook.md` (R1 implementation reference)
