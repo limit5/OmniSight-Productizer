@@ -37,3 +37,9 @@ repos:
         language: system
         files: ^(scripts/.*jira.*ticket.*\.py|.*jira.*ticket.*\.(md|txt)|.*ticket.*spec.*\.(md|txt))$
         pass_filenames: true
+      - id: omnisight-systemd-service-directives
+        name: OmniSight new systemd services require startup directives
+        entry: python3 scripts/check_systemd_service_directives.py
+        language: system
+        files: \.service$
+        pass_filenames: true
