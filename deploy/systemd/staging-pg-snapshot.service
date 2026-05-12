@@ -1,0 +1,94 @@
+; [OP-972] AUDIT-19b — daily prod -> staging anonymized Postgres snapshot.
+;
+; Runs infra/staging/snapshot-restore.sh once per trigger (see
+; staging-pg-snapshot.timer — daily 02:00, the low-traffic window):
+;   1. pg_dump prod via the omnisight-pg-primary container's own pg_dump
+;   2. infra/staging/anonymize.sh masks every PII column declared in
+;      infra/staging/anonymize-fields.yaml (refuses on an uncovered
+;      PII-shaped column — AnonymizeMissedField, exit 3)
+;   3. schema-drift sanity: staging's public table set must match prod's
+;      (refuse + alert on drift — SchemaDrift, exit 2)
+;   4. rollback-safe restore into the staging PG (drop-and-rename; on a
+;      load failure staging reverts to the previous snapshot — exit 4)
+;   5. one best-effort `release_audit` row (outcome=noop, detail.kind=
+;      snapshot_restore — see the script header for the schema caveat)
+;
+; This unit pairs with deploy/systemd/omnisight-staging-compose.service
+; (OP-971 AUDIT-19a): that one owns the staging stack's lifecycle on the
+; co-tenanted 5a host; this one refreshes its database. The two are
+; independent — the snapshot script talks to the staging PG over its host
+; port (STAGING_PG_PORT, default 55432) and to prod via `docker exec`.
+;
+; Exit codes -> systemd unit result:
+;   0  restored ok        2  SchemaDrift (refused)     3  AnonymizeMissedField (refused)
+;   4  RestoreInterrupted (reverted to previous snapshot)     5  prerequisite failure
+; A non-zero result is surfaced by `systemctl --user status` /
+; `journalctl --user -u staging-pg-snapshot` and the timer's last-result.
+; Wire an OnFailure= alert unit here if/when one exists (cf.
+; staging-gate-alert.service for the canary pipeline).
+;
+; Audit DSN: the `release_audit` row is written through OMNISIGHT_DATABASE_URL
+; (the same release-audit DSN auto-promote-develop.service / staging-gate-*
+; use). A systemd unit does not inherit the login shell's environment, so the
+; EnvironmentFile below carries it; the `-` prefix makes it optional (a box
+; without the file still runs — it just skips the DB row and logs the record).
+; Create /home/user/.config/omnisight/release-audit.env (mode 0600) with:
+;     OMNISIGHT_DATABASE_URL=postgresql+asyncpg://USER:PW@PG_PRIMARY:5432/omnisight
+; and /home/user/.config/omnisight/staging-pg-snapshot.env (mode 0600) with
+; the staging-side knobs if the defaults don't fit, e.g.:
+;     STAGING_PG_PORT=55432
+;     STAGING_PG_DB=omnisight_staging
+;     STAGING_PG_SUPERUSER=omnisight
+;     STAGING_PG_PASSWORD=...        # the staging Postgres superuser password
+;     # PROD_PG_CONTAINER=omnisight-pg-primary   # override if renamed
+;
+; Install (user-level — no sudo; mirrors the staging-gate-* / staging-compose units):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/staging-pg-snapshot.{service,timer} ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now staging-pg-snapshot.timer
+;   loginctl enable-linger "$USER"
+;
+; Verify:
+;   systemctl --user list-timers staging-pg-snapshot.timer
+;   systemctl --user start staging-pg-snapshot.service   # run one cycle now
+;   journalctl --user -u staging-pg-snapshot -n 50
+;   psql -h 127.0.0.1 -p 55432 -U omnisight -d postgres -c '\l'   # see omnisight_staging[_prev]
+
+[Unit]
+Description=OmniSight staging PG — daily anonymized snapshot restore from prod (OP-972)
+Documentation=file:///home/user/sora-bridge/infra/staging/snapshot-restore.sh
+; Needs the docker daemon (for `docker exec omnisight-pg-primary pg_dump`)
+; and the network up. dockerd is a system service the user manager has no
+; ordering edge to, so we order after the network and let the script's own
+; `docker exec` surface a not-ready daemon as a prereq failure (exit 5).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+; Defaults match deploy/staging/docker-compose.yml + deploy/postgres-ha/docker-compose.yml.
+Environment=PROD_PG_CONTAINER=omnisight-pg-primary
+Environment=PROD_PG_USER=omnisight
+Environment=PROD_PG_DB=omnisight
+Environment=STAGING_PG_HOST=127.0.0.1
+Environment=STAGING_PG_PORT=55432
+Environment=STAGING_PG_SUPERUSER=omnisight
+Environment=STAGING_PG_DB=omnisight_staging
+Environment=SNAPSHOT_WORKDIR=/var/tmp/omnisight-staging-snapshot
+; OP-964 / AUDIT-16 — DSN for the `release_audit` durable trail (see header).
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
+; Per-host staging knobs (STAGING_PG_PASSWORD, port/db/superuser overrides).
+EnvironmentFile=-/home/user/.config/omnisight/staging-pg-snapshot.env
+ExecStart=/usr/bin/bash /home/user/sora-bridge/infra/staging/snapshot-restore.sh
+StandardOutput=append:/home/user/work/sora/logs/staging/snapshot-restore.log
+StandardError=append:/home/user/work/sora/logs/staging/snapshot-restore.log
+; pg_dump of a mid-size prod DB + load into staging: generous ceiling so a
+; slow run doesn't get SIGTERM'd mid-restore (the revert path handles a real
+; interruption, but we'd rather not provoke one).
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=default.target
