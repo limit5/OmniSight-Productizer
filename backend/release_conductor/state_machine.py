@@ -53,6 +53,8 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from backend.release_conductor import compliance_ledger
+
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +343,21 @@ def transition(
                 f"(rowcount={update_result.rowcount})"
             )
 
+        compliance_ledger.record(
+            actor="release_conductor.state_machine",
+            action="state.transition",
+            release_id=release_id,
+            before_state=from_state,
+            after_state=to_state,
+            reason=reason_clean,
+            evidence={
+                "row_id": row_id,
+                "row_version": next_row_version,
+                "transition": new_entry,
+            },
+            conn=conn,
+        )
+
     logger.info(
         "release_state.transition release_id=%s version_chain=%s -> %s reason=%s",
         release_id,
@@ -565,6 +582,21 @@ def _append_log_entry(
                 f"approval-log UPDATE landed (rowcount={update.rowcount})"
             )
         log_entries.append(enriched)
+        if enriched.get("kind") in (APPROVAL_KIND_GRANTED, APPROVAL_KIND_ABORTED):
+            compliance_ledger.record(
+                actor=str(enriched.get("operator") or "operator"),
+                action=f"operator.{enriched['kind']}",
+                release_id=release_id,
+                before_state=current_state,
+                after_state=current_state,
+                reason=str(enriched.get("reason") or ""),
+                evidence={
+                    "row_id": row_id,
+                    "row_version": next_rv,
+                    "approval": enriched,
+                },
+                conn=conn,
+            )
         return {
             "release_id": release_id,
             "version": version,
