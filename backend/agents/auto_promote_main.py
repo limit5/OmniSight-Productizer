@@ -1,9 +1,35 @@
-"""OP-766 develop -> main auto-promotion on milestone-ready events.
+"""OP-766 / OP-960 (AUDIT-13) develop -> main auto-promotion on
+milestone-ready events.
 
 Consumes the ``milestone_ready`` JSON records emitted by
-``scripts/release_milestone_checker.py`` and promotes ``main`` by a
-server-side fast-forward push from ``develop``. A non-fast-forward shape
-is treated as an operator alert, not as a merge.
+``scripts/release_milestone_checker.py`` and advances ``main`` to the
+``develop`` tip.
+
+History
+-------
+OP-766 originally did a *direct* fast-forward push to ``refs/heads/main``
+(``git push gerrit develop:main``). OP-960 (AUDIT-13) showed that Gerrit's
+ACL on ``refs/heads/main`` correctly refuses bot direct push — ``main``
+must advance through Gerrit Code Review, never a side-door push. So the
+mechanism now pushes ``develop`` to the Gerrit magic ref
+``refs/for/main`` (creating a review change per intervening commit),
+tagged with the hashtags in :data:`PROMOTE_HASHTAGS` and topic
+:data:`PROMOTE_TOPIC`.
+
+What submits the change(s) is, by design, *not* this bot's job:
+* short term — an operator submits via the Gerrit UI (the established
+  humans-in-the-loop pattern; Sprint H H4 / OP-949 adds a one-click
+  "advance main now" affordance);
+* longer term — a conditional submit-requirement keyed on the
+  ``milestone:R3-fastforward`` hashtag lets the merger-bot cast a scoped
+  ``Code-Review: +2`` + auto-submit (an ``area:devops`` Gerrit-config
+  follow-up, tracked in the AUDIT-13 ADR).
+
+A non-fast-forward shape (``main`` has commits absent from ``develop``)
+is still treated as an operator alert, not as a merge. A develop tip more
+than :data:`DEFAULT_MAX_PROMOTE_BATCH` commits ahead of ``main`` is
+refused (Gerrit ``receive.maxBatchChanges``) so an operator does a manual
+catch-up merge first.
 """
 from __future__ import annotations
 
@@ -11,6 +37,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import subprocess
 import sys
 import time
@@ -25,8 +52,24 @@ log = logging.getLogger(__name__)
 
 EVENT_MILESTONE_READY = "milestone_ready"
 EVENT_MAIN_PROMOTED = "main_promoted"
+EVENT_MAIN_PROMOTE_CHANGE_CREATED = "main_promote_change_created"
 AUDIT_ACTION_MAIN_PROMOTED = "release.main_promoted"
+AUDIT_ACTION_MAIN_PROMOTE_CHANGE_CREATED = "release.main_promote_change_created"
 AUDIT_ACTION_MAIN_PROMOTE_BLOCKED = "release.main_promote_blocked"
+
+# Hashtags + topic attached to the develop -> main review change(s).
+# ``auto-promote`` marks the source; ``milestone:R3-fastforward`` is the
+# hook the future conditional submit-requirement keys on (AUDIT-13 ADR /
+# ``area:devops`` follow-up) so the merger-bot may cast a scoped +2 +
+# auto-submit. Until that rule lands an operator submits via the Gerrit UI.
+PROMOTE_HASHTAGS: tuple[str, ...] = ("auto-promote", "milestone:R3-fastforward")
+PROMOTE_TOPIC = "develop-to-main"
+
+# Gerrit refuses a single push that would create more than
+# ``receive.maxBatchChanges`` changes at once (default 10). If ``develop``
+# is that far ahead of ``main`` the promotion needs a manual catch-up
+# merge first — we refuse and alert rather than fire a doomed push.
+DEFAULT_MAX_PROMOTE_BATCH = 10
 
 DEFAULT_REPO = Path("/home/user/sora-bridge")
 DEFAULT_EVENT_LOG = Path("/home/user/work/sora/logs/release-milestone/systemd.log")
@@ -35,6 +78,17 @@ DEFAULT_CURSOR = Path("/home/user/work/sora/logs/release-milestone/auto-promote.
 NotifyFn = Callable[[str, str, str], None]
 EventSink = Callable[[str, dict[str, Any]], None]
 AuditSink = Callable[[str, dict[str, Any]], None]
+# (repo, remote, source_branch, target_branch, hashtags, topic) -> PushOutcome
+PushForReviewFn = Callable[..., "PushOutcome"]
+
+
+@dataclass(frozen=True)
+class PushOutcome:
+    """Result of pushing ``develop`` to ``refs/for/<target>``."""
+
+    ok: bool
+    change_urls: tuple[str, ...] = ()
+    raw: str = ""
 
 
 @dataclass(frozen=True)
@@ -48,6 +102,7 @@ class PromotionResult:
     develop_only: tuple[str, ...]
     main_only: tuple[str, ...]
     detail: str = ""
+    created_changes: tuple[str, ...] = ()
 
 
 def utc_now_iso() -> str:
@@ -84,6 +139,48 @@ def _git_lines(repo: Path, *args: str) -> tuple[str, ...]:
 
 def _git_one(repo: Path, *args: str) -> str:
     return _git(repo, *args).stdout.strip()
+
+
+# Gerrit echoes one ``remote:`` line per created/updated change, e.g.
+#   remote:   https://gerrit.example.com/c/sora-bridge/+/12345 subject [NEW]
+_GERRIT_CHANGE_URL_RE = re.compile(r"https?://\S+?/\+/\d+")
+
+
+def _push_for_review(
+    *,
+    repo: Path,
+    remote: str,
+    source_branch: str,
+    target_branch: str,
+    hashtags: tuple[str, ...] = PROMOTE_HASHTAGS,
+    topic: str = PROMOTE_TOPIC,
+    timeout: int = 120,
+) -> PushOutcome:
+    """Push ``source_branch`` to ``refs/for/<target_branch>`` as review change(s).
+
+    Hashtags + topic go via ``git push -o`` push options (robust for
+    values containing ``:`` like ``milestone:R3-fastforward``, which the
+    ``%``-refspec form can't carry). Returns a :class:`PushOutcome`
+    instead of raising so a Gerrit ACL refusal is handled gracefully (the
+    OP-766 direct-push form let a ``CalledProcessError`` escape).
+    """
+    cmd = ["git", "push"]
+    for tag in hashtags:
+        cmd += ["-o", f"hashtag={tag}"]
+    if topic:
+        cmd += ["-o", f"topic={topic}"]
+    cmd += [remote, f"{source_branch}:refs/for/{target_branch}"]
+    proc = subprocess.run(
+        cmd,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    blob = f"{proc.stdout}\n{proc.stderr}".strip()
+    urls = tuple(dict.fromkeys(_GERRIT_CHANGE_URL_RE.findall(blob)))
+    return PushOutcome(ok=proc.returncode == 0, change_urls=urls, raw=blob[:2000])
 
 
 def _write_audit(action: str, payload: dict[str, Any]) -> None:
@@ -150,11 +247,20 @@ def promote_on_milestone_ready(
     notify: NotifyFn = _default_notify,
     event_sink: EventSink = emit_event,
     audit_sink: AuditSink = _write_audit,
+    push_for_review: PushForReviewFn = _push_for_review,
+    max_promote_batch: int = DEFAULT_MAX_PROMOTE_BATCH,
+    hashtags: tuple[str, ...] = PROMOTE_HASHTAGS,
+    topic: str = PROMOTE_TOPIC,
 ) -> PromotionResult:
     """Handle one release event.
 
-    Only ``milestone_ready`` records trigger git writes. The push uses the
-    exact Gerrit fast-forward refspec from OP-766: ``develop:main``.
+    Only ``milestone_ready`` records trigger git writes, and the write is
+    never a direct push to ``refs/heads/<target>`` (Gerrit ACL refuses
+    bot direct push to ``main`` — by design). When the develop tip is a
+    clean fast-forward over ``main`` we push ``develop`` to
+    ``refs/for/<target>`` so ``main`` advances through Gerrit Code
+    Review; submitting the resulting change(s) stays an operator / future
+    merger-bot action (see module docstring).
     """
     if event.get("event") != EVENT_MILESTONE_READY:
         return PromotionResult("ignored", "", "", "", (), ())
@@ -205,22 +311,77 @@ def promote_on_milestone_ready(
             check.develop_only, check.main_only, detail,
         )
 
-    push = _git(repo, "push", remote, f"{source_branch}:{target_branch}", timeout=120)
-    promoted_tip = _git_one(repo, "rev-parse", source_branch)
+    # Clean fast-forward shape — but ``main`` advances through Gerrit Code
+    # Review, not a direct push. Refuse first if the develop tip is so far
+    # ahead that the single push would breach Gerrit ``receive.maxBatchChanges``.
+    if len(check.develop_only) > max_promote_batch:
+        detail = (
+            f"develop -> main promotion deferred for {version or 'unknown version'}: "
+            f"{source_branch} is {len(check.develop_only)} commit(s) ahead of {target_branch} "
+            f"(> receive.maxBatchChanges={max_promote_batch}); needs a manual catch-up merge first."
+        )
+        notify("release-auto-promote", "critical", detail)
+        audit_sink(AUDIT_ACTION_MAIN_PROMOTE_BLOCKED, {
+            **base_payload,
+            "before": {"main_tip": check.main_tip},
+            "after": {"status": "batch_too_large", "develop_only": list(check.develop_only[:50])},
+        })
+        return PromotionResult(
+            "blocked", version, check.develop_tip, check.main_tip,
+            check.develop_only, check.main_only, detail,
+        )
+
+    push = push_for_review(
+        repo=repo,
+        remote=remote,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        hashtags=hashtags,
+        topic=topic,
+    )
+    review_ref = f"{source_branch}:refs/for/{target_branch}"
+    if not push.ok:
+        detail = (
+            f"develop -> main review-change push to {review_ref} refused by Gerrit "
+            f"for {version or 'unknown version'}: {push.raw[:400] or '(no output)'}"
+        )
+        notify("release-auto-promote", "critical", detail)
+        audit_sink(AUDIT_ACTION_MAIN_PROMOTE_BLOCKED, {
+            **base_payload,
+            "before": {"main_tip": check.main_tip},
+            "after": {"status": "push_rejected", "review_ref": review_ref, "err": push.raw[:400]},
+        })
+        return PromotionResult(
+            "push_rejected", version, check.develop_tip, check.main_tip,
+            check.develop_only, check.main_only, detail,
+        )
+
+    created = list(push.change_urls)
+    detail = (
+        f"develop -> main promotion change(s) created for {version or 'unknown version'} "
+        f"on {review_ref}"
+        + (f": {', '.join(created)}" if created else " (see Gerrit)")
+        + f"; hashtags={list(hashtags)}, topic={topic!r}. main advances through Gerrit "
+        f"Code Review — operator submits via the Gerrit UI (or merger-bot once the "
+        f"milestone:R3-fastforward submit-requirement lands)."
+    )
     payload = {
         **base_payload,
-        "promoted_tip": promoted_tip,
-        "pushed_ref": f"{source_branch}:{target_branch}",
+        "review_ref": review_ref,
+        "hashtags": list(hashtags),
+        "topic": topic,
+        "created_changes": created,
     }
-    event_sink(EVENT_MAIN_PROMOTED, payload)
-    audit_sink(AUDIT_ACTION_MAIN_PROMOTED, {
+    notify("release-auto-promote", "warning", detail)
+    event_sink(EVENT_MAIN_PROMOTE_CHANGE_CREATED, payload)
+    audit_sink(AUDIT_ACTION_MAIN_PROMOTE_CHANGE_CREATED, {
         **payload,
         "before": {"main_tip": check.main_tip},
-        "after": {"main_tip": promoted_tip, "push": push.stderr.strip() or push.stdout.strip()},
+        "after": {"status": "change_created", "created_changes": created, "hashtags": list(hashtags)},
     })
     return PromotionResult(
-        "promoted", version, promoted_tip, check.main_tip,
-        check.develop_only, check.main_only,
+        "change_created", version, check.develop_tip, check.main_tip,
+        check.develop_only, check.main_only, detail, created_changes=tuple(created),
     )
 
 
@@ -272,6 +433,8 @@ def run_once(
     notify: NotifyFn = _default_notify,
     event_sink: EventSink = emit_event,
     audit_sink: AuditSink = _write_audit,
+    push_for_review: PushForReviewFn = _push_for_review,
+    max_promote_batch: int = DEFAULT_MAX_PROMOTE_BATCH,
 ) -> list[PromotionResult]:
     results: list[PromotionResult] = []
     for record in iter_new_records(event_log, cursor):
@@ -284,6 +447,8 @@ def run_once(
             notify=notify,
             event_sink=event_sink,
             audit_sink=audit_sink,
+            push_for_review=push_for_review,
+            max_promote_batch=max_promote_batch,
         )
         if result.status != "ignored":
             results.append(result)
@@ -324,6 +489,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-branch", default="develop")
     parser.add_argument("--target-branch", default="main")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--max-promote-batch", type=int, default=DEFAULT_MAX_PROMOTE_BATCH,
+        help="refuse the promotion if develop is more than this many commits ahead of main",
+    )
     parser.add_argument("--once", action="store_true")
     args = parser.parse_args(argv)
 
@@ -335,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
             remote=args.remote,
             source_branch=args.source_branch,
             target_branch=args.target_branch,
+            max_promote_batch=args.max_promote_batch,
         )
         return 0
     follow(
