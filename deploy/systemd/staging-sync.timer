@@ -1,0 +1,34 @@
+; [OP-973] AUDIT-19c — 10-minute trigger for staging-sync.service.
+;
+; Cadence: every 10 min — deliberately the same as staging-gate-canary.timer
+; (OP-965). The sync deploys the develop tip; the canary probes it; matching
+; the cadences means a fresh develop tip gets onto staging and then gets a
+; canary signal within roughly one interval rather than drifting.
+;
+; Boot order (AC #6 — "first deploys, then probes"): the three staging timers
+; are sequenced by their OnBootSec offsets, not by service ordering edges
+; (the .service units are started by the .timer units, never directly at
+; boot, so After= between them would not create a real boot ordering):
+;     staging-sync.timer          OnBootSec=2min   <-- deploy develop tip first
+;     staging-gate-canary.timer   OnBootSec=3min   <-- then probe (canary)
+;     staging-gate-smoke.timer    OnBootSec=5min   <-- then probe (smoke)
+; (release-milestone-checker.timer also fires at OnBootSec=2min — it only
+; *reads* the JSONL the gates write, so a tie there is harmless; its 5-min
+; cadence picks up the gate output on the next tick regardless.)
+;
+; Persistent=true catches up one missed firing after host downtime so a fresh
+; develop tip is not left un-synced for a full interval after a reboot.
+
+[Unit]
+Description=10-minute trigger for staging-sync.service (OP-973)
+Documentation=https://soraapp.atlassian.net/browse/OP-973
+
+[Timer]
+Unit=staging-sync.service
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
