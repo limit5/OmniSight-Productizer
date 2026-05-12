@@ -355,3 +355,18 @@ def test_project_state_skip_label_disables_injection_per_ticket(
     prompt = runner._build_prompt(fake_client, "OP-1234", "stub body")
     assert _PROJECT_CONTEXT_HEADER not in prompt
     assert calls == [], "label override must short-circuit before any fetch"
+
+
+def test_build_prompt_reads_cognee_recall_flag_from_env(
+    runner, fake_client, monkeypatch
+):
+    """AUDIT-29b-5 — _build_prompt resolves cognee_recall on every pickup."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.setenv("OMNISIGHT_COGNEE_RECALL", "1")
+
+    runner._LAST_AGENT_FEATURE_FLAGS.clear()
+    runner._build_prompt(fake_client, "OP-1023", "stub body")
+
+    assert runner._LAST_AGENT_FEATURE_FLAGS["OP-1023"] == {
+        "cognee_recall": True,
+    }
