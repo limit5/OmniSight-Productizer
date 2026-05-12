@@ -1436,6 +1436,24 @@ def has_ops_only_label(labels: Iterable[str]) -> bool:
     return OPS_ONLY_LABEL in set(labels)
 
 
+def fetch_ticket_labels(client: "DispatchClient", key: str) -> tuple[str, ...]:
+    """Return the *current* JIRA label set for ``key``.
+
+    OP-958 ``LabelsPropagationDrift``: the runner's ``TicketSnapshot``
+    carries a point-in-time label copy taken at *selection* time (JQL
+    ``fetch_pickable_tickets`` → :func:`to_snapshot`, or a single
+    ``GET /issue`` for the target-override path). Operators routinely add
+    ``runner:no-commits-expected`` *after* a ticket is already In
+    Progress — the OP-925 R3 cascade on 2026-05-12 is the canonical
+    case — so a stale snapshot makes :func:`has_ops_only_label` miss the
+    sigil even though it is on the ticket. Re-reading at the no-commits
+    decision point closes that drift window. Callers degrade to the
+    snapshot copy if this raises (JIRA transient fault).
+    """
+    issue = _request(client, "GET", f"/issue/{key}?fields=labels")
+    return tuple((issue.get("fields") or {}).get("labels") or ())
+
+
 def forward_transition_ops_only(
     client: "DispatchClient",
     key: str,
