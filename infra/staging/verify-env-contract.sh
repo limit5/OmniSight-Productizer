@@ -43,7 +43,7 @@
 # Inputs (all optional, env-overridable):
 #   OMNISIGHT_STAGING_ENV_FILE   default /home/user/sora-bridge/deploy/staging/.env
 #                                also reads a sibling `.env.local` if present
-#   OMNISIGHT_STAGING_HEALTHZ_PORT          default 9000
+#   OMNISIGHT_STAGING_HEALTHZ_PORT          default 18080
 #   OMNISIGHT_STAGING_EXTRA_PORTS           space-separated extra ports to check
 #   OMNISIGHT_STAGING_STRICT_PORTS          "1" => PortCollisionWithProd is fatal
 #   OMNISIGHT_STAGING_REQUIRE_CGROUP_V2     "1" => CgroupV1Fallback is fatal
@@ -56,7 +56,7 @@ set -euo pipefail
 
 SELF="verify-env-contract.sh"
 ENV_FILE="${OMNISIGHT_STAGING_ENV_FILE:-/home/user/sora-bridge/deploy/staging/.env}"
-HEALTHZ_PORT="${OMNISIGHT_STAGING_HEALTHZ_PORT:-9000}"
+HEALTHZ_PORT="${OMNISIGHT_STAGING_HEALTHZ_PORT:-18080}"
 STAGING_PG_PORTS=(55432 55433)
 
 log()  { printf '[%s] %s\n' "$SELF" "$*" >&2; }
@@ -194,7 +194,7 @@ port_in_use() {
 	( exec 3<>"/dev/tcp/127.0.0.1/$p" ) >/dev/null 2>&1 && { exec 3>&- 3<&- 2>/dev/null || true; return 0; }
 	return 1
 }
-CHECK_PORTS=("$HEALTHZ_PORT" "${STAGING_HTTP_PORT:-8080}" "${STAGING_BACKEND_A_PORT:-8010}" \
+CHECK_PORTS=("$HEALTHZ_PORT" "${STAGING_HTTP_PORT:-18080}" "${STAGING_BACKEND_A_PORT:-8010}" \
 	"${STAGING_BACKEND_B_PORT:-8011}" "${STAGING_POSTGRES_PORT:-55432}" ${OMNISIGHT_STAGING_EXTRA_PORTS:-})
 collision_ports=()
 for p in "${CHECK_PORTS[@]}"; do
