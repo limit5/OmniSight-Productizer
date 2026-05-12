@@ -992,20 +992,35 @@ def get_default_notifier() -> Notifier:
 def notify(
     severity: Severity | str,
     code: str,
-    message: str,
+    message: str | None = None,
     context: dict[str, Any] | None = None,
     ticket: str | None = None,
     scope: str = "global",
     root_cause_key: str | None = None,
+    **fields: Any,
 ) -> _BurstEntry:
     """Module-level convenience wrapper — most callers should use this.
     Lazily builds the process-wide :class:`Notifier` from env.
 
     Pass ``scope`` and ``root_cause_key`` (OP-755) to opt into the
     broader grouping; legacy callers that pass neither retain the
-    OP-722 ``(code, severity)`` grouping unchanged."""
+    OP-722 ``(code, severity)`` grouping unchanged.
+
+    T2 watchdog-style callers pass structured alert fields as keyword
+    arguments instead of pre-building ``context``. Preserve that API so
+    low-level alert producers can stay stdlib/simple while T1 owns the
+    notification context shape.
+    """
+    ctx = dict(context or {})
+    if fields:
+        msg = fields.pop("message", None)
+        if message is None and isinstance(msg, str):
+            message = msg
+        elif msg is not None:
+            ctx["message"] = msg
+        ctx.update(fields)
     return get_default_notifier().notify(
-        severity, code, message, context, ticket,
+        severity, code, message or "", ctx, ticket,
         scope=scope, root_cause_key=root_cause_key,
     )
 
