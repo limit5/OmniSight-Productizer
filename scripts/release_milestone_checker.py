@@ -240,6 +240,10 @@ class SshGerritClient:
         )
 
     def _query(self, query: str, *, timeout: int = 30) -> list[dict[str, Any]]:
+        # ``--current-patch-set`` is REQUIRED: Gerrit 3.13's ``gerrit query``
+        # no longer emits the ``currentPatchSet`` block by default (pre-3.13 it
+        # did), and ``develop_tip()`` needs ``currentPatchSet.revision``.
+        # See OP-959 / GerritAPIShapeChange313.
         cmd = [
             "ssh",
             "-i",
@@ -254,6 +258,7 @@ class SshGerritClient:
             "gerrit",
             "query",
             "--format=JSON",
+            "--current-patch-set",
             query,
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True)
@@ -274,7 +279,10 @@ class SshGerritClient:
         current = rows[0].get("currentPatchSet") or {}
         revision = str(current.get("revision") or "")
         if not revision:
-            raise RuntimeError("Gerrit develop query did not include currentPatchSet.revision")
+            raise RuntimeError(
+                "Gerrit develop query did not include currentPatchSet.revision "
+                "(expected `gerrit query --current-patch-set`; see OP-959)"
+            )
         return revision
 
     def ticket_merged_on_develop(self, ticket_key: str) -> bool:

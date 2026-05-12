@@ -2,10 +2,15 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from unittest import mock
+
+import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -195,3 +200,78 @@ def test_docs_created_for_deployment_automation_and_lesson() -> None:
     assert "milestone_ready" in adr
     assert "ticket: OP-762" in lesson
     assert "Machine-checkable release milestones" in lesson
+
+
+# ── OP-959 — Gerrit 3.13 query response shape ──────────────────────
+
+
+def _gerrit_client() -> Any:
+    return checker.SshGerritClient(
+        host="codex-bot@gerrit.example",
+        port=29418,
+        key_path=Path("/dev/null"),
+        project="omnisight/OmniSight-Productizer",
+    )
+
+
+def _completed(stdout: str) -> subprocess.CompletedProcess:
+    return subprocess.CompletedProcess(args=["ssh"], returncode=0, stdout=stdout, stderr="")
+
+
+def test_query_passes_current_patch_set_flag_and_parses_revision() -> None:
+    """OP-959 case 1: ``_query`` invokes ``gerrit query --current-patch-set``
+    so a Gerrit 3.13 response carries ``currentPatchSet`` and ``develop_tip``
+    parses the revision."""
+    gerrit = _gerrit_client()
+    # 3.13 only emits this block *because* the flag is present.
+    response = "\n".join(
+        [
+            json.dumps(
+                {
+                    "project": "omnisight/OmniSight-Productizer",
+                    "branch": "develop",
+                    "status": "MERGED",
+                    "currentPatchSet": {"revision": "deadbeefcafe1234"},
+                }
+            ),
+            json.dumps({"type": "stats", "rowCount": 1}),
+        ]
+    )
+    with mock.patch.object(checker.subprocess, "run", return_value=_completed(response)) as run:
+        revision = gerrit.develop_tip()
+
+    assert revision == "deadbeefcafe1234"
+    (cmd,), kwargs = run.call_args
+    assert "--current-patch-set" in cmd
+    # flag sits in the gerrit-query argv segment, before the free-form query
+    assert cmd.index("--current-patch-set") > cmd.index("query")
+    assert cmd.index("--current-patch-set") < cmd.index(
+        "project:omnisight/OmniSight-Productizer branch:develop status:merged"
+    )
+
+
+def test_develop_tip_raises_pointing_at_flag_on_stale_3_13_shape() -> None:
+    """OP-959 case 2 (defensive): if Gerrit still returns a row without
+    ``currentPatchSet`` (e.g. flag silently dropped), the error names the
+    missing flag."""
+    gerrit = _gerrit_client()
+    response = "\n".join(
+        [
+            json.dumps({"project": "p", "branch": "develop", "status": "MERGED"}),
+            json.dumps({"type": "stats", "rowCount": 1}),
+        ]
+    )
+    with mock.patch.object(checker.subprocess, "run", return_value=_completed(response)):
+        with pytest.raises(RuntimeError, match="current-patch-set"):
+            gerrit.develop_tip()
+
+
+def test_ticket_merged_on_develop_uses_current_patch_set_flag() -> None:
+    """All ``_query`` callers go through the patched argv, so the flag is
+    present uniformly (SubprocessFlagDrift guard)."""
+    gerrit = _gerrit_client()
+    response = json.dumps({"id": "I123", "branch": "develop", "status": "MERGED"})
+    with mock.patch.object(checker.subprocess, "run", return_value=_completed(response)) as run:
+        assert gerrit.ticket_merged_on_develop("OP-959") is True
+    (cmd,), _ = run.call_args
+    assert "--current-patch-set" in cmd
