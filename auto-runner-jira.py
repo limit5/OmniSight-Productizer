@@ -88,6 +88,12 @@ FAILURE_GRAPH_FIXTURE = os.environ.get(
 OPS_ONLY_DISABLED = (
     os.environ.get("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", "0").strip() == "1"
 )
+RUNNER_BRANCH_SWEEP_DISABLED = (
+    os.environ.get("OMNISIGHT_RUNNER_BRANCH_SWEEP_DISABLED", "0").strip() == "1"
+)
+ORPHAN_SALVAGE_BRANCH_THRESHOLD = int(
+    os.environ.get("OMNISIGHT_ORPHAN_SALVAGE_BRANCH_THRESHOLD", "50").strip()
+)
 
 # Recognised JIRA `area:<X>` label values. Exported so other tooling
 # (seed scripts, label linters) can introspect the exact same set used
@@ -135,6 +141,81 @@ def _default_worktree_for(agent_class: str) -> str:
         return os.path.normpath(os.path.join(REPO, "..", f"OmniSight-{suffix}"))
     bot = jira_dispatch.resolve_bot_username(agent_class, INSTANCE_ID)
     return os.path.normpath(os.path.join(REPO, "..", f"OmniSight-{bot}-worktree"))
+
+
+def sweep_stale_runner_branches(worktree_path: Path) -> None:
+    """Best-effort local branch sweep before orphan salvage threshold checks."""
+    if RUNNER_BRANCH_SWEEP_DISABLED:
+        return
+    script = REPO / "scripts" / "orphan-branch-triage.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--worktree",
+            str(worktree_path),
+            "--agent-class",
+            AGENT_CLASS,
+            "--delete-safe",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(
+            "[runner] stale branch sweep failed; continuing without cleanup: "
+            f"rc={result.returncode} stderr={result.stderr.strip()[:300]}",
+            file=sys.stderr,
+        )
+    elif result.stderr.strip():
+        print(f"[runner] stale branch sweep: {result.stderr.strip()}")
+
+
+def configure_orphan_salvage_runtime() -> None:
+    """Apply runner-owned salvage threshold and branch-list normalization."""
+    orphan_salvage.MAX_ORPHAN_BRANCHES = ORPHAN_SALVAGE_BRANCH_THRESHOLD
+
+    def runner_branches(worktree_path: Path) -> list[str]:
+        worktrees = subprocess.run(
+            ["git", "-C", str(worktree_path), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        checked_out = {
+            line.removeprefix("branch refs/heads/").strip()
+            for line in worktrees.stdout.splitlines()
+            if line.startswith("branch refs/heads/")
+        }
+        result = subprocess.run(
+            ["git", "-C", str(worktree_path), "branch", "--list", orphan_salvage.BRANCH_PATTERN],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        branches: list[str] = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            branch = line.strip().lstrip("*+ ").strip()
+            if branch in checked_out:
+                continue
+            branch_parts = branch.removeprefix("feature/").split("-")
+            ticket = "-".join(branch_parts[:2])
+            head_msg = subprocess.run(
+                ["git", "-C", str(worktree_path), "log", "-1", "--pretty=%B", branch],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if head_msg.returncode != 0 or ticket not in head_msg.stdout:
+                continue
+            branches.append(branch)
+        return branches
+
+    orphan_salvage._runner_branches = runner_branches
 
 
 def _file_mutex_skip_comment(reason: str) -> str:
@@ -1294,6 +1375,8 @@ def main() -> int:
     if DRY_RUN:
         print(f"[runner] DRY_RUN: would scan orphan commits in {worktree_path}")
     else:
+        sweep_stale_runner_branches(worktree_path)
+        configure_orphan_salvage_runtime()
         salvaged = orphan_salvage.salvage_orphan_commits(worktree_path, AGENT_CLASS)
         if salvaged:
             print(f"[runner] salvaged {salvaged} orphan commits before starting tick")
