@@ -103,6 +103,45 @@ def test_recognised_area_builds_prompt_without_raising(runner, fake_client, monk
     assert "- backend" not in prompt.split("Stay strictly within")[1].split("If you find")[0]
 
 
+# ── OP-986: localized JIRA issuetype name still resolves the full matrix ──
+
+
+def test_japanese_issuetype_resolves_full_capabilities(runner, fake_client, monkeypatch):
+    """OP-986 regression: when JIRA is in the Japanese display locale it
+    returns ``issuetype.name='ストーリー'``. The runner must still resolve the
+    full tier-M capability set for the ticket — including ``gerrit_push`` —
+    not the read-only safe-default (which silently blocked auto-push on every
+    Story-typed pickup, OP-980/981/985 incident 2026-05-12).
+    """
+    payload = {
+        "fields": {
+            "summary": "AUDIT-26 child",
+            "labels": ["area:backend", "tier:M"],
+            "components": [{"name": "HIGH"}],
+            "issuetype": {"name": "ストーリー", "id": "10001"},
+        }
+    }
+    monkeypatch.setattr(jira_dispatch, "_request", lambda *a, **kw: payload)
+
+    prompt = runner._build_prompt(fake_client, "OP-986-repro", "stub body")
+
+    caps = runner._LAST_RESOLVED_CAPABILITIES["OP-986-repro"]
+    assert "gerrit_push" in caps
+    assert {
+        "code_edit", "run_tests", "run_lint",
+        "jira_update", "mcp_search", "memory_recall",
+    }.issubset(caps)
+    # Crucially NOT the read-only-only fallback.
+    assert caps != runner._load_capability_matrix().read_only_default
+    # The prompt's "Enabled capabilities" block must reflect it.
+    caps_block = prompt.split("Enabled capabilities", 1)[1].split("# Documentation rules", 1)[0]
+    assert "gerrit_push" in caps_block
+    # The ticket-type echoed into the metadata side channel is the raw
+    # localized name (the runner doesn't rewrite it — only the matrix lookup
+    # normalizes), so downstream metrics see what JIRA actually returned.
+    assert runner._LAST_TICKET_METADATA["OP-986-repro"]["ticket_type"] == "ストーリー"
+
+
 # ── AC #1: unknown area raises typed exception ──
 
 

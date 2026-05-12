@@ -14,6 +14,7 @@ Public API:
 - :func:`load_capability_matrix`        — parse YAML → :class:`CapabilityMatrix`
 - :class:`CapabilityMatrix.resolve`     — single-area lookup
 - :class:`CapabilityMatrix.resolve_for_areas` — multi-area union lookup
+- :func:`canonical_issuetype`           — localized issuetype name → English key
 - :func:`apply_label_overrides`         — operator escape hatch via labels
 - :func:`require_capability`            — call-site enforcement
 - :func:`parse_label_overrides`         — exposed for the dashboard script
@@ -57,6 +58,52 @@ CAPABILITIES: frozenset[str] = frozenset({
 
 LABEL_ENABLE_PREFIX = "capability:enable="
 LABEL_DISABLE_PREFIX = "capability:disable="
+
+
+# ── Issuetype name localization (OP-986 / CapabilityMatrixLocaleDrift) ──
+#
+# JIRA returns ``issuetype.name`` in the instance's *display locale*, not a
+# stable identifier: a Japanese-locale instance (soraapp.atlassian.net, the
+# OP-986 incident on 2026-05-12) returns ``ストーリー`` where an English instance
+# returns ``Story``. The matrix YAML keys stay English — one source of truth —
+# and incoming localized names are normalized here before lookup. Without this,
+# ``entries.get('ストーリー')`` returns ``None`` → the runner falls back to
+# ``read_only_default`` → ``gerrit_push`` is silently denied for *every*
+# Story-typed ticket the runner picks up.
+#
+# The fully locale-agnostic fix is to key the matrix on the numeric
+# ``issuetype.id`` (``"10001"`` etc.) instead of ``.name``; that's deferred
+# because it needs an ID-based YAML migration plus a per-JIRA-instance canary
+# (the ID itself can differ between instances — ``IssueTypeIDDrift`` in OP-986's
+# error catalog).
+#
+# Add a row below only for locales actually configured on a connected JIRA
+# instance. JIRA's stock issuetype display names for the common locales, for the
+# next operator's reference:
+#   ja (Japanese): ストーリー=Story  バグ=Bug  タスク=Task  エピック=Epic  サブタスク=Sub-task
+#   zh-TW (繁體中文): 故事=Story  錯誤=Bug  工作=Task  epic 史诗→史詩
+#   ko (Korean): 스토리=Story  버그=Bug  작업=Task
+#   de (German): Fehler=Bug  Aufgabe=Task   (Story stays "Story")
+#   fr (French): Récit=Story  Tâche=Task
+_ISSUETYPE_ALIASES: Mapping[str, str] = MappingProxyType({
+    # Japanese — the display locale on soraapp.atlassian.net (OP-986).
+    "ストーリー": "Story",
+    "バグ": "Bug",
+    "タスク": "Task",
+    "エピック": "Epic",
+    "サブタスク": "Sub-task",
+})
+
+
+def canonical_issuetype(ticket_type: str) -> str:
+    """Map a (possibly localized) JIRA issuetype display name to the English
+    canonical name used as a key in ``config/capability_matrix.yaml``.
+
+    Names that are already canonical — or that we have no alias for — pass
+    through unchanged, so a genuinely unmapped ticket type still surfaces as
+    :exc:`CapabilityMatrixMissingEntry` rather than being silently rewritten.
+    """
+    return _ISSUETYPE_ALIASES.get(ticket_type, ticket_type)
 
 
 class CapabilityMatrixError(ValueError):
@@ -211,7 +258,9 @@ class CapabilityMatrix:
     def _lookup(
         self, ticket_type: str, area: str, tier: str
     ) -> frozenset[str] | None:
-        by_area = self.entries.get(ticket_type)
+        # Normalize a (possibly localized) JIRA issuetype name to the English
+        # key used in the YAML — see ``canonical_issuetype`` / OP-986.
+        by_area = self.entries.get(canonical_issuetype(ticket_type))
         if by_area is None:
             return None
         by_tier = by_area.get(area)
@@ -382,6 +431,7 @@ __all__ = [
     "LABEL_DISABLE_PREFIX",
     "LABEL_ENABLE_PREFIX",
     "apply_label_overrides",
+    "canonical_issuetype",
     "load_capability_matrix",
     "parse_label_overrides",
     "require_capability",

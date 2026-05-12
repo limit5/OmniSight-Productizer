@@ -42,7 +42,12 @@ read_only_default:
 
 # Mapping. Keys are ticket_type (JIRA issuetype English name — must
 # match what JQL `issuetype = <X>` returns, see jira_dispatch.py
-# §"Ticket fetch + JQL"). Areas use the labels documented in
+# §"Ticket fetch + JQL"). A JIRA instance in a non-English display
+# locale returns a localized issuetype name (e.g. `ストーリー` for
+# `Story`); those are normalized to the English key in
+# backend/agents/capability_matrix.py::canonical_issuetype (OP-986) —
+# do NOT add localized keys here, the YAML stays English-only.
+# Areas use the labels documented in
 # auto-runner-jira.py::RECOGNISED_AREAS. Tiers are the operator
 # Tier S/M/L/X classification from ADR-0005.
 #

@@ -336,6 +336,64 @@ def test_yaml_capabilities_vocabulary_matches_canonical_set(
     assert shipped_matrix.capabilities == capability_matrix.CAPABILITIES
 
 
+# ── 7. issuetype name localization (OP-986) ────────────────────────
+
+
+def test_resolve_japanese_issuetype_alias_maps_to_story(tmp_path: Path) -> None:
+    """OP-986: a JIRA instance in the Japanese display locale returns
+    ``issuetype.name='ストーリー'``; that must resolve to the same capability set
+    as the English ``Story`` key — not fall through to the read-only
+    safe-default (the bug that silently denied ``gerrit_push`` on every
+    Story-typed pickup on soraapp.atlassian.net, OP-980/981/985 incident).
+    """
+    p = tmp_path / "matrix.yaml"
+    _write_minimal_matrix(p)
+    matrix = capability_matrix.load_capability_matrix(p)
+
+    english = matrix.resolve("Story", "backend", "M")
+    japanese = matrix.resolve("ストーリー", "backend", "M")
+
+    assert "gerrit_push" in japanese
+    assert japanese == english
+    assert japanese != matrix.read_only_default  # not the safe-default fallback
+    # The multi-area path must normalize too (resolve_for_areas → _lookup).
+    assert matrix.resolve_for_areas("ストーリー", ["backend"], "M") == english
+    # The alias must NOT have leaked into the YAML-derived entries — the YAML
+    # stays English-only (single source of truth).
+    assert "ストーリー" not in matrix.known_ticket_types()
+    assert "Story" in matrix.known_ticket_types()
+
+
+def test_canonical_issuetype_normalizes_known_and_passes_through_unknown() -> None:
+    """`canonical_issuetype` maps localized display names to the English key
+    and leaves everything else (already-canonical or genuinely unmapped)
+    untouched, so a real missing entry still raises CapabilityMatrixMissingEntry.
+    """
+    assert capability_matrix.canonical_issuetype("ストーリー") == "Story"
+    assert capability_matrix.canonical_issuetype("バグ") == "Bug"
+    assert capability_matrix.canonical_issuetype("タスク") == "Task"
+    assert capability_matrix.canonical_issuetype("Story") == "Story"
+    assert capability_matrix.canonical_issuetype("Spike") == "Spike"  # unmapped → pass-through
+
+
+def test_resolve_other_locales_documented_in_comment() -> None:
+    """AC#3: the ``_ISSUETYPE_ALIASES`` block must document the other JIRA
+    display locales and point at the locale-agnostic (``issuetype.id``) escape
+    hatch, so the next operator extends the table correctly instead of
+    re-deriving the localized names by trial and error.
+    """
+    src = Path(capability_matrix.__file__).read_text(encoding="utf-8")
+    assert "_ISSUETYPE_ALIASES" in src
+    # Other locales catalogued even though only Japanese is wired today.
+    for marker in ("ja (Japanese)", "zh-TW", "ko (Korean)", "de (German)", "fr (French)"):
+        assert marker in src, f"locale marker {marker!r} missing from capability_matrix.py"
+    # The locale-agnostic alternative (issuetype.id) is referenced.
+    assert "issuetype.id" in src
+    # Root-cause class name from OP-986's error catalog is named in the source.
+    assert "CapabilityMatrixLocaleDrift" in src
+    assert "IssueTypeIDDrift" in src
+
+
 def test_canonical_capabilities_match_ac_list() -> None:
     """AC#2 fixes the canonical vocabulary; this test pins it.
 
