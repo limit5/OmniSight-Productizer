@@ -32,8 +32,11 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §5.6
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
@@ -115,6 +118,16 @@ class MCPServerConfig:
         if self.authorization_token:
             payload["authorization_token"] = self.authorization_token
         return payload
+
+
+@dataclass(frozen=True)
+class MCPToolListProbeResult:
+    """Result from a direct MCP ``tools/list`` reachability probe."""
+
+    server_name: str
+    url: str
+    tool_names: tuple[str, ...]
+    raw: dict[str, Any]
 
 
 # ─── Default catalog (the 4 claude.ai-managed MCPs) ──────────────
@@ -432,6 +445,61 @@ def parse_mcp_tool_name(tool_name: str) -> tuple[str, str] | None:
 
 def is_mcp_tool(tool_name: str) -> bool:
     return parse_mcp_tool_name(tool_name) is not None
+
+
+def query_mcp_tool_list(
+    config: MCPServerConfig,
+    *,
+    opener: Any = urllib.request.urlopen,
+    timeout: float = 10.0,
+) -> MCPToolListProbeResult:
+    """Probe a remote MCP server by issuing an authenticated ``tools/list``.
+
+    This is a runner/deploy smoke primitive, not the normal production
+    dispatch path. Production still passes ``mcp_servers=[]`` to Anthropic;
+    this helper lets a pickup or deploy check prove that the configured URL
+    and bearer token can reach the server before relying on SDK discovery.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "id": f"{config.name}-tools-list",
+        "method": "tools/list",
+        "params": {},
+    }
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    if config.authorization_token:
+        headers["Authorization"] = f"Bearer {config.authorization_token}"
+    request = urllib.request.Request(
+        config.url,
+        data=json.dumps(payload).encode(),
+        method="POST",
+        headers=headers,
+    )
+    try:
+        with opener(request, timeout=timeout) as response:
+            body = response.read().decode()
+    except urllib.error.HTTPError:
+        raise
+    except OSError as exc:
+        raise ConnectionError(
+            f"MCP tools/list probe failed for {config.name} at {config.url}"
+        ) from exc
+    parsed = json.loads(body) if body else {}
+    tools = parsed.get("result", {}).get("tools", [])
+    tool_names = tuple(
+        item["name"]
+        for item in tools
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    )
+    return MCPToolListProbeResult(
+        server_name=config.name,
+        url=config.url,
+        tool_names=tool_names,
+        raw=parsed,
+    )
 
 
 def is_jira_mcp_read_only_tool(tool_name: str) -> bool:
