@@ -11,7 +11,10 @@ to the audit log automatically; this router is read-only.
 from __future__ import annotations
 
 import os
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+import secrets
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from backend import audit
 from backend import auth as _au
@@ -36,6 +39,11 @@ async def _resolve_session_hint(user_id: str, token_hint: str) -> str | None:
 
 router = APIRouter(prefix="/audit", tags=["audit"])
 
+_STAGING_AUDIT_VERIFY_TOKEN_FILE_ENV = "OMNISIGHT_STAGING_AUDIT_VERIFY_TOKEN_FILE"
+_STAGING_AUDIT_VERIFY_TOKEN_FILE = Path(
+    "~/.config/omnisight/staging-audit-verify-token"
+).expanduser()
+
 
 def _require_audit_token(authorization: str | None = Header(default=None)) -> None:
     """Audit reads can leak operator behaviour, so when bearer auth is
@@ -51,6 +59,50 @@ def _require_audit_token(authorization: str | None = Header(default=None)) -> No
         presented = presented[len("Bearer "):]
     if not presented:
         raise HTTPException(status_code=401, detail="Bearer token required for audit access")
+
+
+def _staging_audit_verify_token() -> str:
+    """Read the staging-only audit verify token, if provisioned."""
+    raw_path = os.environ.get(_STAGING_AUDIT_VERIFY_TOKEN_FILE_ENV, "").strip()
+    path = Path(raw_path).expanduser() if raw_path else _STAGING_AUDIT_VERIFY_TOKEN_FILE
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+async def _require_audit_verify_access(
+    request: Request,
+    authorization: str | None = Header(default=None),
+) -> _au.User:
+    """Allow the staging audit-verify token or the existing admin auth path."""
+    expected = _staging_audit_verify_token()
+    presented = authorization or ""
+    if presented.lower().startswith("bearer "):
+        presented = presented[len("bearer "):].strip()
+
+    if expected:
+        if presented and secrets.compare_digest(presented, expected):
+            return _au.User(
+                id="staging-audit-verify",
+                email="staging-audit-verify@local",
+                name="staging audit verify",
+                role="admin",
+                enabled=True,
+                tenant_id=current_tenant_id() or "t-default",
+            )
+        if _au.auth_mode() == "open":
+            raise HTTPException(status_code=401, detail="Invalid audit verify token")
+    else:
+        _require_audit_token(authorization)
+
+    user = await _au.current_user(request)
+    if not _au.role_at_least(user.role, "admin"):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Requires role=admin or higher (you are {user.role})",
+        )
+    return user
 
 
 @router.get("")
@@ -82,8 +134,7 @@ async def list_audit(
 @router.get("/verify")
 async def verify_chain(
     tenant_id: str | None = Query(default=None, description="Tenant to verify (admin only, defaults to current tenant)"),
-    _auth: None = Depends(_require_audit_token),
-    user: _au.User = Depends(_au.require_admin),
+    user: _au.User = Depends(_require_audit_verify_access),
 ) -> dict:
     tid = tenant_id or current_tenant_id() or user.tenant_id
     ok, bad = await audit.verify_chain(tenant_id=tid)

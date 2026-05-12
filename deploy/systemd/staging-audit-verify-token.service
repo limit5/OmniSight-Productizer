@@ -1,0 +1,16 @@
+; [OP-1037] Provision the staging /audit/verify bearer token.
+;
+; Install (user-level, before omnisight-staging-compose.service):
+;   cp deploy/systemd/staging-audit-verify-token.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user start staging-audit-verify-token.service
+
+[Unit]
+Description=Provision OmniSight staging audit verify token (OP-1037)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -lc 'set -euo pipefail; umask 077; mkdir -p /home/user/.config/omnisight; token=/home/user/.config/omnisight/staging-audit-verify-token; if [ ! -s "$$token" ]; then /usr/bin/python3 -c "import secrets; print(secrets.token_urlsafe(48))" > "$$token"; fi; chmod 600 "$$token"'
+
+[Install]
+WantedBy=default.target

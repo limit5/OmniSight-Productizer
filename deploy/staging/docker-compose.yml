@@ -87,11 +87,14 @@ services:
     volumes:
       - staging-artifacts:/app/.artifacts
       - staging-sdks:/app/.sdks
+    secrets:
+      - staging_audit_verify_token
     environment:
       - OMNISIGHT_DEBUG=false
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=staging
       - OMNISIGHT_INSTANCE_ID=staging-backend-a
+      - OMNISIGHT_STAGING_AUDIT_VERIFY_TOKEN_FILE=/run/secrets/staging_audit_verify_token
       - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
@@ -137,11 +140,14 @@ services:
     volumes:
       - staging-artifacts:/app/.artifacts
       - staging-sdks:/app/.sdks
+    secrets:
+      - staging_audit_verify_token
     environment:
       - OMNISIGHT_DEBUG=false
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=staging
       - OMNISIGHT_INSTANCE_ID=staging-backend-b
+      - OMNISIGHT_STAGING_AUDIT_VERIFY_TOKEN_FILE=/run/secrets/staging_audit_verify_token
       - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
@@ -284,6 +290,8 @@ services:
     mem_reservation: 128m
 
 secrets:
+  staging_audit_verify_token:
+    file: ${STAGING_AUDIT_VERIFY_TOKEN_FILE:-/home/user/.config/omnisight/staging-audit-verify-token}
   staging_gerrit_ssh_key:
     file: ${STAGING_GERRIT_SSH_KEY_FILE:-/home/user/.config/omnisight/gerrit-claude-bot-ed25519}
 
