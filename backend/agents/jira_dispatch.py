@@ -1117,9 +1117,15 @@ def push_to_gerrit_for_review(
     blob = ""
 
     for attempt in range(1, max_attempts + 1):
+        # --no-thin forces a full pack containing every object referenced by the
+        # commit (including sub-trees git's thin-pack optimization would assume
+        # the server already has). Eliminates the "Missing tree" failure class
+        # when shared worktrees accumulate unreachable tree objects that get
+        # reused as sub-tree refs in new commits. See OP-1015/1019/1026/1028
+        # incident set (2026-05-13).
         result = BREAKERS["gerrit_ssh"].call(
             subprocess.run,
-            ["git", "push", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
+            ["git", "push", "--no-thin", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
             cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
         )
         blob = (result.stderr + "\n" + result.stdout).strip()
