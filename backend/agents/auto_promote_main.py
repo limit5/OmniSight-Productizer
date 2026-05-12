@@ -1,4 +1,4 @@
-"""OP-766 / OP-960 (AUDIT-13) develop -> main auto-promotion on
+"""OP-766 / OP-960 / OP-983 develop -> main auto-promotion on
 milestone-ready events.
 
 Consumes the ``milestone_ready`` JSON records emitted by
@@ -10,13 +10,14 @@ History
 OP-766 originally did a *direct* fast-forward push to ``refs/heads/main``
 (``git push gerrit develop:main``). OP-960 (AUDIT-13) showed that Gerrit's
 ACL on ``refs/heads/main`` correctly refuses bot direct push — ``main``
-must advance through Gerrit Code Review, never a side-door push. So the
-mechanism now pushes ``develop`` to the Gerrit magic ref
-``refs/for/main`` (creating a review change per intervening commit),
-tagged with the hashtags in :data:`PROMOTE_HASHTAGS` and topic
-:data:`PROMOTE_TOPIC`.
+must advance through Gerrit Code Review, never a side-door push. OP-983
+(AUDIT-26d) replaced the OP-960 bulk-chain review push with one local
+``--no-ff`` merge commit, then pushes that commit to the Gerrit magic ref
+``refs/for/main``. The change is tagged with the hashtags in
+:data:`PROMOTE_HASHTAGS` and a per-release topic from
+:func:`promote_topic_for_version`.
 
-What submits the change(s) is, by design, *not* this bot's job:
+What submits the change is, by design, *not* this bot's job:
 * short term — an operator submits via the Gerrit UI (the established
   humans-in-the-loop pattern; Sprint H H4 / OP-949 adds a one-click
   "advance main now" affordance);
@@ -26,10 +27,9 @@ What submits the change(s) is, by design, *not* this bot's job:
   follow-up, tracked in the AUDIT-13 ADR).
 
 A non-fast-forward shape (``main`` has commits absent from ``develop``)
-is still treated as an operator alert, not as a merge. A develop tip more
-than :data:`DEFAULT_MAX_PROMOTE_BATCH` commits ahead of ``main`` is
-refused (Gerrit ``receive.maxBatchChanges``) so an operator does a manual
-catch-up merge first.
+is still treated as an operator alert, not as a merge. Long develop chains
+are intentionally accepted because the review push now contains one merge
+commit instead of one Gerrit change per intervening commit.
 
 OP-968 (AUDIT-18c) wires the ``release:force-promote`` operator override
 (ADR-0019): the milestone checker may emit ``milestone_force_promoted``
@@ -71,6 +71,7 @@ EVENT_MAIN_PROMOTED = "main_promoted"
 EVENT_MAIN_PROMOTE_CHANGE_CREATED = "main_promote_change_created"
 AUDIT_ACTION_MAIN_PROMOTED = "release.main_promoted"
 AUDIT_ACTION_MAIN_PROMOTE_CHANGE_CREATED = "release.main_promote_change_created"
+AUDIT_ACTION_MAIN_PROMOTE_CHANGE_PUSHED = "release.main_promote_change_pushed"
 AUDIT_ACTION_MAIN_PROMOTE_BLOCKED = "release.main_promote_blocked"
 
 # ``release_audit.outcome`` values. A clean ``milestone_ready`` promotion
@@ -90,12 +91,11 @@ FORCE_PROMOTE_WARNING_PREFIX = "OPERATOR FORCE-PROMOTE WARNING:"
 # ``area:devops`` follow-up) so the merger-bot may cast a scoped +2 +
 # auto-submit. Until that rule lands an operator submits via the Gerrit UI.
 PROMOTE_HASHTAGS: tuple[str, ...] = ("auto-promote", "milestone:R3-fastforward")
-PROMOTE_TOPIC = "develop-to-main"
+PROMOTE_TOPIC_PREFIX = "release-"
+PROMOTE_TOPIC = "release-vX.Y.Z"
 
-# Gerrit refuses a single push that would create more than
-# ``receive.maxBatchChanges`` changes at once (default 10). If ``develop``
-# is that far ahead of ``main`` the promotion needs a manual catch-up
-# merge first — we refuse and alert rather than fire a doomed push.
+# Historical OP-960 guard retained for CLI/API compatibility. OP-983 no
+# longer uses it because one merge commit creates one Gerrit review change.
 DEFAULT_MAX_PROMOTE_BATCH = 10
 
 DEFAULT_REPO = Path("/home/user/sora-bridge")
@@ -105,17 +105,30 @@ DEFAULT_CURSOR = Path("/home/user/work/sora/logs/release-milestone/auto-promote.
 NotifyFn = Callable[[str, str, str], None]
 EventSink = Callable[[str, dict[str, Any]], None]
 AuditSink = Callable[[str, dict[str, Any]], None]
-# (repo, remote, source_branch, target_branch, hashtags, topic) -> PushOutcome
+# (repo, remote, commit_sha, target_ref, hashtags, topic) -> PushOutcome
 PushForReviewFn = Callable[..., "PushOutcome"]
+
+
+class MergeCommitConflict(RuntimeError):
+    """Raised when the local no-ff merge cannot be created cleanly."""
+
+
+class MetaTicketNotFound(RuntimeError):
+    """Raised when no release META ticket can be derived for a version."""
+
+
+class PushToReviewFailedFromMergeCommit(RuntimeError):
+    """Raised when Gerrit refuses the single merge-commit review push."""
 
 
 @dataclass(frozen=True)
 class PushOutcome:
-    """Result of pushing ``develop`` to ``refs/for/<target>``."""
+    """Result of pushing the promotion merge commit to review."""
 
     ok: bool
     change_urls: tuple[str, ...] = ()
     raw: str = ""
+    change_number: str = ""
 
 
 @dataclass(frozen=True)
@@ -171,20 +184,21 @@ def _git_one(repo: Path, *args: str) -> str:
 # Gerrit echoes one ``remote:`` line per created/updated change, e.g.
 #   remote:   https://gerrit.example.com/c/sora-bridge/+/12345 subject [NEW]
 _GERRIT_CHANGE_URL_RE = re.compile(r"https?://\S+?/\+/\d+")
+_GERRIT_CHANGE_NUMBER_RE = re.compile(r"/\+/(\d+)")
 
 
 def _push_for_review(
     *,
     repo: Path,
     remote: str,
-    source_branch: str,
-    target_branch: str,
+    commit_sha: str,
+    target_ref: str = "refs/for/main",
     hashtags: tuple[str, ...] = PROMOTE_HASHTAGS,
     topic: str = PROMOTE_TOPIC,
     change_description: str = "",
     timeout: int = 120,
 ) -> PushOutcome:
-    """Push ``source_branch`` to ``refs/for/<target_branch>`` as review change(s).
+    """Push ``commit_sha`` to ``target_ref`` as one review change.
 
     Hashtags + topic go via ``git push -o`` push options (robust for
     values containing ``:`` like ``milestone:R3-fastforward``, which the
@@ -203,7 +217,7 @@ def _push_for_review(
         cmd += ["-o", f"topic={topic}"]
     if change_description:
         cmd += ["-o", f"message={change_description}"]
-    cmd += [remote, f"{source_branch}:refs/for/{target_branch}"]
+    cmd += [remote, f"{commit_sha}:{target_ref}"]
     proc = subprocess.run(
         cmd,
         cwd=repo,
@@ -214,7 +228,17 @@ def _push_for_review(
     )
     blob = f"{proc.stdout}\n{proc.stderr}".strip()
     urls = tuple(dict.fromkeys(_GERRIT_CHANGE_URL_RE.findall(blob)))
-    return PushOutcome(ok=proc.returncode == 0, change_urls=urls, raw=blob[:2000])
+    change_number = ""
+    if urls:
+        match = _GERRIT_CHANGE_NUMBER_RE.search(urls[0])
+        if match:
+            change_number = match.group(1)
+    return PushOutcome(
+        ok=proc.returncode == 0,
+        change_urls=urls,
+        raw=blob[:2000],
+        change_number=change_number,
+    )
 
 
 def _write_audit(action: str, payload: dict[str, Any]) -> None:
@@ -300,6 +324,56 @@ def evaluate_fast_forward(
     )
 
 
+def promote_topic_for_version(release_version: str) -> str:
+    """Return the ADR-0020 per-release Gerrit topic."""
+    return f"{PROMOTE_TOPIC_PREFIX}{release_version}"
+
+
+def _resolve_meta_ticket_for(release_version: str) -> str:
+    """Resolve the release META identifier carried in merge/audit text."""
+    if not release_version:
+        raise MetaTicketNotFound("missing release version")
+    return f"RELEASE-{release_version}"
+
+
+def _build_promote_merge_commit(
+    repo: Path,
+    develop_sha: str,
+    main_sha: str,
+    release_version: str,
+    meta_ticket: str,
+) -> str:
+    """Create a merge commit with parents ``[main_sha, develop_sha]``.
+
+    Subject: ``[release-cut {release_version}] Merge develop into main for {meta_ticket}``
+    Body: ``Develop tip: {develop_sha} • RELEASE META: {meta_ticket} • Reviewed at R8``
+    Returns merge commit SHA. Caller pushes to ``refs/for/main``.
+    """
+    subject = f"[release-cut {release_version}] Merge develop into main for {meta_ticket}"
+    body = f"Develop tip: {develop_sha} • RELEASE META: {meta_ticket} • Reviewed at R8"
+    try:
+        _git(repo, "checkout", "--detach", main_sha)
+        _git(
+            repo,
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            subject,
+            "-m",
+            body,
+            develop_sha,
+        )
+        return _git_one(repo, "rev-parse", "HEAD")
+    except subprocess.CalledProcessError as exc:
+        try:
+            _git(repo, "merge", "--abort")
+        except Exception:  # noqa: BLE001 - best-effort cleanup after conflict
+            pass
+        detail = ((exc.stderr or "") + (exc.stdout or "")).strip()
+        raise MergeCommitConflict(detail or "merge commit creation failed") from exc
+
+
 def promote_on_milestone_ready(
     event: dict[str, Any],
     *,
@@ -313,7 +387,8 @@ def promote_on_milestone_ready(
     push_for_review: PushForReviewFn = _push_for_review,
     max_promote_batch: int = DEFAULT_MAX_PROMOTE_BATCH,
     hashtags: tuple[str, ...] = PROMOTE_HASHTAGS,
-    topic: str = PROMOTE_TOPIC,
+    topic: str | None = None,
+    meta_ticket_resolver: Callable[[str], str] = _resolve_meta_ticket_for,
 ) -> PromotionResult:
     """Handle one release event.
 
@@ -321,9 +396,9 @@ def promote_on_milestone_ready(
     override ``milestone_force_promoted``) trigger git writes, and the
     write is never a direct push to ``refs/heads/<target>`` (Gerrit ACL
     refuses bot direct push to ``main`` — by design). When the develop tip
-    is a clean fast-forward over ``main`` we push ``develop`` to
-    ``refs/for/<target>`` so ``main`` advances through Gerrit Code
-    Review; submitting the resulting change(s) stays an operator / future
+    is a clean fast-forward over ``main`` we build one merge commit and
+    push that commit to ``refs/for/<target>`` so ``main`` advances through
+    Gerrit Code Review; submitting the resulting change stays an operator / future
     merger-bot action (see module docstring). A force-promoted event
     additionally carries the ``OPERATOR FORCE-PROMOTE WARNING:`` block
     into the change description and an ``outcome=force_promoted`` audit
@@ -339,6 +414,24 @@ def promote_on_milestone_ready(
         PROMOTE_OUTCOME_FORCE_PROMOTED if force_promoted else PROMOTE_OUTCOME_SUCCESS
     )
     version = str(event.get("fixVersion") or "")
+    meta_ticket = str(event.get("metaTicket") or event.get("releaseMeta") or "")
+    if not meta_ticket:
+        try:
+            meta_ticket = meta_ticket_resolver(version)
+        except MetaTicketNotFound as exc:
+            detail = (
+                f"develop -> main promotion blocked for {version or 'unknown version'}: "
+                f"release META ticket not found ({exc})"
+            )
+            notify("release-auto-promote", "critical", detail)
+            audit_sink(AUDIT_ACTION_MAIN_PROMOTE_BLOCKED, {
+                "fixVersion": version,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "before": None,
+                "after": {"status": "meta_ticket_not_found"},
+            })
+            return PromotionResult("blocked", version, "", "", (), (), detail)
     check = evaluate_fast_forward(
         repo=repo,
         source_branch=source_branch,
@@ -384,46 +477,58 @@ def promote_on_milestone_ready(
             check.develop_only, check.main_only, detail,
         )
 
-    # Clean fast-forward shape — but ``main`` advances through Gerrit Code
-    # Review, not a direct push. Refuse first if the develop tip is so far
-    # ahead that the single push would breach Gerrit ``receive.maxBatchChanges``.
-    if len(check.develop_only) > max_promote_batch:
+    # Kept to avoid churn in wrappers/tests that still pass the historical
+    # OP-960 batch guard. OP-983 always pushes one merge commit.
+    _ = max_promote_batch
+
+    try:
+        merge_sha = _build_promote_merge_commit(
+            repo, check.develop_tip, check.main_tip, version, meta_ticket
+        )
+    except MergeCommitConflict as exc:
         detail = (
-            f"develop -> main promotion deferred for {version or 'unknown version'}: "
-            f"{source_branch} is {len(check.develop_only)} commit(s) ahead of {target_branch} "
-            f"(> receive.maxBatchChanges={max_promote_batch}); needs a manual catch-up merge first."
+            f"develop -> main promotion blocked for {version or 'unknown version'}: "
+            f"merge commit could not be created: {exc}"
         )
         notify("release-auto-promote", "critical", detail)
         audit_sink(AUDIT_ACTION_MAIN_PROMOTE_BLOCKED, {
             **base_payload,
             "before": {"main_tip": check.main_tip},
-            "after": {"status": "batch_too_large", "develop_only": list(check.develop_only[:50])},
+            "after": {"status": "merge_conflict", "err": str(exc)[:400]},
         })
         return PromotionResult(
             "blocked", version, check.develop_tip, check.main_tip,
             check.develop_only, check.main_only, detail,
         )
 
+    target_ref = f"refs/for/{target_branch}"
+    review_ref = f"{merge_sha}:{target_ref}"
+    promote_topic = topic or promote_topic_for_version(version)
     push = push_for_review(
         repo=repo,
         remote=remote,
-        source_branch=source_branch,
-        target_branch=target_branch,
+        commit_sha=merge_sha,
+        target_ref=target_ref,
         hashtags=hashtags,
-        topic=topic,
+        topic=promote_topic,
         change_description=warning_block,
     )
-    review_ref = f"{source_branch}:refs/for/{target_branch}"
     if not push.ok:
         detail = (
-            f"develop -> main review-change push to {review_ref} refused by Gerrit "
+            f"develop -> main merge-commit push to {review_ref} refused by Gerrit "
             f"for {version or 'unknown version'}: {push.raw[:400] or '(no output)'}"
         )
+        err = PushToReviewFailedFromMergeCommit(detail)
         notify("release-auto-promote", "critical", detail)
         audit_sink(AUDIT_ACTION_MAIN_PROMOTE_BLOCKED, {
             **base_payload,
             "before": {"main_tip": check.main_tip},
-            "after": {"status": "push_rejected", "review_ref": review_ref, "err": push.raw[:400]},
+            "after": {
+                "status": "push_rejected",
+                "review_ref": review_ref,
+                "merge_sha": merge_sha,
+                "err": str(err)[:400],
+            },
         })
         return PromotionResult(
             "push_rejected", version, check.develop_tip, check.main_tip,
@@ -433,10 +538,10 @@ def promote_on_milestone_ready(
     created = list(push.change_urls)
     detail = (
         (f"{warning_block}\n" if warning_block else "")
-        + f"develop -> main promotion change(s) created for {version or 'unknown version'} "
+        + f"develop -> main promotion merge change created for {version or 'unknown version'} "
         f"on {review_ref}"
         + (f": {', '.join(created)}" if created else " (see Gerrit)")
-        + f"; hashtags={list(hashtags)}, topic={topic!r}. main advances through Gerrit "
+        + f"; hashtags={list(hashtags)}, topic={promote_topic!r}. main advances through Gerrit "
         f"Code Review — operator submits via the Gerrit UI (or merger-bot once the "
         f"milestone:R3-fastforward submit-requirement lands)."
     )
@@ -444,7 +549,10 @@ def promote_on_milestone_ready(
         **base_payload,
         "review_ref": review_ref,
         "hashtags": list(hashtags),
-        "topic": topic,
+        "topic": promote_topic,
+        "release_version": version,
+        "meta_ticket": meta_ticket,
+        "merge_sha": merge_sha,
         "created_changes": created,
     }
     if force_promoted:
@@ -456,15 +564,19 @@ def promote_on_milestone_ready(
         "outcome": outcome,
         "created_changes": created,
         "hashtags": list(hashtags),
+        "develop_sha": check.develop_tip,
+        "release_version": version,
+        "merge_sha": merge_sha,
+        "gerrit_change_number": push.change_number,
     }
     if force_promoted:
         after["force_promote_reasons"] = force_reasons
         after["change_description"] = warning_block
     notify("release-auto-promote", "warning", detail)
     event_sink(EVENT_MAIN_PROMOTE_CHANGE_CREATED, payload)
-    audit_sink(AUDIT_ACTION_MAIN_PROMOTE_CHANGE_CREATED, {
+    audit_sink(AUDIT_ACTION_MAIN_PROMOTE_CHANGE_PUSHED, {
         **payload,
-        "before": {"main_tip": check.main_tip},
+        "before": {"main_sha": check.main_tip},
         "after": after,
     })
     return PromotionResult(
