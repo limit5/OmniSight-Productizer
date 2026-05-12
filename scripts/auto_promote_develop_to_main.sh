@@ -1,27 +1,53 @@
 #!/usr/bin/env bash
-# OP-877 D5 — daily develop -> main auto-promote cron.
+# OP-877 D5 / OP-961 — daily develop -> main auto-promote cron wrapper.
+#
+# This script is a thin wrapper around the OP-960 (AUDIT-13) rewrite of
+# ``backend.agents.auto_promote_main``. It no longer does its own
+# ``git push`` or its own ``release_audit`` write — both now live in the
+# Python module, which advances ``main`` *through Gerrit Code Review*
+# (``develop`` -> ``refs/for/main`` with the ``auto-promote`` +
+# ``milestone:R3-fastforward`` hashtags and ``develop-to-main`` topic),
+# never a direct push to ``refs/heads/main``.
 #
 # Behaviour:
-#   * Read the most recent `release_milestone_checker.py` event log
-#     (D1 / OP-868 acceptance signal for the current fixVersion).
-#   * If acceptance is GREEN: fast-forward `main` to `develop` and push
-#     to Gerrit; record a `promoted` row in the `release_audit` table.
-#   * If acceptance is NOT green: log + no-op + record
-#     `milestone_not_accepted` (cron exits 0 — non-fatal per error catalog).
-#   * If develop/main have diverged (FF impossible): refuse +
-#     `ff_not_possible` audit row + non-zero exit (operator alert).
-#   * If Gerrit refuses the push: `push_rejected` audit row + non-zero
-#     exit (retry next tick).
+#   * Read the most recent ``release_milestone_checker.py`` record from
+#     the D1 / OP-868 event log (the acceptance signal for the current
+#     fixVersion).
+#   * If the latest record is ``milestone_ready``: delegate to
+#     ``backend.agents.auto_promote_main`` which pushes ``develop`` to
+#     ``refs/for/main`` (creating one review change per intervening
+#     commit) and writes the release audit row.
+#   * Otherwise: log + no-op (cron exits 0 — non-fatal).
 #
-# Environment overrides (test seam — production cron uses defaults):
-#   OP877_REPO            git repo path                 (default: /home/user/sora-bridge)
-#   OP877_REMOTE          gerrit remote name            (default: gerrit)
-#   OP877_SOURCE_BRANCH   source branch                 (default: develop)
-#   OP877_TARGET_BRANCH   target branch                 (default: main)
-#   OP877_EVENT_LOG       release-milestone event log   (default: /home/user/work/sora/logs/release-milestone/systemd.log)
-#   OP877_AUDIT_DB        sqlite or postgres URL        (default: $OMNISIGHT_DATABASE_URL)
-#   OP877_AUDIT_DB_KIND   "sqlite" | "postgres" | "skip" (auto-detected from URL prefix)
-#   OP877_NOW             ISO-8601 UTC timestamp override (default: $(date -u))
+# PromotionResult.status -> cron exit code (the R3 / develop->main step;
+# see docs/operations/release-conductor-runbook.md):
+#   change_created          -> 0   review change(s) created on refs/for/main
+#   noop                    -> 0   main already contains develop
+#   milestone_not_accepted  -> 0   latest event is not milestone_ready
+#   ignored                 -> 0   no milestone record in the log yet
+#   push_rejected           -> 2   Gerrit refused the refs/for/main push
+#   non_ff_refused          -> 3   main has commits absent from develop
+#   batch_too_large         -> 4   develop too far ahead for one push
+#                                  (> receive.maxBatchChanges)
+#   (anything else)         -> 1   unexpected — operator alert
+#
+# Environment overrides (test seam — production cron uses defaults from
+# deploy/systemd/auto-promote-develop.service):
+#   OP877_REPO              target git repo path     (default: /home/user/sora-bridge)
+#   OP877_REMOTE            gerrit remote name        (default: gerrit)
+#   OP877_SOURCE_BRANCH     source branch             (default: develop)
+#   OP877_TARGET_BRANCH     target branch             (default: main)
+#   OP877_EVENT_LOG         release-milestone event log
+#   OP877_MAX_PROMOTE_BATCH receive.maxBatchChanges guard (default: 10)
+#   OP877_NOW               ISO-8601 UTC timestamp override (logging only)
+#   OP961_PKG_ROOT          dir holding the ``backend`` package
+#                           (default: this script's repo root)
+#
+# Forwarded verbatim to the Python process (consumed by the module's
+# audit sink / release-conductor hooks): OP877_AUDIT_DB_KIND and every
+# RELEASE_CONDUCTOR_* variable. ``python3`` inherits the process
+# environment so these propagate automatically; we re-export them so the
+# contract is visible at the call site.
 set -euo pipefail
 
 REPO="${OP877_REPO:-/home/user/sora-bridge}"
@@ -29,123 +55,149 @@ REMOTE="${OP877_REMOTE:-gerrit}"
 SOURCE_BRANCH="${OP877_SOURCE_BRANCH:-develop}"
 TARGET_BRANCH="${OP877_TARGET_BRANCH:-main}"
 EVENT_LOG="${OP877_EVENT_LOG:-/home/user/work/sora/logs/release-milestone/systemd.log}"
-AUDIT_DB="${OP877_AUDIT_DB:-${OMNISIGHT_DATABASE_URL:-}}"
+MAX_PROMOTE_BATCH="${OP877_MAX_PROMOTE_BATCH:-10}"
 NOW="${OP877_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 
-# Auto-detect DB kind unless overridden. "skip" suppresses audit write
-# (used by the alembic-apply test which sets up its own DB).
-if [ -z "${OP877_AUDIT_DB_KIND:-}" ]; then
-    case "${AUDIT_DB}" in
-        sqlite:*|*.sqlite|*.db|*.sqlite3) OP877_AUDIT_DB_KIND="sqlite" ;;
-        postgres:*|postgresql:*)          OP877_AUDIT_DB_KIND="postgres" ;;
-        "")                               OP877_AUDIT_DB_KIND="skip" ;;
-        *)                                OP877_AUDIT_DB_KIND="skip" ;;
-    esac
-fi
+# Dir containing the ``backend`` package (this checkout's root). NOT the
+# same as OP877_REPO — that is the *target* repo the promotion operates
+# on (sora-bridge), which need not contain the agent code.
+PKG_ROOT="${OP961_PKG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 log() { printf '[OP-877] %s %s\n' "${NOW}" "$*"; }
 
-# sql_quote ARG  ->  single-quote-escaped SQL literal on stdout.
-sql_quote() {
-    local v="${1//\'/\'\'}"
-    printf "'%s'" "${v}"
-}
+# Re-export the variables the Python side consumes so they survive into
+# the child process even if a caller set them as plain shell variables.
+export OP877_AUDIT_DB_KIND="${OP877_AUDIT_DB_KIND:-}"
+while IFS='=' read -r _name _; do
+    case "${_name}" in RELEASE_CONDUCTOR_*) export "${_name}" ;; esac
+done < <(env)
 
-# record_audit OUTCOME FIX_VERSION DEVELOP_SHA MAIN_SHA DETAIL_JSON
-record_audit() {
-    local outcome="$1" fix_version="${2:-}" develop_sha="${3:-}" main_sha="${4:-}" detail="${5:-{\}}"
-    local fix_version_sql
-    if [ -z "${fix_version}" ]; then
-        fix_version_sql="NULL"
-    else
-        fix_version_sql="$(sql_quote "${fix_version}")"
-    fi
-    case "${OP877_AUDIT_DB_KIND}" in
-        sqlite)
-            local db_file="${AUDIT_DB#sqlite:}"
-            db_file="${db_file#//}"
-            sqlite3 "${db_file}" "INSERT INTO release_audit (ts, outcome, fix_version, develop_sha, main_sha, detail) VALUES ($(sql_quote "${NOW}"), $(sql_quote "${outcome}"), ${fix_version_sql}, $(sql_quote "${develop_sha}"), $(sql_quote "${main_sha}"), $(sql_quote "${detail}"));"
-            ;;
-        postgres)
-            PGPASSWORD="${PGPASSWORD:-}" psql "${AUDIT_DB}" -v ON_ERROR_STOP=1 \
-                -c "INSERT INTO release_audit (outcome, fix_version, develop_sha, main_sha, detail) VALUES ($(sql_quote "${outcome}"), ${fix_version_sql}, $(sql_quote "${develop_sha}"), $(sql_quote "${main_sha}"), $(sql_quote "${detail}"));"
-            ;;
-        skip)
-            log "audit write skipped (OP877_AUDIT_DB_KIND=skip)"
-            ;;
-    esac
-}
+# ── Delegate to backend.agents.auto_promote_main ────────────────────
+# The inline driver picks the latest milestone record from the event log
+# (same selection rule the pre-OP-961 shell used), then calls
+# ``promote_on_milestone_ready`` with the module defaults so the module
+# owns the refs/for/main push, the operator notification, the telemetry
+# event, AND the release audit row. We only read back PromotionResult to
+# choose the cron exit code; the line we add is prefixed with the
+# ``__OP961_RESULT__`` sentinel so it is unambiguous among the module's
+# own JSON event / notify lines.
+set +e
+out="$(
+    cd "${PKG_ROOT}" && PYTHONPATH="${PKG_ROOT}${PYTHONPATH:+:${PYTHONPATH}}" \
+        python3 - "${REPO}" "${REMOTE}" "${SOURCE_BRANCH}" "${TARGET_BRANCH}" "${EVENT_LOG}" "${MAX_PROMOTE_BATCH}" <<'PYEOF'
+import json
+import sys
+from pathlib import Path
 
-# Parse latest milestone_ready / milestone_blocked record from event log.
-# Echoes "<event>\t<fixVersion>" on stdout, or "missing\t" if no recent record.
-latest_acceptance() {
-    if [ ! -s "${EVENT_LOG}" ]; then
-        printf 'missing\t\n'
-        return
-    fi
-    python3 - "${EVENT_LOG}" <<'PYEOF'
-import json, sys
-path = sys.argv[1]
-event, version = "missing", ""
-with open(path, "r", encoding="utf-8", errors="replace") as fh:
-    for raw in fh:
-        raw = raw.strip()
+from backend.agents.auto_promote_main import (
+    EVENT_MILESTONE_READY,
+    PROMOTE_HASHTAGS,
+    PROMOTE_TOPIC,
+    promote_on_milestone_ready,
+)
+
+repo, remote, source_branch, target_branch, event_log, max_batch = sys.argv[1:7]
+
+
+def _emit(payload: dict) -> None:
+    print("__OP961_RESULT__ " + json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
+
+
+def _latest_record(path: Path) -> dict:
+    record = {"event": "missing"}
+    if not path.is_file():
+        return record
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         idx = raw.find("{")
         if idx < 0:
             continue
         try:
-            rec = json.loads(raw[idx:])
+            parsed = json.loads(raw[idx:])
         except json.JSONDecodeError:
             continue
-        ev = rec.get("event", "")
-        if ev in ("milestone_ready", "milestone_blocked"):
-            event, version = ev, str(rec.get("fixVersion", ""))
-print(f"{event}\t{version}")
+        if isinstance(parsed, dict) and parsed.get("event") in (EVENT_MILESTONE_READY, "milestone_blocked"):
+            record = parsed
+    return record
+
+
+try:
+    record = _latest_record(Path(event_log))
+    if record.get("event") != EVENT_MILESTONE_READY:
+        _emit({
+            "status": "milestone_not_accepted",
+            "version": str(record.get("fixVersion") or ""),
+            "event": record.get("event", "missing"),
+        })
+        sys.exit(0)
+
+    result = promote_on_milestone_ready(
+        record,
+        repo=Path(repo),
+        remote=remote,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        max_promote_batch=int(max_batch),
+    )
+    status = result.status
+    if status == "blocked":
+        # The module folds two refusals into status="blocked"; split them
+        # back out for the exit-code contract.
+        status = "non_ff_refused" if result.main_only else "batch_too_large"
+    _emit({
+        "status": status,
+        "version": result.version,
+        "detail": result.detail,
+        "created_changes": list(result.created_changes),
+        "hashtags": list(PROMOTE_HASHTAGS),
+        "topic": PROMOTE_TOPIC,
+    })
+except SystemExit:
+    raise
+except BaseException as exc:  # surface as exit 1 below — never crash the cron silently
+    _emit({"status": "error", "detail": f"{type(exc).__name__}: {exc}"})
 PYEOF
-}
+)"
+rc=$?
+set -e
 
-main() {
-    local accept_line event version
-    accept_line="$(latest_acceptance)"
-    event="${accept_line%%$'\t'*}"
-    version="${accept_line#*$'\t'}"
+# Forward everything the module printed to the journal, then pull our
+# decision line back out.
+if [ -n "${out}" ]; then printf '%s\n' "${out}"; fi
 
-    if [ "${event}" != "milestone_ready" ]; then
-        log "MilestoneNotAccepted: latest event=${event:-<none>} version=${version:-<none>}; no-op"
-        record_audit "milestone_not_accepted" "${version}" "" "" "{\"event\":\"${event}\"}"
-        return 0
-    fi
+decision="$(
+    printf '%s\n' "${out}" | sed -n 's/^__OP961_RESULT__ //p' | tail -n1 \
+        | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); print(json.loads(raw)["status"] if raw else "error")' 2>/dev/null
+)" || decision="error"
+if [ "${rc}" -ne 0 ]; then
+    case "${decision}" in
+        # Python aborted *after* reporting a benign decision — treat as error.
+        change_created|noop|milestone_not_accepted|ignored) decision="error" ;;
+    esac
+fi
 
-    local develop_sha main_sha main_only dev_only
-    develop_sha="$(git -C "${REPO}" rev-parse "${SOURCE_BRANCH}")"
-    main_sha="$(git -C "${REPO}" rev-parse "${TARGET_BRANCH}")"
-    main_only="$(git -C "${REPO}" log --oneline "${SOURCE_BRANCH}..${TARGET_BRANCH}" || true)"
-    dev_only="$(git -C "${REPO}" log --oneline "${TARGET_BRANCH}..${SOURCE_BRANCH}" || true)"
-
-    if [ -n "${main_only}" ]; then
+case "${decision}" in
+    change_created)
+        log "Promoted: ${SOURCE_BRANCH} -> refs/for/${TARGET_BRANCH} review change(s) created (operator/merger-bot submits)"
+        exit 0 ;;
+    noop)
+        log "Noop: ${TARGET_BRANCH} already contains ${SOURCE_BRANCH}"
+        exit 0 ;;
+    milestone_not_accepted)
+        log "MilestoneNotAccepted: latest milestone event is not milestone_ready; no-op"
+        exit 0 ;;
+    ignored)
+        log "Ignored: no milestone_ready record in the event log yet; no-op"
+        exit 0 ;;
+    push_rejected)
+        log "MainPushRejected: Gerrit refused the develop -> refs/for/${TARGET_BRANCH} push"
+        exit 2 ;;
+    non_ff_refused)
         log "GitFFNotPossible: ${TARGET_BRANCH} has commits absent from ${SOURCE_BRANCH}"
-        record_audit "ff_not_possible" "${version}" "${develop_sha}" "${main_sha}" \
-            "{\"main_only_count\":$(printf '%s' "${main_only}" | wc -l | tr -d ' ')}"
-        return 2
-    fi
-    if [ -z "${dev_only}" ]; then
-        log "Noop: ${TARGET_BRANCH} already at ${SOURCE_BRANCH}"
-        record_audit "noop" "${version}" "${develop_sha}" "${main_sha}" "{}"
-        return 0
-    fi
-
-    if ! git -C "${REPO}" push "${REMOTE}" "${SOURCE_BRANCH}:${TARGET_BRANCH}" >/tmp/op877-push.$$.log 2>&1; then
-        local push_err
-        push_err="$(tr '\n' ' ' </tmp/op877-push.$$.log | head -c 400 | sed 's/"/\\"/g')"
-        rm -f /tmp/op877-push.$$.log
-        log "MainPushRejected: gerrit refused push: ${push_err}"
-        record_audit "push_rejected" "${version}" "${develop_sha}" "${main_sha}" "{\"err\":\"${push_err}\"}"
-        return 3
-    fi
-    rm -f /tmp/op877-push.$$.log
-
-    log "Promoted: ${TARGET_BRANCH} ${main_sha} -> ${develop_sha} for ${version}"
-    record_audit "promoted" "${version}" "${develop_sha}" "${main_sha}" "{}"
-}
-
-main "$@"
+        exit 3 ;;
+    batch_too_large)
+        log "BatchTooLarge: ${SOURCE_BRANCH} is too far ahead of ${TARGET_BRANCH} for one push (> receive.maxBatchChanges)"
+        exit 4 ;;
+    *)
+        log "UnexpectedOutcome: decision='${decision}' rc=${rc}; operator alert"
+        exit 1 ;;
+esac
