@@ -59,7 +59,7 @@ Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-codex-b
 ; (web scraping, dep-fetch outside cache), set per-pickup:
 ;   Environment=OMNISIGHT_RUNNER_SANDBOX_NETWORK_ALLOW=<audit-reason>
 ;Environment=OMNISIGHT_RUNNER_SANDBOX_ENFORCE=1
-ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-Productizer/auto-runner-jira.py
+ExecStart=%h/work/sora/OmniSight-Productizer/deploy/runner-wrappers/runner-codex.sh %i
 Restart=on-failure
 ; 90s aligns with the launcher's tmux-loop tick cadence so the runner
 ; doesn't tight-loop on a transient JIRA/Gerrit outage.
