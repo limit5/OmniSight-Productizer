@@ -11,6 +11,13 @@ schema_version: 1
 # AC #2 — error rate < 1% (1-min window) AND p95 < 500ms (5-min window).
 error_rate_max: 0.01
 p95_latency_ms_max: 500
+
+# OP-912 F14 — cross-task awareness latency SLOs.
+project_state_api_p95_ms_max: 2000
+cognee_query_p95_ms_max: 800
+graphiti_query_p95_ms_max: 600
+failure_recall_p95_ms_max: 500
+
 error_rate_window_seconds: 60
 p95_window_seconds: 300
 
