@@ -32,7 +32,14 @@ sudo apt-get install -y -qq \
     python3 python3-pip python3-venv \
     build-essential libffi-dev libssl-dev \
     docker.io docker-compose-v2 \
+    postgresql-client \
     2>/dev/null
+# postgresql-client (OP-964 / AUDIT-16): the D5 develop->main auto-promote
+# cron writes a `release_audit` row per run; operators verify connectivity
+# to that durable trail with `psql "$OMNISIGHT_DATABASE_URL" -c 'SELECT 1'`
+# (the §"Audit DB connectivity smoke test" of the release-conductor runbook).
+# Without psql installed that smoke test — and the legacy shell audit path —
+# silently degrade. See docs/operations/release-conductor-runbook.md.
 
 # Docker group
 if ! groups | grep -q docker; then
@@ -166,6 +173,21 @@ echo -n "Python: " && python3 --version
 echo -n "Node:   " && node --version 2>/dev/null || echo "未安裝"
 echo -n "Docker: " && docker --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' || echo "未安裝"
 echo -n "Git:    " && git --version | grep -oP '\d+\.\d+\.\d+'
+echo -n "psql:   " && psql --version 2>/dev/null || warn "postgresql-client 未安裝 — release_audit smoke test 無法執行"
+
+# OP-964 / AUDIT-16: D5 release_audit connectivity smoke test. The cron
+# (deploy/systemd/auto-promote-develop.service) reads OMNISIGHT_DATABASE_URL
+# from /home/user/.config/omnisight/release-audit.env; when that file is in
+# place the same DSN is exported into the shell env here. Skip silently when
+# it is not configured — dev boxes use the local SQLite default and have no
+# release_audit table to reach.
+if [ -n "${OMNISIGHT_DATABASE_URL:-}" ] && command -v psql >/dev/null 2>&1; then
+    if psql "$OMNISIGHT_DATABASE_URL" -tAc "SELECT 1 FROM release_audit LIMIT 1" >/dev/null 2>&1; then
+        log "release_audit DB 連線 OK ($OMNISIGHT_DATABASE_URL)"
+    else
+        warn "release_audit DB 連線失敗 — 見 release-conductor-runbook §Audit DB connectivity smoke test"
+    fi
+fi
 
 # Quick import test
 python3 -c "from backend import config; print(f'Backend import: ✅ ({config.settings.app_name})')" 2>/dev/null || warn "Backend import 失敗"
