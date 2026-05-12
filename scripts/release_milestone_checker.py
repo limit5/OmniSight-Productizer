@@ -6,6 +6,13 @@ version:
 
 * ``milestone_ready`` when every promotion gate is green.
 * ``milestone_blocked`` with machine-readable reasons when any gate is red.
+* ``milestone_force_promoted`` (ADR-0019 / OP-967 AUDIT-18b) when gates
+  are red **but** the fixVersion carries the operator emergency-override
+  label ``release:force-promote``. The original blockers ride along in
+  ``reasons`` so the audit trail records exactly what was bypassed; when
+  gates are actually green the override is a no-op (plain ``milestone_ready``).
+* ``LabelInvalid`` when the fixVersion carries a near-miss of the override
+  label (e.g. ``release:force_promote``) — rejected, not silently honored.
 
 The integration layer is deliberately thin. Pure gate evaluation is kept
 small enough for tests to exercise without live JIRA, Gerrit, or CI access.
@@ -15,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -28,6 +36,20 @@ from typing import Any, Iterable, Protocol
 
 PUBLISHED_STATUS_NAMES = {"Published", "公開済み"}
 GREEN_STATUSES = {"green", "ok", "pass", "passed", "success"}
+
+# ── ADR-0019 operator force-promote override ───────────────────────────
+# The one valid spelling of the fixVersion label (frozen wire contract).
+FORCE_PROMOTE_LABEL = "release:force-promote"
+# Subtle misspellings an operator might type instead — ``release:force_promote``
+# and friends. Anything that *looks* like the override but isn't the frozen
+# form is rejected (``LabelInvalid``), not silently honored — mirrors the
+# AUDIT-13a ``release:force_create`` rejection in release_conductor_cron.sh.
+_FORCE_PROMOTE_TYPO_RE = re.compile(r"^release:force[-_]?promote$")
+# Same label surface release_conductor_cron.sh::query_fix_version_labels
+# reads: the literal ``labels`` array plus ``release:*`` tokens embedded in
+# the version description.
+_RELEASE_LABEL_RE = re.compile(r"release:[A-Za-z0-9_-]+")
+
 DEFAULT_PROJECT = "OP"
 DEFAULT_AGENT_CLASS = "subscription-codex"
 DEFAULT_GERRIT_PROJECT = "omnisight/OmniSight-Productizer"
@@ -43,6 +65,11 @@ def utc_now_iso() -> str:
     return utc_now().isoformat()
 
 
+def _warn(message: str) -> None:
+    """Emit an operator-facing warning to stderr (the systemd journal)."""
+    print(f"{utc_now_iso()} WARN {message}", file=sys.stderr, flush=True)
+
+
 def parse_timestamp(raw: object) -> datetime | None:
     if not isinstance(raw, str) or not raw:
         return None
@@ -52,7 +79,13 @@ def parse_timestamp(raw: object) -> datetime | None:
         return None
 
 
-def emit_event(event: str, *, version: str, reasons: list[dict[str, Any]] | None = None) -> None:
+def emit_event(
+    event: str,
+    *,
+    version: str,
+    reasons: list[dict[str, Any]] | None = None,
+    operator_override: bool = False,
+) -> None:
     record: dict[str, Any] = {
         "timestamp": utc_now_iso(),
         "level": "INFO" if event == "milestone_ready" else "WARN",
@@ -61,6 +94,10 @@ def emit_event(event: str, *, version: str, reasons: list[dict[str, Any]] | None
     }
     if reasons is not None:
         record["reasons"] = reasons
+    if operator_override:
+        # ADR-0019: flag the abnormal/forced outcome so consumers treat it
+        # as green for control flow but as a bypassed gate for audit/display.
+        record["operator_override"] = True
     print(json.dumps(record, ensure_ascii=False, sort_keys=True), flush=True)
 
 
@@ -89,6 +126,7 @@ class MilestoneResult:
     version: str
     event: str
     reasons: tuple[dict[str, Any], ...]
+    operator_override: bool = False
 
 
 class JiraClient(Protocol):
@@ -99,6 +137,9 @@ class JiraClient(Protocol):
         ...
 
     def highest_open_affects_tickets(self, version: str) -> list[str]:
+        ...
+
+    def fix_version_labels(self, version: str) -> list[str]:
         ...
 
 
@@ -207,6 +248,11 @@ class AtlassianJiraClient:
             'ORDER BY key ASC'
         )
         return [str(issue.get("key", "")) for issue in self._search(jql, ["key"])]
+
+    def fix_version_labels(self, version: str) -> list[str]:
+        payload = self._request("GET", f"/project/{self.project}/versions")
+        rows = payload if isinstance(payload, list) else payload.get("values", [])
+        return sorted(parse_fix_version_labels(rows, version))
 
 
 class SshGerritClient:
@@ -339,6 +385,61 @@ def _load_env(path: Path) -> dict[str, str]:
     return out
 
 
+def parse_fix_version_labels(version_rows: Iterable[dict[str, Any]], version: str) -> set[str]:
+    """Extract the ``release:*`` label set for *version* from a JIRA versions payload.
+
+    Shared "small util" (OP-967 AC #1) extracted from
+    ``release_conductor_cron.sh::query_fix_version_labels`` so the conductor
+    cron and the milestone checker read the *same* label surface: a
+    version's labels are the union of its ``labels`` array and any
+    ``release:*`` tokens embedded in its free-text ``description``.
+    """
+    labels: set[str] = set()
+    for row in version_rows:
+        if str(row.get("name") or "") != version:
+            continue
+        raw_labels = row.get("labels") or []
+        if isinstance(raw_labels, list):
+            labels.update(str(label) for label in raw_labels if label)
+        description = str(row.get("description") or "")
+        labels.update(_RELEASE_LABEL_RE.findall(description))
+        break
+    return labels
+
+
+def resolve_force_promote(labels: Iterable[str], version: str) -> MilestoneResult | bool:
+    """Interpret a fixVersion label set against the ADR-0019 override contract.
+
+    Returns ``True`` when ``release:force-promote`` is present, ``False``
+    when no override applies, and a ``LabelInvalid`` :class:`MilestoneResult`
+    when a near-miss spelling (``release:force_promote`` …) is present —
+    the caller should emit that result verbatim and act on nothing else.
+    """
+    label_set = set(labels)
+    collisions = sorted(
+        label
+        for label in label_set
+        if label != FORCE_PROMOTE_LABEL and _FORCE_PROMOTE_TYPO_RE.match(label)
+    )
+    if collisions:
+        return MilestoneResult(
+            version=version,
+            event="LabelInvalid",
+            reasons=(
+                {
+                    "gate": "operator_label",
+                    "code": "label_format_collision",
+                    "labels": collisions,
+                    "detail": (
+                        f"fixVersion label(s) {collisions} resemble {FORCE_PROMOTE_LABEL!r} "
+                        "but are not the frozen wire form; fix the label on the JIRA version"
+                    ),
+                },
+            ),
+        )
+    return FORCE_PROMOTE_LABEL in label_set
+
+
 def evaluate_version(
     version: str,
     *,
@@ -348,6 +449,26 @@ def evaluate_version(
     now: datetime | None = None,
 ) -> MilestoneResult:
     now = now or utc_now()
+
+    # ── ADR-0019 operator force-promote override ───────────────────────
+    # The fixVersion label set is read *now*, at gate-evaluation time —
+    # never a value cached at META-creation time: operators add
+    # ``release:force-promote`` mid-chain, after a gate has gone red.
+    force_promote = False
+    try:
+        labels = list(jira.fix_version_labels(version))
+    except Exception as exc:  # LabelLookupFailedDuringForce — fail closed
+        _warn(
+            f"LabelLookupFailedDuringForce: {version}: "
+            f"{type(exc).__name__}: {exc} — treating as no override, normal gating applies"
+        )
+    else:
+        decision = resolve_force_promote(labels, version)
+        if isinstance(decision, MilestoneResult):
+            # LabelFormatCollision -> LabelInvalid; do not act on anything else.
+            return decision
+        force_promote = decision
+
     reasons: list[dict[str, Any]] = []
 
     tickets = jira.tickets_for_fix_version(version)
@@ -411,8 +532,22 @@ def evaluate_version(
     if not smoke.ok:
         reasons.append(smoke.evidence)
 
-    event = "milestone_ready" if not reasons else "milestone_blocked"
-    return MilestoneResult(version=version, event=event, reasons=tuple(reasons))
+    if not reasons:
+        # Gates green — any override is a no-op; emit the normal ready event
+        # with no warning block so the warning stays meaningful (it appears
+        # only when something was actually bypassed). ADR-0019 §"Emit".
+        return MilestoneResult(version=version, event="milestone_ready", reasons=())
+    if force_promote:
+        # Gates red but the operator override is set: emit the
+        # green-equivalent ``milestone_force_promoted`` carrying the
+        # original blockers, instead of ``milestone_blocked`` (ADR-0019).
+        return MilestoneResult(
+            version=version,
+            event="milestone_force_promoted",
+            reasons=tuple(reasons),
+            operator_override=True,
+        )
+    return MilestoneResult(version=version, event="milestone_blocked", reasons=tuple(reasons))
 
 
 def check_latest_status(
@@ -482,7 +617,12 @@ def check_all(
             status_reader=status_reader,
             now=now,
         )
-        emit_event(result.event, version=result.version, reasons=list(result.reasons))
+        emit_event(
+            result.event,
+            version=result.version,
+            reasons=list(result.reasons),
+            operator_override=result.operator_override,
+        )
         results.append(result)
     return results
 

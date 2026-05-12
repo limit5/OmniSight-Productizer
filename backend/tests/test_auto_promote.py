@@ -197,6 +197,61 @@ def test_milestone_ready_creates_refs_for_main_review_change(tmp_path: Path) -> 
 
 
 # ─────────────────────────────────────────────────────────────────────
+# 1b. milestone_force_promoted (ADR-0019 / OP-967 AUDIT-18b) is a
+#     green-equivalent: same refs/for/main review change, exit 0, plus a
+#     loud OPERATOR FORCE-PROMOTE line in the journal.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_milestone_force_promoted_treated_as_green(tmp_path: Path) -> None:
+    repo, remote = _init_repo_with_remote(tmp_path)
+    develop_tip = _commit_file(repo, "feature.txt", "forced\n")
+    main_before = _remote_refs(remote)["refs/heads/main"]
+    event_log = _write_event_log(
+        tmp_path,
+        # an earlier blocked record then the operator override on top
+        '{"event": "milestone_blocked", "fixVersion": "v9.99.0", "reasons": [{"gate": "ci_canary"}]}',
+        '{"event": "milestone_force_promoted", "fixVersion": "v9.99.0", '
+        '"operator_override": true, "reasons": [{"gate": "ci_canary", "code": "status_not_green"}]}',
+    )
+
+    result = _run_script(repo=repo, event_log=event_log)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    refs = _remote_refs(remote)
+    assert refs["refs/heads/main"] == main_before
+    assert refs.get("refs/for/main") == develop_tip
+    assert "review change(s) created" in result.stdout
+    assert "OPERATOR FORCE-PROMOTE" in result.stdout
+    decision = [
+        json.loads(line.split("__OP961_RESULT__ ", 1)[1])
+        for line in result.stdout.splitlines()
+        if "__OP961_RESULT__" in line
+    ][-1]
+    assert decision["status"] == "change_created"
+    assert decision["operator_override"] is True
+
+
+def test_milestone_force_promoted_noop_when_main_current(tmp_path: Path) -> None:
+    repo, remote = _init_repo_with_remote(tmp_path)
+    # develop == main: nothing to promote, but the override event must
+    # still be *recognised* (no MilestoneNotAccepted).
+    before = _remote_refs(remote)
+    event_log = _write_event_log(
+        tmp_path,
+        '{"event": "milestone_force_promoted", "fixVersion": "v9.99.0", '
+        '"operator_override": true, "reasons": [{"gate": "smoke_suite"}]}',
+    )
+
+    result = _run_script(repo=repo, event_log=event_log)
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert _remote_refs(remote) == before
+    assert "MilestoneNotAccepted" not in result.stdout
+    assert "Noop" in result.stdout
+
+
+# ─────────────────────────────────────────────────────────────────────
 # 2. + 3. not-ready / no record → no-op, exit 0
 # ─────────────────────────────────────────────────────────────────────
 

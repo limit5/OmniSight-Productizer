@@ -13,10 +13,12 @@
 #   * Read the most recent ``release_milestone_checker.py`` record from
 #     the D1 / OP-868 event log (the acceptance signal for the current
 #     fixVersion).
-#   * If the latest record is ``milestone_ready``: delegate to
-#     ``backend.agents.auto_promote_main`` which pushes ``develop`` to
-#     ``refs/for/main`` (creating one review change per intervening
-#     commit) and writes the release audit row.
+#   * If the latest record is ``milestone_ready`` -- or ``milestone_force_promoted``
+#     (ADR-0019 / OP-967 AUDIT-18b operator emergency override; treated as
+#     green-equivalent here, the bypassed-gate reasons ride in the record's
+#     ``reasons``): delegate to ``backend.agents.auto_promote_main`` which
+#     pushes ``develop`` to ``refs/for/main`` (creating one review change
+#     per intervening commit) and writes the release audit row.
 #   * Otherwise: log + no-op (cron exits 0 — non-fatal).
 #
 # PromotionResult.status -> cron exit code (the R3 / develop->main step;
@@ -98,6 +100,11 @@ from backend.agents.auto_promote_main import (
 
 repo, remote, source_branch, target_branch, event_log, max_batch = sys.argv[1:7]
 
+# ADR-0019 / OP-967 AUDIT-18b: the operator emergency-override event is a
+# green-equivalent for the promote/no-op decision.
+EVENT_MILESTONE_FORCE_PROMOTED = "milestone_force_promoted"
+GREEN_MILESTONE_EVENTS = (EVENT_MILESTONE_READY, EVENT_MILESTONE_FORCE_PROMOTED)
+
 
 def _emit(payload: dict) -> None:
     print("__OP961_RESULT__ " + json.dumps(payload, ensure_ascii=False, sort_keys=True), flush=True)
@@ -107,6 +114,7 @@ def _latest_record(path: Path) -> dict:
     record = {"event": "missing"}
     if not path.is_file():
         return record
+    recognized = (*GREEN_MILESTONE_EVENTS, "milestone_blocked")
     for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
         idx = raw.find("{")
         if idx < 0:
@@ -115,20 +123,27 @@ def _latest_record(path: Path) -> dict:
             parsed = json.loads(raw[idx:])
         except json.JSONDecodeError:
             continue
-        if isinstance(parsed, dict) and parsed.get("event") in (EVENT_MILESTONE_READY, "milestone_blocked"):
+        if isinstance(parsed, dict) and parsed.get("event") in recognized:
             record = parsed
     return record
 
 
 try:
     record = _latest_record(Path(event_log))
-    if record.get("event") != EVENT_MILESTONE_READY:
+    forced = record.get("event") == EVENT_MILESTONE_FORCE_PROMOTED
+    if record.get("event") not in GREEN_MILESTONE_EVENTS:
         _emit({
             "status": "milestone_not_accepted",
             "version": str(record.get("fixVersion") or ""),
             "event": record.get("event", "missing"),
         })
         sys.exit(0)
+
+    if forced:
+        # ``promote_on_milestone_ready`` only acts on ``milestone_ready``;
+        # present the force-promoted record as its green equivalent. The
+        # original blocked reasons stay in the record for the audit detail.
+        record = {**record, "event": EVENT_MILESTONE_READY}
 
     result = promote_on_milestone_ready(
         record,
@@ -150,6 +165,7 @@ try:
         "created_changes": list(result.created_changes),
         "hashtags": list(PROMOTE_HASHTAGS),
         "topic": PROMOTE_TOPIC,
+        "operator_override": forced,
     })
 except SystemExit:
     raise
@@ -168,6 +184,15 @@ decision="$(
     printf '%s\n' "${out}" | sed -n 's/^__OP961_RESULT__ //p' | tail -n1 \
         | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); print(json.loads(raw)["status"] if raw else "error")' 2>/dev/null
 )" || decision="error"
+override="$(
+    printf '%s\n' "${out}" | sed -n 's/^__OP961_RESULT__ //p' | tail -n1 \
+        | python3 -c 'import json,sys; raw=sys.stdin.read().strip(); print("1" if (raw and json.loads(raw).get("operator_override")) else "0")' 2>/dev/null
+)" || override="0"
+if [ "${override}" = "1" ]; then
+    # ADR-0019 / OP-967: this tick acted on a release:force-promote operator
+    # override — the milestone gates were red. Make that loud in the journal.
+    log "OPERATOR FORCE-PROMOTE: promotion decided on a milestone_force_promoted event (gates were red); see ADR-0019 / release:force-promote runbook"
+fi
 if [ "${rc}" -ne 0 ]; then
     case "${decision}" in
         # Python aborted *after* reporting a benign decision — treat as error.
