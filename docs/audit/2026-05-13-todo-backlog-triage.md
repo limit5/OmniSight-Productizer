@@ -43,7 +43,7 @@ A ticket is **kept for refinement** if ANY of these holds (tie-break: keep wins)
 
 Otherwise it is **abandoned** → Won't Do (status `Archived`). Separately, any ticket whose normalised summary (lowercased, whitespace-collapsed) is shared by an older sibling is flagged **duplicate** for human confirmation — the script never auto-closes duplicates unless run with `--allow-duplicate-apply`.
 
-> Provenance: the bulk import that created this dump is the *"Bulk import without refinement creates dead inventory"* anti-pattern — see `docs/sop/architecture-anti-patterns.md` §13 and lesson `L-OP-1014`. The cure is enforced going forward by the 4-AC discipline (a ticket with only a Code AC is shipped-but-not-deployed by design) and by `scripts/file_jira_ticket.py`'s file-time label checks.
+> Provenance: the bulk import that created this dump is the *"Bulk import without refinement creates dead inventory"* anti-pattern — see `docs/sop/architecture-anti-patterns.md` §14 and lesson `L-OP-1014`. The cure is enforced going forward by the 4-AC discipline (a ticket with only a Code AC is shipped-but-not-deployed by design) and by `scripts/file_jira_ticket.py`'s file-time label checks.
 
 ## Abandon set (Won't Do candidates)
 

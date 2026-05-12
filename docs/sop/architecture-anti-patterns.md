@@ -32,7 +32,8 @@ the fix from scratch — these patterns have already been costed.
 | 10 | [Migration ticket fighting in-flight tickets](#10-migration-ticket-fighting-in-flight-tickets) | Structural ticket lands while siblings still write old format |
 | 11 | [Self-referential text-match false positive](#11-self-referential-text-match-false-positive) | Bulk-action filter matches the meta-document about pattern X (which mentions X by name) |
 | 12 | [Spike + final-version add/add scaffold race](#12-spike--final-version-addadd-scaffold-race) | "Validate framework" spike ships full scaffold; sibling "initial scaffold" PR add/add conflicts on every shared file |
-| 13 | [Bulk import without refinement creates dead inventory](#13-bulk-import-without-refinement-creates-dead-inventory) | Hundreds of summary-only tickets imported "to refine later" — invisible to automation, but they dominate every human backlog query |
+| 13 | [Shipped-but-not-deployed](#13-shipped-but-not-deployed) | Code merged + ticket closed, but the systemd unit / container / env-wire / migration never reached prod — found only when a downstream consumer fails |
+| 14 | [Bulk import without refinement creates dead inventory](#14-bulk-import-without-refinement-creates-dead-inventory) | Hundreds of summary-only tickets imported "to refine later" — invisible to automation, but they dominate every human backlog query |
 
 ---
 
@@ -348,7 +349,84 @@ Add/add is structurally different from edit/edit: there is no shared base for gi
 
 ---
 
-## 13. Bulk import without refinement creates dead inventory
+## 13. Shipped-but-not-deployed
+
+**Symptom**: A ticket's code merges to `develop`, the ticket moves to 公開済み /
+Published, and everyone moves on — but the artefact it produced (a systemd
+unit/timer, a `docker compose` stack, an `EnvironmentFile=` env-wire, a DB
+migration that needs `alembic upgrade` on prod) never reached its runtime.
+Nothing is obviously wrong until a *downstream* consumer fails: a cron never
+fires, `staging.sora.services` 404s, `release_audit` has zero rows, a feature
+flag reads its default because the flag store was never configured. This is
+anti-pattern #4 ("push without commit") inverted — there *is* a commit and the
+merge happened; what is missing is the operator-side activation step that sits,
+unrun, in the unit-file header.
+
+**Root cause**: Every existing gate stops at "merged to `develop`". CI green,
+Gerrit +2, runner transition to 公開済み — none of them ask "did anyone run the
+install recipe?" The deploy step *is* documented (`.service`/`.timer` headers
+literally carry their own `systemctl --user enable --now` recipe; compose files
+say `docker compose up -d`; env-wires name the file to create) but it is
+verified by nobody, so it is skipped by default. The work *looks* done because
+the JIRA state machine and the git history both say it is.
+
+**Cure**:
+1. **Mandatory `deployed:` AC item** *(zero infra — do this now)*. Any ticket
+   whose `Files touched` includes `deploy/`, a systemd unit, a compose file, a
+   cron, or a migration MUST carry an AC item `deployed: <yes | n-a>`:
+   - `yes` → cite concrete host evidence: `systemctl --user is-enabled <unit>`
+     output, a `docker ps` line, a `/proc/<pid>/environ` grep, `alembic current`.
+     "merged to `develop`" is **not** evidence of deployment.
+   - `n-a` → state why (e.g. "peer-gated on OP-927; timer ships disabled by
+     design"). This is the same shape as the 4-AC discipline's Deploy AC — a
+     ticket with only a Code AC is shipped-but-not-deployed *by construction*.
+2. **Scheduled deployment audit** *(one unit pair — next sprint)*. Wrap
+   `scripts/deployment-audit.sh` in `deploy/systemd/deployment-audit.{service,timer}`
+   (daily, before the `auto-promote-develop` run), reading a host-specific
+   manifest of *expected-live* units / containers / env-vars / migration heads.
+   Any red row → a structured-log line → the T1 alerter (OP-722). This is the
+   standing regression guard; it catches the next stuck unit within 24 h
+   instead of via a downstream cascade days later.
+3. **Eventually, a `Deployed` workflow state** *(end-state — defer)*. Add a JIRA
+   status after 公開済み that a ticket only reaches once a deploy-verification
+   step passes on prod; the RELEASE-chain JQL keys off `Deployed`, not 公開済み.
+   High value, non-trivial (workflow change + runner transition logic + a
+   deploy-verifier hook); do after #2 has surfaced the real toil.
+
+**Examples**:
+- 2026-05-12 AUDIT-23 (OP-976): of ~10 non-trivial Sprint D/E/F infra
+  deliverables only ~2 were confirmed live. `release-milestone-checker.timer`
+  (OP-762) shipped 2026-05-08 but was not `enable --now`'d until 2026-05-12 —
+  the RELEASE META chain stalled with zero signal for ~4 days.
+  `staging.sora.services` (OP-767 / OP-878) was never `docker compose up -d` —
+  the R3 `ci_canary` / `ci_smoke` gates had no producer (the OP-925 R3 cascade).
+  `~/.config/omnisight/release-audit.env` (OP-964) was never created on prod →
+  the D5 audit sink silently fell back to local SQLite → "where is the audit
+  row" mystery. Full catalogue: `docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md`.
+- 2026-05-12 AUDIT-29 Phase 0: Sprint F (Cognee / Neo4j / Graphiti memory
+  layer) — all 16 children 公開済み, code paths wired, runtime infra never stood
+  up, the gating feature-flag module empty. Same defect class
+  (`docs/audit/2026-05-12-audit-29-phase-0-state-audit.md`).
+
+**Reference tickets**: OP-976 (AUDIT-23 — the audit + the canonical "what / why
+/ who" record this entry points at), OP-1017 (AUDIT-29a-2 — merged this cookbook
+entry + lesson `L-OP-976`), and the OP-925 R3 cascade tickets AUDIT-23
+dissected: OP-762, OP-767, OP-798, OP-878, OP-964, OP-927 R5. Standing-guard
+follow-ups (a `deployed:` AC item in `docs/sop/jira-ticket-conventions.md`; the
+`deployment-audit.{service,timer}` unit pair) are tracked under the AUDIT-23 /
+AUDIT-29 deployment-baseline phase.
+
+**Generalisation**: "Merged" is not "deployed", and "the ticket is closed" is
+not "the thing is running". Any deliverable with a runtime side needs an
+explicit, evidence-bearing activation step in its DoD *and* a cheap recurring
+check that the activation actually happened — the install recipe in a unit
+header is documentation, not a deployment. Treat the gap between "code in
+`develop`" and "artefact live on prod" as a first-class state that something
+owns, not an implicit "someone will run it".
+
+---
+
+## 14. Bulk import without refinement creates dead inventory
 
 **Symptom**: A migration / planning exercise dumps a large list (a `TODO.md`, a spreadsheet, an old tracker) into JIRA as hundreds of standalone tickets — summary only, no `area:` / `tier:` / `class:` labels, no fixVersion, no assignee, no AC section. The runner JQL can't pick a single one (it filters on the runner-pickability labels). But every project-wide query — `project = OP`, sprint review, "how big is the backlog?" — counts all of them, so the *visible* backlog is 3–5× the *actionable* backlog. The promise was "we'll refine these later"; nobody ever does, because there is no forcing function and the items are individually low-context.
 
@@ -371,7 +449,7 @@ Add/add is structurally different from edit/edit: there is no shared base for gi
 
 ## Cross-cutting principles
 
-After 13 patterns, common threads:
+After 14 patterns, common threads:
 
 1. **Idempotency is non-negotiable** for any retry-eligible operation.
 2. **Convergence over correctness-of-predecessor** for terminal events.
@@ -382,9 +460,10 @@ After 13 patterns, common threads:
 7. **Migration is a state, not a moment** — has a beginning, freeze period, and end.
 8. **Filters cannot distinguish "uses X" from "discusses X"** — exclude documentation + META + test paths from content-pattern bulk actions. (Pattern #11.)
 9. **Two tickets writing to the same final file path cannot run in parallel without a chosen winner** — merge the tickets or scope one to a non-canonical output path with an explicit promotion step. (Pattern #12; "spike" is not orthogonal to "implementation" at the filesystem level.)
-10. **A tracker item below actionable quality is pure cost** — invisible to automation, visible to every human planning pass. Pay the refinement cost at creation time or don't create the item; there is no "capture now, refine later" tier. (Pattern #13.)
+10. **"Merged" is not "deployed"** — every existing gate stops at "in `develop`"; the operator-side activation step in the unit header is verified by nobody unless a `deployed:` AC item plus a recurring deployment audit make it so. (Pattern #13.)
+11. **A tracker item below actionable quality is pure cost** — invisible to automation, visible to every human planning pass. Pay the refinement cost at creation time or don't create the item; there is no "capture now, refine later" tier. (Pattern #14.)
 
-If you see a new symptom not in this cookbook, file it as the 14th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
+If you see a new symptom not in this cookbook, file it as the 15th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
 
 ---
 
@@ -401,3 +480,4 @@ If you see a new symptom not in this cookbook, file it as the 14th pattern after
   - `OP-758` (auto-import / decorator registry refactor — H11)
   - `OP-761` (Sprint D — deployment automation)
   - `OP-784` (Sprint E — docs-site build-time generation; Pattern 12 incident)
+  - `OP-976` (AUDIT-23 — deployment-audit baseline; Pattern 13 incident, `docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md`)

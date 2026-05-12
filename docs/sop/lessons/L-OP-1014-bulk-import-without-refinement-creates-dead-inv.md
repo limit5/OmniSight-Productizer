@@ -53,5 +53,9 @@ automation but maximally visible to humans doing planning. Either refine at
 import time (expensive but correct) or don't import as tickets at all
 (cheap, keeps the backlog honest). If a bulk import already happened, treat
 the cleanup as a first-class ticket with a heuristic-driven script — manual
-triage of 500 items never finishes. Recorded as anti-pattern #13 in
-`docs/sop/architecture-anti-patterns.md`.
+triage of 500 items never finishes. Recorded as anti-pattern #14 in
+`docs/sop/architecture-anti-patterns.md` (it was filed as #13; when OP-1017
+landed the AUDIT-23 *shipped-but-not-deployed* entry — which had been reserved
+as #13 by the 2026-05-12 AUDIT-29 phase plan and is referenced as #13 from
+`scripts/file_audit_29_tickets.py` — this entry was bumped to #14 so the
+earlier-reserved slot kept its number).
