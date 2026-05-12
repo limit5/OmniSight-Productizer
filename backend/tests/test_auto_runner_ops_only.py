@@ -387,3 +387,282 @@ def test_prompt_block_present_when_label_present_via_runner_source() -> None:
     assert "ZERO commits" in src
     # And it gets included in the returned prompt string
     assert "{ops_only_block}" in src
+
+
+# ══════════════════════════════════════════════════════════════════════
+# OP-958 — AUDIT-11: snapshot labels not propagated to
+# `_ops_only_active_for` (LabelsPropagationDrift). The fix re-reads the
+# live JIRA label set at the no-commits decision point so a sigil added
+# after pickup (the OP-925 R3 cascade, 2026-05-12) is still seen.
+# ══════════════════════════════════════════════════════════════════════
+
+
+def _issue_payload(key: str, labels: list[str]) -> dict:
+    """Synthetic JIRA issue payload shaped like `fetch_pickable_tickets`."""
+    return {
+        "key": key,
+        "fields": {
+            "summary": f"{key} synthetic ops-only ticket",
+            "labels": list(labels),
+            "status": {"name": "To Do"},
+            "issuetype": {"name": "Story"},
+            "fixVersions": [{"name": "v0.5.0-rc1"}],
+            "created": "2026-05-12T00:00:00.000+0000",
+            "components": [{"name": "CRITICAL"}],
+            "issuelinks": [],
+            "parent": None,
+        },
+    }
+
+
+class _LabelStubClient(_StubClient):
+    """`_StubClient` that also serves a mutable live-label set so
+    `jira_dispatch.fetch_ticket_labels` (which issues a real `_request`)
+    can be exercised through a monkeypatched transport."""
+
+    def __init__(self, live_labels: list[str]) -> None:
+        self.live_labels = list(live_labels)
+
+
+def test_fetch_ticket_labels_reads_live_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-958: the new `jira_dispatch.fetch_ticket_labels` helper issues
+    `GET /issue/<key>?fields=labels` and returns the labels tuple."""
+    from backend.agents import jira_dispatch as jd
+
+    seen: list[tuple[str, str]] = []
+
+    def fake_request(client, method, path, body=None, idem_key=None):
+        seen.append((method, path))
+        return {"fields": {"labels": ["runner:no-commits-expected", "tier:S"]}}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    out = jd.fetch_ticket_labels(_StubClient(), "OP-925")
+    assert out == ("runner:no-commits-expected", "tier:S")
+    assert seen == [("GET", "/issue/OP-925?fields=labels")]
+
+
+def test_fetch_ticket_labels_empty_payload_is_empty_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents import jira_dispatch as jd
+
+    monkeypatch.setattr(jd, "_request", lambda *a, **k: {"fields": {}})
+    assert jd.fetch_ticket_labels(_StubClient(), "OP-1") == ()
+    monkeypatch.setattr(jd, "_request", lambda *a, **k: {})
+    assert jd.fetch_ticket_labels(_StubClient(), "OP-1") == ()
+
+
+# ── AC #1 + #4 — reproduce OP-925: snapshot built BEFORE the operator
+#    added the sigil; live JIRA already carries it → forward, not revert.
+
+
+def test_ops_only_active_for_sees_sigil_added_after_pickup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-958 regression — the OP-925 failure mode.
+
+    Selection-time snapshot has NO sigil (operator hadn't tagged the
+    ticket yet); by the time the CLI exits 0 with 0 commits the operator
+    HAS added `runner:no-commits-expected`. Before the fix
+    `_ops_only_active_for(snapshot)` read only the stale snapshot copy
+    and returned False → `[runner-no-commits-from-cli]` revert. After
+    the fix it unions the live label set and returns True → forward.
+    """
+    monkeypatch.delenv("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", raising=False)
+    mod = _load_jira_runner()
+
+    # Snapshot frozen at selection time — sigil absent.
+    stale_snap = _snapshot(("class:subscription-claude", "tier:S", "area:devops"))
+
+    # Live JIRA now carries the sigil (operator tagged it mid-flight).
+    def fake_fetch_labels(client, key):
+        assert key == "OP-9999"
+        return ("class:subscription-claude", "tier:S", "area:devops",
+                "runner:no-commits-expected")
+
+    monkeypatch.setattr(
+        mod.jira_dispatch, "fetch_ticket_labels", fake_fetch_labels
+    )
+
+    # Old behaviour (no client → snapshot-only): still False.
+    assert not mod._ops_only_active_for(stale_snap)
+    # Fixed behaviour (client supplied → live re-read): True.
+    assert mod._ops_only_active_for(stale_snap, client=_StubClient())
+
+
+# ── Test plan case 1 — happy path through the REAL snapshot pipeline ──
+
+
+def test_ops_only_active_for_real_to_snapshot_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test plan §1: build the snapshot via `jira_dispatch.to_snapshot`
+    (the same function the runner's pickup loop uses) from an issue that
+    carries the sigil → `_ops_only_active_for` recognises it both with
+    and without a live re-read (the snapshot copy already has it)."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", raising=False)
+    mod = _load_jira_runner()
+    snap = mod.jira_dispatch.to_snapshot(
+        _issue_payload("OP-925", [
+            "class:subscription-claude", "tier:S",
+            "runner:no-commits-expected", "RELEASE-v0.5.0-rc1",
+        ])
+    )
+    assert "runner:no-commits-expected" in snap.labels
+    assert mod._ops_only_active_for(snap)
+    # Live re-read agrees too (returns the same set).
+    monkeypatch.setattr(
+        mod.jira_dispatch, "fetch_ticket_labels",
+        lambda c, k: snap.labels,
+    )
+    assert mod._ops_only_active_for(snap, client=_StubClient())
+
+
+# ── Test plan case 2 — mixed labels (sigil + several area:* labels) ──
+
+
+def test_ops_only_active_for_mixed_label_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test plan §2: the sigil is detected even when surrounded by the
+    full real-world label salad (`class:*`, `tier:*`, several `area:*`,
+    a `claim:*`, the RELEASE label)."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", raising=False)
+    mod = _load_jira_runner()
+    snap = mod.jira_dispatch.to_snapshot(
+        _issue_payload("OP-928", [
+            "class:subscription-claude", "tier:S", "area:backend",
+            "area:tests", "area:devops", "claim:claude-1",
+            "RELEASE-v0.5.0-rc1", "runner:no-commits-expected",
+        ])
+    )
+    assert mod._ops_only_active_for(snap)
+    assert mod._ops_only_active_for(snap, client=_StubClient())
+
+
+# ── Test plan case 3 — atomic_claim race: label set changes between
+#    claim and the no-commits check; live re-read still detects it. ────
+
+
+def test_ops_only_active_for_atomic_claim_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Test plan §3: snapshot taken pre-claim; the live label set has
+    drifted (sigil added) by the time the CLI returns. The live re-read
+    catches the new state. Symmetric to `test_ops_only_active_for_sees_
+    sigil_added_after_pickup` but framed around the claim window."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", raising=False)
+    mod = _load_jira_runner()
+    pre_claim_snap = _snapshot(("class:subscription-claude", "tier:S"))
+
+    live: list[str] = ["class:subscription-claude", "tier:S", "claim:claude-1"]
+    monkeypatch.setattr(
+        mod.jira_dispatch, "fetch_ticket_labels", lambda c, k: tuple(live)
+    )
+    assert not mod._ops_only_active_for(pre_claim_snap, client=_StubClient())
+    # Operator tags the ticket while it's In Progress.
+    live.append("runner:no-commits-expected")
+    assert mod._ops_only_active_for(pre_claim_snap, client=_StubClient())
+
+
+# ── Degradation — a live-fetch fault must never be *worse* than the
+#    pre-OP-958 snapshot-only behaviour. ───────────────────────────────
+
+
+def test_ops_only_active_for_degrades_to_snapshot_on_fetch_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    monkeypatch.delenv("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", raising=False)
+    mod = _load_jira_runner()
+
+    def boom(client, key):
+        raise RuntimeError("GET /issue/OP-9999?fields=labels → 503: upstream")
+
+    monkeypatch.setattr(mod.jira_dispatch, "fetch_ticket_labels", boom)
+
+    # Sigil in the snapshot copy → still True despite the fetch fault.
+    assert mod._ops_only_active_for(
+        _snapshot(("runner:no-commits-expected",)), client=_StubClient()
+    )
+    # No sigil anywhere → False (same as pre-OP-958).
+    assert not mod._ops_only_active_for(
+        _snapshot(("tier:S",)), client=_StubClient()
+    )
+    assert "ops-only live-label re-read failed" in capsys.readouterr().err
+
+
+def test_ops_only_active_for_env_knob_short_circuits_live_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kill-switch wins even when the live label set carries the
+    sigil — and we must NOT issue the extra GET when disabled."""
+    monkeypatch.setenv("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", "1")
+    mod = _load_jira_runner()
+    called: list[str] = []
+    monkeypatch.setattr(
+        mod.jira_dispatch, "fetch_ticket_labels",
+        lambda c, k: (called.append(k), ("runner:no-commits-expected",))[1],
+    )
+    assert not mod._ops_only_active_for(
+        _snapshot(("runner:no-commits-expected",)), client=_StubClient()
+    )
+    assert called == []
+
+
+# ── AC #5 — end-to-end: stale snapshot + live sigil → the forward walk
+#    To Do/In Progress → Under Review → 承認済み → 公開済み fires. ──────
+
+
+def test_ops_only_drift_then_forward_walk_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Glue the OP-958 fix to the OP-956 forward-walk: a ticket whose
+    sigil was added after pickup is detected (`_ops_only_active_for`,
+    client-supplied) and `_handle_ops_only_forward_transition` walks the
+    workflow Submit-for-Review → Approve → Deploy (ids 3 → 4 → 7) with
+    no `transition_back_to_todo` (revert) call anywhere."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", raising=False)
+    mod = _load_jira_runner()
+
+    stale_snap = _snapshot(("class:subscription-claude", "tier:S"))
+    monkeypatch.setattr(
+        mod.jira_dispatch, "fetch_ticket_labels",
+        lambda c, k: ("class:subscription-claude", "tier:S",
+                      "runner:no-commits-expected"),
+    )
+    assert mod._ops_only_active_for(stale_snap, client=_StubClient())
+
+    transitions: list[str] = []
+    reverts: list[tuple] = []
+    statuses = iter(["進行中", "Under Review", "Approved"])
+
+    from backend.agents import jira_dispatch as jd
+
+    real_get = jd.get_issue_status
+    real_req = jd._request_idempotent
+    real_add = jd.add_comment
+    try:
+        jd.get_issue_status = lambda c, k: next(statuses)  # type: ignore[assignment]
+
+        def fake_req(client, method, path, body, idem_key):
+            if "transitions" in path:
+                transitions.append(body["transition"]["id"])
+            return {}
+
+        jd._request_idempotent = fake_req  # type: ignore[assignment]
+        jd.add_comment = lambda *a, **k: None  # type: ignore[assignment]
+        monkeypatch.setattr(
+            mod.jira_dispatch, "transition_back_to_todo",
+            lambda *a, **k: reverts.append((a, k)),
+        )
+
+        rc = mod._handle_ops_only_forward_transition(_StubClient(), "OP-9999")
+        assert rc == 0
+        assert transitions == ["3", "4", "7"]
+        assert reverts == []
+    finally:
+        jd.get_issue_status = real_get  # type: ignore[assignment]
+        jd._request_idempotent = real_req  # type: ignore[assignment]
+        jd.add_comment = real_add  # type: ignore[assignment]

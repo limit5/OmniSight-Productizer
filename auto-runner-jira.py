@@ -904,16 +904,41 @@ def _run_memory_writeback(
         )
 
 
-def _ops_only_active_for(snapshot: "scheduler.TicketSnapshot") -> bool:
+def _ops_only_active_for(
+    snapshot: "scheduler.TicketSnapshot",
+    *,
+    client: "jira_dispatch.DispatchClient | None" = None,
+) -> bool:
     """Return True if the OP-956 ops-only forward-transition path applies.
 
     Two gates: (1) the global ``OMNISIGHT_RUNNER_OPS_ONLY_DISABLED`` env
     knob is not set (AC §recovery — operator escape hatch), and (2) the
     ticket carries the ``runner:no-commits-expected`` sigil label.
+
+    OP-958 (``LabelsPropagationDrift``): ``snapshot.labels`` is a copy
+    frozen at ticket-*selection* time; it goes stale if the operator
+    adds the sigil after pickup (the OP-925 R3 cascade — operator tagged
+    the ticket mid-flight while the runner kept reverting it). When a
+    ``client`` is supplied we re-read the *live* label set from JIRA and
+    union it with the snapshot copy so a sigil added (or already present
+    but missing from a thin payload) is still seen. A live-fetch fault
+    degrades to the snapshot copy — i.e. never worse than the old
+    behaviour.
     """
     if OPS_ONLY_DISABLED:
         return False
-    return jira_dispatch.has_ops_only_label(getattr(snapshot, "labels", ()))
+    labels: set[str] = set(getattr(snapshot, "labels", ()) or ())
+    if client is not None:
+        try:
+            labels |= set(jira_dispatch.fetch_ticket_labels(client, snapshot.key))
+        except Exception as exc:  # noqa: BLE001 — degrade to snapshot copy
+            print(
+                f"[runner] ops-only live-label re-read failed for "
+                f"{snapshot.key}: {type(exc).__name__}: {exc}; "
+                f"falling back to selection-time snapshot labels",
+                file=sys.stderr,
+            )
+    return jira_dispatch.has_ops_only_label(labels)
 
 
 def _handle_ops_only_forward_transition(
@@ -1577,7 +1602,7 @@ def main() -> int:
             # (operator/automation runbooks produce reports + audit
             # comments, not commits). Skip OP-827's always-revert path
             # entirely and forward-walk Submit → Approve → Deploy.
-            if _ops_only_active_for(snapshot):
+            if _ops_only_active_for(snapshot, client=client):
                 print(
                     f"[runner] {snapshot.key} CLI produced 0 commits + "
                     f"ops-only label present → forward-transitioning to 公開済み"
@@ -1684,7 +1709,7 @@ def main() -> int:
             # forward-transition". The push above already landed the
             # commits and walked the ticket to Under Review; continue
             # the forward walk from there to 公開済み.
-            if _ops_only_active_for(snapshot):
+            if _ops_only_active_for(snapshot, client=client):
                 push_count = max(1, len(getattr(push_result, "change_numbers", []) or [push_result.change_number]))
                 _handle_ops_only_forward_transition(
                     client, snapshot.key, unexpected_commits=push_count,
