@@ -59,6 +59,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "auto_promote_develop_to_main.sh"
 SERVICE = REPO_ROOT / "deploy" / "systemd" / "auto-promote-develop.service"
 TIMER = REPO_ROOT / "deploy" / "systemd" / "auto-promote-develop.timer"
+SMOKE_SCRIPT = REPO_ROOT / "deploy" / "scripts" / "auto_promote_audit_db_smoke.sh"
 MIGRATION_0207 = (
     REPO_ROOT / "backend" / "alembic" / "versions" / "0207_release_audit.py"
 )
@@ -544,3 +545,69 @@ def test_systemd_service_invokes_the_promote_script() -> None:
     text = SERVICE.read_text(encoding="utf-8")
     assert "scripts/auto_promote_develop_to_main.sh" in text
     assert "Type=oneshot" in text
+
+
+# ─────────────────────────────────────────────────────────────────────
+# OP-964 (AUDIT-16) — the cron unit must carry a usable DB env so the
+# Python audit sink can reach the `release_audit` Postgres, plus a
+# standalone smoke test for that connectivity.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_systemd_service_loads_audit_db_env() -> None:
+    """The unit pulls in OMNISIGHT_DATABASE_URL via an EnvironmentFile so
+    backend.agents.auto_promote_main's audit sink doesn't degrade to the
+    SQLite dev path and skip the durable release_audit row (OP-964)."""
+    text = SERVICE.read_text(encoding="utf-8")
+    env_file_lines = [
+        ln.strip()
+        for ln in text.splitlines()
+        if ln.strip().startswith("EnvironmentFile=")
+    ]
+    assert env_file_lines, "auto-promote-develop.service must declare an EnvironmentFile= for the DB env"
+    # Points at the canonical backend .env (same one omnisight-backend /
+    # omnisight-slo-monitor load), and is "-"-prefixed so a missing file
+    # is non-fatal on dev hosts / the test seam.
+    assert any(
+        "OmniSight-Productizer/.env" in ln and "EnvironmentFile=-" in ln
+        for ln in env_file_lines
+    ), env_file_lines
+
+
+def test_audit_db_smoke_script_shape() -> None:
+    """The smoke script exists, is executable, and exercises the same
+    DSN resolver + asyncpg driver the module's audit sink uses — without
+    a psql dependency (OP-960/OP-961 removed it; psql isn't in the runner
+    env)."""
+    assert SMOKE_SCRIPT.is_file(), SMOKE_SCRIPT
+    assert os.access(SMOKE_SCRIPT, os.X_OK), f"{SMOKE_SCRIPT} must be executable"
+    body = SMOKE_SCRIPT.read_text(encoding="utf-8")
+    assert "OMNISIGHT_DATABASE_URL" in body
+    assert "_resolve_pg_dsn" in body  # the exact resolver auto_promote_main uses
+    assert "asyncpg" in body
+    assert "release_audit" in body
+    # `psql` may appear only in the informational `command -v psql` line —
+    # never as the actual connectivity check.
+    for raw in body.splitlines():
+        line = raw.strip()
+        if "psql" in line and not line.startswith("#"):
+            assert "command -v psql" in line, f"smoke script must not depend on psql: {line!r}"
+
+
+def test_audit_db_smoke_script_fails_loudly_without_dsn() -> None:
+    """No OMNISIGHT_DATABASE_URL / DATABASE_URL -> exit 2 with a message
+    naming the SQLite-fallback hazard (the failure mode OP-925 R3 hit)."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(REPO_ROOT), env.get("PYTHONPATH", "")]
+    ).rstrip(os.pathsep)
+    env.pop("OMNISIGHT_DATABASE_URL", None)
+    env.pop("DATABASE_URL", None)
+    proc = subprocess.run(
+        ["bash", str(SMOKE_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "no Postgres DSN resolved" in proc.stdout

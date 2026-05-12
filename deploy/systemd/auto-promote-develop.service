@@ -2,21 +2,29 @@
 ;
 ; Triggered by auto-promote-develop.timer at 07:00 UTC each day. Runs
 ; scripts/auto_promote_develop_to_main.sh once; on a green D1 acceptance
-; pushes develop -> refs/for/main (OP-960) and the OP-961 Python module's
-; audit sink lands one `release_audit` row per run regardless of outcome.
+; pushes develop -> refs/for/main as Gerrit review change(s) (OP-960),
+; and the OP-961 backend.agents.auto_promote_main module lands one
+; `release_audit` row per run regardless of outcome.
 ;
-; [OP-964 / AUDIT-16] The audit sink in backend.agents.auto_promote_main
-; writes through backend.audit, which connects via OMNISIGHT_DATABASE_URL.
-; A systemd unit does NOT inherit the login shell's environment, so without
-; the EnvironmentFile below the sink falls back to the local SQLite default
-; under WorkingDirectory — i.e. the durable `release_audit` trail in the
-; pg-primary Postgres never gets the row (the OP-925 R3 failure mode).
-; Create /home/user/.config/omnisight/release-audit.env (mode 0600) with:
-;     OMNISIGHT_DATABASE_URL=postgresql+asyncpg://USER:PW@PG_PRIMARY:5432/omnisight
-; The `-` prefix makes it optional so a dev box without the file still runs
-; (it just writes to its local SQLite). Verify connectivity with the
-; §"Audit DB connectivity smoke test" of docs/operations/release-conductor-runbook.md
-; (needs `postgresql-client`; scripts/setup-dev-env.sh installs it).
+; [OP-964 / AUDIT-16] The module's audit sink writes through
+; backend.audit, which connects via OMNISIGHT_DATABASE_URL. A systemd
+; unit does NOT inherit the login shell's environment, so without an
+; EnvironmentFile here the sink degrades to the local SQLite dev path
+; under WorkingDirectory and the durable `release_audit` trail in the
+; pg-primary Postgres never gets the row — the OP-925 R3 failure mode
+; ("no compatible audit DB in runner env"). Two optional sources are
+; loaded below (leading "-" => missing file is non-fatal, so a dev box
+; without either still runs, just against its local SQLite):
+;   1. the canonical backend env (same file omnisight-backend.service /
+;      omnisight-slo-monitor.service load);
+;   2. a dedicated drop-in an operator can create with just the DSN:
+;        install -m 0600 /dev/null /home/user/.config/omnisight/release-audit.env
+;        echo 'OMNISIGHT_DATABASE_URL=postgresql+asyncpg://USER:PW@PG_PRIMARY:5432/omnisight' \
+;          >> /home/user/.config/omnisight/release-audit.env
+; Verify connectivity before relying on the cron (and after rotating
+; the Postgres credentials) with:
+;   PYTHONPATH=/home/user/sora-bridge \
+;     /home/user/sora-bridge/deploy/scripts/auto_promote_audit_db_smoke.sh
 ;
 ; Install (user-level — no sudo):
 ;   mkdir -p ~/.config/systemd/user
@@ -33,6 +41,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/home/user/sora-bridge
+; OP-964 / AUDIT-16 — DB env for the Python audit-write path (see header).
+; Both optional; the dedicated drop-in (listed last) wins for any key it sets.
+EnvironmentFile=-/home/user/work/sora/OmniSight-Productizer/.env
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
 Environment=PYTHONPATH=/home/user/sora-bridge
 Environment=PYTHONUNBUFFERED=1
 Environment=OP877_REPO=/home/user/sora-bridge
@@ -40,8 +52,6 @@ Environment=OP877_REMOTE=gerrit
 Environment=OP877_SOURCE_BRANCH=develop
 Environment=OP877_TARGET_BRANCH=main
 Environment=OP877_EVENT_LOG=/home/user/work/sora/logs/release-milestone/systemd.log
-; OP-964 / AUDIT-16 — DSN for the `release_audit` durable trail (see header).
-EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
 ExecStart=/usr/bin/bash /home/user/sora-bridge/scripts/auto_promote_develop_to_main.sh
 StandardOutput=append:/home/user/work/sora/logs/auto-promote-develop/run.log
 StandardError=append:/home/user/work/sora/logs/auto-promote-develop/run.log
