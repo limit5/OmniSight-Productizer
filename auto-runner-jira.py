@@ -47,10 +47,10 @@ REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
 from backend.agents import (
+    agent_feature_flags,
     capability_matrix,
     circuit_breaker,
     failure_graph,
-    feature_flags as agent_feature_flags,
     memory_writeback,
     outcomes_consumer,
     jira_dispatch,
@@ -401,6 +401,7 @@ _CAPABILITY_MATRIX: capability_matrix.CapabilityMatrix | None = None
 # process because each tick overwrites the previous entry.
 _LAST_RESOLVED_CAPABILITIES: dict[str, frozenset[str]] = {}
 _LAST_TICKET_METADATA: dict[str, dict[str, str]] = {}
+_LAST_AGENT_FEATURE_FLAGS: dict[str, dict[str, bool]] = {}
 
 
 def _load_capability_matrix() -> capability_matrix.CapabilityMatrix:
@@ -659,6 +660,9 @@ def _build_prompt(
     enabled_capabilities = _resolve_runner_capabilities(
         ticket_type, declared_areas, tier, list(labels),
     )
+    _LAST_AGENT_FEATURE_FLAGS[key] = {
+        "cognee_recall": agent_feature_flags.cognee_recall.enabled(),
+    }
     _LAST_RESOLVED_CAPABILITIES[key] = enabled_capabilities
     _LAST_TICKET_METADATA[key] = {
         "ticket_type": ticket_type,
