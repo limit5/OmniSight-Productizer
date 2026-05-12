@@ -1,0 +1,13 @@
+; [OP-952] Daily trigger for release compliance ledger export.
+
+[Unit]
+Description=Daily trigger for compliance-ledger-daily-export.service (OP-952)
+
+[Timer]
+Unit=compliance-ledger-daily-export.service
+OnCalendar=*-*-* 03:30:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

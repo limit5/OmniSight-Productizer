@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from backend.agents import jira_dispatch
+from backend.release_conductor import compliance_ledger
 
 
 logger = logging.getLogger(__name__)
@@ -206,6 +207,21 @@ def on_hotfix_label_added(
 
     picked_change = str(picked["cherry_picked_change"])
     meta = meta_instantiator(target, picked_change)
+    compliance_ledger.record(
+        actor="release_conductor.hotfix_label",
+        action="hotfix.trigger",
+        release_id=str(meta.get("meta_key") or target),
+        before_state=None,
+        after_state="hotfix_triggered",
+        reason=f"hotfix label {label}",
+        evidence={
+            "change_number": change_number,
+            "target": target,
+            "cherry_picked_change": picked_change,
+            "cherry_picked_url": picked.get("cherry_picked_url"),
+            "meta": meta,
+        },
+    )
     gerrit_comment(
         change_number,
         "Hotfix cherry-pick succeeded: "
