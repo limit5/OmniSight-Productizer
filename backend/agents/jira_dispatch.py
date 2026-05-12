@@ -1927,7 +1927,7 @@ def file_mutex_check(
     )
 
 
-# ── OP-838: atomic ticket-claim mutex ─────────────────────────────
+# ── OP-838 → AUDIT-24/OP-977: atomic ticket-claim mutex ──────────────
 #
 # Why this exists: the JQL pickup filter (``assignee is EMPTY``) and the
 # ``transition_to_in_progress`` + assign call are separated by several
@@ -1936,16 +1936,73 @@ def file_mutex_check(
 # proceed past the pre-pickup gates, and both reach
 # ``transition_to_in_progress`` — JIRA accepts both writes and both CLIs
 # then race to push to Gerrit, generating duplicate Change-Ids
-# (different subjects → distinct changes, one merged + one abandoned).
-# Observed on OP-836 #356 and OP-837 #358, 2026-05-11.
+# (different subjects → distinct changes, one merged + one abandoned),
+# or the loser's failure-recovery reverts the winner's work. Observed on
+# OP-836 #356 / OP-837 #358 (2026-05-11, cross-bot) and OP-974
+# (2026-05-12, same-instance — operator rescue required at 16:45).
 #
-# This block adds a fast, atomic claim sequence the runner runs in the
-# narrow window before ``transition_to_in_progress``: GET-assignee, PUT
-# assignee+claim-label, GET-readback. Loser detects via the readback and
-# skips the ticket on this tick. The label encodes the claiming instance
-# so multi-instance setups (OP-783) can tell their own writes apart.
+# OP-838 (2026-05-11) — SUPERSEDED — added a ``claim:{instance_id}`` label
+# "mutex": GET-assignee, PUT assignee+label, GET-readback. It serialises
+# the *cross-bot* shape (assignee is single-valued, last-writer-wins) but
+# CANNOT serialise two runners that share an ``instance_id``: Atlassian's
+# ``update.labels.add`` is set-union (idempotent), not compare-and-swap,
+# so both PUT the same label, both read it back, both believe they won.
+# OP-974 is exactly that failure.
+#
+# AUDIT-24/OP-977 (2026-05-12) replaces the bare-label mutex with a
+# FENCING TOKEN. Each attempt PUTs a unique-per-tick label
+# ``claim:{instance_id}:{token}`` where ``token = f"{epoch_us:016d}-{uuid8}"``.
+# After the PUT the runner GETs the labels back and the LOWEST token among
+# ``claim:{instance_id}:*`` is the canonical winner — lexicographic order
+# over the 16-digit zero-padded microsecond prefix == chronological order,
+# so "lowest token" == "earliest claimer", with the uuid8 suffix breaking
+# same-microsecond ties. Because the winner is decided by a *total order
+# over the readback set* (not by "did my idempotent write succeed"), two
+# same-instance runners agree on exactly one winner; the loser observes
+# its token is not lowest and returns ``ok=False`` ("foreign claim").
+# Stale tokens left by a crashed runner are swept on the next claim's
+# pre-GET once aged past ``2× CLI timeout`` (``OrphanClaimLabel``).
+# Pre-AUDIT-24 bare ``claim:{instance_id}`` labels are treated as expired
+# and GC'd on next encounter (``BackwardCompatStaleClaim``).
+#
+# Rollback: ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1`` reverts to the
+# OP-838 bare-label path (acknowledged-racey-but-known-working baseline).
+# The label formats are mutually forward-compatible: old code reading a
+# new ``claim:default:0017..-ab12`` label sees instance ``"default"`` via
+# ``_claim_label_instance`` (so it correctly treats a foreign-instance
+# fenced claim as foreign and skips), and never mistakes the suffix for a
+# live ``instance_id``. See ``docs/sop/runner-pickup-mutex.md``.
 
 CLAIM_LABEL_PREFIX = "claim:"
+
+# AUDIT-24 fencing-token width: ``token = f"{epoch_us:016d}-{uuid4().hex[:8]}"``.
+# 16 zero-padded digits hold microsecond Unix epochs comfortably past the
+# year 2286, so lexicographic order over tokens == chronological order.
+_CLAIM_TOKEN_EPOCH_WIDTH = 16
+
+# Stale fencing-token sweep: a ``claim:{inst}:{token}`` label whose epoch
+# prefix is older than this is assumed orphaned by a crashed runner and
+# removed on the next claim's pre-GET. Default ``2× CLI hard timeout``
+# (3600s) per the OP-977 error catalog (``OrphanClaimLabel``). Tunable via
+# ``OMNISIGHT_RUNNER_STALE_CLAIM_MAX_AGE_S``.
+try:
+    _STALE_CLAIM_MAX_AGE_S = int(
+        os.environ.get("OMNISIGHT_RUNNER_STALE_CLAIM_MAX_AGE_S", str(2 * 3600))
+    )
+except ValueError:
+    _STALE_CLAIM_MAX_AGE_S = 2 * 3600
+
+# Atlassian's PUT-then-GET is occasionally eventually-consistent: the label
+# we just added can be missing from the very next GET for ~100ms. After the
+# claim PUT we re-GET up to ``_CLAIM_READBACK_RETRIES`` times (first attempt
+# immediate, subsequent attempts ``_CLAIM_READBACK_DELAY_S`` apart) until we
+# see our own label. Worst-case added latency ≈ (retries-1) × delay ≈ 0.4s.
+# Per the OP-977 error catalog (``JIRAPutEventualConsistencyDelay``).
+_CLAIM_READBACK_RETRIES = 3
+_CLAIM_READBACK_DELAY_S = 0.2
+
+# Rollback flag — see module header.
+_LEGACY_CLAIM_ENV = "OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY"
 
 
 @dataclass(frozen=True)
@@ -1953,18 +2010,22 @@ class ClaimResult:
     """Outcome of :func:`claim_ticket_atomic`.
 
     - ``ok=True, lost_to=None``: caller may proceed to
-      ``transition_to_in_progress``. Either we won this race or we're
-      re-claiming a ticket we already held (idempotent re-entry after
-      a runner restart with the same instance_id).
-    - ``ok=False, lost_to=<token>``: another instance claimed first.
-      Caller MUST skip the ticket and MUST NOT call
-      ``transition_to_in_progress``. ``lost_to`` is the foreign claim
-      label (or ``assignee:<accountId>`` for a cross-bot race) — used
-      verbatim in the ``[runner-mutex-lost]`` log line.
+      ``transition_to_in_progress``. Either we won this race (our fencing
+      token is the lowest among ``claim:{instance_id}:*``) or we're
+      re-claiming a ticket we already held (idempotent re-entry after a
+      runner restart with the same instance_id).
+    - ``ok=False, lost_to=<who>``: another claim won. Caller MUST skip the
+      ticket and MUST NOT call ``transition_to_in_progress``. ``lost_to``
+      is the winning ``claim:{inst}:{token}`` label, an
+      ``assignee:<accountId>`` string for a cross-bot race, or
+      ``"claim-label-missing-from-readback"`` if our PUT did not
+      materialise within the eventual-consistency bound — used verbatim in
+      the ``[runner-mutex-lost]`` log line.
 
-    ``claim_token`` records ``{instance_id}:{utc_iso}`` for the attempt,
+    ``claim_token`` records ``{instance_id}:{token}`` for the attempt,
     independent of label/assignee write outcome. Logged on both win and
-    loss so a post-mortem can correlate the two sides of the race.
+    loss so a post-mortem can correlate the two sides of the race. Under
+    the legacy (OP-838) path it is ``{instance_id}:{utc_iso}``.
     """
 
     ok: bool
@@ -1973,12 +2034,13 @@ class ClaimResult:
 
 
 class RunnerMutexLost(RuntimeError):
-    """Soft signal: readback indicates another instance won the claim.
+    """Soft signal: readback indicates another claim won.
 
-    Per OP-838 ``Error catalog``. The runner-facing API surface returns
-    this as :class:`ClaimResult` (loser path returns, not raises) to keep
-    the happy path branch-free, but the typed class is exported for
-    future programmatic callers that prefer exception-based control flow.
+    Per the OP-838 / AUDIT-24 ``Error catalog`` (``MultiClaimDetected``).
+    The runner-facing API surface returns this as :class:`ClaimResult`
+    (loser path returns, not raises) to keep the happy path branch-free,
+    but the typed class is exported for future programmatic callers that
+    prefer exception-based control flow.
     """
 
     def __init__(self, key: str, claim_token: str, observed_token: str | None) -> None:
@@ -2008,17 +2070,120 @@ class RunnerMutexAPIError(RuntimeError):
         self.__cause__ = cause
 
 
+def _legacy_claim_mode() -> bool:
+    """True iff ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY`` selects the OP-838 path."""
+    return os.environ.get(_LEGACY_CLAIM_ENV, "").strip().lower() not in ("", "0", "false", "no")
+
+
 def _our_claim_label(instance_id: str) -> str:
-    """Default-path mutex marker per AC #4: ``claim:{instance_id}``."""
+    """Legacy (OP-838) bare mutex marker: ``claim:{instance_id}``.
+
+    Retained for the rollback path and as the cleanup target for
+    pre-AUDIT-24 labels. The AUDIT-24 fenced path uses
+    :func:`_fenced_claim_label` instead.
+    """
     return f"{CLAIM_LABEL_PREFIX}{instance_id}"
 
 
-def _claim_label_instance(label: str) -> str | None:
-    """Return the instance_id portion of a ``claim:<inst>`` label, or None."""
+def _mint_claim_token(now_us: int | None = None) -> str:
+    """A unique-per-tick fencing token ``{epoch_us:016d}-{uuid8}``.
+
+    The microsecond-epoch prefix makes lexicographic order == chronological
+    order; the 8-hex-char uuid suffix breaks ties between two runners that
+    mint within the same microsecond.
+    """
+    if now_us is None:
+        now_us = time.time_ns() // 1000
+    return f"{now_us:0{_CLAIM_TOKEN_EPOCH_WIDTH}d}-{uuid.uuid4().hex[:8]}"
+
+
+def _fenced_claim_label(instance_id: str, token: str) -> str:
+    """AUDIT-24 fencing-token label: ``claim:{instance_id}:{token}``."""
+    return f"{CLAIM_LABEL_PREFIX}{instance_id}:{token}"
+
+
+def _parse_claim_label(label: str) -> tuple[str, str | None] | None:
+    """Split a ``claim:*`` label into ``(instance_id, token | None)``.
+
+    - ``claim:default:0017..-ab12`` → ``("default", "0017..-ab12")`` — a
+      fenced AUDIT-24 claim.
+    - ``claim:default``             → ``("default", None)`` — a pre-AUDIT-24
+      bare claim (treated as expired by the fenced path).
+    - anything that is not a ``claim:<non-empty>`` label → ``None``.
+    """
     if not label.startswith(CLAIM_LABEL_PREFIX):
         return None
-    suffix = label[len(CLAIM_LABEL_PREFIX):]
-    return suffix or None
+    rest = label[len(CLAIM_LABEL_PREFIX):]
+    if not rest:
+        return None
+    inst, sep, token = rest.partition(":")
+    if not inst:
+        return None
+    return (inst, token if sep else None)
+
+
+def _claim_label_instance(label: str) -> str | None:
+    """Instance-id portion of a ``claim:*`` label, or ``None`` if not one.
+
+    Works for both the legacy bare form and the AUDIT-24 fenced form
+    (returns the ``instance_id``, never the token suffix).
+    """
+    parsed = _parse_claim_label(label)
+    return parsed[0] if parsed else None
+
+
+def _claim_token_epoch_us(token: str) -> int | None:
+    """Microsecond Unix-epoch prefix of a fencing token, or ``None``.
+
+    A token minted by :func:`_mint_claim_token` is ``{digits}-{uuid8}``;
+    the leading digit run is the epoch. Returns ``None`` for tokens that do
+    not follow that shape (defensive — such a token simply never ages out).
+    """
+    head, _, _ = token.partition("-")
+    return int(head) if head.isdigit() else None
+
+
+def _claim_token_is_stale(token: str, now_us: int, max_age_s: int) -> bool:
+    """True iff ``token``'s epoch prefix is older than ``max_age_s`` seconds."""
+    epoch_us = _claim_token_epoch_us(token)
+    if epoch_us is None:
+        return False
+    return (now_us - epoch_us) > max_age_s * 1_000_000
+
+
+def _lowest_uuid_claim_winner(
+    labels: Iterable[str],
+    instance_id: str,
+    *,
+    now_us: int,
+    max_age_s: int = _STALE_CLAIM_MAX_AGE_S,
+) -> str | None:
+    """Lowest *live* fencing token for ``instance_id`` among ``labels``.
+
+    "Live" = the label is a fenced ``claim:{instance_id}:{token}`` (not a
+    pre-AUDIT-24 bare label) whose epoch prefix is younger than
+    ``max_age_s``. Returns the bare ``token`` (not the full label), or
+    ``None`` if our instance has no live claim. Foreign-instance labels are
+    intentionally ignored here — they are handled by the assignee guard and
+    the pre/post foreign-claim checks in :func:`claim_ticket_atomic`.
+
+    This is the deterministic core of the AUDIT-24 mutex (AC #1): every
+    runner sharing ``instance_id`` runs it over the same readback set and
+    therefore agrees on the same winning token.
+    """
+    best: str | None = None
+    for label in labels:
+        parsed = _parse_claim_label(label)
+        if parsed is None:
+            continue
+        inst, token = parsed
+        if inst != instance_id or token is None:
+            continue
+        if _claim_token_is_stale(token, now_us, max_age_s):
+            continue
+        if best is None or token < best:
+            best = token
+    return best
 
 
 def claim_ticket_atomic(
@@ -2026,39 +2191,169 @@ def claim_ticket_atomic(
     key: str,
     instance_id: str,
 ) -> ClaimResult:
-    """Atomically claim ``key`` via assignee field + ``claim:<instance>`` label.
+    """Atomically claim ``key`` before ``transition_to_in_progress``.
 
-    Sequence (per OP-838 AC #1):
+    Dispatches to the AUDIT-24 fencing-token path (default) or the legacy
+    OP-838 bare-label path (``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1``).
+    See the module-level header for the mechanism and the rollback flag.
 
-    1. GET ``/issue/<key>?fields=assignee,labels`` — bail early on a foreign
-       claim label or foreign assignee (cheap fast-fail before any write).
-    2. PUT ``/issue/<key>`` with ``assignee=bot_account_id`` AND
-       ``labels.add = claim:<instance_id>`` in a single request.
-    3. GET again — verify the assignee readback matches our bot account
-       (the primary cross-bot discriminator: assignee is single-valued and
-       last-writer-wins, so two different bots cannot both observe their
-       own accountId in the readback) and our label landed.
-    4. On readback mismatch return ``ok=False`` with ``lost_to`` describing
-       who won — the caller logs ``[runner-mutex-lost]`` and skips. On
-       success return ``ok=True`` and the caller proceeds to
-       ``transition_to_in_progress``.
+    Raises :class:`RunnerMutexAPIError` for transport failures during the
+    claim sequence. Returns :class:`ClaimResult` for the mutex-lost path.
+    """
+    if _legacy_claim_mode():
+        return _claim_ticket_atomic_legacy(client, key, instance_id)
+    return _claim_ticket_atomic_fenced(client, key, instance_id)
 
-    The OP-836/837 race that prompted this work was cross-bot
-    (``codex-bot`` vs ``claude-bot``); the assignee readback catches that
-    case exactly. Same-bot-different-instance is a degenerate config (per
-    OP-783 each instance_id maps to a unique bot account); the pre-GET
-    label fast-fail catches the *sequential* shape of that race, but the
-    fully-interleaved shape is outside the design's atomicity guarantee
-    (operator must keep bot accounts and instance_ids 1:1).
 
-    Idempotent for the same (bot, instance_id): if pre-GET shows our own
-    ``claim:<id>`` and our own assignee, the PUT is a no-op (set-add label
-    dedup + same-value assignee write) and the readback succeeds (AC #5
-    cases 4 + 5 — same-instance re-pickup and runner-restart with
-    persisted claim state).
+def _claim_ticket_atomic_fenced(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> ClaimResult:
+    """AUDIT-24 fencing-token claim (AC #1).
 
-    Raises :class:`RunnerMutexAPIError` for transport failures on any of
-    the three calls. Returns ``ClaimResult`` for the mutex-lost path.
+    Sequence:
+
+    1. pre-GET ``/issue/<key>?fields=assignee,labels`` — fast-fail on a
+       *live* foreign claim (another instance's fenced label, or a foreign
+       assignee); collect *stale* fenced tokens and *bare* pre-AUDIT-24
+       labels to GC in the same PUT.
+    2. PUT ``/issue/<key>``: add our ``claim:{instance_id}:{token}`` label
+       (+ assignee), and ``remove`` every stale/bare claim label spotted in
+       step 1 — one request.
+    3. post-GET readback, retried up to ``_CLAIM_READBACK_RETRIES`` times
+       until our label appears (Atlassian eventual-consistency window).
+    4. assignee readback must equal our bot account (cross-bot guard, kept
+       from OP-838), then the LOWEST live token among ``claim:{instance_id}:*``
+       wins (AC #1). If ours is not lowest we return ``ok=False`` and leave
+       our label for the next pre-GET's stale sweep — we never delete it
+       eagerly, so the winner observing it does not flip.
+    """
+    now_us = time.time_ns() // 1000
+    token = _mint_claim_token(now_us)
+    our_label = _fenced_claim_label(instance_id, token)
+    our_claim_token = f"{instance_id}:{token}"
+
+    # Step 1: pre-GET.
+    try:
+        pre = _request(client, "GET", f"/issue/{key}?fields=assignee,labels")
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        raise RunnerMutexAPIError(key, "pre-GET", e) from e
+    pre_fields = pre.get("fields") or {}
+    pre_assignee_id = (pre_fields.get("assignee") or {}).get("accountId")
+    pre_labels = list(pre_fields.get("labels") or [])
+
+    stale_to_remove: list[str] = []
+    live_foreign: str | None = None
+    for label in pre_labels:
+        parsed = _parse_claim_label(label)
+        if parsed is None:
+            continue
+        inst, tok = parsed
+        if tok is None:
+            # Pre-AUDIT-24 bare ``claim:<inst>`` — BackwardCompatStaleClaim:
+            # treat as expired, GC it, never count it as a live claim.
+            stale_to_remove.append(label)
+            continue
+        if _claim_token_is_stale(tok, now_us, _STALE_CLAIM_MAX_AGE_S):
+            # OrphanClaimLabel: crashed-runner leftover — GC and ignore.
+            stale_to_remove.append(label)
+            continue
+        if inst != instance_id and (live_foreign is None or label < live_foreign):
+            live_foreign = label
+    if live_foreign is not None:
+        return ClaimResult(ok=False, lost_to=live_foreign, claim_token=our_claim_token)
+    if pre_assignee_id and pre_assignee_id != client.bot_account_id:
+        return ClaimResult(
+            ok=False, lost_to=f"assignee:{pre_assignee_id}", claim_token=our_claim_token
+        )
+
+    # Step 2: atomic PUT — add our fenced label (+ assignee), GC the rest.
+    update_ops: list[dict] = [{"add": our_label}]
+    for label in dict.fromkeys(stale_to_remove):  # de-dup, preserve order
+        update_ops.append({"remove": label})
+    try:
+        _request(
+            client, "PUT", f"/issue/{key}",
+            {
+                "fields": {"assignee": {"accountId": client.bot_account_id}},
+                "update": {"labels": update_ops},
+            },
+        )
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        raise RunnerMutexAPIError(key, "PUT", e) from e
+
+    # Step 3: post-GET readback, with the eventual-consistency retry loop.
+    post_labels: list[str] = []
+    post_assignee_id: str | None = None
+    for attempt in range(_CLAIM_READBACK_RETRIES):
+        if attempt:
+            time.sleep(_CLAIM_READBACK_DELAY_S)
+        try:
+            post = _request(client, "GET", f"/issue/{key}?fields=assignee,labels")
+        except (RuntimeError, urllib.error.URLError, OSError) as e:
+            raise RunnerMutexAPIError(key, "post-GET", e) from e
+        post_fields = post.get("fields") or {}
+        post_assignee_id = (post_fields.get("assignee") or {}).get("accountId")
+        post_labels = list(post_fields.get("labels") or [])
+        if our_label in post_labels:
+            break
+    else:
+        # JIRAPutEventualConsistencyDelay exceeded — do not proceed on
+        # inconsistent state; the caller retries on the next tick.
+        return ClaimResult(
+            ok=False, lost_to="claim-label-missing-from-readback", claim_token=our_claim_token
+        )
+
+    # Step 4a: cross-bot guard — assignee is single-valued, last-writer-wins.
+    if post_assignee_id != client.bot_account_id:
+        return ClaimResult(
+            ok=False, lost_to=f"assignee:{post_assignee_id}", claim_token=our_claim_token
+        )
+
+    # Step 4b: a live *foreign-instance* fenced claim that landed between
+    # our pre-GET and post-GET (degenerate same-bot-different-instance
+    # config — the assignee guard already covers cross-bot).
+    foreign_live = [
+        label
+        for label in post_labels
+        if (p := _parse_claim_label(label)) is not None
+        and p[1] is not None
+        and p[0] != instance_id
+        and not _claim_token_is_stale(p[1], now_us, _STALE_CLAIM_MAX_AGE_S)
+    ]
+    if foreign_live:
+        return ClaimResult(ok=False, lost_to=min(foreign_live), claim_token=our_claim_token)
+
+    # Step 4c: lowest live token among our instance's claims wins (AC #1).
+    winning_token = _lowest_uuid_claim_winner(post_labels, instance_id, now_us=now_us)
+    if winning_token is not None and winning_token != token:
+        return ClaimResult(
+            ok=False,
+            lost_to=_fenced_claim_label(instance_id, winning_token),
+            claim_token=our_claim_token,
+        )
+    return ClaimResult(ok=True, lost_to=None, claim_token=our_claim_token)
+
+
+def _claim_ticket_atomic_legacy(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> ClaimResult:
+    """OP-838 bare-label claim path — SUPERSEDED, rollback baseline only.
+
+    Reachable only via ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1``. Known to
+    NOT serialise two runners that share an ``instance_id`` (Atlassian's
+    label-add is set-union, not compare-and-swap) — that is the OP-974
+    failure AUDIT-24 fixed. Kept verbatim so an emergency rollback returns
+    to a known-working-for-the-cross-bot-case baseline.
+
+    Sequence: pre-GET (fast-fail on foreign claim label / foreign
+    assignee), PUT ``assignee + labels.add = claim:<instance_id>``,
+    post-GET (assignee readback discriminates cross-bot races, label
+    readback confirms our write landed). Idempotent for the same
+    ``(bot, instance_id)``.
     """
     our_label = _our_claim_label(instance_id)
     utc_iso = datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -2140,20 +2435,46 @@ def release_ticket_claim(
     client: DispatchClient,
     key: str,
     instance_id: str,
+    token: str | None = None,
 ) -> None:
-    """Remove our ``claim:<instance>`` label from ``key``.
+    """Remove this instance's claim label(s) from ``key`` (AUDIT-24 GC).
 
-    Best-effort cleanup for the AC #5 case 3 path ("someone already cleared
-    the prior claim"). JIRA treats a remove-op for an absent label as a
-    no-op, so this is idempotent and safe to call when no claim was set.
-    Transport failures are logged + swallowed — the claim label is audit
-    state, not load-bearing for correctness.
+    The winner GCs *every* ``claim:{instance_id}:*`` fenced label (its own
+    token plus any same-instance peer's left-behind loser label) and the
+    legacy bare ``claim:{instance_id}`` label — a single GET-then-PUT. If
+    the GET fails, falls back to removing just ``token`` (or the bare label
+    if no ``token`` is given) so a transport hiccup still clears the common
+    case. Orphan labels from a *different* crashed instance are left to the
+    next claim's pre-GET stale sweep (``_STALE_CLAIM_MAX_AGE_S``).
+
+    Best-effort: transport failures are logged + swallowed — the claim
+    label is audit state, not load-bearing for correctness (the stale sweep
+    bounds accumulation regardless).
     """
-    label = _our_claim_label(instance_id)
+    targets: list[str] = []
     try:
-        remove_label(client, key, label)
-    except RuntimeError as e:
-        log.warning("release_ticket_claim: removing %s failed: %s", label, e)
+        cur = _request(client, "GET", f"/issue/{key}?fields=labels")
+        labels = list((cur.get("fields") or {}).get("labels") or [])
+        for label in labels:
+            parsed = _parse_claim_label(label)
+            if parsed is not None and parsed[0] == instance_id:
+                targets.append(label)
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        log.warning("release_ticket_claim: GET labels for %s failed: %s", key, e)
+        targets = [
+            _fenced_claim_label(instance_id, token) if token else _our_claim_label(instance_id)
+        ]
+
+    targets = list(dict.fromkeys(targets))
+    if not targets:
+        return
+    try:
+        _request(
+            client, "PUT", f"/issue/{key}",
+            {"update": {"labels": [{"remove": label} for label in targets]}},
+        )
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        log.warning("release_ticket_claim: removing %r from %s failed: %s", targets, key, e)
 
 
 PREREQS_RE = re.compile(
