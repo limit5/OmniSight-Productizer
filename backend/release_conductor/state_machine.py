@@ -121,6 +121,12 @@ ALLOWED_TRANSITIONS[STATE_ROLLED_BACK] = ALLOWED_TRANSITIONS[STATE_ROLLED_BACK] 
 # Freeze the value sets — keys are already frozen at module load.
 ALLOWED_TRANSITIONS = {k: frozenset(v) for k, v in ALLOWED_TRANSITIONS.items()}
 
+# Genuinely terminal states — no outgoing edges. ``rolled_back`` is
+# deliberately NOT listed: it keeps a single re-entry edge to
+# ``pending`` (AC #6), so a rolled-back release may still be "open"
+# pending an operator decision and stays visible on the G7 dashboard.
+TERMINAL_STATES: frozenset[str] = frozenset({STATE_DONE, STATE_FAILED})
+
 
 # ─── Error catalog (per ticket description) ──────────────────────────
 class IllegalStateTransition(RuntimeError):
@@ -678,6 +684,37 @@ def list_pending_approvals() -> list[dict[str, Any]]:
                 "requested_at": latest.get("at"),
             }
         )
+    return out
+
+
+def list_releases(*, include_terminal: bool = False) -> list[dict[str, Any]]:
+    """Return every ``release_state`` row, newest transition first.
+
+    Each dict is the :func:`_row_to_dict` shape plus an ``approval``
+    key carrying the trailing approval-* log entry (or ``None``). When
+    ``include_terminal`` is False (the default) rows whose ``state`` is
+    in :data:`TERMINAL_STATES` (``done`` / ``failed``) are omitted —
+    the G7 "Pending releases" dashboard (OP-943) only cares about
+    in-flight work. ``rolled_back`` rows are *kept*: they retain the
+    AC #6 re-entry edge and may still be awaiting an operator decision.
+    """
+    with _engine().connect() as conn:
+        rows = conn.execute(
+            sa.text(
+                "SELECT id, release_id, version, state, row_version, "
+                "       last_transition_at, transition_log_json, "
+                "       created_at "
+                "FROM release_state "
+                "ORDER BY last_transition_at DESC"
+            )
+        ).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        d = _row_to_dict(row)
+        if not include_terminal and d["state"] in TERMINAL_STATES:
+            continue
+        d["approval"] = _latest_approval_entry(d["transition_log"])
+        out.append(d)
     return out
 
 

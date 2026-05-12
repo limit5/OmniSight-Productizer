@@ -1477,6 +1477,8 @@ from backend.release_conductor import event_router as _release_event_router  # O
 _include_versioned_router(_release_event_router.router)
 from backend.api import release_approval as _release_approval_api_router  # OP-949 H4 operator approval API
 _include_versioned_router(_release_approval_api_router.router)
+from backend.api import release_state as _release_state_api_router  # OP-943 G7 pending-releases aggregator
+_include_versioned_router(_release_state_api_router.router)
 
 # Final mount: attach the aggregate v1 + v2 routers to the app. The
 # routers themselves were populated above via _include_versioned_router
