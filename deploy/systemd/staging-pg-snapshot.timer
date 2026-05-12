@@ -1,0 +1,24 @@
+; [OP-972] AUDIT-19b — daily 02:00 trigger for staging-pg-snapshot.service.
+;
+; Cadence: once a day at 02:00 (local time — the low-traffic window per the
+; AUDIT-19b AC; switch to "02:00 UTC" by appending " UTC" if the operator
+; prefers a fixed wall clock). RandomizedDelaySec spreads the start a little
+; so the snapshot doesn't collide head-on with the 02:17 backup-daily.timer.
+;
+; Persistent=true: if the host was off at 02:00 the run fires once on the
+; next boot rather than waiting another full day — a daily refresh that
+; silently skips for a long weekend is exactly the staleness this pipeline
+; exists to prevent.
+
+[Unit]
+Description=Daily 02:00 trigger for OmniSight staging PG snapshot restore (OP-972)
+
+[Timer]
+Unit=staging-pg-snapshot.service
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=5min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

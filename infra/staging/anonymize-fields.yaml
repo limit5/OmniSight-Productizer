@@ -1,0 +1,175 @@
+# [OP-972] AUDIT-19b — declarative PII-anonymization spec for the staging
+# Postgres snapshot pipeline.
+#
+# ONE source of truth, read by BOTH phases of the pipeline:
+#
+#   Phase 1 (6c, this sprint)  infra/staging/anonymize.sh parses `tables:`
+#                              and emits, for each table, either a
+#                              `DELETE FROM` (tables with `truncate: true` —
+#                              transient/sensitive data staging doesn't need)
+#                              or one UPDATE per declared column. It also
+#                              uses `pii_column_patterns:` as the
+#                              AnonymizeMissedField guard — any column in the
+#                              prod dump whose *name* matches a pattern MUST
+#                              be covered (declared, or in a truncated table)
+#                              or the restore is REFUSED. Leaking a freshly
+#                              added real-PII column to staging is
+#                              unacceptable, so the safe failure is "stop",
+#                              not "ship the leak".
+#   Phase 2 (6g, future 5c)    Greenmask consumes YAML natively. The
+#                              `greenmask:` block below is the canonical
+#                              translation of each Phase-1 `strategy` to a
+#                              Greenmask transformer, so the 6c -> 6g swap is
+#                              "replace anonymize.sh with a greenmask wrapper
+#                              that reads this same file" — no change here.
+#
+# This spec is a STARTING POINT covering the PII/secret columns visible in
+# backend/db.py at filing time. The AnonymizeMissedField guard is what makes
+# it safe to be incomplete: the first real run against a schema with an
+# uncovered PII-shaped column refuses loudly and tells the operator exactly
+# which column to add. Extend `tables:` (and `pii_column_patterns:` if the
+# column introduces a new naming convention); CI's
+# backend/tests/test_staging_snapshot_restore.py keeps the shape honest.
+
+version: 1
+
+# ── Strategies the Phase 1 SQL pass understands (column-level) ───────
+# Keep these uniqueness-preserving where the underlying column may carry a
+# UNIQUE constraint (email, etc.) — a constant value would collide and the
+# post-load UPDATE would fail. Hash/id-suffixed values stay distinct.
+#
+#   email_hash : 'redacted-' || left(md5(<col>::text), 12) || '@staging.test'
+#   test_user  : 'Test User ' || <id_column>::text       (needs id_column)
+#   null       : NULL                                    (column must be NULLable)
+#   redact     : '[redacted]'
+#   zero       : 0
+#
+# Table-level alternative:
+#   truncate: true  -> `DELETE FROM <table>;` (all rows). Use for purely
+#                      transient + sensitive tables (live session tokens,
+#                      TOTP secrets, the hash-chained audit log — which would
+#                      anyway be invalidated by row mutation). A truncated
+#                      table needs no `columns:` and counts as covering every
+#                      one of its columns for the AnonymizeMissedField guard.
+strategies: [email_hash, test_user, "null", redact, zero]
+
+# ── Tables / columns to anonymize ───────────────────────────────────
+# Tables/columns absent from a given prod dump are skipped with a `-- skip`
+# comment (a stale entry is harmless — only *missing* coverage of a present
+# PII-shaped column is fatal). `id_column` is required only for tables that
+# use the `test_user` strategy.
+tables:
+  # Accounts — the big PII table.
+  - schema: public
+    name: users
+    id_column: id
+    columns:
+      - { name: email,          strategy: email_hash }   # UNIQUE -> hash keeps it distinct
+      - { name: name,           strategy: test_user }
+      - { name: password_hash,  strategy: "null" }
+      - { name: oidc_subject,   strategy: "null" }
+
+  # Tenant org names can be customer-identifying.
+  - schema: public
+    name: tenants
+    columns:
+      - { name: name,           strategy: redact }
+
+  # Pending invites carry an invitee email + a token hash.
+  - schema: public
+    name: tenant_invites
+    columns:
+      - { name: email,          strategy: email_hash }
+      - { name: token_hash,     strategy: "null" }
+
+  # Forge credentials (PAT / SSH key / webhook secret material).
+  - schema: public
+    name: git_accounts
+    columns:
+      - { name: username,                 strategy: redact }
+      - { name: encrypted_token,           strategy: "null" }
+      - { name: encrypted_ssh_key,         strategy: "null" }
+      - { name: encrypted_webhook_secret,  strategy: "null" }
+      - { name: code_verifier,             strategy: "null" }
+
+  # API keys: the hashes/lookup indexes aren't reversible, but a staging copy
+  # of real key material is still credential-shaped — null it. (Staging seeds
+  # its own keys; see deploy/staging.)
+  - schema: public
+    name: api_keys
+    columns:
+      - { name: key_hash,         strategy: "null" }
+      - { name: key_lookup_index, strategy: "null" }
+
+  # Transient + sensitive — drop the rows entirely.
+  - schema: public
+    name: sessions          # live session tokens (KS-enveloped); staging gets fresh logins
+    truncate: true
+  - schema: public
+    name: user_mfa          # TOTP secrets / WebAuthn credentials
+    truncate: true
+  - schema: public
+    name: mfa_backup_codes  # hashed MFA recovery codes
+    truncate: true
+  - schema: public
+    name: audit_log         # per-tenant hash-chained log — row mutation breaks the chain;
+    truncate: true          # staging restarts it from genesis. Also avoids leaking PII
+                            # that may sit in before/after JSON blobs.
+
+# ── AnonymizeMissedField guard ──────────────────────────────────────
+# Case-insensitive regexes matched (fullmatch OR prefix-match) against bare
+# column names in the prod dump's CREATE TABLE statements. A match that is
+# NOT covered by `tables:` above => `AnonymizeMissedField` => restore
+# refused. These are the *high-confidence* PII/secret name conventions —
+# kept deliberately tight so the guard flags real leaks, not every innocent
+# `name`/`label` column. Widen it whenever a migration adds a new
+# PII-shaped naming convention (and add the column under its table above).
+pii_column_patterns:
+  - ".*email.*"
+  - ".*phone.*"
+  - "^ip$"
+  - ".*_ip$"
+  - "^ip_address$"
+  - ".*ssn.*"
+  - ".*passwd.*"
+  - ".*password.*"
+  - ".*secret.*"
+  - ".*token.*"
+  - ".*api_key.*"
+  - ".*private_key.*"
+  - ".*ssh_key.*"
+  - ".*credential.*"
+  - ".*code_verifier.*"
+  - "^oidc_subject$"
+  - ".*first_name.*"
+  - ".*last_name.*"
+  - ".*full_name.*"
+
+# ── Phase 2 (Greenmask) translation ─────────────────────────────────
+# Greenmask's own config is `dump.transformation[].transformers[]`; the 6g
+# wrapper builds that from `tables:` above using this map. Documented here
+# so the swap is mechanical and reviewable. See https://greenmask.io/ .
+greenmask:
+  # How each Phase-1 strategy maps onto a Greenmask transformer.
+  strategy_to_transformer:
+    email_hash:
+      name: Hash               # md5 of the source; the '@staging.test'
+      engine: md5              # suffix is applied by a chained Template
+      template: "redacted-{{ .GetColumnValue \"_hash\" | trunc 12 }}@staging.test"
+    test_user:
+      name: Template
+      template: "Test User {{ .GetColumnValue \"id\" }}"
+    "null":
+      name: SetNull
+    redact:
+      name: Replace
+      value: "[redacted]"
+    zero:
+      name: Replace
+      value: 0
+  # `truncate: true` tables map to Greenmask's `dump.transformation` being
+  # omitted for that table plus a `--exclude-table-data` entry (Greenmask
+  # dumps the schema but not the rows). Greenmask also preserves referential
+  # integrity natively, so when 6g lands the post-load-UPDATE ordering caveat
+  # in anonymize.sh disappears.
+  exclude_table_data_for_truncated: true
