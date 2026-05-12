@@ -1,0 +1,21 @@
+# Release-conductor notification routing — OP-942.
+#
+# The OP-721 bridge supplies the transports. This file selects the
+# operator-facing Slack channel label and email recipient per release
+# tier. If this file is missing, the backend falls back to the
+# `default` values below and logs RoutingConfigMissing.
+
+version: 1
+
+tiers:
+  default:
+    slack_channel: "#omnisight-releases"
+    email_recipient: "releases@sora.services"
+
+  rc:
+    slack_channel: "#releases-rc"
+    email_recipient: "releases@sora.services"
+
+  prod:
+    slack_channel: "#releases-prod"
+    email_recipient: "releases@sora.services"
