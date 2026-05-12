@@ -1,0 +1,91 @@
+; [OP-971] AUDIT-19a — systemd wrapper that activates the OP-767/878
+; staging compose stack under a managed lifecycle on the 5a host.
+;
+; This unit does NOT define any services itself — it wraps the existing
+; deploy/staging/docker-compose.yml shipped by OP-767/878:
+;
+;   ExecStartPre — infra/staging/verify-env-contract.sh refuses to start
+;                  the stack if the env file points at prod (prod DSN,
+;                  live API keys, missing environment=staging). A boot
+;                  with a fat-fingered .env.local fails loudly here
+;                  instead of silently bringing staging up against prod
+;                  Postgres. See the EnvContractViolation error code.
+;   ExecStart    — docker compose ... up -d --wait  (blocks until every
+;                  service healthcheck is green, so `systemctl start`
+;                  returns non-zero if the stack does not converge).
+;   ExecStartPost— curl the staging healthz endpoint; a 200 confirms the
+;                  Caddy ingress + backend pair came up. Non-200 fails
+;                  the unit and triggers ExecStop's `down`.
+;   ExecStop     — docker compose ... down  (clean teardown).
+;
+; Cgroup isolation (AC #5): staging is a second stack co-tenanted with
+; prod on the same box until the OP-927 dedicated staging host exists.
+; MemoryMax/CPUQuota/IOWeight cap it at <=30% of the box so a runaway
+; staging deploy (image build loop, leak, fork bomb in an agent task)
+; cannot starve prod. These apply to the whole cgroup subtree, which
+; includes the `docker compose` client *and* — because the unit runs in
+; the user manager's app.slice and docker is rootless-mode-agnostic here
+; only for the client — the orchestration overhead. The containers' own
+; mem_limit/mem_reservation in docker-compose.yml are the per-service
+; ceilings; this is the aggregate ceiling on the unit's own slice.
+;
+; cgroup v2 is required for the percentage-relative MemoryMax/CPUQuota
+; accounting used here. If the kernel only exposes cgroup v1 the user
+; manager will log "Failed to set MemoryMax" and the limits silently
+; do nothing — see CgroupV1Fallback in the runbook for the v1 fallback
+; (absolute MemoryMax=… bytes) or the decision to refuse to start.
+;
+; Install (user-level — no sudo; mirrors the staging-gate-* units):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/omnisight-staging-compose.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now omnisight-staging-compose.service
+;   loginctl enable-linger "$USER"   # so it survives logout / boots on start
+;
+; Verify:
+;   systemctl --user status omnisight-staging-compose
+;   docker ps --filter name=staging
+;   curl -fsS http://localhost:9000/healthz
+;   systemd-cgls /user.slice/user-1000.slice/user@1000.service/app.slice/omnisight-staging-compose.service
+
+[Unit]
+Description=OmniSight staging stack (docker compose up -d --wait) — OP-971
+Documentation=file:///home/user/sora-bridge/docs/operations/staging-environment-runbook.md
+; dockerd here is a system service; the user manager has no ordering edge
+; to it, so we only order after the network. The compose `up` retries
+; the socket itself; ExecStartPre's contract check does not need docker.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/user/sora-bridge/deploy/staging
+; environment=staging is part of the env contract verify-env-contract.sh
+; enforces; export it here too so the compose project + the contract
+; check agree even if the operator's .env / .env.local omits it.
+Environment=environment=staging
+Environment=OMNISIGHT_ENV=staging
+Environment=OMNISIGHT_STAGING_HEALTHZ_URL=http://localhost:9000/healthz
+; Optional per-host overrides (staging port, alternative env file path,
+; sandbox-key prefixes). `-` => optional; absence is not an error.
+EnvironmentFile=-/home/user/.config/omnisight/staging-compose.env
+ExecStartPre=/home/user/sora-bridge/infra/staging/verify-env-contract.sh
+ExecStart=/usr/bin/docker compose -f /home/user/sora-bridge/deploy/staging/docker-compose.yml up -d --wait --remove-orphans
+ExecStartPost=/usr/bin/curl -fsS --retry 12 --retry-delay 5 --retry-connrefused -o /dev/null ${OMNISIGHT_STAGING_HEALTHZ_URL}
+ExecStop=/usr/bin/docker compose -f /home/user/sora-bridge/deploy/staging/docker-compose.yml down
+; First boot pulls the GHCR backend/frontend images + builds nothing
+; (pull_policy: missing); allow 5 min. Subsequent boots converge in
+; seconds because `up -d --wait` short-circuits on already-healthy state.
+TimeoutStartSec=300
+TimeoutStopSec=90
+
+; ── Cgroup quota (AC #3 / AC #5) — staging may never take down prod ──
+; Percentages are relative to the host's total RAM / one CPU's worth of
+; runtime. Requires cgroup v2 (see header / runbook CgroupV1Fallback).
+MemoryMax=30%
+CPUQuota=30%
+IOWeight=50
+
+[Install]
+WantedBy=default.target

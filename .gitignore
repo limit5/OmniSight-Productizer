@@ -27,6 +27,8 @@ debug/
 .env*
 !.env.example
 !.env.test
+# OP-971: staging compose env template (placeholders only, no secrets)
+!infra/staging/.env.template
 
 # python
 backend/.venv/
