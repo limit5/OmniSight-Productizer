@@ -176,7 +176,7 @@ services:
     image: caddy:2-alpine
     restart: always
     ports:
-      - "${STAGING_HTTP_PORT:-8080}:80"
+      - "${STAGING_HTTP_PORT:-18080}:80"
       - "${STAGING_HTTPS_PORT:-8443}:443"
     volumes:
       - ./caddy.json:/etc/caddy/caddy.json:ro
