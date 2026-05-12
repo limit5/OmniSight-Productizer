@@ -175,6 +175,19 @@ async def close_pool() -> None:
     await pool.close()
 
 
+def is_initialized() -> bool:
+    """True iff the process-global pool has been created and not yet closed.
+
+    Cheap and never raises — the counterpart to :func:`get_pool` for code
+    paths that need to *decide* whether to lazy-init the pool rather than
+    assume the lifespan handler already did. Standalone scripts / cron
+    entry points (e.g. ``backend.agents.auto_promote_main``) call audit
+    helpers that consult this before falling back to env-driven lazy init
+    (see ``backend.audit._ensure_pool`` / OP-981).
+    """
+    return _pool is not None
+
+
 def get_pool() -> asyncpg.Pool:
     """Return the global pool or raise if not initialised.
 
