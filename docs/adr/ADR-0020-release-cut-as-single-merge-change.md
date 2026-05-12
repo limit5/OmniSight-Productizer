@@ -361,12 +361,52 @@ to project-global `[project] submitType = MERGE_ALWAYS` and re-run the §2
 (Screenshots / API output to be appended to this section by the AUDIT-26e
 operator, mirroring how OP-980 recorded its Phase-0 evidence.)
 
+## Follow-up — linear-history consumer re-audit (OP-1032)
+
+AUDIT-29d-4 / OP-1032 re-ran the OP-980 §4 14-consumer linear-history audit
+against the **as-shipped** code (after OP-982 / OP-983 / OP-984 / OP-985 landed).
+Full findings: `docs/audit/2026-05-13-linear-history-consumers.md`. Summary:
+
+- **12 of 14 consumers are merge-agnostic (OK)** — confirmed unchanged. The
+  release machinery keys on JIRA milestone state + recorded SHAs + semver tags,
+  not on "`main` is a linear superset of `develop`".
+- **Consumer #1 (`auto_promote_main`) — the §"Consequences/History" line "the
+  only two that break are `auto_promote_main.evaluate_fast_forward` (→ AUDIT-26d
+  redesigns it away)" is not yet true.** OP-983 (AUDIT-26d) rewrote the *push*
+  side (one merge commit instead of an N-change bulk chain — that part is done and
+  correct) but **left `evaluate_fast_forward` and its `main_only`-non-empty →
+  `blocked` routing intact** (`backend/agents/auto_promote_main.py:303-323`,
+  `:435-481`). Once `MERGE_ALWAYS` is live, the **second** release cut sees
+  `git log develop..main` non-empty (the prior cut's merge commit, which is a
+  *descendant* of the promoted develop tip, never an ancestor) → `status =
+  "blocked"` → `critical` alert + `outcome=non_ff`, the cut is never built. The
+  redesign §"Decision" 1 calls for — drop the linear pre-check, keep only the
+  `noop` short-circuit, let a real divergence surface as `MergeCommitConflict` —
+  still needs to be done. Tracked as an AUDIT-26d follow-up (OP-1032 §5.1); also
+  folds in the `backend/submit_rule.py` mirror gap noted in §"SSOT mirror".
+- **Consumer #2 (`auto_tag_release._update_release_branch`) — AUDIT-26a-3 was
+  never filed or landed.** `auto_tag_release.py:175-176` still cherry-picks
+  `main_sha` with no `-m 1`, which errors on a merge commit. One-line fix; tracked
+  as OP-1032 §5.2.
+- **AC §4 ("no regression after `MERGE_ALWAYS` active") is not yet checkable** —
+  the `refs/meta/config` flip is the still-pending AUDIT-26e operator step. The
+  single-cut path is covered by `backend/tests/test_release_cut_e2e.py`; the
+  second-cut path (where consumer #1 wedges) has no coverage and should get a test
+  in the OP-1032 §5.1 follow-up.
+
+Net: this ADR's *design* is sound and the two breaks remain exactly the two
+OP-980 §4 named — but their fixes are **not** both in code yet, contrary to what
+§"Consequences" implies. Do not flip `MERGE_ALWAYS` on (AUDIT-26e) until the
+OP-1032 §5.1 fix lands, or the second post-flip release cut will wedge
+`auto_promote_main`.
+
 ## References
 
 - ADR-0016 — D5 develop→main promotion via Gerrit review change (superseded by this ADR; the `milestone:R3-fastforward` path-C hook is reused)
 - ADR-0003 — Gerrit Code Review (the dual-sign gate; keep Gerrit close to stock)
 - ADR-0019 — `release:force-promote` operator override (sibling: how a META amendment + operator `+1` is the right path for policy relaxations)
 - OP-980 / AUDIT-26a — Phase 0 verification: `docs/audit/2026-05-12-audit-26-phase-0-verification.md` (Q1 ACL, Q2 `MERGE_ALWAYS` semantics, Q3 the merger-rule gap this ADR fills, Q4 the 14-consumer linear-history audit)
+- OP-1032 / AUDIT-29d-4 — linear-history consumer re-audit (post-implementation): `docs/audit/2026-05-13-linear-history-consumers.md` (re-verifies OP-980 §4 against the as-shipped code; surfaces the two still-unfixed `needs-fix` consumers — see §"Follow-up" above)
 - OP-962 / AUDIT-13b — `MainFastForwardMergerPlus2` (the doubly-keyed conditional `+2` this ADR generalises to a quad-key)
 - L-OP-692 — Gerrit 3.13 declarative submit-requirements pattern (`rules.pl` rejected)
 - `reference_gerrit_submit_requirements.md` — live submit-rule architecture (updated for `release-cut-promote` by OP-982)
