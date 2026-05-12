@@ -156,10 +156,26 @@
 [submit]
     mergeContent = true
 
-# Submit-Requirements (OP-692 / OP-694 / OP-962 — replace the
+# AUDIT-26 / ADR-0020 — release cut to `main` as a single merge change.
+# refs/heads/main switches to MERGE_ALWAYS so the release-cut change
+# (one merge commit pushed to refs/for/main by auto_promote_main —
+# AUDIT-26d) submits as exactly one merge commit, never an N-change
+# fast-forward chain (the OP-925 / AUDIT-13a bulk-chain failure mode).
+# The project-global submitType above stays REBASE_IF_NECESSARY for
+# every other branch.
+#
+# Deploy note (AUDIT-26e): if Gerrit 3.13 does not honour this per-ref
+# [submit "refs/heads/main"] form, move it to project-global
+# [project] submitType = MERGE_ALWAYS and re-confirm the develop /
+# release/* impact per
+# docs/audit/2026-05-12-audit-26-phase-0-verification.md §2.
+[submit "refs/heads/main"]
+    submitType = MERGE_ALWAYS
+
+# Submit-Requirements (OP-692 / OP-694 / OP-962 / OP-982 — replace the
 # originally-planned Prolog rules.pl, which Gerrit 3.13 rejects).
-# Together these blocks implement the ADR 0003 dual-sign gate plus the
-# ADR-0016 path-C carve-out.
+# Together these blocks implement the ADR 0003 dual-sign gate, the
+# ADR-0016 path-C carve-out, and the ADR-0020 release-cut promotion.
 
 [submit-requirement "Human-Plus-2"]
     description = Requires +2 from non-ai-reviewer group (CLAUDE.md L1 human hard gate). Conditional carve-out (OP-962 / ADR-0016 path C): NOT applicable to the develop->main auto-promote fast-forward change — that change carries the `milestone:R3-fastforward` hashtag AND targets branch:main, and is gated by MainFastForwardMergerPlus2 instead. EVERY other change on EVERY other branch — including any non-hashtagged change on main, or one carrying a different `milestone:*` hashtag — still requires the human +2. The carve-out is doubly-keyed on purpose (see error catalog `SubmitRuleOverScopes` in OP-962).
@@ -203,6 +219,46 @@
     description = auto-promote-bot or merger-bot +2 allowed only for milestone:R3-fastforward auto-promote changes on main
     applicableIf = hashtag:"milestone:R3-fastforward" AND branch:main
     submittableIf = (label:Code-Review=+2,group=merger-agent-bot) OR (label:Code-Review=+2,group=non-ai-reviewer)
+    canOverrideInChildProjects = false
+
+[submit-requirement "release-cut-promote"]
+    # OP-982 / AUDIT-26c / ADR-0020 — the release cut is ONE merge change
+    # on refs/heads/main (submitType=MERGE_ALWAYS, above; pushed to
+    # refs/for/main by auto_promote_main per AUDIT-26d), not an N-change
+    # fast-forward chain. This requirement generalises
+    # MainFastForwardMergerPlus2 from a doubly-keyed to a QUADRUPLY-keyed
+    # carve-out, and — unlike that rule — it is CO-EXIST, not substitute:
+    # it requires a merger-agent-bot +2 IN ADDITION TO the standing
+    # non-ai-reviewer (human) +2, so the CLAUDE.md L1 "human +2 required
+    # for merge" rule is untouched. The merger-bot +2 is the mechanical
+    # attestation ("this merge commit really is a clean promotion of
+    # accepted develop content"); the human +2 is the release
+    # authorisation. Both are needed.
+    #
+    # Applicability is QUADRUPLY keyed — a change must (1) target
+    # branch:main, (2) carry a topic matching ^release-v[0-9]+[.][0-9]+[.][0-9]+.*$
+    # (i.e. release-vX.Y.Z, tolerating -rcN / +build suffixes — written
+    # with [0-9]/[.] rather than \d/\. to avoid git-config backslash-
+    # escaping ambiguity; semantically identical), (3) carry the
+    # milestone:R3-fastforward hashtag (auto_promote_main emits it; an
+    # ai-reviewer-bot cannot forge it — no editHashtags on refs/for/* —
+    # see [access "refs/for/refs/heads/*"]), and (4) be authored by one
+    # of the release-cut identities (auto-promote-bot / claude-bot /
+    # codex-bot). A change missing ANY key falls through to the
+    # unconditional Human-Plus-2 gate — the SubmitRuleOverScopes
+    # regression invariant (tightened from OP-962's two keys to four).
+    #
+    # No-Veto (below) still applies, so a -1 (incl. the one the
+    # merger-bot casts when its pre-vote validation fails) hard-blocks.
+    #
+    # Transition: MainFastForwardMergerPlus2 above and the Human-Plus-2
+    # carve-out become redundant once auto_promote_main is rewritten
+    # (AUDIT-26d) to push the topic'd merge change; AUDIT-26f removes /
+    # re-keys them. They co-exist consistently in the interim (the
+    # stricter AND gate here wins for genuine release cuts). See ADR-0020.
+    description = Release-cut promotion to main; conditional merger-bot +2 acceptable when topic + hashtag + author match the auto-promote pattern.
+    applicableIf = branch:main AND topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ AND hashtag:"milestone:R3-fastforward" AND author:^auto-promote-bot$|^claude-bot$|^codex-bot$
+    submittableIf = (label:Code-Review=+2,group=merger-agent-bot) AND (label:Code-Review=+2,group=non-ai-reviewer)
     canOverrideInChildProjects = false
 
 [submit-requirement "No-Veto"]
