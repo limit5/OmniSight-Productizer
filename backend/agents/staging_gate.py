@@ -86,7 +86,7 @@ BRANCH = "develop"
 DEFAULT_CANARY_LOG = Path("/home/user/work/sora/logs/release-milestone/canary-status.jsonl")
 DEFAULT_SMOKE_LOG = Path("/home/user/work/sora/logs/release-milestone/smoke-status.jsonl")
 
-DEFAULT_STAGING_URL = "https://staging.sora.services"
+DEFAULT_STAGING_URL = "http://localhost:18080"
 DEFAULT_GERRIT_PROJECT = "omnisight/OmniSight-Productizer"
 
 # Liveness + readiness probes — ``/readyz`` only returns 200 when the

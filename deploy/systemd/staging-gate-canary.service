@@ -42,7 +42,7 @@ Environment=OMNISIGHT_GERRIT_SSH_HOST=codex-bot@sora.services
 Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
 Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
 Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
-Environment=OMNISIGHT_STAGING_URL=https://staging.sora.services
+Environment=OMNISIGHT_STAGING_URL=http://localhost:18080
 Environment=OMNISIGHT_RELEASE_CANARY_LOG=/home/user/work/sora/logs/release-milestone/canary-status.jsonl
 ; OP-965 / §6 — DSN for the release-audit trail (see header). Also a good
 ; place to put OMNISIGHT_STAGING_URL / probe overrides for this host.
