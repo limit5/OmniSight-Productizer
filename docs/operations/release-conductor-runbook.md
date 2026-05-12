@@ -323,7 +323,8 @@ result — see the `release_audit_outcome_chk` enum in
 - `config/release_notification_routing.yaml` (Slack/email routing)
 - `config/release_meta_description.md.template` (META description template)
 - `docs/sop/lessons/L-OP-874-jira-blockedby-direction-trap.md`
-- `docs/operations/release-cut-runbook.md` (R1 implementation reference)
+- `docs/operations/release-cut-runbook.md` (R1 implementation reference;
+  also hosts the R5 staging tip-match audit per OP-975/AUDIT-22)
 - `docs/operations/release-runbook.md` (R6-R10 implementation reference)
 - `docs/operations/release-notes-runbook.md` (R11 implementation reference)
 - Memory: `reference_release_workflow.md` (META-as-state-machine summary)
