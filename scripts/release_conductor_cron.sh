@@ -17,6 +17,8 @@ AGENT_CLASS="${OMNISIGHT_JIRA_AGENT_CLASS:-subscription-codex}"
 SEMVER_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-((rc|beta|alpha)[0-9]+))?$'
 HOTFIX_TARGET_RE='^v[0-9]+\.[0-9]+\.[0-9]+\+[1-9][0-9]*$'
 MAX_CONSECUTIVE_FAILURES=3
+LABEL_SKIP_AUTO="release:skip-auto-conductor"
+LABEL_FORCE_CREATE="release:force-create"
 
 mkdir -p "$STATE_DIR" "$(dirname "$AUDIT_LOG")"
 
@@ -127,6 +129,37 @@ for issue in payload.get("issues", []):
 PY
 }
 
+query_fix_version_labels() {
+  local version="$1"
+  if [[ -n "${RELEASE_CONDUCTOR_FIXVERSION_LABELS_CMD:-}" ]]; then
+    RELEASE_CONDUCTOR_VERSION="$version" bash -c "$RELEASE_CONDUCTOR_FIXVERSION_LABELS_CMD"
+    return
+  fi
+
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - "$AGENT_CLASS" "$version" <<'PY'
+import re
+import sys
+
+from backend.agents import jira_dispatch
+
+agent_class, version = sys.argv[1:3]
+client = jira_dispatch.make_client(agent_class)
+versions = jira_dispatch._request(client, "GET", f"/project/{client.project_key}/versions")
+labels = set()
+for row in versions:
+    if str(row.get("name") or "") != version:
+        continue
+    raw_labels = row.get("labels") or []
+    if isinstance(raw_labels, list):
+        labels.update(str(label) for label in raw_labels if label)
+    description = str(row.get("description") or "")
+    labels.update(re.findall(r"release:[A-Za-z0-9_-]+", description))
+    break
+for label in sorted(labels):
+    print(label)
+PY
+}
+
 meta_exists() {
   local version="$1"
   if [[ -n "${RELEASE_CONDUCTOR_META_EXISTS_CMD:-}" ]]; then
@@ -181,9 +214,31 @@ PY
 
 instantiate_meta() {
   local version="$1"
+  local force_create="${2:-0}"
   if [[ -n "${RELEASE_CONDUCTOR_INSTANTIATE_CMD:-}" ]]; then
-    RELEASE_CONDUCTOR_VERSION="$version" bash -c "$RELEASE_CONDUCTOR_INSTANTIATE_CMD"
+    RELEASE_CONDUCTOR_VERSION="$version" \
+      RELEASE_CONDUCTOR_FORCE_CREATE="$force_create" \
+      RELEASE_CONDUCTOR_FORCE_CREATE_WARNING="OPERATOR OVERRIDE: ${LABEL_FORCE_CREATE} bypassed milestone acceptance for ${version}." \
+      bash -c "$RELEASE_CONDUCTOR_INSTANTIATE_CMD"
     return
+  fi
+
+  if [[ "$force_create" == "1" ]]; then
+    local template
+    template="$(mktemp "${STATE_DIR}/force-create-meta-template.XXXXXX.md")"
+    {
+      printf '# OPERATOR OVERRIDE WARNING\n\n'
+      printf 'This RELEASE META was created because `%s` was present on fixVersion `%s`.\n\n' \
+        "$LABEL_FORCE_CREATE" "$version"
+      printf 'The milestone acceptance gate was NOT green at cron time. Treat this release as operator-forced until the acceptance evidence is reconciled.\n\n'
+      cat "$REPO_ROOT/config/release_meta_description.md.template"
+    } > "$template"
+    python3 "$REPO_ROOT/scripts/instantiate_release_meta.py" \
+      --version "$version" \
+      --meta-description-template "$template"
+    local status=$?
+    rm -f "$template"
+    return "$status"
   fi
 
   python3 "$REPO_ROOT/scripts/instantiate_release_meta.py" --version "$version"
@@ -295,7 +350,51 @@ process_hotfix_changes() {
 handle_version() {
   local version="$1"
   local failures
+  local label
+  local has_skip=0
+  local has_force=0
+  local invalid_labels=()
+  local labels_output
   failures="$(read_counter "$version")"
+
+  if ! labels_output="$(query_fix_version_labels "$version")"; then
+    notify_operator "LabelLookupFailed" "$version" "fixVersion label lookup failed; refusing to act"
+    log "refuse ${version}: fixVersion label lookup failed"
+    return 0
+  fi
+
+  while IFS= read -r label; do
+    [[ -n "$label" ]] || continue
+    case "$label" in
+      "$LABEL_SKIP_AUTO")
+        has_skip=1
+        ;;
+      "$LABEL_FORCE_CREATE")
+        has_force=1
+        ;;
+      *)
+        invalid_labels+=("$label")
+        ;;
+    esac
+  done <<< "$labels_output"
+
+  if (( ${#invalid_labels[@]} > 0 )); then
+    notify_operator "LabelInvalid" "$version" "invalid release conductor label(s): ${invalid_labels[*]}"
+    log "refuse ${version}: invalid release conductor label(s): ${invalid_labels[*]}"
+    return 0
+  fi
+
+  if (( has_skip == 1 && has_force == 1 )); then
+    notify_operator "LabelConflictBothSet" "$version" "${LABEL_SKIP_AUTO} and ${LABEL_FORCE_CREATE} are mutually exclusive"
+    log "refuse ${version}: mutually exclusive operator labels"
+    return 0
+  fi
+
+  if (( has_skip == 1 )); then
+    append_audit "OperatorSkipAutoConductor" "$version" "${LABEL_SKIP_AUTO} present; cron ignored fixVersion"
+    log "skip ${version}: ${LABEL_SKIP_AUTO} present"
+    return 0
+  fi
 
   if (( failures >= MAX_CONSECUTIVE_FAILURES )); then
     notify_operator "Backoff3Consecutive" "$version" "suppressed after ${failures} consecutive acceptance failures"
@@ -313,7 +412,7 @@ handle_version() {
     return 0
   fi
 
-  if ! acceptance_green "$version"; then
+  if (( has_force == 0 )) && ! acceptance_green "$version"; then
     failures=$((failures + 1))
     write_counter "$version" "$failures"
     append_audit "MilestoneAcceptanceCheckFailed" "$version" "consecutive_failures=${failures}"
@@ -325,9 +424,17 @@ handle_version() {
   fi
 
   reset_counter "$version"
-  if instantiate_meta "$version"; then
-    append_audit "ReleaseMetaInstantiated" "$version" "G1 instantiate_release_meta.py completed"
-    notify_operator "ReleaseMetaInstantiated" "$version" "RELEASE-${version} META instantiated"
+  if (( has_force == 1 )); then
+    append_audit "OperatorForceCreate" "$version" "${LABEL_FORCE_CREATE} present; bypassing milestone acceptance"
+  fi
+  if instantiate_meta "$version" "$has_force"; then
+    if (( has_force == 1 )); then
+      append_audit "ReleaseMetaInstantiated" "$version" "G1 instantiate_release_meta.py completed via ${LABEL_FORCE_CREATE}"
+      notify_operator "ReleaseMetaInstantiated" "$version" "RELEASE-${version} META instantiated via ${LABEL_FORCE_CREATE}"
+    else
+      append_audit "ReleaseMetaInstantiated" "$version" "G1 instantiate_release_meta.py completed"
+      notify_operator "ReleaseMetaInstantiated" "$version" "RELEASE-${version} META instantiated"
+    fi
     return 0
   fi
 

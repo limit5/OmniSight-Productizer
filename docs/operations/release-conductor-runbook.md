@@ -101,16 +101,50 @@ The terminal output prints the same map. Copy that block into the
 release operator log; it is the single source of truth for which
 ticket is which stage.
 
-## 4. Error catalog + exit codes
+## 4. Daily cron operator labels
+
+`scripts/release_conductor_cron.sh` normally creates a release META
+only after the fixVersion is SemVer-shaped, no live `RELEASE-vX.Y.Z`
+META exists, and the OP-868 milestone acceptance check is green.
+Operators may override that cron decision by adding exactly one
+release-conductor label to the JIRA fixVersion. If the JIRA UI exposes
+version labels, use that field; otherwise place the token as a standalone
+word in the fixVersion Description:
+
+| Label | Cron behavior | Audit event |
+|---|---|---|
+| `release:skip-auto-conductor` | Ignore this fixVersion. The cron does not run acceptance or instantiate a META. | `OperatorSkipAutoConductor` |
+| `release:force-create` | Create the META even when acceptance is not green. Existing META checks still run first. | `OperatorForceCreate` then `ReleaseMetaInstantiated` |
+
+`release:force-create` is an operator override, not a substitute for
+acceptance evidence. The cron prepends an `OPERATOR OVERRIDE WARNING`
+section to the generated META description before calling
+`scripts/instantiate_release_meta.py`, so every downstream reviewer can
+see that the milestone gate was bypassed at creation time.
+
+The labels are mutually exclusive. If both are present, the cron
+refuses to act, emits `LabelConflictBothSet`, and alerts through
+`RELEASE_CONDUCTOR_NOTIFY_CMD` when that hook is configured. If any
+other release-conductor label is present, for example a typo such as
+`release:force_create`, the cron refuses with `LabelInvalid` and alerts
+the operator.
+
+Recovery is label-only: add, remove, or correct the fixVersion label in
+JIRA and wait for the next daily cron run. No code change or manual
+state-file edit is required.
+
+## 5. Error catalog + exit codes
 
 | Exit | Error class | Meaning | Recovery |
 |---|---|---|---|
 | 0 | — | META + 13 children created and wired | proceed to R1 |
 | 1 | `MetaAlreadyExists` | A META for `vX.Y.Z` already exists | inspect `OP-...`; if it was Archived, rerun with `--force` |
 | 2 | `TemplateYAMLInvalid` | Schema validation failed | fix `config/release_template.yaml`; rerun `--dry-run` |
-| 3 | `BlockedByWiringFailed` | Tickets created but link wiring crashed | follow §5 (Rollback) |
+| 3 | `BlockedByWiringFailed` | Tickets created but link wiring crashed | follow §6 (Rollback) |
+| — | `LabelConflictBothSet` | `release:skip-auto-conductor` and `release:force-create` are both on the fixVersion | remove one label; the next cron run will re-evaluate |
+| — | `LabelInvalid` | The fixVersion has an unknown or malformed release-conductor label | correct the label; the next cron run will re-evaluate |
 
-## 5. Rollback
+## 6. Rollback
 
 If the script aborts after ticket creation but before completing the
 link wiring, it writes a rollback file:
@@ -122,7 +156,7 @@ link wiring, it writes a rollback file:
 The file contains every ticket key created during the run. Two
 supported recovery paths:
 
-### 5a. Operator deletes by hand
+### 6a. Operator deletes by hand
 
 ```bash
 jq -r '.ticket_keys | to_entries[] | .value' \
@@ -133,7 +167,7 @@ jq -r '.ticket_keys | to_entries[] | .value' \
 done
 ```
 
-### 5b. Cleanup script (G2, planned)
+### 6b. Cleanup script (G2, planned)
 
 `scripts/release_rollback.py` (not yet shipped) will consume the
 JSON and call DELETE for each key. Track it under the G2 follow-up.
@@ -141,7 +175,7 @@ JSON and call DELETE for each key. Track it under the G2 follow-up.
 After cleanup, re-run `scripts/instantiate_release_meta.py
 --version vX.Y.Z` from scratch.
 
-## 6. `--force` semantics
+## 7. `--force` semantics
 
 `--force` is **only** honoured when the existing META is in an
 Archived state. In every other state, the script still refuses and
@@ -158,7 +192,7 @@ Do NOT use `--force` to clobber an in-flight META. Delete the
 existing META manually, drop the rollback file, then rerun without
 `--force`.
 
-## 7. Template versioning
+## 8. Template versioning
 
 `config/release_template.yaml` carries a top-level `version: "v1"`.
 Bump it whenever:
@@ -171,7 +205,7 @@ Bump it whenever:
 The script records the template version on the META so retrospectives
 can correlate cycle-time data against a specific template revision.
 
-## 8. Drift guards
+## 9. Drift guards
 
 | Guard | Purpose |
 |---|---|
@@ -183,7 +217,7 @@ can correlate cycle-time data against a specific template revision.
 If any of these guards fail after a template edit, halt and reconcile
 before shipping the edit.
 
-## 9. After the META lands
+## 10. After the META lands
 
 The operator's daily loop on a live release:
 

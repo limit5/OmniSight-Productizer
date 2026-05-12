@@ -196,3 +196,103 @@ def test_hotfix_instantiate_failure_audited_not_fatal(tmp_path: Path) -> None:
     rows = _audit_rows(tmp_path)
     assert rows[-1]["event"] == "InstantiateHotfixMetaFailed"
     assert rows[-1]["fixVersion"] == "v1.2.4+1"
+
+
+# ── OP-940 (G4) — operator override labels ───────────────────────────
+
+
+def test_skip_auto_conductor_label_suppresses_acceptance_and_instantiation(tmp_path: Path) -> None:
+    _run_cron(
+        tmp_path,
+        RELEASE_CONDUCTOR_FIXVERSIONS_CMD="printf '%s\n' v9.99.0",
+        RELEASE_CONDUCTOR_FIXVERSION_LABELS_CMD="printf '%s\n' release:skip-auto-conductor",
+        RELEASE_CONDUCTOR_ACCEPTANCE_CMD="exit 42",
+        RELEASE_CONDUCTOR_INSTANTIATE_CMD="exit 42",
+    )
+
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["event"] == "OperatorSkipAutoConductor"
+    assert rows[-1]["fixVersion"] == "v9.99.0"
+    assert rows[-1]["detail"] == (
+        "release:skip-auto-conductor present; cron ignored fixVersion"
+    )
+
+
+def test_force_create_label_bypasses_acceptance_and_warns_instantiation(tmp_path: Path) -> None:
+    created = tmp_path / "created.txt"
+
+    _run_cron(
+        tmp_path,
+        RELEASE_CONDUCTOR_FIXVERSIONS_CMD="printf '%s\n' v9.99.0",
+        RELEASE_CONDUCTOR_FIXVERSION_LABELS_CMD="printf '%s\n' release:force-create",
+        RELEASE_CONDUCTOR_ACCEPTANCE_CMD="exit 42",
+        CREATED_FILE=str(created),
+        RELEASE_CONDUCTOR_INSTANTIATE_CMD=(
+            'printf "%s|%s|%s\n" "$RELEASE_CONDUCTOR_VERSION" '
+            '"$RELEASE_CONDUCTOR_FORCE_CREATE" '
+            '"$RELEASE_CONDUCTOR_FORCE_CREATE_WARNING" >> "$CREATED_FILE"'
+        ),
+    )
+
+    assert created.read_text().splitlines() == [
+        (
+            "v9.99.0|1|OPERATOR OVERRIDE: release:force-create "
+            "bypassed milestone acceptance for v9.99.0."
+        )
+    ]
+    assert [row["event"] for row in _audit_rows(tmp_path)][-3:] == [
+        "OperatorForceCreate",
+        "ReleaseMetaInstantiated",
+        "ReleaseMetaInstantiated",
+    ]
+
+
+def test_conflicting_operator_labels_refuse_and_alert(tmp_path: Path) -> None:
+    notified = tmp_path / "notified.txt"
+
+    _run_cron(
+        tmp_path,
+        RELEASE_CONDUCTOR_FIXVERSIONS_CMD="printf '%s\n' v9.99.0",
+        RELEASE_CONDUCTOR_FIXVERSION_LABELS_CMD=(
+            "printf '%s\n' release:skip-auto-conductor release:force-create"
+        ),
+        RELEASE_CONDUCTOR_ACCEPTANCE_CMD="exit 42",
+        RELEASE_CONDUCTOR_INSTANTIATE_CMD="exit 42",
+        NOTIFIED_FILE=str(notified),
+        RELEASE_CONDUCTOR_NOTIFY_CMD=(
+            'printf "%s %s %s\n" "$RELEASE_CONDUCTOR_EVENT" '
+            '"$RELEASE_CONDUCTOR_VERSION" "$RELEASE_CONDUCTOR_DETAIL" '
+            '>> "$NOTIFIED_FILE"'
+        ),
+    )
+
+    assert "LabelConflictBothSet v9.99.0" in notified.read_text()
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["event"] == "LabelConflictBothSet"
+    assert rows[-1]["detail"] == (
+        "release:skip-auto-conductor and release:force-create are mutually exclusive"
+    )
+
+
+def test_invalid_operator_label_refuses_and_alerts(tmp_path: Path) -> None:
+    notified = tmp_path / "notified.txt"
+
+    _run_cron(
+        tmp_path,
+        RELEASE_CONDUCTOR_FIXVERSIONS_CMD="printf '%s\n' v9.99.0",
+        RELEASE_CONDUCTOR_FIXVERSION_LABELS_CMD="printf '%s\n' release:force_create",
+        RELEASE_CONDUCTOR_ACCEPTANCE_CMD="exit 42",
+        RELEASE_CONDUCTOR_INSTANTIATE_CMD="exit 42",
+        NOTIFIED_FILE=str(notified),
+        RELEASE_CONDUCTOR_NOTIFY_CMD=(
+            'printf "%s %s %s\n" "$RELEASE_CONDUCTOR_EVENT" '
+            '"$RELEASE_CONDUCTOR_VERSION" "$RELEASE_CONDUCTOR_DETAIL" '
+            '>> "$NOTIFIED_FILE"'
+        ),
+    )
+
+    assert "LabelInvalid v9.99.0 invalid release conductor label(s): release:force_create" in (
+        notified.read_text()
+    )
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["event"] == "LabelInvalid"
