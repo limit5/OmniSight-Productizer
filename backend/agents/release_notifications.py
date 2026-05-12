@@ -324,3 +324,46 @@ def notify_jira_transition(
         }
     )
     return result
+
+
+def notify_release_event(
+    event: dict[str, Any],
+    *,
+    h2_available: bool = True,
+    routing_path: Path = DEFAULT_ROUTING_PATH,
+    notifier_factory: Callable[
+        [RoutingTarget],
+        operator_notifier.Notifier,
+    ] = _build_release_notifier,
+) -> dict[str, Any]:
+    """Use H6 event-driven fan-out, falling back to the G6 SSE path."""
+
+    if h2_available:
+        try:
+            from backend.release_conductor.event_handlers import notification
+
+            return notification.on_release_event(
+                event,
+                routing_path=routing_path,
+                notifier_factory=notifier_factory,
+            )
+        except Exception as exc:  # noqa: BLE001 -- fallback preserves G6 delivery
+            logger.exception(
+                "release notification H2 handler unavailable; falling back to G6 SSE path"
+            )
+            result = notify_jira_transition(
+                event,
+                routing_path=routing_path,
+                notifier_factory=notifier_factory,
+            )
+            result["fallback"] = "g6_sse"
+            result["fallback_reason"] = f"{type(exc).__name__}: {exc}"
+            return result
+
+    result = notify_jira_transition(
+        event,
+        routing_path=routing_path,
+        notifier_factory=notifier_factory,
+    )
+    result["fallback"] = "g6_sse"
+    return result

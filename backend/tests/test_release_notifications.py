@@ -168,17 +168,17 @@ def test_all_done_status_transitions_are_covered(tmp_path: Path) -> None:
 
 
 def test_jira_handler_returns_notification_result_for_release_done(monkeypatch) -> None:
-    """AC: SSE/JIRA listener path matches transition then invokes fan-out."""
+    """AC: H2/JIRA listener path matches transition then queues fan-out."""
     calls: list[dict] = []
 
     def fake_notify(event: dict) -> dict:
         calls.append(event)
-        return {"outcome": "notified", "slack_channel": "#releases-prod"}
+        return {"outcome": "queued", "slack_channel": "#releases-prod"}
 
-    monkeypatch.setattr(jira_handlers.release_notifications, "notify_jira_transition", fake_notify)
+    monkeypatch.setattr(jira_handlers.release_notifications, "notify_release_event", fake_notify)
 
     result = jira_handlers.on_issue_updated(_event())
 
     assert result["outcome"] == "advance_next"
-    assert result["notification"]["outcome"] == "notified"
+    assert result["notification"]["outcome"] == "queued"
     assert len(calls) == 1
