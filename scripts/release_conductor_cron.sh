@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # [OP-939] Daily release conductor cron skeleton.
+# [OP-941] G5 hotfix trigger: merged Gerrit changes labelled
+#          hotfix:cherry-pick-to=release/vX.Y.Z+N spawn a HOTFIX-vX.Y.Z+N META.
 #
 # Enumerates new SemVer JIRA fixVersions, runs the OP-868 milestone
 # acceptance check read-only, and invokes G1 only when the release is
-# ready and no RELEASE-vX.Y.Z META exists yet.
+# ready and no RELEASE-vX.Y.Z META exists yet. Then scans Gerrit for
+# merged hotfix-labelled changes and invokes G5 for each.
 
 set -euo pipefail
 
@@ -12,6 +15,7 @@ STATE_DIR="${RELEASE_CONDUCTOR_STATE_DIR:-${REPO_ROOT}/logs/release-conductor/st
 AUDIT_LOG="${RELEASE_CONDUCTOR_AUDIT_LOG:-${REPO_ROOT}/logs/release-conductor/audit.jsonl}"
 AGENT_CLASS="${OMNISIGHT_JIRA_AGENT_CLASS:-subscription-codex}"
 SEMVER_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-((rc|beta|alpha)[0-9]+))?$'
+HOTFIX_TARGET_RE='^v[0-9]+\.[0-9]+\.[0-9]+\+[1-9][0-9]*$'
 MAX_CONSECUTIVE_FAILURES=3
 
 mkdir -p "$STATE_DIR" "$(dirname "$AUDIT_LOG")"
@@ -185,6 +189,109 @@ instantiate_meta() {
   python3 "$REPO_ROOT/scripts/instantiate_release_meta.py" --version "$version"
 }
 
+# ── G5 hotfix trigger (OP-941) ───────────────────────────────────────
+
+# Emit "<gerrit-change-number> <vX.Y.Z+N>" lines for merged Gerrit
+# changes carrying a hotfix:cherry-pick-to=release/vX.Y.Z+N marker.
+# The default scan is best-effort (label/hashtag/commit-message
+# placement varies); operators override it with
+# RELEASE_CONDUCTOR_HOTFIX_CHANGES_CMD. Never fatal — a Gerrit outage
+# must not break the release-version loop.
+query_hotfix_changes() {
+  if [[ -n "${RELEASE_CONDUCTOR_HOTFIX_CHANGES_CMD:-}" ]]; then
+    bash -c "$RELEASE_CONDUCTOR_HOTFIX_CHANGES_CMD" || true
+    return
+  fi
+
+  PYTHONPATH="$REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}" python3 - "$AGENT_CLASS" <<'PY' || true
+import json
+import re
+import subprocess
+import sys
+
+from backend.agents import jira_dispatch
+
+agent_class = sys.argv[1]
+user, ssh_key = jira_dispatch._gerrit_auth_for_instance(agent_class)
+proc = subprocess.run(
+    [
+        "ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
+        "-i", str(ssh_key), "-p", str(jira_dispatch.GERRIT_SSH_PORT),
+        f"{user}@{jira_dispatch.GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON", "--current-patch-set",
+        "status:merged", "-age:30d", "limit:200",
+    ],
+    capture_output=True, text=True, check=True,
+)
+pat = re.compile(r"hotfix:cherry-pick-to=release/(v\d+\.\d+\.\d+\+[1-9]\d*)")
+seen = set()
+for line in proc.stdout.splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    payload = json.loads(line)
+    if "project" not in payload:
+        continue  # trailing stats row
+    haystack = " ".join([
+        str(payload.get("commitMessage") or ""),
+        " ".join(payload.get("hashtags") or []),
+        str(payload.get("topic") or ""),
+    ])
+    m = pat.search(haystack)
+    if not m:
+        continue
+    number = str(payload.get("number") or payload.get("_number") or "")
+    if not number or number in seen:
+        continue
+    seen.add(number)
+    print(f"{number} {m.group(1)}")
+PY
+}
+
+instantiate_hotfix() {
+  local change="$1"
+  local target="$2"
+  if [[ -n "${RELEASE_CONDUCTOR_INSTANTIATE_HOTFIX_CMD:-}" ]]; then
+    RELEASE_CONDUCTOR_HOTFIX_CHANGE="$change" \
+      RELEASE_CONDUCTOR_HOTFIX_TARGET="$target" \
+      bash -c "$RELEASE_CONDUCTOR_INSTANTIATE_HOTFIX_CMD"
+    return
+  fi
+
+  python3 "$REPO_ROOT/scripts/instantiate_hotfix_meta.py" \
+    --from-change "$change" --target "$target" --repo "$REPO_ROOT"
+}
+
+handle_hotfix() {
+  local change="$1"
+  local target="$2"
+  if instantiate_hotfix "$change" "$target"; then
+    append_audit "HotfixMetaInstantiated" "$target" \
+      "G5 instantiate_hotfix_meta.py change=${change} (created or idempotent skip)"
+    notify_operator "HotfixMetaInstantiated" "$target" \
+      "HOTFIX-${target} META from merged Gerrit change ${change}"
+    return 0
+  fi
+
+  local rc=$?
+  append_audit "InstantiateHotfixMetaFailed" "$target" \
+    "G5 exit=${rc} change=${change}; retry tomorrow"
+  log "instantiate hotfix failed for ${target} (change ${change}, exit ${rc}); retrying tomorrow"
+  return 0
+}
+
+process_hotfix_changes() {
+  local change target
+  while IFS=' ' read -r change target _; do
+    [[ -n "$change" && -n "$target" ]] || continue
+    if [[ "$target" =~ $HOTFIX_TARGET_RE ]]; then
+      handle_hotfix "$change" "$target"
+    else
+      append_audit "HotfixTriggerSkipped" "$target" "change=${change} target not vX.Y.Z+N"
+    fi
+  done < <(query_hotfix_changes)
+}
+
 handle_version() {
   local version="$1"
   local failures
@@ -244,12 +351,15 @@ main() {
   if (( ${#versions[@]} == 0 )); then
     append_audit "NoFixVersions" "" "no vX.Y.Z fixVersions created in last 7 days"
     log "no recent semver fixVersions"
-    return 0
+  else
+    for version in "${versions[@]}"; do
+      handle_version "$version"
+    done
   fi
 
-  for version in "${versions[@]}"; do
-    handle_version "$version"
-  done
+  # G5 (OP-941): hotfix-labelled merged changes always get scanned,
+  # independent of whether any new release fixVersions showed up.
+  process_hotfix_changes
 }
 
 main "$@"

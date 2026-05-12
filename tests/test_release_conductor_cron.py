@@ -27,6 +27,10 @@ def _run_cron(tmp_path: Path, **overrides: str) -> subprocess.CompletedProcess[s
             "RELEASE_CONDUCTOR_META_EXISTS_CMD": "exit 1",
             "RELEASE_CONDUCTOR_ACCEPTANCE_CMD": "exit 0",
             "RELEASE_CONDUCTOR_INSTANTIATE_CMD": "true",
+            # OP-941: keep the hotfix scan deterministic + offline by
+            # default (tests opt into a payload via this override).
+            "RELEASE_CONDUCTOR_HOTFIX_CHANGES_CMD": "true",
+            "RELEASE_CONDUCTOR_INSTANTIATE_HOTFIX_CMD": "true",
         }
     )
     env.update(overrides)
@@ -137,3 +141,58 @@ def test_existing_meta_suppresses_acceptance_and_instantiation(tmp_path: Path) -
     rows = _audit_rows(tmp_path)
     assert rows[-1]["event"] == "ExistingMetaSuppress"
     assert rows[-1]["fixVersion"] == "v9.99.0"
+
+
+# ── OP-941 (G5) — hotfix trigger ─────────────────────────────────────
+
+
+def test_hotfix_labelled_change_instantiates_hotfix_meta(tmp_path: Path) -> None:
+    invoked = tmp_path / "hotfix_invoked.txt"
+    notified = tmp_path / "notified.txt"
+
+    _run_cron(
+        tmp_path,
+        RELEASE_CONDUCTOR_FIXVERSIONS_CMD="true",
+        RELEASE_CONDUCTOR_HOTFIX_CHANGES_CMD="printf '%s\n' '95001 v1.2.4+1'",
+        INVOKED_FILE=str(invoked),
+        NOTIFIED_FILE=str(notified),
+        RELEASE_CONDUCTOR_INSTANTIATE_HOTFIX_CMD=(
+            'printf "%s %s\n" "$RELEASE_CONDUCTOR_HOTFIX_CHANGE" '
+            '"$RELEASE_CONDUCTOR_HOTFIX_TARGET" >> "$INVOKED_FILE"'
+        ),
+        RELEASE_CONDUCTOR_NOTIFY_CMD=(
+            'printf "%s %s\n" "$RELEASE_CONDUCTOR_EVENT" '
+            '"$RELEASE_CONDUCTOR_VERSION" >> "$NOTIFIED_FILE"'
+        ),
+    )
+
+    assert invoked.read_text().splitlines() == ["95001 v1.2.4+1"]
+    assert "HotfixMetaInstantiated v1.2.4+1" in notified.read_text()
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["event"] == "HotfixMetaInstantiated"
+    assert rows[-1]["fixVersion"] == "v1.2.4+1"
+
+
+def test_hotfix_malformed_target_is_skipped(tmp_path: Path) -> None:
+    _run_cron(
+        tmp_path,
+        RELEASE_CONDUCTOR_FIXVERSIONS_CMD="true",
+        RELEASE_CONDUCTOR_HOTFIX_CHANGES_CMD="printf '%s\n' '95001 release/not-semver'",
+        RELEASE_CONDUCTOR_INSTANTIATE_HOTFIX_CMD="exit 42",
+    )
+
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["event"] == "HotfixTriggerSkipped"
+
+
+def test_hotfix_instantiate_failure_audited_not_fatal(tmp_path: Path) -> None:
+    _run_cron(
+        tmp_path,
+        RELEASE_CONDUCTOR_FIXVERSIONS_CMD="true",
+        RELEASE_CONDUCTOR_HOTFIX_CHANGES_CMD="printf '%s\n' '95001 v1.2.4+1'",
+        RELEASE_CONDUCTOR_INSTANTIATE_HOTFIX_CMD="exit 7",
+    )
+
+    rows = _audit_rows(tmp_path)
+    assert rows[-1]["event"] == "InstantiateHotfixMetaFailed"
+    assert rows[-1]["fixVersion"] == "v1.2.4+1"
