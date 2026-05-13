@@ -59,6 +59,7 @@ from backend.agents import (
     orphan_salvage,
     runner_metrics_recorder,
     runner_failure_classifier,
+    runner_progress,
     runner_sandbox,
     runner_workspace_safety,
     scheduler,
@@ -1792,6 +1793,34 @@ def main() -> int:
             )
             return 1
 
+        # SP-B-X-002a / OP-1060 — C1 resume surface. After the worktree
+        # is synced (so `git stash list` reflects the real local state),
+        # cross-check progress.txt against the live stash listing and
+        # post the AC §C1 ``[progress-recovered]`` comment on a hit.
+        # Read failures + missing-progress are silently OK — this is a
+        # passive recovery surface, not a gate.
+        try:
+            recovered = runner_progress.find_recovered_snapshot(worktree_path)
+        except Exception as exc:  # noqa: BLE001 — recovery surface must not block pickup
+            print(
+                f"[runner] progress recovery probe failed for {snapshot.key}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            recovered = None
+        if recovered is not None:
+            try:
+                jira_dispatch.add_comment(
+                    client, snapshot.key,
+                    runner_progress.format_recovered_comment(recovered),
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] progress-recovered comment post failed for "
+                    f"{snapshot.key}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+
     # Step 3: pre-pickup check now runs against fresh worktree, not stale main repo.
     # OP-687: a "mutex conflict" reason means a sibling ticket holds the same
     # mutex:<path>; the dispatch loop already skipped to this candidate, so a
@@ -1948,6 +1977,21 @@ def main() -> int:
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)
 
+    # SP-B-X-002a / OP-1060 — C1 FSM boundary: idle → picking_up done.
+    # If the pickup-prep step (sentinel write, sync, hook install) left
+    # the worktree dirty, snapshot now so a kill -9 during the CLI run
+    # below preserves whatever the pre-CLI prep produced. The clean
+    # case writes a row with empty ref + label — that's truthful and
+    # the recovery probe correctly treats it as nothing-to-restore.
+    try:
+        runner_progress.record_phase(worktree_path, "picking_up", snapshot.key)
+    except Exception as exc:  # noqa: BLE001 — durability failure is logged but non-fatal
+        print(
+            f"[runner] progress.record_phase(picking_up) failed for "
+            f"{snapshot.key}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
     # SP-B-X-004 / OP-1062: freeze a pickup-time view of the mutable
     # JIRA fields (assignee, status, labels, Blocks issuelinks) so the
     # phase-boundary rechecks below can diff against it and bail out
@@ -2055,6 +2099,24 @@ def main() -> int:
             # ensure_change_ids rebases onto sync_result.develop_sha (Phase 1.5 fix per L16),
             # not local main; codex's commits get Change-Id via commit-msg hook.
             jira_dispatch.ensure_change_ids(worktree_path, base_ref=sync_result.develop_sha)
+            # SP-B-X-002a / OP-1060 — C1 FSM boundary: working → submitting.
+            # Placed AFTER ``ensure_change_ids`` on purpose: that helper
+            # raises ``WorktreeDirtyError`` on the OP-827 wedge (CLI
+            # wrote files without committing). Snapshotting *before*
+            # the dirty-check would silently sweep those uncommitted
+            # files into a stash and let the push proceed, masking the
+            # very signal OP-827 was filed to catch. After
+            # ``ensure_change_ids`` succeeds the worktree is canonically
+            # clean, so the snapshot is a no-op but the progress.txt
+            # row monotonically advances to "working" complete.
+            try:
+                runner_progress.record_phase(worktree_path, "working", snapshot.key)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] progress.record_phase(working) failed for "
+                    f"{snapshot.key}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
             # SP-B-X-004 / OP-1062 — TOCTOU reread #2: between `committing`
             # (ensure_change_ids stamped Change-Ids) and the actual push.
             # Same mutation classes; rate-limit reuses the #1 fetch when
@@ -2171,6 +2233,18 @@ def main() -> int:
 
         if push_result.success:
             print(f"[runner] pushed Change #{push_result.change_number}: {push_result.change_url}")
+            # SP-B-X-002a / OP-1060 — C1 FSM boundary: submitting → completed.
+            # Post-push the worktree is normally clean (commits landed,
+            # rebase tidied); the clean-row case is the expected steady
+            # state and the recovery probe handles it correctly.
+            try:
+                runner_progress.record_phase(worktree_path, "submitting", snapshot.key)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] progress.record_phase(submitting) failed for "
+                    f"{snapshot.key}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
             if push_result.recovery_note:
                 jira_dispatch.add_comment(
                     client,
