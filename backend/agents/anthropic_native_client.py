@@ -35,6 +35,17 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from backend.agents.anthropic_sdk_audit import assert_no_deprecated_beta_messages_call
+from backend.agents.stale_refresh_strategy import (
+    build_refresh_marker,
+    build_skip_marker,
+    estimate_tokens,
+    extract_mutated_path,
+    get_refresh_every_n,
+    get_refresh_max_tokens,
+    get_refresh_strategy,
+    pick_refresh_target,
+    read_file_for_refresh,
+)
 from backend.agents.system_prompt_builder import inject_tool_catalog
 from backend.agents.tool_dispatcher import ToolDispatcher, get_default_dispatcher
 from backend.agents.tool_schemas import to_anthropic_tools
@@ -367,6 +378,63 @@ class AnthropicClient:
         """Expose the SDK `messages` namespace for low-level access (batches, etc)."""
         return self._client.messages
 
+    @staticmethod
+    def _maybe_inject_stale_refresh(
+        *,
+        iteration: int,
+        messages: list[dict[str, Any]],
+        transcript: list[dict[str, Any]],
+        touched_files: dict[str, int],
+        every_n: int,
+        strategy: str,
+        max_tokens: int,
+    ) -> None:
+        """C5 refresh: every ``every_n`` iterations append a synthetic view block.
+
+        The block is appended as an extra ``text`` content block on the most
+        recent ``user`` message — keeps the user/assistant alternation that
+        Anthropic enforces while making the fresh file content visible on the
+        next API call. Cost-gated by ``max_tokens`` to bound the injection.
+        """
+        if every_n <= 0 or iteration % every_n != 0:
+            return
+        if not touched_files or not messages or messages[-1].get("role") != "user":
+            return
+
+        target = pick_refresh_target(
+            touched_files, strategy, iteration=iteration
+        )
+        if not target:
+            return
+
+        content = read_file_for_refresh(target)
+        if content is None:
+            return
+
+        tokens = estimate_tokens(content)
+        if tokens > max_tokens:
+            logger.info(build_skip_marker(target, iteration, tokens, max_tokens))
+            return
+
+        marker = build_refresh_marker(target, iteration, strategy)
+        logger.info(marker)
+        injected_block = {"type": "text", "text": f"{marker}\n\n{content}"}
+
+        last_msg = messages[-1]
+        existing = last_msg.get("content")
+        if isinstance(existing, list):
+            last_msg["content"] = [*existing, injected_block]
+        elif isinstance(existing, str):
+            last_msg["content"] = [
+                {"type": "text", "text": existing},
+                injected_block,
+            ]
+        else:
+            last_msg["content"] = [injected_block]
+        transcript.append(
+            {"role": "user", "content": [injected_block], "stale_refresh": True}
+        )
+
     def simple(
         self,
         *,
@@ -505,8 +573,23 @@ class AnthropicClient:
         stop_reason = "unknown"
         final_text = ""
 
+        # C5 semantic-drift refresh policy (SP-B-X-006 / OP-1064).
+        touched_files: dict[str, int] = {}
+        refresh_every_n = get_refresh_every_n()
+        refresh_strategy = get_refresh_strategy()
+        refresh_max_tokens = get_refresh_max_tokens()
+
         while iterations < max_iterations:
             iterations += 1
+            self._maybe_inject_stale_refresh(
+                iteration=iterations,
+                messages=messages,
+                transcript=transcript,
+                touched_files=touched_files,
+                every_n=refresh_every_n,
+                strategy=refresh_strategy,
+                max_tokens=refresh_max_tokens,
+            )
             kwargs: dict[str, Any] = {
                 "model": model or self.default_model,
                 "max_tokens": max_tokens or self.max_tokens_default,
@@ -559,6 +642,12 @@ class AnthropicClient:
                         "is_error": result.is_error,
                     }
                 )
+                if not result.is_error:
+                    mutated_path = extract_mutated_path(tu)
+                    if mutated_path:
+                        touched_files[mutated_path] = (
+                            touched_files.get(mutated_path, 0) + 1
+                        )
 
             # Feed all tool_results back in one user message — Anthropic's
             # convention for multi-tool responses in a single turn.
