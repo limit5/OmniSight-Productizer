@@ -31,6 +31,7 @@ on:
   push:
     branches:
       - main
+      - develop
     tags:
       - "v*"
   workflow_dispatch:
@@ -101,16 +102,31 @@ jobs:
         # tags only apply when the trigger was a `v*` tag push — for
         # main-branch pushes we deliberately do NOT touch :latest, so
         # :latest stays pinned to the last release.
+        #
+        # OP-1035: also emit the :<full-40-sha> tag (always) and the
+        # :develop-latest floating tag (on develop pushes). staging-sync.sh
+        # uses git rev-parse HEAD which is the full 40-char SHA — without
+        # the full-SHA tag staging cannot pull per-develop-tip images.
         run: |
           set -euo pipefail
           short_sha="$(echo '${{ github.sha }}' | cut -c1-12)"
+          full_sha="${{ github.sha }}"
           base="${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}"
           tags="${base}:sha-${short_sha}"
+          # Full-SHA tag for staging-sync compatibility (OP-1035).
+          tags="${tags}"$'\n'"${base}:${full_sha}"
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             version="${GITHUB_REF#refs/tags/}"
             tags="${tags}"$'\n'"${base}:${version}"$'\n'"${base}:latest"
             echo "is_release=true"  >> "$GITHUB_OUTPUT"
             echo "version=${version}" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == refs/heads/develop ]]; then
+            # Floating "develop-latest" pointer for ops convenience. The
+            # immutable :sha-<short> and :<full-sha> tags remain canonical;
+            # :develop-latest just gives operators a stable name to chase.
+            tags="${tags}"$'\n'"${base}:develop-latest"
+            echo "is_release=false" >> "$GITHUB_OUTPUT"
+            echo "version="          >> "$GITHUB_OUTPUT"
           else
             echo "is_release=false" >> "$GITHUB_OUTPUT"
             echo "version="          >> "$GITHUB_OUTPUT"
