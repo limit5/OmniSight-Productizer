@@ -34,6 +34,9 @@ the bridge's forward-only JIRA transitions: id=3 (`In Progress` ->
 (`Approved` -> `Published`).
 Set `OMNISIGHT_PYTHON=/path/to/python` in the unit environment if the host
 must use a project venv instead of `python3`.
+Set `OMNISIGHT_ARCHIVE_AGE_DAYS` to control the Published-to-Archived
+retention window; unset defaults to 30 days. Tickets labelled
+`coord-keep-open` are excluded from automatic archive.
 
 The daemon connects with:
 
@@ -70,6 +73,11 @@ Heartbeat lines use `event=heartbeat` and include:
   `Published` after Gerrit reported a merged develop change.
 - `event=ticket_already_published`: matching ticket was already terminal;
   the duplicate merge/catchup event was a harmless no-op.
+- `event=ticket_auto_archived`: matching ticket was already Published and
+  older than `OMNISIGHT_ARCHIVE_AGE_DAYS`, so the bridge moved it to
+  Archived and wrote a coordinator decision-log entry.
+- `event=archive_keep_open_skip`: matching ticket carried
+  `coord-keep-open`, so automatic archive was skipped.
 - `event=ticket_archived_skip`: matching ticket was operator-archived; the
   bridge does not unarchive tickets automatically.
 - `event=ticket_unexpected_status_skip`: matching ticket is in an unknown
@@ -91,3 +99,20 @@ For any result, check the Gerrit change linked by the
 the bridge should publish it during startup catchup. The expected steady
 state after first run is zero merged tickets left in these predecessor
 states.
+
+## Daily Archive Sweep
+
+Install the daily sweep in the same user-level systemd scope as the bridge:
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp deploy/systemd/gerrit-jira-archive-sweep.service ~/.config/systemd/user/
+cp deploy/systemd/gerrit-jira-archive-sweep.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now gerrit-jira-archive-sweep.timer
+```
+
+The timer runs `python3 -m backend.agents.gerrit_jira_bridge
+--archive-sweep-once` daily. Each Archived transition posts a JIRA comment
+and appends `action_type=auto_archive_published_ticket` to the coordinator
+decision log.
