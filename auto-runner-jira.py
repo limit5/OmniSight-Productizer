@@ -51,6 +51,7 @@ from backend.agents import (
     capability_matrix,
     circuit_breaker,
     failure_graph,
+    jira_authority_check,
     gerrit_jira_bridge,
     live_state_check,
     memory_writeback,
@@ -76,6 +77,7 @@ AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "default"
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
+_RUNNER_ACTIVE_ITERATION = 0
 
 # OP-858 (C8): pickup-time failure-graph context injection. Until C2's
 # runner_incidents Postgres table ships, the runner reads a JSON fixture
@@ -1491,6 +1493,7 @@ def _handle_toctou_abort(
     recheck: "live_state_check.BoundaryRecheckResult",
     *,
     phase: str,
+    claim: "jira_dispatch.ClaimResult | None" = None,
 ) -> int:
     """Apply the JIRA recovery action for a transition-boundary TOCTOU abort.
 
@@ -1503,6 +1506,41 @@ def _handle_toctou_abort(
     wrong (ticket has already walked forward and a duplicate push
     would land twice).
     """
+    if recheck.action in (
+        "abort_assignee_changed",
+        "abort_reverted",
+        "abort_already_advanced",
+    ):
+        try:
+            change = jira_authority_check.latest_authority_change(client, key)
+        except Exception as exc:  # noqa: BLE001 — fall back to the C3a path
+            print(
+                f"[runner] authority changelog check failed for {key}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            change = None
+        if change is not None and change.author.kind == "human":
+            author_id = change.author.account_id or change.author.display_name
+            comment = (
+                f"[runner-yielded-to-human-authority] author={author_id} "
+                f"change={change.field} {change.old}→{change.new}; pausing."
+            )
+            print(
+                f"[runner] {key} yielding to human authority: {comment}",
+                file=sys.stderr,
+            )
+            try:
+                jira_dispatch.add_comment(client, key, comment)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] human-authority comment post failed for {key}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+            _release_ticket_claim_if_acquired(client, key, claim)
+            return 0
+
     audit = f"[runner-toctou:{phase}:{recheck.action}] {recheck.reason}"
     print(f"[runner] {key} toctou abort: {audit}", file=sys.stderr)
     try:
@@ -1524,6 +1562,12 @@ def _handle_toctou_abort(
             file=sys.stderr,
         )
     return 1
+
+
+def _runner_active_marker(ticket: str, phase: str) -> str:
+    global _RUNNER_ACTIVE_ITERATION
+    _RUNNER_ACTIVE_ITERATION += 1
+    return f"[runner-active: {ticket} {phase} {_RUNNER_ACTIVE_ITERATION}]"
 
 
 def _run_git_text(worktree_path: Path, args: list[str], *, timeout: int = 20) -> str:
@@ -1663,6 +1707,7 @@ def main() -> int:
         f"[runner] agent_class={AGENT_CLASS}, instance_id={INSTANCE_ID}, "
         f"bot={_bot_username()}, dry_run={DRY_RUN}"
     )
+    print(_runner_active_marker(TARGET_OVERRIDE or "<selection>", "tick"))
     # OP-845: log sandbox state once at startup so journalctl shows the
     # operator whether bubblewrap is wired before any ticket is processed.
     _sandbox_enforce = os.environ.get(runner_sandbox.ENV_ENFORCE, "0")
@@ -1741,6 +1786,7 @@ def main() -> int:
         snapshot = winner
 
     print(f"[runner] selected: {snapshot.key} (component={snapshot.component})")
+    print(_runner_active_marker(snapshot.key, "selected"))
 
     merged_info = already_merged_in_gerrit(snapshot.key)
     if merged_info:
@@ -2089,7 +2135,7 @@ def main() -> int:
             )
             if not recheck.ok:
                 return _handle_toctou_abort(
-                    client, snapshot.key, recheck, phase="pre-submit",
+                    client, snapshot.key, recheck, phase="pre-submit", claim=claim,
                 )
         # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
         # Phase 3 SHIPPED in OP-689; events-stream consumer:
@@ -2127,7 +2173,7 @@ def main() -> int:
                 )
                 if not recheck.ok:
                     return _handle_toctou_abort(
-                        client, snapshot.key, recheck, phase="pre-push",
+                        client, snapshot.key, recheck, phase="pre-push", claim=claim,
                     )
             push_result = jira_dispatch.push_to_gerrit_for_review(
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
