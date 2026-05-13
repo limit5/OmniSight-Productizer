@@ -1022,6 +1022,7 @@ def _finalize_under_review(
     client: "jira_dispatch.DispatchClient",
     key: str,
     gerrit_change_url: str,
+    change_number: int | None = None,
 ) -> None:
     """Phase 1.5 post-push idempotency block (OP-691).
 
@@ -1046,8 +1047,23 @@ def _finalize_under_review(
         return
 
     try:
-        jira_dispatch.post_runner_pushed_comment(client, key, gerrit_change_url)
-        transitioned = jira_dispatch.transition_to_under_review_if_needed(client, key)
+        idem_key = jira_dispatch._under_review_idem_key(
+            key,
+            change_number=change_number,
+            change_url=gerrit_change_url,
+        )
+        jira_dispatch.post_runner_pushed_comment(
+            client,
+            key,
+            gerrit_change_url,
+            idem_key=f"{idem_key}-comment",
+        )
+        transitioned = jira_dispatch.transition_to_under_review_if_needed(
+            client,
+            key,
+            idem_key=idem_key,
+            change_number=change_number,
+        )
     except Exception as e:  # noqa: BLE001 — any 4xx etc → log skip, do not crash
         print(f"[runner] transition to Under Review failed ({type(e).__name__}: {e}); "
               f"Gerrit push already succeeded — logging skip comment", file=sys.stderr)
@@ -1068,6 +1084,26 @@ def _finalize_under_review(
     else:
         print(f"[runner] {key} already Under Review at transition step (raced); "
               f"comment posted, transition skipped")
+
+
+def _finalize_successful_push(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    push_result: "jira_dispatch.GerritPushResult",
+) -> None:
+    _finalize_under_review(
+        client,
+        key,
+        push_result.change_url,
+        change_number=push_result.change_number,
+    )
+    if push_result.post_push_warning:
+        jira_dispatch.add_comment(
+            client,
+            key,
+            "[runner-pre-review-self-fix-warning] "
+            f"{push_result.post_push_warning}",
+        )
 
 
 def _run_memory_writeback(
@@ -1978,7 +2014,7 @@ def main() -> int:
                     area=metric_meta.get("area"),
                 )
                 return 0
-            _finalize_under_review(client, snapshot.key, push_result.change_url)
+            _finalize_successful_push(client, snapshot.key, push_result)
             # OP-956: OpsLabelButCommitsProduced — CLI was tagged ops-only
             # but produced commits anyway. AC error catalog says "Log
             # warning + still push the commits (don't lose work) +

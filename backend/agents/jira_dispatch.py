@@ -18,6 +18,7 @@ Authentication: reads ``~/.config/omnisight/jira-claude.env`` /
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -543,6 +544,7 @@ class GerritPushResult:
     change_url: str | None
     detail: str
     recovery_note: str = ""
+    post_push_warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1380,11 +1382,13 @@ def push_to_gerrit_for_review(
             target=target,
         )
     except Exception as exc:  # noqa: BLE001 - keep original push result diagnosable
+        warning = f"pre-review mergeability self-fix failed: {type(exc).__name__}: {exc}"
         return GerritPushResult(
-            False,
+            True,
             change_number,
             change_url,
-            f"pre-review mergeability self-fix failed: {type(exc).__name__}: {exc}",
+            blob[-1500:],
+            post_push_warning=warning,
         )
     if not self_fix.mergeable:
         exhaustion_note = ""
@@ -1407,14 +1411,16 @@ def push_to_gerrit_for_review(
                     " Exhaustion escalation ticket filing failed: "
                     f"{type(exc).__name__}: {exc}."
                 )
+        warning = (
+            "pre-review mergeability self-fix did not produce a mergeable "
+            f"patchset: {self_fix.detail}.{exhaustion_note}"
+        )
         return GerritPushResult(
-            False,
+            True,
             change_number,
             change_url,
-            (
-                "pre-review mergeability self-fix did not produce a mergeable "
-                f"patchset: {self_fix.detail}.{exhaustion_note}"
-            ),
+            blob[-1500:],
+            post_push_warning=warning,
         )
 
     recovery_note = ""
@@ -1516,10 +1522,37 @@ def post_runner_pushed_comment(
     )
 
 
+def _under_review_idem_key(
+    key: str,
+    *,
+    change_number: int | None = None,
+    change_url: str | None = None,
+) -> str:
+    operation_type = "transition"
+    if change_number is not None:
+        material = json.dumps(
+            {"target_status": "under-review", "patchset": change_number},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        args_hash = hashlib.sha256(material.encode()).hexdigest()[:12]
+    elif change_url:
+        args_hash = hashlib.sha256(change_url.encode()).hexdigest()[:12]
+    else:
+        material = json.dumps(
+            {"target_status": "under-review", "patchset": None},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        args_hash = hashlib.sha256(material.encode()).hexdigest()[:12]
+    return f"{key}:{operation_type}:{args_hash}"
+
+
 def transition_to_under_review_if_needed(
     client: "DispatchClient",
     key: str,
     idem_key: str | None = None,
+    change_number: int | None = None,
 ) -> bool:
     """In Progress → Under Review, but only if not already there.
 
@@ -1530,7 +1563,11 @@ def transition_to_under_review_if_needed(
     """
     if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
         return False
-    idem_key = idem_key or f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    idem_key = idem_key or (
+        _under_review_idem_key(key, change_number=change_number)
+        if change_number is not None
+        else f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    )
     _request_idempotent(
         client, "POST", f"/issue/{key}/transitions",
         {"transition": {"id": TRANSITION_IDS["to_under_review"]}},
@@ -1606,7 +1643,7 @@ def transition_to_under_review(
     """
     if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
         return
-    base_key = idem_key or f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    base_key = idem_key or _under_review_idem_key(key, change_url=gerrit_change_url)
     post_runner_pushed_comment(client, key, gerrit_change_url, idem_key=f"{base_key}-comment")
     transition_to_under_review_if_needed(client, key, idem_key=f"{base_key}-transition")
 

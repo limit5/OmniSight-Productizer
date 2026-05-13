@@ -387,8 +387,9 @@ def test_push_to_gerrit_for_review_files_exhaustion_ticket(
 
     result = jd.push_to_gerrit_for_review(tmp_path, "subscription-codex")
 
-    assert result.success is False
-    assert "Filed escalation ticket OP-2000" in result.detail
+    assert result.success is True
+    assert result.post_push_warning is not None
+    assert "Filed escalation ticket OP-2000" in result.post_push_warning
     assert len(requests) == 1
     assert requests[0][0] == "POST"
     assert requests[0][1] == "/issue"
