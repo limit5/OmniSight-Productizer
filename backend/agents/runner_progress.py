@@ -143,7 +143,19 @@ def _git(worktree_path: Path, args: list[str], *, timeout: int = 30) -> str:
     return result.stdout
 
 
-_OUR_OWN_ARTIFACTS = frozenset({PROGRESS_FILENAME, PROGRESS_FILENAME + _PROGRESS_TMP_SUFFIX})
+_OUR_OWN_ARTIFACTS = frozenset({
+    PROGRESS_FILENAME,
+    PROGRESS_FILENAME + _PROGRESS_TMP_SUFFIX,
+    # OP-842 sentinel — see ensure_change_ids precedent referenced in
+    # _worktree_dirty docstring below. Without this exclusion, the
+    # untracked sentinel triggers `_worktree_dirty() = True`, which
+    # makes `take_phase_snapshot` stash it (via --include-untracked)
+    # and the sentinel disappears from the working tree. The runner's
+    # subsequent sentinel-check then fires `workspace-tampered` and
+    # reverts the ticket. Affects both claude-bot and codex-bot runners
+    # (observed on OP-1069/1070/1071 against SP-B-X-002a).
+    ".runner-cwd-sentinel",
+})
 
 
 def _worktree_dirty(worktree_path: Path) -> bool:
