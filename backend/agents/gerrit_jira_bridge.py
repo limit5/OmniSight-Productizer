@@ -19,7 +19,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterable
 from uuid import uuid4
 
@@ -470,9 +470,19 @@ class GerritJiraBridge:
         # the rebase path don't import the module at all.
         self._auto_rebase_sweeper: Any = None
         self._auto_rebase_scheduler: Any = None
+        # SP-B-X-019 / OP-1077 — independent heartbeat-thread state.
+        # The maintenance-tick loop runs *inside* ``stream_forever``'s
+        # blocking SSH read, so it stalls during quiet Gerrit periods.
+        # The heartbeat thread (started in ``stream_forever``) writes
+        # the on-disk heartbeat on a wall-clock cadence regardless of
+        # event traffic; this Event lets ``stop()`` unblock the thread
+        # so the daemon can exit cleanly without a 30s wait.
+        self._heartbeat_thread: Thread | None = None
+        self._heartbeat_thread_stop = Event()
 
     def stop(self) -> None:
         self._stop = True
+        self._heartbeat_thread_stop.set()
 
     def jira_request(
         self,
@@ -1417,6 +1427,17 @@ class GerritJiraBridge:
         # long) startup catchup and trip a false "bridge down" alert.
         self._touch_heartbeat_file()
         self._last_heartbeat_file = time.monotonic()
+        # SP-B-X-019 / OP-1077 — start the heartbeat thread BEFORE
+        # catchup. ``startup_catchup`` and the SSH stream read can both
+        # block for minutes during quiet Gerrit periods; without the
+        # thread, ``_maintenance_ticks``'s heartbeat write only fires
+        # when the next stream-event arrives, and the on-disk file
+        # goes stale → runner pickup gate trips a false "bridge_down".
+        # The thread runs ``_touch_heartbeat_file`` on a half-cadence
+        # wall clock so the gate's 5-min stale threshold never trips
+        # while the daemon is healthy. ``stop()`` sets the Event so
+        # shutdown doesn't wait a full cycle.
+        self._start_heartbeat_thread()
         self.startup_catchup()
         self.replay_from_cursor()
         consecutive_failures = 0
@@ -1512,6 +1533,56 @@ class GerritJiraBridge:
                 err=f"{type(exc).__name__}: {exc}",
                 heartbeat_path=str(path),
             )
+
+    def _start_heartbeat_thread(self) -> None:
+        """SP-B-X-019 / OP-1077 — start the wall-clock heartbeat thread.
+
+        The thread is a ``daemon=True`` background worker that calls
+        :meth:`_touch_heartbeat_file` every ``heartbeat_file_seconds / 2``
+        (clamped to a 5s floor) regardless of Gerrit event traffic. This
+        keeps the on-disk heartbeat fresh during quiet periods when the
+        SSH stream-events read blocks for minutes — without the thread,
+        the runner-side pickup gate would falsely trip ``bridge_down``.
+
+        ``stop()`` sets ``self._heartbeat_thread_stop`` so the thread
+        observes the Event during its sleep and exits within one
+        check interval rather than waiting a full cadence.
+
+        Half-cadence (``heartbeat_file_seconds / 2``) keeps the stale
+        window safely below the runner gate's ``OMNISIGHT_BRIDGE_STALE_AFTER_SEC``
+        threshold even if one tick fires late.
+
+        Idempotent: if the thread is already alive (e.g. ``stream_forever``
+        is restarted by an in-process test), this method is a no-op so
+        we don't accumulate threads.
+        """
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
+        self._heartbeat_thread_stop.clear()
+        cadence = max(5.0, float(self.config.heartbeat_file_seconds) / 2.0)
+
+        def _run() -> None:
+            # First write happens at startup via stream_forever; loop
+            # waits a full cadence before the first repeated write.
+            while not self._heartbeat_thread_stop.wait(cadence):
+                try:
+                    self._touch_heartbeat_file()
+                except Exception as exc:  # noqa: BLE001 — must never crash the daemon
+                    # _touch_heartbeat_file already swallows OSError; this
+                    # catches anything else (e.g. mocked-test sentinels).
+                    self.log(
+                        "WARN",
+                        "heartbeat_thread_write_failed",
+                        err=f"{type(exc).__name__}: {exc}",
+                    )
+
+        thread = Thread(
+            target=_run,
+            name="bridge-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread = thread
+        thread.start()
 
     def _emit_heartbeat(self) -> None:
         payload = self.counters.__dict__.copy()
