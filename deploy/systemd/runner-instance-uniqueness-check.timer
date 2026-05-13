@@ -1,0 +1,15 @@
+; [OP-1068] 5-minute timer for runner-instance-uniqueness-check.service.
+
+[Unit]
+Description=Run OmniSight runner instance uniqueness check every 5 min (OP-1068)
+Documentation=https://soraapp.atlassian.net/browse/OP-1068
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=true
+Unit=runner-instance-uniqueness-check.service
+
+[Install]
+WantedBy=timers.target
