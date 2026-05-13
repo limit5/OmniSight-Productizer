@@ -39,6 +39,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    from jira_label_validator import format_issues, validate
+except ModuleNotFoundError:  # pragma: no cover - import path used by tests
+    from scripts.jira_label_validator import format_issues, validate
+
 CRED_DIR = Path("~/.config/omnisight").expanduser()
 STATE_FILE = Path("~/.cache/omnisight/audit-29-bootstrap-state.json").expanduser()
 USER_AGENT = "OmniSight-audit-29-bootstrap/2.0"
@@ -577,7 +582,7 @@ def _f_children() -> list[TicketSpec]:
             "Subsequent design conversations on the coordinator cite ADR-0021 instead of re-deriving",
         ],
         go_live="2026-05-13 (today, on filing of these tickets)",
-        labels=["area:docs", "tier:S", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:docs", "tier:S", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -610,7 +615,7 @@ def _f_children() -> list[TicketSpec]:
             ">=1 watchdog-driven restart observed (forced via kill -9 in test)",
         ],
         go_live="T+0.5d after 29f-1",
-        labels=["area:backend", "area:devops", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "area:devops", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -638,7 +643,7 @@ def _f_children() -> list[TicketSpec]:
             "No rule observed mis-firing (false positive corrections from operator <3 in 7d)",
         ],
         go_live="T+1d after 29f-2",
-        labels=["area:backend", "area:tests", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "area:tests", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -667,7 +672,7 @@ def _f_children() -> list[TicketSpec]:
             "At least 1 capacity-driven routing suggestion observed in decision log",
         ],
         go_live="T+0.5d after 29f-2",
-        labels=["area:backend", "area:devops", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "area:devops", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
         extra_notes="**Critical wiring step**: this ticket requires MODIFYING the 4 existing runner instances, not just writing new code. Verify all 4 are restarted with new emit logic before closing.",
     ))
@@ -695,7 +700,7 @@ def _f_children() -> list[TicketSpec]:
             "At least 1 operator override via coord-mode:* label observed working",
         ],
         go_live="T+0.5d after 29f-2",
-        labels=["area:backend", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -729,7 +734,7 @@ def _f_children() -> list[TicketSpec]:
             "Cost telemetry: actual $/decision matches estimate within 50%",
         ],
         go_live="T+1d after 29f-2 + 29b complete",
-        labels=["area:backend", "area:tests", "tier:L", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "area:tests", "tier:L", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -761,7 +766,7 @@ def _f_children() -> list[TicketSpec]:
             ">=1 L6 crash recovery observed (forced kill -9)",
         ],
         go_live="T+0.75d after 29f-2 + 29a + 29c complete",
-        labels=["area:backend", "area:devops", "tier:L", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "area:devops", "tier:L", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -793,7 +798,7 @@ def _f_children() -> list[TicketSpec]:
             ">=24 hourly sweeps observed (no missed firings)",
         ],
         go_live="T+0.5d after 29f-2",
-        labels=["area:backend", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
         extra_notes="**Critical wiring step**: requires modifying gerrit_jira_bridge to emit JSONL — not just consuming. Both halves needed before close.",
     ))
@@ -825,7 +830,7 @@ def _f_children() -> list[TicketSpec]:
             "At least 1 scope-review ticket filed by re-plan",
         ],
         go_live="T+0.5d after 29f-4 + 29f-6 complete",
-        labels=["area:backend", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -853,7 +858,7 @@ def _f_children() -> list[TicketSpec]:
             "Schema validator caught at least 1 real malformed entry (or absence justified)",
         ],
         go_live="T+0.5d after 29f-9",
-        labels=["area:tests", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:tests", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -886,7 +891,7 @@ def _f_children() -> list[TicketSpec]:
             ">=1 rule-graduation proposal generated (operator reviews + merges or rejects)",
         ],
         go_live="T+1d after 29f-6 + 29b complete",
-        labels=["area:backend", "tier:L", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:backend", "tier:L", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -914,7 +919,7 @@ def _f_children() -> list[TicketSpec]:
             "At least 1 real production scenario observed matching test pattern A/B/C",
         ],
         go_live="T+0.5d after 29f-2..29f-11 substantially complete",
-        labels=["area:tests", "tier:M", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:tests", "tier:M", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -942,7 +947,7 @@ def _f_children() -> list[TicketSpec]:
             "If shadow-mode review (29f-14) generated questions, runbook updated to address them",
         ],
         go_live="T+0.5d (parallel with main features)",
-        labels=["area:docs", "tier:S", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:docs", "tier:S", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -971,7 +976,7 @@ def _f_children() -> list[TicketSpec]:
             ">=1 Tier-1 rule graduated from learning-loop proposals during week 1 of acting",
         ],
         go_live="T+8d after 29f-12 + 29f-13 + all preceding (=T+22d from 29f-1)",
-        labels=["area:devops", "tier:L", "agent:auto", "priority:audit-29", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
+        labels=["area:devops", "tier:L", "agent:auto", "phase:audit-29f", "adr:0021", "scope:pre-rc2"],
         parent_refs=base_parents,
     ))
 
@@ -1018,7 +1023,7 @@ def _followups() -> list[TicketSpec]:
                 "Zero new tickets created with retired labels in following 7 days",
             ],
             go_live="Independent — no specific deadline; complete within 1 week of acceptance",
-            labels=["area:tooling", "area:devops", "tier:S", "agent:auto", "priority:medium", "type:cleanup",
+            labels=["area:tooling", "area:devops", "tier:S", "agent:auto", "type:cleanup",
                     "scope:label-hygiene"],
             parent_refs=["Independent cleanup ticket — not in AUDIT-29 chain"],
             fix_version=None,
@@ -1058,7 +1063,7 @@ def _followups() -> list[TicketSpec]:
                 "Operator can articulate real backlog size after sweep (vs 'I have no idea' before)",
             ],
             go_live="Independent — target 1 week of effort, no hard deadline",
-            labels=["area:tooling", "area:devops", "area:docs", "tier:L", "agent:auto", "priority:high",
+            labels=["area:tooling", "area:devops", "area:docs", "tier:L", "agent:auto",
                     "type:cleanup", "scope:backlog-hygiene"],
             parent_refs=["Independent cleanup ticket — not in AUDIT-29 chain"],
             priority="High",
@@ -1177,7 +1182,8 @@ def ensure_fix_version(site: str, project: str, auth: str, name: str) -> str:
     return created["id"]
 
 
-def create_issue(site: str, project: str, auth: str, spec: TicketSpec) -> str:
+def create_issue(site: str, project: str, auth: str, spec: TicketSpec, force: bool = False) -> str:
+    _validate_spec_or_exit(spec, force=force)
     fields: dict[str, Any] = {
         "project": {"key": project},
         "summary": spec.summary,
@@ -1190,6 +1196,14 @@ def create_issue(site: str, project: str, auth: str, spec: TicketSpec) -> str:
         fields["fixVersions"] = [{"name": spec.fix_version}]
     resp = _request("POST", site + "/rest/api/3/issue", auth, {"fields": fields})
     return resp["key"]
+
+
+def _validate_spec_or_exit(spec: TicketSpec, force: bool) -> None:
+    issues = validate(spec.labels, build_description(spec))
+    for line in format_issues(issues):
+        print(f"{spec.alias}: {line}", file=sys.stderr)
+    if any(issue.is_error for issue in issues) and not force:
+        raise SystemExit(f"{spec.alias}: aborting; pass --force to skip label validation errors")
 
 
 def create_link(site: str, auth: str, blocker_key: str, blocked_key: str) -> None:
@@ -1253,7 +1267,7 @@ def print_plan(specs: list[TicketSpec], links: list[LinkSpec]) -> None:
     print(f"  Meaning: {sample.blocker_alias} IS the blocker. ✓")
 
 
-def execute(specs: list[TicketSpec], links: list[LinkSpec], link_only: bool = False) -> int:
+def execute(specs: list[TicketSpec], links: list[LinkSpec], link_only: bool = False, force: bool = False) -> int:
     site, project, auth = _jira_config()
     state = load_state()
     alias_to_key: dict[str, str] = state.get("alias_to_key", {})
@@ -1278,7 +1292,7 @@ def execute(specs: list[TicketSpec], links: list[LinkSpec], link_only: bool = Fa
                 print(f"  [{i:>2d}/{len(specs)}] {spec.alias}: already {alias_to_key[spec.alias]} (skip)")
                 continue
             try:
-                key = create_issue(site, project, auth, spec)
+                key = create_issue(site, project, auth, spec, force=force)
                 alias_to_key[spec.alias] = key
                 state["alias_to_key"] = alias_to_key
                 save_state(state)
@@ -1324,6 +1338,7 @@ def main(argv: list[str]) -> int:
     grp.add_argument("--dry-run", action="store_true")
     grp.add_argument("--execute", action="store_true")
     grp.add_argument("--link-only", action="store_true")
+    parser.add_argument("--force", action="store_true", help="bypass label validation errors")
     args = parser.parse_args(argv)
 
     specs = all_specs()
@@ -1332,7 +1347,7 @@ def main(argv: list[str]) -> int:
     if args.dry_run:
         print_plan(specs, links)
         return 0
-    return execute(specs, links, link_only=args.link_only)
+    return execute(specs, links, link_only=args.link_only, force=args.force)
 
 
 if __name__ == "__main__":

@@ -104,3 +104,50 @@ def test_python_ticket_spec_with_devops_missing_activation_item_fails(tmp_path, 
     err = capsys.readouterr().err
     assert "area:devops TicketSpec lacks an activation AC bullet" in err
     assert "Synthetic devops ticket" in err
+
+
+def test_python_ticket_spec_with_bad_label_fails(tmp_path, capsys) -> None:
+    mod = _load_script()
+    ticket = tmp_path / "file_jira_ticket_specs.py"
+    ticket.write_text(
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class TicketSpec:\n"
+        "    summary: str\n"
+        "    code_ac: list[str]\n"
+        "    deploy_ac: list[str]\n"
+        "    integration_ac: list[str]\n"
+        "    exercised_ac: list[str]\n"
+        "    labels: list[str]\n"
+        "SPEC = TicketSpec(\n"
+        "    summary='Synthetic bad label ticket',\n"
+        "    code_ac=['Add a lint hook'],\n"
+        "    deploy_ac=[],\n"
+        "    integration_ac=[],\n"
+        "    exercised_ac=[],\n"
+        "    labels=['class:subscription-codex', 'tier:M', 'area:tests', 'priority:fx-track'],\n"
+        ")\n",
+        encoding="utf-8",
+    )
+
+    assert mod.main([str(ticket)]) == 1
+    err = capsys.readouterr().err
+    assert "unknown-label: unknown or retired label: priority:fx-track" in err
+
+
+def test_yaml_ticket_spec_with_type_meta_implementation_path_fails(tmp_path, capsys) -> None:
+    mod = _load_script()
+    ticket = tmp_path / "jira-ticket-spec.yaml"
+    ticket.write_text(
+        "labels:\n"
+        "  - class:subscription-codex\n"
+        "  - tier:M\n"
+        "  - area:tests\n"
+        "  - type:meta\n"
+        "description: 'Change scripts/file_jira_ticket.py'\n",
+        encoding="utf-8",
+    )
+
+    assert mod.main([str(ticket)]) == 1
+    err = capsys.readouterr().err
+    assert "meta-type-with-implementation" in err

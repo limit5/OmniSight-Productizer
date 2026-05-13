@@ -24,6 +24,11 @@ from base64 import b64encode
 from pathlib import Path
 from typing import Any
 
+try:
+    from jira_label_validator import format_issues, validate
+except ModuleNotFoundError:  # pragma: no cover - import path used by tests
+    from scripts.jira_label_validator import format_issues, validate
+
 VALID_AREAS = {
     "backend",
     "frontend",
@@ -167,7 +172,13 @@ def _labels(args: argparse.Namespace) -> list[str]:
 
 
 def _validate_or_exit(args: argparse.Namespace, description_text: str) -> None:
-    _labels(args)
+    labels = _labels(args)
+    label_issues = validate(labels, description_text)
+    for line in format_issues(label_issues):
+        print(line, file=sys.stderr)
+    if any(issue.is_error for issue in label_issues) and not args.force:
+        raise SystemExit("aborting; pass --force to skip label validation errors")
+
     warnings = validate_areas_match_description(set(args.areas), description_text)
     if warnings and not args.force:
         for warning in warnings:
