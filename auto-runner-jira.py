@@ -51,6 +51,7 @@ from backend.agents import (
     capability_matrix,
     circuit_breaker,
     failure_graph,
+    gerrit_jira_bridge,
     live_state_check,
     memory_writeback,
     outcomes_consumer,
@@ -62,6 +63,7 @@ from backend.agents import (
     runner_workspace_safety,
     scheduler,
 )
+from backend.agents.operator_notifier import Severity, notify as operator_notify
 from backend.agents.loop_detector import (
     DEFAULT_GRADER_MODEL,
     OUTCOMES_GRADER_MODEL_ENV,
@@ -378,6 +380,76 @@ def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
         except (KeyError, TypeError, ValueError):
             continue
     return None
+
+
+# SP-B-X-009 (OP-1067) — C9 bridge-health pickup gate. The Gerrit/JIRA
+# bridge daemon owns the change-merged → Published transition; if its
+# heartbeat goes stale every freshly picked ticket will eventually wedge
+# at Approved waiting for a transition that will never arrive. Running
+# this gate before claim_ticket_atomic surrenders the tick early so we
+# do not burn a claim slot on work the rest of the pipeline cannot
+# finalise. The gate fires ``operator_notifier.notify(Severity.CRITICAL,
+# "bridge_down", ...)`` so the alert lands on the on-call channels per
+# the standard severity matrix; the JIRA comment side-effect is gated
+# behind ``OMNISIGHT_FLEET_HEALTH_CANARY_KEY`` so we don't pollute every
+# runner-host's ticket with bridge-down noise.
+def _bridge_health_pickup_gate(
+    client: jira_dispatch.DispatchClient,
+    *,
+    check_fn=gerrit_jira_bridge.check_bridge_heartbeat,
+    notify_fn=operator_notify,
+    comment_fn=jira_dispatch.add_comment,
+) -> bool:
+    """Return True if the bridge heartbeat is fresh; False otherwise.
+
+    On stale heartbeat (or missing file) emits a CRITICAL operator
+    notification and — only when ``OMNISIGHT_FLEET_HEALTH_CANARY_KEY``
+    is set — also posts a ``[runner-bridge-down]`` comment on that
+    canary ticket so the symptom is preserved in JIRA for the
+    incident retrospective.
+    """
+
+    is_fresh, age_sec, path = check_fn()
+    if is_fresh:
+        return True
+
+    age_repr = "missing" if age_sec == float("inf") else f"{age_sec:.0f}s"
+    print(
+        f"[runner] bridge_down: heartbeat stale at {path} (age={age_repr}); "
+        f"skipping pickup",
+        file=sys.stderr,
+    )
+    try:
+        notify_fn(
+            Severity.CRITICAL,
+            "bridge_down",
+            message=f"bridge heartbeat stale at {path}; runners blocked",
+            context={"heartbeat_path": str(path), "age_sec": age_sec},
+        )
+    except Exception as exc:  # noqa: BLE001 — notifier failure must not wedge the gate
+        print(
+            f"[runner] bridge_down notify failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+    canary_key = os.environ.get("OMNISIGHT_FLEET_HEALTH_CANARY_KEY", "").strip()
+    if canary_key and not DRY_RUN:
+        try:
+            comment_fn(
+                client,
+                canary_key,
+                (
+                    f"[runner-bridge-down] Pickup short-circuited: bridge "
+                    f"heartbeat stale at {path} (age={age_repr}). "
+                    f"Investigate per `docs/sop/runbooks/bridge-health-degraded.md`."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — canary post is best-effort
+            print(
+                f"[runner] bridge_down canary post failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    return False
 
 
 def _check_pre_pickup_candidate(
@@ -1632,6 +1704,14 @@ def main() -> int:
 
     client = jira_dispatch.make_client(AGENT_CLASS, INSTANCE_ID)
     print(f"[runner] authenticated as {client.bot_email} ({client.bot_account_id})")
+
+    # SP-B-X-009 (OP-1067) — bridge-health gate: if the Gerrit/JIRA
+    # bridge has gone silent, every freshly picked ticket will wedge at
+    # Approved waiting for a change-merged transition the bridge will
+    # never make. Surrender the tick now so the pipeline can recover
+    # before we burn claim slots and review cycles.
+    if not _bridge_health_pickup_gate(client):
+        return 0
 
     # Step 1: ticket selection
     if TARGET_OVERRIDE:
