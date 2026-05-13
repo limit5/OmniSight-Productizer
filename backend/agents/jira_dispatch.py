@@ -1009,6 +1009,7 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
 
 _GERRIT_CHANGE_URL_RE = re.compile(r"(https://\S+/c/[^\s]+/\+/(\d+))")
 _GERRIT_CHANGE_ID_RE = re.compile(r"^Change-Id:\s*(I[0-9a-fA-F]+)\s*$", re.MULTILINE)
+_OP_KEY_RE = re.compile(r"\bOP-\d+\b")
 _TRANSIENT_GERRIT_PUSH_RE = re.compile(
     r"Missing tree|Unpack error|remote unpack failed|Connection reset|"
     r"Connection timed out|timed out|Broken pipe|Connection refused|"
@@ -1016,6 +1017,12 @@ _TRANSIENT_GERRIT_PUSH_RE = re.compile(
     re.IGNORECASE,
 )
 _GERRIT_PUSH_RETRY_BACKOFFS = (2, 4, 8)
+PRE_REVIEW_SELF_FIX_EXHAUSTED_LABELS = (
+    "needs-coordinator",
+    "pre-review-self-fix-exhausted",
+    "class:operator",
+)
+PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS = 30000
 
 
 def _is_transient_gerrit_push_failure(detail: str) -> bool:
@@ -1041,6 +1048,131 @@ def _head_change_id(worktree_path: Path) -> str | None:
         return None
     match = _GERRIT_CHANGE_ID_RE.search(result.stdout)
     return match.group(1) if match else None
+
+
+def _infer_ticket_key_from_worktree(worktree_path: Path) -> str | None:
+    """Infer the source OP ticket from the branch or HEAD commit text."""
+
+    for cmd in (
+        ["git", "branch", "--show-current"],
+        ["git", "log", "-1", "--format=%B"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode != 0:
+            continue
+        match = _OP_KEY_RE.search(result.stdout)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _pre_review_self_fix_diff_context(worktree_path: Path, target: str) -> str:
+    """Return bounded diff context for the exhaustion escalation ticket."""
+
+    commands = (
+        ["git", "diff", "--stat", "FETCH_HEAD...HEAD"],
+        ["git", "diff", "FETCH_HEAD...HEAD"],
+    )
+    chunks: list[str] = []
+    for cmd in commands:
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            chunks.append(f"$ {' '.join(cmd)}\n<failed: {type(exc).__name__}: {exc}>")
+            continue
+        body = result.stdout if result.returncode == 0 else (result.stderr or result.stdout)
+        chunks.append(f"$ {' '.join(cmd)}\n{body.strip()}")
+
+    text = "\n\n".join(chunks).strip()
+    if len(text) > PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS:
+        omitted = len(text) - PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS
+        text = (
+            text[:PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS]
+            + f"\n\n[diff context truncated by {omitted} chars]"
+        )
+    return text or "<no diff context produced>"
+
+
+def _adf_codeblock(text: str, language: str = "markdown") -> dict:
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "codeBlock",
+                "attrs": {"language": language},
+                "content": [{"type": "text", "text": text}],
+            }
+        ],
+    }
+
+
+def file_pre_review_self_fix_exhaustion_ticket(
+    client: DispatchClient,
+    *,
+    source_ticket_key: str | None,
+    change_number: int,
+    change_url: str,
+    change_id: str | None,
+    attempts: int,
+    target: str,
+    detail: str,
+    diff_context: str,
+) -> str:
+    """File the operator escalation when pre-review self-fix is exhausted."""
+
+    source = source_ticket_key or "unknown-source-ticket"
+    summary = f"pre-review-self-fix-exhausted: {source} Change {change_number}"
+    description = "\n".join(
+        [
+            "@coordinator",
+            "@operator fallback if coordinator is not live.",
+            "",
+            "Pre-review mergeability self-fix exhausted and needs operator coordination.",
+            "",
+            f"Source ticket: {source}",
+            f"Gerrit change: {change_url}",
+            f"Change-Id: {change_id or 'unknown'}",
+            f"Target branch: {target}",
+            f"Self-fix attempts: {attempts}",
+            f"Runner detail: {detail}",
+            "",
+            "Diff context:",
+            "```diff",
+            diff_context,
+            "```",
+        ]
+    )
+    body = {
+        "fields": {
+            "project": {"key": client.project_key},
+            "summary": summary,
+            "description": _adf_codeblock(description),
+            "issuetype": {"name": "Story"},
+            "priority": {"name": "High"},
+            "labels": list(PRE_REVIEW_SELF_FIX_EXHAUSTED_LABELS),
+        }
+    }
+    resp = _request(client, "POST", "/issue", body)
+    key = str(resp.get("key") or "")
+    if not key:
+        raise RuntimeError(f"JIRA POST /issue returned no key: {resp!r}")
+    return key
 
 
 def query_gerrit_change_by_change_id(
@@ -1201,11 +1333,34 @@ def push_to_gerrit_for_review(
             f"pre-review mergeability self-fix failed: {type(exc).__name__}: {exc}",
         )
     if not self_fix.mergeable:
+        exhaustion_note = ""
+        if self_fix.cap_exhausted:
+            try:
+                escalation_key = file_pre_review_self_fix_exhaustion_ticket(
+                    make_client(agent_class, instance_id),
+                    source_ticket_key=_infer_ticket_key_from_worktree(worktree_path),
+                    change_number=change_number,
+                    change_url=change_url,
+                    change_id=change_id,
+                    attempts=self_fix.attempts,
+                    target=target,
+                    detail=self_fix.detail,
+                    diff_context=_pre_review_self_fix_diff_context(worktree_path, target),
+                )
+                exhaustion_note = f" Filed escalation ticket {escalation_key}."
+            except Exception as exc:  # noqa: BLE001 - preserve original push failure path
+                exhaustion_note = (
+                    " Exhaustion escalation ticket filing failed: "
+                    f"{type(exc).__name__}: {exc}."
+                )
         return GerritPushResult(
             False,
             change_number,
             change_url,
-            f"pre-review mergeability self-fix did not produce a mergeable patchset: {self_fix.detail}",
+            (
+                "pre-review mergeability self-fix did not produce a mergeable "
+                f"patchset: {self_fix.detail}.{exhaustion_note}"
+            ),
         )
 
     recovery_note = ""

@@ -322,6 +322,91 @@ def test_push_to_gerrit_for_review_runs_pre_review_self_fix(
     assert "Pre-review self-fix rebased and force-pushed" in result.recovery_note
 
 
+def test_push_to_gerrit_for_review_files_exhaustion_ticket(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Three failed self-fix attempts file the coordinator escalation ticket."""
+
+    from backend.agents import auto_rebase, pre_review_self_fix
+
+    key = tmp_path / "ssh-key"
+    key.write_text("placeholder", encoding="utf-8")
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def fake_breaker_call(fn, args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="",
+            stderr=(
+                "remote:   https://sora.services:29420/c/"
+                "omnisight/OmniSight-Productizer/+/42 subject\n"
+            ),
+        )
+
+    def fake_self_fix(**kwargs):
+        return pre_review_self_fix.SelfFixResult(
+            mergeable=False,
+            attempts=3,
+            rebased=True,
+            force_pushed=True,
+            cap_exhausted=True,
+            detail="mergeable=false after 3 self-fix attempt(s)",
+        )
+
+    client = jd.DispatchClient(
+        agent_class="subscription-codex",
+        base_url="https://jira.example.test/rest/api/3",
+        project_key="OP",
+        auth_header="Basic token",
+        bot_account_id="bot-account",
+        bot_email="bot@example.test",
+    )
+
+    def fake_request(client, method, path, body=None, idem_key=None):
+        requests.append((method, path, body))
+        return {"key": "OP-2000"}
+
+    monkeypatch.setattr(
+        jd,
+        "_gerrit_auth_for_instance",
+        lambda agent_class, instance_id=None: ("codex-bot", key),
+    )
+    monkeypatch.setattr(jd, "_head_change_id", lambda worktree_path: "Iabc123")
+    monkeypatch.setattr(jd, "_infer_ticket_key_from_worktree", lambda worktree_path: "OP-1039")
+    monkeypatch.setattr(
+        jd,
+        "_pre_review_self_fix_diff_context",
+        lambda worktree_path, target: "diff --git a/backend/a.py b/backend/a.py",
+    )
+    monkeypatch.setattr(jd, "make_client", lambda agent_class, instance_id=None: client)
+    monkeypatch.setattr(jd, "_request", fake_request)
+    monkeypatch.setattr(jd.BREAKERS["gerrit_ssh"], "call", fake_breaker_call)
+    monkeypatch.setattr(auto_rebase, "load_owner_http_password", lambda user: "secret")
+    monkeypatch.setattr(pre_review_self_fix, "self_fix_mergeability", fake_self_fix)
+
+    result = jd.push_to_gerrit_for_review(tmp_path, "subscription-codex")
+
+    assert result.success is False
+    assert "Filed escalation ticket OP-2000" in result.detail
+    assert len(requests) == 1
+    assert requests[0][0] == "POST"
+    assert requests[0][1] == "/issue"
+    fields = requests[0][2]["fields"]
+    assert fields["summary"] == "pre-review-self-fix-exhausted: OP-1039 Change 42"
+    assert fields["labels"] == [
+        "needs-coordinator",
+        "pre-review-self-fix-exhausted",
+        "class:operator",
+    ]
+    description = fields["description"]["content"][0]["content"][0]["text"]
+    assert "@coordinator" in description
+    assert "@operator fallback" in description
+    assert "Change-Id: Iabc123" in description
+    assert "Self-fix attempts: 3" in description
+    assert "diff --git a/backend/a.py b/backend/a.py" in description
+
+
 def test_transition_ids_includes_under_review() -> None:
     """OP-247 Phase 1 added to_under_review = '3' per §10 mapping."""
     assert jd.TRANSITION_IDS["to_under_review"] == "3"
