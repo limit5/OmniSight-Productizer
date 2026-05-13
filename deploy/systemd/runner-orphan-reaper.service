@@ -1,0 +1,36 @@
+; [OP-1059] systemd unit — C1 runner orphan reaper.
+;
+; Runs backend/agents/runner_orphan_reaper.py once per fire. Triggered by
+; the matching .timer every 10 minutes. Detects In-Progress JIRA tickets
+; whose runner-host claim is TTL-exceeded with no live heartbeat, and
+; returns them to a clean To Do state (comment + label strip + assignee
+; clear + transition + operator alert).
+;
+; Install (user-level — shares JIRA credentials with the runner):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/runner-orphan-reaper.service ~/.config/systemd/user/
+;   cp deploy/systemd/runner-orphan-reaper.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now runner-orphan-reaper.timer
+;
+; Disable without uninstalling (kill-switch):
+;   OMNISIGHT_RUNNER_REAPER_ENABLED=0 in ~/.config/omnisight/runner-orphan-reaper.env
+;   systemctl --user restart runner-orphan-reaper.service  # exits 0 without scanning
+
+[Unit]
+Description=OmniSight C1 runner orphan reaper (OP-1059)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-%h/.config/omnisight/runner-orphan-reaper.env
+ExecStart=/usr/bin/python3 -m backend.agents.runner_orphan_reaper
+StandardOutput=append:%h/work/sora/logs/runner-orphan-reaper/run.log
+StandardError=append:%h/work/sora/logs/runner-orphan-reaper/run.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
