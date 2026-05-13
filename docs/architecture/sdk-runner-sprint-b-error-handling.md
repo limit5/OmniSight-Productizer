@@ -1,6 +1,6 @@
 # Sprint B — Error Handling, State Machines, Exit Mechanisms
 
-**Status**: Companion to `docs/audit/2026-05-09-sprint-b-runner-reliability-plan.md` (Gerrit #333). Required reading before any Sprint B child enters `In Progress`.
+**Status**: Implementation reference / appendix for ADR-0035 — non-binding details for §4 + §5 + §6
 **Date**: 2026-05-09 (initial), 2026-05-10 (PS3 expansion per operator request to "挖深一點 + 把過去失敗案例考慮進去")
 **Audit method**: 25 historical failure incidents mined from `docs/sop/lessons-learned.md` (L1-L27) + governance memory + recent Gerrit conflict series + the 3 S1 launcher pilot failures. Each incident classified by causal layer + mapped to Sprint B child where it could recur. Then 7-dimension coverage check (errors / exceptions / exit / FSM / propagation / recovery / idempotency) per child, plus 8 cross-cutting concerns.
 
@@ -34,6 +34,8 @@ Three passes:
 ---
 
 ## 2. Top-level runner FSM
+
+[Authoritative version in ADR-0035 §Decision + §Invariants I1-I6 — see there for binding form.]
 
 This is the *aggregate* state machine across all Sprint B children. Each child plugs into specific transitions; child-internal FSMs are in §4.
 
@@ -589,6 +591,8 @@ Eight concerns that don't belong to any single child but emerge from interaction
 
 ### C4 — External system cascade failures
 
+[Authoritative version in ADR-0035 §External system ordering (§C4) — see there for binding form.]
+
 **Failure modes**:
 - Gerrit rejects push → JIRA still transitioned to Under Review → orphaned state
 - JIRA transition succeeds → Gerrit push fails → ticket stuck in wrong state
@@ -661,6 +665,8 @@ Eight concerns that don't belong to any single child but emerge from interaction
 ---
 
 ## 7. Recovery primitives — codified spec
+
+[Authoritative version in ADR-0035 §Idempotency primitives (§7) — see there for binding form.]
 
 This section defines the primitive operations Sprint B children rely on.
 
