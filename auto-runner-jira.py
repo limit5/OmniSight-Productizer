@@ -91,6 +91,27 @@ OPS_ONLY_DISABLED = (
 RUNNER_BRANCH_SWEEP_DISABLED = (
     os.environ.get("OMNISIGHT_RUNNER_BRANCH_SWEEP_DISABLED", "0").strip() == "1"
 )
+
+# AUDIT-29b-6 (OP-1024) — the lesson-surface meta-mechanism. ``_build_prompt``
+# injects the top-N most relevant prior lessons (``cognee_recall`` flag) and the
+# architecture anti-patterns matching the ticket's area (``antipattern_inject``
+# flag) into every pickup. Both blocks degrade to an empty string when the
+# source is offline (Cognee KG down / lessons dir unreadable / cookbook missing)
+# — a pickup must never fail because lesson recall is unavailable.
+LESSONS_DIR = REPO / "docs" / "sop" / "lessons"
+ANTIPATTERNS_DOC = REPO / "docs" / "sop" / "architecture-anti-patterns.md"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name, "") or "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+LESSON_RECALL_TOP_K = _env_int("OMNISIGHT_LESSON_RECALL_TOP_K", 3)
+ANTIPATTERN_TOP_N = _env_int("OMNISIGHT_ANTIPATTERN_TOP_N", 2)
 ORPHAN_SALVAGE_BRANCH_THRESHOLD = int(
     os.environ.get("OMNISIGHT_ORPHAN_SALVAGE_BRANCH_THRESHOLD", "50").strip()
 )
@@ -619,6 +640,115 @@ def _load_failure_graph_for_pickup() -> failure_graph.FailureGraph | None:
         return None
 
 
+def _build_lesson_recall_block(key: str, summary: str, description: str) -> str:
+    """AUDIT-29b-6 (OP-1024) — surface the top-N prior lessons for this ticket.
+
+    Gated by the ``cognee_recall`` agent flag (default off). Retrieval is
+    routed through the Cognee KG with the OP-848 BM25 index as the fallback,
+    so the block is shape-stable whether or not the optional KG is running.
+    Any retrieval error degrades to an empty block + a stderr log line —
+    pickup must never fail because lesson recall is unavailable.
+
+    Integration AC: the ``[runner] lesson_recall.*`` log line is what the
+    debug-mode pickup log shows to confirm a recall block was emitted.
+    """
+    if not agent_feature_flags.cognee_recall.enabled():
+        return ""
+    try:
+        from backend.agents.cognee_integration import retrieve_lessons_via_cognee
+
+        lessons = retrieve_lessons_via_cognee(
+            LESSONS_DIR,
+            ticket_title=summary,
+            acceptance_criteria=description,
+            top_k=LESSON_RECALL_TOP_K,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade on any retrieval error
+        print(f"[runner] lesson_recall.unavailable key={key} err={exc}", file=sys.stderr)
+        return ""
+    if not lessons:
+        print(f"[runner] lesson_recall.empty key={key}", file=sys.stderr)
+        return ""
+    ids = [getattr(item.path, "name", str(item.path)) for item in lessons]
+    print(
+        f"[runner] lesson_recall.surfaced key={key} count={len(lessons)} ids={ids}",
+        file=sys.stderr,
+    )
+    parts = [
+        "# Relevant lessons (AUDIT-29b lesson-surface)",
+        "",
+        "These prior lessons were retrieved by similarity to this ticket's",
+        "summary + acceptance criteria. Read them before you start — they",
+        "encode mistakes already made on adjacent work:",
+        "",
+    ]
+    for item in lessons:
+        name = getattr(item.path, "name", str(item.path))
+        body = (item.text or "").strip()
+        parts.append(f"## {name}\n\n{body}\n")
+    return "\n" + "\n".join(parts) + "\n"
+
+
+def _build_antipattern_block(
+    key: str, summary: str, description: str, declared_areas: list[str],
+) -> str:
+    """AUDIT-29b-6 (OP-1024) — surface architecture anti-patterns for this ticket.
+
+    Gated by the ``antipattern_inject`` agent flag (default off). Selection
+    is Cognee top-N similarity with a deterministic keyword fallback, biased
+    toward patterns whose ``Domains`` line intersects the ticket's ``area:``
+    labels (so e.g. an ``area:db`` migration ticket auto-surfaces pattern #10
+    "Migration ticket fighting in-flight tickets"). Any error degrades to an
+    empty block + a stderr log line.
+    """
+    if not agent_feature_flags.antipattern_inject.enabled():
+        return ""
+    try:
+        from backend.agents.cognee_integration import retrieve_antipatterns_via_cognee
+
+        matches = retrieve_antipatterns_via_cognee(
+            ANTIPATTERNS_DOC,
+            ticket_title=summary,
+            acceptance_criteria=description,
+            declared_areas=declared_areas,
+            top_k=ANTIPATTERN_TOP_N,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade on any retrieval error
+        print(
+            f"[runner] antipattern_inject.unavailable key={key} err={exc}",
+            file=sys.stderr,
+        )
+        return ""
+    if not matches:
+        print(f"[runner] antipattern_inject.empty key={key}", file=sys.stderr)
+        return ""
+    pattern_ids = [match.record.pattern_id for match in matches]
+    print(
+        f"[runner] antipattern_inject.surfaced key={key} count={len(matches)} "
+        f"patterns={pattern_ids} areas={sorted(declared_areas)}",
+        file=sys.stderr,
+    )
+    parts = [
+        "# Anti-patterns matching this ticket (AUDIT-29b lesson-surface)",
+        "",
+        "These entries from docs/sop/architecture-anti-patterns.md match this",
+        "ticket's area / subject. Before designing a fix, check whether you're",
+        "about to re-enter one — the Cure section already costed the way out:",
+        "",
+    ]
+    for match in matches:
+        area_tag = (
+            f" (area match: {', '.join(match.matched_domains)})"
+            if match.matched_domains
+            else ""
+        )
+        parts.append(
+            f"## Pattern #{match.record.pattern_id}: {match.record.title}{area_tag}\n\n"
+            f"{match.record.text.strip()}\n"
+        )
+    return "\n" + "\n".join(parts) + "\n"
+
+
 def _build_prompt(
     client: jira_dispatch.DispatchClient,
     key: str,
@@ -712,6 +842,17 @@ def _build_prompt(
             "your behalf when the CLI exits cleanly with no commits.\n"
         )
 
+    # AUDIT-29b-6 (OP-1024) — the lesson-surface meta-mechanism: feed the
+    # most relevant prior lessons + the architecture anti-patterns matching
+    # this ticket's area into the pickup prompt. Both are flag-gated (default
+    # off) and degrade to an empty string when the KG / cookbook is offline.
+    # They sit before the Documentation-rules / AC-verification sections so
+    # the CLI reads the context before it is told what to satisfy.
+    lessons_block = _build_lesson_recall_block(key, summary, description)
+    antipattern_block = _build_antipattern_block(
+        key, summary, description, declared_areas,
+    )
+
     return f"""You are working on JIRA ticket {key}.
 
 Component: {component_label}
@@ -726,7 +867,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-{capabilities_block}{fg_block}{ps_block}{ops_only_block}
+{capabilities_block}{fg_block}{ps_block}{ops_only_block}{lessons_block}{antipattern_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.

@@ -328,3 +328,199 @@ def test_missing_cognee_package_falls_back_silently(repo_with_code_and_lessons: 
             acceptance_criteria="run alpha",
         )
         assert results, "B10 should still produce hits when Cognee is absent"
+
+
+# ── AUDIT-29b-6 (OP-1024): anti-pattern parsing + recall ───────────────
+
+
+_FIXTURE_COOKBOOK = """# Architecture Anti-patterns Cookbook
+
+intro paragraph that mentions nothing actionable.
+
+---
+
+## Index
+
+| # | Pattern | Symptom |
+|---|---|---|
+| 1 | [Numbered flat-file registry](#1-numbered-flat-file-registry) | shared file conflicts |
+| 2 | [Migration ticket fighting in-flight tickets](#2-migration-ticket-fighting-in-flight-tickets) | migration vs siblings |
+| 3 | [Ad-hoc pattern without domains line](#3-ad-hoc-pattern-without-domains-line) | needs inference |
+
+---
+
+## 1. Numbered flat-file registry
+
+**Domains**: docs, backend, tooling
+
+**Symptom**: a single mutable shared file with sequential ids and N writers.
+
+**Cure**: decompose into per-file entries with a build script.
+
+---
+
+## 2. Migration ticket fighting in-flight tickets
+
+**Domains**: backend, db
+
+**Symptom**: a structural migration lands while sibling alembic migrations write the old schema.
+
+**Cure**: a migration freeze label that the runner pickup gate honours.
+
+---
+
+## 3. Ad-hoc pattern without domains line
+
+**Symptom**: a long-running runner daemon retries an external call forever with no circuit breaker.
+
+**Cure**: add a circuit breaker per external service.
+
+---
+
+## Cross-cutting principles
+
+1. Idempotency is non-negotiable.
+
+---
+
+## See also
+
+- some other doc
+"""
+
+_COOKBOOK_PATH = (
+    Path(__file__).resolve().parents[2] / "docs" / "sop" / "architecture-anti-patterns.md"
+)
+
+
+@pytest.fixture
+def fixture_cookbook(tmp_path: Path) -> Path:
+    path = tmp_path / "architecture-anti-patterns.md"
+    path.write_text(_FIXTURE_COOKBOOK, encoding="utf-8")
+    return path
+
+
+def test_parse_antipatterns_reads_domains_line(fixture_cookbook: Path) -> None:
+    records = ci.parse_antipatterns(fixture_cookbook)
+    assert [r.pattern_id for r in records] == ["1", "2", "3"]
+    assert records[0].title == "Numbered flat-file registry"
+    assert records[0].domains == ("docs", "backend", "tooling")
+    assert records[1].domains == ("backend", "db")
+    # The Index / Cross-cutting principles / See also headings are not patterns.
+    assert all("Cross-cutting" not in r.text for r in records)
+    # Stable identifier used as the Cognee node id.
+    assert records[0].identifier == "antipattern-1-numbered-flat-file-registry"
+
+
+def test_parse_antipatterns_infers_domains_when_missing(fixture_cookbook: Path) -> None:
+    records = ci.parse_antipatterns(fixture_cookbook)
+    pattern3 = next(r for r in records if r.pattern_id == "3")
+    # No **Domains**: line — inferred from the body ("runner daemon",
+    # "circuit breaker") and must be non-empty.
+    assert pattern3.domains
+    assert "backend" in pattern3.domains
+
+
+def test_parse_antipatterns_missing_file_returns_empty(tmp_path: Path) -> None:
+    assert ci.parse_antipatterns(tmp_path / "nope.md") == []
+
+
+def test_collect_antipattern_sources_per_pattern(fixture_cookbook: Path) -> None:
+    sources = ci.collect_antipattern_sources(fixture_cookbook)
+    assert len(sources) == 3
+    assert all(s.kind == ci.SOURCE_KIND_ANTIPATTERN for s in sources)
+    assert {s.identifier for s in sources} == {
+        "antipattern-1-numbered-flat-file-registry",
+        "antipattern-2-migration-ticket-fighting-in-flight-tickets",
+        "antipattern-3-ad-hoc-pattern-without-domains-line",
+    }
+    assert sources[1].metadata["domains"] == ["backend", "db"]
+    # Re-ingestion is idempotent because identifiers are stable, not random.
+    again = ci.collect_antipattern_sources(fixture_cookbook)
+    assert [s.identifier for s in sources] == [s.identifier for s in again]
+
+
+def test_retrieve_antipatterns_via_cognee_follows_search_order(fixture_cookbook: Path) -> None:
+    # Cognee returns pattern #3 first, then #2; the helper preserves that
+    # order and resolves identifiers back to the parsed records.
+    fake = _FakeCognee(
+        search_response=[
+            {"identifier": "antipattern-3-ad-hoc-pattern-without-domains-line", "score": 0.9},
+            {"identifier": "antipattern-2-migration-ticket-fighting-in-flight-tickets", "score": 0.7},
+        ]
+    )
+    matches = ci.retrieve_antipatterns_via_cognee(
+        fixture_cookbook,
+        ticket_title="x",
+        acceptance_criteria="y",
+        top_k=2,
+        adapter=_adapter(fake),
+    )
+    assert [m.record.pattern_id for m in matches] == ["3", "2"]
+    # Searched the antipattern dataset, not the lesson dataset.
+    assert fake.searches[0][1] == ("t-default:antipattern",)
+
+
+def test_retrieve_antipatterns_area_match_is_biased_first(fixture_cookbook: Path) -> None:
+    # Cognee orders #1 then #2, but the ticket is area:db — pattern #2
+    # (Domains: backend, db) must be promoted ahead of #1, with the matched
+    # domain recorded.
+    fake = _FakeCognee(
+        search_response=[
+            {"identifier": "antipattern-1-numbered-flat-file-registry", "score": 0.9},
+            {"identifier": "antipattern-2-migration-ticket-fighting-in-flight-tickets", "score": 0.6},
+        ]
+    )
+    matches = ci.retrieve_antipatterns_via_cognee(
+        fixture_cookbook,
+        ticket_title="add a migration",
+        acceptance_criteria="alembic revision",
+        declared_areas=["db"],
+        top_k=2,
+        adapter=_adapter(fake),
+    )
+    assert matches[0].record.pattern_id == "2"
+    assert matches[0].matched_domains == ("db",)
+    assert matches[1].matched_domains == ()
+
+
+def test_retrieve_antipatterns_falls_back_when_cognee_absent(fixture_cookbook: Path) -> None:
+    with patch.object(
+        ci.CogneeAdapter, "from_env", side_effect=ci.CogneeNotInstalled("missing")
+    ):
+        matches = ci.retrieve_antipatterns_via_cognee(
+            fixture_cookbook,
+            ticket_title="migration freeze",
+            acceptance_criteria="alembic siblings old schema",
+            declared_areas=["db"],
+            top_k=2,
+        )
+    # Keyword fallback still produces results, and the area:db match is
+    # promoted to the front.
+    assert matches
+    assert matches[0].record.pattern_id == "2"
+    assert matches[0].matched_domains == ("db",)
+
+
+def test_retrieve_antipatterns_against_real_cookbook() -> None:
+    records = ci.parse_antipatterns(_COOKBOOK_PATH)
+    # The cookbook has 14 numbered patterns (Index / Cross-cutting / See also
+    # are not patterns).
+    assert [r.pattern_id for r in records] == [str(n) for n in range(1, 15)]
+    # Every pattern carries a Domains line (AUDIT-29b-6 added them).
+    assert all(r.domains for r in records)
+    # An area:db ticket auto-surfaces pattern #10 "Migration ticket fighting
+    # in-flight tickets" (Domains: backend, db, docs) even with Cognee absent.
+    with patch.object(
+        ci.CogneeAdapter, "from_env", side_effect=ci.CogneeNotInstalled("missing")
+    ):
+        matches = ci.retrieve_antipatterns_via_cognee(
+            _COOKBOOK_PATH,
+            ticket_title="migration ticket conflicts with in-flight siblings",
+            acceptance_criteria="freeze the scope before pickup",
+            declared_areas=["db"],
+            top_k=3,
+        )
+    surfaced = {m.record.pattern_id for m in matches}
+    assert "10" in surfaced
+    assert any(m.matched_domains for m in matches)
