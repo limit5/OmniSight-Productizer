@@ -45,6 +45,17 @@ CURSOR_FILE = Path(
     )
 )
 
+# SP-B-X-009 (OP-1067) — C9 bridge-health heartbeat. The bridge daemon
+# touches this file on every maintenance tick (default 30s cadence) so
+# pickup-side runners can fail fast when the bridge has stopped
+# producing change-merged transitions. ``OMNISIGHT_BRIDGE_HEARTBEAT_PATH``
+# overrides for user-level systemd installs where ``/var/run`` is not
+# writable; ``OMNISIGHT_BRIDGE_STALE_AFTER_SEC`` tunes the staleness
+# threshold consumed by ``check_bridge_heartbeat`` and the runner gate.
+DEFAULT_HEARTBEAT_FILE = "/var/run/omnisight-bridge/heartbeat"
+DEFAULT_HEARTBEAT_FILE_SECONDS = 30.0
+DEFAULT_BRIDGE_STALE_AFTER_SEC = 300
+
 APPROVED_STATUS_NAMES = {"Approved", "承認済み"}
 ARCHIVED_STATUS_NAMES = {"Archived"}
 IN_PROGRESS_STATUS_NAMES = {"In Progress", "進行中"}
@@ -114,6 +125,71 @@ def save_cursor(event_id: str, ts: datetime, path: Path = CURSOR_FILE) -> None:
     tmp.replace(path)
 
 
+def heartbeat_path_from_env(env: dict[str, str] | None = None) -> Path:
+    """Resolve the bridge heartbeat file path. SP-B-X-009 (OP-1067)."""
+
+    e = env if env is not None else os.environ
+    return Path(e.get("OMNISIGHT_BRIDGE_HEARTBEAT_PATH", DEFAULT_HEARTBEAT_FILE))
+
+
+def heartbeat_stale_after_seconds(env: dict[str, str] | None = None) -> int:
+    """Resolve ``OMNISIGHT_BRIDGE_STALE_AFTER_SEC``; defaults to 300."""
+
+    e = env if env is not None else os.environ
+    raw = e.get("OMNISIGHT_BRIDGE_STALE_AFTER_SEC", "").strip()
+    if not raw:
+        return DEFAULT_BRIDGE_STALE_AFTER_SEC
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_BRIDGE_STALE_AFTER_SEC
+    return max(1, value)
+
+
+def touch_heartbeat_file(path: Path | None = None, now: float | None = None) -> Path:
+    """Touch the heartbeat file to ``now`` (or wall-clock ``time.time()``).
+
+    Creates the parent directory if missing — the systemd unit may run as
+    a user-level service against ``~/.local/state/omnisight-bridge/`` and
+    we cannot rely on the deployer pre-creating the directory.
+    """
+
+    target = path if path is not None else heartbeat_path_from_env()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.touch(exist_ok=True)
+    ts = now if now is not None else time.time()
+    os.utime(target, (ts, ts))
+    return target
+
+
+def check_bridge_heartbeat(
+    path: Path | None = None,
+    stale_after_seconds: int | None = None,
+    now: float | None = None,
+) -> tuple[bool, float, Path]:
+    """Return ``(is_fresh, age_seconds, resolved_path)``.
+
+    A missing heartbeat file is treated as stale (``is_fresh=False``,
+    ``age_seconds=inf``) — the bridge has either never started or its
+    install drifted from the configured path; pickup-side callers must
+    fail closed in either case.
+    """
+
+    target = path if path is not None else heartbeat_path_from_env()
+    stale = (
+        stale_after_seconds
+        if stale_after_seconds is not None
+        else heartbeat_stale_after_seconds()
+    )
+    current = now if now is not None else time.time()
+    try:
+        mtime = target.stat().st_mtime
+    except FileNotFoundError:
+        return False, float("inf"), target
+    age = max(0.0, current - mtime)
+    return age <= stale, age, target
+
+
 @dataclass
 class BridgeConfig:
     agent_class: str = "subscription-claude"
@@ -124,6 +200,11 @@ class BridgeConfig:
         "~/.config/omnisight/gerrit-claude-bot-ed25519"
     ).expanduser()
     heartbeat_seconds: float = 60.0
+    # SP-B-X-009 — separate cadence for the on-disk heartbeat file; the
+    # pickup gate reads its mtime, so the file must tick more often than
+    # the log heartbeat to keep the runner-side stale-threshold tight.
+    heartbeat_file_seconds: float = DEFAULT_HEARTBEAT_FILE_SECONDS
+    heartbeat_file_path: Path | None = None
     silent_warn_seconds: float = 600.0
     periodic_catchup_seconds: float = 900.0
     max_backoff_seconds: float = 60.0
@@ -378,6 +459,10 @@ class GerritJiraBridge:
         self._stop = False
         self._started_at = time.monotonic()
         self._last_heartbeat = time.monotonic()
+        # SP-B-X-009 — primed to "long ago" so the first maintenance tick
+        # writes the heartbeat file immediately rather than waiting one
+        # full ``heartbeat_file_seconds`` cycle.
+        self._last_heartbeat_file = time.monotonic() - self.config.heartbeat_file_seconds
         self._last_periodic_catchup = time.monotonic()
         self._cursor_missing_warned = False
         # OP-733 — lazy-initialised on the first change-merged event so
@@ -1326,6 +1411,12 @@ class GerritJiraBridge:
             return self._ticket_locks[ticket_key]
 
     def stream_forever(self) -> None:
+        # SP-B-X-009 — emit one heartbeat before catchup so the file
+        # appears on disk the moment the daemon is up. Without this the
+        # gate could read a missing file during the (potentially minute-
+        # long) startup catchup and trip a false "bridge down" alert.
+        self._touch_heartbeat_file()
+        self._last_heartbeat_file = time.monotonic()
         self.startup_catchup()
         self.replay_from_cursor()
         consecutive_failures = 0
@@ -1376,6 +1467,8 @@ class GerritJiraBridge:
     def run_once_from_lines(self, lines: Iterable[str]) -> None:
         self.startup_catchup()
         self.replay_from_cursor()
+        self._touch_heartbeat_file()
+        self._last_heartbeat_file = time.monotonic()
         for line in lines:
             payload = parse_stream_line(line)
             if payload is None:
@@ -1385,17 +1478,40 @@ class GerritJiraBridge:
             self.process_stream_event(payload)
             self.save_event_cursor(payload)
         self._emit_heartbeat()
+        self._touch_heartbeat_file()
 
     def _maintenance_ticks(self) -> None:
         now = time.monotonic()
         if now - self._last_heartbeat >= self.config.heartbeat_seconds:
             self._emit_heartbeat()
             self._last_heartbeat = now
+        if now - self._last_heartbeat_file >= self.config.heartbeat_file_seconds:
+            self._touch_heartbeat_file()
+            self._last_heartbeat_file = now
         if self.config.periodic_catchup_seconds > 0 and (
             now - self._last_periodic_catchup >= self.config.periodic_catchup_seconds
         ):
             self.startup_catchup()
             self._last_periodic_catchup = now
+
+    def _touch_heartbeat_file(self) -> None:
+        """SP-B-X-009 — write the on-disk heartbeat for the pickup gate.
+
+        Errors are logged but never raised: a stale heartbeat is *exactly*
+        the failure-mode the pickup gate is designed to detect, so a write
+        failure must not also crash the daemon. The runner side will pick
+        up the stale mtime and notify the operator on its next pickup."""
+
+        path = self.config.heartbeat_file_path or heartbeat_path_from_env()
+        try:
+            touch_heartbeat_file(path)
+        except OSError as exc:
+            self.log(
+                "WARN",
+                "heartbeat_file_write_failed",
+                err=f"{type(exc).__name__}: {exc}",
+                heartbeat_path=str(path),
+            )
 
     def _emit_heartbeat(self) -> None:
         payload = self.counters.__dict__.copy()
