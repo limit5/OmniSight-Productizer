@@ -51,6 +51,7 @@ from backend.agents import (
     capability_matrix,
     circuit_breaker,
     failure_graph,
+    live_state_check,
     memory_writeback,
     outcomes_consumer,
     jira_dispatch,
@@ -1394,6 +1395,47 @@ def _handle_gerrit_push_failure(
     return category, action
 
 
+def _handle_toctou_abort(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    recheck: "live_state_check.BoundaryRecheckResult",
+    *,
+    phase: str,
+) -> int:
+    """Apply the JIRA recovery action for a transition-boundary TOCTOU abort.
+
+    SP-B-X-004 (OP-1062). Posts a ``[runner-toctou:<phase>:<action>]``
+    audit comment unconditionally. Reverts to To Do for the mutation
+    classes where the runner is the one that has to step aside
+    (assignee swap, operator-window label added, new unresolved
+    Blocks dep). Leaves status untouched for the two classes where a
+    revert would either be redundant (already in To Do) or actively
+    wrong (ticket has already walked forward and a duplicate push
+    would land twice).
+    """
+    audit = f"[runner-toctou:{phase}:{recheck.action}] {recheck.reason}"
+    print(f"[runner] {key} toctou abort: {audit}", file=sys.stderr)
+    try:
+        jira_dispatch.add_comment(client, key, audit)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[runner] toctou audit-comment post failed for {key}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+    if recheck.action in ("abort_reverted", "abort_already_advanced"):
+        return 1
+    try:
+        jira_dispatch.transition_back_to_todo(client, key, audit)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[runner] toctou revert failed for {key}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+    return 1
+
+
 def _run_git_text(worktree_path: Path, args: list[str], *, timeout: int = 20) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -1809,6 +1851,22 @@ def main() -> int:
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)
 
+    # SP-B-X-004 / OP-1062: freeze a pickup-time view of the mutable
+    # JIRA fields (assignee, status, labels, Blocks issuelinks) so the
+    # phase-boundary rechecks below can diff against it and bail out
+    # on mid-flight operator mutations.
+    try:
+        toctou_snapshot = live_state_check.capture_transition_boundary_snapshot(
+            client, snapshot.key,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade rather than wedge pickup
+        print(
+            f"[runner] toctou snapshot capture failed for {snapshot.key}: "
+            f"{type(exc).__name__}: {exc}; rechecks will be skipped.",
+            file=sys.stderr,
+        )
+        toctou_snapshot = None
+
     metric_meta = _LAST_TICKET_METADATA.get(snapshot.key, {})
     metric_id, metric_started_at = runner_metrics_recorder.record_pickup_sync(
         runner_metrics_recorder.RunnerMetricStart(
@@ -1879,6 +1937,19 @@ def main() -> int:
             client, snapshot, enabled_caps, "gerrit_push",
         ):
             return 1
+        # SP-B-X-004 / OP-1062 — TOCTOU reread #1: between `working` and
+        # `submitting`. If the operator reverted the ticket, advanced it,
+        # swapped assignees, tagged it for operator-window, or added a new
+        # unresolved Blocks dep while the agent CLI was running, abort
+        # before we touch Gerrit.
+        if toctou_snapshot is not None:
+            recheck = live_state_check.recheck_transition_boundary_state(
+                client, snapshot.key, toctou_snapshot,
+            )
+            if not recheck.ok:
+                return _handle_toctou_abort(
+                    client, snapshot.key, recheck, phase="pre-submit",
+                )
         # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
         # Phase 3 SHIPPED in OP-689; events-stream consumer:
         # backend/agents/gerrit_jira_bridge.py.
@@ -1887,6 +1958,18 @@ def main() -> int:
             # ensure_change_ids rebases onto sync_result.develop_sha (Phase 1.5 fix per L16),
             # not local main; codex's commits get Change-Id via commit-msg hook.
             jira_dispatch.ensure_change_ids(worktree_path, base_ref=sync_result.develop_sha)
+            # SP-B-X-004 / OP-1062 — TOCTOU reread #2: between `committing`
+            # (ensure_change_ids stamped Change-Ids) and the actual push.
+            # Same mutation classes; rate-limit reuses the #1 fetch when
+            # the two boundaries hit inside the 60s TTL window.
+            if toctou_snapshot is not None:
+                recheck = live_state_check.recheck_transition_boundary_state(
+                    client, snapshot.key, toctou_snapshot,
+                )
+                if not recheck.ok:
+                    return _handle_toctou_abort(
+                        client, snapshot.key, recheck, phase="pre-push",
+                    )
             push_result = jira_dispatch.push_to_gerrit_for_review(
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
             )
