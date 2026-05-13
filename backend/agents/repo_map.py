@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -32,6 +34,8 @@ DEFAULT_TOKEN_BUDGET = 1000
 NO_FILES_TOUCHED_TOKEN_BUDGET = 2000
 DEFAULT_TOP_N = 50
 FALLBACK_RECENT_FILE_COUNT = 100
+DEFAULT_CACHE_TTL_SEC = 300
+REPO_MAP_TTL_ENV = "OMNISIGHT_REPO_MAP_TTL_SEC"
 _CACHE_DIR = Path(".cache/omnisight/repo-map")
 _PATH_RE = re.compile(r"\b[A-Za-z0-9_./-]+\.(?:py|ts|tsx)\b")
 
@@ -119,6 +123,8 @@ def load_or_build_graph(
     repo_root = repo_root.resolve()
     head_sha = repo_head_sha(repo_root)
     target_cache_dir = repo_root / (cache_dir or _CACHE_DIR)
+    ttl_sec = _cache_ttl_sec()
+    _evict_expired_cache_entries(target_cache_dir, ttl_sec)
     cache_path = target_cache_dir / f"{head_sha}.json"
     if cache_path.exists():
         try:
@@ -131,6 +137,23 @@ def load_or_build_graph(
     target_cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path.write_text(json.dumps(graph.to_json(), indent=2, sort_keys=True) + "\n")
     return graph
+
+
+def get_cache_stats(repo_root: Path, *, cache_dir: Path | None = None) -> dict[str, object]:
+    repo_root = repo_root.resolve()
+    target_cache_dir = repo_root / (cache_dir or _CACHE_DIR)
+    ttl_sec = _cache_ttl_sec()
+    head_sha = repo_head_sha(repo_root)
+    files = tuple(target_cache_dir.glob("*.json")) if target_cache_dir.exists() else ()
+    return {
+        "cache_dir": str(target_cache_dir),
+        "ttl_sec": ttl_sec,
+        "head_sha": head_sha,
+        "head_cached": (target_cache_dir / f"{head_sha}.json") in files,
+        "entries": len(files),
+        "expired_entries": sum(1 for path in files if _cache_entry_expired(path, ttl_sec)),
+        "size_bytes": sum(path.stat().st_size for path in files if path.exists()),
+    }
 
 
 def build_graph(
@@ -273,6 +296,32 @@ def repo_head_sha(repo_root: Path) -> str:
         return proc.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return "no-git-head"
+
+
+def _cache_ttl_sec() -> int:
+    raw = os.environ.get(REPO_MAP_TTL_ENV, str(DEFAULT_CACHE_TTL_SEC))
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_CACHE_TTL_SEC
+
+
+def _evict_expired_cache_entries(cache_dir: Path, ttl_sec: int) -> None:
+    if not cache_dir.exists():
+        return
+    now = time.time()
+    for path in cache_dir.glob("*.json"):
+        if not _cache_entry_expired(path, ttl_sec, now=now):
+            continue
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _cache_entry_expired(path: Path, ttl_sec: int, *, now: float | None = None) -> bool:
+    age_sec = (now if now is not None else time.time()) - path.stat().st_mtime
+    return age_sec > ttl_sec
 
 
 def _parse_files(
