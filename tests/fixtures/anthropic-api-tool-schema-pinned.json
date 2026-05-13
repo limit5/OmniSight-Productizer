@@ -1,0 +1,52 @@
+{
+  "_doc": "[OP-1066] Pinned Anthropic built-in-tool API surface. Re-pin requires an explicit operator commit — see docs/sop/runbooks/anthropic-api-drift-response.md.",
+  "schema_version": "v1",
+  "pinned_at": "2026-05-14",
+  "pinned_against": "anthropic-python-sdk text_editor_20250728 / bash_20250124 (production runner usage 2026-05).",
+  "tool_name": "str_replace_based_edit_tool",
+  "tool_type": "text_editor_20250728",
+  "request_tool_payload": {
+    "type": "text_editor_20250728",
+    "name": "str_replace_based_edit_tool"
+  },
+  "response_invariants": {
+    "top_level_required_keys": [
+      "id",
+      "type",
+      "role",
+      "content",
+      "stop_reason",
+      "model",
+      "usage"
+    ],
+    "top_level_fixed_values": {
+      "type": "message",
+      "role": "assistant"
+    },
+    "stop_reason_allowed": [
+      "tool_use",
+      "end_turn"
+    ],
+    "tool_use_block": {
+      "type_value": "tool_use",
+      "required_keys": [
+        "type",
+        "id",
+        "name",
+        "input"
+      ],
+      "name_must_equal": "str_replace_based_edit_tool",
+      "input_required_keys_for_view": [
+        "command",
+        "path"
+      ],
+      "input_allowed_command_values": [
+        "view"
+      ]
+    },
+    "usage_required_keys": [
+      "input_tokens",
+      "output_tokens"
+    ]
+  }
+}
