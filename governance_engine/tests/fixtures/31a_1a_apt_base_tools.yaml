@@ -1,0 +1,45 @@
+# Source: docs/sprint-s12/phase-31a-ticket-spec.md §6 31.A-1a
+# Golden positive case for the G.A-v0 ticket-contract kernel.
+# Must round-trip through governance_engine.schema.v0.TicketContract and
+# satisfy all 10 forbidden-combination rules (A2).
+schema_version: v0
+class: subscription-claude
+authority_required: L3
+l1_exclusive_reason: null
+l2_reason: null
+
+# 11 v2 boundary fields (source-faithful to §6 31.A-1a)
+loc_delta_max: 80
+files_touched_max: 1
+required_paths:
+  - scripts/setup-dev-env-full/01-base-tools.sh
+forbidden_paths:
+  - scripts/setup-dev-env-full.sh
+  - scripts/setup-dev-env-full/02-*
+  - scripts/setup-dev-env-full/0[3-9]-*
+non_goals:
+  - "DO NOT install nvm/Node — 31.A-1b owns"
+  - "DO NOT install pnpm/Python venv — 31.A-1c owns"
+  - "DO NOT touch master script (setup-dev-env-full.sh) — 31.A-11a owns"
+test_scope: defer-to-integration
+destructive_op_classes: []
+destructive_op_scope: none
+execution_mode: unit-testable
+evidence_class: unit
+on_scope_creep: file-followup
+
+# Remaining schema fields required for round-trip
+interface_contract: "outputs: scripts/setup-dev-env-full/01-base-tools.sh executable + idempotent; inputs: none (first in chain)"
+scope_components:
+  - devops
+  - tooling
+external_side_effect: none
+external_payload_class: operational
+runtime_capability: unit-only
+dependency_artifacts: []
+mutex_with: []
+scope_summary_max_chars: 200
+tag_type: story
+reversibility: reversible
+environment_scope: local
+external_systems: []
