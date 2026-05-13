@@ -54,8 +54,8 @@ Documentation=file:///home/user/sora-bridge/docs/operations/staging-environment-
 ; dockerd here is a system service; the user manager has no ordering edge
 ; to it, so we only order after the network. The compose `up` retries
 ; the socket itself; ExecStartPre's contract check does not need docker.
-After=network-online.target
-Wants=network-online.target
+After=network-online.target staging-audit-verify-token.service
+Wants=network-online.target staging-audit-verify-token.service
 
 [Service]
 Type=oneshot
@@ -71,6 +71,7 @@ Environment=OMNISIGHT_STAGING_HEALTHZ_URL=http://localhost:18080/healthz
 ; sandbox-key prefixes). `-` => optional; absence is not an error.
 EnvironmentFile=-/home/user/.config/omnisight/staging-compose.env
 ExecStartPre=/home/user/sora-bridge/infra/staging/verify-env-contract.sh
+ExecStartPre=/usr/bin/test -s /home/user/.config/omnisight/staging-audit-verify-token
 ExecStart=/usr/bin/docker compose -f /home/user/sora-bridge/deploy/staging/docker-compose.yml up -d --wait --remove-orphans
 ExecStartPost=/usr/bin/curl -fsS --retry 12 --retry-delay 5 --retry-connrefused -o /dev/null ${OMNISIGHT_STAGING_HEALTHZ_URL}
 ExecStop=/usr/bin/docker compose -f /home/user/sora-bridge/deploy/staging/docker-compose.yml down
