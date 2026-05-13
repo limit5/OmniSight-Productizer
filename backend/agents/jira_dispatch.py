@@ -52,6 +52,45 @@ MIGRATION_IN_FLIGHT_LABEL = "migration:in-flight"
 MIGRATION_OVERRIDE_LABEL = "migration:override"
 MIGRATION_SCOPE_PREFIX = "migration:scope="
 
+# ADR-0033 §6 / S12.G v2 spec §3.6: runners (L3) MUST refuse pickup of any
+# ticket carrying a ``class:operator-window-*`` or ``class:operator-rehearsal``
+# label, even when the same ticket also carries ``class:subscription-*``.
+# Refusal is silent — no JIRA comment, only a structured audit log line — so
+# operators (L1/L2) can drive the ticket without runner interference.
+REFUSAL_LABEL_PREFIXES = ("class:operator-window-", "class:operator-rehearsal")
+
+
+def _runner_refuses_pickup(labels: list[str]) -> tuple[bool, str | None]:
+    """Return ``(True, matching_label)`` if any label triggers L3 refusal.
+
+    Operator-window-* / operator-rehearsal labels always win over a
+    co-present ``class:subscription-*`` — the runner refuses pickup so the
+    ticket stays available for the operator's window.
+    """
+    for label in labels:
+        if not isinstance(label, str):
+            continue
+        for prefix in REFUSAL_LABEL_PREFIXES:
+            if label.startswith(prefix):
+                return True, label
+    return False, None
+
+
+def _emit_runner_refusal_audit(ticket_key: str, refusal_label: str) -> None:
+    """Emit structured ``runner_refusal_by_class`` event — no JIRA write."""
+    log.info(
+        "runner_refusal_by_class %s",
+        json.dumps(
+            {
+                "event": "runner_refusal_by_class",
+                "ticket_key": ticket_key,
+                "refusal_label": refusal_label,
+                "runner_instance": _instance_id_from_env(),
+            },
+            sort_keys=True,
+        ),
+    )
+
 # ── Auth + config per agent_class ─────────────────────────────────
 
 CRED_DIR = Path("~/.config/omnisight").expanduser()
@@ -276,7 +315,13 @@ PICKUP_JQL_TEMPLATE = (
 
 
 def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> list[dict]:
-    """Run pickup JQL per §16. Returns raw issue dicts (not snapshots)."""
+    """Run pickup JQL per §16. Returns raw issue dicts (not snapshots).
+
+    Per ADR-0033 §6, tickets carrying any :data:`REFUSAL_LABEL_PREFIXES`
+    label are silently dropped from the candidate list and emit a
+    ``runner_refusal_by_class`` audit line. No JIRA comment is posted —
+    operator-window tickets are L1/L2-only by design.
+    """
     jql = PICKUP_JQL_TEMPLATE.format(project=client.project_key, cls=client.agent_class)
     resp = _request(client, "POST", "/search/jql", {
         "jql": jql,
@@ -284,7 +329,15 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
                    "created", "components", "issuelinks", "parent"],
         "maxResults": max_results,
     })
-    return resp.get("issues", [])
+    pickable: list[dict] = []
+    for issue in resp.get("issues", []):
+        labels = ((issue.get("fields") or {}).get("labels")) or []
+        refused, refusal_label = _runner_refuses_pickup(labels)
+        if refused:
+            _emit_runner_refusal_audit(issue.get("key", "?"), refusal_label)
+            continue
+        pickable.append(issue)
+    return pickable
 
 
 def to_snapshot(issue: dict) -> TicketSnapshot:
@@ -2826,6 +2879,17 @@ def pre_pickup_ok(
     """
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
     from backend.agents.file_coordinator import has_unresolved_blockedby
+
+    # ADR-0033 §6 / S12.G v2 §3.6 — FIRST gate. Refuse operator-window-* /
+    # operator-rehearsal pickup before any other check (capability matrix,
+    # fencing-token claim, live-state). Primary filtering happens in
+    # :func:`fetch_pickable_tickets`; this branch is the defensive belt-and-
+    # suspenders for direct callers and label-added-after-fetch TOCTOU races.
+    refused, refusal_label = _runner_refuses_pickup(list(snapshot.labels))
+    if refused:
+        _emit_runner_refusal_audit(snapshot.key, refusal_label)
+        return False, f"runner_refusal_by_class:{refusal_label}"
+
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)
 
