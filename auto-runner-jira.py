@@ -1087,10 +1087,26 @@ def _finalize_under_review(
               f"comment posted, transition skipped")
 
 
+def _release_ticket_claim_if_acquired(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    claim: "jira_dispatch.ClaimResult | None",
+) -> None:
+    """Best-effort claim release after a successful runner claim."""
+    if claim is None or not claim.ok:
+        return
+    token = None
+    prefix = f"{INSTANCE_ID}:"
+    if claim.claim_token and claim.claim_token.startswith(prefix):
+        token = claim.claim_token[len(prefix):]
+    jira_dispatch.release_ticket_claim(client, key, INSTANCE_ID, token)
+
+
 def _finalize_successful_push(
     client: "jira_dispatch.DispatchClient",
     key: str,
     push_result: "jira_dispatch.GerritPushResult",
+    claim: "jira_dispatch.ClaimResult | None" = None,
 ) -> None:
     _finalize_under_review(
         client,
@@ -1098,6 +1114,7 @@ def _finalize_successful_push(
         push_result.change_url,
         change_number=push_result.change_number,
     )
+    _release_ticket_claim_if_acquired(client, key, claim)
     if push_result.post_push_warning:
         jira_dispatch.add_comment(
             client,
@@ -1990,6 +2007,7 @@ def main() -> int:
                     f"self-reverted (discovered-dependency / §11); "
                     f"no additional comment, exiting 0."
                 )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 0
             # OP-956: ops-only ticket-type path. When the operator has
             # tagged the ticket as `runner:no-commits-expected`, the
@@ -2017,6 +2035,7 @@ def main() -> int:
                     failure_class=None if rc_fwd == 0 else "OPS_ONLY_TRANSITION_REFUSED",
                     area=metric_meta.get("area"),
                 )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return rc_fwd
             # OP-827 fix: claude/codex CLI exited without committing. Posting AC
             # and exiting bypasses the commit, so there is nothing to push and
@@ -2037,6 +2056,7 @@ def main() -> int:
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except jira_dispatch.WorktreeDirtyError as e:
             # OP-827 fix: CLI wrote files but never committed (or skipped
@@ -2057,6 +2077,7 @@ def main() -> int:
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except Exception as e:
             print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
@@ -2065,6 +2086,7 @@ def main() -> int:
                 f"[runner-gerrit-setup-fail] Could not prepare Gerrit push:\n{type(e).__name__}: {e}\n\n"
                 f"Operator: review changes in `{worktree_path}`, push manually, then transition Under Review.",
             )
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
 
         if push_result.success:
@@ -2085,6 +2107,7 @@ def main() -> int:
                     push_result.change_number,
                 )
             except outcomes_consumer.OutcomesGraderRefused:
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 1
             if outcomes_status == "fail":
                 print(f"[runner] {snapshot.key} Outcomes grader failed; ticket reopened")
@@ -2096,8 +2119,9 @@ def main() -> int:
                     failure_class="OUTCOMES_GRADER_REFUSED",
                     area=metric_meta.get("area"),
                 )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 0
-            _finalize_successful_push(client, snapshot.key, push_result)
+            _finalize_successful_push(client, snapshot.key, push_result, claim)
             # OP-956: OpsLabelButCommitsProduced — CLI was tagged ops-only
             # but produced commits anyway. AC error catalog says "Log
             # warning + still push the commits (don't lose work) +
@@ -2124,6 +2148,7 @@ def main() -> int:
                 push_result.detail,
                 agent_class=AGENT_CLASS,
             )
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
     elif rc == 99:
         print(f"[runner] {snapshot.key} skipped (API agent_class not yet wired in MVP)")

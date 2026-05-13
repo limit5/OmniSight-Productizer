@@ -108,11 +108,9 @@ load-bearing for correctness: the assignee field is the real "this ticket
 is taken" signal (it drops the ticket out of the pickup JQL), and the
 stale-sweep bounds label accumulation regardless.
 
-> **Wiring note (residual follow-up)**: `release_ticket_claim` is correct
-> and tested but is **not yet called from `auto-runner-jira.py`'s post-CLI
-> path** as of OP-977 — `auto-runner-jira.py` is out of OP-977's area
-> (backend/docs/tests). Not load-bearing because the pre-GET stale-sweep
-> caps accumulation; wiring it in is a recommended cleanup ticket.
+> **Wiring note**: post-CLI `auto-runner-jira.py` claim release shipped
+> 2026-05-14 by SP-B-X-003 / OP-1061. The runner releases only after a
+> successful claim acquisition and treats pre-claim exits as no-ops.
 
 ### 3.1 Single-flag rollback
 
