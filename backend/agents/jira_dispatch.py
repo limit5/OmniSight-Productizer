@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from backend.config import settings
+from backend.agents import runner_progress
 from backend.agents.circuit_breaker import BREAKERS
 from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
@@ -1041,24 +1042,13 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
         cwd=worktree_path, check=True, capture_output=True, text=True,
     )
     dirty = [line[3:] for line in status.stdout.splitlines() if line.strip()]
-    # OP-842 sentinel (above) + SP-B-X-016 follow-up: also exclude
-    # progress.txt + progress.txt.tmp (the runner's own runtime
-    # bookkeeping files written by ``runner_progress.record_phase`` at
-    # FSM boundaries). They are not part of the AC; the runner writes
-    # them as untracked artifacts for crash-recovery durability per
-    # SP-B-X-002a / OP-1060. Without this filter, every ticket that
-    # transitions phases (i.e., every ticket after OP-1060 deployed)
-    # wedges here post-AC because ``progress.txt`` shows up dirty
-    # (observed on OP-1070: codex completed work + AC verified at
-    # 02:46:29, then dirty-worktree revert at 02:46:42 because
-    # progress.txt remained untracked). The companion sentinel filter
-    # is for OP-842; this one is for OP-1060's writer.
-    _RUNNER_OWN_ARTIFACTS = {
-        ".runner-cwd-sentinel",
-        "progress.txt",
-        "progress.txt.tmp",
-    }
-    dirty = [f for f in dirty if f not in _RUNNER_OWN_ARTIFACTS]
+    # SP-B-X-018 / OP-1076: filter via the CANONICAL constant exported
+    # by ``runner_progress`` so this site and ``_worktree_dirty`` never
+    # disagree about which files are runner-own bookkeeping. Previously
+    # each site maintained its own local set (SP-B-X-016 fixed one,
+    # SP-B-X-017 fixed the other) — the consolidation lets future
+    # additions land in one place.
+    dirty = [f for f in dirty if f not in runner_progress.RUNNER_RUNTIME_ARTIFACTS]
     if dirty:
         raise WorktreeDirtyError(dirty_files=dirty)
 

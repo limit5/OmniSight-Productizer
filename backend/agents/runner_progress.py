@@ -143,19 +143,42 @@ def _git(worktree_path: Path, args: list[str], *, timeout: int = 30) -> str:
     return result.stdout
 
 
-_OUR_OWN_ARTIFACTS = frozenset({
+#: Files written by the runner pipeline itself for bookkeeping / safety,
+#: NOT by the CLI's ticket work. These must be filtered out of every
+#: dirty-check that decides whether the worktree is "CLI-modified".
+#:
+#: Public + canonical: ``jira_dispatch.ensure_change_ids`` imports this
+#: same constant rather than duplicating the set (SP-B-X-018 / OP-1076).
+#: If a new runner-runtime file is added in the future, add it HERE
+#: only — both dirty-check sites will pick it up automatically.
+#:
+#: Entries:
+#:   * ``progress.txt`` (+ ``.tmp``) — phase-progress writer (SP-B-X-002a
+#:     / OP-1060). ``runner_progress.record_phase`` writes this at every
+#:     FSM boundary; a naive dirty-check would report dirty on every
+#:     phase transition.
+#:   * ``.runner-cwd-sentinel`` — workspace-tamper sentinel (OP-842 /
+#:     OP-836). ``runner_workspace_safety.write_workspace_sentinel``
+#:     drops this pre-CLI as an intentionally-untracked tamper-detection
+#:     marker. Two distinct dirty-check failure modes were created when
+#:     it leaked into either of the two checks (workspace-tampered if
+#:     phase-snapshot stash-sweeps it, dirty-worktree if ensure_change_ids
+#:     surfaces it) — both fixed by including it here.
+#:
+#: Long-term consideration: ``.gitignore`` would catch these at the git
+#: layer and obviate the explicit filters, but per
+#: ``docs/sop/runner-runtime-artifacts.md`` the project intentionally
+#: keeps these out of ``.gitignore`` (the filter approach is a smaller,
+#: layered fix consistent with the OP-842 precedent).
+RUNNER_RUNTIME_ARTIFACTS: frozenset[str] = frozenset({
     PROGRESS_FILENAME,
     PROGRESS_FILENAME + _PROGRESS_TMP_SUFFIX,
-    # OP-842 sentinel — see ensure_change_ids precedent referenced in
-    # _worktree_dirty docstring below. Without this exclusion, the
-    # untracked sentinel triggers `_worktree_dirty() = True`, which
-    # makes `take_phase_snapshot` stash it (via --include-untracked)
-    # and the sentinel disappears from the working tree. The runner's
-    # subsequent sentinel-check then fires `workspace-tampered` and
-    # reverts the ticket. Affects both claude-bot and codex-bot runners
-    # (observed on OP-1069/1070/1071 against SP-B-X-002a).
     ".runner-cwd-sentinel",
 })
+
+#: Back-compat alias — pre-SP-B-X-018 callers used this private name.
+#: New code MUST import :data:`RUNNER_RUNTIME_ARTIFACTS` instead.
+_OUR_OWN_ARTIFACTS = RUNNER_RUNTIME_ARTIFACTS
 
 
 def _worktree_dirty(worktree_path: Path) -> bool:
