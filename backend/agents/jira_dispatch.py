@@ -35,7 +35,12 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from backend.config import settings
-from backend.agents import provider_orchestrator, runner_coordination, runner_progress
+from backend.agents import (
+    model_deconfliction,
+    provider_orchestrator,
+    runner_coordination,
+    runner_progress,
+)
 from backend.agents.circuit_breaker import BREAKERS
 from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
@@ -87,6 +92,44 @@ def _emit_runner_refusal_audit(ticket_key: str, refusal_label: str) -> None:
                 "event": "runner_refusal_by_class",
                 "ticket_key": ticket_key,
                 "refusal_label": refusal_label,
+                "runner_instance": _instance_id_from_env(),
+            },
+            sort_keys=True,
+        ),
+    )
+
+
+def _emit_deconfliction_refusal_audit(
+    ticket_key: str,
+    agent_class: str,
+    decision: "model_deconfliction.DispatchDecision",
+) -> None:
+    """Emit structured ``runner_deconfliction_refusal`` event — no JIRA write.
+
+    Mirrors :func:`_emit_runner_refusal_audit` so operators can grep both
+    refusal modes from the same audit feed. The blocking incident
+    metadata (failure class + runner that failed) is recorded so the
+    operator can confirm the thrash-prevention decision without
+    re-running the ticket.
+    """
+    blocking = decision.blocking_incident
+    log.info(
+        "runner_deconfliction_refusal %s",
+        json.dumps(
+            {
+                "event": "runner_deconfliction_refusal",
+                "ticket_key": ticket_key,
+                "agent_class": agent_class,
+                "reason": decision.reason,
+                "blocking_failure_class": (
+                    blocking.failure_class.value if blocking else None
+                ),
+                "blocking_runner_class": (
+                    blocking.runner_class if blocking else None
+                ),
+                "blocking_incident_id": (
+                    blocking.incident_id if blocking else None
+                ),
                 "runner_instance": _instance_id_from_env(),
             },
             sort_keys=True,
@@ -323,6 +366,12 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
     label are silently dropped from the candidate list and emit a
     ``runner_refusal_by_class`` audit line. No JIRA comment is posted —
     operator-window tickets are L1/L2-only by design.
+
+    Per OP-1117 (v2-Ⅹ-5e), tickets that another runner ``agent_class``
+    failed on recently are dropped when the failure class is one where
+    swapping models is unlikely to help (see
+    :mod:`backend.agents.model_deconfliction`). A
+    ``runner_deconfliction_refusal`` audit line records the decision.
     """
     jql = PICKUP_JQL_TEMPLATE.format(project=client.project_key, cls=client.agent_class)
     resp = _request(client, "POST", "/search/jql", {
@@ -333,11 +382,23 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
     })
     pickable: list[dict] = []
     for issue in resp.get("issues", []):
+        ticket_key = issue.get("key", "?")
         labels = ((issue.get("fields") or {}).get("labels")) or []
         refused, refusal_label = _runner_refuses_pickup(labels)
         if refused:
-            _emit_runner_refusal_audit(issue.get("key", "?"), refusal_label)
+            _emit_runner_refusal_audit(ticket_key, refusal_label)
             continue
+
+        decision = model_deconfliction.should_pickup_after_prior_failure(
+            ticket_key=ticket_key,
+            current_runner_class=client.agent_class,
+        )
+        if not decision.allowed:
+            _emit_deconfliction_refusal_audit(
+                ticket_key, client.agent_class, decision
+            )
+            continue
+
         pickable.append(issue)
     return pickable
 
