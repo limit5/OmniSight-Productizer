@@ -2299,6 +2299,10 @@ _CLAIM_READBACK_DELAY_S = 0.2
 
 # Rollback flag — see module header.
 _LEGACY_CLAIM_ENV = "OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY"
+# OP-1110 cutover rollback: set to "1" to restore the dual-write (label +
+# coordination-table) path. Default mode is coordination-table-only writes;
+# labels are read-only for backwards compat (with deprecation warning).
+_LABEL_CUTOVER_ROLLBACK_ENV = "OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY"
 
 
 @dataclass(frozen=True)
@@ -2426,6 +2430,20 @@ def _legacy_claim_mode() -> bool:
     return os.environ.get(_LEGACY_CLAIM_ENV, "").strip().lower() not in ("", "0", "false", "no")
 
 
+def _label_cutover_rollback_mode() -> bool:
+    """True iff ``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY`` enables OP-1110
+    emergency rollback to label-based claim writes (dual-write era).
+
+    Default (env unset or 0) is the table-only write mode shipped with the
+    OP-1110 cutover. Setting this flag re-enables the pre-cutover behaviour
+    where every claim acquire + release also writes ``claim:*`` labels via
+    the legacy/fenced atomic-claim algorithm — used only to ride out a
+    coordination-DB outage that bypasses the runner_coordination layer's
+    own degraded-mode tolerance.
+    """
+    return os.environ.get(_LABEL_CUTOVER_ROLLBACK_ENV, "").strip().lower() not in ("", "0", "false", "no")
+
+
 def _our_claim_label(instance_id: str) -> str:
     """Legacy (OP-838) bare mutex marker: ``claim:{instance_id}``.
 
@@ -2544,13 +2562,24 @@ def claim_ticket_atomic(
 ) -> ClaimResult:
     """Atomically claim ``key`` before ``transition_to_in_progress``.
 
-    Dispatches to the AUDIT-24 fencing-token path (default) or the legacy
-    OP-838 bare-label path (``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1``).
-    See the module-level header for the mechanism and the rollback flag.
+    OP-1110 cutover: by default the coordination table
+    (:func:`runner_coordination.acquire_claim`) is the sole authority for
+    the per-ticket-ownership claim. Label writes have been dropped; the
+    JIRA assignee is still set as a human-visible observability marker but
+    is no longer load-bearing for correctness.
+
+    Rollback: set ``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1`` to restore the
+    pre-cutover dual-write path (label add via the AUDIT-24 fenced
+    algorithm, or the OP-838 legacy bare-label path when
+    ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1`` is also set).
 
     Raises :class:`RunnerMutexAPIError` for transport failures during the
     claim sequence. Returns :class:`ClaimResult` for the mutex-lost path.
     """
+    if not _label_cutover_rollback_mode():
+        return _claim_ticket_atomic_table_only(client, key, instance_id)
+
+    # ── Rollback path: legacy dual-write (pre-OP-1110) ────────────────
     coordination_lease = _shadow_acquire_claim(client, key, instance_id)
     try:
         if _legacy_claim_mode():
@@ -2579,6 +2608,85 @@ def claim_ticket_atomic(
         result,
         coordination_lease_id=coordination_lease.lease_id,
         coordination_fencing_token=coordination_lease.fencing_token,
+    )
+
+
+def _claim_ticket_atomic_table_only(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> ClaimResult:
+    """OP-1110 cutover claim path: coordination table is sole authority.
+
+    Sequence:
+
+    1. ``runner_coordination.acquire_claim`` on the ticket resource_key.
+       The table's partial unique index on ``(resource_key) WHERE
+       state='active'`` atomically serializes contenders — on conflict
+       the call raises :class:`runner_coordination.ClaimBlocked` carrying
+       the existing lease.
+    2. Best-effort JIRA assignee PUT for human observability. Failures
+       here are logged but do not roll back the table claim — the table
+       row is the load-bearing state.
+
+    No labels written, no eventual-consistency retry loop, no label-based
+    tie-break. The table's atomic INSERT replaces the entire fenced-label
+    protocol. Cross-bot conflicts are caught by the same unique-index
+    serialization (each bot+instance has a distinct
+    ``owner_agent_class`` + ``owner_instance_id``).
+
+    Raises :class:`RunnerMutexAPIError` if the coordination table is
+    unavailable — the cutover requires the table to be reachable; falling
+    back silently to label-only would re-introduce the race the cutover
+    is closing. Operators with a coordination-DB outage can set
+    ``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1`` to revert to dual-write.
+    """
+    our_claim_token = f"{instance_id}:{_mint_claim_token(time.time_ns() // 1000)}"
+
+    try:
+        lease = runner_coordination.acquire_claim(
+            ticket_key=key,
+            resource_key=_coordination_resource_key(key),
+            owner_agent_class=getattr(client, "agent_class", "unknown"),
+            owner_instance_id=instance_id,
+            phase="pickup",
+            external_refs={"source": "claim_ticket_atomic_table_only"},
+        )
+    except runner_coordination.ClaimBlocked as exc:
+        existing = exc.existing_lease
+        lost_to = (
+            existing.fencing_token if existing is not None
+            else f"resource:{_coordination_resource_key(key)}"
+        )
+        return ClaimResult(
+            ok=False, lost_to=lost_to, claim_token=our_claim_token,
+        )
+    except Exception as exc:
+        # OP-1110: cutover requires the table. Surface as transport-style
+        # error so the runner skips this tick rather than silently
+        # bypassing mutex enforcement on a DB outage.
+        raise RunnerMutexAPIError(key, "table-acquire", exc) from exc
+
+    # Observability: set JIRA assignee so humans see who's working. Best-
+    # effort; the table claim is already held and is the authoritative
+    # state, so a 5xx here does not invalidate ownership.
+    try:
+        _request(
+            client, "PUT", f"/issue/{key}",
+            {"fields": {"assignee": {"accountId": client.bot_account_id}}},
+        )
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        log.warning(
+            "claim_ticket_atomic_table_only: assignee PUT for %s failed "
+            "(non-fatal — table claim still held): %s", key, e,
+        )
+
+    return ClaimResult(
+        ok=True,
+        lost_to=None,
+        claim_token=our_claim_token,
+        coordination_lease_id=lease.lease_id,
+        coordination_fencing_token=lease.fencing_token,
     )
 
 
@@ -2817,20 +2925,32 @@ def release_ticket_claim(
     coordination_lease_id: str | None = None,
     coordination_fencing_token: str | None = None,
 ) -> None:
-    """Remove this instance's claim label(s) from ``key`` (AUDIT-24 GC).
+    """Release this instance's claim on ``key``.
 
-    The winner GCs *every* ``claim:{instance_id}:*`` fenced label (its own
-    token plus any same-instance peer's left-behind loser label) and the
-    legacy bare ``claim:{instance_id}`` label — a single GET-then-PUT. If
-    the GET fails, falls back to removing just ``token`` (or the bare label
-    if no ``token`` is given) so a transport hiccup still clears the common
-    case. Orphan labels from a *different* crashed instance are left to the
-    next claim's pre-GET stale sweep (``_STALE_CLAIM_MAX_AGE_S``).
+    OP-1110 cutover: by default the coordination-table lease is the
+    authoritative state; releasing it (via
+    :func:`runner_coordination.release_claim`) is the only required step.
+    No JIRA label removal happens in cutover mode — because none were
+    added on acquire.
 
-    Best-effort: transport failures are logged + swallowed — the claim
-    label is audit state, not load-bearing for correctness (the stale sweep
-    bounds accumulation regardless).
+    Rollback (``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1``): the legacy GC
+    path runs (sweep all ``claim:{instance_id}:*`` fenced labels + the
+    legacy bare ``claim:{instance_id}`` label via a GET-then-PUT) in
+    addition to the table release. Best-effort: label-GC transport
+    failures are logged + swallowed.
     """
+    if not _label_cutover_rollback_mode():
+        # OP-1110 default: only the table lease needs releasing. Label
+        # write paths were stripped on acquire, so there is nothing to
+        # remove from JIRA.
+        _shadow_release_claim(
+            coordination_lease_id,
+            coordination_fencing_token,
+            "released",
+        )
+        return
+
+    # ── Rollback path: pre-OP-1110 label-GC + table release ──────────
     targets: list[str] = []
     try:
         cur = _request(client, "GET", f"/issue/{key}?fields=labels")
@@ -2964,6 +3084,9 @@ def find_mutex_holders(
         return _find_mutex_holders_jql(client, mutex_labels, exclude_key)
 
 
+_JQL_FALLBACK_DEPRECATION_WARNED = False
+
+
 def _find_mutex_holders_jql(
     client: "DispatchClient",
     mutex_labels: list[str],
@@ -2973,7 +3096,22 @@ def _find_mutex_holders_jql(
 
     Retained as the degraded-mode fallback path. Operates on the same
     contract — list of ``{key, fields: {status, labels}}`` dicts.
+
+    OP-1110: this path is deprecated and will be removed one sprint after
+    Atlas closure. Each process logs a single deprecation warning the
+    first time it falls through here so operators can spot lingering
+    coordination-table outages from the runner logs.
     """
+    global _JQL_FALLBACK_DEPRECATION_WARNED
+    if not _JQL_FALLBACK_DEPRECATION_WARNED:
+        log.warning(
+            "find_mutex_holders: JQL fallback path active — coordination "
+            "table read failed, using deprecated JIRA-label search. This "
+            "fallback will be removed one sprint after Sprint Atlas "
+            "closure. Investigate runner_claims table availability "
+            "(OMNISIGHT_DATABASE_PATH, alembic head, DB process)."
+        )
+        _JQL_FALLBACK_DEPRECATION_WARNED = True
     if not mutex_labels:
         return []
     label_clause = " OR ".join(f'labels = "{m}"' for m in mutex_labels)

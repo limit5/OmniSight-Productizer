@@ -1166,6 +1166,170 @@ def test_find_mutex_holders_falls_back_to_jql_on_table_exception(
     assert any("coordination-table read failed" in m for m in caplog.messages)
 
 
+def _bootstrap_runner_claims_db(tmp_path, monkeypatch):
+    """Shared helper: stand up an empty runner_claims SQLite DB and point
+    OMNISIGHT_DATABASE_PATH at it. Used by OP-1108 and OP-1110 tests."""
+    import sqlite3
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active', phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    conn.commit()
+    conn.close()
+    return db
+
+
+# ── OP-1110 cutover: claim_ticket_atomic writes to table, not labels ──
+
+
+def test_claim_ticket_atomic_acquires_via_table_in_cutover_mode(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1110: default mode → table is sole authority for claim writes."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY", raising=False)
+    _bootstrap_runner_claims_db(tmp_path, monkeypatch)
+
+    put_bodies: list[dict] = []
+
+    def fake_request(client, method, path, body=None):
+        if method == "PUT" and path.startswith("/issue/"):
+            put_bodies.append(body or {})
+            return {}
+        raise AssertionError(f"unexpected request {method} {path}")
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+
+    result = jd.claim_ticket_atomic(_fake_dispatch_client(), "OP-cut-1", "claude-1")
+
+    assert result.ok is True
+    assert result.coordination_lease_id is not None
+    assert result.coordination_fencing_token is not None
+    # Exactly one PUT: assignee only, no labels
+    assert len(put_bodies) == 1
+    body = put_bodies[0]
+    assert "fields" in body and "assignee" in body["fields"]
+    assert "update" not in body or "labels" not in body.get("update", {}), \
+        "OP-1110 cutover: no label writes expected on claim acquire"
+
+
+def test_claim_ticket_atomic_blocked_when_table_resource_held(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1110: ClaimBlocked from runner_coordination surfaces as
+    ClaimResult(ok=False) with lost_to set."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY", raising=False)
+    db = _bootstrap_runner_claims_db(tmp_path, monkeypatch)
+
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO runner_claims (lease_id, ticket_key, resource_key, "
+        "owner_agent_class, owner_instance_id, fencing_token) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("other-1", "OP-cut-2", "ticket:OP-cut-2",
+         "subscription-codex", "codex-1", "claim:codex-1:0-other"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(jd, "_request",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no JIRA call expected on table-blocked path")))
+
+    result = jd.claim_ticket_atomic(_fake_dispatch_client(), "OP-cut-2", "claude-1")
+    assert result.ok is False
+    assert "claim:codex-1:0-other" in (result.lost_to or "")
+
+
+def test_claim_ticket_atomic_raises_when_table_unavailable_in_cutover(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1110: DB unavailable in default cutover mode → loud failure
+    (RunnerMutexAPIError). Operator either fixes DB or sets
+    OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1 for emergency rollback."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY", raising=False)
+    bad = tmp_path / "broken.db"
+    bad.write_text("not a sqlite db")
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(bad))
+
+    monkeypatch.setattr(jd, "_request",
+                        lambda *a, **kw: (_ for _ in ()).throw(
+                            AssertionError("no JIRA call expected when table acquire fails")))
+
+    with pytest.raises(jd.RunnerMutexAPIError):
+        jd.claim_ticket_atomic(_fake_dispatch_client(), "OP-cut-3", "claude-1")
+
+
+def test_release_ticket_claim_skips_label_remove_in_cutover_mode(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1110: default release does NOT touch JIRA labels — only the
+    coordination table lease is released."""
+    monkeypatch.delenv("OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY", raising=False)
+    _bootstrap_runner_claims_db(tmp_path, monkeypatch)
+
+    from backend.agents import runner_coordination as rc
+    lease = rc.acquire_claim(
+        ticket_key="OP-rel-1",
+        resource_key="ticket:OP-rel-1",
+        owner_agent_class="subscription-claude",
+        owner_instance_id="claude-1",
+    )
+
+    def explode(*a, **kw):
+        raise AssertionError("no JIRA call expected in cutover-mode release")
+
+    monkeypatch.setattr(jd, "_request", explode)
+
+    jd.release_ticket_claim(
+        _fake_dispatch_client(), "OP-rel-1", "claude-1",
+        coordination_lease_id=lease.lease_id,
+        coordination_fencing_token=lease.fencing_token,
+    )
+
+    holders = rc.find_active_holders(resource_keys=["ticket:OP-rel-1"])
+    assert holders == []
+
+
+def test_jql_fallback_emits_deprecation_warning_once(monkeypatch, caplog) -> None:
+    """OP-1110: first call into the JQL fallback path emits a deprecation
+    warning; subsequent calls in the same process stay quiet."""
+    import logging
+
+    monkeypatch.setattr(jd, "_JQL_FALLBACK_DEPRECATION_WARNED", False, raising=False)
+
+    captured: list = []
+    monkeypatch.setattr(jd, "_request",
+                        lambda *a, **kw: captured.append(1) or {"issues": []})
+
+    with caplog.at_level(logging.WARNING, logger="backend.agents.jira_dispatch"):
+        jd._find_mutex_holders_jql(_fake_dispatch_client(), ["mutex:foo"], "OP-1")
+        jd._find_mutex_holders_jql(_fake_dispatch_client(), ["mutex:foo"], "OP-2")
+        jd._find_mutex_holders_jql(_fake_dispatch_client(), ["mutex:foo"], "OP-3")
+
+    deprecation_msgs = [
+        m for m in caplog.messages
+        if "deprecated" in m.lower() or "will be removed" in m.lower()
+    ]
+    assert len(deprecation_msgs) == 1, \
+        f"expected 1 deprecation warning, got {len(deprecation_msgs)}: {deprecation_msgs}"
+    assert len(captured) == 3, "all 3 calls should run; warning doesn't short-circuit work"
+
+
 def test_find_mutex_holders_4_concurrent_pickups_see_first_winner(
     monkeypatch, tmp_path
 ) -> None:

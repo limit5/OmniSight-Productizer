@@ -104,6 +104,17 @@ def _install_fake(monkeypatch, fake: FakeJira) -> None:
 _FENCED_RE = re.compile(r"^claim:[^:]+:\d{16,}-[0-9a-f]{8}$")
 
 
+@pytest.fixture(autouse=True)
+def _enable_label_claim_rollback(monkeypatch):
+    """OP-1110 cutover: tests in this module pin the pre-cutover label-
+    based claim algorithm (AUDIT-24/OP-977 fenced + OP-838 legacy). They
+    run under the ``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1`` rollback env
+    so the legacy code path stays exercised — the cutover-mode (table-
+    only) behaviour is pinned in ``test_jira_dispatch.py`` under
+    ``test_claim_ticket_atomic_*_cutover_mode`` / friends."""
+    monkeypatch.setenv("OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY", "1")
+
+
 # ── Helpers / label format (AC #1) ─────────────────────────────────
 
 
