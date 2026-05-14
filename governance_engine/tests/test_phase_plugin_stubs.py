@@ -35,7 +35,11 @@ def _plugin_class(suffix: str) -> type:
 
 
 def test_all_11_phases_registered() -> None:
-    assert len(DEFAULT_REGISTRY.all()) == 11
+    phase_plugins = [
+        plugin for plugin in DEFAULT_REGISTRY.all() if plugin.phase_id.startswith("31.")
+    ]
+
+    assert len(phase_plugins) == 11
 
 
 def test_each_phase_id_matches_module() -> None:

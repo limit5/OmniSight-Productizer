@@ -48,7 +48,9 @@ def tracked_registry(
     plugins were dispatched. Each mock wraps the original method so behaviour
     (returns ``[]``) is preserved while call counts are observable.
     """
-    plugins = DEFAULT_REGISTRY.all()
+    plugins = [
+        plugin for plugin in DEFAULT_REGISTRY.all() if plugin.phase_id.startswith("31.")
+    ]
     assert {p.phase_id for p in plugins} == set(ALL_PHASE_IDS), (
         "DEFAULT_REGISTRY must register all 11 phase 31.A-K stubs before "
         "the dispatch contract can be exercised"
