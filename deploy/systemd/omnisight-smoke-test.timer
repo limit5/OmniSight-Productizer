@@ -1,0 +1,16 @@
+; [OP-1132] 10-minute post-boot trigger and 30-minute recurring cadence
+; for omnisight-smoke-test.service.
+
+[Unit]
+Description=Run OmniSight production smoke test after boot and every 30 min (OP-1132)
+Documentation=https://soraapp.atlassian.net/browse/OP-1132
+
+[Timer]
+Unit=omnisight-smoke-test.service
+OnBootSec=10min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
