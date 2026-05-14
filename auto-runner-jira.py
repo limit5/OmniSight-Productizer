@@ -2114,6 +2114,13 @@ def main() -> int:
             failure_class="WORKTREE_DIRTY",
             area=metric_meta.get("area"),
         )
+        # OP-1109: ensure coordination lease is released on this terminal
+        # path. Without this, a workspace-tampered abort orphaned an
+        # active claim row that only the (currently still-missing) TTL
+        # sweeper could clean up. Symptom: post-incident `runner-rescue
+        # dump` showed stale `state=active` rows older than the original
+        # CLI run with no live owner process.
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         return 1
     runner_metrics_recorder.record_completion_sync(
         metric_id=metric_id,
@@ -2130,6 +2137,11 @@ def main() -> int:
         if not _require_runner_capability(
             client, snapshot, enabled_caps, "gerrit_push",
         ):
+            # OP-1109: capability-gate refusal is one of the 6 terminal
+            # paths the spec calls out. Releasing the lease here lets
+            # the next runner instance pick the ticket up on the next
+            # tick without waiting for TTL expiry.
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         # SP-B-X-004 / OP-1062 — TOCTOU reread #1: between `working` and
         # `submitting`. If the operator reverted the ticket, advanced it,

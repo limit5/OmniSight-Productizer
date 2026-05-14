@@ -360,3 +360,136 @@ def test_integration_shadow_write_round_trip(db_path: Path):
     ).fetchone()
     conn.close()
     assert row == ("released", "success")
+
+
+# ── OP-1109: heartbeat TTL expiry (Integration AC) ────────────────────
+
+
+def _backdate_heartbeat(db_path, lease_id: str, age_seconds: int) -> None:
+    """Helper: rewind ``heartbeat_at`` of an active claim so it appears
+    older than ``age_seconds``. Lets tests cover the TTL-expiry path
+    without sleeping."""
+    import sqlite3
+    from datetime import datetime, timedelta, timezone
+    backdated = (
+        datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "UPDATE runner_claims SET heartbeat_at = ? WHERE lease_id = ?",
+        (backdated, lease_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_expire_stale_active_claims_marks_stale_as_released(db_path):
+    lease = rc.acquire_claim(
+        ticket_key="OP-stale-1",
+        resource_key="mutex:stale1",
+        owner_agent_class="subscription-claude",
+        owner_instance_id="claude-1",
+    )
+    # Backdate so heartbeat is 10 min old (older than default 5-min TTL)
+    _backdate_heartbeat(db_path, lease.lease_id, age_seconds=600)
+
+    expired = rc.expire_stale_active_claims(max_age_seconds=300)
+    assert expired == 1
+
+    # The lease is now released with reason 'ttl-expired'
+    import sqlite3
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute(
+        "SELECT state, release_reason FROM runner_claims WHERE lease_id = ?",
+        (lease.lease_id,),
+    ).fetchone()
+    conn.close()
+    assert row == ("released", "ttl-expired")
+    # And the resource is now claimable again
+    assert rc.find_active_holders(resource_keys=["mutex:stale1"]) == []
+
+
+def test_expire_stale_active_claims_leaves_fresh_claims_alone(db_path):
+    """A claim whose heartbeat is recent must not be expired."""
+    lease = rc.acquire_claim(
+        ticket_key="OP-fresh-1",
+        resource_key="mutex:fresh1",
+        owner_agent_class="subscription-claude",
+        owner_instance_id="claude-1",
+    )
+    # heartbeat_at is now-ish; 5-min TTL must NOT expire it
+    expired = rc.expire_stale_active_claims(max_age_seconds=300)
+    assert expired == 0
+    holders = rc.find_active_holders(resource_keys=["mutex:fresh1"])
+    assert len(holders) == 1
+    assert holders[0].lease_id == lease.lease_id
+
+
+def test_expire_stale_active_claims_record_phase_refreshes_heartbeat(db_path):
+    """Calling record_phase() must reset the heartbeat clock so a
+    long-running but still-alive claim is not collected as stale."""
+    lease = rc.acquire_claim(
+        ticket_key="OP-long-1",
+        resource_key="mutex:long1",
+        owner_agent_class="subscription-claude",
+        owner_instance_id="claude-1",
+    )
+    # Pretend 10 min have passed
+    _backdate_heartbeat(db_path, lease.lease_id, age_seconds=600)
+    # Worker checks in — should reset the clock
+    rc.record_phase(
+        lease_id=lease.lease_id,
+        fencing_token=lease.fencing_token,
+        phase="implementing",
+    )
+    expired = rc.expire_stale_active_claims(max_age_seconds=300)
+    assert expired == 0, "record_phase should have refreshed the heartbeat"
+
+
+def test_expire_stale_active_claims_idempotent(db_path):
+    """A second sweep with the same threshold must be a no-op once the
+    stale rows are already in 'released' state."""
+    lease = rc.acquire_claim(
+        ticket_key="OP-idem-1",
+        resource_key="mutex:idem1",
+        owner_agent_class="subscription-claude",
+        owner_instance_id="claude-1",
+    )
+    _backdate_heartbeat(db_path, lease.lease_id, age_seconds=900)
+    first = rc.expire_stale_active_claims(max_age_seconds=300)
+    second = rc.expire_stale_active_claims(max_age_seconds=300)
+    assert first == 1
+    assert second == 0
+
+
+def test_expire_stale_active_claims_partial_age_buckets(db_path):
+    """Of 4 active claims with varied heartbeat ages, only those older
+    than the threshold get expired."""
+    fresh = rc.acquire_claim(
+        ticket_key="OP-bk-1", resource_key="mutex:bk1",
+        owner_agent_class="subscription-claude", owner_instance_id="claude-1",
+    )
+    just_under = rc.acquire_claim(
+        ticket_key="OP-bk-2", resource_key="mutex:bk2",
+        owner_agent_class="subscription-claude", owner_instance_id="claude-1",
+    )
+    just_over = rc.acquire_claim(
+        ticket_key="OP-bk-3", resource_key="mutex:bk3",
+        owner_agent_class="subscription-claude", owner_instance_id="claude-1",
+    )
+    very_stale = rc.acquire_claim(
+        ticket_key="OP-bk-4", resource_key="mutex:bk4",
+        owner_agent_class="subscription-claude", owner_instance_id="claude-1",
+    )
+    _backdate_heartbeat(db_path, just_under.lease_id, age_seconds=250)
+    _backdate_heartbeat(db_path, just_over.lease_id, age_seconds=320)
+    _backdate_heartbeat(db_path, very_stale.lease_id, age_seconds=3600)
+
+    expired = rc.expire_stale_active_claims(max_age_seconds=300)
+    assert expired == 2, "just_over + very_stale should be expired"
+
+    active = {h.lease_id for h in rc.find_active_holders()}
+    assert fresh.lease_id in active
+    assert just_under.lease_id in active
+    assert just_over.lease_id not in active
+    assert very_stale.lease_id not in active

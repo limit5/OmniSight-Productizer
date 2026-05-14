@@ -44,7 +44,7 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
@@ -58,6 +58,7 @@ __all__ = [
     "release_claim",
     "record_phase",
     "find_active_holders",
+    "expire_stale_active_claims",
 ]
 
 
@@ -397,3 +398,37 @@ def find_active_holders(
     with _conn() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [_row_to_lease(r) for r in rows]
+
+
+def expire_stale_active_claims(*, max_age_seconds: int = 300) -> int:
+    """Mark active claims whose heartbeat is older than ``max_age_seconds``
+    as ``released`` with reason ``"ttl-expired"``.
+
+    Returns the number of claims expired. Idempotent: a second call with
+    the same threshold is a no-op because the just-expired rows have
+    ``state='released'`` and are no longer matched by the WHERE clause.
+
+    OP-1109 Integration AC: SIGKILL of a runner mid-pickup must result
+    in the orphaned claim being collectable within 5 min. This function
+    is the collector; a periodic caller (cron / systemd timer / runner
+    pre-pickup helper) is the trigger. The default 300-second TTL aligns
+    with the 5-min target; the per-claim heartbeat written by
+    :func:`record_phase` is the freshness signal.
+
+    Note: this collects claims by *heartbeat age*, not by *acquired age*.
+    A long-running ticket that calls :func:`record_phase` regularly will
+    not be expired. A frozen / killed runner stops heartbeating and gets
+    swept on the first run after ``max_age_seconds`` elapses.
+    """
+    now = _now_iso()
+    threshold = (
+        datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
+    ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE runner_claims SET state = 'released', "
+            "released_at = ?, release_reason = 'ttl-expired' "
+            "WHERE state = 'active' AND heartbeat_at < ?",
+            (now, threshold),
+        )
+        return cur.rowcount or 0
