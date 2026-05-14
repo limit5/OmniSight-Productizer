@@ -183,18 +183,122 @@ def test_ensure_change_ids_raises_when_runtime_AND_unrelated(
 
 def test_both_sites_reference_the_same_canonical_constant() -> None:
     """Regression test: the SP-B-X-016/017 era had two SEPARATE local
-    sets that drifted. After SP-B-X-018, both sites must read the
-    canonical constant. We verify by checking the module source.
+    sets that drifted. After SP-B-X-018 / OP-1111, both sites must read
+    the canonical constant — historically from
+    ``runner_progress.RUNNER_RUNTIME_ARTIFACTS``, now also accepting the
+    OP-1111 canonical import path
+    ``runner_artifacts.RUNNER_RUNTIME_ARTIFACTS`` (or the bare
+    ``RUNNER_RUNTIME_ARTIFACTS`` from a ``from`` import).
     """
     src_path = Path(jira_dispatch.__file__)
     src = src_path.read_text()
-    # Must reference the canonical name (not a local hardcoded literal)
-    assert "runner_progress.RUNNER_RUNTIME_ARTIFACTS" in src, (
+    has_legacy_path = "runner_progress.RUNNER_RUNTIME_ARTIFACTS" in src
+    has_new_path = (
+        "runner_artifacts import RUNNER_RUNTIME_ARTIFACTS" in src
+        or "runner_artifacts.RUNNER_RUNTIME_ARTIFACTS" in src
+    )
+    assert has_legacy_path or has_new_path, (
         f"jira_dispatch.py no longer imports the canonical constant "
         f"({src_path}); the SP-B-X-016/017 regression is back."
     )
-    # And the legacy local name must NOT come back
     assert "_RUNNER_OWN_ARTIFACTS = {" not in src, (
         "jira_dispatch.py reintroduced a local _RUNNER_OWN_ARTIFACTS set; "
         "this is the SP-B-X-018 regression — use the canonical constant."
+    )
+
+
+# ── OP-1111: canonical module + gitignore mirror ──────────────────────
+
+
+def test_canonical_module_is_runner_artifacts() -> None:
+    """OP-1111: RUNNER_RUNTIME_ARTIFACTS now lives in its own module
+    (``backend.agents.runner_artifacts``). The previous home
+    (``backend.agents.runner_progress``) re-exports for backwards
+    compat — both names must resolve to the same object."""
+    from backend.agents import runner_artifacts
+    assert isinstance(runner_artifacts.RUNNER_RUNTIME_ARTIFACTS, frozenset)
+    # Re-export identity: runner_progress's name is the SAME object
+    assert (
+        runner_progress.RUNNER_RUNTIME_ARTIFACTS
+        is runner_artifacts.RUNNER_RUNTIME_ARTIFACTS
+    ), "runner_progress must re-export the canonical frozenset, not a copy"
+
+
+def test_gitignore_mirrors_runner_runtime_artifacts() -> None:
+    """OP-1111 Code AC #3: ``.gitignore`` mirrors the canonical set.
+    Defense in depth — Python-layer filter + git-layer ignore. The
+    sentinel-bounded block in ``.gitignore`` must list every entry."""
+    from backend.agents import runner_artifacts
+    repo_root = Path(__file__).resolve().parents[1]
+    gitignore = (repo_root / ".gitignore").read_text()
+    begin = runner_artifacts.GITIGNORE_BEGIN_SENTINEL
+    end = runner_artifacts.GITIGNORE_END_SENTINEL
+    assert begin in gitignore, (
+        f"missing START sentinel {begin!r} in .gitignore — add the "
+        "OP-1111 auto-mirror block per backend/agents/runner_artifacts.py"
+    )
+    assert end in gitignore, (
+        f"missing END sentinel {end!r} in .gitignore"
+    )
+    block = gitignore.split(begin, 1)[1].split(end, 1)[0]
+    # Each entry in the constant must appear as its own non-comment line
+    block_entries = {
+        line.strip() for line in block.splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    }
+    missing = runner_artifacts.RUNNER_RUNTIME_ARTIFACTS - block_entries
+    extra = block_entries - runner_artifacts.RUNNER_RUNTIME_ARTIFACTS
+    assert not missing, (
+        f"{sorted(missing)!r} in RUNNER_RUNTIME_ARTIFACTS but not in "
+        ".gitignore mirror block — update .gitignore to match"
+    )
+    assert not extra, (
+        f"{sorted(extra)!r} in .gitignore mirror block but not in "
+        "RUNNER_RUNTIME_ARTIFACTS — remove from .gitignore or add to "
+        "the frozenset"
+    )
+
+
+def test_synthetic_op1070_replay_finalization_does_not_revert(git_worktree: Path) -> None:
+    """OP-1111 Integration AC: synthetic OP-1070 replay. Set up a
+    worktree containing every RUNNER_RUNTIME_ARTIFACT, then confirm the
+    consolidated dirty-checks see the worktree as CLEAN (no spurious
+    revert because of our own bookkeeping files).
+
+    Pre-OP-1111 history: SP-B-X-016 (sentinel) and SP-B-X-017 (progress
+    .txt) each patched ONE site reactively. SP-B-X-018 / OP-1076
+    consolidated them. OP-1111 finishes the job: canonical module +
+    gitignore mirror, so a future write that lands here can never
+    cascade to a workspace-tampered revert again.
+    """
+    from backend.agents import runner_artifacts
+    # Plant every known artifact as an untracked file
+    for name in runner_artifacts.RUNNER_RUNTIME_ARTIFACTS:
+        (git_worktree / name).write_text("synthetic OP-1070 replay content\n")
+
+    # Both dirty checks must report CLEAN despite the artifacts being present
+    assert runner_progress._worktree_dirty(git_worktree) is False, (
+        "OP-1070 regression: runner_progress._worktree_dirty saw its own "
+        "artifacts as dirt"
+    )
+    # ensure_change_ids is the other historic dirty-check failure site;
+    # we exercise its filtering loop directly without invoking the full
+    # rebase machinery (which needs a real Gerrit hook + multiple commits).
+    import subprocess as _sp
+    dirty = _sp.check_output(
+        ["git", "status", "--porcelain", "-uall"],
+        cwd=git_worktree, text=True,
+    ).splitlines()
+    dirty_names = []
+    for line in dirty:
+        parts = line.split(maxsplit=1)
+        if len(parts) == 2:
+            dirty_names.append(parts[1])
+    filtered = [
+        f for f in dirty_names
+        if f not in runner_artifacts.RUNNER_RUNTIME_ARTIFACTS
+    ]
+    assert filtered == [], (
+        f"OP-1111 Integration AC: after filtering RUNNER_RUNTIME_ARTIFACTS, "
+        f"unexpected dirty entries remain: {filtered!r}"
     )

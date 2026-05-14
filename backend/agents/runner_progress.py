@@ -165,19 +165,23 @@ def _git(worktree_path: Path, args: list[str], *, timeout: int = 30) -> str:
 #:     phase-snapshot stash-sweeps it, dirty-worktree if ensure_change_ids
 #:     surfaces it) — both fixed by including it here.
 #:
-#: Long-term consideration: ``.gitignore`` would catch these at the git
-#: layer and obviate the explicit filters, but per
-#: ``docs/sop/runner-runtime-artifacts.md`` the project intentionally
-#: keeps these out of ``.gitignore`` (the filter approach is a smaller,
-#: layered fix consistent with the OP-842 precedent).
-RUNNER_RUNTIME_ARTIFACTS: frozenset[str] = frozenset({
-    PROGRESS_FILENAME,
-    PROGRESS_FILENAME + _PROGRESS_TMP_SUFFIX,
-    ".runner-cwd-sentinel",
-})
+#: Re-exported from :mod:`backend.agents.runner_artifacts` (OP-1111).
+#: The canonical home moved to a dedicated module so dirty-check sites
+#: have a single import point without coupling to the progress.txt
+#: writer. Legacy callers that imported
+#: ``runner_progress.RUNNER_RUNTIME_ARTIFACTS`` keep working unchanged.
+#:
+#: OP-1111 also reversed the original SP-B-X-018 "filter-only"
+#: decision: ``.gitignore`` now mirrors this set (defense in depth —
+#: Python-layer filter + git-layer ignore). See
+#: ``backend/agents/runner_artifacts.py`` module docstring.
+from backend.agents.runner_artifacts import (  # noqa: E402
+    RUNNER_RUNTIME_ARTIFACTS,
+)
 
 #: Back-compat alias — pre-SP-B-X-018 callers used this private name.
-#: New code MUST import :data:`RUNNER_RUNTIME_ARTIFACTS` instead.
+#: New code MUST import :data:`RUNNER_RUNTIME_ARTIFACTS` from
+#: :mod:`backend.agents.runner_artifacts` instead.
 _OUR_OWN_ARTIFACTS = RUNNER_RUNTIME_ARTIFACTS
 
 
