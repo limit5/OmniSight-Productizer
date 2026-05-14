@@ -1048,7 +1048,11 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
     # each site maintained its own local set (SP-B-X-016 fixed one,
     # SP-B-X-017 fixed the other) — the consolidation lets future
     # additions land in one place.
-    dirty = [f for f in dirty if f not in runner_progress.RUNNER_RUNTIME_ARTIFACTS]
+    # OP-1111: import from runner_artifacts (canonical home);
+    # runner_progress.RUNNER_RUNTIME_ARTIFACTS still re-exports for
+    # backwards compat with pre-OP-1111 callers.
+    from backend.agents.runner_artifacts import RUNNER_RUNTIME_ARTIFACTS
+    dirty = [f for f in dirty if f not in RUNNER_RUNTIME_ARTIFACTS]
     if dirty:
         raise WorktreeDirtyError(dirty_files=dirty)
 
