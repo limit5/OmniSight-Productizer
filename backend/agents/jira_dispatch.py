@@ -2921,6 +2921,58 @@ def find_mutex_holders(
     "Holding" = status in :data:`MUTEX_HOLDING_STATUSES`. Used by
     :func:`pre_pickup_ok` (OP-687) to enforce that two agents never
     concurrently work tickets sharing a ``mutex:<resource-id>``.
+
+    OP-1108 (v2-Ⅹ-2bc): authoritative source moved from JIRA-label JQL
+    to the ``runner_claims`` coordination table populated by the OP-1107
+    shadow-write integration. JQL is retained as a degraded-mode
+    fallback when the table is unavailable (DB down / schema missing) —
+    this keeps pickup pre-checks functional during operational incidents
+    where the coordination DB is offline but JIRA is still reachable.
+
+    Return shape stays as the legacy list-of-issue-dicts so callers
+    (notably :func:`pre_pickup_ok`'s error-message formatter) do not
+    have to be refactored alongside this read-path swap. The dicts
+    synthesised from coordination rows carry status ``"In Progress"``
+    and a single-element ``labels`` list with the matching mutex
+    resource_key — enough for the caller's
+    ``set(labels) & set(mutex_labels)`` intersection logic to surface
+    the right mutex name in the conflict report.
+    """
+    if not mutex_labels:
+        return []
+
+    try:
+        from backend.agents import runner_coordination as rc
+
+        # If the coordination DB hasn't been bootstrapped yet, fall back
+        # immediately — saves a noisy stacktrace on fresh-install hosts
+        # where the table migration hasn't run.
+        if not rc._db_path().exists():
+            return _find_mutex_holders_jql(client, mutex_labels, exclude_key)
+
+        leases = rc.find_active_holders(
+            resource_keys=mutex_labels,
+            exclude_ticket=exclude_key,
+        )
+        return [_lease_to_mutex_holder_dict(lease) for lease in leases]
+    except Exception as exc:  # noqa: BLE001 - degraded mode must never raise
+        log.warning(
+            "find_mutex_holders: coordination-table read failed, "
+            "falling back to JQL; err=%s",
+            exc,
+        )
+        return _find_mutex_holders_jql(client, mutex_labels, exclude_key)
+
+
+def _find_mutex_holders_jql(
+    client: "DispatchClient",
+    mutex_labels: list[str],
+    exclude_key: str,
+) -> list[dict]:
+    """Pre-OP-1108 JIRA-label-JQL implementation of :func:`find_mutex_holders`.
+
+    Retained as the degraded-mode fallback path. Operates on the same
+    contract — list of ``{key, fields: {status, labels}}`` dicts.
     """
     if not mutex_labels:
         return []
@@ -2938,6 +2990,27 @@ def find_mutex_holders(
         "maxResults": 50,
     })
     return resp.get("issues", [])
+
+
+def _lease_to_mutex_holder_dict(lease) -> dict:
+    """Adapt a :class:`runner_coordination.ClaimLease` to the legacy
+    JIRA-issue dict shape consumed by :func:`pre_pickup_ok`'s error
+    formatter.
+
+    An active claim row always represents a ticket that has been
+    transitioned to In Progress (or is mid-pickup en route there), so
+    we synthesise ``status.name = "In Progress"`` rather than reading
+    JIRA. The synthesised ``labels`` list carries the matching
+    resource_key so the caller's mutex-label intersection logic
+    surfaces a stable label in the conflict report.
+    """
+    return {
+        "key": lease.ticket_key,
+        "fields": {
+            "status": {"name": "In Progress"},
+            "labels": [lease.resource_key],
+        },
+    }
 
 
 PartyMembershipCheck = Callable[[str], Optional[str]]

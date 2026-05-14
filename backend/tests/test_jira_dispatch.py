@@ -977,8 +977,10 @@ def test_find_mutex_holders_empty_labels_skips_jql(monkeypatch) -> None:
     assert called == []
 
 
-def test_find_mutex_holders_jql_excludes_self_and_filters_holding_statuses(monkeypatch) -> None:
-    """JQL must scope to project, holding statuses, mutex labels (OR'd), exclude self."""
+def test_find_mutex_holders_jql_legacy_excludes_self_and_filters_holding_statuses(monkeypatch) -> None:
+    """JQL fallback path: must scope to project, holding statuses, mutex labels
+    (OR'd), exclude self. Pre-OP-1108 this was the only path; now it's the
+    degraded-mode fallback when the coordination table is unavailable."""
     captured: dict = {}
 
     def fake_request(client, method, path, body=None):
@@ -988,7 +990,7 @@ def test_find_mutex_holders_jql_excludes_self_and_filters_holding_statuses(monke
         return {"issues": []}
 
     monkeypatch.setattr(jd, "_request", fake_request)
-    jd.find_mutex_holders(
+    jd._find_mutex_holders_jql(
         _fake_dispatch_client(),
         ["mutex:backend/foo.py", "mutex:alembic-chain-head"],
         exclude_key="OP-555",
@@ -1002,6 +1004,235 @@ def test_find_mutex_holders_jql_excludes_self_and_filters_holding_statuses(monke
     assert 'mutex:alembic-chain-head' in jql
     assert ' OR ' in jql
     assert '"In Progress"' in jql and '"Under Review"' in jql
+
+
+# ── OP-1108 (v2-Ⅹ-2bc): find_mutex_holders reads from coordination table ──
+
+
+def test_find_mutex_holders_reads_coordination_table_when_db_present(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108: when the coordination DB exists, find_mutex_holders queries
+    the runner_claims table (not JIRA JQL) and converts ClaimLease results
+    back to the legacy issue-dict shape consumed by pre_pickup_ok."""
+    import sqlite3
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+
+    # Bootstrap the runner_claims table inline (mirrors alembic 0236)
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active',
+            phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    # Plant one active claim on mutex:backend/foo.py held by OP-100
+    conn.execute(
+        "INSERT INTO runner_claims "
+        "(lease_id, ticket_key, resource_key, owner_agent_class, "
+        " owner_instance_id, fencing_token) VALUES (?, ?, ?, ?, ?, ?)",
+        ("lease-1", "OP-100", "mutex:backend/foo.py",
+         "subscription-codex", "codex-1", "claim:codex-1:0-aaaa"),
+    )
+    conn.commit()
+    conn.close()
+
+    # Fail loudly if find_mutex_holders touches JIRA — should hit table only
+    def _no_jql(*a, **kw):
+        raise AssertionError("JIRA JQL should not be called when table is present")
+    monkeypatch.setattr(jd, "_request", _no_jql)
+
+    holders = jd.find_mutex_holders(
+        _fake_dispatch_client(),
+        ["mutex:backend/foo.py"],
+        exclude_key="OP-555",
+    )
+    assert len(holders) == 1
+    h = holders[0]
+    assert h["key"] == "OP-100"
+    assert h["fields"]["status"]["name"] == "In Progress"
+    assert h["fields"]["labels"] == ["mutex:backend/foo.py"]
+
+
+def test_find_mutex_holders_excludes_self_via_table_query(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108: exclude_key filters out the caller's own row when the table
+    has it (e.g., shadow-write already recorded the caller as pending)."""
+    import sqlite3
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active', phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    # Self claim — should be excluded
+    conn.execute(
+        "INSERT INTO runner_claims (lease_id, ticket_key, resource_key, "
+        "owner_agent_class, owner_instance_id, fencing_token) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("self-1", "OP-555", "mutex:backend/foo.py", "claude", "claude-1",
+         "claim:claude-1:0-self"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(jd, "_request", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("table path should not fall through to JQL")))
+
+    holders = jd.find_mutex_holders(
+        _fake_dispatch_client(),
+        ["mutex:backend/foo.py"],
+        exclude_key="OP-555",
+    )
+    assert holders == []
+
+
+def test_find_mutex_holders_falls_back_to_jql_when_db_missing(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108 degraded mode: DB not yet bootstrapped → fast-fail to JQL."""
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(tmp_path / "missing.db"))
+
+    captured: dict = {}
+
+    def fake_request(client, method, path, body=None):
+        captured["used_jql"] = True
+        return {"issues": [{"key": "OP-fallback", "fields": {
+            "status": {"name": "In Progress"},
+            "labels": ["mutex:backend/foo.py"],
+        }}]}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    holders = jd.find_mutex_holders(
+        _fake_dispatch_client(),
+        ["mutex:backend/foo.py"],
+        exclude_key="OP-555",
+    )
+    assert captured.get("used_jql") is True
+    assert len(holders) == 1
+    assert holders[0]["key"] == "OP-fallback"
+
+
+def test_find_mutex_holders_falls_back_to_jql_on_table_exception(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    """OP-1108 degraded mode: table read raises (DB locked / corrupt) →
+    fall back to JQL and log a warning."""
+    db = tmp_path / "rc.db"
+    db.write_bytes(b"not a real sqlite database")
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+
+    used_jql = []
+
+    def fake_request(client, method, path, body=None):
+        used_jql.append(True)
+        return {"issues": []}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="backend.agents.jira_dispatch"):
+        holders = jd.find_mutex_holders(
+            _fake_dispatch_client(),
+            ["mutex:backend/foo.py"],
+            exclude_key="OP-555",
+        )
+    assert used_jql == [True], "JQL must be exercised when table read fails"
+    assert holders == []
+    # Warning logged so operators can spot degraded-mode incidents
+    assert any("coordination-table read failed" in m for m in caplog.messages)
+
+
+def test_find_mutex_holders_4_concurrent_pickups_see_first_winner(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108 Code AC: 4-runner concurrent pickup of same ticket — exactly
+    1 actually claims (per OP-1106 acquire_claim race), and subsequent
+    find_mutex_holders calls from the other 3 all see the winner.
+
+    The atomic-acquire race itself is tested in
+    test_runner_coordination.test_race_4_concurrent_acquires_exactly_one_wins.
+    This test pins the *read-side* visibility: after one runner wins,
+    pre_pickup_ok-equivalent reads from the other 3 see the winner."""
+    import sqlite3, threading
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active', phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    # Simulate one runner having won the race for ticket:OP-target
+    conn.execute(
+        "INSERT INTO runner_claims (lease_id, ticket_key, resource_key, "
+        "owner_agent_class, owner_instance_id, fencing_token) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("won-1", "OP-target", "ticket:OP-target", "subscription-claude",
+         "claude-1", "claim:claude-1:0-won"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(jd, "_request", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("table should be authoritative here")))
+
+    results: list = []
+    lock = threading.Lock()
+
+    def reader(idx: int):
+        # The 3 losing runners check whether anyone holds ticket:OP-target
+        # by querying find_mutex_holders with that resource key in mutex_labels.
+        holders = jd.find_mutex_holders(
+            _fake_dispatch_client(),
+            ["ticket:OP-target"],
+            exclude_key=f"OP-loser-{idx}",
+        )
+        with lock:
+            results.append((idx, len(holders), [h["key"] for h in holders]))
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    # All 3 losing readers see the same winner
+    assert all(r[1] == 1 for r in results), f"expected 1 holder each, got {results}"
+    assert all(r[2] == ["OP-target"] for r in results), f"winner mismatch: {results}"
 
 
 def test_pre_pickup_ok_blocks_when_mutex_held_by_in_progress_sibling(monkeypatch) -> None:
