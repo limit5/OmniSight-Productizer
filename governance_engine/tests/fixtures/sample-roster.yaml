@@ -1,0 +1,15 @@
+schema_version: governance-roster/v1
+environment: test
+l1:
+  name: OP-1096 Fixture L1
+  fingerprint: DB05223CD1CECB4DA69C7C02011FEE752BFEDBB3
+deputies:
+  - level: L2
+    name: Ada Lovelace
+    ssh_key_fingerprint: SHA256:1w5Q7S7z3v7xw6n8r9c2d4e6f8a0b1c3d5e7f9a1b2c
+  - level: L2
+    name: Grace Hopper
+    ssh_key_fingerprint: SHA256:2x6R8T8a4w8yx7o9s0d3e5f7g9b1c2d4e6f8a0b2c3d
+  - level: L2
+    name: Katherine Johnson
+    ssh_key_fingerprint: SHA256:3y7S9U9b5x9zy8p0t1e4f6g8h0c2d3e5f7a9b1c3d4e
