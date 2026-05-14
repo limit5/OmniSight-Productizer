@@ -2808,6 +2808,13 @@ def parse_prerequisites(description: str) -> dict[str, list]:
 # Anything else (TODO, Approved, Published, Archived, ...) is "released" —
 # pickup of a sibling sharing the same mutex:<path> may proceed.
 MUTEX_HOLDING_STATUSES = ("In Progress", "Under Review")
+BRIDGE_DEGRADED_AFTER_SECONDS = 300
+BRIDGE_STALE_AFTER_SECONDS = 900
+BRIDGE_REVIEW_YIELDING_LABELS = frozenset({
+    "runner-batch-merge-candidate",
+    "runner-glance-required",
+    "class:subscription-codex-batch-merge",
+})
 
 
 def find_mutex_holders(
@@ -2890,11 +2897,52 @@ def _pickup_agent_from_labels(labels: Iterable[str]) -> str | None:
     return None
 
 
+def _bridge_health_pickup_reason(
+    snapshot: TicketSnapshot,
+    enabled_capabilities: Iterable[str] | None,
+    bridge_health_check: Callable[[], tuple[bool, float, Path]] | None,
+) -> str | None:
+    """Return a bridge-health refusal reason, or ``None`` when pickup may proceed.
+
+    OP-1113 / v2-X-4bc narrows the old fleet-wide bridge gate to the
+    Gerrit-finalizing capability bucket. Tickets without ``gerrit_push``
+    bypass the bridge-health gate entirely; review-yielding tickets with
+    explicit batch/glance labels may proceed during a stale window and
+    finalization is handled later by the runner/bridge lease path.
+    """
+    if enabled_capabilities is None:
+        return None
+    caps = frozenset(enabled_capabilities)
+    if "gerrit_push" not in caps:
+        return None
+
+    if bridge_health_check is None:
+        from backend.agents.gerrit_jira_bridge import check_bridge_heartbeat
+
+        bridge_health_check = check_bridge_heartbeat
+
+    _is_fresh, age_sec, path = bridge_health_check()
+    if age_sec <= BRIDGE_DEGRADED_AFTER_SECONDS:
+        return None
+    if set(snapshot.labels or ()) & BRIDGE_REVIEW_YIELDING_LABELS:
+        return None
+    if age_sec <= BRIDGE_STALE_AFTER_SECONDS:
+        return None
+
+    age_repr = "missing" if age_sec == float("inf") else f"{age_sec:.0f}s"
+    return (
+        "bridge_health_stale: Gerrit-finalizing pickup requires a fresh "
+        f"bridge heartbeat; heartbeat at {path} age={age_repr}"
+    )
+
+
 def pre_pickup_ok(
     client: DispatchClient,
     snapshot: TicketSnapshot,
     worktree_path: Path | None = None,
     party_membership_check: "PartyMembershipCheck | None" = None,
+    enabled_capabilities: Iterable[str] | None = None,
+    bridge_health_check: Callable[[], tuple[bool, float, Path]] | None = None,
 ) -> tuple[bool, str]:
     """Combined pre-pickup gate. Returns (ok, reason).
 
@@ -2920,6 +2968,12 @@ def pre_pickup_ok(
     compatible — ``party_membership_check=None`` skips the gate, so
     existing callers (auto-runner-*.py) keep working until they opt
     in.
+
+    Bridge-health gate (OP-1113 / v2-X-4bc): when the caller provides
+    the resolved OP-855 capability set, stale bridge heartbeat state
+    blocks only Gerrit-finalizing pickups. Code-only tickets, and
+    review-yielding tickets carrying the explicit batch/glance envelope,
+    are allowed to proceed.
     """
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
     from backend.agents.file_coordinator import has_unresolved_blockedby
@@ -2933,6 +2987,12 @@ def pre_pickup_ok(
     if refused:
         _emit_runner_refusal_audit(snapshot.key, refusal_label)
         return False, f"runner_refusal_by_class:{refusal_label}"
+
+    bridge_reason = _bridge_health_pickup_reason(
+        snapshot, enabled_capabilities, bridge_health_check
+    )
+    if bridge_reason is not None:
+        return False, bridge_reason
 
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)

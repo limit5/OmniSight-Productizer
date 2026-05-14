@@ -843,6 +843,89 @@ def test_pre_pickup_ok_default_worktree_path_is_none() -> None:
     assert sig.parameters["worktree_path"].default is None
 
 
+# ── OP-1113: capability-scoped bridge-health gate ─────────────────
+
+
+def _allow_pre_pickup_common(monkeypatch) -> None:
+    from backend.agents import file_coordinator
+
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: "## Goal\nNo prereqs.\n")
+    monkeypatch.setattr(
+        jd,
+        "migration_freeze_check",
+        lambda c, s, description=None: (True, "no freeze"),
+    )
+    monkeypatch.setattr(
+        file_coordinator,
+        "has_unresolved_blockedby",
+        lambda c, s: (False, "none"),
+    )
+
+
+def test_pre_pickup_ok_allows_code_only_ticket_when_bridge_stale(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1067/OP-1077 regression: stale bridge must not block code-only pickup."""
+    _allow_pre_pickup_common(monkeypatch)
+    calls: list[str] = []
+
+    def stale_bridge():
+        calls.append("bridge")
+        return False, 1200.0, tmp_path / "heartbeat"
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(key="OP-1067"),
+        enabled_capabilities={"code_edit", "run_tests", "run_lint", "jira_update"},
+        bridge_health_check=stale_bridge,
+    )
+
+    assert ok is True
+    assert reason == "pre-pickup checks passed"
+    assert calls == [], "code-only pickups bypass bridge-health probing"
+
+
+def test_pre_pickup_ok_blocks_gerrit_finalizing_ticket_when_bridge_stale(
+    tmp_path,
+) -> None:
+    def stale_bridge():
+        return False, 1200.0, tmp_path / "heartbeat"
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(key="OP-1113"),
+        enabled_capabilities={"code_edit", "gerrit_push", "jira_update"},
+        bridge_health_check=stale_bridge,
+    )
+
+    assert ok is False
+    assert reason.startswith("bridge_health_stale:")
+    assert "Gerrit-finalizing pickup" in reason
+    assert "age=1200s" in reason
+
+
+def test_pre_pickup_ok_allows_review_yielding_ticket_when_bridge_stale(
+    monkeypatch, tmp_path
+) -> None:
+    _allow_pre_pickup_common(monkeypatch)
+
+    def stale_bridge():
+        return False, float("inf"), tmp_path / "missing-heartbeat"
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(
+            key="OP-1077",
+            labels=("runner-batch-merge-candidate",),
+        ),
+        enabled_capabilities={"code_edit", "gerrit_push", "jira_update"},
+        bridge_health_check=stale_bridge,
+    )
+
+    assert ok is True
+    assert reason == "pre-pickup checks passed"
+
+
 # ── OP-687: mutex enforcement at pre-pickup ───────────────────────
 
 
