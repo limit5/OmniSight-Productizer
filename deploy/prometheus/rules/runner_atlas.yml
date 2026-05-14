@@ -1,0 +1,120 @@
+# OP-1119 — v2-Ⅹ-AlertRule — Runner alert rules (per AlertBridge-1a contract).
+#
+# Canonical-form rule file (`docs/sop/alert-rule-contract.md`). The `__bridge`
+# block on each rule is framework metadata consumed by the v2-AlertBridge
+# promote pipeline (`scripts/promote-alert-rule.py`, filed under
+# `v2-AlertBridge-2bc`); the pipeline strips `__bridge` before handing the
+# rules to Prometheus. Until that pipeline ships, this file lives in the
+# repo as the source of truth and Prometheus loads its stripped sibling.
+#
+# Contract checklist applied to every rule below:
+#   §3  four-label minimum: severity / area / family / defense_dimension
+#   §4  four-annotation minimum: summary / description / runbook_url / remediation_hint
+#   §5  critical_labels declared (dedupe-key participants)
+#   §6  resolve policy is severity-driven; not declared per rule
+#   §7  cardinality cap ≤ 10 per descriptive label
+#   §8  receiver routing in framework config, not in the rule
+#   §9  grouping fixed in framework, not in the rule
+#
+# Producer metrics expected (wiring lands in `v2-Ⅹ-1bc`):
+#   - runner_claim_heartbeat_age_seconds{owner_instance_id, resource_key}   (gauge, seconds)
+#   - runner_claim_acquire_total{outcome, owner_instance_id}                (counter; outcome ∈ {won, lost, api-error})
+#   - runner_state_drift_count{kind}                                        (gauge; kind ∈ {table_only, jira_only})
+#
+# Sprint reference: §3 Family ⑩ §4 ticket row 16
+# (docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md).
+
+groups:
+  - name: runner_atlas
+    interval: 30s
+    rules:
+      # ── runner_claim_stale ────────────────────────────────────────────
+      # PAGE: any active runner_claims row whose owner instance has not
+      # advanced its heartbeat in > 5 min. Indicates the runner is wedged
+      # or crashed mid-phase. The orphan reaper (OP-1059) will sweep the
+      # row eventually; on-call needs the faster signal.
+      - alert: runner_claim_stale
+        expr: max by (owner_instance_id) (runner_claim_heartbeat_age_seconds) > 300
+        for: 5m
+        labels:
+          severity: page
+          area: runner
+          family: "10"
+          defense_dimension: D1
+        annotations:
+          summary: "Runner claim heartbeat stale > 5 min"
+          description: |
+            owner_instance_id={{ $labels.owner_instance_id }} holds an active
+            runner_claims row whose heartbeat_at has not advanced in over 5
+            minutes (current age {{ $value | humanizeDuration }}). The
+            runner is wedged or crashed mid-phase; pickup on any
+            resource_key it owns is blocked until the lease is released.
+          runbook_url: "https://docs.sora.services/runbooks/runner-claim-stale"
+          remediation_hint: "Run `omnisight runner-rescue dump --instance {{ $labels.owner_instance_id }}` then `omnisight runner-rescue release <lease_id>` per docs/sop/runbooks/runner-claim-stale.md."
+        __bridge:
+          critical_labels: [owner_instance_id]
+          cardinality_caps:
+            owner_instance_id: 10
+
+      # ── runner_pickup_block_rate ──────────────────────────────────────
+      # WARN: > 20 % of acquire attempts ended in 'lost' (i.e. blocked by a
+      # different active claim) over the trailing hour. A high block rate
+      # is the early signal that either an incumbent claim is wedged
+      # (often paired with runner_claim_stale) or a runner is mis-keyed
+      # and starving the rest of the fleet.
+      - alert: runner_pickup_block_rate
+        expr: |
+          (
+            sum by (owner_instance_id) (rate(runner_claim_acquire_total{outcome="lost"}[1h]))
+            /
+            sum by (owner_instance_id) (rate(runner_claim_acquire_total[1h]))
+          ) > 0.20
+        for: 1h
+        labels:
+          severity: warn
+          area: runner
+          family: "10"
+          defense_dimension: D1
+        annotations:
+          summary: "Runner pickup block rate > 20 % (1 h window)"
+          description: |
+            owner_instance_id={{ $labels.owner_instance_id }} was blocked on
+            {{ $value | humanizePercentage }} of acquire attempts over the
+            last hour. Threshold is 20 %. Likely incumbent-claim stall;
+            cross-check the runner_claim_stale alert and the runner_claims
+            table for stuck active rows on contended resource_keys.
+          runbook_url: "https://docs.sora.services/runbooks/runner-pickup-block-rate"
+          remediation_hint: "Run `omnisight runner-rescue dump --instance {{ $labels.owner_instance_id }}` to enumerate contended resource_keys, then release the lease blocking the fleet per docs/sop/runbooks/runner-pickup-block-rate.md."
+        __bridge:
+          critical_labels: [owner_instance_id]
+          cardinality_caps:
+            owner_instance_id: 10
+
+      # ── runner_state_drift ────────────────────────────────────────────
+      # WARN: the daily shadow comparison job found at least one
+      # disagreement between the authoritative runner_claims table and the
+      # legacy JIRA `claim:*` labels. Per ADR-0037 the v2-Ⅹ-2bc
+      # read-replacement cutover is blocked until the drift count is 0 for
+      # ≥ 3 consecutive days on the 40-ticket sample.
+      - alert: runner_state_drift
+        expr: max by (kind) (runner_state_drift_count) > 0
+        for: 10m
+        labels:
+          severity: warn
+          area: runner
+          family: "10"
+          defense_dimension: D1
+        annotations:
+          summary: "Runner state drift between runner_claims and JIRA labels"
+          description: |
+            The shadow comparison job reported {{ $value }} disagreement(s)
+            of kind={{ $labels.kind }} between the runner_claims table and
+            JIRA claim:* labels in the most recent sweep. table_only =
+            substrate row with no JIRA label; jira_only = JIRA label with
+            no substrate row.
+          runbook_url: "https://docs.sora.services/runbooks/runner-state-drift"
+          remediation_hint: "Inspect the latest comparison report under docs/audit/AUDIT-G-A-v2-Family-10/ and reconcile the disagreeing row per docs/sop/runbooks/runner-state-drift.md before the next sweep."
+        __bridge:
+          critical_labels: [kind]
+          cardinality_caps:
+            kind: 2
