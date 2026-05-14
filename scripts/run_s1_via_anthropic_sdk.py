@@ -139,6 +139,13 @@ from backend.agents.reflection_loop import (
     build_test_reflection_input,
 )
 from backend.agents.runner_handlers import make_runner_dispatcher
+from backend.agents.session_resume import (
+    BridgeStaleCriticalError,
+    ConcurrentRunnerConflictError,
+    CwdNotWorktreeError,
+    SessionResumeError,
+    open_session,
+)
 from backend.agents.skills_loader import (
     SkillRegistry,
     load_default_scopes,
@@ -931,6 +938,46 @@ async def process_ticket_full(
                 log_outcome, ticket_key, started, status="failed",
                 error=f"worktree sync failed: {exc}",
             )
+
+    # === B9 session-resume opener (OP-1122) ===
+    # Pin cwd to WORKTREE_PATH so the AC #4 step 1 check passes
+    # (F17/F24 mitigation) — the launcher may have been started from
+    # any directory. ``open_session`` enforces the invariant; the
+    # chdir is the launcher's side of the contract.
+    if not dry_run:
+        os.chdir(WORKTREE_PATH)
+        try:
+            session_opener = open_session(
+                worktree_path=WORKTREE_PATH,
+                owner=LAUNCHER_AGENT_CLASS,
+                ticket_key=ticket_key,
+                smoke_test_modules=[
+                    "backend.agents.session_resume",
+                    "backend.agents.progress_log",
+                ],
+                smoke_test_pytest_paths=None,
+                run_smoke_test=True,
+                run_bridge_checks=True,
+            )
+        except (
+            CwdNotWorktreeError,
+            BridgeStaleCriticalError,
+            ConcurrentRunnerConflictError,
+            SessionResumeError,
+        ) as exc:
+            return _abort_and_log(
+                log_outcome, ticket_key, started, status="failed",
+                error=f"session_resume aborted: {type(exc).__name__}: {exc}",
+            )
+        if session_opener.warnings:
+            print(
+                f"  [{ticket_key}] session_resume warnings: "
+                + " | ".join(session_opener.warnings)
+            )
+        print(
+            f"  [{ticket_key}] session_resume phase={session_opener.phase} "
+            f"prior_entries={len(session_opener.prior_entries)}"
+        )
 
     # === SDK invocation ===
     if dry_run:
