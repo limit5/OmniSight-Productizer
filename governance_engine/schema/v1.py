@@ -12,9 +12,16 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from governance_engine.schema.v0 import L2Reason, TicketClass, TicketContract
+from governance_engine.schema.v1_validators import (
+    EXTERNAL_ARTIFACT_NAME_PATTERN,
+    L1_EXCLUSIVE_REASON_VALUES,
+    validate_external_artifact_name,
+    validate_l1_exclusive_reason_value,
+    validate_required_path_shape,
+)
 
 
 class CrossPhaseBlocker(BaseModel):
@@ -49,6 +56,44 @@ class TicketContractV1(TicketContract):
     blocked_by: list[str] = Field(default_factory=list)
     cross_phase_blockers: list[CrossPhaseBlocker] = Field(default_factory=list)
     phase_plugin_version: Literal["v1"]
+
+    @field_validator("required_paths")
+    @classmethod
+    def validate_required_paths(cls, paths: list[str]) -> list[str]:
+        for path in paths:
+            if not validate_required_path_shape(path):
+                raise ValueError(
+                    "required_paths entries must be POSIX-style relative paths "
+                    f"(no '..', leading '/', or '\\\\'); offending value={path!r}"
+                )
+        return paths
+
+    @field_validator("cross_phase_blockers")
+    @classmethod
+    def validate_cross_phase_blocker_artifacts(
+        cls, blockers: list[CrossPhaseBlocker]
+    ) -> list[CrossPhaseBlocker]:
+        for blocker in blockers:
+            if not validate_external_artifact_name(blocker.blocker_artifact):
+                raise ValueError(
+                    "cross_phase_blockers.blocker_artifact must match "
+                    f"{EXTERNAL_ARTIFACT_NAME_PATTERN}; "
+                    f"offending value={blocker.blocker_artifact!r}"
+                )
+        return blockers
+
+    @field_validator("l1_exclusive_reason")
+    @classmethod
+    def validate_l1_exclusive_reason(cls, reason: str | None) -> str | None:
+        if reason is None:
+            return reason
+        if not validate_l1_exclusive_reason_value(reason):
+            allowed = ", ".join(sorted(L1_EXCLUSIVE_REASON_VALUES)) + ", <custom>"
+            raise ValueError(
+                "l1_exclusive_reason must be one of "
+                f"{{{allowed}}}; offending value={reason!r}"
+            )
+        return reason
 
 
 __all__ = ["TicketContractV1", "CrossPhaseBlocker", "TicketClass", "L2Reason"]
