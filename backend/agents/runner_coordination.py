@@ -59,6 +59,8 @@ __all__ = [
     "record_phase",
     "find_active_holders",
     "expire_stale_active_claims",
+    "force_release_claim",
+    "record_audit_event",
 ]
 
 
@@ -432,3 +434,85 @@ def expire_stale_active_claims(*, max_age_seconds: int = 300) -> int:
             (now, threshold),
         )
         return cur.rowcount or 0
+
+
+# ── OP-1118 (v2-Ⅹ-RescueCLI): operator override + audit ───────────────
+
+
+def force_release_claim(
+    *,
+    lease_id: str,
+    release_reason: str,
+    operator_fingerprint: str,
+) -> Optional[ClaimLease]:
+    """Operator-driven release that bypasses the fencing-token check.
+
+    Used by the rescue CLI (OP-1118) when an active claim is stuck on a
+    runner that has died, hung, or otherwise won't release the lease
+    through the normal path. Returns the lease snapshot prior to
+    release (for audit), or ``None`` if no active lease existed for
+    ``lease_id``.
+
+    Caller must record an audit event via :func:`record_audit_event`
+    with the resulting snapshot so the override is reviewable. The
+    rescue CLI does this in one transaction-equivalent sequence; direct
+    callers should follow the same pattern.
+
+    Note: this function does NOT enforce operator-fingerprint format —
+    the CLI's argparse / OMNISIGHT_L2_OPERATORS allow-list does that.
+    Here we only treat the fingerprint as opaque audit metadata.
+    """
+    if not operator_fingerprint:
+        raise ValueError("force_release_claim requires operator_fingerprint")
+    now = _now_iso()
+    with _conn() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            row = conn.execute(
+                "SELECT * FROM runner_claims WHERE lease_id = ? LIMIT 1",
+                (lease_id,),
+            ).fetchone()
+            if row is None or row["state"] != "active":
+                conn.execute("COMMIT")
+                return None
+            snapshot = _row_to_lease(row)
+            conn.execute(
+                "UPDATE runner_claims SET state = 'released', "
+                "released_at = ?, release_reason = ? "
+                "WHERE lease_id = ? AND state = 'active'",
+                (now, f"operator-override:{release_reason}", lease_id),
+            )
+            conn.execute("COMMIT")
+            return snapshot
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+
+
+def record_audit_event(
+    *,
+    action: str,
+    operator_fingerprint: Optional[str] = None,
+    target_lease_id: Optional[str] = None,
+    target_ticket_key: Optional[str] = None,
+    details: Optional[dict] = None,
+) -> None:
+    """Append a row to ``runner_audit_events`` (alembic 0237).
+
+    Append-only; no UPDATE / DELETE. Used by the rescue CLI (OP-1118)
+    to record every dump / release / reset invocation. Read access for
+    incident review goes through ``omnisight-runner-rescue dump`` itself
+    or direct SQL.
+    """
+    details_json = json.dumps(details or {})
+    with _conn() as conn:
+        conn.execute(
+            "INSERT INTO runner_audit_events ("
+            "action, operator_fingerprint, target_lease_id, "
+            "target_ticket_key, details) VALUES (?, ?, ?, ?, ?)",
+            (action, operator_fingerprint, target_lease_id,
+             target_ticket_key, details_json),
+        )
