@@ -1,0 +1,66 @@
+- &base
+  schema_version: v1
+  class: subscription-claude
+  authority_required: L3
+  l1_exclusive_reason: null
+  l2_reason: null
+  loc_delta_max: 80
+  files_touched_max: 1
+  required_paths: [backend/preflight-owner.py]
+  forbidden_paths: []
+  non_goals: ["fixture-only broken roster"]
+  interface_contract: "fixture ticket"
+  test_scope: integration
+  destructive_op_classes: []
+  destructive_op_scope: none
+  scope_components: [backend]
+  external_side_effect: none
+  external_payload_class: operational
+  runtime_capability: integration
+  dependency_artifacts: []
+  execution_mode: integration
+  mutex_with: []
+  evidence_class: integration
+  on_scope_creep: file-followup
+  scope_summary_max_chars: 200
+  tag_type: story
+  reversibility: reversible
+  environment_scope: local
+  external_systems: []
+  ticket_key: OP-1101
+  labels: [phase:31.A, class:subscription-claude]
+  blocked_by: [OP-1100]
+  cross_phase_blockers:
+    - blocker_phase: bad-phase
+      blocker_artifact: valid-artifact
+      reason: "invalid phase trips blocker shape"
+  phase_plugin_version: v1
+- <<: *base
+  ticket_key: OP-1102
+  labels: [phase:31.B, class:subscription-claude]
+  blocked_by: []
+  required_paths: [backend/preflight-peer.py]
+  forbidden_paths: [backend/preflight-owner.py]
+  dependency_artifacts: [missing-artifact]
+  cross_phase_blockers: []
+- <<: *base
+  ticket_key: OP-1103
+  blocked_by: []
+  required_paths: [backend/credential.py]
+  scope_components: [tooling]
+  external_payload_class: credential-material
+  cross_phase_blockers: []
+- <<: *base
+  ticket_key: OP-1100
+  blocked_by: []
+  required_paths: []
+  scope_components: [tooling]
+  tag_type: meta
+  cross_phase_blockers: []
+- <<: *base
+  ticket_key: OP-1104
+  labels: [phase:31.C, class:subscription-claude]
+  blocked_by: []
+  required_paths: [backend/plugin.py]
+  scope_components: [tooling]
+  cross_phase_blockers: []
