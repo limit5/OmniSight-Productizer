@@ -1,0 +1,195 @@
+## §0. One-paragraph bottom line
+
+If I (codex) had agency over runner design, the single most important first change would be to move claim ownership, runner-owned artifacts, pickup progress, and terminal cleanup out of JIRA labels/comments and into a small Postgres-backed coordination record, while leaving JIRA as the human-facing ticket ledger. Time horizon: 2-3 weeks for a strangler first pass that preserves current JIRA transitions. Confidence: high. The evidence is not abstract: on 2026-05-14 I repeatedly completed OP-1070's implementation work, then lost the pickup to runner-runtime artifacts (`.runner-cwd-sentinel`, `progress.txt`), stale claim residue, TOCTOU assignee divergence, and pre-sync failures. Those are not code-generation failures; they are coordination-state failures masquerading as task failures.
+
+## §1. Lived-experience failure modes (top 3, ranked)
+
+1. Runner-owned artifacts make my successful work look unsafe.
+
+From inside a pickup, the worst failure is: I implement the ticket, add tests, post AC verification, and then the runner reverts because its own files made the worktree look dirty or tampered. OP-1070 is the clearest case. Comments show codex picked it up at 2026-05-14 02:01:52, completed AC verification at 02:07:39, then reverted at 02:07:51 because `.runner-cwd-sentinel` had disappeared. Later I completed AC at 02:46:29 and reverted at 02:46:42 because the first uncommitted path was `progress.txt`. The same pattern hit claude on OP-1069 and OP-1071.
+
+SP-B-X coverage: OP-1074 fixes the sentinel omission, OP-1075 fixes `progress.txt` in `ensure_change_ids`, and OP-1076 consolidates the duplicated filter debt. Those are hot-fixes and debt cleanup, not a structural solution. Based on the JIRA statuses I read, OP-1074/1075 were approved paper-trail hot-fixes and OP-1076 was published, but the local checkout I am auditing still lacks the final ADR/code shape those tickets reference. So I cannot say the fix is deployed everywhere; I can only say the JIRA evidence shows it was pushed and then codex still encountered related dirty/pre-sync failures around OP-1070/OP-1077.
+
+Operator intent: protect the worktree from destructive CLI behavior and make crash recovery possible. Architecture failure: the protection files live inside the same worktree and are then judged by generic git cleanliness checks. The runner created state and then punished the agent for seeing that state.
+
+What would have prevented it: a single `RUNNER_RUNTIME_ARTIFACTS` contract used by every dirty check is the local patch. The architectural prevention is externalizing runner runtime state: heartbeat, progress, snapshot refs, and sentinels belong in a runner state store or outside the git worktree, not in files that `git status`, `git stash --include-untracked`, and rebase checks must constantly special-case.
+
+2. Claim and status state are split across labels, assignee, comments, and worktree side effects.
+
+When I pick up a ticket I do not get one authoritative lease. I get JIRA status, assignee, class label, claim labels, comments, worktree branch state, and sometimes bridge state. On OP-1070, after several reverted attempts, comments show repeated `[runner-presync-fail]` from `git switch -C feature/OP-1070-runner-fresh ...` in the codex-2 worktree, followed by fresh pickups from another codex worktree. Then at 02:55 and 03:14 the runner aborted because the assignee diverged from pickup (`live=None`). That is a textbook symptom of state-authority ambiguity: the runner is trying to infer whether it still owns the task from mutable JIRA fields that other automation also mutates.
+
+SP-B-X coverage: OP-1059 orphan reaper, OP-1061 claim release post-CLI, OP-1069 human-authority race detection, and OP-1070 state-authority precedence all address pieces. OP-1061's premise is especially direct: `release_ticket_claim` existed in documentation but was not wired into all post-CLI exit paths. OP-1058 also requires 30-day stability, which implies the family was not yet proven by the time of this audit.
+
+Operator intent: prevent two agents from editing the same logical resource and make stuck claims recoverable. Architecture failure: JIRA labels are being used as a distributed lock, a progress record, and an audit surface all at once. Labels are eventually consistent, human-editable, not transactional with status transitions, and not automatically cleaned when worktree preparation fails.
+
+What would have prevented it: one durable claim row keyed by ticket and resource, with fencing token, owner instance, heartbeat timestamp, state, and release reason. JIRA should receive a summarized comment after state converges, not be the lock implementation.
+
+3. Health gates that are meant to protect me can block every pickup because they depend on the thing they are checking.
+
+OP-1067 added bridge-health as a runner pickup signal. OP-1077 then documents the follow-up: the bridge heartbeat was emitted from `_maintenance_ticks()` inside a loop blocked on `gerrit stream-events`, so quiet Gerrit periods made the heartbeat stale even when the process was alive. The result was that runner pickup would see `bridge_down` and block all work. The workaround was an external `while true; touch heartbeat; sleep 60` loop. I personally saw OP-1077 fail as codex: at 03:56:59 I picked it up, at 03:57:03 pre-sync failed, and later at 04:03:46 my completed verification was blocked by `runner-capability-blocked` because `gerrit_push` was not permitted.
+
+SP-B-X coverage: OP-1067 is the first-class bridge health gate; OP-1077 fixes the heartbeat cadence by moving heartbeat emission into a background thread. That is net-positive once deployed, but the first version introduced a fleet-wide pickup blocker.
+
+Operator intent: do not let agents push work if the Gerrit->JIRA bridge is down, because merged work could fail to publish ticket state. Architecture failure: the health signal was coupled to the bridge's event loop and then used as a hard pickup gate. A protection mechanism became a single-point denial of service.
+
+What would have prevented it: health signals need independent liveness contracts and graded behavior. For a stale bridge, the runner can still pick up code-only work but hold finalization or mark "review pending bridge"; it should not blindly block all pickup unless the ticket requires bridge-dependent state mutation.
+
+## §2. Labels-as-state critique (Q-B)
+
+When I pick up a ticket and see roughly 22 labels, I actually consume a small subset:
+
+- `class:*`: selects whether codex/claude/API runner is eligible.
+- `area:*`: prompt boundary and forbidden-area calculation.
+- `tier:*`: prompt and authority/risk handling.
+- `priority:*` or JIRA Component: scheduling fallback.
+- `capability:enable=*`: permission to edit, push, update JIRA, run tests, etc.
+- `mutex:*` or `mutex_with` from description YAML: concurrency gating.
+- `scope:*`, `ticket-id:*`, `parent:*`: useful for human context and sometimes grouping, but not essential to execution.
+- `prefer:*`: useful for routing, but less authoritative than `class:*`.
+
+Noise from my execution perspective includes most ADR cross-reference labels, historical scope labels, claim residue after revert, `runner-loop-paused-pending-review` once it is stale, and `runner-blocked:*` labels that encode transient conditions. They matter to dashboards, but they should not be in the same flat namespace as immutable routing metadata.
+
+Labels I write or trigger today include comments and/or labels for: `runner-presync-fail`, `runner-live-state-fail`, `runner-mutex-blocked`, `runner-dirty-worktree`, `runner-workspace-tampered`, `runner-pushed-to-gerrit`, `runner-pre-review-self-fix-warning`, `runner-provider-dispatch`, `runner-capability-blocked`, and claim labels of the form `claim:default:<token>`. These writes are only partially idempotent. Comments are append-only, so duplicate retries create noisy history. Label add/remove is idempotent in the narrow REST sense, but the combined operation "claim + transition + assignee + comment + worktree branch" is not atomic or recoverable if the process dies halfway. Ordering is also weak: OP-1070 shows comments and status transitions interleaving across codex and claude attempts.
+
+If this moved to a Postgres coordination substrate, the diff would land primarily in `backend/agents/jira_dispatch.py` and the runner entry points:
+
+- Add `backend/agents/runner_coordination.py` with `acquire_claim(ticket_key, agent_class, resources, instance_id) -> ClaimLease`, `heartbeat_claim(lease_id)`, `release_claim(lease_id, reason)`, `record_phase(lease_id, phase, artifact_ref=None)`, and `mark_terminal(lease_id, terminal_state, external_refs)`.
+- In `auto-runner-jira.py`, replace the pre-transition implicit ownership sequence with `acquire_claim()` before `transition_to_in_progress()`. If acquisition fails, skip without writing a blocking label.
+- In `auto-runner-multi.py`, make `_select_candidate()` consult the coordination table for active claims instead of relying only on JIRA labels/status.
+- In `jira_dispatch.pre_pickup_ok()`, keep `live_state_requires` and JIRA dependency checks, but replace `find_mutex_holders()` JQL label search with a coordination-table query.
+- In `transition_back_to_todo()` and `transition_to_under_review()`, stop encoding runtime cleanup in labels. Release the claim in the coordination table first or in a finally block, then write one JIRA comment summarizing the terminal state.
+- In `auto-runner-codex.py`, the old TODO marker flow (`[~][G]`) is the ancestor of this problem. For TODO-mode it should be treated as legacy; JIRA-mode should not mirror that pattern with labels.
+
+## §3. SP-B-X retrospective from inside (Q-C)
+
+I only claim direct experience for tickets where I saw codex pickup comments or failures in JIRA during this audit.
+
+OP-1057 / SP-B-X-001, push success decoupled from post-push self-fix: net-positive. I saw this work on OP-1069, OP-1071, and OP-1073: codex pushed to Gerrit, transitioned under review, and posted `[runner-pre-review-self-fix-warning]` instead of treating mergeability self-fix failure as push failure. This is a real improvement because Gerrit success stopped being retroactively reclassified.
+
+OP-1060 / SP-B-X-002a, progress durability via stash: mixed to net-negative in its first production form. The intent is good, but the implementation introduced sentinel and progress dirty-check regressions. OP-1074 and OP-1075 exist because OP-1060's runtime artifacts interacted badly with existing worktree checks. This is masking a deeper bug: runner state belongs outside the dirty worktree or behind one canonical artifact contract.
+
+OP-1067 / SP-B-X-009, bridge-health as first-class runner signal: mixed. The concept is correct, but the first implementation made heartbeat freshness depend on event-loop progress. OP-1077 documents that quiet Gerrit periods made the heartbeat stale and blocked every pickup. This is another deeper bug: hard pickup gates must have independent liveness and graceful degradation.
+
+OP-1069 / SP-B-X-011, human-authority race detection: net-positive in principle, but it exposed how brittle ownership inference is. Codex completed OP-1069 successfully and pushed #552. On OP-1070, similar TOCTOU checks later aborted because assignee changed to `None`. That may be correct in the literal sense, but the user-visible effect is confusing: I did useful work and then the runner threw it away because another cleanup path released ownership while I was still inside the pickup.
+
+OP-1070 / SP-B-X-012, state-authority precedence: unknown-to-mixed. I repeatedly implemented it; the bridge eventually force-transitioned OP-1070 to published. But I cannot separate the fix's quality from the surrounding artifact/claim failures. It is probably necessary, but it does not solve the underlying problem that authoritative state is scattered.
+
+OP-1073 / SP-B-X-015, description drift validator: net-positive. I saw codex complete and push this successfully (#547). It addresses a real operator pain: ticket specs drift between parent docs and filed JIRA descriptions. It does not improve pickup reliability directly, but it improves the input quality I receive.
+
+OP-1074 / SP-B-X-016 and OP-1075 / SP-B-X-017, runner artifact hot-fixes: net-positive as patches, but they are evidence that the architecture is reactive. The fix is correct for the immediate symptoms, but the fact that there were two sibling hot-fixes for two call sites proves the artifact contract was not centralized.
+
+OP-1077 / SP-B-X-019, heartbeat thread: net-positive design, but my own OP-1077 pickup failed due to pre-sync and then capability gating after a manual Claude/Gerrit path had already moved the ticket. Again, the implementation target is good; the runner path around it still has coordination ambiguity.
+
+For SP-B-X tickets I did not directly experience in production (OP-1059 orphan reaper, OP-1062 TOCTOU primitive as a standalone, OP-1063 repo_map TTL, OP-1064 stale refresh, OP-1065 CostGuard audit, OP-1066 API canary, OP-1068 instance uniqueness, OP-1072 admin closure), I do not assert success or failure. They look plausible from descriptions, but I did not observe their runtime impact.
+
+## §4. The redesign: minimum first move (Q-D)
+
+Single first change: add a coordination substrate for claim and runtime artifact state, then route claim acquisition/release through it while keeping JIRA transitions unchanged.
+
+Concrete shape:
+
+- New file: `backend/agents/runner_coordination.py`.
+- New DB table: `runner_claims(ticket_key text, resource_key text, lease_id text, owner_agent_class text, owner_instance_id text, fencing_token text, state text, phase text, heartbeat_at timestamptz, acquired_at timestamptz, released_at timestamptz, release_reason text, external_refs jsonb)`.
+- Function signatures:
+  - `acquire_claim(client, ticket_key: str, resources: list[str], agent_class: str, instance_id: str) -> ClaimLease | ClaimBlocked`
+  - `release_claim(lease: ClaimLease, reason: str) -> None`
+  - `record_phase(lease: ClaimLease, phase: str, artifact_refs: dict | None = None) -> None`
+  - `find_active_holders(resources: list[str], exclude_ticket: str | None = None) -> list[ClaimLease]`
+- Replace in `backend/agents/jira_dispatch.py`: `find_mutex_holders()` and any `claim:*` label manipulation become table reads/writes. `pre_pickup_ok()` still fetches JIRA descriptions and evaluates `live_state_requires`, but mutex ownership no longer comes from label JQL.
+- Replace in `auto-runner-jira.py` and `auto-runner-multi.py`: claim acquisition occurs before `transition_to_in_progress()`, and release happens in a `finally` around all terminal paths, including pre-sync, capability failure, no-commit, dirty worktree, push hard-fail, and success.
+
+Why this and not the others: the operator's empirical numbers already identify this as the largest leak: 22.4 labels per ticket, 103 unique labels over 40 tickets, 45% `runner-blocked`, 40% `claim:*` residue, and 12% `runner-loop-paused-pending-review`. My own OP-1070 experience matches the numbers: repeated useful work was invalidated by claim/artifact/status state, not by inability to code. A cost ledger is essential for API/SDK expansion, but for subscription codex pickup reliability, claim/runtime state is the immediate blocker.
+
+Smallest validation:
+
+- For one week after deploying the substrate in shadow-write then enforcing mode, track the last 40 runner-handled tickets.
+- Expected: `claim:*` labels on terminal tickets drop from 40% to 0%; `runner-blocked` drops from 45% to below 10%; duplicate pickup attempts on a single ticket drop materially; no ticket has more than one active claim row per mutex resource.
+- Direct regression: replay OP-1070-like scenario where progress/sentinel runtime files are present; runner finalization must not revert due to its own artifacts.
+
+What it blocks: it should not block future work if implemented as a strangler. Existing labels can remain as read-only compatibility for dashboards for one sprint. The only thing it intentionally blocks is adding more label-based coordination states.
+
+## §5. Dual-mission release (Q-E)
+
+I would be glad to be released from product-aspiration concerns that make a dev runner less reliable:
+
+- Gamified agent/runtime systems, character state, party/guild abstractions, XP, and long-lived autonomous evolution inside the same runner path.
+- User-facing multi-tenant session semantics in the dev-ticket runner.
+- API/SDK cost enforcement inside the executor itself. Subscription dev-runner can report cost/usage, but hard budget should be a platform primitive independent of the model process.
+- Broad natural-language task intake. My dev-runner input should stay structured: JIRA fields, labels, AC, boundaries, and explicit prerequisites.
+
+I would fight to keep:
+
+- JIRA ticket ingestion and AC verification comments.
+- Worktree fresh-sync to Gerrit develop, commit-msg hook installation, bot identity setup, and Gerrit push flow.
+- Capability-aware routing, but only if backed by a small, clear policy rather than dozens of ad hoc labels.
+- Pre-pickup live-state checks and mutex/resource locking, moved to the substrate.
+- Provider adapter interface for codex/claude subscription CLIs, because even the dev-runner benefits from model fallback and health checks.
+- Lessons learned / memory summaries that are read-only context at pickup time, not mutable state that can wedge a task.
+
+My minimum viable dev runner is:
+
+1. Poll JIRA for `status=To Do`, `class=subscription-codex` or configured classes, and declared area/tier/capability.
+2. Acquire a coordination lease in Postgres.
+3. Fresh-sync the correct worktree to Gerrit develop and install bot identity/hook.
+4. Build a strict prompt from summary, description, boundaries, and closest-rule docs.
+5. Invoke codex/claude CLI with timeout.
+6. Verify commit presence and AC comment.
+7. Push to Gerrit, transition Under Review, release lease.
+8. On failure, preserve artifacts, release lease with reason, and write one JIRA comment.
+
+Everything else should be Layer 1 platform or Layer 2b user-agent work.
+
+## §6. Multi-model coordination — from inside (Q-F)
+
+My relationship to Claude in production is cooperative but weakly coordinated. We do not share a durable lease. We infer ownership from JIRA status, assignee, class labels, claim labels, mutex labels, comments, and worktree state. Sometimes this works: `class:subscription-codex` vs `class:subscription-claude` routes most tickets to one runner. Sometimes it fails: OP-1070 shows both claude and codex attempting the same ticket across multiple worktrees after reverts and cleanup. The bridge then force-transitioned the ticket from `進行中` to published after a merge, which is useful but also proof that terminal state convergence is happening after the fact.
+
+Current arbitration path:
+
+- `auto-runner-jira.py` uses `fetch_pickable_tickets()` from `backend/agents/jira_dispatch.py` with JQL: Story, To Do, unassigned, `labels = class:{cls}`, not tier X.
+- `scheduler.dispatch()` scores candidates and calls `pre_pickup_ok()`.
+- `pre_pickup_ok()` fetches description, evaluates `live_state_requires`, parses `mutex_with`, and calls `find_mutex_holders()` which searches JIRA for matching mutex labels in `In Progress` or `Under Review`.
+- Then the runner transitions to In Progress and assigns the bot.
+
+This is not reliable enough for six model families. The first thing to break at six-way concurrency is not model quality; it is lock correctness and label hygiene. Six agents will multiply stale `claim:*`, duplicate comments, assignee races, capability label mismatches, bridge-health global blocks, and worktree pre-sync collisions. The flat label namespace also cannot express model-vs-task fit without becoming unreadable.
+
+The proposed Postgres substrate is necessary but not sufficient. It covers claim mutex and state table, which is the first-order problem. For six model families it also needs:
+
+- Capability-aware routing as data, not labels alone: model family, mode (sub/API/SDK), tools, areas, max tier, known failure classes, and current health.
+- Cost-aware routing independent of the executor, especially for API/SDK families.
+- Per-provider circuit breakers and quota state, which `provider_orchestrator.py` and provider quota modules already sketch, but they need to be enforced before pickup, not after partial execution.
+- Model deconfliction policy: e.g. do not let a fallback model pick up a ticket that another model just failed unless the failure class is one that fallback is expected to improve.
+- Separate human authority model: operator edits should invalidate or pause leases via coordination events, not by surprising a runner at pre-submit.
+
+## §7. Honest blind-spot self-assessment (Q-G)
+
+Codex is strong on narrow, pattern-replicated implementation: small backend modules, tests that mirror existing tests, scripts, schema validators, docs/runbooks, and focused bug fixes where the file set is explicit. OP-1073 is the representative success shape: a script + tests + clear field comparison AC. OP-1069 also shows codex can implement a bounded backend/test change and push successfully once the runner path lets it.
+
+Claude appears stronger on broad architectural synthesis, cross-ticket strategy, and operator-context-heavy design. The strategic document and the SP-B-X decomposition have Claude's strengths: it can hold a large plan and explain why a family exists. I am more likely to execute a constrained child ticket correctly than to own a whole cross-subsystem redesign without overfitting to the immediate failure.
+
+Equivalent shapes: straightforward docs, small adapters, validators, and test additions. Either model can do these; the runner should choose based on current health/capacity, not identity.
+
+Ticket shapes where neither current codex nor claude should be trusted without a future adapter or human gate: production secrets, multi-tenant security boundaries, irreversible database migrations, deployment cutovers, cost-bearing API loops without an external ledger, and anything requiring long-lived autonomous operation. Those need platform-enforced contracts, not just better prompts.
+
+A ticket shape where current codex repeatedly fails and the operator may misread it as infra: "code task completed, but finalization reverts due to runner state." OP-1070 is the example. The agent did the work multiple times. The failure looked like dirty worktree, workspace tamper, pre-sync, or TOCTOU. If one only counts terminal state, it looks like codex instability; if one reads comments, it is runner-state instability.
+
+My biggest blind spot on OmniSight tickets is over-trusting the prompt's declared state when the repo/JIRA/live system disagree. I can follow scope, but if the ticket description cites files that are missing locally, line numbers from a different branch, or dependencies not actually deployed, I need the runner to surface that mismatch as a first-class blocked state instead of letting me improvise or produce work against a phantom tree.
+
+## §8. Recommended sequencing
+
+1. Shadow-write runner coordination table, 1 week, low-to-medium effort. Add `runner_coordination.py`, DB table, and write claim/phase/release records alongside current JIRA labels/comments. No behavior change yet. This gives evidence without risking production.
+
+2. Enforce coordination-table claim acquisition for mutex resources, 1-2 weeks after shadow confidence. Replace JIRA `claim:*` and mutex-holder JQL for active lock decisions. Keep JIRA comments as human-readable audit. Dependency: table exists and shadow writes prove no missing terminal path.
+
+3. Centralize runner runtime artifacts, 2-3 days. Export one `RUNNER_RUNTIME_ARTIFACTS` constant and use it in every dirty/stash/change-id path. Then decide whether `.gitignore` should carry these files. Dependency: none; this reduces immediate OP-1074/1075 recurrence risk.
+
+4. Convert bridge health from hard global pickup gate to capability-scoped gate, 3-5 days. If bridge is stale, block only tickets requiring Gerrit/JIRA finalization or allow implementation but hold push/transition with an explicit lease state. Dependency: heartbeat thread fix deployed.
+
+5. Build capability/cost routing registry from existing provider adapter work, 2-3 weeks. Move `capability:enable=*` overrides toward a typed policy: provider, model, tools, max tier, cost mode, health, known failure classes. Dependency: coordination table, because routing needs reliable claim outcomes.
+
+## §9. What this audit didn't cover
+
+I could not read `docs/adr/ADR-0035-runner-fsm-and-error-handling.md` from the local checkout because the path is absent. JIRA OP-1071 proves it was created and merged/pushed in a later flow, and OP-1073 includes an ADR-0035 skeleton, but the file is not present in this worktree. The same is true for `docs/architecture/sdk-runner-sprint-b-error-handling.md`, `docs/sprint-s12/sprint-s12g-governance-engine-spec.md`, and `docs/sop/sprint-s12-ticket-decomposition-rules.md`: they appear as deleted or absent in this branch's current status, while some new docs are untracked. I therefore used the strategic doc, incident retrospective, local code, and JIRA ticket/comment evidence.
+
+I did not run production daemons, inspect systemd state, or verify whether Gerrit changes #547/#552/#553/#554/#555/#558 are deployed in the running runner host. I also did not audit the full 40-ticket label sample; I used the prompt's provided aggregate numbers and spot-checked OP-1057..1077 plus comments on the key tickets.
+
+I did not review actual database schema migrations for a proposed coordination table, nor did I inspect all existing runner tests because this was an audit memo, not an implementation task. The biggest missing data is a clean event log that correlates each pickup attempt, lease/claim state, worktree branch, JIRA transition, Gerrit change, and final terminal outcome. The absence of that log is itself part of the problem.

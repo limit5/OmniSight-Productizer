@@ -1,0 +1,308 @@
+## §0. Bottom-line recommendation
+hold-and-rework
+
+Reason: the G.A-v2 idea is directionally useful, but the v1.1 spec is not file-ready. The main blockers are: required reference documents are missing from the checkout; the spec has no per-ticket boundaries / required paths even though the review prompt and G.A-v1 precedent require those at filing quality; several integration tickets are tier:S despite being integration / soak / migration gates; the SD-1 dog-food rule is introduced without evidence blocks for the spec's own novelty-style claims; and multiple recovery / rescue paths remain operator-shaped rather than deterministic enough to file.
+
+## §1. P0 BLOCKING findings (must fix before file)
+
+### P0-1 — Required review corpus is incomplete in this checkout
+
+Evidence:
+- Spec related block references ADR-0023, ADR-0033, ADR-0034, parent `sprint-s12g-governance-engine-spec.md`, and phase specs as dependencies (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:7-14`).
+- Spec says the new rules extend G.A-v0 forbidden combinations per `sprint-s12g-governance-engine-spec.md §0 P1` (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:102-113`).
+- Spec relies on ADR-0033 authority and ADR-0034 override lifecycle in the schema and bootstrap path (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:94-99`, `389-390`).
+- Local evidence: the required prompt paths `docs/sprint-s12/sprint-s12g-governance-engine-spec.md`, `docs/sop/sprint-s12-ticket-decomposition-rules.md`, and ADR-0023/0033/0034/0035 are not present in `git ls-files` or `find docs` in this checkout.
+
+Impact: reviewers cannot verify whether G.A-v2 extends the parent governance model correctly, whether tickets comply with the Sprint S12 decomposition rules, or whether authority / override semantics match ADR-0033/0034/0035. Filing a child ticket from an unverifiable spec would bypass the very governance contract the spec is trying to add.
+
+Concrete fix: add or restore the named parent spec, SOP, and ADR docs before filing, or amend §0/§6 to point to their actual repository paths. Include a short `review_corpus:` block in the spec with exact paths and commit SHAs for each required reference.
+
+### P0-2 — SD-1 self-compliance fails: the spec creates `novelty-claim-requires-evidence` but contains no actual evidence block for its own trigger phrases
+
+Evidence:
+- SD-1 requires novelty phrases in ticket / ADR / architecture memo text to have an accompanying `evidence_grep_artifact` block (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:115-147`).
+- The spec's own text contains novelty-style claims: "5 new required fields" (`43`), "new combinations" (`307`), many "new" defense dimensions (`188`, `220`, `238`, `263`, `288`), and "NEW shared plumbing" (`390`).
+- The only `evidence_grep_artifact` occurrences in the spec are the schema definition / examples, not evidence for the spec's own claims (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:123-133`, `314`).
+- The architecture memo that triggered SD-1 still contains corrected novelty claims with no machine-readable evidence block around the "actually new" 3-layer mapping (`docs/architecture/2026-05-14-runner-pivot-and-three-layer-architecture.md:135-148`).
+
+Impact: even with the prompt's 4-week soft-fail note, this is a dog-food failure. If v2-A9 scans v2-A1..A7 and related architecture docs, it will either warn on the bootstrap spec itself or require exclusions broad enough to weaken SD-1.
+
+Concrete fix: add a top-of-file `evidence_grep_artifact` block covering every intentional novelty claim, or narrow the SD-1 regex / exclusions so schema-evolution phrases like "new field" are explicitly outside scope. Also add evidence for the architecture memo's "3-layer mapping is new" claim or rephrase it as an operator decision rather than historical novelty.
+
+### P0-3 — Integration tickets violate the required tier:M+ rule and are mis-sized as tier:S
+
+Evidence:
+- Review prompt requires integration tickets to be tier:M or higher per SOP §3.2.
+- `v2-AlertBridge-AMMigrationTest` is a synthetic alert migration gate comparing stdout/email vs AM webhook payloads, but is tier:S (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:173-179`).
+- `v2-⑦-Integration` is an E2E auth-baseline enforce-mode probe across all allowlisted endpoints, but is tier:S (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:252-257`).
+- `v2-⑨-Integration` is an up/down/up chaos cycle plus alert behavior and user-visible-error validation, but is tier:S (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:294-298`).
+- `v2-A7-Integration` is synthetic end-to-end validation of all 5 dimensions, but is tier:S (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:306-313`).
+
+Impact: the filing plan will understate coordination cost, operator-window needs, and evidence requirements. It also contradicts the prompt's explicit tier gate.
+
+Concrete fix: amend these four tickets to tier:M at minimum. Consider tier:L for `v2-AlertBridge-AMMigrationTest` if it must touch live AM / Discord routing. Update §5 summary tier counts accordingly (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:316-328`).
+
+### P0-4 — Per-ticket boundary declarations are absent, so the spec cannot be filed at G.A-v1 quality
+
+Evidence:
+- The spec gives overview tables only for all child tickets (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:171-179`, `199-213`, `222-232`, `248-257`, `265-276`, `290-298`, `304-314`).
+- It does not include `boundaries:` fields for mutexes, destructive operation classes, scope components, external side effects, runtime capability, evidence class, or tag type.
+- The spec itself says defense fields are required from G.A-v2 onward (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:56-60`, `383-391`) and v2-A8 will audit v2-A1..A7's own defense contract blocks (`312-314`, `389`).
+
+Impact: child tickets cannot be validated for destructive ops, area ownership, side effects, or rescue authority at filing time. This especially breaks `v2-⑥-RescueCLI`, `v2-⑧-2a`, `v2-⑤-2bc-Timer`, and all alert-routing tickets.
+
+Concrete fix: before any JIRA filing, expand each child ticket with a boundary block. At minimum include `mutex_with`, `destructive_op_classes`, `scope_components`, `external_side_effect`, `runtime_capability`, `evidence_class`, `tag_type`, and `required_paths`.
+
+## §2. P1 STRUCTURAL findings (should fix in v2)
+
+### P1-1 — Family ⑥ D4/D5 recovery is not deterministic enough for the highest-priority outage class
+
+Evidence:
+- Option C says image-ahead auto-runs `alembic upgrade head`; image-behind exits 78 with remediation (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:190-198`).
+- The retrospective identifies real drift candidates beyond simple image-vs-DB version skew: manual `alembic upgrade head` from dev workspace, cross-branch head merge, or previous rollback leaving DB ahead (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:162-170`).
+- `v2-⑥-RescueCLI` bundles DB downgrade with backup, manual upgrade with override, and L2 fingerprint into one ticket (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:209`).
+
+Gap: the spec does not define how the startup hook handles multi-heads, branch labels, failed partial migrations, data-destructive downgrades, or advisory locking between two backend replicas starting concurrently.
+
+Concrete fix: split Family ⑥ into deterministic subcontracts: migration lock/acquire semantics; image-head resolution algorithm; forward startup hook; backward fail-fast; rescue backup capture; downgrade eligibility matrix; override/audit event writer. Make `v2-⑥-RescueCLI` tier:M/L and require an explicit no-downgrade-default path.
+
+### P1-2 — Family ⑤ misses the consumer-side auto-pull / auto-redeploy gap from the retrospective
+
+Evidence:
+- Retrospective gap #2 says OP-1035 only added the build side; the consumer side does not exist, with options such as `pull_policy: always`, cron redeploy, Watchtower / Diun / custom watcher (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:106-114`).
+- The v2 spec Family ⑤ covers `/version`, manifest bake, deployment-audit script, timer, alert rule, and integration (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:216-232`).
+- The spec explicitly scopes Family ⑤ to detection/remediation and says D3/D4/D5 are N/A (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:220`).
+
+Gap: detection catches stale images, but no ticket closes the missing consumer redeploy path. If the audit fires daily, recovery is still manual and timing-dependent.
+
+Concrete fix: either add a D4 remediation ticket for `pull latest + recreate + verify /readyz`, or explicitly state that Family ⑤ only detects and files a follow-up blocker for 31.H/31.J/31.E to own auto-redeploy. Without that, ⑤ is incomplete against the retro.
+
+### P1-3 — Family ⑦ fixes allowlist drift but not the enforce-mode rollout ambiguity named in the retro
+
+Evidence:
+- Retrospective says `/health` 401 may be caused by a third enforcement point or out-of-sync enforcement layer in `auth_baseline.py` enforce mode (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:177-183`).
+- Spec chooses single-source allowlist consumed by five middleware and then resolves `/health` path policy (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:240-257`).
+- Spec defers full auth strict-mode rollout audit (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:397-400`).
+
+Gap: the family may prove all five listed middleware call `is_public()`, but still miss hidden auth surfaces, mount-order behavior, reverse-proxy health path differences, or `/api/v1/health` vs `/health` split.
+
+Concrete fix: add one discovery/audit ticket before `v2-⑦-2bc` that enumerates every auth decision point and its middleware order. Require a failing test reproducing current `/health` 401 before refactor. If full auth audit is deferred, explicitly define the subset that this family certifies.
+
+### P1-4 — Family ⑧ underestimates host-side WSL2 shutdown limits and labels D1/D2/D5 as partial without tickets
+
+Evidence:
+- Retrospective says WSL2 emitted `RB_POWER_OFF` after 10,000 ms and `user@1000.service` default `TimeoutStopSec` is 30s (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:17-25`, `184-192`).
+- Spec says Productizer-internal only; Windows-side hooks are out of scope (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:49-53`).
+- Family ⑧ says D1/D2/D5 are partial, but the ticket table only implements D3/D4 (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:263-276`).
+
+Gap: increasing systemd `TimeoutStopSec` and compose `stop_grace_period` may not beat the Windows / WSL hard shutdown path that killed the instance. There is also no D1 signal for "last shutdown was forced" or D2 remediation for post-reboot warning.
+
+Concrete fix: either mark D1/D2/D5 N/A with rationale, or add explicit tickets for post-boot forced-shutdown detection, operator warning, and rescue escalation. Add a hard assumption test proving WSL honors the proposed systemd path during Windows update shutdown.
+
+### P1-5 — Family ⑨ changes from cross-project hygiene to optional auxiliary contract but leaves daemon hygiene only as a one-shot decision
+
+Evidence:
+- Retrospective says `ai_gateway` has been crashlooping for 10 days and the cross-project hygiene gap is uncontracted (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:194-199`).
+- Spec reframes ai-core as optional auxiliary and limits broader cross-project policy to post-rc2 (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:278-288`, `397-402`).
+- `v2-⑨-3a-Decision` is a one-shot operator decision about the current crashlooping container and says it does not affect the contract (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:297`).
+
+Gap: the spec makes application fallback dynamic, but does not prevent the original host-level resource problem from recurring for another optional stack. The root incident included daemon/log/CPU hygiene, not just Productizer provider-chain behavior.
+
+Concrete fix: add a minimal D1 host hygiene signal scoped to known auxiliary containers, or explicitly split this into a separate post-rc2 META with a blocker relationship. The current `v2-⑨-3a-Decision` should not be counted as closing the retro gap.
+
+### P1-6 — `v2-A3` is too coarse for tier:S if it includes field validators, cross-field validators, SD interactions, and bootstrap exclusions
+
+Evidence:
+- §2 defines 5 dimensions with many subfields and enums (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:56-100`).
+- §2 lists six runtime forbidden combinations (`102-113`).
+- §4 has `v2-A3` as "defense_contract field-level validators" tier:S, and `v2-A9` later adds SD-1 validator tier:S (`306-314`).
+
+Gap: the field validators are not just shape checks; they interact with runtime capability, destructive op classes, lifecycle detection, user-facing remediation, and rescue semantics. If A3 owns all field-level validators, it will need several fixture classes and existing payload compatibility handling.
+
+Concrete fix: split A3 into `A3a schema field validators`, `A3b runtime cross-field forbidden combinations`, and `A3c bootstrap/audit-mode compatibility`, or make A3 tier:M with detailed fixtures.
+
+### P1-7 — AlertBridge framework promises "zero-surprise swap" and byte-for-byte equivalence before knowing 31.G's actual AM payload contract
+
+Evidence:
+- AlertBridge says the AM bridge migration is a config change and no rule changes (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:167-180`).
+- `v2-AlertBridge-AMMigrationTest` requires `P == P'` byte-for-byte modulo timestamps (`178`).
+- Cross-phase dependencies say 31.G-LibsGate blocks v2 alert rules because Prometheus + AM stack is needed (`352-354`).
+
+Gap: stdout/email and AM webhook payloads are unlikely to be byte-identical if AM injects grouping, receiver, status, fingerprint, startsAt/endsAt, generatorURL, or labels. The framework can preserve a canonical normalized event, but byte-for-byte AM equality is likely the wrong invariant.
+
+Concrete fix: define a canonical alert envelope and compare normalized fields, not transport payload bytes. Change the dependency wording so AlertBridge contract can be filed before 31.G, but AM migration test is blocked by the concrete 31.G receiver schema.
+
+## §3. P2 POLISH findings (nice-to-have)
+
+### P2-1 — Spec metadata says version v1 while prompt calls it v1.1
+
+Evidence: frontmatter says `version: v1` and title says `Ticket Spec v1`, while status says draft v1.1 (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:1-6`, `17`).
+
+Fix: set `version: v1.1` and title suffix v1.1, or explain that v1.1 is review state rather than document version.
+
+### P2-2 — §6 filing graph references the wrong ticket ID for Family ⑨ operator decision
+
+Evidence: filing graph says Family ⑨ depends on operator decision in `v2-⑨-2a`, but the table defines the decision ticket as `v2-⑨-3a-Decision` (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:294-298`, `332-345`).
+
+Fix: change §6 line 345 to `v2-⑨-3a-Decision` or rename the ticket.
+
+### P2-3 — Family ordering is inconsistent with cross-family dependencies
+
+Evidence: §3 presents AlertBridge, then ⑥, ⑤, ⑦, ⑧, ⑨ (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:149-300`), while §6 filing order starts schema kernel then ⑥/⑤/⑦/⑧/⑨ (`332-350`). AlertBridge blocks ⑤/⑥ alert rules but is not shown in the filing graph.
+
+Fix: include AlertBridge explicitly in the graph between schema kernel and ⑤/⑥ AlertRule tickets.
+
+### P2-4 — `area` vocabulary for AlertBridge is assumed but not tied to filing labels
+
+Evidence: AlertBridge fixes labels including `area`, `family`, and `defense_dimension` (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:155-165`), but no per-ticket area labels / required paths are declared in child tables.
+
+Fix: add `area_label:` and `required_paths:` to each alert ticket so `area=deployment` / `area=observability` cannot drift from JIRA labels.
+
+## §4. Per-question answers (Q-A through Q-G)
+
+### Q-A. Completeness of the 5 gap families (⑤⑥⑦⑧⑨)
+
+⑤ shipped-not-deployed: partial. The spec covers runtime version surfacing, manifest bake, audit script, timer, alert, and E2E (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:216-232`). It does not close the retrospective's auto-pull / auto-redeploy consumer-side gap (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:106-114`). Adjacent failure modes missing: stale non-`:latest` tags, GHCR inaccessible during audit, digest changed but compose `pull_policy: missing` still reuses local image, and DB schema ahead after manual migration. D4 is declared N/A (`220`) but operational recovery is still manual; that is hand-wavy unless a separate deploy path owns it.
+
+⑥ image-vs-DB drift: partial. It covers Option C startup behavior, gauge/routine scrape, readyz remediation, alert, rescue CLI, and drills (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:184-213`). The retro lists causes such as manual prod DB alembic, cross-branch merge, and rollback residue (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:162-170`), but the spec does not define advisory locking, multi-head resolution, failed partial migration recovery, downgrade eligibility, or data-loss rules. D4 is deterministic only for the happy forward path; D5 is still hand-wavy because `v2-⑥-RescueCLI` combines backup, downgrade, manual upgrade, override, and audit without policy detail (`209`).
+
+⑦ allowlist single-source: partial. It addresses the root drift class by making all five middleware consume `PUBLIC_PATH_ALLOWLIST` (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:240-257`). It does not fully cover the retro's uncertainty about auth strict-mode enforcement layers and mount ordering (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:177-183`). Adjacent missing modes: reverse-proxy health paths, `/api/v1/health` vs `/health`, docs/OpenAPI exceptions, WebSocket/auth bypasses, and new middleware not using `is_public()`. D4 is N/A, but D2 remediation should include a failing current-state reproduction before refactor.
+
+⑧ shutdown contract: partial. It covers scripts, systemd ExecStop, compose grace periods, PG safety check, docs, drill, soak (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:260-276`). The retro's host-level forced WSL limit is not solved by Productizer-internal changes alone (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:17-25`, `184-192`), and Windows hooks are explicitly out of scope (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:49-53`). Adjacent missing modes: unattended Windows Update, laptop power loss, Docker daemon stop order, Postgres checkpoint timeout, and post-boot forced-shutdown detection. D4 is better than other families but still lacks deterministic evidence for Windows-initiated shutdown.
+
+⑨ optional auxiliary: partial. It covers app-level optionality: probe, gauge, feature flag, fallback-chain exclusion, decision, and integration (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:278-298`). It does not fully cover the retro's daemon-resource hygiene problem from a crashlooping sister container (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:194-199`). Adjacent missing modes: health endpoint absent, network partition to auxiliary, flapping threshold, stale capability inventory, and auxiliary stack consuming disk/log/CPU while app correctly excludes it. D4/D5 are declared N/A (`288`), but host cleanup still needs a deterministic decision / timer if the retro gap is to be closed.
+
+### Q-B. Atomic decomposition compliance (per SOP §1-§3)
+
+Because the required SOP document is missing from this checkout, this is a best-effort audit against the prompt's stated rules and the visible G.A-v1 precedent requirement.
+
+Likely tier:S after expansion: `v2-A1` schema only, `v2-A2` six forbidden combinations if fixtures are bounded, `v2-A4` golden fixture update, `v2-⑤-1bc` endpoint, `v2-⑤-Dockerfile-Manifest` if manifest script already exists or is split, `v2-⑦-1bc` single helper module, `v2-⑦-FixHealth` after the decision is locked, `v2-⑧-2b` compose grace periods, and `v2-⑨-2bc` fallback-chain builder if probe/flag already exists.
+
+Likely must split or tier:M/L: `v2-A3` because it spans many validators and cross-field rules (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:56-113`, `306-314`); `v2-⑥-RescueCLI` because it spans CLI, backup, downgrade/manual upgrade, L2 fingerprint, override, audit, and operator window (`209`); `v2-⑨-1bc` because probe + Prometheus gauge + in-process feature flag + flapping behavior is three surfaces (`295`); `v2-⑧-2a` because systemd refactor and operator prepare-only live unit work is not a bounded code pickup (`271`); `v2-⑤-2bc-Timer` because systemd timer + evidence write + Discord post crosses ops, docs/audit, and integration (`230`); `v2-AlertBridge-1bc` because adapter + cardinality + dedupe + tests is likely more than one bounded implementation (`176`); `v2-A9-SDValidator` because regex semantics + YAML parser + exceptions + soft-fail + override hook is large (`314`).
+
+Tier:M+ integration check: fail. `v2-⑦-Integration`, `v2-⑨-Integration`, `v2-A7-Integration`, and `v2-AlertBridge-AMMigrationTest` are all tier:S even though they are explicitly integration / migration smoke tests (`178`, `257`, `298`, `312`). `v2-⑤-Integration`, `v2-⑥-Integration`, and `v2-⑧-Integration` are already tier:L (`212`, `232`, `276`).
+
+### Q-C. Boundaries declaration completeness
+
+Boundary fields are absent across the overview tables (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:171-179`, `199-213`, `222-232`, `248-257`, `265-276`, `290-298`, `304-314`). At least these tickets need explicit blocks:
+
+- `v2-⑥-RescueCLI` (`209`): `mutex_with: [prod-deploy, alembic-upgrade, backup-restore]`; `destructive_op_classes: [db-downgrade, manual-schema-upgrade, backup-create]`; `scope_components: [backend, alembic, ops-cli, audit]`; `external_side_effect: network-production`; `runtime_capability: network-production-when-apply`; `evidence_class: operator-rehearsal + audit-log`; `tag_type: operator-window`. This crosses DB + ops + audit boundaries and should be tier:M/L.
+
+- `v2-⑧-2a` (`271`): `mutex_with: [prod-compose-restart, windows-shutdown-drill]`; `destructive_op_classes: [service-stop, systemd-unit-change]`; `scope_components: [deploy, systemd, scripts]`; `external_side_effect: local-host-service`; `runtime_capability: production-lifecycle`; `evidence_class: systemd-analyze + dry-run + operator-window`; `tag_type: operator-prepare-only`. It likely touches `/etc/systemd` outside repo, so filing must specify whether the repo change is a unit template or live host edit.
+
+- `v2-⑤-2bc-Timer` (`230`): `mutex_with: [deployment-audit-run, prod-compose-recreate]`; `destructive_op_classes: []` unless it posts to external systems; `scope_components: [scripts, docs/audit, systemd, discord-integration]`; `external_side_effect: network-production + discord-post`; `runtime_capability: scheduled-production-audit`; `evidence_class: JSON evidence + notification transcript`; `tag_type: operator-prepare-only`. It crosses script, docs/audit, ops, and external notification.
+
+- `v2-AlertBridge-1bc` (`176`): `scope_components: [backend/alerting, metrics, email]`; `external_side_effect: email-send` for warn/page; `runtime_capability: alert-routing`; `evidence_class: unit + adapter fake`; `destructive_op_classes: []`. Without this, email side effects can leak in tests.
+
+- `v2-⑦-2bc` (`254`): `scope_components: [backend/auth_baseline.py, backend/main.py, backend/auth.py, backend/middleware_allowlist.py]`; `external_side_effect: auth-policy-change`; `runtime_capability: production-auth`; `evidence_class: auth contract tests`. This crosses a Claude-owned auth/security area per coordination defaults (`coordination.md:31-57`) and should not be codex tier:S without explicit operator override.
+
+Likely cross-area failures: `v2-⑦-2bc` touches auth/security; `v2-⑤-2bc-Timer` touches scripts + docs/audit + Discord integration; `v2-⑥-RescueCLI` touches backend/alembic + ops CLI + audit; `v2-⑧-2a` touches repo plus live systemd unit; `v2-AlertBridge-*` touches backend alerting + deploy/prometheus + notification channels.
+
+### Q-D. SOP §2 file-path → area-label audit
+
+The spec does not list file-touch sets. Five inferred examples:
+
+1. `v2-⑤-1bc` (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:227`): likely paths `backend/main.py`, `backend/routers/version.py` or existing router package, `backend/tests/test_version_endpoint.py`, maybe `Dockerfile.backend` only via manifest consumer. Required area labels: `area:backend`, `area:deployment` if manifest fields are runtime-deploy metadata. Suggested `required_paths: [backend/routers/**, backend/main.py, backend/tests/**]`.
+
+2. `v2-⑤-Dockerfile-Manifest` (`228`): likely paths `Dockerfile.backend`, `scripts/bake-image-manifest.sh`, `backend/alembic/versions/**` read-only reference, tests for script. Required labels: `area:devops`, `area:deployment`, maybe `area:backend-build`. Suggested `required_paths: [Dockerfile.backend, scripts/bake-image-manifest.sh, backend/alembic/versions/**]`.
+
+3. `v2-⑥-2bc` (`206`): likely paths `Dockerfile.backend` or backend startup module, alembic env/config, `scripts/bootstrap_prod.sh`, tests. Required labels: `area:backend`, `area:db`, `area:deployment`. It conflicts with class codex/S because prod DB migration startup is high-risk and likely operator-window. Suggested `required_paths: [backend/**, backend/alembic/**, Dockerfile.backend, scripts/bootstrap_prod.sh, backend/tests/**]`.
+
+4. `v2-⑦-2bc` (`254`): likely paths `backend/auth_baseline.py`, `backend/main.py`, `backend/auth.py`, `backend/middleware_allowlist.py`, backend auth tests. Required labels: `area:auth`, `area:backend`, `area:security`. Conflict: class codex despite auth/security ownership defaulting to Claude (`coordination.md:31-57`). Suggested `required_paths: [backend/auth_baseline.py, backend/auth.py, backend/main.py, backend/middleware_allowlist.py, backend/tests/test_*auth*]`.
+
+5. `v2-⑧-2b` (`272`): likely path `docker-compose.prod.yml`, compose tests/lints, maybe docs. Required labels: `area:devops`, `area:deployment`, `area:ops`. Suggested `required_paths: [docker-compose.prod.yml, docs/ops/**, scripts/**]`.
+
+Other conflicts: `v2-⑤-2bc-Timer` likely needs `area:integration` because it posts to Discord (`230`), while class is `claude + operator-prepare-only`; okay but should be explicit. `v2-AlertBridge-2bc` touches CI and deploy/prometheus (`177`) but is class codex; likely okay only if path-limited to linter and tests. `v2-A9-SDValidator` touches governance plugin + ADR override hook (`314`), so required paths may cross governance/runner-owned areas.
+
+Suggested field: every ticket should add:
+
+```yaml
+required_paths:
+  allow:
+    - backend/...
+    - scripts/...
+  deny:
+    - test_assets/**
+    - coordination.md
+  required_area_labels:
+    - area:backend
+    - area:deployment
+  filing_check: reject_if_changed_path_not_covered
+```
+
+### Q-E. Cross-phase dependency correctness
+
+31.G-LibsGate-external: partially reversed/over-broad. Spec says it blocks v2-⑥-AlertRule and v2-⑤-AlertRule because Prometheus + AM stack are needed (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:352-354`), but the spec also says alert rules can file before 31.G with stdout/email v0 delivery and AM migration later (`151-180`, `389-390`). Better shape: AlertRule contract/spec can proceed before 31.G; AM webhook migration test blocks on 31.G concrete receiver schema.
+
+31.C-Integration-external: plausible. `v2-⑤-2bc-Timer` posts to Discord (`230`), so Discord routing dependency (`354`) is correct if the timer really posts externally. If v0 stdout/email is enough, Discord should be moved to integration only.
+
+31.H-StabilityCheckpoint-external: correct direction as written. Spec says it is NOT blocking and ⑧ should inform 31.H BackupDRDrill (`355`). That matches the retrospective that 31.H restore drill is bottom-of-funnel and shutdown contract is top-of-funnel (`docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:184-192`).
+
+31.I-2bc: correct direction. Spec says 31.I consumes v2-⑥ healthcheck-validator and waits on us (`356`). The architecture note also frames defense_contract as a Layer 1 primitive consumed downstream (`docs/architecture/2026-05-14-runner-pivot-and-three-layer-architecture.md:238-245`).
+
+Missing dependencies:
+- v2-⑥ likely depends on 31.H canary-runner design if Option C names canary-runner canonical path (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:203-206`; retro canary coverage at `docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:142-145`, `162-165`). If 31.H is not shipped, G.A-v2 must either own startup migration independently or state canary-runner is conceptual only.
+- v2-⑤ likely depends on 31.E CI Wave 2 image manifest / publish contract because it compares running `/version` to latest GHCR digest (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:226-232`; retro `OP-1035` build-side at `docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md:33-35`, `143`).
+- v2-⑦ likely depends on 31.B or other runner/governance plugin work if `PUBLIC_PATH_ALLOWLIST` must become a filing-time policy hook. The current spec treats it as independent after v2-A1 (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:343`) but it touches auth policy and CI integration.
+
+Sequencing risk: G.A-v2 -> G.B -> 31.B is not tight enough. §6 says G.B unblocked after all families and stability checkpoint (`347-350`), but §7 says 31.A-31.K v2 tickets can treat defense_contract as optional for four weeks after checkpoint (`391`). If one ship slips, G.B can consume partially hardened validators while phase tickets are still optional, causing a mixed regime. Add explicit "G.B may file only with validator version X and optional-mode flag Y" gates.
+
+### Q-F. Hidden-assumption surface
+
+Other implicit assumptions and how to test them:
+
+1. Assumption: backend startup can safely run `alembic upgrade head` in production with two backend replicas racing. Test: concurrent startup integration with advisory lock contention; assert exactly one upgrader, other waits/fails deterministically.
+
+2. Assumption: `image_alembic_head` can be computed reliably from baked manifest and not from stale filesystem state. Test: build image from branch with multiple heads / merge migration and compare manifest value to `alembic heads` inside container.
+
+3. Assumption: exit code 78 propagates through Docker Compose/systemd in a way operators and alerts can distinguish from generic crash. Test: compose/systemd harness asserts unit status, logs, restart policy behavior, and alert payload for exit 78.
+
+4. Assumption: all five auth middleware can share `is_public(path)` without changing path normalization, prefix matching, trailing slash, root path, or mounted router behavior. Test: table-driven tests for raw path, `scope['path']`, `/api/v1` prefix, slash variants, docs/static routes, and mounted routers.
+
+5. Assumption: daily audit evidence can be written under `docs/audit/...` from production without dirtying the repo or colliding with git ownership. Test: run timer under production service user and verify write permissions, rotation, and no committed secrets / transient data.
+
+6. Assumption: alert label cardinality can be statically capped at <=10 values (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:155-165`). Test: run rule-linter against generated labels from real instances/images/services and fail if cardinality exceeds the declared cap.
+
+7. Assumption: `AI_CORE_AVAILABLE` as an in-process flag is coherent across multiple backend workers / replicas. Test: two-process backend fixture where one probe changes state; assert both replicas update capability inventory within one probe cycle or move flag to shared store.
+
+8. Assumption: optional auxiliary unavailability is safe to hide from users except capability inventory. Test: force ollama down during active Local LLM request; assert request is routed to a valid provider or returns a non-fatal, explicit provider-unavailable response.
+
+9. Assumption: WSL2/systemd shutdown path used in drills matches Windows Update forced shutdown. Test: operator rehearsal using actual Windows shutdown/update simulation, not only `kill -9 systemd` (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:275`).
+
+10. Assumption: G.A-v2 bootstrap overrides can be audited after the validator ships and corrected without invalidating already-filed tickets. Test: file a deliberately bad bootstrap ticket in staging JIRA, run v2-A8 self-audit, verify override resolution workflow and remediation path.
+
+### Q-G. SD-1 self-compliance (dog-food check)
+
+Fail / soft-fail but important. The spec defines SD-1 at `docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:115-147`, including trigger phrases and required `evidence_grep_artifact`. The spec itself contains novelty phrases or close equivalents:
+
+- "5 new required fields" (`43`)
+- "6 new combinations" (`113`, `307`)
+- "new" defense dimensions for ⑥/⑤/⑦/⑧/⑨ (`188`, `220`, `238`, `263`, `288`)
+- "v2-A8-SelfAudit (NEW)" (`313`, `389`)
+- "v2-AlertBridge-Framework (NEW shared plumbing)" (`390`)
+
+No corresponding evidence block exists; the only evidence block is the schema example itself (`123-133`). Some of these are internal change descriptors rather than historical novelty claims, so the validator should probably exclude local schema/ticket-change terms. But as written, SD-1 says ticket descriptions containing novelty phrases require evidence, and the v2-* ticket table descriptions contain them. That is a self-compliance failure.
+
+The architecture memo also contains the companion novelty correction and then asserts what is "actually new" (`docs/architecture/2026-05-14-runner-pivot-and-three-layer-architecture.md:135-148`) without an `evidence_grep_artifact`. If the G.A-v2 validator covers architecture memos (`docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md:136-140`), that document will warn/fail too.
+
+Because the prompt says the 4-week pilot is soft-fail, I would not block solely on SD-1. But combined with the absent corpus and missing boundaries, this remains a P0 filing-quality issue.
+
+## §5. Open questions for operator
+
+1. Are the missing parent spec, decomposition SOP, and ADR-0023/0033/0034/0035 intentionally outside this checkout, or are the spec paths stale?
+
+2. Should G.A-v2 close only detection/remediation for ⑤, or must it also own the consumer-side auto-pull / auto-redeploy path identified in the retro?
+
+3. Is `v2-⑦-2bc` explicitly authorized for Codex despite touching auth/security-owned files, or should Claude own the middleware refactor?
+
+4. For Family ⑧, is the target defense "best effort inside WSL2" or "survives actual Windows Update shutdown"? The latter needs host-side evidence even if automation remains manual.
+
+5. Should SD-1 scan ordinary uses of "new" in ticket-change descriptions, or only historical novelty claims like "first surfaced" / "never before documented"?
+
+## §6. SOP discipline check
+
+- Atomic decomposition: partial
+- Integration tier:M+ rule: fail
+- File-path → area label: fail
+- SD-1 self-compliance: fail (soft-fail pilot, but not dog-food clean)
+- Cross-phase blocker shape: partial
