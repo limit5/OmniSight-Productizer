@@ -1,30 +1,35 @@
-# OP-1096 Test L1 Keypair
+# OP-1096 test L1 keypair
 
-This fixture keypair was generated once on 2026-05-14 with:
+The test L1 keypair was generated once by `gpg --batch --gen-key` on
+2026-05-14 with these parameters:
 
-```sh
-gpg --batch --homedir /tmp/op1096-gnupg --passphrase '' \
-  --quick-generate-key 'OmniSight OP-1096 Test L1 <op-1096-l1@example.invalid>' \
-  ed25519 sign 0
+```text
+%no-protection
+Key-Type: eddsa
+Key-Curve: ed25519
+Key-Usage: sign
+Name-Real: OmniSight OP-1096 Test L1
+Name-Comment: canonical roster fixture signing key
+Name-Email: test-l1-op-1096@example.invalid
+Expire-Date: 0
+%commit
 ```
 
 Public key fingerprint:
 
 ```text
-DB05223CD1CECB4DA69C7C02011FEE752BFEDBB3
+F995558736203E70E98F29175464E20846F314B2
 ```
 
-The armored public key is committed as `test-l1-public-key.asc`. Tests import
-that public key into an isolated `GNUPGHOME` and use this fingerprint as the
-trusted L1 value.
+The private key is not committed. It existed only in the original
+generator's temporary keyring and was used once to sign
+`sample-roster.yaml` into `sample-roster.yaml.asc`. After that one signing
+event, the temporary keyring was destroyed.
 
-The private key is not committed. It existed only in the temporary generator
-keyring and was used once to sign `sample-roster.yaml` into
-`sample-roster.yaml.asc`; after signing, the temporary keyring was destroyed.
+The signature in this repository is the canonical test signature. Tests
+must not regenerate it; they verify against the committed `.asc` file
+using the committed public key.
 
-The detached signature committed in `sample-roster.yaml.asc` is the canonical
-test signature. Tests must not regenerate it.
-
-Do not use this keypair in production. Any roster signed by this fingerprint
-must be rejected by production runners because the production L1 fingerprint is
-different.
+Do not use this keypair in production. Any roster signed by this
+fingerprint must be rejected by production runners because the production
+L1 fingerprint differs.

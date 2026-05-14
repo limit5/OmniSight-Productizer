@@ -1,15 +1,19 @@
 schema_version: governance-roster/v1
-environment: test
-l1:
-  name: OP-1096 Fixture L1
-  fingerprint: DB05223CD1CECB4DA69C7C02011FEE752BFEDBB3
+roster_id: op-1096-sample-roster
+issued_at: "2026-05-14T00:00:00Z"
+authority:
+  l1_role: operator
+  l1_key_fingerprint: F995558736203E70E98F29175464E20846F314B2
 deputies:
-  - level: L2
-    name: Ada Lovelace
-    ssh_key_fingerprint: SHA256:1w5Q7S7z3v7xw6n8r9c2d4e6f8a0b1c3d5e7f9a1b2c
-  - level: L2
-    name: Grace Hopper
-    ssh_key_fingerprint: SHA256:2x6R8T8a4w8yx7o9s0d3e5f7g9b1c2d4e6f8a0b2c3d
-  - level: L2
-    name: Katherine Johnson
-    ssh_key_fingerprint: SHA256:3y7S9U9b5x9zy8p0t1e4f6g8h0c2d3e5f7a9b1c3d4e
+  - id: l2-deputy-aiko-tan
+    name: Aiko Tan
+    role: release-deputy
+    ssh_key_fingerprint: SHA256:MQe7ovg0+2rL5kz7h3oC0R3xxw9T5CMx9pW9FE0a2kE
+  - id: l2-deputy-morgan-lee
+    name: Morgan Lee
+    role: incident-deputy
+    ssh_key_fingerprint: SHA256:pJ3mPHJAFgksGB0E2QyqM2cXcI9WkR+p5mOSLwa6e3k
+  - id: l2-deputy-rina-patel
+    name: Rina Patel
+    role: governance-deputy
+    ssh_key_fingerprint: SHA256:bYZ45aOgjYxkKT2qNuG4tx8zHUlq0k6m17WaiY1qKDM
