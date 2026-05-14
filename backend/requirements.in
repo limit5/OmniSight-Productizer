@@ -23,6 +23,12 @@ pydantic==2.11.3
 pydantic-settings==2.9.1
 python-dotenv==1.2.2
 pyyaml==6.0.3
+# OP-1082 (G.A-v1-4): JSON Schema round-trip parity for the v1 ticket
+# contract — backend/tests/test_tier_paths_yaml_schema.py and the new
+# governance_engine/tests/test_v1_json_schema_round_trip.py both call
+# ``jsonschema.validate``. Already used transitively for years; pin
+# explicitly so the lockfile no longer relies on accidental presence.
+jsonschema==4.23.0
 
 # --- Agent graph / LLM -------------------------------------------------
 langgraph==1.1.6
