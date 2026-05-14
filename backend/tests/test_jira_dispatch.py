@@ -926,6 +926,31 @@ def test_pre_pickup_ok_allows_review_yielding_ticket_when_bridge_stale(
     assert reason == "pre-pickup checks passed"
 
 
+def test_pre_pickup_ok_blocks_provider_quota_before_description(monkeypatch) -> None:
+    """OP-1116: quota exhaustion short-circuits before any partial pickup work."""
+    monkeypatch.setattr(
+        jd.provider_orchestrator,
+        "pre_pickup_provider_decision",
+        lambda task: jd.provider_orchestrator.PrePickupProviderDecision(
+            ok=False,
+            reason="provider_quota_exhausted:openai-subscription:5h",
+        ),
+    )
+    monkeypatch.setattr(
+        jd,
+        "fetch_description",
+        lambda c, k: pytest.fail("description fetch must not run after quota block"),
+    )
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(labels=("class:subscription-codex", "tier:S", "area:backend")),
+    )
+
+    assert ok is False
+    assert reason == "provider_quota_exhausted:openai-subscription:5h"
+
+
 # ── OP-687: mutex enforcement at pre-pickup ───────────────────────
 
 

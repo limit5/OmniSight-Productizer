@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from backend.config import settings
-from backend.agents import runner_coordination, runner_progress
+from backend.agents import provider_orchestrator, runner_coordination, runner_progress
 from backend.agents.circuit_breaker import BREAKERS
 from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
@@ -3245,6 +3245,28 @@ def _bridge_health_pickup_reason(
     )
 
 
+def _provider_task_for_pickup(
+    snapshot: TicketSnapshot,
+    agent_class: str,
+) -> provider_orchestrator.TaskSpec:
+    tier = "M"
+    areas: list[str] = []
+    for label in snapshot.labels:
+        if label.startswith("tier:"):
+            tier = label.split(":", 1)[1].strip().upper() or tier
+        elif label.startswith("area:"):
+            area = label.split(":", 1)[1].strip()
+            if area:
+                areas.append(area)
+    return provider_orchestrator.TaskSpec(
+        prompt=snapshot.key,
+        agent_class=agent_class,
+        tier=tier,
+        area=areas,
+        correlation_id=snapshot.key,
+    )
+
+
 def pre_pickup_ok(
     client: DispatchClient,
     snapshot: TicketSnapshot,
@@ -3302,6 +3324,12 @@ def pre_pickup_ok(
     )
     if bridge_reason is not None:
         return False, bridge_reason
+
+    provider_decision = provider_orchestrator.pre_pickup_provider_decision(
+        _provider_task_for_pickup(snapshot, client.agent_class)
+    )
+    if not provider_decision.ok:
+        return False, provider_decision.reason
 
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)
