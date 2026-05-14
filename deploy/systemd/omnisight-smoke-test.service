@@ -1,0 +1,32 @@
+; [OP-1132] Post-reboot production smoke test.
+; Install: copy service+timer to /etc/systemd/system, daemon-reload,
+; enable --now omnisight-smoke-test.timer.
+
+[Unit]
+Description=OmniSight post-reboot production smoke test (OP-1132)
+Documentation=https://soraapp.atlassian.net/browse/OP-1132
+After=network-online.target omnisight-compose-prod.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONPATH=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_SMOKE_REPO_ROOT=/home/user/work/sora/OmniSight-Productizer
+Environment=OMNISIGHT_SMOKE_BASE_URL=http://localhost:8000
+Environment=OMNISIGHT_SMOKE_LOG=/var/log/omnisight-smoke-test.log
+Environment=OMNISIGHT_SMOKE_RUNNER_LOG_GLOB=/home/user/work/sora/logs/runner/*.log
+Environment=OMNISIGHT_SMOKE_RUNNER_MAX_AGE_SECONDS=300
+Environment=OMNISIGHT_GERRIT_SSH_HOST=codex-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
+EnvironmentFile=-/home/user/.config/omnisight/prod-smoke-test.env
+ExecStart=/bin/bash /home/user/work/sora/OmniSight-Productizer/scripts/smoke-test-prod.sh
+TimeoutStartSec=180
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=omnisight-smoke-test
+
+[Install]
+WantedBy=default.target
