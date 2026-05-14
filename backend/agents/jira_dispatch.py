@@ -29,13 +29,13 @@ import urllib.error
 import urllib.request
 import uuid
 from base64 import b64encode
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from backend.config import settings
-from backend.agents import runner_progress
+from backend.agents import runner_coordination, runner_progress
 from backend.agents.circuit_breaker import BREAKERS
 from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
@@ -2327,6 +2327,61 @@ class ClaimResult:
     ok: bool
     lost_to: str | None = None
     claim_token: str | None = None
+    coordination_lease_id: str | None = None
+    coordination_fencing_token: str | None = None
+
+
+def _coordination_resource_key(key: str) -> str:
+    """Resource key used by the OP-1107 shadow coordination table write."""
+    return f"ticket:{key}"
+
+
+def _shadow_acquire_claim(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> runner_coordination.ClaimLease | None:
+    """Best-effort OP-1107 shadow table claim.
+
+    The JIRA label path remains load-bearing during the observation
+    period, so coordination-table write failures are logged but do not
+    change pickup behaviour.
+    """
+    if not runner_coordination._db_path().exists():
+        return None
+    try:
+        return runner_coordination.acquire_claim(
+            ticket_key=key,
+            resource_key=_coordination_resource_key(key),
+            owner_agent_class=getattr(client, "agent_class", "unknown"),
+            owner_instance_id=instance_id,
+            phase="pickup",
+            external_refs={"source": "jira_dispatch.claim_ticket_atomic"},
+        )
+    except Exception as exc:  # noqa: BLE001 - shadow write must not alter label path
+        log.warning("runner_coordination.acquire_claim shadow failed key=%s err=%s", key, exc)
+        return None
+
+
+def _shadow_release_claim(
+    lease_id: str | None,
+    fencing_token: str | None,
+    reason: str,
+) -> None:
+    if not lease_id or not fencing_token:
+        return
+    try:
+        runner_coordination.release_claim(
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            release_reason=reason,
+        )
+    except Exception as exc:  # noqa: BLE001 - shadow release must not alter label path
+        log.warning(
+            "runner_coordination.release_claim shadow failed lease_id=%s err=%s",
+            lease_id,
+            exc,
+        )
 
 
 class RunnerMutexLost(RuntimeError):
@@ -2496,9 +2551,35 @@ def claim_ticket_atomic(
     Raises :class:`RunnerMutexAPIError` for transport failures during the
     claim sequence. Returns :class:`ClaimResult` for the mutex-lost path.
     """
-    if _legacy_claim_mode():
-        return _claim_ticket_atomic_legacy(client, key, instance_id)
-    return _claim_ticket_atomic_fenced(client, key, instance_id)
+    coordination_lease = _shadow_acquire_claim(client, key, instance_id)
+    try:
+        if _legacy_claim_mode():
+            result = _claim_ticket_atomic_legacy(client, key, instance_id)
+        else:
+            result = _claim_ticket_atomic_fenced(client, key, instance_id)
+    except Exception:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-error",
+            )
+        raise
+
+    if coordination_lease is None:
+        return result
+    if not result.ok:
+        _shadow_release_claim(
+            coordination_lease.lease_id,
+            coordination_lease.fencing_token,
+            "label-claim-lost",
+        )
+        return result
+    return replace(
+        result,
+        coordination_lease_id=coordination_lease.lease_id,
+        coordination_fencing_token=coordination_lease.fencing_token,
+    )
 
 
 def _claim_ticket_atomic_fenced(
@@ -2732,6 +2813,9 @@ def release_ticket_claim(
     key: str,
     instance_id: str,
     token: str | None = None,
+    *,
+    coordination_lease_id: str | None = None,
+    coordination_fencing_token: str | None = None,
 ) -> None:
     """Remove this instance's claim label(s) from ``key`` (AUDIT-24 GC).
 
@@ -2763,6 +2847,11 @@ def release_ticket_claim(
 
     targets = list(dict.fromkeys(targets))
     if not targets:
+        _shadow_release_claim(
+            coordination_lease_id,
+            coordination_fencing_token,
+            "label-claim-released",
+        )
         return
     try:
         _request(
@@ -2771,6 +2860,11 @@ def release_ticket_claim(
         )
     except (RuntimeError, urllib.error.URLError, OSError) as e:
         log.warning("release_ticket_claim: removing %r from %s failed: %s", targets, key, e)
+    _shadow_release_claim(
+        coordination_lease_id,
+        coordination_fencing_token,
+        "label-claim-released",
+    )
 
 
 PREREQS_RE = re.compile(

@@ -20,6 +20,7 @@ import re
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -174,6 +175,39 @@ def test_solo_claim_writes_fenced_label_and_wins(monkeypatch) -> None:
     fenced = [l for l in fake.labels if l.startswith("claim:")]
     assert len(fenced) == 1 and _FENCED_RE.match(fenced[0]), fenced
     assert fenced[0].startswith("claim:default:")
+
+
+def test_claim_shadow_writes_coordination_table_before_label_put(monkeypatch, tmp_path) -> None:
+    fake = FakeJira()
+    _install_fake(monkeypatch, fake)
+    db_marker = tmp_path / "omnisight.db"
+    db_marker.write_text("")
+    events: list[str] = []
+
+    monkeypatch.setattr(jd.runner_coordination, "_db_path", lambda: db_marker)
+
+    def acquire(**kwargs):
+        events.append(f"coord-acquire:{kwargs['ticket_key']}")
+        return SimpleNamespace(
+            lease_id="lease-1",
+            fencing_token="coord-token-1",
+        )
+
+    monkeypatch.setattr(jd.runner_coordination, "acquire_claim", acquire)
+
+    def observed_request(client, method, path, body=None):
+        if method == "PUT":
+            events.append("jira-label-put")
+        return fake.request(client, method, path, body)
+
+    monkeypatch.setattr(jd, "_request", observed_request)
+
+    result = jd.claim_ticket_atomic(_fake_client(), "OP-555", "default")
+
+    assert result.ok is True
+    assert result.coordination_lease_id == "lease-1"
+    assert result.coordination_fencing_token == "coord-token-1"
+    assert events[:2] == ["coord-acquire:OP-555", "jira-label-put"]
 
 
 def test_solo_claim_emits_get_put_get(monkeypatch) -> None:
@@ -335,6 +369,39 @@ def test_release_removes_all_own_instance_claim_labels(monkeypatch) -> None:
     assert not any(l.startswith("claim:default") for l in fake.labels)
     assert "claim:other:0000000000000000012-cccccccc" in fake.labels
     assert "tier:M" in fake.labels
+
+
+def test_release_shadow_releases_coordination_table_after_label_clear(monkeypatch) -> None:
+    fake = FakeJira(initial_labels=("claim:default:0000000000000000010-aaaaaaaa",))
+    _install_fake(monkeypatch, fake)
+    events: list[str] = []
+
+    def observed_request(client, method, path, body=None):
+        if method == "PUT":
+            events.append("jira-label-clear")
+        return fake.request(client, method, path, body)
+
+    def release(**kwargs):
+        events.append(
+            f"coord-release:{kwargs['lease_id']}:{kwargs['fencing_token']}:{kwargs['release_reason']}"
+        )
+
+    monkeypatch.setattr(jd, "_request", observed_request)
+    monkeypatch.setattr(jd.runner_coordination, "release_claim", release)
+
+    jd.release_ticket_claim(
+        _fake_client(),
+        "OP-555",
+        "default",
+        token="0000000000000000010-aaaaaaaa",
+        coordination_lease_id="lease-1",
+        coordination_fencing_token="coord-token-1",
+    )
+
+    assert events == [
+        "jira-label-clear",
+        "coord-release:lease-1:coord-token-1:label-claim-released",
+    ]
 
 
 def test_release_no_op_when_no_matching_claim(monkeypatch) -> None:

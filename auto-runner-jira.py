@@ -1174,7 +1174,14 @@ def _release_ticket_claim_if_acquired(
     prefix = f"{INSTANCE_ID}:"
     if claim.claim_token and claim.claim_token.startswith(prefix):
         token = claim.claim_token[len(prefix):]
-    jira_dispatch.release_ticket_claim(client, key, INSTANCE_ID, token)
+    jira_dispatch.release_ticket_claim(
+        client,
+        key,
+        INSTANCE_ID,
+        token,
+        coordination_lease_id=claim.coordination_lease_id,
+        coordination_fencing_token=claim.coordination_fencing_token,
+    )
 
 
 def _finalize_successful_push(

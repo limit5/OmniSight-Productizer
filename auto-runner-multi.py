@@ -50,6 +50,7 @@ import backend.agents.provider_adapters.openai_subscription  # noqa: E402,F401
 DEFAULT_CLASSES = ("subscription-codex", "subscription-claude")
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
+INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "default"
 
 CODEX_WORKTREE = Path(os.environ.get(
     "OMNISIGHT_CODEX_WORKTREE",
@@ -343,6 +344,7 @@ def _push_successful_work(
     candidate: Candidate,
     worktree_path: Path,
     sync_result: jira_dispatch.WorktreeSyncResult,
+    claim: jira_dispatch.ClaimResult | None = None,
 ) -> int:
     try:
         jira_dispatch.ensure_change_ids(worktree_path, base_ref=sync_result.develop_sha)
@@ -360,6 +362,7 @@ def _push_successful_work(
             f"{type(exc).__name__}: {exc}\n\n"
             f"Operator: review changes in `{worktree_path}`, push manually, then transition Under Review.",
         )
+        _release_ticket_claim_if_acquired(candidate.client, candidate.snapshot.key, claim)
         return 1
 
     if push_result.success:
@@ -369,6 +372,7 @@ def _push_successful_work(
             candidate.snapshot.key,
             push_result.change_url,
         )
+        _release_ticket_claim_if_acquired(candidate.client, candidate.snapshot.key, claim)
         return 0
 
     print(f"[multi-runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
@@ -378,7 +382,29 @@ def _push_successful_work(
         f"[runner-gerrit-push-fail] Gerrit rejected push:\n```\n{push_result.detail}\n```\n\n"
         f"Operator: review + push manually.",
     )
+    _release_ticket_claim_if_acquired(candidate.client, candidate.snapshot.key, claim)
     return 1
+
+
+def _release_ticket_claim_if_acquired(
+    client: jira_dispatch.DispatchClient,
+    key: str,
+    claim: jira_dispatch.ClaimResult | None,
+) -> None:
+    if claim is None or not claim.ok:
+        return
+    token = None
+    prefix = f"{INSTANCE_ID}:"
+    if claim.claim_token and claim.claim_token.startswith(prefix):
+        token = claim.claim_token[len(prefix):]
+    jira_dispatch.release_ticket_claim(
+        client,
+        key,
+        INSTANCE_ID,
+        token,
+        coordination_lease_id=claim.coordination_lease_id,
+        coordination_fencing_token=claim.coordination_fencing_token,
+    )
 
 
 def main() -> int:
@@ -446,6 +472,20 @@ def main() -> int:
         return 0
 
     print(f"[multi-runner] transitioning {ticket_key} -> In Progress")
+    try:
+        claim = jira_dispatch.claim_ticket_atomic(candidate.client, ticket_key, INSTANCE_ID)
+    except jira_dispatch.RunnerMutexAPIError as exc:
+        print(
+            f"[multi-runner] mutex API error for {ticket_key}: {exc}; will retry next tick",
+            file=sys.stderr,
+        )
+        return 0
+    if not claim.ok:
+        print(
+            f"[multi-runner] mutex lost for {ticket_key}: lost to {claim.lost_to} "
+            f"(our token: {claim.claim_token}); will retry next tick"
+        )
+        return 0
     jira_dispatch.transition_to_in_progress(candidate.client, ticket_key)
 
     outcome = _dispatch_with_orchestrator(
@@ -460,6 +500,7 @@ def main() -> int:
         reason = f"No reachable provider in order: {', '.join(outcome.attempted_provider_ids) or '<none>'}"
         print(f"[multi-runner] {reason}", file=sys.stderr)
         jira_dispatch.transition_back_to_todo(candidate.client, ticket_key, reason)
+        _release_ticket_claim_if_acquired(candidate.client, ticket_key, claim)
         return 1
 
     result = outcome.result
@@ -477,11 +518,12 @@ def main() -> int:
     if result.success:
         if sync_result is None:
             raise RuntimeError("sync_result missing outside dry-run")
-        return _push_successful_work(candidate, worktree_path, sync_result)
+        return _push_successful_work(candidate, worktree_path, sync_result, claim)
 
     reason = result.error or f"provider {result.provider_id} failed"
     print(f"[multi-runner] {ticket_key} provider failed: {reason}", file=sys.stderr)
     jira_dispatch.transition_back_to_todo(candidate.client, ticket_key, reason)
+    _release_ticket_claim_if_acquired(candidate.client, ticket_key, claim)
     return 1
 
 
