@@ -14,6 +14,7 @@ from backend.agents.provider_orchestrator import (
     CircuitBreaker,
     DispatchResult,
     HealthStatus,
+    PrePickupProviderDecision,
     ProviderAdapter,
     ProviderNotRegistered,
     TaskSpec,
@@ -371,6 +372,66 @@ def test_circuit_breaker_normalises_provider_id_before_quota_lookup(monkeypatch)
 def test_circuit_breaker_rejects_empty_provider_id() -> None:
     with pytest.raises(ValueError, match="provider_id must be non-empty"):
         CircuitBreaker(" ")
+
+
+# Pre-pickup provider gate contract
+
+
+def test_pre_pickup_blocks_quota_exhausted_provider(monkeypatch) -> None:
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+    orchestrator.register_adapter(
+        _FakeAdapter(
+            "openai-subscription",
+            quota_state=_quota_state("openai-subscription", rolling_5h_tokens=100),
+        )
+    )
+
+    decision = orchestrator.pre_pickup_provider_decision(
+        _task(agent_class="api-openai", tier="S")
+    )
+
+    assert decision == PrePickupProviderDecision(
+        ok=False,
+        reason="provider_quota_exhausted:openai-subscription:5h",
+    )
+
+
+def test_pre_pickup_blocks_open_circuit_provider() -> None:
+    orchestrator.register_adapter(
+        _FakeAdapter(
+            "anthropic-subscription",
+            quota_state=_quota_state("anthropic-subscription", circuit_state="open"),
+        )
+    )
+
+    decision = orchestrator.pre_pickup_provider_decision(
+        _task(agent_class="api-anthropic", tier="S")
+    )
+
+    assert decision == PrePickupProviderDecision(
+        ok=False,
+        reason="provider_circuit_open:anthropic-subscription",
+    )
+
+
+def test_pre_pickup_allows_healthy_provider(monkeypatch) -> None:
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+    orchestrator.register_adapter(
+        _FakeAdapter(
+            "openai-subscription",
+            quota_state=_quota_state("openai-subscription", rolling_5h_tokens=99),
+        )
+    )
+
+    decision = orchestrator.pre_pickup_provider_decision(
+        _task(agent_class="api-openai", tier="S")
+    )
+
+    assert decision == PrePickupProviderDecision(
+        ok=True,
+        reason="pre-pickup provider checks passed",
+        provider_id="openai-subscription",
+    )
 
 
 # Routing policy contract
