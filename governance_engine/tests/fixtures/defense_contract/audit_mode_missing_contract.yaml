@@ -1,0 +1,4 @@
+ticket_overrides:
+  ticket_key: v2-A7
+  labels: [phase:G.A-v2, class:subscription-codex, bootstrap:defense-contract]
+  defense_contract: null

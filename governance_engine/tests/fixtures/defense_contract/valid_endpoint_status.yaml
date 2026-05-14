@@ -1,0 +1,28 @@
+defense_contract:
+  error_detection:
+    signal: endpoint_status
+    channel: GET /healthz
+    detection_latency_p99: 10s
+    observability_test: governance_engine/tests/test_g_a_v2_defense_validator.py
+    alert_rule_id: null
+  exception_handling:
+    enumerated_states: [endpoint_unhealthy]
+    remediation_hint_contract: inspect endpoint status evidence
+    user_facing: false
+    fail_loudly: true
+  shutdown_contract:
+    drain_seconds_p99: 5
+    cleanup_sequence: [flush queue]
+    forced_termination_safe: true
+    state_persistence: sqlite checkpoint
+  recovery_path:
+    trigger_condition: endpoint remains unhealthy
+    steps: [restart service]
+    idempotent: true
+    rto_seconds_p99: 60
+    evidence_file: governance_engine/tests/test_g_a_v2_defense_validator.py
+  rescue_path:
+    trigger_condition: restart fails
+    operator_actions: [open operator note]
+    authority_required: L2
+    audit_trail: JIRA OP-1101 comments

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import importlib.util
 import logging
 from pathlib import Path
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PLUGIN_MODULES = [
     f"governance_engine.plugins.phase_31{phase}" for phase in "abcdefghijk"
-]
+] + ["governance_engine.plugins.g_a_v2_defense_validator"]
 
 
 class PluginRegistry:
@@ -66,17 +67,37 @@ def _iter_imported_modules(path: str) -> list[ModuleType]:
     return [importlib.import_module(path)]
 
 
-def _register_module_plugins(registry: PluginRegistry, module: ModuleType) -> None:
+def _plugin_instance(
+    plugin_class: type[BasePhasePlugin],
+    **plugin_kwargs: object,
+) -> BasePhasePlugin:
+    signature = inspect.signature(plugin_class)
+    accepted_kwargs = {
+        key: value for key, value in plugin_kwargs.items() if key in signature.parameters
+    }
+    return plugin_class(**accepted_kwargs)
+
+
+def _register_module_plugins(
+    registry: PluginRegistry,
+    module: ModuleType,
+    **plugin_kwargs: object,
+) -> None:
     for value in vars(module).values():
         if (
             isinstance(value, type)
             and issubclass(value, BasePhasePlugin)
             and value is not BasePhasePlugin
         ):
-            registry.register(value())
+            registry.register(_plugin_instance(value, **plugin_kwargs))
 
 
-def load_plugins_from_module_paths(paths: list[str]) -> PluginRegistry:
+def load_plugins_from_module_paths(
+    paths: list[str],
+    *,
+    audit_mode: bool = False,
+    bootstrap_mode: bool = False,
+) -> PluginRegistry:
     registry = PluginRegistry()
     for path in paths:
         try:
@@ -85,7 +106,12 @@ def load_plugins_from_module_paths(paths: list[str]) -> PluginRegistry:
             logger.warning("Could not import plugin module %s: %s", path, exc)
             continue
         for module in modules:
-            _register_module_plugins(registry, module)
+            _register_module_plugins(
+                registry,
+                module,
+                audit_mode=audit_mode,
+                bootstrap_mode=bootstrap_mode,
+            )
     return registry
 
 

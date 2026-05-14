@@ -1,0 +1,28 @@
+defense_contract:
+  error_detection:
+    signal: exit_code
+    channel: backend/.venv/bin/pytest
+    detection_latency_p99: 1s
+    observability_test: governance_engine/tests/test_g_a_v2_defense_validator.py
+    alert_rule_id: null
+  exception_handling:
+    enumerated_states: [command_failed]
+    remediation_hint_contract: report failing command and stderr
+    user_facing: true
+    fail_loudly: true
+  shutdown_contract:
+    drain_seconds_p99: null
+    cleanup_sequence: []
+    forced_termination_safe: true
+    state_persistence: none
+  recovery_path:
+    trigger_condition: command exits non-zero
+    steps: [fix failure, rerun command]
+    idempotent: true
+    rto_seconds_p99: 120
+    evidence_file: governance_engine/tests/test_g_a_v2_defense_validator.py
+  rescue_path:
+    trigger_condition: command remains red
+    operator_actions: [comment on OP-1101]
+    authority_required: L2
+    audit_trail: JIRA OP-1101 comments
