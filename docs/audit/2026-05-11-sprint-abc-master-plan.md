@@ -288,6 +288,7 @@ Sprint A is filed (OP-808 META + OP-809..OP-823). DO NOT refile. Refinement note
 | **Phase** | 2 |
 | **Tier** | M |
 | **Class** | subscription-claude |
+| **JIRA** | OP-835 (公開済み — filed + shipped) |
 | **Days** | 1 |
 | **LOC budget** | ~250 |
 | **BlockedBy** | B4, B5 |
@@ -396,6 +397,7 @@ Sprint A is filed (OP-808 META + OP-809..OP-823). DO NOT refile. Refinement note
 | **Phase** | 3 |
 | **Tier** | L |
 | **Class** | subscription-claude |
+| **JIRA** | OP-1122 (filed 2026-05-14 by OP-1072 B6/B9 verification) |
 | **Days** | 2 |
 | **LOC budget** | ~400 |
 | **BlockedBy** | B1, B2, B3 |
