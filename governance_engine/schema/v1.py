@@ -5,7 +5,8 @@ Extends v0 with G.A-v1 sprint spec §3.2 operational fields:
 the structured blocker shape follows master S12.G v2 spec §0 lines 56-58.
 Adds the master S12.G v2 spec §0 line 45 plugin schema lock via
 ``phase_plugin_version``; §0 line 63 ``credential-material`` payload
-class; and §0 lines 64-65 evidence-class extensions.
+class; §0 lines 64-65 evidence-class extensions; and the G.A-v2
+``defense_contract`` block from spec §2 lines 60-100.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from governance_engine.schema.defense_contract import DefenseContract
 from governance_engine.schema.v0 import L2Reason, TicketClass, TicketContract
 from governance_engine.schema.v1_validators import (
     EXTERNAL_ARTIFACT_NAME_PATTERN,
@@ -56,6 +58,7 @@ class TicketContractV1(TicketContract):
     blocked_by: list[str] = Field(default_factory=list)
     cross_phase_blockers: list[CrossPhaseBlocker] = Field(default_factory=list)
     phase_plugin_version: Literal["v1"]
+    defense_contract: DefenseContract | None = None
 
     @field_validator("required_paths")
     @classmethod
@@ -96,4 +99,10 @@ class TicketContractV1(TicketContract):
         return reason
 
 
-__all__ = ["TicketContractV1", "CrossPhaseBlocker", "TicketClass", "L2Reason"]
+__all__ = [
+    "TicketContractV1",
+    "CrossPhaseBlocker",
+    "DefenseContract",
+    "TicketClass",
+    "L2Reason",
+]

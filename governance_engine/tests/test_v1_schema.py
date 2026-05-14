@@ -10,8 +10,13 @@ from pydantic import ValidationError
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from governance_engine.schema import DefenseContract as PackageDefenseContract
 from governance_engine.schema.v0 import TicketContract
-from governance_engine.schema.v1 import CrossPhaseBlocker, TicketContractV1
+from governance_engine.schema.v1 import (
+    CrossPhaseBlocker,
+    DefenseContract,
+    TicketContractV1,
+)
 
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "31a_1a_apt_base_tools.yaml"
@@ -51,6 +56,46 @@ def _load_v1_payload() -> dict[str, object]:
     return payload
 
 
+def _defense_contract_payload() -> dict[str, object]:
+    return {
+        "error_detection": {
+            "signal": "structured_log",
+            "channel": "log:governance-defense-contract",
+            "detection_latency_p99": "30s",
+            "observability_test": "governance_engine/tests/test_v1_schema.py",
+            "alert_rule_id": None,
+        },
+        "exception_handling": {
+            "enumerated_states": ["validation_error", "operator_blocked"],
+            "remediation_hint_contract": "return pydantic validation details",
+            "user_facing": True,
+            "fail_loudly": True,
+        },
+        "shutdown_contract": {
+            "drain_seconds_p99": None,
+            "cleanup_sequence": [],
+            "forced_termination_safe": True,
+            "state_persistence": "none",
+        },
+        "recovery_path": {
+            "trigger_condition": "schema regression detected by pytest",
+            "steps": ["revert schema change", "rerun governance schema tests"],
+            "idempotent": True,
+            "rto_seconds_p99": 300,
+            "evidence_file": "governance_engine/tests/test_v1_schema.py",
+        },
+        "rescue_path": {
+            "trigger_condition": "recovery tests still fail",
+            "operator_actions": [
+                "comment on OP-1099",
+                "transition ticket back to TODO",
+            ],
+            "authority_required": "L2",
+            "audit_trail": "JIRA OP-1099 comments",
+        },
+    }
+
+
 def test_v1_extends_v0_fields() -> None:
     payload = _load_v1_payload()
     contract = TicketContractV1.model_validate(payload)
@@ -59,6 +104,50 @@ def test_v1_extends_v0_fields() -> None:
     assert set(TicketContract.model_fields).issubset(TicketContractV1.model_fields)
     for field_name in TicketContract.model_fields:
         assert field_name in dumped
+
+
+def test_schema_package_exports_defense_contract() -> None:
+    assert PackageDefenseContract is DefenseContract
+
+
+def test_defense_contract_shape_accepts_all_five_dimensions() -> None:
+    contract = DefenseContract.model_validate(_defense_contract_payload())
+
+    assert contract.error_detection.signal == "structured_log"
+    assert contract.exception_handling.fail_loudly is True
+    assert contract.shutdown_contract.forced_termination_safe is True
+    assert contract.recovery_path.idempotent is True
+    assert contract.rescue_path.authority_required == "L2"
+
+
+def test_ticket_contract_v1_accepts_optional_defense_contract() -> None:
+    payload = _load_v1_payload()
+    payload["defense_contract"] = _defense_contract_payload()
+
+    contract = TicketContractV1.model_validate(payload)
+
+    assert contract.defense_contract is not None
+    assert contract.defense_contract.error_detection.observability_test.endswith(
+        "test_v1_schema.py"
+    )
+
+
+@pytest.mark.parametrize(
+    "missing_dimension",
+    [
+        "error_detection",
+        "exception_handling",
+        "shutdown_contract",
+        "recovery_path",
+        "rescue_path",
+    ],
+)
+def test_defense_contract_rejects_missing_dimension(missing_dimension: str) -> None:
+    payload = _defense_contract_payload()
+    payload.pop(missing_dimension)
+
+    with pytest.raises(ValidationError):
+        DefenseContract.model_validate(payload)
 
 
 def test_ticket_key_required() -> None:

@@ -11,10 +11,85 @@
       "title": "CrossPhaseBlocker",
       "type": "object"
     },
+    "DefenseContract": {
+      "additionalProperties": false,
+      "properties": {
+        "error_detection": {"$ref": "#/$defs/ErrorDetection"},
+        "exception_handling": {"$ref": "#/$defs/ExceptionHandling"},
+        "recovery_path": {"$ref": "#/$defs/RecoveryPath"},
+        "rescue_path": {"$ref": "#/$defs/RescuePath"},
+        "shutdown_contract": {"$ref": "#/$defs/ShutdownContract"}
+      },
+      "required": ["error_detection", "exception_handling", "shutdown_contract", "recovery_path", "rescue_path"],
+      "title": "DefenseContract",
+      "type": "object"
+    },
+    "ErrorDetection": {
+      "additionalProperties": false,
+      "properties": {
+        "alert_rule_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Alert Rule Id"},
+        "channel": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Channel"},
+        "detection_latency_p99": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Detection Latency P99"},
+        "observability_test": {"title": "Observability Test", "type": "string"},
+        "signal": {"enum": ["prometheus_metric", "structured_log", "exit_code", "endpoint_status", "none"], "title": "Signal", "type": "string"}
+      },
+      "required": ["signal", "channel", "detection_latency_p99", "observability_test", "alert_rule_id"],
+      "title": "ErrorDetection",
+      "type": "object"
+    },
+    "ExceptionHandling": {
+      "additionalProperties": false,
+      "properties": {
+        "enumerated_states": {"items": {"type": "string"}, "title": "Enumerated States", "type": "array"},
+        "fail_loudly": {"title": "Fail Loudly", "type": "boolean"},
+        "remediation_hint_contract": {"title": "Remediation Hint Contract", "type": "string"},
+        "user_facing": {"title": "User Facing", "type": "boolean"}
+      },
+      "required": ["enumerated_states", "remediation_hint_contract", "user_facing", "fail_loudly"],
+      "title": "ExceptionHandling",
+      "type": "object"
+    },
     "L2Reason": {
       "enum": ["execution-only", "witness-only", "approval-only", "credential-entry", "production-touch", "release-governance", "roster-mutation", "override-action", "destructive-action"],
       "title": "L2Reason",
       "type": "string"
+    },
+    "RecoveryPath": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_file": {"title": "Evidence File", "type": "string"},
+        "idempotent": {"title": "Idempotent", "type": "boolean"},
+        "rto_seconds_p99": {"title": "Rto Seconds P99", "type": "integer"},
+        "steps": {"items": {"type": "string"}, "title": "Steps", "type": "array"},
+        "trigger_condition": {"title": "Trigger Condition", "type": "string"}
+      },
+      "required": ["trigger_condition", "steps", "idempotent", "rto_seconds_p99", "evidence_file"],
+      "title": "RecoveryPath",
+      "type": "object"
+    },
+    "RescuePath": {
+      "additionalProperties": false,
+      "properties": {
+        "audit_trail": {"title": "Audit Trail", "type": "string"},
+        "authority_required": {"enum": ["L1", "L2", "L3", "none"], "title": "Authority Required", "type": "string"},
+        "operator_actions": {"items": {"type": "string"}, "title": "Operator Actions", "type": "array"},
+        "trigger_condition": {"title": "Trigger Condition", "type": "string"}
+      },
+      "required": ["trigger_condition", "operator_actions", "authority_required", "audit_trail"],
+      "title": "RescuePath",
+      "type": "object"
+    },
+    "ShutdownContract": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_sequence": {"items": {"type": "string"}, "title": "Cleanup Sequence", "type": "array"},
+        "drain_seconds_p99": {"anyOf": [{"type": "integer"}, {"type": "null"}], "title": "Drain Seconds P99"},
+        "forced_termination_safe": {"title": "Forced Termination Safe", "type": "boolean"},
+        "state_persistence": {"title": "State Persistence", "type": "string"}
+      },
+      "required": ["drain_seconds_p99", "cleanup_sequence", "forced_termination_safe", "state_persistence"],
+      "title": "ShutdownContract",
+      "type": "object"
     },
     "TicketClass": {"enum": ["subscription-claude", "subscription-codex", "operator-window-top", "operator-window-deputy", "operator-rehearsal"], "title": "TicketClass", "type": "string"}
   },
@@ -26,6 +101,7 @@
     "blocked_by": {"items": {"type": "string"}, "title": "Blocked By", "type": "array"},
     "class": {"$ref": "#/$defs/TicketClass"},
     "cross_phase_blockers": {"items": {"$ref": "#/$defs/CrossPhaseBlocker"}, "title": "Cross Phase Blockers", "type": "array"},
+    "defense_contract": {"anyOf": [{"$ref": "#/$defs/DefenseContract"}, {"type": "null"}], "default": null},
     "dependency_artifacts": {"items": {"type": "string"}, "title": "Dependency Artifacts", "type": "array"},
     "destructive_op_classes": {"items": {"type": "string"}, "title": "Destructive Op Classes", "type": "array"},
     "destructive_op_scope": {"enum": ["none", "local", "staging", "production"], "title": "Destructive Op Scope", "type": "string"},
