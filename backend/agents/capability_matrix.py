@@ -394,6 +394,45 @@ def require_capability(enabled: Iterable[str], requested: str) -> None:
         raise CapabilityNotPermitted(requested, enabled_set)
 
 
+def resolve_with_profile(
+    matrix: CapabilityMatrix,
+    ticket_type: str,
+    area: str,
+    tier: str,
+    *,
+    profile: Any,
+    labels: Iterable[str] = (),
+) -> frozenset[str]:
+    """Resolve through a ``capability_profile`` overlay.
+
+    The profile is allowed to narrow the OP-855 matrix, not widen it. Legacy
+    ``capability:enable=`` / ``capability:disable=`` labels still apply last
+    during the transition sprint.
+    """
+    from backend.agents.capability_registry import _enforce_profile
+
+    _enforce_profile(profile, tier)
+    base = matrix.resolve(ticket_type, area, tier, labels=())
+    return apply_label_overrides(base & profile.tools, labels)
+
+
+def resolve_for_areas_with_profile(
+    matrix: CapabilityMatrix,
+    ticket_type: str,
+    areas: Iterable[str],
+    tier: str,
+    *,
+    profile: Any,
+    labels: Iterable[str] = (),
+) -> frozenset[str]:
+    """Multi-area variant of :func:`resolve_with_profile`."""
+    from backend.agents.capability_registry import _enforce_profile
+
+    _enforce_profile(profile, tier)
+    base = matrix.resolve_for_areas(ticket_type, areas, tier, labels=())
+    return apply_label_overrides(base & profile.tools, labels)
+
+
 def _clean_capability(value: Any) -> str:
     if not isinstance(value, str):
         raise CapabilityMatrixError(f"capability must be a string, got {value!r}")
@@ -435,4 +474,6 @@ __all__ = [
     "load_capability_matrix",
     "parse_label_overrides",
     "require_capability",
+    "resolve_for_areas_with_profile",
+    "resolve_with_profile",
 ]
