@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+from pathlib import Path
 import smtplib
 import ssl
 from typing import IO, Literal, Protocol
@@ -80,6 +81,12 @@ class SmtpConfig:
     username: str = ""
     password: str = ""
     use_starttls: bool = True
+
+
+@dataclass(frozen=True)
+class JsonFileConfig:
+    output_dir: Path
+    rotate_daily: bool = True
 
 
 class DedupeKeyGen:
@@ -263,6 +270,38 @@ class StdoutEmailAdapter:
         msg["To"] = ", ".join(self.smtp.recipients)
         msg.set_content(json.dumps(canonical_envelope(envelope), sort_keys=True, indent=2))
         self._send_fn(self.smtp, msg)
+
+
+class JsonFileAdapter:
+    name = "json_file"
+
+    def __init__(self, config: JsonFileConfig) -> None:
+        self.config = config
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> JsonFileAdapter:
+        e = env if env is not None else os.environ
+        output_dir = Path(e.get("OMNISIGHT_ALERT_JSONFILE_DIR", "docs/audit/alerts"))
+        return cls(JsonFileConfig(output_dir=output_dir))
+
+    def deliver(self, envelope: AlertEnvelope) -> AdapterHealth:
+        path = self._path_for(envelope.fired_at)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(canonical_envelope(envelope))
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        return AdapterHealth(ok=True, detail=f"json file appended: {path}")
+
+    def healthcheck(self) -> AdapterHealth:
+        return AdapterHealth(ok=True, detail=f"json file enabled: {self.config.output_dir}")
+
+    def _path_for(self, fired_at: datetime) -> Path:
+        if self.config.rotate_daily:
+            return self.config.output_dir / f"{_format_dt(fired_at)[:10]}.jsonl"
+        return self.config.output_dir / "alerts.jsonl"
 
 
 class AlertBridge:
