@@ -6,7 +6,8 @@ that should be applied to the agent's character card by a later storage layer.
 
 W4 sub-wave coverage in this module
 -----------------------------------
-- W4.1 (OP-132): ``award_xp`` -- the deterministic XpDelta entry point.
+- W4.1 (OP-132 / OP-1349): ``award_xp`` -- the deterministic XpDelta
+  entry point.
 - W4.2 (OP-133): ``level_threshold`` / ``level_for_xp`` -- the
   ``100 * N**1.4`` cumulative-XP curve plus the ``MAX_LEVEL = 80`` hard cap
   that delivers the ADR-0008 "sigmoid late-game" property.
