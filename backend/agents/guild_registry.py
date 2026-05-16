@@ -331,9 +331,11 @@ def secondary_guilds_for_agent_class(
         return frozenset()
 
     primary = _coerce_guild(primary_guild, field="primary_guild")
+    eligible = eligible_guilds_for_agent_class(agent_class)
+    _assert_primary_guild_eligible(agent_class, primary, eligible)
     return frozenset(
         guild
-        for guild in eligible_guilds_for_agent_class(agent_class)
+        for guild in eligible
         if guild != primary
     )
 
@@ -354,6 +356,11 @@ def choose_secondary_guild(
         )
 
     primary = _coerce_guild(primary_guild, field="primary_guild")
+    _assert_primary_guild_eligible(
+        agent_class,
+        primary,
+        eligible_guilds_for_agent_class(agent_class),
+    )
     secondary = _coerce_guild(secondary_guild, field="secondary_guild")
     if secondary == primary:
         raise SecondaryGuildChoiceError(
@@ -426,6 +433,20 @@ def _coerce_guild(value: Guild | str, *, field: str) -> Guild:
         return Guild(clean)
     except ValueError as exc:
         raise ValueError(f"unknown {field}: {clean!r}") from exc
+
+
+def _assert_primary_guild_eligible(
+    agent_class: str,
+    primary_guild: Guild,
+    eligible_guilds: FrozenSet[Guild],
+) -> None:
+    if primary_guild in eligible_guilds:
+        return
+    allowed = ", ".join(sorted(guild.value for guild in eligible_guilds)) or "none"
+    raise SecondaryGuildChoiceError(
+        f"primary Guild {primary_guild.value!r} is not eligible for "
+        f"agent_class {agent_class.strip()!r}; allowed: {allowed}"
+    )
 
 
 def _validate_level(level: int) -> None:
