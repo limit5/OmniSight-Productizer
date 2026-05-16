@@ -780,6 +780,12 @@ if _AVAILABLE:
         labelnames=("area", "tier", "issuetype"),
         registry=REGISTRY,
     )
+    runner_pre_pickup_cap_gate_blocked_total = Counter(
+        "omnisight_runner_pre_pickup_cap_gate_blocked_total",
+        "Runner pre-pickup capability gate blocks before CLI invocation",
+        labelnames=("area", "tier", "issuetype"),
+        registry=REGISTRY,
+    )
     runner_comment_suppressed_total = Counter(
         "omnisight_runner_comment_suppressed_total",
         "Runner JIRA comments suppressed by the per-ticket dedupe wrapper",
@@ -900,6 +906,7 @@ else:
     billing_workspace_gb_hours_total = _NoOp()  # type: ignore
     metrics_label_cap_used = _NoOp()  # type: ignore
     capability_matrix_unexpected_fallback_total = _NoOp()  # type: ignore
+    runner_pre_pickup_cap_gate_blocked_total = _NoOp()  # type: ignore
     runner_comment_suppressed_total = _NoOp()  # type: ignore
     aux_service_available = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
@@ -1400,6 +1407,7 @@ def reset_for_tests() -> None:
     global billing_llm_output_tokens_total, billing_llm_cost_usd_total
     global billing_workflow_runs_total, billing_workspace_gb_hours_total
     global metrics_label_cap_used, capability_matrix_unexpected_fallback_total
+    global runner_pre_pickup_cap_gate_blocked_total
     global runner_comment_suppressed_total, aux_service_available
     billing_llm_calls_total = Counter(
         "omnisight_billing_llm_calls_total",
@@ -1449,6 +1457,12 @@ def reset_for_tests() -> None:
     capability_matrix_unexpected_fallback_total = Counter(
         "omnisight_capability_matrix_unexpected_fallback_total",
         "Capability matrix expected rows that fell back to read-only safe-default",
+        labelnames=("area", "tier", "issuetype"),
+        registry=REGISTRY,
+    )
+    runner_pre_pickup_cap_gate_blocked_total = Counter(
+        "omnisight_runner_pre_pickup_cap_gate_blocked_total",
+        "Runner pre-pickup capability gate blocks before CLI invocation",
         labelnames=("area", "tier", "issuetype"),
         registry=REGISTRY,
     )
