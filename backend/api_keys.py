@@ -47,6 +47,7 @@ class ApiKey:
     created_by: str = ""
     last_used_ip: str | None = None
     last_used_at: float | None = None
+    expires_at: float | None = None
     enabled: bool = True
     created_at: str = ""
 
@@ -59,6 +60,7 @@ class ApiKey:
             "created_by": self.created_by,
             "last_used_ip": self.last_used_ip,
             "last_used_at": self.last_used_at,
+            "expires_at": self.expires_at,
             "enabled": self.enabled,
             "created_at": self.created_at,
         }
@@ -116,7 +118,7 @@ def _pack_hash(hashed: str, key_id: str, tenant_id: str = "t-default") -> str:
 
 _LIST_COLS = (
     "id, name, key_prefix, scopes, created_by, last_used_ip, "
-    "last_used_at, enabled, created_at"
+    "last_used_at, expires_at, enabled, created_at"
 )
 
 
@@ -131,15 +133,22 @@ def _row_to_key(r, *, override_ip: str | None = None,
             override_last_used if override_last_used is not None
             else r["last_used_at"]
         ),
+        expires_at=r["expires_at"],
         enabled=bool(r["enabled"]),
         created_at=r["created_at"] or "",
     )
 
 
 async def create_key(name: str, scopes: list[str] | None = None,
-                     created_by: str = "") -> tuple[ApiKey, str]:
+                     created_by: str = "",
+                     ttl_seconds: float | None = None) -> tuple[ApiKey, str]:
     """Create a new API key. Returns (ApiKey, raw_secret).
     The raw secret is shown exactly once — it is NOT stored."""
+    expires_at = None
+    if ttl_seconds is not None:
+        if ttl_seconds <= 0:
+            raise ValueError("ttl_seconds must be positive")
+        expires_at = time.time() + ttl_seconds
     raw = "omni_" + secrets.token_urlsafe(30)
     key_id = f"ak-{uuid.uuid4().hex[:10]}"
     hashed = _hash_key(raw)
@@ -151,13 +160,13 @@ async def create_key(name: str, scopes: list[str] | None = None,
         await conn.execute(
             "INSERT INTO api_keys "
             "(id, name, key_hash, key_lookup_index, key_prefix, scopes, "
-            "created_by, enabled) "
-            "VALUES ($1, $2, $3, $4, $5, $6, $7, 1)",
+            "created_by, expires_at, enabled) "
+            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 1)",
             key_id, name, _pack_hash(hashed, key_id), hashed, prefix,
-            scope_json, created_by,
+            scope_json, created_by, expires_at,
         )
     key = ApiKey(id=key_id, name=name, key_prefix=prefix, scopes=scope_list,
-                 created_by=created_by, enabled=True)
+                 created_by=created_by, expires_at=expires_at, enabled=True)
     logger.info("[API-KEY] Created key %s (%s) by %s", key_id, name, created_by)
     return key, raw
 
@@ -167,7 +176,7 @@ async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
     or (None, '') if key not found."""
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
-            "SELECT id, name, scopes, created_by, enabled, created_at, "
+            "SELECT id, name, scopes, created_by, expires_at, enabled, created_at, "
             "COALESCE(tenant_id, 't-default') AS tenant_id "
             "FROM api_keys WHERE id = $1",
             key_id,
@@ -185,7 +194,8 @@ async def rotate_key(key_id: str) -> tuple[ApiKey | None, str]:
         )
     scopes = json.loads(r["scopes"] or '["*"]')
     key = ApiKey(id=r["id"], name=r["name"], key_prefix=prefix, scopes=scopes,
-                 created_by=r["created_by"], enabled=bool(r["enabled"]),
+                 created_by=r["created_by"], expires_at=r["expires_at"],
+                 enabled=bool(r["enabled"]),
                  created_at=r["created_at"] or "")
     logger.info("[API-KEY] Rotated key %s (%s)", key_id, r["name"])
     return key, raw
@@ -248,13 +258,16 @@ async def validate_bearer(raw_token: str, ip: str = "") -> ApiKey | None:
     hashed = _hash_key(raw_token)
     async with get_pool().acquire() as conn:
         r = await conn.fetchrow(
-            "SELECT id, name, key_prefix, scopes, created_by, enabled, created_at "
+            "SELECT id, name, key_prefix, scopes, created_by, enabled, "
+            "expires_at, created_at "
             "FROM api_keys WHERE key_lookup_index = $1 AND enabled = 1",
             hashed,
         )
         if not r:
             return None
         now = time.time()
+        if r["expires_at"] is not None and r["expires_at"] <= now:
+            return None
         await conn.execute(
             "UPDATE api_keys SET last_used_ip = $1, last_used_at = $2 "
             "WHERE id = $3",
@@ -266,6 +279,7 @@ async def validate_bearer(raw_token: str, ip: str = "") -> ApiKey | None:
         created_by=r["created_by"],
         last_used_ip=ip or None,
         last_used_at=now,
+        expires_at=r["expires_at"],
         enabled=True,
         created_at=r["created_at"] or "",
     )

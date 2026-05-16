@@ -294,6 +294,7 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("api_keys", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
         # OP-228: deterministic lookup for KS-enveloped api_keys.key_hash.
         ("api_keys", sa.Column("key_lookup_index", _t())),
+        ("api_keys", sa.Column("expires_at", sa.Float(), nullable=True)),
         ("provisioned_storage", sa.Column("bucket_lookup_index", _t())),
         # Q.7 #301 — optimistic-lock version column expansion (mirrors
         # alembic 0023_optimistic_lock_expansion for SQLite bootstrap).
@@ -1332,6 +1333,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_by      TEXT NOT NULL DEFAULT '',
     last_used_ip    TEXT,
     last_used_at    REAL,
+    expires_at      REAL,
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
