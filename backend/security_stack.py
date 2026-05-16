@@ -467,10 +467,10 @@ class SecurityCertArtifact:
 
 # -- Config loading (cached) --
 
-_SEC_CACHE: dict | None = None
+_SEC_CACHE: dict[str, Any] | None = None
 
 
-def _load_security_config() -> dict:
+def _load_security_config() -> dict[str, Any]:
     global _SEC_CACHE
     if _SEC_CACHE is None:
         try:
@@ -500,7 +500,7 @@ def reload_security_config_for_tests() -> None:
 
 # -- Secure boot chain queries --
 
-def _parse_boot_stage(data: dict) -> BootStage:
+def _parse_boot_stage(data: dict[str, Any]) -> BootStage:
     return BootStage(
         stage_id=data.get("stage_id", ""),
         name=data.get("name", ""),
@@ -512,7 +512,7 @@ def _parse_boot_stage(data: dict) -> BootStage:
     )
 
 
-def _parse_boot_chain(chain_id: str, data: dict) -> SecureBootChainDef:
+def _parse_boot_chain(chain_id: str, data: dict[str, Any]) -> SecureBootChainDef:
     stages = [_parse_boot_stage(s) for s in data.get("stages", [])]
     return SecureBootChainDef(
         chain_id=chain_id,
@@ -538,14 +538,14 @@ def get_boot_chain(chain_id: str) -> SecureBootChainDef | None:
 
 # -- TEE binding queries --
 
-def _parse_tee_function(data: dict) -> TEEFunction:
+def _parse_tee_function(data: dict[str, Any]) -> TEEFunction:
     return TEEFunction(
         name=data.get("name", ""),
         description=data.get("description", ""),
     )
 
 
-def _parse_tee_binding(tee_id: str, data: dict) -> TEEBindingDef:
+def _parse_tee_binding(tee_id: str, data: dict[str, Any]) -> TEEBindingDef:
     funcs = [_parse_tee_function(f) for f in data.get("api_functions", [])]
     return TEEBindingDef(
         tee_id=tee_id,
@@ -574,21 +574,21 @@ def get_tee_binding(tee_id: str) -> TEEBindingDef | None:
 
 # -- Attestation provider queries --
 
-def _parse_attestation_op(data: dict) -> AttestationOperation:
+def _parse_attestation_op(data: dict[str, Any]) -> AttestationOperation:
     return AttestationOperation(
         name=data.get("name", ""),
         description=data.get("description", ""),
     )
 
 
-def _parse_pcr_assignment(data: dict) -> PCRAssignment:
+def _parse_pcr_assignment(data: dict[str, Any]) -> PCRAssignment:
     return PCRAssignment(
         pcr_index=data.get("pcr_index", 0),
         description=data.get("description", ""),
     )
 
 
-def _parse_attestation_provider(provider_id: str, data: dict) -> AttestationProviderDef:
+def _parse_attestation_provider(provider_id: str, data: dict[str, Any]) -> AttestationProviderDef:
     ops = [_parse_attestation_op(o) for o in data.get("operations", [])]
     pcrs = [_parse_pcr_assignment(p) for p in data.get("pcr_assignments", [])]
     return AttestationProviderDef(
@@ -619,7 +619,7 @@ def get_attestation_provider(provider_id: str) -> AttestationProviderDef | None:
 
 # -- SBOM signer queries --
 
-def _parse_signing_mode(data: dict) -> SBOMSigningMode:
+def _parse_signing_mode(data: dict[str, Any]) -> SBOMSigningMode:
     return SBOMSigningMode(
         mode_id=data.get("mode_id", ""),
         name=data.get("name", ""),
@@ -629,7 +629,7 @@ def _parse_signing_mode(data: dict) -> SBOMSigningMode:
     )
 
 
-def _parse_sbom_signer(tool_id: str, data: dict) -> SBOMSignerDef:
+def _parse_sbom_signer(tool_id: str, data: dict[str, Any]) -> SBOMSignerDef:
     modes = [_parse_signing_mode(m) for m in data.get("signing_modes", [])]
     return SBOMSignerDef(
         tool_id=tool_id,
@@ -658,7 +658,7 @@ def get_sbom_signer(tool_id: str) -> SBOMSignerDef | None:
 
 # -- Threat model queries --
 
-def _parse_threat_entry(data: dict) -> ThreatEntry:
+def _parse_threat_entry(data: dict[str, Any]) -> ThreatEntry:
     return ThreatEntry(
         category=data.get("category", ""),
         threats=data.get("threats", []),
@@ -666,7 +666,7 @@ def _parse_threat_entry(data: dict) -> ThreatEntry:
     )
 
 
-def _parse_threat_model(class_id: str, data: dict) -> ThreatModelDef:
+def _parse_threat_model(class_id: str, data: dict[str, Any]) -> ThreatModelDef:
     cats = [_parse_threat_entry(c) for c in data.get("stride_categories", [])]
     return ThreatModelDef(
         class_id=class_id,
@@ -690,7 +690,7 @@ def get_threat_model(class_id: str) -> ThreatModelDef | None:
 
 # -- Test recipe queries --
 
-def _parse_security_test_recipe(data: dict) -> SecurityTestRecipe:
+def _parse_security_test_recipe(data: dict[str, Any]) -> SecurityTestRecipe:
     return SecurityTestRecipe(
         recipe_id=data["id"],
         name=data.get("name", data["id"]),
