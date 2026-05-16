@@ -550,6 +550,8 @@ Rejected: Path A (cheapest but doesn't address the drift class); Path B (normali
 
 ### Family ⑨ — Optional auxiliary service contract (ai-core / Local LLM)
 
+**Contract spec doc** (filed 2026-05-16, OP-1155): [`docs/sprint-s12/2026-05-16-v2-family9-aux-service-contract.md`](2026-05-16-v2-family9-aux-service-contract.md) — full "available-then-use, unavailable-then-skip" pattern definition, `ai_core_probe` reference impl contract (endpoint / timeout / flap detection / chain consumer), capability inventory propagation, `severity=warn` 24 h alert routing via AlertBridge, cross-service extensibility map (omnisight-ai-engine, omnisight-vision-core), the Codex P1-5 punt to `META-POST-RC2-CROSS-STACK-HYGIENE`, `v2-⑨-3a-Decision` scope, cross-stack delegation map. Downstream Family ⑨ tickets cite that doc's §-anchors in their AC.
+
 **Reframe LOCKED (operator 2026-05-14, Q3)**: ai-core is an **附屬專案 / optional auxiliary**, not a hard dependency. Productizer must treat it as:
 
 - **Available → auto-provide** the Local LLM service (ollama included in fallback chain, exposed via capability inventory, user-facing UI shows "Local LLM enabled").
