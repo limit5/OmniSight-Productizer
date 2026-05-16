@@ -22,6 +22,7 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import yaml
@@ -1449,7 +1450,7 @@ async def list_uvc_devices() -> str:
     return "[OK] UVC Cameras:\n" + "\n".join(results)
 
 
-async def _get_deploy_info(platform: str = "") -> dict | None:
+async def _get_deploy_info(platform: str = "") -> dict[str, Any] | None:
     """Read deploy configuration from platform YAML."""
     if not platform:
         # Auto-detect from workspace hint
@@ -1930,7 +1931,7 @@ _MCP_CALL_TIMEOUT = int(os.environ.get("OMNISIGHT_MCP_CALL_TIMEOUT", "60"))
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
-def _load_mcp_server_spec(name: str) -> dict | None:
+def _load_mcp_server_spec(name: str) -> dict[str, Any] | None:
     """Read the MCP registry JSON and return the named server spec, or None."""
     import json as _json
     if not _MCP_REGISTRY_PATH.is_file():
@@ -1949,7 +1950,7 @@ def _load_mcp_server_spec(name: str) -> dict | None:
 async def _call_mcp_tool(
     server_name: str,
     tool_name: str,
-    arguments: dict,
+    arguments: dict[str, Any],
     *,
     timeout: int = _MCP_CALL_TIMEOUT,
 ) -> tuple[bool, str]:
@@ -2000,12 +2001,12 @@ async def _call_mcp_tool(
     except Exception as exc:
         return False, f"Failed to spawn MCP server {server_name!r}: {exc}"
 
-    async def _send(payload: dict) -> None:
+    async def _send(payload: dict[str, Any]) -> None:
         line = (_json.dumps(payload) + "\n").encode("utf-8")
         proc.stdin.write(line)
         await proc.stdin.drain()
 
-    async def _recv_response(req_id: int) -> dict:
+    async def _recv_response(req_id: int) -> dict[str, Any]:
         while True:
             raw = await proc.stdout.readline()
             if not raw:
@@ -2018,7 +2019,7 @@ async def _call_mcp_tool(
                 return msg
 
     try:
-        async def _do_call() -> dict:
+        async def _do_call() -> dict[str, Any]:
             await _send({
                 "jsonrpc": "2.0",
                 "id": 1,
