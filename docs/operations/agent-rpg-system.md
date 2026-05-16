@@ -375,10 +375,34 @@ Per-`(agent_id, skill_id)` rows live in `agent_skill_state` (alembic
 | Helper | Purpose |
 |---|---|
 | `await award_skill_xp(store, agent_id, skill_id, delta=..., outcome=..., …)` | Apply XP delta with outcome / Tier-L+ / first-time / anti-grind multipliers |
-| `compute_level(xp)` | Pure: returns Lv 1-5 per thresholds `25 / 100 / 250 / 600 / 1500` |
+| `compute_level(xp)` | Pure: returns Lv 1-5 per the W12.2 curve below |
 | `await lock_branch_choice(store, agent_id, skill_id, branch)` | Idempotent + refuses re-write (immutable at Lv 3) |
 | `await teach_other_agent(store, teacher, student, skill_id)` | Lv-5 only; one-shot +25 XP injection, 7-day cooldown |
 | `await decay_idle_skills(store, now=...)` | Sweep: 5%/week on rows idle >= 30 days |
+
+### Skill XP curve (W12.2 / OP-171)
+
+Per-skill cumulative XP thresholds in task-success-tokens. Each
+threshold is the XP at which an `(agent_id, skill_id)` row *enters*
+that level; the fifth point is the Lv-5 decay floor, not a level gate.
+
+| Skill Lv | Threshold (cumulative XP) | Source symbol                                     |
+| -------- | ------------------------- | ------------------------------------------------- |
+| 1        | 0                         | `LEVEL_THRESHOLDS[1]`                             |
+| 2        | 25                        | `LEVEL_THRESHOLDS[2]` — unlocks `extended_thinking_enabled` |
+| 3        | 100                       | `LEVEL_THRESHOLDS[3]` — unlocks `parallel_subtask_enabled`; Lv-3 branch fork required |
+| 4        | 250                       | `LEVEL_THRESHOLDS[4]` — unlocks `prompt_overhead_reduced` |
+| 5        | 600                       | `LEVEL_THRESHOLDS[5]` — unlocks `teach_other_agent` |
+| 5 (cap)  | 1500                      | `LEVEL_5_CAP_THRESHOLD` — decay floor; cannot drop below `LEVEL_5_CAP_THRESHOLD - 1` |
+
+Computed by `compute_level(xp)` in
+`backend/agents/skill_leveling.py`. The curve is intentionally short
+(only 5 levels) so that the per-skill mastery surface stays operator-
+legible — long-tail progression lives on the agent-level XP curve
+(W4.2 / OP-133), not here. Skill XP is incremented by
+`award_skill_xp(...)` after multiplier stacking; the agent-level XP
+curve (`xp_engine.award_xp`) is a *separate* engine and the two never
+share thresholds.
 
 ### Per-level unlock effects (set by `award_skill_xp`)
 
