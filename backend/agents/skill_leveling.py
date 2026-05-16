@@ -24,6 +24,20 @@ future reader of git blame can resolve a symbol to its W12.x ticket.
   1500 is the decay floor (not a level gate) so a Lv-5 row cannot
   decay below ``LEVEL_5_CAP_THRESHOLD - 1`` and demote out of cap.
 
+- W12.4 (OP-173): :data:`BRANCH_LOCK_LEVEL` + :func:`lock_branch_choice`
+  + :class:`SkillBranchAlreadyLocked` + the
+  ``branch_choice_required`` flag on :class:`SkillXpAward` --
+  ADR-0008 §"Skill leveling (W12)" 's "每個 base skill 在 Lv 3 分叉
+  2 條" rule. At Lv 3 every base skill forks into exactly two
+  branches declared in ``skill_matrix.yaml``; the operator picks one
+  from the Character Card "Skills" tab and the choice is
+  immutable per ``(agent_id, skill_id)``. ``award_skill_xp`` raises
+  ``branch_choice_required=True`` when an XP gain pushes the row
+  past Lv 3 with no branch locked yet, which is what the Character
+  Card uses to render the picker. The drift guard
+  (:func:`backend.agents.skill_matrix.assert_branch_choice_in_matrix`)
+  rejects a lock whose ``branch`` is not declared in the YAML.
+
 Module-global state audit (per project SOP)
 -------------------------------------------
 This module defines constants, dataclasses, exception classes, and
@@ -56,6 +70,10 @@ ConnFactory = Callable[[], Any]
 # ── Constants from ADR-0008 §"Skill leveling (W12)" ────────────────
 
 MAX_SKILL_LEVEL = 5
+# W12.4 (OP-173): the branching-tree fork level per ADR-0008
+# §"Skill leveling (W12)" — at Lv 3 every base skill forks into two
+# branches declared in ``skill_matrix.yaml`` and ``lock_branch_choice``
+# persists the operator's immutable pick.
 BRANCH_LOCK_LEVEL = 3
 TEACH_LEVEL = 5
 TEACH_COOLDOWN_DAYS = 7
@@ -174,7 +192,14 @@ class SkillState:
 
 @dataclass(frozen=True)
 class SkillXpAward:
-    """Return value of :func:`award_skill_xp`."""
+    """Return value of :func:`award_skill_xp`.
+
+    The ``branch_choice_required`` flag is the W12.4 (OP-173) signal
+    consumed by the Character Card "Skills" tab: ``True`` means the
+    row sits at or above :data:`BRANCH_LOCK_LEVEL` with no branch
+    locked yet, so the UI should render the two-option picker against
+    ``skill_matrix.yaml``.
+    """
 
     agent_id: str
     skill_id: str
@@ -533,10 +558,22 @@ async def lock_branch_choice(
 ) -> SkillState:
     """Persist the immutable Lv-3 branch fork for ``(agent_id, skill_id)``.
 
+    W12.4 (OP-173) — implements the "operator picks from Character
+    Card" half of the branching-tree contract: the Character Card
+    "Skills" tab surfaces ``branch_choice_required`` when the row is
+    at or above :data:`BRANCH_LOCK_LEVEL`, the operator chooses one of
+    the two declared branches from ``skill_matrix.yaml``, and this
+    helper persists the pick on the existing ``agent_skill_state`` row
+    (alembic 0226).
+
     Idempotent on the *same* branch (returns the existing row unchanged)
     and refuses to overwrite a *different* branch with
     :class:`SkillBranchAlreadyLocked` — operators must spawn a new
-    instance for a fresh fork.
+    instance for a fresh fork. The branch string is validated against
+    the canonical ``skill_matrix.yaml`` by
+    :func:`backend.agents.skill_matrix.assert_branch_choice_in_matrix`
+    before the upsert; drift raises
+    :class:`backend.agents.skill_matrix.SkillMatrixDriftError`.
     """
     _assert_skill_id_in_matrix(skill_id)
     assert_branch_choice_in_matrix(skill_id, branch)
