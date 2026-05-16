@@ -8,7 +8,7 @@ W4 sub-wave coverage in this module
 -----------------------------------
 - W4.1 (OP-132 / OP-1349): ``award_xp`` -- the deterministic XpDelta
   entry point.
-- W4.2 (OP-133): ``level_threshold`` / ``level_for_xp`` -- the
+- W4.2 (OP-133 / OP-1350): ``level_threshold`` / ``level_for_xp`` -- the
   ``100 * N**1.4`` cumulative-XP curve plus the ``MAX_LEVEL = 80`` hard cap
   that delivers the ADR-0008 "sigmoid late-game" property.
 - W4.3 (OP-134): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
@@ -40,6 +40,7 @@ OutcomeStatus = Literal["success", "partial", "fail", "failed"]
 ClassXpTarget = Literal["primary", "secondary"]
 
 BASE_TASK_XP = 100
+LEVEL_CURVE_BASE_XP = 100
 MAX_LEVEL = 80
 LEVEL_CURVE_EXPONENT = 1.4
 # W4.3 (OP-134): Tier-L+ tasks earn a flat 2.0× XP bump on top of the
@@ -138,8 +139,8 @@ def award_xp(
 def level_threshold(level: int) -> int:
     """RPG.W4.2 -- cumulative XP required to reach ``level`` per ADR-0008.
 
-    Returns ``ceil(BASE_TASK_XP * level ** LEVEL_CURVE_EXPONENT)``, i.e. the
-    ``100 * N**1.4`` curve from the ADR. The per-level marginal cost
+    Returns ``ceil(LEVEL_CURVE_BASE_XP * level ** LEVEL_CURVE_EXPONENT)``,
+    i.e. the ``100 * N**1.4`` curve from the ADR. The per-level marginal cost
     ``level_threshold(N+1) - level_threshold(N)`` grows monotonically with
     ``N`` (per-level grind gets heavier), and the absolute cap from
     :func:`level_for_xp` flattens the curve past :data:`MAX_LEVEL` -- the
@@ -150,7 +151,7 @@ def level_threshold(level: int) -> int:
         raise TypeError("level must be an int")
     if level < 1:
         raise ValueError("level must be >= 1")
-    return math.ceil(BASE_TASK_XP * (level ** LEVEL_CURVE_EXPONENT))
+    return math.ceil(LEVEL_CURVE_BASE_XP * (level ** LEVEL_CURVE_EXPONENT))
 
 
 def level_for_xp(total_xp: int) -> int:
@@ -501,6 +502,7 @@ __all__ = [
     "DUPLICATE_TASK_MULTIPLIER",
     "FIRST_TIME_SKILL_MULTIPLIER",
     "HYBRID_SYNERGY_PARTY_XP_MULTIPLIER",
+    "LEVEL_CURVE_BASE_XP",
     "LEVEL_CURVE_EXPONENT",
     "MAX_LEVEL",
     "OUTCOME_MULTIPLIERS",
