@@ -447,12 +447,90 @@ def _check_provider_chain() -> tuple[bool, str]:
 
 
 def _build_readyz_payload(checks: dict, ready: bool) -> dict:
-    return {
+    payload = {
         "status": "ready" if ready else "not_ready",
         "ready": ready,
         "checks": checks,
         "timestamp": time.time(),
     }
+    if not ready:
+        remediation = _readyz_remediation(checks)
+        if remediation:
+            payload["remediation"] = remediation
+    return payload
+
+
+def _metric_sample_value(name: str, **labels: str) -> float | None:
+    from backend import metrics
+
+    try:
+        body = metrics.render_exposition()[0].decode()
+    except Exception:
+        return None
+    wanted = ",".join(f'{key}="{value}"' for key, value in sorted(labels.items()))
+    for line in body.splitlines():
+        if not line.startswith(name):
+            continue
+        if labels and "{" + wanted + "}" not in line:
+            continue
+        try:
+            return float(line.rsplit(" ", 1)[1])
+        except (IndexError, ValueError):
+            return None
+    return None
+
+
+def _active_alembic_drift() -> str | None:
+    for direction in ("backward", "forward"):
+        value = _metric_sample_value(
+            "omnisight_alembic_drift",
+            direction=direction,
+        )
+        if value is not None and value > 0:
+            return direction
+    return None
+
+
+def _detail_token(detail: str, key: str) -> str | None:
+    prefix = f"{key}="
+    for part in detail.replace(",", " ").split():
+        if part.startswith(prefix):
+            return part[len(prefix):]
+    return None
+
+
+def _image_head_from_latest_file(latest_file: str | None) -> str | None:
+    if not latest_file:
+        return None
+    return latest_file.removesuffix(".py")
+
+
+def _readyz_remediation(checks: dict) -> str | None:
+    migrations = checks.get("migrations")
+    if not isinstance(migrations, dict) or migrations.get("ok") is True:
+        return None
+
+    detail = str(migrations.get("detail") or "")
+    direction = _active_alembic_drift()
+    if direction == "backward":
+        db_head = _detail_token(detail, "current") or "the database head"
+        image_head = _image_head_from_latest_file(
+            _detail_token(detail, "latest_file"),
+        )
+        if image_head:
+            return (
+                "deploy backend image with alembic head >= "
+                f"{db_head} (current image head {image_head}); see ADR-0036"
+            )
+        return (
+            "deploy backend image with alembic head >= "
+            f"{db_head}; see ADR-0036"
+        )
+    if direction == "forward":
+        return "alembic upgrade pending; container should auto-upgrade on next start"
+    if detail:
+        return detail
+    return None
 
 
 #: OP-1126 AC#3 — spec names ("alembic_head", "db_ping", "jira_ping") to
