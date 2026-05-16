@@ -28,7 +28,7 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from backend.models import HealthResponse
@@ -274,6 +274,77 @@ def _probe_provider_deep(provider: str, key: str) -> tuple[bool, str]:
     return ok, detail
 
 
+#: OP-1126 AC#3 — JIRA-ping cache. Same TTL/key shape as the provider
+#: deep-check cache so frequent /readyz probes during a rolling deploy
+#: don't hammer Atlassian Cloud. Cache key is the URL+token-tail so a
+#: token rotation invalidates the entry on the next probe.
+_JIRA_PING_CACHE: tuple[bool, str, float] | None = None
+_JIRA_PING_TTL_S = 60.0
+_JIRA_PING_TIMEOUT_S = 3.0
+
+
+def _check_jira() -> tuple[bool, str]:
+    """OP-1126 AC#3 — observational JIRA reachability probe.
+
+    Default (shallow) mode: returns ok=True iff JIRA URL+token are
+    configured. This is the cheapest "is JIRA wired up at all?" check
+    and is safe to evaluate on every /readyz call.
+
+    Deep mode (``OMNISIGHT_READYZ_DEEP_CHECK=1``, same flag the provider
+    chain already honours): issues an authenticated GET against the
+    JIRA ``/serverInfo`` endpoint, cached for 60s. A 200 means the URL
+    is reachable and the token is accepted; any other outcome surfaces
+    in ``detail`` so on-call can tell "key rotated" from "JIRA down"
+    from "URL misconfigured".
+
+    Always observational — the ``ready`` verdict is NOT gated on JIRA
+    reachability. Rationale: a JIRA outage must not pull the runtime
+    out of rotation; agents that talk to JIRA already self-degrade
+    through the dispatch-client retry path.
+    """
+    global _JIRA_PING_CACHE
+    import os as _os
+    from backend.config import settings
+
+    url = (settings.notification_jira_url or "").strip().rstrip("/")
+    token = (settings.notification_jira_token or "").strip()
+
+    if not url or not token:
+        return True, "jira_not_configured"
+
+    deep = _os.environ.get("OMNISIGHT_READYZ_DEEP_CHECK", "").strip().lower() in {"1", "true", "yes"}
+    if not deep:
+        return True, "config_present"
+
+    import time as _time
+    cached = _JIRA_PING_CACHE
+    now = _time.time()
+    if cached and cached[2] > now:
+        return cached[0], cached[1] + ":cached"
+
+    import urllib.request
+    import urllib.error
+
+    try:
+        req = urllib.request.Request(
+            f"{url}/rest/api/3/serverInfo",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=_JIRA_PING_TIMEOUT_S) as resp:
+            ok = 200 <= resp.status < 300
+            detail = f"http_{resp.status}"
+    except urllib.error.HTTPError as exc:
+        ok = False
+        detail = f"http_{exc.code}"
+    except Exception as exc:
+        ok = False
+        detail = f"probe_error:{type(exc).__name__}"
+
+    _JIRA_PING_CACHE = (ok, detail, now + _JIRA_PING_TTL_S)
+    return ok, detail
+
+
 def _check_db_pool() -> tuple[bool, str]:
     """Phase-3-Runtime-v2 SP-1.5: observational probe of the asyncpg.Pool.
 
@@ -384,7 +455,19 @@ def _build_readyz_payload(checks: dict, ready: bool) -> dict:
     }
 
 
-async def _readyz_handler() -> JSONResponse:
+#: OP-1126 AC#3 — spec names ("alembic_head", "db_ping", "jira_ping") to
+#: the historical check keys. The historical keys stay in the response
+#: unconditionally so existing Grafana panels / Alertmanager rules /
+#: ops dashboards keep working; the spec-named aliases only materialise
+#: when callers opt in via ``?verbose=1``. Adding a key is additive —
+#: never rename or drop the historical ones.
+_READYZ_VERBOSE_ALIASES: tuple[tuple[str, str], ...] = (
+    ("alembic_head", "migrations"),
+    ("db_ping", "db"),
+)
+
+
+async def _readyz_handler(verbose: bool = False) -> JSONResponse:
     # G7 (HA-07): time the probe and label the histogram sample with
     # outcome so Grafana can split p50/p99 by ready / not_ready /
     # draining. `outcome` is resolved once we know the verdict.
@@ -444,8 +527,26 @@ async def _readyz_handler() -> JSONResponse:
     pool_ok, pool_detail = _check_db_pool()
     checks["db_pool"] = {"ok": pool_ok, "detail": pool_detail}
 
+    # ── 6. JIRA ping (OP-1126 AC#3, observational) ───────────────────
+    # Surfaces JIRA reachability so on-call can distinguish "JIRA
+    # outage" from "agent dispatch wedged" without grepping logs. Not
+    # part of the ready gate — a JIRA outage must not eject a healthy
+    # runtime from rotation. See _check_jira docstring for rationale.
+    jira_ok, jira_detail = _check_jira()
+    checks["jira_ping"] = {"ok": jira_ok, "detail": jira_detail}
+
+    # OP-1126 AC#3: ?verbose=1 surfaces spec-named aliases for the
+    # checks the ticket calls out by name. Historical keys remain so
+    # existing consumers keep working; this is purely additive.
+    if verbose:
+        for alias, source in _READYZ_VERBOSE_ALIASES:
+            if source in checks:
+                checks[alias] = checks[source]
+
     ready = db_ok and mig_ok and prov_ok
     payload = _build_readyz_payload(checks, ready=ready)
+    if verbose:
+        payload["verbose"] = True
     outcome = "ready" if ready else "not_ready"
     _observe(outcome)
     return JSONResponse(
@@ -455,12 +556,25 @@ async def _readyz_handler() -> JSONResponse:
     )
 
 
+def _verbose_flag(request: Request) -> bool:
+    # Truthy on "1", "true", "yes" (case-insensitive). Empty / "0" /
+    # "false" / missing → False. Same shape as the deep-check env knob
+    # so the operator mental model stays consistent across the two.
+    raw = request.query_params.get("verbose", "").strip().lower()
+    return raw in {"1", "true", "yes"}
+
+
 @probe_router.get("/readyz")
-async def readyz() -> JSONResponse:
-    """Readiness probe — DB + migrations + provider chain."""
-    return await _readyz_handler()
+async def readyz(request: Request) -> JSONResponse:
+    """Readiness probe — DB + migrations + provider chain.
+
+    OP-1126 AC#3: pass ``?verbose=1`` to also receive the spec-named
+    aliases ``alembic_head``, ``db_ping`` (mapped to the historical
+    ``migrations`` / ``db`` keys). ``jira_ping`` is always surfaced.
+    """
+    return await _readyz_handler(verbose=_verbose_flag(request))
 
 
 @router.get("/readyz")
-async def readyz_prefixed() -> JSONResponse:
-    return await _readyz_handler()
+async def readyz_prefixed(request: Request) -> JSONResponse:
+    return await _readyz_handler(verbose=_verbose_flag(request))
