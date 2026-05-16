@@ -190,6 +190,9 @@ Party tasks are exclusive: one active task per party. Party XP is shared evenly 
 
 - **Character Card** (`components/omnisight/agents/CharacterCard.tsx`) — RPG-style: portrait / Guild crest / level bar / skill radar / talent tree / tool proficiency bars. Three tabs: Stats / Skills / Tools.
 - **Guild Hall** (`components/omnisight/agents/GuildHall.tsx`) — grid of Guilds with member counts; click → roster.
+- **Party Hall** (`components/omnisight/agents/PartyHall.tsx`) — grid of active multi-agent parties; one card per party with member portraits, the assigned Tier L+ task, and the synergy badge. Renders the "Form party" CTA when the caller wires an `onCreatePartyClick` handler.
+- **Party Builder modal** (`components/omnisight/agents/PartyBuilderModal.tsx`, W17.6) — operator-facing composer for new parties: name input, 2-5 agent picker keyed off the eligible roster, and a live synergy preview that mirrors `synergy_registry.synergy_for_members` (strongest applicable entry by `xp_bonus` desc → `skill_bonus` desc → `label` asc). Agents already in an active party are surfaced as locked-out rows so the operator does not race the server-side `MemberAlreadyInParty` 409. On confirm, the caller POSTs to `POST /api/v1/agents/parties`.
+- **Active-party indicator** (`components/omnisight/agents/ActivePartyIndicator.tsx`, W17.6) — inline pill rendered next to an agent display name in rosters and Character Card headers, showing which active party an agent belongs to (and which Tier L+ task that party currently holds, when present). Returns `null` for solo agents so it adds no layout weight outside party context; amber-locked styling when the party is mid-task signals "cannot solo-assign".
 - **Instance Carousel** — `α / β / γ` switcher on Character Card.
 - **Level-up animation** — flare effect + toast (respects `prefers-reduced-motion`).
 - **Onboarding** — 3-step tooltip tour first time card opens; `seen_rpg_tour` persists.
