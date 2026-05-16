@@ -15,6 +15,10 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+RPG_LEVEL_UP_EVENT = "rpg.level_up"
+RPG_LEVEL_UP_EFFECT = "flare"
+RPG_LEVEL_UP_TOAST_TITLE = "Level up"
+
 # Late import to avoid circular — resolved at first use.
 # Lock prevents two early concurrent emits from each importing the system
 # module and racing on the assignment.
@@ -401,14 +405,14 @@ def emit_rpg_level_up(
 ) -> None:
     """RPG character-card level-up animation trigger for operator UIs."""
     broadcast_scope = _resolve_scope("emit_rpg_level_up", broadcast_scope, "global")
-    bus.publish("rpg.level_up", {
+    bus.publish(RPG_LEVEL_UP_EVENT, {
         "agent_id": agent_id,
         "previous_level": previous_level,
         "level": level,
         "xp": xp,
-        "effect": "flare",
+        "effect": RPG_LEVEL_UP_EFFECT,
         "toast": {
-            "title": "Level up",
+            "title": RPG_LEVEL_UP_TOAST_TITLE,
             "message": f"{agent_id} reached level {level}.",
         },
         **extra,
