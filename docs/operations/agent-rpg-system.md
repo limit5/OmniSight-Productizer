@@ -1002,6 +1002,73 @@ duplicates / malformed rows with `SynergyComputeFailed`. Per AC #3,
 `create_party` catches that exception and degrades to a no-bonus base
 XP path so a YAML edit accident does not break party creation.
 
+### Party formation rules (W17.2 / OP-193)
+
+ADR-0008 §"Party / Synergy system (W17)" pins the *formation
+contract* for a valid party — the slice of the W17 ship that decides
+"can this set of agents form a party?" before `create_party`
+persists anything. The contract:
+
+- **Size bound**: `2 ≤ |members| ≤ 5` (`MIN_PARTY_SIZE` /
+  `MAX_PARTY_SIZE` in `backend/agents/party.py`; mirrored by the
+  `agent_party_state` CHECK constraint in alembic 0230 so a manual
+  DB write also cannot violate it).
+- **Per-member Guild slug required**: the caller resolves every
+  member's Guild from their Character Card and passes a
+  `member_agent_id → guild_slug` mapping. Missing or empty slugs
+  refuse the formation rather than fall back to a default Guild.
+- **Cross-Guild synergy lookup**: the party's Guild bag feeds
+  `synergy_for_members`, which returns the strongest matrix entry
+  whose pair is fully covered. Same-Guild parties get
+  `synergy_label=None` (no bonus — synergy is by definition
+  cross-Guild). Parties whose Guild bag is not covered by any matrix
+  entry also get no synergy.
+- **Degradation on YAML failure (AC #3)**: if
+  `config/synergy_matrix.yaml` cannot be loaded the formation still
+  succeeds with no synergy (a warning is logged) — never block party
+  creation on a YAML edit accident.
+- **No member in another active party**: enforced at persistence
+  time inside `create_party` via the store's
+  `active_party_for_member` probe (raises `MemberAlreadyInParty`).
+  This is the one check the pure pre-flight helper cannot perform
+  because it needs the store handle.
+
+The W17.2 helper surface, exposed by `backend/agents/party.py`:
+
+| Helper | Purpose |
+|---|---|
+| `party_formation_rules(*, synergy_path=...)` | Returns the pinned `PartyFormationRules` catalog (`min_size`, `max_size`, `synergy_matrix_path`) — no I/O, no YAML read, so the Party Builder UI can render the bounds without out-of-band constants |
+| `preview_party_formation(member_agent_ids, member_guilds, *, synergy_path=...)` | Pure pre-flight — runs the size + per-member Guild + cross-Guild synergy lookup that `create_party` does, but reports refusals through `PartyFormationPreview.issues` instead of raising, and degrades to `synergy=None` on YAML failure. Used by the W17.6 Party Builder UI for live validation |
+| `PartyFormationRules` | Frozen dataclass: `min_size`, `max_size`, `synergy_matrix_path` |
+| `PartyFormationPreview` | Frozen dataclass: `member_agent_ids`, `synergy`, `issues`, plus the `is_valid` predicate (true iff `issues` is empty) |
+
+The W17.6 Party Builder consumes `preview_party_formation` on every
+form keystroke; the W17.2 contract is the single authoritative
+spec for what constitutes a valid formation, and the authoritative
+refusal still happens server-side in `create_party` (only that path
+can probe the store for "is this member already in another active
+party?").
+
+Operator-facing invariant: `preview_party_formation(...).is_valid`
+is *necessary* for `create_party` to succeed but **not sufficient**
+— the active-party check is store-bound and cannot be previewed
+client-side. Treat the preview as live validation, not a contract
+on the eventual `POST /agents/parties` response.
+
+Source symbols (per W17.2 attribution):
+
+| Symbol | File |
+|---|---|
+| `MIN_PARTY_SIZE` / `MAX_PARTY_SIZE` (pinned size bounds) | `backend/agents/party.py` |
+| `PartyFormationRules` / `party_formation_rules` (catalog accessor) | `backend/agents/party.py` |
+| `PartyFormationPreview` / `preview_party_formation` (pre-flight) | `backend/agents/party.py` |
+| `_validate_members` (size + duplicate check) | `backend/agents/party.py` |
+| `_validate_member_guilds` (per-member Guild requirement) | `backend/agents/party.py` |
+| `_resolve_synergy` (cross-Guild lookup + AC #3 degradation) | `backend/agents/party.py` |
+| `PartySizeInvalid` / `MemberAlreadyInParty` (refusal classes) | `backend/agents/party.py` |
+| `agent_party_state` CHECK constraint (storage-layer bound) | `backend/alembic/versions/0230_agent_party.py` |
+| Lock-in tests (size happy / below / above / cross-Guild / same-Guild / degraded YAML) | `backend/tests/test_party.py` |
+
 ### Per-task exclusivity (pre-pickup gate)
 
 When a party holds an active task, its members cannot accept
