@@ -31,7 +31,9 @@ import asyncio
 import hashlib
 import json
 import logging
+import sys
 import time
+import weakref
 from typing import Any, Optional
 
 from backend.db_context import tenant_insert_value, tenant_where_pg
@@ -150,6 +152,115 @@ async def _log_impl(
     return row["id"] if row else None
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AUDIT-26b / OP-981 — lazy pool init for standalone-script contexts.
+#
+#  ``backend.audit.log()`` is called from D5 ``auto_promote_main`` and
+#  future cron entry points that run *outside* the FastAPI lifespan, so
+#  ``db_pool.init_pool`` was never called and ``get_pool()`` raised
+#  ``RuntimeError: db_pool.get_pool called before init_pool`` — the
+#  OP-925 R3 incident where ``release_audit`` silently stopped gaining
+#  rows. Fix: if the pool isn't pre-initialised, lazy-init it from the
+#  ``OMNISIGHT_DATABASE_URL`` / ``DATABASE_URL`` env DSN; if no DSN is
+#  configured (dev/SQLite, or env unset), fall back to a visible
+#  stderr-only record rather than crashing the script.
+#
+#  Why a per-event-loop lock and not a single module-level one: same
+#  hazard the SP-9.2 note above describes — a module-level ``asyncio.Lock``
+#  binds to whichever loop first touches it, so pytest's function-scoped
+#  loops would hit ``RuntimeError: <Lock> is bound to a different event
+#  loop`` on the second test. Keying by the running loop (weakly, so
+#  closed loops don't leak) sidesteps that while still serialising the
+#  RaceOnFirstInit case (two concurrent script-context calls).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_lazy_init_locks: "weakref.WeakKeyDictionary[Any, asyncio.Lock]" = weakref.WeakKeyDictionary()
+
+
+def _lazy_init_lock() -> asyncio.Lock:
+    """Return the lazy-pool-init lock bound to the *running* event loop."""
+    loop = asyncio.get_running_loop()
+    lock = _lazy_init_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _lazy_init_locks[loop] = lock
+    return lock
+
+
+async def _ensure_pool():
+    """Return the process-global asyncpg pool, lazy-initialising it from
+    the environment DSN if the FastAPI lifespan handler hasn't already.
+
+    Returns
+    -------
+    asyncpg.Pool
+        The live pool — either the lifespan-initialised one (the common
+        runtime case: this function is then a no-op) or one this call
+        just created from ``OMNISIGHT_DATABASE_URL`` / ``DATABASE_URL``.
+    None
+        No PG DSN is configured (dev/SQLite or env unset). The caller
+        must fall back to stderr rather than dereference the pool.
+
+    Raises
+    ------
+    asyncpg.PostgresError
+        The env DSN is set but unreachable (``DSNUnreachable``). The
+        caller (:func:`log`) catches this and stderr-falls-back without
+        crashing the script.
+    """
+    from backend import db_pool
+    if db_pool.is_initialized():
+        return db_pool.get_pool()
+    from backend.db import _resolve_pg_dsn
+    dsn = _resolve_pg_dsn()
+    if not dsn:
+        return None
+    async with _lazy_init_lock():
+        # Re-check under the lock — a concurrent script-context call (or
+        # the lifespan handler) may have won the race while we waited.
+        if db_pool.is_initialized():
+            return db_pool.get_pool()
+        try:
+            return await db_pool.init_pool(dsn)
+        except RuntimeError:
+            # PoolAlreadyInitialized — a racer not holding *our* lock
+            # (e.g. the lifespan handler) created it. Use the live pool.
+            return db_pool.get_pool()
+
+
+def _stderr_fallback(
+    action: str,
+    entity_kind: str,
+    entity_id: str | None,
+    before: dict[str, Any] | None,
+    after: dict[str, Any] | None,
+    actor: str,
+    session_id: str | None,
+    *,
+    reason: str,
+) -> None:
+    """Last-resort audit record: a single JSON line on stderr.
+
+    Used only when the audit table is unreachable from a standalone
+    script (no DSN, or DSN unreachable). NOT hash-chained — it exists so
+    the operator running the script sees *something* rather than silent
+    data loss, and so log scrapers can recover the event after the fact.
+    """
+    rec = {
+        "audit_fallback": True,
+        "reason": reason,
+        "ts": time.time(),
+        "action": action,
+        "entity_kind": entity_kind,
+        "entity_id": entity_id or "",
+        "actor": actor,
+        "session_id": session_id,
+        "before": before or {},
+        "after": after or {},
+    }
+    print("AUDIT-FALLBACK " + _canonical(rec), file=sys.stderr, flush=True)
+
+
 async def log(
     action: str,
     entity_kind: str,
@@ -169,27 +280,62 @@ async def log(
     callers call without conn and this function borrows one from the
     pool. Either way, the append runs inside a fresh transaction with
     a tenant-scoped advisory lock.
+
+    Standalone-script context (AUDIT-26b / OP-981): when called without
+    ``conn`` and the FastAPI lifespan never ran, the pool is lazy-init'd
+    from ``OMNISIGHT_DATABASE_URL`` / ``DATABASE_URL``. If no DSN is
+    configured the call degrades to a visible stderr-only record (see
+    :func:`_stderr_fallback`) and returns ``None`` rather than raising —
+    the receipt printer running out of paper must not derail the script.
     """
-    try:
-        if conn is None:
-            from backend.db_pool import get_pool
-            async with get_pool().acquire() as owned_conn:
+    if conn is None:
+        try:
+            pool = await _ensure_pool()
+        except Exception as exc:
+            # Lazy-init failed (DSNUnreachable / malformed env DSN).
+            # Don't crash the caller — warn loudly + stderr breadcrumb.
+            logger.warning(
+                "audit.log: lazy pool init failed (%s on %s): %s",
+                action, entity_kind, exc,
+            )
+            _stderr_fallback(
+                action, entity_kind, entity_id, before, after, actor, session_id,
+                reason=f"pool lazy-init failed: {type(exc).__name__}: {exc}",
+            )
+            return None
+        if pool is None:
+            logger.warning(
+                "audit.log: no PG DSN configured (OMNISIGHT_DATABASE_URL "
+                "unset); %s/%s recorded to stderr only",
+                action, entity_kind,
+            )
+            _stderr_fallback(
+                action, entity_kind, entity_id, before, after, actor, session_id,
+                reason="no PG DSN configured (OMNISIGHT_DATABASE_URL unset)",
+            )
+            return None
+        try:
+            async with pool.acquire() as owned_conn:
                 async with owned_conn.transaction():
                     return await _log_impl(
                         owned_conn, action, entity_kind, entity_id,
                         before, after, actor, session_id,
                     )
-        else:
-            # Nested transaction → PG savepoint; advisory lock is
-            # still scoped to the outer tx (released on its commit).
+        except Exception as exc:
+            logger.warning("audit.log failed (%s on %s): %s", action, entity_kind, exc)
+            return None
+    else:
+        # Nested transaction → PG savepoint; advisory lock is
+        # still scoped to the outer tx (released on its commit).
+        try:
             async with conn.transaction():
                 return await _log_impl(
                     conn, action, entity_kind, entity_id,
                     before, after, actor, session_id,
                 )
-    except Exception as exc:
-        logger.warning("audit.log failed (%s on %s): %s", action, entity_kind, exc)
-        return None
+        except Exception as exc:
+            logger.warning("audit.log failed (%s on %s): %s", action, entity_kind, exc)
+            return None
 
 
 def log_sync(action: str, entity_kind: str, entity_id: str | None,
@@ -200,7 +346,16 @@ def log_sync(action: str, entity_kind: str, entity_id: str | None,
     """Fire-and-forget wrapper for callers that aren't on an async stack
     (e.g. decision_engine.set_mode is sync). Schedules log() on the
     running loop; if there's no loop, drops with a debug message
-    (typically only happens in unit-test setup paths)."""
+    (typically only happens in unit-test setup paths).
+
+    AUDIT-26b / OP-981: ``log_sync`` does not need its own lazy-pool-init
+    branch — it does not call ``get_pool()`` directly; it defers to
+    :func:`log`, which gained the standalone-script lazy-init/stderr
+    fallback. It does, however, still require a *running* event loop to
+    schedule onto (no ``asyncio.run`` wrapper ⇒ no-op), so a pure
+    synchronous script that wants an audit row should ``await log(...)``
+    inside its own ``asyncio.run`` rather than rely on ``log_sync``.
+    """
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:

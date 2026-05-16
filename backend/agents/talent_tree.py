@@ -21,6 +21,68 @@ This module owns:
   :func:`available_talents`, :func:`lock_talent`,
   :func:`agent_talent_summary`, plus capstone equivalents.
 
+W14 sub-wave coverage in this module
+------------------------------------
+The W14 module shipped in one bundle under OP-219; this table tracks
+the attribution of each sub-wave back to its dedicated TODO row so a
+future reader of git blame can resolve a symbol to its W14.x ticket.
+
+- W14.1 (OP-185): :data:`MILESTONE_LEVELS` +
+  :func:`available_talents` + :func:`lock_talent`'s
+  ``agent_level >= milestone`` gate + :class:`MilestoneNotReached` --
+  ADR-0008 §"Talent tree (W14)" 's "Lv 10/30/50/80 trigger a talent
+  fork" gate. The W14.5 (OP-189) Character Card modal consumes
+  ``available_talents`` and posts back through ``lock_talent``.
+
+- W14.2 (OP-186): :class:`TalentOption` +
+  :func:`load_talent_tree`'s per-Guild parser +
+  :data:`OPTIONS_PER_MILESTONE` + :class:`TalentIdNotInTree` --
+  ADR-0008 §"Talent tree (W14)" 's "3 Guild-specific options per
+  milestone declared in ``config/talent_tree.yaml``" rule, including
+  the drift guard that rejects a lock whose ``talent_id`` is not
+  declared in the YAML.
+
+- W14.3 (OP-187): :class:`TalentChoice` +
+  :class:`TalentChoiceStore` Protocol +
+  :class:`PostgresTalentChoiceStore` + :class:`InMemoryTalentChoiceStore`
+  + :class:`TalentAlreadyLocked` -- ADR-0008 §"Talent tree (W14)" 's
+  ``agent_talent_choice`` table (alembic 0228) with the
+  ``(agent_id, milestone_level)`` primary key and immutable-on-pick
+  semantics. ``lock_talent`` is idempotent on the same ``talent_id``
+  and raises ``TalentAlreadyLocked`` on a different value — operators
+  must spawn a new agent instance for a fresh pick.
+
+- W14.4 (OP-188): :data:`ROUTING_WEIGHT_TALENT_MATCH` +
+  :func:`routing_weight_multiplier_for_talents` +
+  :func:`prompt_reminders_for_talents` +
+  :class:`RoutingWeightInjectionFailed` -- ADR-0008 §"Talent tree
+  (W14)" 's "talent affects routing weight + system prompt
+  enrichment" clause. The two pure compute helpers feed two
+  consumer-module wiring layers:
+
+  * :func:`backend.agents.routing_policy.talent_routing_weight_multiplier`
+    + :func:`backend.agents.routing_policy.build_talent_routing_weight_resolver`
+    -- the +20%-per-matching-talent multiplier, feature-flagged on
+    ``OMNISIGHT_MP_TALENT_ROUTING_ENABLED`` and degrading silently to
+    ``1.0`` on YAML errors.
+  * :func:`backend.agents.prompt_builder.enrich_system_prompt_with_talents`
+    + :func:`backend.agents.prompt_builder.build_talent_prompt_enricher`
+    -- the ``Talent reminders (per RPG.W14):`` block appended at task
+    start, ordered by ascending milestone so the earliest commitments
+    come first.
+
+  The ``build_talent_*`` closures take a :class:`TalentChoiceStore`
+  and return an ``async (agent_id, …) -> result`` callable so dispatch
+  callers don't have to hand-roll the ``store.list_choices`` lookup.
+
+- W14.6 (OP-190): :data:`CAPSTONE_LEVEL` + :class:`CapstoneAbility` +
+  :class:`CapstoneStore` + :func:`capstone_for_guild` +
+  :func:`lock_capstone_ability` + :class:`CapstoneRequiresLv80` --
+  ADR-0008 §"Talent tree (W14)" 's "Lv 80 unlocks a Guild signature
+  ability" gate. ``lock_capstone_ability`` is gated by both
+  ``agent_level >= 80`` AND the Lv-80 milestone talent being already
+  locked; either gate raises ``CapstoneRequiresLv80``.
+
 Module-global state audit (per project SOP)
 -------------------------------------------
 The module reads ``config/talent_tree.yaml`` lazily on each
@@ -35,7 +97,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -55,9 +117,11 @@ MILESTONE_LEVELS: tuple[int, ...] = (10, 30, 50, 80)
 CAPSTONE_LEVEL = 80
 OPTIONS_PER_MILESTONE = 3
 ROUTING_WEIGHT_TALENT_MATCH = 1.20
-"""Multiplier applied by MP routing_policy when a task label matches a
-locked talent's routing_label. ``+20%`` per ADR-0008 §"Routing
-integration"; feature-flagged so W7.1 can drop in cleanly."""
+"""W14.4 (OP-188) — multiplier applied by MP routing_policy when a
+task label matches a locked talent's ``routing_label``. ``+20%`` per
+ADR-0008 §"Routing integration"; feature-flagged on
+``OMNISIGHT_MP_TALENT_ROUTING_ENABLED`` so RPG.W7.1
+(``prefer_agent_id``) can drop in cleanly."""
 
 
 # ── YAML path resolution ───────────────────────────────────────────
@@ -220,6 +284,85 @@ def available_talents(
     return tree[guild_enum].options_by_milestone[milestone_int]
 
 
+def milestones_crossed(
+    previous_level: int,
+    new_level: int,
+) -> tuple[int, ...]:
+    """Return the milestone levels crossed by a ``previous_level → new_level`` transition.
+
+    W14.1 (OP-185): the talent-fork trigger half of ADR-0008 §"Talent
+    tree (W14)". A level transition from ``previous_level`` to
+    ``new_level`` "crosses" milestone ``M`` iff ``previous_level < M <=
+    new_level`` — i.e. the agent has just *reached or passed* the gate.
+    The returned tuple preserves ascending milestone order so the
+    earliest commitment fires first (mirrors the ordering contract of
+    :func:`backend.agents.skill_leveling.unlocks_crossed`).
+
+    Returns ``()`` for any non-increasing transition (``new_level <=
+    previous_level``) — the helper is pure and never raises on this
+    case so callers can ask "did the latest XP award cross a
+    milestone?" without first checking direction. Demotion is not a
+    real state on the W4 character-level path (XP only grows; decay
+    erodes XP, not level), but the function tolerates it for symmetry
+    with the skill-leveling test pattern.
+    """
+    if not isinstance(previous_level, int) or isinstance(previous_level, bool):
+        raise TypeError("previous_level must be an int")
+    if not isinstance(new_level, int) or isinstance(new_level, bool):
+        raise TypeError("new_level must be an int")
+    if new_level <= previous_level:
+        return ()
+    return tuple(
+        milestone
+        for milestone in MILESTONE_LEVELS
+        if previous_level < milestone <= new_level
+    )
+
+
+def pending_milestone_forks(
+    agent_level: int,
+    choices: tuple[TalentChoice, ...] | tuple[int, ...],
+) -> tuple[int, ...]:
+    """Return milestones the agent has reached but not yet locked a talent for.
+
+    W14.1 (OP-185): this is the "talent fork required" signal consumed
+    by the Character Card "Talents" tab (W14.5 modal) and the
+    ``GET /agents/{agent_id}/talents`` endpoint. A milestone ``M`` is
+    *pending* iff ``agent_level >= M`` and no
+    :class:`TalentChoice` row exists for ``M`` in ``choices``.
+
+    ``choices`` accepts either a tuple of :class:`TalentChoice` rows
+    (the canonical store-emitted shape from
+    :meth:`TalentChoiceStore.list_choices`) or a tuple of integer
+    ``milestone_level`` values (the de-normalised shape some routers
+    pass after projecting the rows down).
+
+    The returned tuple is in ascending milestone order so the UI can
+    surface the earliest unresolved fork first. Returns ``()`` for any
+    agent below the first milestone or whose every reached milestone is
+    already locked.
+    """
+    if not isinstance(agent_level, int) or isinstance(agent_level, bool):
+        raise TypeError("agent_level must be an int")
+    if agent_level < 1:
+        raise ValueError("agent_level must be >= 1")
+    locked: set[int] = set()
+    for entry in choices:
+        if isinstance(entry, TalentChoice):
+            locked.add(int(entry.milestone_level))
+        elif isinstance(entry, int) and not isinstance(entry, bool):
+            locked.add(entry)
+        else:
+            raise TypeError(
+                "choices entries must be TalentChoice or int milestone_level"
+            )
+    return tuple(
+        milestone
+        for milestone in MILESTONE_LEVELS
+        if agent_level >= milestone and milestone not in locked
+    )
+
+
 def capstone_for_guild(
     guild: Guild | str,
     *,
@@ -292,7 +435,11 @@ class InMemoryTalentChoiceStore:
         )
 
     async def upsert_choice(self, choice: TalentChoice) -> TalentChoice:
-        self._rows[(choice.agent_id, choice.milestone_level)] = choice
+        key = (choice.agent_id, choice.milestone_level)
+        existing = self._rows.get(key)
+        if existing is not None:
+            return existing
+        self._rows[key] = choice
         return choice
 
 
@@ -358,10 +505,7 @@ class PostgresTalentChoiceStore:
                     created_at, updated_at
                 )
                 VALUES ($1, $2, $3, $4, NOW(), NOW())
-                ON CONFLICT (agent_id, milestone_level) DO UPDATE
-                    SET talent_id = EXCLUDED.talent_id,
-                        chosen_at = EXCLUDED.chosen_at,
-                        updated_at = NOW()
+                ON CONFLICT (agent_id, milestone_level) DO NOTHING
                 RETURNING agent_id, milestone_level, talent_id, chosen_at
                 """,
                 choice.agent_id,
@@ -369,6 +513,16 @@ class PostgresTalentChoiceStore:
                 choice.talent_id,
                 choice.chosen_at,
             )
+            if row is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT agent_id, milestone_level, talent_id, chosen_at
+                    FROM agent_talent_choice
+                    WHERE agent_id = $1 AND milestone_level = $2
+                    """,
+                    choice.agent_id,
+                    choice.milestone_level,
+                )
         return _row_to_choice(row)
 
 
@@ -544,17 +698,24 @@ def routing_weight_multiplier_for_talents(
     path: Path | str = TALENT_TREE_PATH,
     guild: Guild | str | None = None,
 ) -> float:
-    """Return the multiplicative routing-weight multiplier for ``choices``.
+    """W14.4 (OP-188) -- return the routing-weight multiplier for ``choices``.
 
     Each ``choice.talent_id`` is resolved against ``config/talent_tree.yaml``
     to find its ``routing_label``. Every choice whose label appears in
     ``task_labels`` contributes :data:`ROUTING_WEIGHT_TALENT_MATCH`.
 
     The function is pure — MP routing_policy callers invoke it
-    behind the feature flag and degrade silently
+    behind the :func:`backend.agents.routing_policy.is_talent_routing_enabled`
+    feature flag and degrade silently
     (:class:`RoutingWeightInjectionFailed`) on import/IO errors. ``guild``
     is optional: when omitted we scan every Guild's tree (cheap, ≤ 2
     guilds × 4 milestones × 3 options today).
+
+    See :func:`backend.agents.routing_policy.build_talent_routing_weight_resolver`
+    for the W14.4 dispatcher-wiring helper that fetches an agent's
+    talent choices from the store and applies this multiplier in one
+    call — production callers reach for that closure rather than
+    composing ``store.list_choices`` + this helper themselves.
     """
     if not choices or not task_labels:
         return 1.0
@@ -587,11 +748,16 @@ def prompt_reminders_for_talents(
     path: Path | str = TALENT_TREE_PATH,
     guild: Guild | str | None = None,
 ) -> tuple[str, ...]:
-    """Return the prompt-reminder strings for every locked talent.
+    """W14.4 (OP-188) -- prompt-reminder strings for every locked talent.
 
-    Used by :mod:`backend.agents.prompt_builder` to enrich the system
-    prompt at task start. Order is by ascending milestone level so the
-    earliest commitments (Lv 10) come first.
+    Used by :func:`backend.agents.prompt_builder.enrich_system_prompt_with_talents`
+    to enrich the system prompt at task start. Order is by ascending
+    milestone level so the earliest commitments (Lv 10) come first.
+
+    See :func:`backend.agents.prompt_builder.build_talent_prompt_enricher`
+    for the W14.4 dispatcher-wiring closure that fetches an agent's
+    talent choices from the store and applies the enrichment in one
+    call.
     """
     if not choices:
         return ()
@@ -818,6 +984,8 @@ __all__ = [
     "load_talent_tree",
     "lock_capstone_ability",
     "lock_talent",
+    "milestones_crossed",
+    "pending_milestone_forks",
     "prompt_reminders_for_talents",
     "routing_weight_multiplier_for_talents",
 ]

@@ -1,0 +1,67 @@
+# OP-1019 / AUDIT-29b-1 — Cognee primary memory-store container.
+#
+# Usage:
+#   cp deploy/cognee/.env.example deploy/cognee/.env
+#   # edit .env -> set auth + provider secrets
+#   docker compose -f deploy/cognee/docker-compose.yml --env-file deploy/cognee/.env up -d
+#
+# Verification:
+#   docker ps --filter name=omnisight-cognee
+#   curl -sf http://127.0.0.1:${COGNEE_HOST_PORT:-8002}/health
+#   docker compose -f deploy/cognee/docker-compose.yml --env-file deploy/cognee/.env restart cognee
+
+services:
+  cognee:
+    image: cognee/cognee:1.0.9@sha256:6a9b8fef66383eb7886309092008e1e5bf5a41ccc74d3e8a9667aab9ddb32746
+    container_name: omnisight-cognee
+    restart: unless-stopped
+    ports:
+      - "${COGNEE_HOST_PORT:-8002}:8000"
+    environment:
+      REQUIRE_AUTHENTICATION: "${COGNEE_REQUIRE_AUTHENTICATION:-true}"
+      COGNEE_AUTH_EMAIL: "${COGNEE_AUTH_EMAIL:?COGNEE_AUTH_EMAIL must be set in .env}"
+      COGNEE_AUTH_PASSWORD: "${COGNEE_AUTH_PASSWORD:?COGNEE_AUTH_PASSWORD must be set in .env}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-openai}"
+      LLM_MODEL: "${LLM_MODEL:-openai/gpt-4o-mini}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-openai}"
+      EMBEDDING_MODEL: "${EMBEDDING_MODEL:-openai/text-embedding-3-large}"
+      EMBEDDING_API_KEY: "${EMBEDDING_API_KEY:-${LLM_API_KEY:-}}"
+      DB_PROVIDER: "${DB_PROVIDER:-sqlite}"
+      GRAPH_DATABASE_PROVIDER: "${GRAPH_DATABASE_PROVIDER:-kuzu}"
+      VECTOR_DB_PROVIDER: "${VECTOR_DB_PROVIDER:-lancedb}"
+      DATA_ROOT_DIRECTORY: /app/.data_storage
+      SYSTEM_ROOT_DIRECTORY: /app/.cognee_system
+      COGNEE_LOGS_DIR: /app/logs
+      COGNEE_SKIP_CONNECTION_TEST: "${COGNEE_SKIP_CONNECTION_TEST:-true}"
+      TELEMETRY_DISABLED: "${TELEMETRY_DISABLED:-true}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - cognee-data:/app/.data_storage
+      - cognee-system:/app/.cognee_system
+      - cognee-logs:/app/logs
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 4g
+    mem_reservation: 1g
+
+volumes:
+  cognee-data:
+    driver: local
+  cognee-system:
+    driver: local
+  cognee-logs:
+    driver: local

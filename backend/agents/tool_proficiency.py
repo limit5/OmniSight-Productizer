@@ -22,6 +22,28 @@ falls behind by more than 24h the gate keeps allowing invocations
 but emits ``TelemetryConsumerLag`` as a warning so the operator can
 unstick the consumer without users seeing degraded UX.
 
+W13 sub-wave coverage in this module
+------------------------------------
+The W13 module shipped in one bundle under OP-218; this table tracks
+the attribution of each sub-wave back to its dedicated TODO row so a
+future reader of git blame can resolve a symbol to its W13.x ticket.
+
+- W13.3 (OP-180): :func:`get_required_level` + the YAML at
+  ``config/tool_proficiency_gates.yaml`` +
+  :func:`build_feature_unlock_gate` +
+  :func:`install_feature_unlock_gate` -- ADR-0008 §"MCP/A2A tool
+  proficiency (W13)" 's "drives feature-unlock gating: a low-Lv agent
+  literally cannot call high-Lv-only flags" clause. The canonical
+  sample is ``mcp__filesystem__write_multiple_files`` (a Lv-3 batch
+  variant of ``Write``): the YAML maps the tool_id to its required
+  Lv, :func:`build_feature_unlock_gate` builds a closure that reads
+  the YAML and consults :func:`can_invoke_at_level` against the
+  per-agent row, and :func:`install_feature_unlock_gate` wires that
+  closure onto a ``ToolDispatcher`` via
+  ``set_proficiency_gate`` so the refusal surfaces as a
+  ``tool_proficiency_insufficient`` ``tool_result`` to the calling
+  model.
+
 Module-global state audit (per project SOP)
 -------------------------------------------
 This module defines constants, dataclasses, exception classes, and
@@ -35,13 +57,16 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from backend.agents.tool_dispatcher import ToolDispatcher
 
 
 LOG = logging.getLogger(__name__)
@@ -80,6 +105,43 @@ LEVEL_CAPABILITIES: Mapping[int, str] = MappingProxyType(
         3: "batch_ops",
         4: "advanced_flags_cross_guild_a2a",
         5: "author_new_mcp_wrapper",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ToolLevelSpec:
+    """Static ADR-0008 semantics for one tool-proficiency level."""
+
+    level: int
+    min_success_count: int
+    min_success_ratio: float
+    capability: str
+
+    def __post_init__(self) -> None:
+        if self.level < 1 or self.level > MAX_TOOL_LEVEL:
+            raise ValueError(f"level must be 1..{MAX_TOOL_LEVEL}")
+        if self.min_success_count < 0:
+            raise ValueError("min_success_count must be >= 0")
+        if self.min_success_ratio < 0.0 or self.min_success_ratio > 1.0:
+            raise ValueError("min_success_ratio must be 0.0..1.0")
+        if not isinstance(self.capability, str):
+            raise TypeError("capability must be a string")
+        capability = self.capability.strip()
+        if not capability:
+            raise ValueError("capability is required")
+        object.__setattr__(self, "capability", capability)
+
+
+TOOL_LEVEL_SPECS: Mapping[int, ToolLevelSpec] = MappingProxyType(
+    {
+        level: ToolLevelSpec(
+            level=level,
+            min_success_count=requirement[0],
+            min_success_ratio=requirement[1],
+            capability=LEVEL_CAPABILITIES[level],
+        )
+        for level, requirement in LEVEL_REQUIREMENTS.items()
     }
 )
 
@@ -179,9 +241,14 @@ def compute_tool_level(invocation_count: int, success_count: int) -> int:
 
 def capability_for_level(level: int) -> str:
     """Return the per-level capability label (see ``LEVEL_CAPABILITIES``)."""
+    return tool_level_spec(level).capability
+
+
+def tool_level_spec(level: int) -> ToolLevelSpec:
+    """Return the pinned Lv 1-5 requirements and unlock semantics."""
     if level < 1 or level > MAX_TOOL_LEVEL:
         raise ValueError(f"level must be 1..{MAX_TOOL_LEVEL}")
-    return LEVEL_CAPABILITIES[level]
+    return TOOL_LEVEL_SPECS[level]
 
 
 # ── Dataclasses ─────────────────────────────────────────────────────
@@ -486,6 +553,84 @@ async def list_proficiencies(
     return await store.list_states(_required("agent_id", agent_id))
 
 
+# ── W13.3 (OP-180) feature-unlock gating ────────────────────────────
+
+
+def build_feature_unlock_gate(
+    store: ToolProficiencyStore,
+    *,
+    config_path: Path | str | None = None,
+    now: datetime | None = None,
+) -> Callable[[str, str], Awaitable[bool]]:
+    """Return a dispatcher-compatible gate that enforces the YAML gates.
+
+    W13.3 (OP-180) — implements the "drives feature-unlock gating: a
+    low-Lv agent literally cannot call high-Lv-only flags" half of
+    ADR-0008 §"MCP/A2A tool proficiency (W13)". The returned closure
+    has the shape ``async (tool_name, agent_id) -> bool`` that
+    :meth:`backend.agents.tool_dispatcher.ToolDispatcher.set_proficiency_gate`
+    expects: per-call it reads the per-tool required level from
+    ``config/tool_proficiency_gates.yaml`` (via :func:`get_required_level`)
+    and consults :func:`can_invoke_at_level` against the per-agent row
+    in ``store``.
+
+    Tools absent from the YAML default to Lv 1 (permissive) so the
+    gate is a no-op for un-listed tools — only entries explicitly
+    listed in the YAML refuse a low-Lv agent. The canonical W13.3
+    sample is ``mcp__filesystem__write_multiple_files: 3`` (the
+    batch-ops variant of ``Write``).
+
+    The ``now`` argument is forwarded to :func:`can_invoke_at_level`
+    so the gate's telemetry-lag check stays deterministic in unit
+    tests; production callers leave it ``None`` and the helper reads
+    ``datetime.now(timezone.utc)`` on each invocation.
+    """
+
+    async def _gate(tool_name: str, agent_id: str) -> bool:
+        required_level = get_required_level(tool_name, config_path=config_path)
+        return await can_invoke_at_level(
+            store,
+            agent_id,
+            tool_name,
+            required_level=required_level,
+            now=now,
+        )
+
+    return _gate
+
+
+def install_feature_unlock_gate(
+    dispatcher: "ToolDispatcher",
+    *,
+    store: ToolProficiencyStore,
+    agent_id: str,
+    config_path: Path | str | None = None,
+    now: datetime | None = None,
+) -> Callable[[str, str], Awaitable[bool]]:
+    """Wire the W13.3 (OP-180) feature-unlock gate onto ``dispatcher``.
+
+    Builds the gate via :func:`build_feature_unlock_gate` and installs
+    it with ``dispatcher.set_proficiency_gate(gate, agent_id=...)``.
+    Returns the gate closure so production callers (and tests) can
+    keep a reference for ad-hoc reuse — re-installing with a different
+    ``agent_id`` is the supported way to re-scope an already-running
+    dispatcher to a different agent without re-building the closure.
+
+    The dispatcher returns a structured
+    ``tool_proficiency_insufficient`` ``tool_result`` (and emits
+    ``tool:gate:blocked`` on the SSE bus) when the gate refuses, so
+    the calling model can self-correct exactly like it does for any
+    other handler error.
+    """
+    gate = build_feature_unlock_gate(
+        store, config_path=config_path, now=now
+    )
+    dispatcher.set_proficiency_gate(
+        gate, agent_id=_required("agent_id", agent_id)
+    )
+    return gate
+
+
 # ── Gate config loading ─────────────────────────────────────────────
 
 
@@ -680,18 +825,23 @@ __all__ = [
     "PostgresToolProficiencyStore",
     "ProficiencyGateConfigMissing",
     "TELEMETRY_LAG_THRESHOLD",
+    "TOOL_LEVEL_SPECS",
     "TelemetryConsumerLag",
     "ToolInvocationRecorded",
+    "ToolLevelSpec",
     "ToolNotInProficiencyTable",
     "ToolProficiencyError",
     "ToolProficiencyInsufficient",
     "ToolProficiencyState",
     "ToolProficiencyStore",
+    "build_feature_unlock_gate",
     "can_invoke_at_level",
     "capability_for_level",
     "compute_tool_level",
     "get_required_level",
+    "install_feature_unlock_gate",
     "list_proficiencies",
     "record_tool_invocation",
     "reset_gate_config_cache_for_tests",
+    "tool_level_spec",
 ]

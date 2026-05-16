@@ -1,0 +1,19 @@
+; [OP-952] Daily release compliance ledger export.
+
+[Unit]
+Description=OmniSight release compliance ledger daily export (OP-952)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -lc '/home/user/sora-bridge/backend/.venv/bin/python /home/user/sora-bridge/scripts/export_compliance_ledger.py --since="$(date -u +%%F)" --output-dir=/home/user/work/sora/compliance-ledger-exports'
+StandardOutput=append:/home/user/work/sora/logs/release-conductor/compliance-ledger-export.log
+StandardError=append:/home/user/work/sora/logs/release-conductor/compliance-ledger-export.log
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

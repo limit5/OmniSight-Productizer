@@ -55,7 +55,7 @@ services:
   #   / VOLUMES / INFO — none of these are needed by the app today.
   docker-socket-proxy:
     image: tecnativa/docker-socket-proxy:0.3
-    restart: always
+    restart: unless-stopped
     environment:
       - CONTAINERS=1
       - IMAGES=1
@@ -80,6 +80,7 @@ services:
       - LOG_LEVEL=warning
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    stop_grace_period: 10s
     # H4-followup: partial hardening. The tecnativa image's entrypoint
     # writes haproxy.cfg next to a template bundled in the image at
     # /usr/local/etc/haproxy/ — tmpfs-ing that dir hides the template
@@ -107,7 +108,7 @@ services:
       interval: 15s
       timeout: 3s
       retries: 3
-      start_period: 5s
+      start_period: 30s
 
   # G2 #2 — HA-02 dual backend replicas for rolling-restart + reverse-proxy HA.
   #
@@ -212,7 +213,8 @@ services:
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
-    restart: always
+    restart: unless-stopped
+    stop_grace_period: 40s
     # H4-followup: runtime hardening. Non-root already via Dockerfile
     # USER app (commit 2fb03dde). These knobs complete the defence-
     # in-depth: setuid paths blocked, root caps dropped, root
@@ -241,7 +243,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
 
   backend-b:
     image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
@@ -260,7 +262,12 @@ services:
     command:
       - "sh"
       - "-c"
-      - "WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS --no-access-log"
+      # OP-1127 (Boreas-A2): drift gate runs BEFORE uvicorn binds :8001.
+      # Same contract as the baked Dockerfile.backend CMD on backend-a;
+      # this override re-states the gate so port-8001 replica also fails
+      # closed on image-vs-DB head drift instead of starting a stale image
+      # against a newer schema.
+      - "python -m backend.alembic_drift_gate && WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')} && exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS --no-access-log"
     ports:
       - "8001:8001"
     volumes:
@@ -300,7 +307,8 @@ services:
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
-    restart: always
+    restart: unless-stopped
+    stop_grace_period: 40s
     # H4-followup: hardening (see backend-a for rationale).
     read_only: true
     tmpfs:
@@ -318,7 +326,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
 
   # G2 #4 — Caddy reverse proxy for zero-downtime rolling restart.
   # Sits in front of both backend replicas with /readyz health checks.
@@ -344,7 +352,8 @@ services:
         condition: service_healthy
       backend-b:
         condition: service_healthy
-    restart: always
+    restart: unless-stopped
+    stop_grace_period: 15s
     # H4-followup: hardening. Caddy binds :80 + :443 (privileged ports)
     # and issues/saves internal-CA certs — it needs NET_BIND_SERVICE
     # back, plus SETUID/SETGID for its own internal privilege drop,
@@ -379,7 +388,7 @@ services:
       interval: 15s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 30s
 
   frontend:
     image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
@@ -424,7 +433,8 @@ services:
     depends_on:
       caddy:
         condition: service_healthy
-    restart: always
+    restart: unless-stopped
+    stop_grace_period: 15s
     # H4-followup: hardening. Non-root already via Dockerfile USER app
     # (commit 445ab13a). Next.js standalone server.js writes only to
     # stdout/stderr (docker logs) at runtime, so read_only rootfs
@@ -455,7 +465,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
 
   # Cloudflare Tunnel — optional public-internet connector. Enable with
   # `docker compose --profile tunnel up -d cloudflared`. CF edge
@@ -533,7 +543,8 @@ services:
     depends_on:
       caddy:
         condition: service_healthy
-    restart: always
+    restart: unless-stopped
+    stop_grace_period: 15s
     # H4-followup: hardening. cloudflared is upstream-maintained by
     # Cloudflare (digest-pinned per H3 commit 7b4afbb3). It maintains
     # internal state for QUIC connections, so we leave rootfs
@@ -657,6 +668,7 @@ services:
       docker-socket-proxy:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 10s
     # Threat model §4.2 — read-only rootfs + sized tmpfs.
     # ``/tmp`` is noexec/nosuid/nodev: vendor installers that try to
     # self-extract a binary into /tmp and exec it are blocked by
@@ -711,7 +723,7 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 30s
 
   # Phase 52 — Observability sidecars. Enable with `--profile observability`.
   prometheus:
@@ -727,15 +739,24 @@ services:
       - "--storage.tsdb.path=/prometheus"
       - "--storage.tsdb.retention.time=15d"
     depends_on:
-      - backend-a
-      - backend-b
-    restart: always
+      backend-a:
+        condition: service_healthy
+      backend-b:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 10s
     # FX.7.7 — cgroup memory caps. Prometheus TSDB compaction + 15d
     # retention can grow heap several hundred MB on busy stacks. 1g
     # ceiling is generous for this scrape-target footprint (backend-a +
     # backend-b only); 256m reservation is the soft floor under pressure.
     mem_limit: 1g
     mem_reservation: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # FX.7.8 — Grafana admin-password startup validator.
   #
@@ -798,6 +819,7 @@ services:
         done
         echo "FX.7.8 OK: GRAFANA_ADMIN_PASSWORD passes startup validation."
     restart: "no"
+    stop_grace_period: 10s
     # FX.7.7 — cgroup memory caps. Trivial alpine sh validator; <8 MB
     # RSS in practice. 64m ceiling is more than enough; 16m reservation
     # is the soft floor.
@@ -821,14 +843,15 @@ services:
       - omnisight-grafana:/var/lib/grafana
     depends_on:
       prometheus:
-        condition: service_started
+        condition: service_healthy
       # FX.7.8 — gate grafana startup on the validator exiting 0.
       # `service_completed_successfully` blocks the dependent service
       # until the named one terminates with code 0; non-zero halts the
       # whole stack up.
       grafana-env-validator:
         condition: service_completed_successfully
-    restart: always
+    restart: unless-stopped
+    stop_grace_period: 10s
     # FX.7.7 — cgroup memory caps. Grafana steady-state ~150 MB; 512m
     # ceiling absorbs heavy dashboard-render bursts, 128m reservation
     # keeps the UI responsive under host pressure.

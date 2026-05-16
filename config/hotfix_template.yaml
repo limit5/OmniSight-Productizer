@@ -1,0 +1,91 @@
+# Hotfix META template — OP-941 (G5)
+#
+# Defines the canonical 4-child emergency-hotfix pipeline created by
+# ``scripts/instantiate_hotfix_meta.py``. Each entry describes one JIRA
+# ticket: name, blockedBy chain (relative H-id), runner class, tier,
+# area labels, and Acceptance Criteria text.
+#
+# The script substitutes ``{target}`` (the hotfix version, e.g.
+# ``v1.2.4+1``), ``{source_change}`` (the merged Gerrit change number the
+# hotfix is cherry-picked from), and ``{meta_key}`` placeholders at
+# instantiation time. The ``blocked_by`` chain uses relative H-ids
+# ("H1", "H2", …) that the script resolves to real OP-keys after the
+# children are created — never write absolute OP-keys here.
+#
+# Direction reminder (L-OP-874):
+#   blocked_by is the BLOCKER side. The script wires the JIRA Blocks
+#   link as inward=blocker, outward=blocked via
+#   backend.agents.file_coordinator.add_blocked_by.
+#
+# Versioning: bump ``version`` whenever the structure changes so the
+# META comment can record which template each hotfix was cut from.
+#
+# Spec: docs/operations/hotfix-runbook.md (D14, OP-886) +
+#       docs/operations/release-conductor-runbook.md.
+
+version: "v1"
+
+meta:
+  # Summary template — the script substitutes {target} at runtime.
+  summary_template: "HOTFIX-{target} META — emergency production hotfix conductor"
+  # Labels always applied to the META ticket itself. The script also
+  # adds ``HOTFIX-{target}`` (tag-style label so JQL can scope to a
+  # single hotfix), ``tier:<X>`` (from meta.tier), and
+  # ``hotfix-source:<change>`` so the idempotency guard can recognise a
+  # re-run for the same source change. ``meta:release`` is kept so the
+  # G1 release engine's HOTFIX-overlap scan still finds this META.
+  labels:
+    - "agent:auto"
+    - "meta:release"
+    - "meta:hotfix"
+  # tier:X intentionally — the META is a planning/audit container, not a
+  # runner-pickable Story. Children carry their own tier; the script
+  # derives the ``tier:<X>`` label from ``meta.tier`` below.
+  tier: "X"
+  class: "subscription-claude"
+  issuetype: "Story"
+
+children:
+  - h_id: "H1"
+    name: "D14 cherry-pick + smoke ({target})"
+    blocked_by: []
+    class: "subscription-claude"
+    tier: "M"
+    areas: ["tooling", "tests"]
+    ac: |
+      - [ ] Merged Gerrit change {source_change} cherry-picked onto `release/{target}` via `scripts/hotfix_cherry_pick.py --from-change {source_change} --target release/{target}`
+      - [ ] Cherry-pick carries a `-x` provenance trailer; the hotfix branch is never force-pushed or rewritten
+      - [ ] Production smoke (`scripts/prod_smoke_test.py https://<prod-host>`) is green against the cherry-picked tip — D1 milestone acceptance is intentionally skipped on the hotfix path
+
+  - h_id: "H2"
+    name: "🔒 Operator approval — one human +2 ({target})"
+    blocked_by: ["H1"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["devops"]
+    ac: |
+      - [ ] Exactly one attending human `Code-Review +2` recorded on the cherry-picked Gerrit change (AI reviewers max +1, per CLAUDE.md L1)
+      - [ ] `/admin/release-approval?tag={target}` records the operator's reason for the emergency ship
+      - [ ] The approval surface returns `status=approved` for `{target}`; a `deploy_audit` row `kind=approve, status=succeeded` is written
+
+  - h_id: "H3"
+    name: "D9 prod deploy + D10 canary 25% ({target})"
+    blocked_by: ["H2"]
+    class: "subscription-claude"
+    tier: "L"
+    areas: ["devops"]
+    ac: |
+      - [ ] Production deploy of `{target}` started within 30 minutes of the recorded approval timestamp
+      - [ ] Canary jumps straight to 25% (the 5% step is skipped on the hotfix path) and the canary watch is clean
+      - [ ] Promoted to 100%; `deploy_audit` shows `kind=deploy, status=succeeded` for `{target}`
+
+  - h_id: "H4"
+    name: "D14 backport-to-develop check ({target})"
+    blocked_by: ["H3"]
+    class: "subscription-claude"
+    tier: "S"
+    areas: ["tooling", "tests"]
+    ac: |
+      - [ ] The hotfix commit is cherry-picked back onto `develop` (a normal `git cherry-pick -x` satisfies patch-identity)
+      - [ ] `scripts/hotfix_backport_check.py --hotfix-ref release/{target} --develop-ref develop --base-ref main` exits 0 (no `HotfixBackportMissing`)
+      - [ ] Parent META {meta_key} updated via comment; the META is transitioned to Published once H1–H4 are all Published

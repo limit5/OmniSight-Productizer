@@ -37,6 +37,12 @@
  *   - `RollbackButtonRaceCondition`: rollback state is keyed by
  *     `release_id`. The same id cannot be in flight twice; clicking again
  *     is a no-op until the previous call resolves.
+ *
+ * OP-943 G7 — the panel is now a tab host: the original deployments
+ * view lives under the "Deployments" tab; a new "Pending releases" tab
+ * mounts {@link PendingReleasesTable} (the open RELEASE-* / HOTFIX-*
+ * aggregator + 1-click operator approval). Both tabs ride the same SSE
+ * `release.dashboard.updated` event independently.
  */
 "use client"
 
@@ -60,6 +66,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Separator } from "@/components/ui/separator"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 
 import { subscribeEvents } from "@/lib/api"
 import {
@@ -69,6 +76,10 @@ import {
   type DeployRecord,
   type DeployRecordOutcome,
 } from "./DeployHistoryRow"
+import {
+  PendingReleasesTable,
+  type PendingReleasesTableProps,
+} from "./PendingReleasesTable"
 
 // ─── Wire shapes ──────────────────────────────────────────────────────────
 
@@ -403,6 +414,9 @@ function InFlightStrip({
 
 // ─── Main panel ──────────────────────────────────────────────────────────
 
+/** Which tab of the deployments dashboard is showing (OP-943 G7). */
+export type DeploymentsTab = "deployments" | "pending-releases"
+
 export interface DeploymentsPanelProps {
   /** Override the network fetch (default: `/api/v1/admin/deploy-history`). */
   fetchSnapshot?: FetchSnapshot
@@ -418,6 +432,10 @@ export interface DeploymentsPanelProps {
   pageSize?: number
   /** Initial snapshot, useful when the host hydrates from SSR. */
   initialSnapshot?: DeploymentsSnapshot | null
+  /** Which tab opens first (OP-943 G7; default: `"deployments"`). */
+  defaultTab?: DeploymentsTab
+  /** Props forwarded to the G7 "Pending releases" tab content. */
+  pendingReleasesProps?: PendingReleasesTableProps
   /** `data-testid` root. */
   testId?: string
 }
@@ -436,6 +454,8 @@ export function DeploymentsPanel(props: DeploymentsPanelProps) {
     nowImpl,
     pageSize = 10,
     initialSnapshot = null,
+    defaultTab = "deployments",
+    pendingReleasesProps,
     testId = "deployments-panel",
   } = props
 
@@ -574,6 +594,37 @@ export function DeploymentsPanel(props: DeploymentsPanelProps) {
   const globalRollbackInFlight = rollback.inFlight.size > 0
 
   return (
+    <Tabs
+      defaultValue={defaultTab}
+      data-testid={`${testId}-tabs`}
+      className="flex min-h-0 flex-col gap-2"
+    >
+      <TabsList data-testid={`${testId}-tablist`}>
+        <TabsTrigger
+          value="deployments"
+          data-testid={`${testId}-tab-deployments`}
+        >
+          Deployments
+        </TabsTrigger>
+        <TabsTrigger
+          value="pending-releases"
+          data-testid={`${testId}-tab-pending-releases`}
+        >
+          Pending releases
+        </TabsTrigger>
+      </TabsList>
+
+      <TabsContent
+        value="pending-releases"
+        data-testid={`${testId}-tabpanel-pending-releases`}
+      >
+        <PendingReleasesTable {...(pendingReleasesProps ?? {})} />
+      </TabsContent>
+
+      <TabsContent
+        value="deployments"
+        data-testid={`${testId}-tabpanel-deployments`}
+      >
     <section
       data-testid={testId}
       data-loading={loading ? "true" : "false"}
@@ -856,6 +907,8 @@ export function DeploymentsPanel(props: DeploymentsPanelProps) {
         </span>
       </footer>
     </section>
+      </TabsContent>
+    </Tabs>
   )
 }
 

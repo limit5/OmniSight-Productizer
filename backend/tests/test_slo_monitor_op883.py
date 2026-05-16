@@ -18,6 +18,8 @@ Six DoD cases mapped to the test plan:
 * **T6** ``test_cooldown_prevents_flap`` -- after the first rollback,
   a second sustained-breach sample inside the cooldown window does
   NOT trigger a second rollback (the AC #4 flap guard).
+* **OP-912** cross-task awareness latency SLO cases -- each memory
+  query axis breaches independently and uses the same rollback chain.
 
 The tests do not touch Prometheus, the file system (beyond a temp
 flag file in the override-source test), or Docker. Sources are stubbed:
@@ -145,6 +147,35 @@ def sse_spy():
         spy.restore()
 
 
+class _StatusSpy:
+    """Capture ``slo.status`` frames consumed by the F15 dashboard tile."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict]] = []
+        self._lock = threading.Lock()
+        self._orig = events.bus.publish
+
+        def _patched(event_name, data, *args, **kwargs):
+            if event_name == "slo.status":
+                with self._lock:
+                    self.events.append((event_name, dict(data)))
+            return self._orig(event_name, data, *args, **kwargs)
+
+        events.bus.publish = _patched  # type: ignore[assignment]
+
+    def restore(self) -> None:
+        events.bus.publish = self._orig  # type: ignore[assignment]
+
+
+@pytest.fixture()
+def status_spy():
+    spy = _StatusSpy()
+    try:
+        yield spy
+    finally:
+        spy.restore()
+
+
 # Smaller windows than prod so each test runs in a handful of ticks
 # without breaking the AC #3/#4 ratio (sustain > sample, cooldown >
 # sustain).
@@ -197,6 +228,15 @@ def _err_breach() -> sm.SloSample:
 def _p95_breach() -> sm.SloSample:
     return sm.SloSample(
         error_rate=0.0, p95_latency_ms=900.0, observed_at=0.0,
+    )
+
+
+def _cross_task_breach(sample_attr: str, value_ms: float) -> sm.SloSample:
+    return sm.SloSample(
+        error_rate=0.0,
+        p95_latency_ms=100.0,
+        observed_at=0.0,
+        **{sample_attr: value_ms},
     )
 
 
@@ -333,6 +373,96 @@ def test_p95_and_error_rate_breaches_are_independent(sse_spy):
     assert payload["error_rate"] == pytest.approx(0.0)
 
 
+# ── OP-912: cross-task awareness latency SLOs ───────────────────────
+
+
+@pytest.mark.parametrize(
+    ("metric_name", "sample_attr", "threshold_attr", "value_ms"),
+    [
+        (
+            "project_state_api_p95",
+            "project_state_api_p95_ms",
+            "project_state_api_p95_ms_max",
+            2100.0,
+        ),
+        (
+            "cognee_query_p95",
+            "cognee_query_p95_ms",
+            "cognee_query_p95_ms_max",
+            900.0,
+        ),
+        (
+            "graphiti_query_p95",
+            "graphiti_query_p95_ms",
+            "graphiti_query_p95_ms_max",
+            700.0,
+        ),
+        (
+            "failure_recall_p95",
+            "failure_recall_p95_ms",
+            "failure_recall_p95_ms_max",
+            600.0,
+        ),
+    ],
+)
+def test_cross_task_awareness_breach_triggers_canary_rollback(
+    sse_spy, metric_name, sample_attr, threshold_attr, value_ms,
+):
+    """OP-912 AC #1/#2 -- each F14 latency SLO independently rolls
+    through the D11 sustained-breach path into the F13 canary trigger."""
+    src = _FakeMetricSource(
+        samples=[_cross_task_breach(sample_attr, value_ms)]
+    )
+    monitor, clock, rb, _ = _make_monitor(source=src)
+
+    first = monitor.tick()
+    assert first.action == sm.TickAction.breach_pending
+    assert first.breached_metrics == (metric_name,)
+    assert first.axis_status[metric_name]["ok"] is False
+
+    clock.advance(_TEST_THRESHOLDS.breach_sustain_seconds)
+    triggered = monitor.tick()
+    assert triggered.action == sm.TickAction.rollback_triggered
+    assert triggered.breached_metrics == (metric_name,)
+    assert triggered.rollback is not None and triggered.rollback.mode == "canary"
+    assert len(rb.invocations) == 1
+    assert metric_name in rb.invocations[0]
+
+    _, payload = sse_spy.events[-1]
+    assert payload["rollback_mode"] == "canary"
+    assert payload["breached_metrics"] == [metric_name]
+    assert payload["axes"][metric_name] == {
+        "value_ms": value_ms,
+        "threshold_ms": getattr(_TEST_THRESHOLDS, threshold_attr),
+        "ok": False,
+    }
+
+
+def test_status_event_exposes_cross_task_axes_for_dashboard(status_spy):
+    """OP-912 AC #4 -- evaluated ticks emit live per-axis SLO state
+    without requiring the F15 frontend tile in this backend ticket."""
+    src = _FakeMetricSource(samples=[_healthy()])
+    monitor, _clock, _rb, _ = _make_monitor(source=src)
+
+    result = monitor.tick()
+
+    assert result.action == sm.TickAction.ok
+    assert set(result.axis_status) == {
+        "project_state_api_p95",
+        "cognee_query_p95",
+        "graphiti_query_p95",
+        "failure_recall_p95",
+    }
+    assert len(status_spy.events) == 1
+    _, payload = status_spy.events[0]
+    assert payload["axes"] == result.axis_status
+    assert payload["axes"]["project_state_api_p95"] == {
+        "value_ms": 0.0,
+        "threshold_ms": 2000.0,
+        "ok": True,
+    }
+
+
 # ── T6: cooldown prevents flap ──────────────────────────────────────
 
 
@@ -378,6 +508,28 @@ def test_load_thresholds_defaults_propagate(tmp_path):
     assert thresholds.sample_interval_seconds == 30
     assert thresholds.breach_sustain_seconds == 120
     assert thresholds.cooldown_seconds == 600
+
+
+def test_load_thresholds_reads_op912_cross_task_slos(tmp_path):
+    cfg = tmp_path / "slo_thresholds.yaml"
+    cfg.write_text(
+        "\n".join(
+            [
+                "project_state_api_p95_ms_max: 2000",
+                "cognee_query_p95_ms_max: 800",
+                "graphiti_query_p95_ms_max: 600",
+                "failure_recall_p95_ms_max: 500",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    thresholds = sm.load_thresholds(cfg)
+
+    assert thresholds.project_state_api_p95_ms_max == 2000
+    assert thresholds.cognee_query_p95_ms_max == 800
+    assert thresholds.graphiti_query_p95_ms_max == 600
+    assert thresholds.failure_recall_p95_ms_max == 500
 
 
 def test_maybe_rollback_raises_in_cooldown():

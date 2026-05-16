@@ -1,0 +1,19 @@
+; [OP-1059] 10-minute trigger for runner-orphan-reaper.service.
+;
+; Cadence: every 10 minutes after boot. RandomizedDelaySec=60s smooths
+; the load when multiple reapers are co-installed (one per agent_class).
+; Persistent=true fires any missed sweep on host resume.
+
+[Unit]
+Description=10-minute trigger for runner-orphan-reaper.service (OP-1059)
+
+[Timer]
+Unit=runner-orphan-reaper.service
+OnBootSec=2min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60s
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

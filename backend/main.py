@@ -4,8 +4,10 @@ import base64
 from contextlib import asynccontextmanager
 import hashlib
 from html.parser import HTMLParser
+import json
 import re
 import secrets
+import sys
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -121,6 +123,53 @@ async def lifespan(app: FastAPI):
         _log.error("config validation failed: %s", exc)
         raise
     try:
+        from backend.db import _resolve_pg_dsn as _r_pg
+        _pg_dsn = _r_pg()
+        if _pg_dsn:
+            from backend.alembic_startup_hook import (
+                AlembicBackwardDrift,
+                AlembicLockTimeout,
+                AlembicManifestError,
+                maybe_run_startup_upgrade,
+            )
+            try:
+                _db_head = maybe_run_startup_upgrade(db_url=_pg_dsn)
+                _log.info("alembic startup hook aligned DB head: %s", _db_head)
+            except AlembicBackwardDrift as exc:
+                _log.critical(
+                    json.dumps(exc.to_log_payload(), sort_keys=True)
+                )
+                sys.exit(78)
+            except AlembicLockTimeout as exc:
+                _log.critical(
+                    json.dumps(
+                        {
+                            "event": "alembic_lock_timeout",
+                            "remediation": (
+                                "wait for the active migration worker to "
+                                "finish or inspect stuck alembic lock holder"
+                            ),
+                            "error_msg": str(exc),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                sys.exit(78)
+            except AlembicManifestError as exc:
+                _log.critical(
+                    json.dumps(
+                        {
+                            "event": "alembic_manifest_error",
+                            "remediation": (
+                                "rebuild image with /app/MANIFEST.json from "
+                                "OP-1159"
+                            ),
+                            "error_msg": str(exc),
+                        },
+                        sort_keys=True,
+                    )
+                )
+                sys.exit(78)
         await db.init()
         # Phase-3 Step C.2 (2026-04-21): the PG compat wrapper that
         # used to coexist with the pool has been retired. On the PG
@@ -130,8 +179,6 @@ async def lifespan(app: FastAPI):
         # ``db._db`` for the handful of callers that still reach
         # for aiosqlite directly.
         from backend import db_pool as _db_pool
-        from backend.db import _resolve_pg_dsn as _r_pg
-        _pg_dsn = _r_pg()
         if _pg_dsn:
             await _db_pool.init_pool(_pg_dsn)
             _log.info("db_pool: initialised against PG DSN")
@@ -1477,6 +1524,8 @@ from backend.release_conductor import event_router as _release_event_router  # O
 _include_versioned_router(_release_event_router.router)
 from backend.api import release_approval as _release_approval_api_router  # OP-949 H4 operator approval API
 _include_versioned_router(_release_approval_api_router.router)
+from backend.api import release_state as _release_state_api_router  # OP-943 G7 pending-releases aggregator
+_include_versioned_router(_release_state_api_router.router)
 
 # Final mount: attach the aggregate v1 + v2 routers to the app. The
 # routers themselves were populated above via _include_versioned_router

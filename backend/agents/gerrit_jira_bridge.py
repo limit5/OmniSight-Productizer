@@ -12,13 +12,14 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from threading import Lock
+from threading import Event, Lock, Thread
 from typing import Any, Callable, Iterable
 from uuid import uuid4
 
@@ -44,11 +45,24 @@ CURSOR_FILE = Path(
     )
 )
 
+# SP-B-X-009 (OP-1067) — C9 bridge-health heartbeat. The bridge daemon
+# touches this file on every maintenance tick (default 30s cadence) so
+# pickup-side runners can fail fast when the bridge has stopped
+# producing change-merged transitions. ``OMNISIGHT_BRIDGE_HEARTBEAT_PATH``
+# overrides for user-level systemd installs where ``/var/run`` is not
+# writable; ``OMNISIGHT_BRIDGE_STALE_AFTER_SEC`` tunes the staleness
+# threshold consumed by ``check_bridge_heartbeat`` and the runner gate.
+DEFAULT_HEARTBEAT_FILE = "/var/run/omnisight-bridge/heartbeat"
+DEFAULT_HEARTBEAT_FILE_SECONDS = 30.0
+DEFAULT_BRIDGE_STALE_AFTER_SEC = 300
+
 APPROVED_STATUS_NAMES = {"Approved", "承認済み"}
 ARCHIVED_STATUS_NAMES = {"Archived"}
 IN_PROGRESS_STATUS_NAMES = {"In Progress", "進行中"}
 PUBLISHED_STATUS_NAMES = {"Published", "公開済み"}
 UNDER_REVIEW_STATUS_NAMES = {"Under Review"}
+KEEP_OPEN_LABEL = "coord-keep-open"
+DEFAULT_ARCHIVE_AGE_DAYS = 30
 AUTH_FAILURE_MARKERS = (
     "Permission denied",
     "Authentication failed",
@@ -111,6 +125,71 @@ def save_cursor(event_id: str, ts: datetime, path: Path = CURSOR_FILE) -> None:
     tmp.replace(path)
 
 
+def heartbeat_path_from_env(env: dict[str, str] | None = None) -> Path:
+    """Resolve the bridge heartbeat file path. SP-B-X-009 (OP-1067)."""
+
+    e = env if env is not None else os.environ
+    return Path(e.get("OMNISIGHT_BRIDGE_HEARTBEAT_PATH", DEFAULT_HEARTBEAT_FILE))
+
+
+def heartbeat_stale_after_seconds(env: dict[str, str] | None = None) -> int:
+    """Resolve ``OMNISIGHT_BRIDGE_STALE_AFTER_SEC``; defaults to 300."""
+
+    e = env if env is not None else os.environ
+    raw = e.get("OMNISIGHT_BRIDGE_STALE_AFTER_SEC", "").strip()
+    if not raw:
+        return DEFAULT_BRIDGE_STALE_AFTER_SEC
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_BRIDGE_STALE_AFTER_SEC
+    return max(1, value)
+
+
+def touch_heartbeat_file(path: Path | None = None, now: float | None = None) -> Path:
+    """Touch the heartbeat file to ``now`` (or wall-clock ``time.time()``).
+
+    Creates the parent directory if missing — the systemd unit may run as
+    a user-level service against ``~/.local/state/omnisight-bridge/`` and
+    we cannot rely on the deployer pre-creating the directory.
+    """
+
+    target = path if path is not None else heartbeat_path_from_env()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.touch(exist_ok=True)
+    ts = now if now is not None else time.time()
+    os.utime(target, (ts, ts))
+    return target
+
+
+def check_bridge_heartbeat(
+    path: Path | None = None,
+    stale_after_seconds: int | None = None,
+    now: float | None = None,
+) -> tuple[bool, float, Path]:
+    """Return ``(is_fresh, age_seconds, resolved_path)``.
+
+    A missing heartbeat file is treated as stale (``is_fresh=False``,
+    ``age_seconds=inf``) — the bridge has either never started or its
+    install drifted from the configured path; pickup-side callers must
+    fail closed in either case.
+    """
+
+    target = path if path is not None else heartbeat_path_from_env()
+    stale = (
+        stale_after_seconds
+        if stale_after_seconds is not None
+        else heartbeat_stale_after_seconds()
+    )
+    current = now if now is not None else time.time()
+    try:
+        mtime = target.stat().st_mtime
+    except FileNotFoundError:
+        return False, float("inf"), target
+    age = max(0.0, current - mtime)
+    return age <= stale, age, target
+
+
 @dataclass
 class BridgeConfig:
     agent_class: str = "subscription-claude"
@@ -121,6 +200,11 @@ class BridgeConfig:
         "~/.config/omnisight/gerrit-claude-bot-ed25519"
     ).expanduser()
     heartbeat_seconds: float = 60.0
+    # SP-B-X-009 — separate cadence for the on-disk heartbeat file; the
+    # pickup gate reads its mtime, so the file must tick more often than
+    # the log heartbeat to keep the runner-side stale-threshold tight.
+    heartbeat_file_seconds: float = DEFAULT_HEARTBEAT_FILE_SECONDS
+    heartbeat_file_path: Path | None = None
     silent_warn_seconds: float = 600.0
     periodic_catchup_seconds: float = 900.0
     max_backoff_seconds: float = 60.0
@@ -131,10 +215,54 @@ class BridgeConfig:
     # debounce coalesces them into a single sweep on the most recent
     # merged SHA.
     auto_rebase_debounce_seconds: float = 30.0
+    archive_age_days: int | None = None
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def archive_age_days_from_env(env: dict[str, str] | None = None) -> int:
+    raw = (env or os.environ).get("OMNISIGHT_ARCHIVE_AGE_DAYS", "")
+    if not raw:
+        return DEFAULT_ARCHIVE_AGE_DAYS
+    try:
+        value = int(raw)
+    except ValueError:
+        structured_log(
+            "WARN",
+            "archive_age_days_invalid_defaulted",
+            err=raw,
+            default=DEFAULT_ARCHIVE_AGE_DAYS,
+        )
+        return DEFAULT_ARCHIVE_AGE_DAYS
+    if value < 0:
+        structured_log(
+            "WARN",
+            "archive_age_days_negative_defaulted",
+            err=raw,
+            default=DEFAULT_ARCHIVE_AGE_DAYS,
+        )
+        return DEFAULT_ARCHIVE_AGE_DAYS
+    return value
+
+
+def parse_jira_datetime(value: str) -> datetime | None:
+    if not value:
+        return None
+    normalized = value
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    # Atlassian commonly returns +0000; fromisoformat wants +00:00.
+    if re.search(r"[+-]\d{4}$", normalized):
+        normalized = normalized[:-2] + ":" + normalized[-2:]
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def structured_log(
@@ -331,6 +459,10 @@ class GerritJiraBridge:
         self._stop = False
         self._started_at = time.monotonic()
         self._last_heartbeat = time.monotonic()
+        # SP-B-X-009 — primed to "long ago" so the first maintenance tick
+        # writes the heartbeat file immediately rather than waiting one
+        # full ``heartbeat_file_seconds`` cycle.
+        self._last_heartbeat_file = time.monotonic() - self.config.heartbeat_file_seconds
         self._last_periodic_catchup = time.monotonic()
         self._cursor_missing_warned = False
         # OP-733 — lazy-initialised on the first change-merged event so
@@ -338,9 +470,19 @@ class GerritJiraBridge:
         # the rebase path don't import the module at all.
         self._auto_rebase_sweeper: Any = None
         self._auto_rebase_scheduler: Any = None
+        # SP-B-X-019 / OP-1077 — independent heartbeat-thread state.
+        # The maintenance-tick loop runs *inside* ``stream_forever``'s
+        # blocking SSH read, so it stalls during quiet Gerrit periods.
+        # The heartbeat thread (started in ``stream_forever``) writes
+        # the on-disk heartbeat on a wall-clock cadence regardless of
+        # event traffic; this Event lets ``stop()`` unblock the thread
+        # so the daemon can exit cleanly without a 30s wait.
+        self._heartbeat_thread: Thread | None = None
+        self._heartbeat_thread_stop = Event()
 
     def stop(self) -> None:
         self._stop = True
+        self._heartbeat_thread_stop.set()
 
     def jira_request(
         self,
@@ -407,6 +549,31 @@ class GerritJiraBridge:
         )
         return list(resp.get("issues", []))
 
+    def search_archive_candidate_tickets(self) -> list[dict[str, Any]]:
+        archive_age_days = self.archive_age_days()
+        jql = (
+            f'project = "{self.client.project_key}" '
+            'AND status in ("Published", "公開済み") '
+            f"AND statusCategoryChangedDate <= -{archive_age_days}d "
+            "ORDER BY statusCategoryChangedDate ASC"
+        )
+        resp = self.jira_request(
+            "POST",
+            "/search/jql",
+            {
+                "jql": jql,
+                "fields": [
+                    "summary",
+                    "status",
+                    "labels",
+                    "statuscategorychangedate",
+                    "updated",
+                ],
+                "maxResults": 100,
+            },
+        )
+        return list(resp.get("issues", []))
+
     def search_approved_tickets(self) -> list[dict[str, Any]]:
         """Backward-compatible alias for tests/scripts from OP-689."""
         return self.search_catchup_candidate_tickets()
@@ -415,6 +582,12 @@ class GerritJiraBridge:
         issue = self.jira_request("GET", f"/issue/{ticket_key}?fields=status")
         status = ((issue.get("fields") or {}).get("status") or {}).get("name", "")
         return str(status)
+
+    def fetch_issue_archive_fields(self, ticket_key: str) -> dict[str, Any]:
+        return self.jira_request(
+            "GET",
+            f"/issue/{ticket_key}?fields=status,labels,statuscategorychangedate,updated",
+        )
 
     def fetch_issue_comments(self, ticket_key: str) -> list[dict[str, Any]]:
         resp = self.jira_request("GET", f"/issue/{ticket_key}/comment?maxResults=100")
@@ -429,6 +602,9 @@ class GerritJiraBridge:
 
     def transition_to_published(self, ticket_key: str) -> None:
         self.transition_ticket(ticket_key, "to_published")
+
+    def transition_to_archived(self, ticket_key: str) -> None:
+        self.transition_ticket(ticket_key, "to_archived")
 
     def add_jira_comment(self, ticket_key: str, message: str) -> None:
         # OP-844 — defense-in-depth egress filter. The bridge daemon
@@ -613,7 +789,11 @@ class GerritJiraBridge:
         if change.status.upper() != "MERGED":
             self.log("INFO", "catchup_change_not_merged", ticket_key=ticket_key, change_id=change.change_id)
             return
-        self.process_ticket_for_change(ticket_key, change.change_id)
+        self.process_ticket_for_change(
+            ticket_key,
+            change.change_id,
+            allow_auto_archive=True,
+        )
 
     def process_stream_event(self, event: dict[str, Any]) -> None:
         self.counters.events_received += 1
@@ -753,7 +933,11 @@ class GerritJiraBridge:
                 err=",".join(ticket_keys),
             )
             return
-        self.process_ticket_for_change(ticket_keys[0], change.change_id)
+        self.process_ticket_for_change(
+            ticket_keys[0],
+            change.change_id,
+            allow_auto_archive=True,
+        )
 
     # ─── patchset-created → proactive merger + AI Reviewer (OP-715/801) ──
 
@@ -982,12 +1166,187 @@ class GerritJiraBridge:
             {"update": {"labels": [{"remove": label}]}},
         )
 
-    def process_ticket_for_change(self, ticket_key: str, change_id: str) -> bool:
+    def archive_age_days(self) -> int:
+        if self.config.archive_age_days is not None:
+            return self.config.archive_age_days
+        return archive_age_days_from_env()
+
+    def run_archive_sweep(self) -> int:
+        archived = 0
+        self.log(
+            "INFO",
+            "archive_sweep_start",
+            archive_age_days=self.archive_age_days(),
+        )
+        for issue in self.search_archive_candidate_tickets():
+            ticket_key = str(issue.get("key") or "")
+            if not ticket_key:
+                continue
+            fields = issue.get("fields") or {}
+            if self.maybe_archive_published_ticket(
+                ticket_key,
+                change_id="daily-archive-sweep",
+                issue_fields=fields,
+            ):
+                archived += 1
+        self.log("INFO", "archive_sweep_done", archived=archived)
+        return archived
+
+    def maybe_archive_published_ticket(
+        self,
+        ticket_key: str,
+        change_id: str,
+        *,
+        issue_fields: dict[str, Any] | None = None,
+    ) -> bool:
+        if issue_fields is None:
+            issue = self.fetch_issue_archive_fields(ticket_key)
+            issue_fields = issue.get("fields") or {}
+
+        status = str(((issue_fields.get("status") or {}).get("name")) or "")
+        if status not in PUBLISHED_STATUS_NAMES:
+            self.log(
+                "INFO",
+                "archive_skip_not_published",
+                ticket_key=ticket_key,
+                change_id=change_id,
+                err=status,
+            )
+            return False
+
+        labels = set(issue_fields.get("labels") or [])
+        if KEEP_OPEN_LABEL in labels:
+            self.log(
+                "INFO",
+                "archive_keep_open_skip",
+                ticket_key=ticket_key,
+                change_id=change_id,
+                label=KEEP_OPEN_LABEL,
+            )
+            return False
+
+        published_at_raw = (
+            issue_fields.get("statuscategorychangedate")
+            or issue_fields.get("updated")
+            or ""
+        )
+        published_at = parse_jira_datetime(str(published_at_raw))
+        if published_at is None:
+            self.log(
+                "WARN",
+                "archive_skip_missing_published_at",
+                ticket_key=ticket_key,
+                change_id=change_id,
+            )
+            return False
+
+        age_days = (
+            datetime.now(timezone.utc) - published_at
+        ).total_seconds() / 86400
+        retention_days = self.archive_age_days()
+        if age_days <= retention_days:
+            self.log(
+                "INFO",
+                "archive_retention_not_met",
+                ticket_key=ticket_key,
+                change_id=change_id,
+                age_days=round(age_days, 3),
+                retention_days=retention_days,
+            )
+            return False
+
+        self.transition_to_archived(ticket_key)
+        self.counters.transitions_made += 1
+        self.add_jira_comment(
+            ticket_key,
+            (
+                "[bridge] Auto-archived after 公開済み retention window. "
+                f"age_days={age_days:.1f}; retention_days={retention_days}; "
+                f"source={change_id}."
+            ),
+        )
+        self._record_archive_decision(
+            ticket_key=ticket_key,
+            change_id=change_id,
+            age_days=age_days,
+            retention_days=retention_days,
+        )
+        self.log(
+            "INFO",
+            "ticket_auto_archived",
+            ticket_key=ticket_key,
+            change_id=change_id,
+            age_days=round(age_days, 3),
+            retention_days=retention_days,
+        )
+        return True
+
+    def _record_archive_decision(
+        self,
+        *,
+        ticket_key: str,
+        change_id: str,
+        age_days: float,
+        retention_days: int,
+    ) -> None:
+        event = {
+            "ts": utc_now_iso(),
+            "source": "gerrit-jira-bridge",
+            "action_type": "auto_archive_published_ticket",
+            "ticket_key": ticket_key,
+            "change_id": change_id,
+            "from_status": "公開済み",
+            "to_status": "Archived",
+            "age_days": round(age_days, 3),
+            "retention_days": retention_days,
+        }
+        try:
+            root = Path(
+                os.environ.get(
+                    "OMNISIGHT_COORDINATOR_DECISION_LOG_DIR",
+                    "~/.config/omnisight/coordinator/decision-log",
+                )
+            ).expanduser()
+            root.mkdir(parents=True, exist_ok=True)
+            date_slug = datetime.now(timezone.utc).date().isoformat()
+            log_path = root / f"{date_slug}.jsonl"
+            with log_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event, sort_keys=True) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            self.log(
+                "WARN",
+                "archive_decision_log_write_failed",
+                ticket_key=ticket_key,
+                err=f"{type(exc).__name__}: {exc}",
+            )
+
+    def process_ticket_for_change(
+        self,
+        ticket_key: str,
+        change_id: str,
+        *,
+        allow_auto_archive: bool = False,
+    ) -> bool:
         lock = self._lock_for(ticket_key)
         with lock:
             status = self.fetch_issue_status(ticket_key)
             original_status = status
             if status in PUBLISHED_STATUS_NAMES:
+                if allow_auto_archive:
+                    try:
+                        return self.maybe_archive_published_ticket(
+                            ticket_key,
+                            change_id,
+                        )
+                    except Exception as exc:
+                        self.log(
+                            "ERROR",
+                            "ticket_auto_archive_failed",
+                            ticket_key=ticket_key,
+                            change_id=change_id,
+                            err=f"{type(exc).__name__}: {exc}",
+                        )
+                        return False
                 self.log(
                     "INFO",
                     "ticket_already_published",
@@ -1062,6 +1421,23 @@ class GerritJiraBridge:
             return self._ticket_locks[ticket_key]
 
     def stream_forever(self) -> None:
+        # SP-B-X-009 — emit one heartbeat before catchup so the file
+        # appears on disk the moment the daemon is up. Without this the
+        # gate could read a missing file during the (potentially minute-
+        # long) startup catchup and trip a false "bridge down" alert.
+        self._touch_heartbeat_file()
+        self._last_heartbeat_file = time.monotonic()
+        # SP-B-X-019 / OP-1077 — start the heartbeat thread BEFORE
+        # catchup. ``startup_catchup`` and the SSH stream read can both
+        # block for minutes during quiet Gerrit periods; without the
+        # thread, ``_maintenance_ticks``'s heartbeat write only fires
+        # when the next stream-event arrives, and the on-disk file
+        # goes stale → runner pickup gate trips a false "bridge_down".
+        # The thread runs ``_touch_heartbeat_file`` on a half-cadence
+        # wall clock so the gate's 5-min stale threshold never trips
+        # while the daemon is healthy. ``stop()`` sets the Event so
+        # shutdown doesn't wait a full cycle.
+        self._start_heartbeat_thread()
         self.startup_catchup()
         self.replay_from_cursor()
         consecutive_failures = 0
@@ -1112,6 +1488,8 @@ class GerritJiraBridge:
     def run_once_from_lines(self, lines: Iterable[str]) -> None:
         self.startup_catchup()
         self.replay_from_cursor()
+        self._touch_heartbeat_file()
+        self._last_heartbeat_file = time.monotonic()
         for line in lines:
             payload = parse_stream_line(line)
             if payload is None:
@@ -1121,17 +1499,90 @@ class GerritJiraBridge:
             self.process_stream_event(payload)
             self.save_event_cursor(payload)
         self._emit_heartbeat()
+        self._touch_heartbeat_file()
 
     def _maintenance_ticks(self) -> None:
         now = time.monotonic()
         if now - self._last_heartbeat >= self.config.heartbeat_seconds:
             self._emit_heartbeat()
             self._last_heartbeat = now
+        if now - self._last_heartbeat_file >= self.config.heartbeat_file_seconds:
+            self._touch_heartbeat_file()
+            self._last_heartbeat_file = now
         if self.config.periodic_catchup_seconds > 0 and (
             now - self._last_periodic_catchup >= self.config.periodic_catchup_seconds
         ):
             self.startup_catchup()
             self._last_periodic_catchup = now
+
+    def _touch_heartbeat_file(self) -> None:
+        """SP-B-X-009 — write the on-disk heartbeat for the pickup gate.
+
+        Errors are logged but never raised: a stale heartbeat is *exactly*
+        the failure-mode the pickup gate is designed to detect, so a write
+        failure must not also crash the daemon. The runner side will pick
+        up the stale mtime and notify the operator on its next pickup."""
+
+        path = self.config.heartbeat_file_path or heartbeat_path_from_env()
+        try:
+            touch_heartbeat_file(path)
+        except OSError as exc:
+            self.log(
+                "WARN",
+                "heartbeat_file_write_failed",
+                err=f"{type(exc).__name__}: {exc}",
+                heartbeat_path=str(path),
+            )
+
+    def _start_heartbeat_thread(self) -> None:
+        """SP-B-X-019 / OP-1077 — start the wall-clock heartbeat thread.
+
+        The thread is a ``daemon=True`` background worker that calls
+        :meth:`_touch_heartbeat_file` every ``heartbeat_file_seconds / 2``
+        (clamped to a 5s floor) regardless of Gerrit event traffic. This
+        keeps the on-disk heartbeat fresh during quiet periods when the
+        SSH stream-events read blocks for minutes — without the thread,
+        the runner-side pickup gate would falsely trip ``bridge_down``.
+
+        ``stop()`` sets ``self._heartbeat_thread_stop`` so the thread
+        observes the Event during its sleep and exits within one
+        check interval rather than waiting a full cadence.
+
+        Half-cadence (``heartbeat_file_seconds / 2``) keeps the stale
+        window safely below the runner gate's ``OMNISIGHT_BRIDGE_STALE_AFTER_SEC``
+        threshold even if one tick fires late.
+
+        Idempotent: if the thread is already alive (e.g. ``stream_forever``
+        is restarted by an in-process test), this method is a no-op so
+        we don't accumulate threads.
+        """
+        if self._heartbeat_thread is not None and self._heartbeat_thread.is_alive():
+            return
+        self._heartbeat_thread_stop.clear()
+        cadence = max(5.0, float(self.config.heartbeat_file_seconds) / 2.0)
+
+        def _run() -> None:
+            # First write happens at startup via stream_forever; loop
+            # waits a full cadence before the first repeated write.
+            while not self._heartbeat_thread_stop.wait(cadence):
+                try:
+                    self._touch_heartbeat_file()
+                except Exception as exc:  # noqa: BLE001 — must never crash the daemon
+                    # _touch_heartbeat_file already swallows OSError; this
+                    # catches anything else (e.g. mocked-test sentinels).
+                    self.log(
+                        "WARN",
+                        "heartbeat_thread_write_failed",
+                        err=f"{type(exc).__name__}: {exc}",
+                    )
+
+        thread = Thread(
+            target=_run,
+            name="bridge-heartbeat",
+            daemon=True,
+        )
+        self._heartbeat_thread = thread
+        thread.start()
 
     def _emit_heartbeat(self) -> None:
         payload = self.counters.__dict__.copy()
@@ -1178,8 +1629,17 @@ def build_bridge(agent_class: str = "subscription-claude") -> GerritJiraBridge:
     user, key_path = auth
     return GerritJiraBridge(
         client,
-        BridgeConfig(agent_class=agent_class, gerrit_user=user, gerrit_key_path=key_path),
+        BridgeConfig(
+            agent_class=agent_class,
+            gerrit_user=user,
+            gerrit_key_path=key_path,
+        ),
     )
+
+
+def archive_sweep_once(agent_class: str = "subscription-claude") -> int:
+    """Run the Published → Archived sweep once for systemd timer use."""
+    return build_bridge(agent_class).run_archive_sweep()
 
 
 async def _run_with_db_pool(agent_class: str = "subscription-claude") -> None:
@@ -1211,3 +1671,28 @@ def run(agent_class: str = "subscription-claude") -> int:
     except BridgeFatalError as exc:
         structured_log("ALERT", "bridge_fatal", err=str(exc))
         return 2
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--agent-class",
+        default="subscription-claude",
+        help="JIRA/Gerrit bot credential class; default uses claude-bot.",
+    )
+    parser.add_argument(
+        "--archive-sweep-once",
+        action="store_true",
+        help="Run one Published-to-Archived retention sweep and exit.",
+    )
+    args = parser.parse_args(argv)
+    if args.archive_sweep_once:
+        archive_sweep_once(args.agent_class)
+        return 0
+    return run(args.agent_class)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

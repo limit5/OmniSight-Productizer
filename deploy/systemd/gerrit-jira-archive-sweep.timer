@@ -1,0 +1,14 @@
+; OP-995 / AUDIT-29h — daily timer for Published -> Archived retention.
+
+[Unit]
+Description=Run OmniSight JIRA archive sweep daily (OP-995)
+Documentation=https://soraapp.atlassian.net/browse/OP-995
+
+[Timer]
+OnCalendar=daily
+AccuracySec=5min
+Persistent=true
+Unit=gerrit-jira-archive-sweep.service
+
+[Install]
+WantedBy=timers.target

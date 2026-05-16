@@ -1,0 +1,23 @@
+; [OP-1068] Read-only C10 runner instance-id uniqueness check.
+; Install: copy service+timer to /etc/systemd/system, daemon-reload,
+; enable --now runner-instance-uniqueness-check.timer.
+
+[Unit]
+Description=OmniSight runner instance uniqueness check (OP-1068)
+Documentation=https://soraapp.atlassian.net/browse/OP-1068
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONPATH=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 /home/user/work/sora/OmniSight-Productizer/scripts/runner-instance-uniqueness-check.py
+TimeoutStartSec=60
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=runner-instance-uniqueness-check
+
+[Install]
+WantedBy=default.target

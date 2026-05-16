@@ -1,0 +1,22 @@
+; OP-1136 / Sprint Boreas-C1 — 30-second cadence for runner-mirror-fetch.
+;
+; Fires the .service every 30s after the previous fire FINISHES (not
+; starts), so a slow fetch doesn't pile up new invocations on top of
+; itself. Per-cycle ephemeral clones (OP-1137 / Boreas-C2) use the
+; mirror via `git clone --reference`, so this cadence determines how
+; stale a cycle's clone can be relative to develop tip.
+
+[Unit]
+Description=Refresh runner bare mirror every 30s
+Documentation=https://soraapp.atlassian.net/browse/OP-1136
+Requires=runner-mirror-fetch.service
+
+[Timer]
+OnBootSec=10s
+OnUnitInactiveSec=30s
+AccuracySec=5s
+Unit=runner-mirror-fetch.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

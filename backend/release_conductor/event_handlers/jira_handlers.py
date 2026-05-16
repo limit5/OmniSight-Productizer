@@ -23,6 +23,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from backend.agents import release_notifications
+
 
 logger = logging.getLogger(__name__)
 
@@ -94,11 +96,13 @@ def on_issue_updated(event: dict[str, Any]) -> dict[str, Any]:
             from_status,
             to_status,
         )
+        notification = release_notifications.notify_release_event(event)
         return {
             "outcome": "advance_next",
             "issue_key": issue_key,
             "from_status": from_status,
             "to_status": to_status,
+            "notification": notification,
         }
     if to_status in _PROGRESS_NAMES:
         logger.info(

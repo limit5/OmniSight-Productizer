@@ -1,0 +1,31 @@
+; systemd unit for the OmniSight Graphiti MCP service (OP-1021).
+;
+; Install (user-level):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/omnisight-graphiti-mcp.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now omnisight-graphiti-mcp
+;   loginctl enable-linger $USER
+;
+; Required env in /home/user/work/sora/OmniSight-Productizer/.env:
+;   NEO4J_PASSWORD
+;   OMNISIGHT_MCP_GRAPHITI_TOKEN
+; Optional:
+;   OMNISIGHT_GRAPHITI_PORT=8003
+
+[Unit]
+Description=OmniSight Graphiti MCP service (OP-1021)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+TimeoutStartSec=300
+TimeoutStopSec=60
+ExecStart=/usr/bin/docker compose --profile graphiti up -d graphiti
+ExecStop=/usr/bin/docker compose --profile graphiti stop graphiti
+
+[Install]
+WantedBy=default.target

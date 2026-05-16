@@ -1,0 +1,20 @@
+parent: |
+  # Sprint B-X Synthetic Parent
+  ### §3.17 SP-B-X-015 — Ticket-description drift validator
+  Parent says 9 categories must be preserved in child AC.
+  #### Boundaries
+  ```yaml
+  loc_delta_max: 400
+  files_touched_max: 4
+  required_paths: [scripts/ticket-description-drift-validator.py, tests/test_ticket_description_drift_validator.py, tests/fixtures/sprint-sp-b-x-drift-validator-fixtures/, docs/sop/ticket-description-drift-validator.md]
+  forbidden_paths: [governance_engine/schema/, backend/agents/jira_dispatch.py]
+  class: subscription-codex
+  authority_required: L3
+  tag_type: story
+  schema_version: v0
+  dependency_artifacts: ["governance_engine.schema.forbidden_combinations::validate_forbidden_combinations()", "JIRA REST /rest/api/3/issue/{key}"]
+  external_systems: [jira]
+  external_side_effect: write
+  external_payload_class: operational
+  mutex_with: []
+  ```

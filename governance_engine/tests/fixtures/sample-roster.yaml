@@ -1,0 +1,19 @@
+schema_version: governance-roster/v1
+roster_id: op-1096-sample-roster
+issued_at: "2026-05-14T00:00:00Z"
+authority:
+  l1_role: operator
+  l1_key_fingerprint: F995558736203E70E98F29175464E20846F314B2
+deputies:
+  - id: l2-deputy-aiko-tan
+    name: Aiko Tan
+    role: release-deputy
+    ssh_key_fingerprint: SHA256:MQe7ovg0+2rL5kz7h3oC0R3xxw9T5CMx9pW9FE0a2kE
+  - id: l2-deputy-morgan-lee
+    name: Morgan Lee
+    role: incident-deputy
+    ssh_key_fingerprint: SHA256:pJ3mPHJAFgksGB0E2QyqM2cXcI9WkR+p5mOSLwa6e3k
+  - id: l2-deputy-rina-patel
+    name: Rina Patel
+    role: governance-deputy
+    ssh_key_fingerprint: SHA256:bYZ45aOgjYxkKT2qNuG4tx8zHUlq0k6m17WaiY1qKDM

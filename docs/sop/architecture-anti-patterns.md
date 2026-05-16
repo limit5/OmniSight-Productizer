@@ -14,6 +14,19 @@ If you recognise one, follow the Cure section's recipe and reference the
 existing tickets in your new ticket's Spec References section. Don't redesign
 the fix from scratch — these patterns have already been costed.
 
+**Auto-injection (AUDIT-29b-6 / OP-1024)**: each pattern carries a
+`**Domains**:` line listing the OmniSight `area:` labels it is relevant to.
+The runner's `_build_prompt` (when the `antipattern_inject` flag is on) parses
+this file via `backend.agents.cognee_integration.parse_antipatterns`, ranks
+the patterns by Cognee similarity to the ticket (keyword-overlap fallback when
+the KG is offline), biases the result toward patterns whose `Domains` intersect
+the ticket's `area:` labels, and injects the top-N as an "Anti-patterns matching
+this ticket" block. Keep the `**Domains**:` line accurate when you add a pattern;
+the parser falls back to keyword inference if it is missing, but explicit is
+better. The per-file lessons under `docs/sop/lessons/` are surfaced the same way
+(`cognee_recall` flag → "Relevant lessons" block). Bootstrap the knowledge graph
+with `python3 scripts/cognee-ingest-lessons.py`.
+
 ---
 
 ## Index
@@ -32,10 +45,14 @@ the fix from scratch — these patterns have already been costed.
 | 10 | [Migration ticket fighting in-flight tickets](#10-migration-ticket-fighting-in-flight-tickets) | Structural ticket lands while siblings still write old format |
 | 11 | [Self-referential text-match false positive](#11-self-referential-text-match-false-positive) | Bulk-action filter matches the meta-document about pattern X (which mentions X by name) |
 | 12 | [Spike + final-version add/add scaffold race](#12-spike--final-version-addadd-scaffold-race) | "Validate framework" spike ships full scaffold; sibling "initial scaffold" PR add/add conflicts on every shared file |
+| 13 | [Shipped-but-not-deployed](#13-shipped-but-not-deployed) | Code merged + ticket closed, but the systemd unit / container / env-wire / migration never reached prod — found only when a downstream consumer fails |
+| 14 | [Bulk import without refinement creates dead inventory](#14-bulk-import-without-refinement-creates-dead-inventory) | Hundreds of summary-only tickets imported "to refine later" — invisible to automation, but they dominate every human backlog query |
 
 ---
 
 ## 1. Numbered flat-file registry
+
+**Domains**: docs, backend, tooling
 
 **Symptom**: Single mutable file (e.g. `lessons-learned.md`, `docs/adr/ADR-0010-*.md`,
 `backend/main.py` router list, `lib/api.ts` exports) with sequential identifiers
@@ -73,6 +90,8 @@ as the template when applying this cure to a new resource.
 
 ## 2. Shared mutable git config across worktrees
 
+**Domains**: backend, tooling, devops
+
 **Symptom**: Two sibling workers (e.g. claude-bot and codex-bot runners) both
 write `git config user.email` to satisfy their bot identity. The last one to
 write wins. The other runner subsequently commits with the wrong author and
@@ -102,6 +121,8 @@ from. All sibling worktrees see the same value.
 ---
 
 ## 3. Idempotency-blind external mutation
+
+**Domains**: backend, db
 
 **Symptom**: When an external API call (JIRA `add_comment`, audit log insert,
 notification send) is retried after a transient failure, duplicate side
@@ -133,6 +154,8 @@ exponential backoff helpers) do not add idempotency keys by default.
 
 ## 4. Push without commit
 
+**Domains**: backend, tooling
+
 **Symptom**: `git push` returns `! [remote rejected] HEAD -> refs/for/develop (no new changes)`. Runner posts a `[runner-gerrit-push-fail]` comment and exits rc=1, leaving the JIRA ticket stuck at 進行中 forever.
 
 **Root cause**: CLI completed (rc=0) but did not actually create a commit
@@ -156,6 +179,8 @@ attempted push because the gate was "rc==0" not "rc==0 AND HEAD moved".
 ---
 
 ## 5. Daemon without event cursor
+
+**Domains**: backend, devops
 
 **Symptom**: Long-running event-stream daemon (gerrit-jira-bridge,
 notification consumer, etc.) crashes or reconnects. Events that occurred
@@ -186,6 +211,8 @@ last successfully-processed event. There is no cursor; replay is impossible.
 ---
 
 ## 6. Strict state machine on terminal events
+
+**Domains**: backend
 
 **Symptom**: Event handler ignores a terminal event because the entity is in
 an "unexpected" predecessor state. The work that triggered the event still
@@ -218,6 +245,8 @@ for intermediate in path_from(state, TERMINAL):
 
 ## 7. Synchronous external call without circuit breaker
 
+**Domains**: backend, devops
+
 **Symptom**: External service is unreachable. Code retries every tick (cron / loop) at full rate, generating noise without progress. When the service recovers, all retries succeed simultaneously, creating a thundering herd.
 
 **Root cause**: No circuit breaker. No backoff. No notion that "if 5 calls in a row failed, the service is probably down — stop trying for a minute."
@@ -237,6 +266,8 @@ for intermediate in path_from(state, TERMINAL):
 ---
 
 ## 8. Worktree state-leak across ticks
+
+**Domains**: backend, tooling
 
 **Symptom**: Subsequent runner tick fails with "cannot switch branch while rebasing" / "cherry-pick in progress" / "merge conflict not resolved". The current tick did nothing wrong; the leak came from a previous tick that crashed mid-operation.
 
@@ -260,6 +291,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 ## 9. Auto-resolver brittle to nested markers
 
+**Domains**: backend, tooling
+
 **Symptom**: An automated conflict resolver "successfully" resolves a conflict, commits, pushes — but the resulting PS has unresolved conflict markers (`<<<<<<<` / `=======` / `>>>>>>>`) embedded as literal text in a tracked file. Subsequent rebase attempts fail because git reads the markers as text.
 
 **Root cause**: Resolver uses `re.search` (returns first match) and assumes exactly one conflict region per file. When a file has nested or sequential conflicts (e.g. from prior failed rebases), the resolver misses the outer markers.
@@ -278,6 +311,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 ---
 
 ## 10. Migration ticket fighting in-flight tickets
+
+**Domains**: backend, db, docs
 
 **Symptom**: A structural / migration ticket (e.g. "split lessons-learned.md into per-file") merges into develop. Within minutes, multiple in-flight PSes that wrote to the OLD format hit conflict, requiring each to be reformatted.
 
@@ -299,6 +334,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 
 ## 11. Self-referential text-match false positive
+
+**Domains**: tooling, backend, docs
 
 **Symptom**: A bulk-action filter that uses full-text search to identify tickets matching pattern X (e.g. `text ~ "refine before pickup"`) accidentally matches the META ticket *about* pattern X. The meta-ticket gets the bulk action applied to itself, often disabling its own ability to ship the fix.
 
@@ -325,6 +362,8 @@ empty commits (the specific bug that triggered OP-167's stuck rebase).
 
 ## 12. Spike + final-version add/add scaffold race
 
+**Domains**: backend, frontend, tests, tooling
+
 **Symptom**: A sprint splits "validate framework choice" into one ticket (E1: spike + ADR) and "build the proper scaffold" into a sibling ticket (E2). The spike ticket ships an *entire* working scaffold (mkdocs.yml, requirements.txt, docs/, theme files) instead of the minimum proof-of-concept it was scoped for. E2 is then written against a clean base, ADDs the same files, and `git merge` reports `add/add` conflicts on every shared scaffold file once E1 merges first.
 
 **Root cause**: "Spike to validate" and "build the thing" overlap unbounded. The spike implementer doesn't know which exact files they shouldn't write — and from inside the spike, writing the full scaffold is the *easiest* way to demonstrate the framework works end-to-end. The sprint planner's intent ("E1 = throwaway, E2 = canonical") never becomes a code-level constraint, only a Goal-section english sentence.
@@ -347,9 +386,111 @@ Add/add is structurally different from edit/edit: there is no shared base for gi
 
 ---
 
+## 13. Shipped-but-not-deployed
+
+**Domains**: devops, backend, db
+
+**Symptom**: A ticket's code merges to `develop`, the ticket moves to 公開済み /
+Published, and everyone moves on — but the artefact it produced (a systemd
+unit/timer, a `docker compose` stack, an `EnvironmentFile=` env-wire, a DB
+migration that needs `alembic upgrade` on prod) never reached its runtime.
+Nothing is obviously wrong until a *downstream* consumer fails: a cron never
+fires, `staging.sora.services` 404s, `release_audit` has zero rows, a feature
+flag reads its default because the flag store was never configured. This is
+anti-pattern #4 ("push without commit") inverted — there *is* a commit and the
+merge happened; what is missing is the operator-side activation step that sits,
+unrun, in the unit-file header.
+
+**Root cause**: Every existing gate stops at "merged to `develop`". CI green,
+Gerrit +2, runner transition to 公開済み — none of them ask "did anyone run the
+install recipe?" The deploy step *is* documented (`.service`/`.timer` headers
+literally carry their own `systemctl --user enable --now` recipe; compose files
+say `docker compose up -d`; env-wires name the file to create) but it is
+verified by nobody, so it is skipped by default. The work *looks* done because
+the JIRA state machine and the git history both say it is.
+
+**Cure**:
+1. **Mandatory `deployed:` AC item** *(zero infra — do this now)*. Any ticket
+   whose `Files touched` includes `deploy/`, a systemd unit, a compose file, a
+   cron, or a migration MUST carry an AC item `deployed: <yes | n-a>`:
+   - `yes` → cite concrete host evidence: `systemctl --user is-enabled <unit>`
+     output, a `docker ps` line, a `/proc/<pid>/environ` grep, `alembic current`.
+     "merged to `develop`" is **not** evidence of deployment.
+   - `n-a` → state why (e.g. "peer-gated on OP-927; timer ships disabled by
+     design"). This is the same shape as the 4-AC discipline's Deploy AC — a
+     ticket with only a Code AC is shipped-but-not-deployed *by construction*.
+2. **Scheduled deployment audit** *(one unit pair — next sprint)*. Wrap
+   `scripts/deployment-audit.sh` in `deploy/systemd/deployment-audit.{service,timer}`
+   (daily, before the `auto-promote-develop` run), reading a host-specific
+   manifest of *expected-live* units / containers / env-vars / migration heads.
+   Any red row → a structured-log line → the T1 alerter (OP-722). This is the
+   standing regression guard; it catches the next stuck unit within 24 h
+   instead of via a downstream cascade days later.
+3. **Eventually, a `Deployed` workflow state** *(end-state — defer)*. Add a JIRA
+   status after 公開済み that a ticket only reaches once a deploy-verification
+   step passes on prod; the RELEASE-chain JQL keys off `Deployed`, not 公開済み.
+   High value, non-trivial (workflow change + runner transition logic + a
+   deploy-verifier hook); do after #2 has surfaced the real toil.
+
+**Examples**:
+- 2026-05-12 AUDIT-23 (OP-976): of ~10 non-trivial Sprint D/E/F infra
+  deliverables only ~2 were confirmed live. `release-milestone-checker.timer`
+  (OP-762) shipped 2026-05-08 but was not `enable --now`'d until 2026-05-12 —
+  the RELEASE META chain stalled with zero signal for ~4 days.
+  `staging.sora.services` (OP-767 / OP-878) was never `docker compose up -d` —
+  the R3 `ci_canary` / `ci_smoke` gates had no producer (the OP-925 R3 cascade).
+  `~/.config/omnisight/release-audit.env` (OP-964) was never created on prod →
+  the D5 audit sink silently fell back to local SQLite → "where is the audit
+  row" mystery. Full catalogue: `docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md`.
+- 2026-05-12 AUDIT-29 Phase 0: Sprint F (Cognee / Neo4j / Graphiti memory
+  layer) — all 16 children 公開済み, code paths wired, runtime infra never stood
+  up, the gating feature-flag module empty. Same defect class
+  (`docs/audit/2026-05-12-audit-29-phase-0-state-audit.md`).
+
+**Reference tickets**: OP-976 (AUDIT-23 — the audit + the canonical "what / why
+/ who" record this entry points at), OP-1017 (AUDIT-29a-2 — merged this cookbook
+entry + lesson `L-OP-976`), and the OP-925 R3 cascade tickets AUDIT-23
+dissected: OP-762, OP-767, OP-798, OP-878, OP-964, OP-927 R5. Standing-guard
+follow-ups (a `deployed:` AC item in `docs/sop/jira-ticket-conventions.md`; the
+`deployment-audit.{service,timer}` unit pair) are tracked under the AUDIT-23 /
+AUDIT-29 deployment-baseline phase.
+
+**Generalisation**: "Merged" is not "deployed", and "the ticket is closed" is
+not "the thing is running". Any deliverable with a runtime side needs an
+explicit, evidence-bearing activation step in its DoD *and* a cheap recurring
+check that the activation actually happened — the install recipe in a unit
+header is documentation, not a deployment. Treat the gap between "code in
+`develop`" and "artefact live on prod" as a first-class state that something
+owns, not an implicit "someone will run it".
+
+---
+
+## 14. Bulk import without refinement creates dead inventory
+
+**Domains**: tooling, backend, docs
+
+**Symptom**: A migration / planning exercise dumps a large list (a `TODO.md`, a spreadsheet, an old tracker) into JIRA as hundreds of standalone tickets — summary only, no `area:` / `tier:` / `class:` labels, no fixVersion, no assignee, no AC section. The runner JQL can't pick a single one (it filters on the runner-pickability labels). But every project-wide query — `project = OP`, sprint review, "how big is the backlog?" — counts all of them, so the *visible* backlog is 3–5× the *actionable* backlog. The promise was "we'll refine these later"; nobody ever does, because there is no forcing function and the items are individually low-context.
+
+**Root cause**: Tickets are created at a granularity and quality below what makes them actionable, on the theory that refinement is a separable later step. It isn't: the moment they exist they are simultaneously invisible to automation and maximally visible to humans doing capacity planning. The bulk-import operation optimised for "capture everything" and externalised the cost onto every future planning query.
+
+**Cure**:
+1. **Don't create the inventory.** A ticket without the runner-pickability invariants (issuetype the runner JQL filters for + `area:` labels covering every domain the AC touches — see L-OP-737) and a real AC section is dead on arrival. The 4-AC discipline already says a Code-AC-only ticket is shipped-but-not-deployed *by design*; a summary-only ticket is un-pickable by design. Stage planning notes in a planning doc or an Epic, not as hundreds of `タスク`.
+2. **If it already happened, triage it with a heuristic, not by hand.** `scripts/jira-todo-backlog-triage.py` classifies each legacy-label ticket as `keep` (has a live signal: started / assigned / has fixVersion / non-bot comment / recently updated / too young to call dead), `abandon` (old + cold + never started → Won't Do / Archived) or `duplicate` (shares a normalised summary with an older sibling → human confirms). `triage` is read-only (writes a Markdown report + a JSONL decision file); `apply` runs the bulk Won't Do transition from an operator-reviewed decision file and defaults to dry-run. Manual triage of 500 items never finishes — the script does.
+3. **Don't over-correct either.** Mass-archiving a week-old import is the same mistake in reverse. The abandon heuristic has an age gate (default 30d) precisely so a fresh dump isn't auto-closed before anyone has had a chance to refine the survivors. Re-run `triage` once the window matures; a deliberate "the import was a mistake, revert it" is an operator policy call, recorded as such, not a heuristic sweep.
+
+**Examples**:
+- 2026-05 governance migration: `TODO.md` imported as ~530 open OP tickets tagged `runner-needs-refinement` / `migrated-from-todo-bulk` / `migrated-from-todo` — all `To Do`, unassigned, no fixVersion, no comments. ~half of all open OP tickets. OP-1014 built the triage tooling + `docs/audit/2026-05-13-todo-backlog-triage.md`; the report's honest finding was that the dump was only ~1 week old so 0 tickets were archive-eligible *yet* (window opens ~2026-06-05) — i.e. it will not self-clear; the survivors need real refinement or the import needs reverting.
+- General: any "import everything from the old system, we'll triage later" migration; any sprint that files sub-task fragments as standalone tickets "for visibility".
+
+**Reference tickets**: OP-1014 (triage tooling + report + this pattern), and the 2026-05 governance-migration tickets that produced the dump. See lesson `L-OP-1014` and L-OP-737 (runner-pickability invariants at file time).
+
+**Generalisation**: Creating a tracker item is cheap; refining it is expensive; and an unrefined item costs every future planning pass. Either pay the refinement cost at creation time or don't create the item — there is no free "capture now, refine later" tier. When a bulk import already exists, the cleanup is a first-class ticket with a heuristic-driven script and an operator-reviewed decision file, not a hand sweep and not a reflexive mass-close.
+
+---
+
 ## Cross-cutting principles
 
-After 12 patterns, common threads:
+After 14 patterns, common threads:
 
 1. **Idempotency is non-negotiable** for any retry-eligible operation.
 2. **Convergence over correctness-of-predecessor** for terminal events.
@@ -360,8 +501,10 @@ After 12 patterns, common threads:
 7. **Migration is a state, not a moment** — has a beginning, freeze period, and end.
 8. **Filters cannot distinguish "uses X" from "discusses X"** — exclude documentation + META + test paths from content-pattern bulk actions. (Pattern #11.)
 9. **Two tickets writing to the same final file path cannot run in parallel without a chosen winner** — merge the tickets or scope one to a non-canonical output path with an explicit promotion step. (Pattern #12; "spike" is not orthogonal to "implementation" at the filesystem level.)
+10. **"Merged" is not "deployed"** — every existing gate stops at "in `develop`"; the operator-side activation step in the unit header is verified by nobody unless a `deployed:` AC item plus a recurring deployment audit make it so. (Pattern #13.)
+11. **A tracker item below actionable quality is pure cost** — invisible to automation, visible to every human planning pass. Pay the refinement cost at creation time or don't create the item; there is no "capture now, refine later" tier. (Pattern #14.)
 
-If you see a new symptom not in this cookbook, file it as the 13th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
+If you see a new symptom not in this cookbook, file it as the 15th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
 
 ---
 
@@ -378,3 +521,4 @@ If you see a new symptom not in this cookbook, file it as the 13th pattern after
   - `OP-758` (auto-import / decorator registry refactor — H11)
   - `OP-761` (Sprint D — deployment automation)
   - `OP-784` (Sprint E — docs-site build-time generation; Pattern 12 incident)
+  - `OP-976` (AUDIT-23 — deployment-audit baseline; Pattern 13 incident, `docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md`)

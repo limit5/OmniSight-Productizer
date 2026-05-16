@@ -38,7 +38,14 @@ WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
 ; Timeout: first-ever boot pulls images (cloudflare/cloudflared ~120 MB) so
 ; allow 5 min. Subsequent boots return in seconds (images cached).
 TimeoutStartSec=300
-TimeoutStopSec=60
+; OP-1128 (Sprint Boreas-A3, 2026-05-15): TimeoutStopSec bumped 60 → 180s
+; after the 2026-05-15 05:29 WSL reboot incident showed that 60s was
+; insufficient for clean teardown of the 7-container stack — WSL fired
+; RB_POWER_OFF before backend containers had flushed in-flight requests,
+; leaving dirty state for the next boot. 180s = (30s per-container
+; `down --timeout 30`) × 6 in-flight × safety margin, with a target of
+; "containers actually flush" rather than "systemd gives up".
+TimeoutStopSec=180
 ; `--profile tunnel` includes cloudflared so the public URL comes back too.
 ; If you ever want to boot the stack *without* opening the tunnel, disable
 ; this unit and bring it up manually without --profile tunnel.
@@ -58,7 +65,24 @@ TimeoutStopSec=60
 ; observability back via `docker compose -f docker-compose.prod.yml
 ; --profile observability up -d` after boot if needed.
 ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel up -d --remove-orphans
-ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel down
+; OP-1128 (Sprint Boreas-A3): `--timeout 30` gives each container 30s
+; to handle SIGTERM gracefully before docker promotes to SIGKILL. Without
+; the explicit flag, docker compose down uses the per-service
+; `stop_grace_period` (default 10s) which is too short for backend
+; containers serving in-flight requests during a shutdown race.
+; The 30s per-container × 6 in-flight = 180s ceiling matches the
+; TimeoutStopSec bump above.
+;
+; Cross-stack note (per codex's §11 discovered-dependency finding on
+; OP-1128 round 1): the production Postgres lives in a SEPARATE compose
+; stack at deploy/postgres-ha/docker-compose.yml with its own lifecycle.
+; This unit does NOT — and CANNOT — order against postgres-ha from
+; within its own scope. Backend graceful stop here completes before
+; backend is force-killed; postgres-ha runs in its own systemd timeline,
+; so the natural shutdown order (backend stops first, DB outlives it,
+; DB stops when ITS unit stops) is already correct in practice. A
+; cross-stack ordering ticket (if needed) is separate scope.
+ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml --profile tunnel down --timeout 30
 
 [Install]
 WantedBy=multi-user.target

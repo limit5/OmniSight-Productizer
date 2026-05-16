@@ -45,6 +45,14 @@ Sub-task = (rare)      used for in-flight split, see §6
 
 ## §2 Required Fields + Labels
 
+> **Label vocabulary**: the full namespace registry — every prefix, its
+> allowed values, side-effects, required-with rules, the retired/legacy
+> rewrite table, and the forbidden-combination list (incl. the `type:meta`
+> mis-routing case study) — lives in [`jira-label-conventions.md`](jira-label-conventions.md),
+> with [`jira-label-schema.yaml`](jira-label-schema.yaml) as the
+> machine-parseable mirror that `scripts/file_jira_ticket.py` validates
+> against. This section is the at-a-glance subset.
+
 ### Required JIRA fields
 
 | Field | Value source | Example |

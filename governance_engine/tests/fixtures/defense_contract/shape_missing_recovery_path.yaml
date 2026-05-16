@@ -1,0 +1,22 @@
+defense_contract:
+  error_detection:
+    signal: structured_log
+    channel: log:governance-defense-contract
+    detection_latency_p99: 30s
+    observability_test: governance_engine/tests/test_g_a_v2_defense_validator.py
+    alert_rule_id: null
+  exception_handling:
+    enumerated_states: [validation_error]
+    remediation_hint_contract: return validator detail
+    user_facing: true
+    fail_loudly: true
+  shutdown_contract:
+    drain_seconds_p99: null
+    cleanup_sequence: []
+    forced_termination_safe: true
+    state_persistence: none
+  rescue_path:
+    trigger_condition: pytest remains red
+    operator_actions: [comment on OP-1101]
+    authority_required: L2
+    audit_trail: JIRA OP-1101 comments

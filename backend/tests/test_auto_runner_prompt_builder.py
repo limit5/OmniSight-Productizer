@@ -103,6 +103,45 @@ def test_recognised_area_builds_prompt_without_raising(runner, fake_client, monk
     assert "- backend" not in prompt.split("Stay strictly within")[1].split("If you find")[0]
 
 
+# ── OP-986: localized JIRA issuetype name still resolves the full matrix ──
+
+
+def test_japanese_issuetype_resolves_full_capabilities(runner, fake_client, monkeypatch):
+    """OP-986 regression: when JIRA is in the Japanese display locale it
+    returns ``issuetype.name='ストーリー'``. The runner must still resolve the
+    full tier-M capability set for the ticket — including ``gerrit_push`` —
+    not the read-only safe-default (which silently blocked auto-push on every
+    Story-typed pickup, OP-980/981/985 incident 2026-05-12).
+    """
+    payload = {
+        "fields": {
+            "summary": "AUDIT-26 child",
+            "labels": ["area:backend", "tier:M"],
+            "components": [{"name": "HIGH"}],
+            "issuetype": {"name": "ストーリー", "id": "10001"},
+        }
+    }
+    monkeypatch.setattr(jira_dispatch, "_request", lambda *a, **kw: payload)
+
+    prompt = runner._build_prompt(fake_client, "OP-986-repro", "stub body")
+
+    caps = runner._LAST_RESOLVED_CAPABILITIES["OP-986-repro"]
+    assert "gerrit_push" in caps
+    assert {
+        "code_edit", "run_tests", "run_lint",
+        "jira_update", "mcp_search", "memory_recall",
+    }.issubset(caps)
+    # Crucially NOT the read-only-only fallback.
+    assert caps != runner._load_capability_matrix().read_only_default
+    # The prompt's "Enabled capabilities" block must reflect it.
+    caps_block = prompt.split("Enabled capabilities", 1)[1].split("# Documentation rules", 1)[0]
+    assert "gerrit_push" in caps_block
+    # The ticket-type echoed into the metadata side channel is the raw
+    # localized name (the runner doesn't rewrite it — only the matrix lookup
+    # normalizes), so downstream metrics see what JIRA actually returned.
+    assert runner._LAST_TICKET_METADATA["OP-986-repro"]["ticket_type"] == "ストーリー"
+
+
 # ── AC #1: unknown area raises typed exception ──
 
 
@@ -316,3 +355,130 @@ def test_project_state_skip_label_disables_injection_per_ticket(
     prompt = runner._build_prompt(fake_client, "OP-1234", "stub body")
     assert _PROJECT_CONTEXT_HEADER not in prompt
     assert calls == [], "label override must short-circuit before any fetch"
+
+
+def test_build_prompt_reads_cognee_recall_flag_from_env(
+    runner, fake_client, monkeypatch
+):
+    """AUDIT-29b-5 — _build_prompt resolves cognee_recall on every pickup."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.setenv("OMNISIGHT_COGNEE_RECALL", "1")
+
+    runner._LAST_AGENT_FEATURE_FLAGS.clear()
+    runner._build_prompt(fake_client, "OP-1023", "stub body")
+
+    assert runner._LAST_AGENT_FEATURE_FLAGS["OP-1023"] == {
+        "cognee_recall": True,
+    }
+
+
+# ── AUDIT-29b-6 (OP-1024): lesson-surface meta-mechanism in _build_prompt ──
+#
+# _build_prompt grows two flag-gated blocks: "Relevant lessons" (cognee_recall)
+# and "Anti-patterns matching this ticket" (antipattern_inject). Both must:
+#   - appear only when the flag is on,
+#   - sit before the AC-verification section,
+#   - degrade to nothing (never raise) when retrieval fails,
+#   - emit a `[runner] *.surfaced` debug log line when they fire.
+
+from backend.agents import cognee_integration as _ci  # noqa: E402
+from backend.agents.lesson_retrieval import LessonSearchResult  # noqa: E402
+
+_AC_MARKER = "# Acceptance Criteria verification"
+_LESSON_HEADER = "# Relevant lessons (AUDIT-29b lesson-surface)"
+_ANTIPATTERN_HEADER = "# Anti-patterns matching this ticket (AUDIT-29b lesson-surface)"
+
+
+def test_lesson_recall_block_present_when_flag_on(
+    runner, fake_client, monkeypatch, capsys
+):
+    """cognee_recall on → "Relevant lessons" block, positioned before the AC marker."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"], summary="runner identity")
+    monkeypatch.setenv("OMNISIGHT_COGNEE_RECALL", "1")
+    fake_lessons = (
+        LessonSearchResult(
+            path=Path("docs/sop/lessons/L-OP-729-runner-bot-identity-must-be-worktree-local.md"),
+            text="**Situation**: shared identity. **Fix**: worktree-local bot identity.",
+            score=2.0,
+        ),
+    )
+    monkeypatch.setattr(_ci, "retrieve_lessons_via_cognee", lambda *a, **kw: fake_lessons)
+    prompt = runner._build_prompt(fake_client, "OP-1024-lr", "synthetic ticket about runner identity")
+    assert _LESSON_HEADER in prompt
+    assert "L-OP-729-runner-bot-identity-must-be-worktree-local.md" in prompt
+    assert "worktree-local bot identity" in prompt
+    assert _AC_MARKER in prompt
+    assert prompt.index(_LESSON_HEADER) < prompt.index(_AC_MARKER)
+    assert "lesson_recall.surfaced" in capsys.readouterr().err
+
+
+def test_lesson_recall_block_absent_when_flag_off(runner, fake_client, monkeypatch):
+    """cognee_recall default-off → no block, retriever never invoked."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.delenv("OMNISIGHT_COGNEE_RECALL", raising=False)
+
+    calls: list[tuple] = []
+
+    def _should_not_run(*a, **kw):  # noqa: ANN002, ANN003
+        calls.append((a, kw))
+        return ()
+
+    monkeypatch.setattr(_ci, "retrieve_lessons_via_cognee", _should_not_run)
+    prompt = runner._build_prompt(fake_client, "OP-1024-off", "body")
+    assert _LESSON_HEADER not in prompt
+    assert calls == [], "retriever must short-circuit on flag-off"
+
+
+def test_lesson_recall_retrieval_error_degrades_to_empty(runner, fake_client, monkeypatch):
+    """A retriever exception degrades to an empty block — the pickup still builds."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.setenv("OMNISIGHT_COGNEE_RECALL", "1")
+
+    def _boom(*a, **kw):  # noqa: ANN002, ANN003
+        raise RuntimeError("kg exploded")
+
+    monkeypatch.setattr(_ci, "retrieve_lessons_via_cognee", _boom)
+    prompt = runner._build_prompt(fake_client, "OP-1024-err", "body still here")
+    assert _LESSON_HEADER not in prompt
+    assert "OP-1024-err" in prompt
+    assert "body still here" in prompt
+
+
+def test_antipattern_block_auto_injected_on_area_match(
+    runner, fake_client, monkeypatch, capsys
+):
+    """antipattern_inject on + area:db → cookbook pattern surfaced with an "area match" tag.
+
+    Cognee is not installed in the test env, so this exercises the
+    deterministic keyword-overlap fallback path + the area-domain bias over
+    the real docs/sop/architecture-anti-patterns.md.
+    """
+    _patch_issue(monkeypatch, labels=["area:db", "tier:M"], summary="migration ticket scope")
+    monkeypatch.setenv("OMNISIGHT_ANTIPATTERN_INJECT", "1")
+    prompt = runner._build_prompt(
+        fake_client, "OP-1024-ap", "synthetic migration ticket touching alembic schema"
+    )
+    assert _ANTIPATTERN_HEADER in prompt
+    assert "area match" in prompt
+    assert prompt.index(_ANTIPATTERN_HEADER) < prompt.index(_AC_MARKER)
+    err = capsys.readouterr().err
+    assert "antipattern_inject.surfaced" in err
+    # The surfaced pattern must be one tagged with the area:db domain.
+    assert "area match: " in prompt
+
+
+def test_antipattern_block_absent_when_flag_off(runner, fake_client, monkeypatch):
+    _patch_issue(monkeypatch, labels=["area:db", "tier:M"])
+    monkeypatch.delenv("OMNISIGHT_ANTIPATTERN_INJECT", raising=False)
+    prompt = runner._build_prompt(fake_client, "OP-1024-apoff", "body")
+    assert _ANTIPATTERN_HEADER not in prompt
+
+
+def test_both_lesson_blocks_off_by_default(runner, fake_client, monkeypatch):
+    """Default config: neither block appears (zero-impact rollout)."""
+    _patch_issue(monkeypatch, labels=["area:backend", "tier:M"])
+    monkeypatch.delenv("OMNISIGHT_COGNEE_RECALL", raising=False)
+    monkeypatch.delenv("OMNISIGHT_ANTIPATTERN_INJECT", raising=False)
+    prompt = runner._build_prompt(fake_client, "OP-1024-default", "body")
+    assert _LESSON_HEADER not in prompt
+    assert _ANTIPATTERN_HEADER not in prompt

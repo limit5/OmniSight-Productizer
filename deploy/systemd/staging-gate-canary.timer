@@ -1,0 +1,20 @@
+; [OP-965] AUDIT-17 — 10-minute trigger for staging-gate-canary.service.
+;
+; Cadence: every 10 min. The R3 ``ci_canary`` gate has no max-age window
+; in release_milestone_checker (it only requires the latest record for the
+; current develop tip be green), but a short cadence means a fresh develop
+; tip gets a canary signal quickly rather than blocking R3 for an hour.
+; Persistent=true catches up once after host downtime.
+
+[Unit]
+Description=10-minute trigger for staging-gate-canary.service (OP-965)
+
+[Timer]
+Unit=staging-gate-canary.service
+OnBootSec=3min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

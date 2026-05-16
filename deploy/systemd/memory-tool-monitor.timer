@@ -1,0 +1,12 @@
+; OP-908: run Memory Tool monitor hourly.
+
+[Unit]
+Description=Hourly OmniSight Memory Tool monitor
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=memory-tool-monitor.service
+
+[Install]
+WantedBy=timers.target

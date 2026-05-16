@@ -2,8 +2,29 @@
 ;
 ; Triggered by auto-promote-develop.timer at 07:00 UTC each day. Runs
 ; scripts/auto_promote_develop_to_main.sh once; on a green D1 acceptance
-; fast-forwards main to develop and pushes to Gerrit. Audit row lands
-; in the `release_audit` Postgres table regardless of outcome.
+; pushes develop -> refs/for/main as Gerrit review change(s) (OP-960),
+; and the OP-961 backend.agents.auto_promote_main module lands one
+; `release_audit` row per run regardless of outcome.
+;
+; [OP-964 / AUDIT-16] The module's audit sink writes through
+; backend.audit, which connects via OMNISIGHT_DATABASE_URL. A systemd
+; unit does NOT inherit the login shell's environment, so without an
+; EnvironmentFile here the sink degrades to the local SQLite dev path
+; under WorkingDirectory and the durable `release_audit` trail in the
+; pg-primary Postgres never gets the row — the OP-925 R3 failure mode
+; ("no compatible audit DB in runner env"). Two optional sources are
+; loaded below (leading "-" => missing file is non-fatal, so a dev box
+; without either still runs, just against its local SQLite):
+;   1. the canonical backend env (same file omnisight-backend.service /
+;      omnisight-slo-monitor.service load);
+;   2. a dedicated drop-in an operator can create with just the DSN:
+;        install -m 0600 /dev/null /home/user/.config/omnisight/release-audit.env
+;        echo 'OMNISIGHT_DATABASE_URL=postgresql+asyncpg://USER:PW@PG_PRIMARY:5432/omnisight' \
+;          >> /home/user/.config/omnisight/release-audit.env
+; Verify connectivity before relying on the cron (and after rotating
+; the Postgres credentials) with:
+;   PYTHONPATH=/home/user/sora-bridge \
+;     /home/user/sora-bridge/deploy/scripts/auto_promote_audit_db_smoke.sh
 ;
 ; Install (user-level — no sudo):
 ;   mkdir -p ~/.config/systemd/user
@@ -20,6 +41,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 WorkingDirectory=/home/user/sora-bridge
+; OP-964 / AUDIT-16 — DB env for the Python audit-write path (see header).
+; Both optional; the dedicated drop-in (listed last) wins for any key it sets.
+EnvironmentFile=-/home/user/work/sora/OmniSight-Productizer/.env
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
 Environment=PYTHONPATH=/home/user/sora-bridge
 Environment=PYTHONUNBUFFERED=1
 Environment=OP877_REPO=/home/user/sora-bridge

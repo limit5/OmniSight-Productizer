@@ -39,7 +39,7 @@ Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-claude-
 ; (web scraping, dep-fetch outside cache), set per-pickup:
 ;   Environment=OMNISIGHT_RUNNER_SANDBOX_NETWORK_ALLOW=<audit-reason>
 ;Environment=OMNISIGHT_RUNNER_SANDBOX_ENFORCE=1
-ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-Productizer/auto-runner-jira.py
+ExecStart=%h/work/sora/OmniSight-Productizer/deploy/runner-wrappers/runner-claude.sh %i
 Restart=on-failure
 RestartSec=90
 KillSignal=SIGTERM

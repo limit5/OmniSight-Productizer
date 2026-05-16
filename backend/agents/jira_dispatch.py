@@ -18,6 +18,7 @@ Authentication: reads ``~/.config/omnisight/jira-claude.env`` /
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -34,6 +35,12 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from backend.config import settings
+from backend.agents import (
+    model_deconfliction,
+    provider_orchestrator,
+    runner_coordination,
+    runner_progress,
+)
 from backend.agents.circuit_breaker import BREAKERS
 from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
@@ -41,6 +48,7 @@ from backend.agents.scope_to_paths import (
     ALWAYS_TOUCHED,
     ALWAYS_TOUCHED_TEMPLATE,
     FILES_SECTION_RE,
+    HOT_FILES,
     PATH_TOKEN_RE,
     SCOPE_TO_PATHS,
     parse_files_section,
@@ -51,6 +59,83 @@ log = logging.getLogger(__name__)
 MIGRATION_IN_FLIGHT_LABEL = "migration:in-flight"
 MIGRATION_OVERRIDE_LABEL = "migration:override"
 MIGRATION_SCOPE_PREFIX = "migration:scope="
+
+# ADR-0033 §6 / S12.G v2 spec §3.6: runners (L3) MUST refuse pickup of any
+# ticket carrying a ``class:operator-window-*`` or ``class:operator-rehearsal``
+# label, even when the same ticket also carries ``class:subscription-*``.
+# Refusal is silent — no JIRA comment, only a structured audit log line — so
+# operators (L1/L2) can drive the ticket without runner interference.
+REFUSAL_LABEL_PREFIXES = ("class:operator-window-", "class:operator-rehearsal")
+
+
+def _runner_refuses_pickup(labels: list[str]) -> tuple[bool, str | None]:
+    """Return ``(True, matching_label)`` if any label triggers L3 refusal.
+
+    Operator-window-* / operator-rehearsal labels always win over a
+    co-present ``class:subscription-*`` — the runner refuses pickup so the
+    ticket stays available for the operator's window.
+    """
+    for label in labels:
+        if not isinstance(label, str):
+            continue
+        for prefix in REFUSAL_LABEL_PREFIXES:
+            if label.startswith(prefix):
+                return True, label
+    return False, None
+
+
+def _emit_runner_refusal_audit(ticket_key: str, refusal_label: str) -> None:
+    """Emit structured ``runner_refusal_by_class`` event — no JIRA write."""
+    log.info(
+        "runner_refusal_by_class %s",
+        json.dumps(
+            {
+                "event": "runner_refusal_by_class",
+                "ticket_key": ticket_key,
+                "refusal_label": refusal_label,
+                "runner_instance": _instance_id_from_env(),
+            },
+            sort_keys=True,
+        ),
+    )
+
+
+def _emit_deconfliction_refusal_audit(
+    ticket_key: str,
+    agent_class: str,
+    decision: "model_deconfliction.DispatchDecision",
+) -> None:
+    """Emit structured ``runner_deconfliction_refusal`` event — no JIRA write.
+
+    Mirrors :func:`_emit_runner_refusal_audit` so operators can grep both
+    refusal modes from the same audit feed. The blocking incident
+    metadata (failure class + runner that failed) is recorded so the
+    operator can confirm the thrash-prevention decision without
+    re-running the ticket.
+    """
+    blocking = decision.blocking_incident
+    log.info(
+        "runner_deconfliction_refusal %s",
+        json.dumps(
+            {
+                "event": "runner_deconfliction_refusal",
+                "ticket_key": ticket_key,
+                "agent_class": agent_class,
+                "reason": decision.reason,
+                "blocking_failure_class": (
+                    blocking.failure_class.value if blocking else None
+                ),
+                "blocking_runner_class": (
+                    blocking.runner_class if blocking else None
+                ),
+                "blocking_incident_id": (
+                    blocking.incident_id if blocking else None
+                ),
+                "runner_instance": _instance_id_from_env(),
+            },
+            sort_keys=True,
+        ),
+    )
 
 # ── Auth + config per agent_class ─────────────────────────────────
 
@@ -276,7 +361,19 @@ PICKUP_JQL_TEMPLATE = (
 
 
 def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> list[dict]:
-    """Run pickup JQL per §16. Returns raw issue dicts (not snapshots)."""
+    """Run pickup JQL per §16. Returns raw issue dicts (not snapshots).
+
+    Per ADR-0033 §6, tickets carrying any :data:`REFUSAL_LABEL_PREFIXES`
+    label are silently dropped from the candidate list and emit a
+    ``runner_refusal_by_class`` audit line. No JIRA comment is posted —
+    operator-window tickets are L1/L2-only by design.
+
+    Per OP-1117 (v2-Ⅹ-5e), tickets that another runner ``agent_class``
+    failed on recently are dropped when the failure class is one where
+    swapping models is unlikely to help (see
+    :mod:`backend.agents.model_deconfliction`). A
+    ``runner_deconfliction_refusal`` audit line records the decision.
+    """
     jql = PICKUP_JQL_TEMPLATE.format(project=client.project_key, cls=client.agent_class)
     resp = _request(client, "POST", "/search/jql", {
         "jql": jql,
@@ -284,7 +381,27 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
                    "created", "components", "issuelinks", "parent"],
         "maxResults": max_results,
     })
-    return resp.get("issues", [])
+    pickable: list[dict] = []
+    for issue in resp.get("issues", []):
+        ticket_key = issue.get("key", "?")
+        labels = ((issue.get("fields") or {}).get("labels")) or []
+        refused, refusal_label = _runner_refuses_pickup(labels)
+        if refused:
+            _emit_runner_refusal_audit(ticket_key, refusal_label)
+            continue
+
+        decision = model_deconfliction.should_pickup_after_prior_failure(
+            ticket_key=ticket_key,
+            current_runner_class=client.agent_class,
+        )
+        if not decision.allowed:
+            _emit_deconfliction_refusal_audit(
+                ticket_key, client.agent_class, decision
+            )
+            continue
+
+        pickable.append(issue)
+    return pickable
 
 
 def to_snapshot(issue: dict) -> TicketSnapshot:
@@ -345,6 +462,7 @@ TRANSITION_IDS = {
     "to_under_review": "3",      # "Submit for Review" — In Progress → Under Review
     "to_approved": "4",          # "Approve" — Under Review → Approved
     "to_published": "7",         # "Deploy" — Approved → Published; bridge-only per ADR 0003
+    "to_archived": "8",          # "Archive" — Published → Archived
 }
 
 
@@ -489,6 +607,7 @@ class GerritPushResult:
     change_url: str | None
     detail: str
     recovery_note: str = ""
+    post_push_warning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -985,7 +1104,17 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
         cwd=worktree_path, check=True, capture_output=True, text=True,
     )
     dirty = [line[3:] for line in status.stdout.splitlines() if line.strip()]
-    dirty = [f for f in dirty if f != ".runner-cwd-sentinel"]
+    # SP-B-X-018 / OP-1076: filter via the CANONICAL constant exported
+    # by ``runner_progress`` so this site and ``_worktree_dirty`` never
+    # disagree about which files are runner-own bookkeeping. Previously
+    # each site maintained its own local set (SP-B-X-016 fixed one,
+    # SP-B-X-017 fixed the other) — the consolidation lets future
+    # additions land in one place.
+    # OP-1111: import from runner_artifacts (canonical home);
+    # runner_progress.RUNNER_RUNTIME_ARTIFACTS still re-exports for
+    # backwards compat with pre-OP-1111 callers.
+    from backend.agents.runner_artifacts import RUNNER_RUNTIME_ARTIFACTS
+    dirty = [f for f in dirty if f not in RUNNER_RUNTIME_ARTIFACTS]
     if dirty:
         raise WorktreeDirtyError(dirty_files=dirty)
 
@@ -1009,6 +1138,7 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
 
 _GERRIT_CHANGE_URL_RE = re.compile(r"(https://\S+/c/[^\s]+/\+/(\d+))")
 _GERRIT_CHANGE_ID_RE = re.compile(r"^Change-Id:\s*(I[0-9a-fA-F]+)\s*$", re.MULTILINE)
+_OP_KEY_RE = re.compile(r"\bOP-\d+\b")
 _TRANSIENT_GERRIT_PUSH_RE = re.compile(
     r"Missing tree|Unpack error|remote unpack failed|Connection reset|"
     r"Connection timed out|timed out|Broken pipe|Connection refused|"
@@ -1016,6 +1146,12 @@ _TRANSIENT_GERRIT_PUSH_RE = re.compile(
     re.IGNORECASE,
 )
 _GERRIT_PUSH_RETRY_BACKOFFS = (2, 4, 8)
+PRE_REVIEW_SELF_FIX_EXHAUSTED_LABELS = (
+    "needs-coordinator",
+    "pre-review-self-fix-exhausted",
+    "class:operator",
+)
+PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS = 30000
 
 
 def _is_transient_gerrit_push_failure(detail: str) -> bool:
@@ -1041,6 +1177,131 @@ def _head_change_id(worktree_path: Path) -> str | None:
         return None
     match = _GERRIT_CHANGE_ID_RE.search(result.stdout)
     return match.group(1) if match else None
+
+
+def _infer_ticket_key_from_worktree(worktree_path: Path) -> str | None:
+    """Infer the source OP ticket from the branch or HEAD commit text."""
+
+    for cmd in (
+        ["git", "branch", "--show-current"],
+        ["git", "log", "-1", "--format=%B"],
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode != 0:
+            continue
+        match = _OP_KEY_RE.search(result.stdout)
+        if match:
+            return match.group(0)
+    return None
+
+
+def _pre_review_self_fix_diff_context(worktree_path: Path, target: str) -> str:
+    """Return bounded diff context for the exhaustion escalation ticket."""
+
+    commands = (
+        ["git", "diff", "--stat", "FETCH_HEAD...HEAD"],
+        ["git", "diff", "FETCH_HEAD...HEAD"],
+    )
+    chunks: list[str] = []
+    for cmd in commands:
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=worktree_path,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            chunks.append(f"$ {' '.join(cmd)}\n<failed: {type(exc).__name__}: {exc}>")
+            continue
+        body = result.stdout if result.returncode == 0 else (result.stderr or result.stdout)
+        chunks.append(f"$ {' '.join(cmd)}\n{body.strip()}")
+
+    text = "\n\n".join(chunks).strip()
+    if len(text) > PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS:
+        omitted = len(text) - PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS
+        text = (
+            text[:PRE_REVIEW_SELF_FIX_EXHAUSTED_MAX_DIFF_CHARS]
+            + f"\n\n[diff context truncated by {omitted} chars]"
+        )
+    return text or "<no diff context produced>"
+
+
+def _adf_codeblock(text: str, language: str = "markdown") -> dict:
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            {
+                "type": "codeBlock",
+                "attrs": {"language": language},
+                "content": [{"type": "text", "text": text}],
+            }
+        ],
+    }
+
+
+def file_pre_review_self_fix_exhaustion_ticket(
+    client: DispatchClient,
+    *,
+    source_ticket_key: str | None,
+    change_number: int,
+    change_url: str,
+    change_id: str | None,
+    attempts: int,
+    target: str,
+    detail: str,
+    diff_context: str,
+) -> str:
+    """File the operator escalation when pre-review self-fix is exhausted."""
+
+    source = source_ticket_key or "unknown-source-ticket"
+    summary = f"pre-review-self-fix-exhausted: {source} Change {change_number}"
+    description = "\n".join(
+        [
+            "@coordinator",
+            "@operator fallback if coordinator is not live.",
+            "",
+            "Pre-review mergeability self-fix exhausted and needs operator coordination.",
+            "",
+            f"Source ticket: {source}",
+            f"Gerrit change: {change_url}",
+            f"Change-Id: {change_id or 'unknown'}",
+            f"Target branch: {target}",
+            f"Self-fix attempts: {attempts}",
+            f"Runner detail: {detail}",
+            "",
+            "Diff context:",
+            "```diff",
+            diff_context,
+            "```",
+        ]
+    )
+    body = {
+        "fields": {
+            "project": {"key": client.project_key},
+            "summary": summary,
+            "description": _adf_codeblock(description),
+            "issuetype": {"name": "Story"},
+            "priority": {"name": "High"},
+            "labels": list(PRE_REVIEW_SELF_FIX_EXHAUSTED_LABELS),
+        }
+    }
+    resp = _request(client, "POST", "/issue", body)
+    key = str(resp.get("key") or "")
+    if not key:
+        raise RuntimeError(f"JIRA POST /issue returned no key: {resp!r}")
+    return key
 
 
 def query_gerrit_change_by_change_id(
@@ -1101,7 +1362,7 @@ def push_to_gerrit_for_review(
     import os
     import subprocess
     try:
-        _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+        bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
     except ValueError as exc:
         return GerritPushResult(False, None, None, str(exc))
     if not ssh_key.exists():
@@ -1117,9 +1378,15 @@ def push_to_gerrit_for_review(
     blob = ""
 
     for attempt in range(1, max_attempts + 1):
+        # --no-thin forces a full pack containing every object referenced by the
+        # commit (including sub-trees git's thin-pack optimization would assume
+        # the server already has). Eliminates the "Missing tree" failure class
+        # when shared worktrees accumulate unreachable tree objects that get
+        # reused as sub-tree refs in new commits. See OP-1015/1019/1026/1028
+        # incident set (2026-05-13).
         result = BREAKERS["gerrit_ssh"].call(
             subprocess.run,
-            ["git", "push", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
+            ["git", "push", "--no-thin", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
             cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
         )
         blob = (result.stderr + "\n" + result.stdout).strip()
@@ -1173,11 +1440,75 @@ def push_to_gerrit_for_review(
     if not m:
         return GerritPushResult(False, None, None, f"push succeeded but Change URL not parsed:\n{blob[-1500:]}")
 
+    change_number = int(m.group(2))
+    change_url = m.group(1)
+    try:
+        from backend.agents import auto_rebase, pre_review_self_fix
+
+        self_fix = pre_review_self_fix.self_fix_mergeability(
+            worktree_path=worktree_path,
+            change_number=change_number,
+            gerrit_ssh_url=_gerrit_ssh_url(agent_class, instance_id),
+            rest_base_url=GERRIT_HOOK_URL.rsplit("/tools/", 1)[0],
+            username=bot_username,
+            http_password=auto_rebase.load_owner_http_password(bot_username),
+            target=target,
+        )
+    except Exception as exc:  # noqa: BLE001 - keep original push result diagnosable
+        warning = f"pre-review mergeability self-fix failed: {type(exc).__name__}: {exc}"
+        return GerritPushResult(
+            True,
+            change_number,
+            change_url,
+            blob[-1500:],
+            post_push_warning=warning,
+        )
+    if not self_fix.mergeable:
+        exhaustion_note = ""
+        if self_fix.cap_exhausted:
+            try:
+                escalation_key = file_pre_review_self_fix_exhaustion_ticket(
+                    make_client(agent_class, instance_id),
+                    source_ticket_key=_infer_ticket_key_from_worktree(worktree_path),
+                    change_number=change_number,
+                    change_url=change_url,
+                    change_id=change_id,
+                    attempts=self_fix.attempts,
+                    target=target,
+                    detail=self_fix.detail,
+                    diff_context=_pre_review_self_fix_diff_context(worktree_path, target),
+                )
+                exhaustion_note = f" Filed escalation ticket {escalation_key}."
+            except Exception as exc:  # noqa: BLE001 - preserve original push failure path
+                exhaustion_note = (
+                    " Exhaustion escalation ticket filing failed: "
+                    f"{type(exc).__name__}: {exc}."
+                )
+        warning = (
+            "pre-review mergeability self-fix did not produce a mergeable "
+            f"patchset: {self_fix.detail}.{exhaustion_note}"
+        )
+        return GerritPushResult(
+            True,
+            change_number,
+            change_url,
+            blob[-1500:],
+            post_push_warning=warning,
+        )
+
+    recovery_note = ""
+    if self_fix.force_pushed:
+        recovery_note = (
+            "Pre-review self-fix rebased and force-pushed replacement "
+            f"patchset after mergeable=false ({self_fix.attempts} attempt(s))."
+        )
+
     return GerritPushResult(
         success=True,
-        change_number=int(m.group(2)),
-        change_url=m.group(1),
+        change_number=change_number,
+        change_url=change_url,
         detail=blob[-1500:],
+        recovery_note=recovery_note,
     )
 
 
@@ -1264,10 +1595,37 @@ def post_runner_pushed_comment(
     )
 
 
+def _under_review_idem_key(
+    key: str,
+    *,
+    change_number: int | None = None,
+    change_url: str | None = None,
+) -> str:
+    operation_type = "transition"
+    if change_number is not None:
+        material = json.dumps(
+            {"target_status": "under-review", "patchset": change_number},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        args_hash = hashlib.sha256(material.encode()).hexdigest()[:12]
+    elif change_url:
+        args_hash = hashlib.sha256(change_url.encode()).hexdigest()[:12]
+    else:
+        material = json.dumps(
+            {"target_status": "under-review", "patchset": None},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        args_hash = hashlib.sha256(material.encode()).hexdigest()[:12]
+    return f"{key}:{operation_type}:{args_hash}"
+
+
 def transition_to_under_review_if_needed(
     client: "DispatchClient",
     key: str,
     idem_key: str | None = None,
+    change_number: int | None = None,
 ) -> bool:
     """In Progress → Under Review, but only if not already there.
 
@@ -1278,7 +1636,11 @@ def transition_to_under_review_if_needed(
     """
     if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
         return False
-    idem_key = idem_key or f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    idem_key = idem_key or (
+        _under_review_idem_key(key, change_number=change_number)
+        if change_number is not None
+        else f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    )
     _request_idempotent(
         client, "POST", f"/issue/{key}/transitions",
         {"transition": {"id": TRANSITION_IDS["to_under_review"]}},
@@ -1354,7 +1716,7 @@ def transition_to_under_review(
     """
     if get_issue_status(client, key) == UNDER_REVIEW_STATUS_NAME:
         return
-    base_key = idem_key or f"transition-{key}-under-review-{uuid.uuid4().hex[:12]}"
+    base_key = idem_key or _under_review_idem_key(key, change_url=gerrit_change_url)
     post_runner_pushed_comment(client, key, gerrit_change_url, idem_key=f"{base_key}-comment")
     transition_to_under_review_if_needed(client, key, idem_key=f"{base_key}-transition")
 
@@ -1434,6 +1796,24 @@ def has_ops_only_label(labels: Iterable[str]) -> bool:
     we match the exact sigil string and never interpret label values.
     """
     return OPS_ONLY_LABEL in set(labels)
+
+
+def fetch_ticket_labels(client: "DispatchClient", key: str) -> tuple[str, ...]:
+    """Return the *current* JIRA label set for ``key``.
+
+    OP-958 ``LabelsPropagationDrift``: the runner's ``TicketSnapshot``
+    carries a point-in-time label copy taken at *selection* time (JQL
+    ``fetch_pickable_tickets`` → :func:`to_snapshot`, or a single
+    ``GET /issue`` for the target-override path). Operators routinely add
+    ``runner:no-commits-expected`` *after* a ticket is already In
+    Progress — the OP-925 R3 cascade on 2026-05-12 is the canonical
+    case — so a stale snapshot makes :func:`has_ops_only_label` miss the
+    sigil even though it is on the ticket. Re-reading at the no-commits
+    decision point closes that drift window. Callers degrade to the
+    snapshot copy if this raises (JIRA transient fault).
+    """
+    issue = _request(client, "GET", f"/issue/{key}?fields=labels")
+    return tuple((issue.get("fields") or {}).get("labels") or ())
 
 
 def forward_transition_ops_only(
@@ -1580,6 +1960,21 @@ def transition_back_to_todo(
         f"{base_key}-transition",
     )
 
+    # OP-1140: stoploss circuit-breaker recording — best-effort.
+    # A recorder fault (network blip, label-fetch 404 on a freshly-created
+    # ticket, ...) must NEVER prevent the §11-revert from completing; the
+    # operator still needs the ticket re-armed for triage even if the
+    # counter slips one tick.
+    try:
+        from backend.agents import runner_stoploss
+
+        labels_now = fetch_labels(client, key)
+        runner_stoploss.register_revert(client, key, labels_now)
+    except Exception as exc:  # noqa: BLE001 — best-effort wiring
+        log.warning(
+            "jira_dispatch.register_revert_failed key=%s err=%s", key, exc,
+        )
+
 
 def add_comment(client: DispatchClient, key: str, text: str, idem_key: str | None = None) -> None:
     idem_key = idem_key or f"comment-{key}-{uuid.uuid4().hex[:12]}"
@@ -1630,6 +2025,13 @@ def dependency_waiting_labels(labels: Iterable[str]) -> list[str]:
 
 
 # ── Description / Prerequisites parsing ───────────────────────────
+
+
+def fetch_labels(client: DispatchClient, key: str) -> list[str]:
+    """Return the current label list for ``key``. Stoploss callers need this
+    after a §11-revert to count recent revert labels (OP-1140)."""
+    issue = _request(client, "GET", f"/issue/{key}?fields=labels")
+    return list((issue.get("fields") or {}).get("labels") or [])
 
 
 def fetch_description(client: DispatchClient, key: str) -> str:
@@ -1788,6 +2190,50 @@ def _paths_overlap(targets: set[str], in_flight: set[str]) -> set[str]:
     return overlaps
 
 
+def _agent_class_from_snapshot(snapshot: TicketSnapshot) -> str:
+    """Resolve the runner class label carried by a scheduler snapshot."""
+    for label in getattr(snapshot, "labels", ()):
+        if isinstance(label, str) and label.startswith("class:"):
+            return label.split(":", 1)[1]
+    return "subscription-codex"
+
+
+def _check_active_claim_hot_overlap(
+    snapshot: TicketSnapshot,
+    hot_in_target: set[str],
+) -> tuple[bool, str]:
+    """Block hot-file pickup when another claimed ticket declares same path."""
+    client = make_client(_agent_class_from_snapshot(snapshot), _instance_id_from_env())
+    jql = (
+        f'project = "{client.project_key}" '
+        f'AND labels ~ "{CLAIM_LABEL_PREFIX}*" '
+        f'AND key != "{snapshot.key}"'
+    )
+    resp = _request(client, "POST", "/search/jql", {
+        "jql": jql,
+        "fields": ["labels"],
+        "maxResults": 50,
+    })
+    for issue in resp.get("issues", []):
+        key = issue.get("key", "?")
+        labels = ((issue.get("fields") or {}).get("labels")) or []
+        if not any(isinstance(label, str) and label.startswith(CLAIM_LABEL_PREFIX) for label in labels):
+            continue
+        description = fetch_description(client, key)
+        overlap = _paths_overlap(hot_in_target, parse_files_section(description))
+        if not overlap:
+            continue
+        first = sorted(overlap)[0]
+        return (
+            False,
+            (
+                f"hot-file claim collision: {first} already claimed by {key}; "
+                f"[runner-hot-file-mutex] pre-PS claim-level mutex blocked pickup"
+            ),
+        )
+    return True, "no active hot-file claim collision"
+
+
 def migration_scope_globs(labels: Iterable[str]) -> tuple[str, ...]:
     """Extract ``migration:scope=<glob>`` labels from a JIRA label list."""
     scopes: list[str] = []
@@ -1883,12 +2329,44 @@ def file_mutex_check(
 
     overlap = _paths_overlap(target, set(in_flight_owners))
     if not overlap:
+        hot_in_target = target & HOT_FILES
+        if hot_in_target:
+            try:
+                ok, reason = _check_active_claim_hot_overlap(snapshot, hot_in_target)
+            except Exception as exc:  # noqa: BLE001 - hot-file JIRA probe fails open
+                log.warning(
+                    "hot-file claim mutex query failed for %s: %s: %s",
+                    snapshot.key,
+                    type(exc).__name__,
+                    exc,
+                )
+                return (
+                    True,
+                    "no open-PS collision; hot-file claim query failed - "
+                    f"pre-PS mutex skipped: {type(exc).__name__}: {exc}",
+                )
+            if not ok:
+                return False, reason
         return True, "no collision"
 
     first_path = sorted(overlap)[0]
     owner = in_flight_owners[first_path][0]
 
     if FILE_OVERLAP_OVERRIDE_LABEL in set(getattr(snapshot, "labels", ())):
+        hot_in_target = target & HOT_FILES
+        if hot_in_target:
+            try:
+                ok, reason = _check_active_claim_hot_overlap(snapshot, hot_in_target)
+            except Exception as exc:  # noqa: BLE001 - hot-file JIRA probe fails open
+                log.warning(
+                    "hot-file claim mutex query failed for %s: %s: %s",
+                    snapshot.key,
+                    type(exc).__name__,
+                    exc,
+                )
+                ok = True
+            if not ok:
+                return False, reason
         return (
             True,
             f"file-overlap override: {FILE_OVERLAP_OVERRIDE_LABEL} bypassed "
@@ -1909,7 +2387,7 @@ def file_mutex_check(
     )
 
 
-# ── OP-838: atomic ticket-claim mutex ─────────────────────────────
+# ── OP-838 → AUDIT-24/OP-977: atomic ticket-claim mutex ──────────────
 #
 # Why this exists: the JQL pickup filter (``assignee is EMPTY``) and the
 # ``transition_to_in_progress`` + assign call are separated by several
@@ -1918,16 +2396,76 @@ def file_mutex_check(
 # proceed past the pre-pickup gates, and both reach
 # ``transition_to_in_progress`` — JIRA accepts both writes and both CLIs
 # then race to push to Gerrit, generating duplicate Change-Ids
-# (different subjects → distinct changes, one merged + one abandoned).
-# Observed on OP-836 #356 and OP-837 #358, 2026-05-11.
+# (different subjects → distinct changes, one merged + one abandoned),
+# or the loser's failure-recovery reverts the winner's work. Observed on
+# OP-836 #356 / OP-837 #358 (2026-05-11, cross-bot) and OP-974
+# (2026-05-12, same-instance — operator rescue required at 16:45).
 #
-# This block adds a fast, atomic claim sequence the runner runs in the
-# narrow window before ``transition_to_in_progress``: GET-assignee, PUT
-# assignee+claim-label, GET-readback. Loser detects via the readback and
-# skips the ticket on this tick. The label encodes the claiming instance
-# so multi-instance setups (OP-783) can tell their own writes apart.
+# OP-838 (2026-05-11) — SUPERSEDED — added a ``claim:{instance_id}`` label
+# "mutex": GET-assignee, PUT assignee+label, GET-readback. It serialises
+# the *cross-bot* shape (assignee is single-valued, last-writer-wins) but
+# CANNOT serialise two runners that share an ``instance_id``: Atlassian's
+# ``update.labels.add`` is set-union (idempotent), not compare-and-swap,
+# so both PUT the same label, both read it back, both believe they won.
+# OP-974 is exactly that failure.
+#
+# AUDIT-24/OP-977 (2026-05-12) replaces the bare-label mutex with a
+# FENCING TOKEN. Each attempt PUTs a unique-per-tick label
+# ``claim:{instance_id}:{token}`` where ``token = f"{epoch_us:016d}-{uuid8}"``.
+# After the PUT the runner GETs the labels back and the LOWEST token among
+# ``claim:{instance_id}:*`` is the canonical winner — lexicographic order
+# over the 16-digit zero-padded microsecond prefix == chronological order,
+# so "lowest token" == "earliest claimer", with the uuid8 suffix breaking
+# same-microsecond ties. Because the winner is decided by a *total order
+# over the readback set* (not by "did my idempotent write succeed"), two
+# same-instance runners agree on exactly one winner; the loser observes
+# its token is not lowest and returns ``ok=False`` ("foreign claim").
+# Stale tokens left by a crashed runner are swept on the next claim's
+# pre-GET once aged past ``2× CLI timeout`` (``OrphanClaimLabel``).
+# Pre-AUDIT-24 bare ``claim:{instance_id}`` labels are treated as expired
+# and GC'd on next encounter (``BackwardCompatStaleClaim``).
+#
+# Rollback: ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1`` reverts to the
+# OP-838 bare-label path (acknowledged-racey-but-known-working baseline).
+# The label formats are mutually forward-compatible: old code reading a
+# new ``claim:default:0017..-ab12`` label sees instance ``"default"`` via
+# ``_claim_label_instance`` (so it correctly treats a foreign-instance
+# fenced claim as foreign and skips), and never mistakes the suffix for a
+# live ``instance_id``. See ``docs/sop/runner-pickup-mutex.md``.
 
 CLAIM_LABEL_PREFIX = "claim:"
+
+# AUDIT-24 fencing-token width: ``token = f"{epoch_us:016d}-{uuid4().hex[:8]}"``.
+# 16 zero-padded digits hold microsecond Unix epochs comfortably past the
+# year 2286, so lexicographic order over tokens == chronological order.
+_CLAIM_TOKEN_EPOCH_WIDTH = 16
+
+# Stale fencing-token sweep: a ``claim:{inst}:{token}`` label whose epoch
+# prefix is older than this is assumed orphaned by a crashed runner and
+# removed on the next claim's pre-GET. Default ``2× CLI hard timeout``
+# (3600s) per the OP-977 error catalog (``OrphanClaimLabel``). Tunable via
+# ``OMNISIGHT_RUNNER_STALE_CLAIM_MAX_AGE_S``.
+try:
+    _STALE_CLAIM_MAX_AGE_S = int(
+        os.environ.get("OMNISIGHT_RUNNER_STALE_CLAIM_MAX_AGE_S", str(2 * 3600))
+    )
+except ValueError:
+    _STALE_CLAIM_MAX_AGE_S = 2 * 3600
+
+# Atlassian's PUT-then-GET is occasionally eventually-consistent: the label
+# we just added can be missing from the very next GET for ~100ms. After the
+# claim PUT we re-GET up to ``_CLAIM_READBACK_RETRIES`` times (first attempt
+# immediate, subsequent attempts ``_CLAIM_READBACK_DELAY_S`` apart) until we
+# see our own label. Worst-case added latency ≈ (retries-1) × delay ≈ 0.4s.
+# Per the OP-977 error catalog (``JIRAPutEventualConsistencyDelay``).
+_CLAIM_READBACK_RETRIES = 3
+_CLAIM_READBACK_DELAY_S = 0.2
+
+# Rollback flag — see module header.
+_LEGACY_CLAIM_ENV = "OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY"
+# OP-1168 shadow-write flag. Default-on: labels remain authoritative while
+# runner_coordination receives best-effort shadow writes for observation.
+_CLAIM_SHADOW_ENV = "OMNISIGHT_RUNNER_CLAIM_SHADOW"
 
 
 @dataclass(frozen=True)
@@ -1935,32 +2473,118 @@ class ClaimResult:
     """Outcome of :func:`claim_ticket_atomic`.
 
     - ``ok=True, lost_to=None``: caller may proceed to
-      ``transition_to_in_progress``. Either we won this race or we're
-      re-claiming a ticket we already held (idempotent re-entry after
-      a runner restart with the same instance_id).
-    - ``ok=False, lost_to=<token>``: another instance claimed first.
-      Caller MUST skip the ticket and MUST NOT call
-      ``transition_to_in_progress``. ``lost_to`` is the foreign claim
-      label (or ``assignee:<accountId>`` for a cross-bot race) — used
-      verbatim in the ``[runner-mutex-lost]`` log line.
+      ``transition_to_in_progress``. Either we won this race (our fencing
+      token is the lowest among ``claim:{instance_id}:*``) or we're
+      re-claiming a ticket we already held (idempotent re-entry after a
+      runner restart with the same instance_id).
+    - ``ok=False, lost_to=<who>``: another claim won. Caller MUST skip the
+      ticket and MUST NOT call ``transition_to_in_progress``. ``lost_to``
+      is the winning ``claim:{inst}:{token}`` label, an
+      ``assignee:<accountId>`` string for a cross-bot race, or
+      ``"claim-label-missing-from-readback"`` if our PUT did not
+      materialise within the eventual-consistency bound — used verbatim in
+      the ``[runner-mutex-lost]`` log line.
 
-    ``claim_token`` records ``{instance_id}:{utc_iso}`` for the attempt,
+    ``claim_token`` records ``{instance_id}:{token}`` for the attempt,
     independent of label/assignee write outcome. Logged on both win and
-    loss so a post-mortem can correlate the two sides of the race.
+    loss so a post-mortem can correlate the two sides of the race. Under
+    the legacy (OP-838) path it is ``{instance_id}:{utc_iso}``.
     """
 
     ok: bool
     lost_to: str | None = None
     claim_token: str | None = None
+    coordination_lease_id: str | None = None
+    coordination_fencing_token: str | None = None
+
+
+def _coordination_resource_key(key: str) -> str:
+    """Resource key used by the OP-1107 shadow coordination table write."""
+    return f"ticket:{key}"
+
+
+def _shadow_acquire_claim(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+    *,
+    label_fencing_token: str | None = None,
+) -> runner_coordination.ClaimLease | None:
+    """Best-effort OP-1168 shadow table claim.
+
+    The JIRA label path remains load-bearing during the observation
+    period, so coordination-table write failures are logged but do not
+    change pickup behaviour.
+    """
+    if not _claim_shadow_enabled():
+        return None
+    try:
+        refs = {"source": "jira_dispatch.claim_ticket_atomic"}
+        if label_fencing_token is not None:
+            refs["label_fencing_token"] = label_fencing_token
+        return runner_coordination.acquire_claim(
+            ticket_key=key,
+            resource_key=_coordination_resource_key(key),
+            owner_agent_class=getattr(client, "agent_class", "unknown"),
+            owner_instance_id=instance_id,
+            phase="pickup",
+            external_refs=refs,
+        )
+    except Exception as exc:  # noqa: BLE001 - shadow write must not alter label path
+        log.warning("runner_coordination.acquire_claim shadow failed key=%s err=%s", key, exc)
+        return None
+
+
+def _shadow_record_phase(
+    lease: runner_coordination.ClaimLease | None,
+    phase: str,
+) -> None:
+    if lease is None or not _claim_shadow_enabled():
+        return
+    try:
+        runner_coordination.record_phase(
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            phase=phase,
+        )
+    except Exception as exc:  # noqa: BLE001 - shadow write must not alter label path
+        log.warning(
+            "runner_coordination.record_phase shadow failed lease_id=%s phase=%s err=%s",
+            lease.lease_id,
+            phase,
+            exc,
+        )
+
+
+def _shadow_release_claim(
+    lease_id: str | None,
+    fencing_token: str | None,
+    reason: str,
+) -> None:
+    if not lease_id or not fencing_token or not _claim_shadow_enabled():
+        return
+    try:
+        runner_coordination.release_claim(
+            lease_id=lease_id,
+            fencing_token=fencing_token,
+            release_reason=reason,
+        )
+    except Exception as exc:  # noqa: BLE001 - shadow release must not alter label path
+        log.warning(
+            "runner_coordination.release_claim shadow failed lease_id=%s err=%s",
+            lease_id,
+            exc,
+        )
 
 
 class RunnerMutexLost(RuntimeError):
-    """Soft signal: readback indicates another instance won the claim.
+    """Soft signal: readback indicates another claim won.
 
-    Per OP-838 ``Error catalog``. The runner-facing API surface returns
-    this as :class:`ClaimResult` (loser path returns, not raises) to keep
-    the happy path branch-free, but the typed class is exported for
-    future programmatic callers that prefer exception-based control flow.
+    Per the OP-838 / AUDIT-24 ``Error catalog`` (``MultiClaimDetected``).
+    The runner-facing API surface returns this as :class:`ClaimResult`
+    (loser path returns, not raises) to keep the happy path branch-free,
+    but the typed class is exported for future programmatic callers that
+    prefer exception-based control flow.
     """
 
     def __init__(self, key: str, claim_token: str, observed_token: str | None) -> None:
@@ -1990,17 +2614,127 @@ class RunnerMutexAPIError(RuntimeError):
         self.__cause__ = cause
 
 
+def _legacy_claim_mode() -> bool:
+    """True iff ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY`` selects the OP-838 path."""
+    return os.environ.get(_LEGACY_CLAIM_ENV, "").strip().lower() not in ("", "0", "false", "no")
+
+
+def _claim_shadow_enabled() -> bool:
+    """True unless ``OMNISIGHT_RUNNER_CLAIM_SHADOW`` explicitly disables it."""
+    return os.environ.get(_CLAIM_SHADOW_ENV, "on").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
 def _our_claim_label(instance_id: str) -> str:
-    """Default-path mutex marker per AC #4: ``claim:{instance_id}``."""
+    """Legacy (OP-838) bare mutex marker: ``claim:{instance_id}``.
+
+    Retained for the rollback path and as the cleanup target for
+    pre-AUDIT-24 labels. The AUDIT-24 fenced path uses
+    :func:`_fenced_claim_label` instead.
+    """
     return f"{CLAIM_LABEL_PREFIX}{instance_id}"
 
 
-def _claim_label_instance(label: str) -> str | None:
-    """Return the instance_id portion of a ``claim:<inst>`` label, or None."""
+def _mint_claim_token(now_us: int | None = None) -> str:
+    """A unique-per-tick fencing token ``{epoch_us:016d}-{uuid8}``.
+
+    The microsecond-epoch prefix makes lexicographic order == chronological
+    order; the 8-hex-char uuid suffix breaks ties between two runners that
+    mint within the same microsecond.
+    """
+    if now_us is None:
+        now_us = time.time_ns() // 1000
+    return f"{now_us:0{_CLAIM_TOKEN_EPOCH_WIDTH}d}-{uuid.uuid4().hex[:8]}"
+
+
+def _fenced_claim_label(instance_id: str, token: str) -> str:
+    """AUDIT-24 fencing-token label: ``claim:{instance_id}:{token}``."""
+    return f"{CLAIM_LABEL_PREFIX}{instance_id}:{token}"
+
+
+def _parse_claim_label(label: str) -> tuple[str, str | None] | None:
+    """Split a ``claim:*`` label into ``(instance_id, token | None)``.
+
+    - ``claim:default:0017..-ab12`` → ``("default", "0017..-ab12")`` — a
+      fenced AUDIT-24 claim.
+    - ``claim:default``             → ``("default", None)`` — a pre-AUDIT-24
+      bare claim (treated as expired by the fenced path).
+    - anything that is not a ``claim:<non-empty>`` label → ``None``.
+    """
     if not label.startswith(CLAIM_LABEL_PREFIX):
         return None
-    suffix = label[len(CLAIM_LABEL_PREFIX):]
-    return suffix or None
+    rest = label[len(CLAIM_LABEL_PREFIX):]
+    if not rest:
+        return None
+    inst, sep, token = rest.partition(":")
+    if not inst:
+        return None
+    return (inst, token if sep else None)
+
+
+def _claim_label_instance(label: str) -> str | None:
+    """Instance-id portion of a ``claim:*`` label, or ``None`` if not one.
+
+    Works for both the legacy bare form and the AUDIT-24 fenced form
+    (returns the ``instance_id``, never the token suffix).
+    """
+    parsed = _parse_claim_label(label)
+    return parsed[0] if parsed else None
+
+
+def _claim_token_epoch_us(token: str) -> int | None:
+    """Microsecond Unix-epoch prefix of a fencing token, or ``None``.
+
+    A token minted by :func:`_mint_claim_token` is ``{digits}-{uuid8}``;
+    the leading digit run is the epoch. Returns ``None`` for tokens that do
+    not follow that shape (defensive — such a token simply never ages out).
+    """
+    head, _, _ = token.partition("-")
+    return int(head) if head.isdigit() else None
+
+
+def _claim_token_is_stale(token: str, now_us: int, max_age_s: int) -> bool:
+    """True iff ``token``'s epoch prefix is older than ``max_age_s`` seconds."""
+    epoch_us = _claim_token_epoch_us(token)
+    if epoch_us is None:
+        return False
+    return (now_us - epoch_us) > max_age_s * 1_000_000
+
+
+def _lowest_uuid_claim_winner(
+    labels: Iterable[str],
+    instance_id: str,
+    *,
+    now_us: int,
+    max_age_s: int = _STALE_CLAIM_MAX_AGE_S,
+) -> str | None:
+    """Lowest *live* fencing token for ``instance_id`` among ``labels``.
+
+    "Live" = the label is a fenced ``claim:{instance_id}:{token}`` (not a
+    pre-AUDIT-24 bare label) whose epoch prefix is younger than
+    ``max_age_s``. Returns the bare ``token`` (not the full label), or
+    ``None`` if our instance has no live claim. Foreign-instance labels are
+    intentionally ignored here — they are handled by the assignee guard and
+    the pre/post foreign-claim checks in :func:`claim_ticket_atomic`.
+
+    This is the deterministic core of the AUDIT-24 mutex (AC #1): every
+    runner sharing ``instance_id`` runs it over the same readback set and
+    therefore agrees on the same winning token.
+    """
+    best: str | None = None
+    for label in labels:
+        parsed = _parse_claim_label(label)
+        if parsed is None:
+            continue
+        inst, token = parsed
+        if inst != instance_id or token is None:
+            continue
+        if _claim_token_is_stale(token, now_us, max_age_s):
+            continue
+        if best is None or token < best:
+            best = token
+    return best
 
 
 def claim_ticket_atomic(
@@ -2008,39 +2742,298 @@ def claim_ticket_atomic(
     key: str,
     instance_id: str,
 ) -> ClaimResult:
-    """Atomically claim ``key`` via assignee field + ``claim:<instance>`` label.
+    """Atomically claim ``key`` before ``transition_to_in_progress``.
 
-    Sequence (per OP-838 AC #1):
+    OP-1168 shadow phase: JIRA claim labels remain the load-bearing
+    ownership path. When ``OMNISIGHT_RUNNER_CLAIM_SHADOW`` is unset or
+    ``on``, the same acquire/release lifecycle is also written
+    best-effort to :mod:`runner_coordination` for observation. Shadow
+    failures are logged and swallowed.
 
-    1. GET ``/issue/<key>?fields=assignee,labels`` — bail early on a foreign
-       claim label or foreign assignee (cheap fast-fail before any write).
-    2. PUT ``/issue/<key>`` with ``assignee=bot_account_id`` AND
-       ``labels.add = claim:<instance_id>`` in a single request.
-    3. GET again — verify the assignee readback matches our bot account
-       (the primary cross-bot discriminator: assignee is single-valued and
-       last-writer-wins, so two different bots cannot both observe their
-       own accountId in the readback) and our label landed.
-    4. On readback mismatch return ``ok=False`` with ``lost_to`` describing
-       who won — the caller logs ``[runner-mutex-lost]`` and skips. On
-       success return ``ok=True`` and the caller proceeds to
-       ``transition_to_in_progress``.
+    Raises :class:`RunnerMutexAPIError` for transport failures during the
+    claim sequence. Returns :class:`ClaimResult` for the mutex-lost path.
+    """
+    if _legacy_claim_mode():
+        return _claim_ticket_atomic_legacy(client, key, instance_id)
+    return _claim_ticket_atomic_fenced(client, key, instance_id)
 
-    The OP-836/837 race that prompted this work was cross-bot
-    (``codex-bot`` vs ``claude-bot``); the assignee readback catches that
-    case exactly. Same-bot-different-instance is a degenerate config (per
-    OP-783 each instance_id maps to a unique bot account); the pre-GET
-    label fast-fail catches the *sequential* shape of that race, but the
-    fully-interleaved shape is outside the design's atomicity guarantee
-    (operator must keep bot accounts and instance_ids 1:1).
 
-    Idempotent for the same (bot, instance_id): if pre-GET shows our own
-    ``claim:<id>`` and our own assignee, the PUT is a no-op (set-add label
-    dedup + same-value assignee write) and the readback succeeds (AC #5
-    cases 4 + 5 — same-instance re-pickup and runner-restart with
-    persisted claim state).
+def _claim_ticket_atomic_table_only(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> ClaimResult:
+    """OP-1110 cutover claim path: coordination table is sole authority.
 
-    Raises :class:`RunnerMutexAPIError` for transport failures on any of
-    the three calls. Returns ``ClaimResult`` for the mutex-lost path.
+    Sequence:
+
+    1. ``runner_coordination.acquire_claim`` on the ticket resource_key.
+       The table's partial unique index on ``(resource_key) WHERE
+       state='active'`` atomically serializes contenders — on conflict
+       the call raises :class:`runner_coordination.ClaimBlocked` carrying
+       the existing lease.
+    2. Best-effort JIRA assignee PUT for human observability. Failures
+       here are logged but do not roll back the table claim — the table
+       row is the load-bearing state.
+
+    No labels written, no eventual-consistency retry loop, no label-based
+    tie-break. The table's atomic INSERT replaces the entire fenced-label
+    protocol. Cross-bot conflicts are caught by the same unique-index
+    serialization (each bot+instance has a distinct
+    ``owner_agent_class`` + ``owner_instance_id``).
+
+    Raises :class:`RunnerMutexAPIError` if the coordination table is
+    unavailable — the cutover requires the table to be reachable; falling
+    back silently to label-only would re-introduce the race the cutover
+    is closing. Operators with a coordination-DB outage can set
+    ``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1`` to revert to dual-write.
+    """
+    our_claim_token = f"{instance_id}:{_mint_claim_token(time.time_ns() // 1000)}"
+
+    try:
+        lease = runner_coordination.acquire_claim(
+            ticket_key=key,
+            resource_key=_coordination_resource_key(key),
+            owner_agent_class=getattr(client, "agent_class", "unknown"),
+            owner_instance_id=instance_id,
+            phase="pickup",
+            external_refs={"source": "claim_ticket_atomic_table_only"},
+        )
+    except runner_coordination.ClaimBlocked as exc:
+        existing = exc.existing_lease
+        lost_to = (
+            existing.fencing_token if existing is not None
+            else f"resource:{_coordination_resource_key(key)}"
+        )
+        return ClaimResult(
+            ok=False, lost_to=lost_to, claim_token=our_claim_token,
+        )
+    except Exception as exc:
+        # OP-1110: cutover requires the table. Surface as transport-style
+        # error so the runner skips this tick rather than silently
+        # bypassing mutex enforcement on a DB outage.
+        raise RunnerMutexAPIError(key, "table-acquire", exc) from exc
+
+    # Observability: set JIRA assignee so humans see who's working. Best-
+    # effort; the table claim is already held and is the authoritative
+    # state, so a 5xx here does not invalidate ownership.
+    try:
+        _request(
+            client, "PUT", f"/issue/{key}",
+            {"fields": {"assignee": {"accountId": client.bot_account_id}}},
+        )
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        log.warning(
+            "claim_ticket_atomic_table_only: assignee PUT for %s failed "
+            "(non-fatal — table claim still held): %s", key, e,
+        )
+
+    return ClaimResult(
+        ok=True,
+        lost_to=None,
+        claim_token=our_claim_token,
+        coordination_lease_id=lease.lease_id,
+        coordination_fencing_token=lease.fencing_token,
+    )
+
+
+def _claim_ticket_atomic_fenced(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> ClaimResult:
+    """AUDIT-24 fencing-token claim (AC #1).
+
+    Sequence:
+
+    1. pre-GET ``/issue/<key>?fields=assignee,labels`` — fast-fail on a
+       *live* foreign claim (another instance's fenced label, or a foreign
+       assignee); collect *stale* fenced tokens and *bare* pre-AUDIT-24
+       labels to GC in the same PUT.
+    2. PUT ``/issue/<key>``: add our ``claim:{instance_id}:{token}`` label
+       (+ assignee), and ``remove`` every stale/bare claim label spotted in
+       step 1 — one request.
+    3. post-GET readback, retried up to ``_CLAIM_READBACK_RETRIES`` times
+       until our label appears (Atlassian eventual-consistency window).
+    4. assignee readback must equal our bot account (cross-bot guard, kept
+       from OP-838), then the LOWEST live token among ``claim:{instance_id}:*``
+       wins (AC #1). If ours is not lowest we return ``ok=False`` and leave
+       our label for the next pre-GET's stale sweep — we never delete it
+       eagerly, so the winner observing it does not flip.
+    """
+    now_us = time.time_ns() // 1000
+    token = _mint_claim_token(now_us)
+    our_label = _fenced_claim_label(instance_id, token)
+    our_claim_token = f"{instance_id}:{token}"
+
+    # Step 1: pre-GET.
+    try:
+        pre = _request(client, "GET", f"/issue/{key}?fields=assignee,labels")
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        raise RunnerMutexAPIError(key, "pre-GET", e) from e
+    pre_fields = pre.get("fields") or {}
+    pre_assignee_id = (pre_fields.get("assignee") or {}).get("accountId")
+    pre_labels = list(pre_fields.get("labels") or [])
+
+    stale_to_remove: list[str] = []
+    live_foreign: str | None = None
+    for label in pre_labels:
+        parsed = _parse_claim_label(label)
+        if parsed is None:
+            continue
+        inst, tok = parsed
+        if tok is None:
+            # Pre-AUDIT-24 bare ``claim:<inst>`` — BackwardCompatStaleClaim:
+            # treat as expired, GC it, never count it as a live claim.
+            stale_to_remove.append(label)
+            continue
+        if _claim_token_is_stale(tok, now_us, _STALE_CLAIM_MAX_AGE_S):
+            # OrphanClaimLabel: crashed-runner leftover — GC and ignore.
+            stale_to_remove.append(label)
+            continue
+        if inst != instance_id and (live_foreign is None or label < live_foreign):
+            live_foreign = label
+    if live_foreign is not None:
+        return ClaimResult(ok=False, lost_to=live_foreign, claim_token=our_claim_token)
+    if pre_assignee_id and pre_assignee_id != client.bot_account_id:
+        return ClaimResult(
+            ok=False, lost_to=f"assignee:{pre_assignee_id}", claim_token=our_claim_token
+        )
+
+    coordination_lease = _shadow_acquire_claim(
+        client,
+        key,
+        instance_id,
+        label_fencing_token=token,
+    )
+
+    # Step 2: atomic PUT — add our fenced label (+ assignee), GC the rest.
+    update_ops: list[dict] = [{"add": our_label}]
+    for label in dict.fromkeys(stale_to_remove):  # de-dup, preserve order
+        update_ops.append({"remove": label})
+    try:
+        _request(
+            client, "PUT", f"/issue/{key}",
+            {
+                "fields": {"assignee": {"accountId": client.bot_account_id}},
+                "update": {"labels": update_ops},
+            },
+        )
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-error",
+            )
+        raise RunnerMutexAPIError(key, "PUT", e) from e
+
+    # Step 3: post-GET readback, with the eventual-consistency retry loop.
+    post_labels: list[str] = []
+    post_assignee_id: str | None = None
+    for attempt in range(_CLAIM_READBACK_RETRIES):
+        if attempt:
+            time.sleep(_CLAIM_READBACK_DELAY_S)
+        try:
+            post = _request(client, "GET", f"/issue/{key}?fields=assignee,labels")
+        except (RuntimeError, urllib.error.URLError, OSError) as e:
+            raise RunnerMutexAPIError(key, "post-GET", e) from e
+        post_fields = post.get("fields") or {}
+        post_assignee_id = (post_fields.get("assignee") or {}).get("accountId")
+        post_labels = list(post_fields.get("labels") or [])
+        if our_label in post_labels:
+            break
+    else:
+        # JIRAPutEventualConsistencyDelay exceeded — do not proceed on
+        # inconsistent state; the caller retries on the next tick.
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
+        return ClaimResult(
+            ok=False, lost_to="claim-label-missing-from-readback", claim_token=our_claim_token
+        )
+
+    # Step 4a: cross-bot guard — assignee is single-valued, last-writer-wins.
+    if post_assignee_id != client.bot_account_id:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
+        return ClaimResult(
+            ok=False, lost_to=f"assignee:{post_assignee_id}", claim_token=our_claim_token
+        )
+
+    # Step 4b: a live *foreign-instance* fenced claim that landed between
+    # our pre-GET and post-GET (degenerate same-bot-different-instance
+    # config — the assignee guard already covers cross-bot).
+    foreign_live = [
+        label
+        for label in post_labels
+        if (p := _parse_claim_label(label)) is not None
+        and p[1] is not None
+        and p[0] != instance_id
+        and not _claim_token_is_stale(p[1], now_us, _STALE_CLAIM_MAX_AGE_S)
+    ]
+    if foreign_live:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
+        return ClaimResult(ok=False, lost_to=min(foreign_live), claim_token=our_claim_token)
+
+    # Step 4c: lowest live token among our instance's claims wins (AC #1).
+    winning_token = _lowest_uuid_claim_winner(post_labels, instance_id, now_us=now_us)
+    if winning_token is not None and winning_token != token:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
+        return ClaimResult(
+            ok=False,
+            lost_to=_fenced_claim_label(instance_id, winning_token),
+            claim_token=our_claim_token,
+        )
+    _shadow_record_phase(coordination_lease, "label-claimed")
+    return ClaimResult(
+        ok=True,
+        lost_to=None,
+        claim_token=our_claim_token,
+        coordination_lease_id=(
+            coordination_lease.lease_id if coordination_lease is not None else None
+        ),
+        coordination_fencing_token=(
+            coordination_lease.fencing_token if coordination_lease is not None else None
+        ),
+    )
+
+
+def _claim_ticket_atomic_legacy(
+    client: DispatchClient,
+    key: str,
+    instance_id: str,
+) -> ClaimResult:
+    """OP-838 bare-label claim path — SUPERSEDED, rollback baseline only.
+
+    Reachable only via ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1``. Known to
+    NOT serialise two runners that share an ``instance_id`` (Atlassian's
+    label-add is set-union, not compare-and-swap) — that is the OP-974
+    failure AUDIT-24 fixed. Kept verbatim so an emergency rollback returns
+    to a known-working-for-the-cross-bot-case baseline.
+
+    Sequence: pre-GET (fast-fail on foreign claim label / foreign
+    assignee), PUT ``assignee + labels.add = claim:<instance_id>``,
+    post-GET (assignee readback discriminates cross-bot races, label
+    readback confirms our write landed). Idempotent for the same
+    ``(bot, instance_id)``.
     """
     our_label = _our_claim_label(instance_id)
     utc_iso = datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -2073,6 +3066,13 @@ def claim_ticket_atomic(
             claim_token=our_token,
         )
 
+    coordination_lease = _shadow_acquire_claim(
+        client,
+        key,
+        instance_id,
+        label_fencing_token=utc_iso,
+    )
+
     # Step b: atomic PUT — assignee + label add in one request.
     try:
         _request(
@@ -2083,6 +3083,12 @@ def claim_ticket_atomic(
             },
         )
     except (RuntimeError, urllib.error.URLError, OSError) as e:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-error",
+            )
         raise RunnerMutexAPIError(key, "PUT", e) from e
 
     # Step c: post-GET readback.
@@ -2099,6 +3105,12 @@ def claim_ticket_atomic(
     # and last-writer-wins. Two concurrent PUTs from different bots end
     # with exactly one bot account in the readback; everybody else loses.
     if post_assignee_id != client.bot_account_id:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(
             ok=False,
             lost_to=f"assignee:{post_assignee_id}",
@@ -2109,33 +3121,82 @@ def claim_ticket_atomic(
     # readback means the PUT was rejected or partial — treat as a loss so
     # the caller doesn't proceed on inconsistent state.
     if our_label not in post_labels:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(
             ok=False,
             lost_to="claim-label-missing-from-readback",
             claim_token=our_token,
         )
 
-    return ClaimResult(ok=True, lost_to=None, claim_token=our_token)
+    _shadow_record_phase(coordination_lease, "label-claimed")
+    return ClaimResult(
+        ok=True,
+        lost_to=None,
+        claim_token=our_token,
+        coordination_lease_id=(
+            coordination_lease.lease_id if coordination_lease is not None else None
+        ),
+        coordination_fencing_token=(
+            coordination_lease.fencing_token if coordination_lease is not None else None
+        ),
+    )
 
 
 def release_ticket_claim(
     client: DispatchClient,
     key: str,
     instance_id: str,
+    token: str | None = None,
+    *,
+    coordination_lease_id: str | None = None,
+    coordination_fencing_token: str | None = None,
 ) -> None:
-    """Remove our ``claim:<instance>`` label from ``key``.
+    """Release this instance's claim on ``key``.
 
-    Best-effort cleanup for the AC #5 case 3 path ("someone already cleared
-    the prior claim"). JIRA treats a remove-op for an absent label as a
-    no-op, so this is idempotent and safe to call when no claim was set.
-    Transport failures are logged + swallowed — the claim label is audit
-    state, not load-bearing for correctness.
+    OP-1168 shadow phase: sweep all ``claim:{instance_id}:*`` fenced
+    labels plus the legacy bare ``claim:{instance_id}`` label via the
+    existing JIRA label path, then best-effort release the coordination
+    table lease when one was captured during acquire.
     """
-    label = _our_claim_label(instance_id)
+    targets: list[str] = []
     try:
-        remove_label(client, key, label)
-    except RuntimeError as e:
-        log.warning("release_ticket_claim: removing %s failed: %s", label, e)
+        cur = _request(client, "GET", f"/issue/{key}?fields=labels")
+        labels = list((cur.get("fields") or {}).get("labels") or [])
+        for label in labels:
+            parsed = _parse_claim_label(label)
+            if parsed is not None and parsed[0] == instance_id:
+                targets.append(label)
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        log.warning("release_ticket_claim: GET labels for %s failed: %s", key, e)
+        targets = [
+            _fenced_claim_label(instance_id, token) if token else _our_claim_label(instance_id)
+        ]
+
+    targets = list(dict.fromkeys(targets))
+    if not targets:
+        _shadow_release_claim(
+            coordination_lease_id,
+            coordination_fencing_token,
+            "label-claim-released",
+        )
+        return
+    try:
+        _request(
+            client, "PUT", f"/issue/{key}",
+            {"update": {"labels": [{"remove": label} for label in targets]}},
+        )
+    except (RuntimeError, urllib.error.URLError, OSError) as e:
+        log.warning("release_ticket_claim: removing %r from %s failed: %s", targets, key, e)
+    _shadow_release_claim(
+        coordination_lease_id,
+        coordination_fencing_token,
+        "label-claim-released",
+    )
 
 
 PREREQS_RE = re.compile(
@@ -2173,6 +3234,13 @@ def parse_prerequisites(description: str) -> dict[str, list]:
 # Anything else (TODO, Approved, Published, Archived, ...) is "released" —
 # pickup of a sibling sharing the same mutex:<path> may proceed.
 MUTEX_HOLDING_STATUSES = ("In Progress", "Under Review")
+BRIDGE_DEGRADED_AFTER_SECONDS = 300
+BRIDGE_STALE_AFTER_SECONDS = 900
+BRIDGE_REVIEW_YIELDING_LABELS = frozenset({
+    "runner-batch-merge-candidate",
+    "runner-glance-required",
+    "class:subscription-codex-batch-merge",
+})
 
 
 def find_mutex_holders(
@@ -2185,7 +3253,77 @@ def find_mutex_holders(
     "Holding" = status in :data:`MUTEX_HOLDING_STATUSES`. Used by
     :func:`pre_pickup_ok` (OP-687) to enforce that two agents never
     concurrently work tickets sharing a ``mutex:<resource-id>``.
+
+    OP-1108 (v2-Ⅹ-2bc): authoritative source moved from JIRA-label JQL
+    to the ``runner_claims`` coordination table populated by the OP-1107
+    shadow-write integration. JQL is retained as a degraded-mode
+    fallback when the table is unavailable (DB down / schema missing) —
+    this keeps pickup pre-checks functional during operational incidents
+    where the coordination DB is offline but JIRA is still reachable.
+
+    Return shape stays as the legacy list-of-issue-dicts so callers
+    (notably :func:`pre_pickup_ok`'s error-message formatter) do not
+    have to be refactored alongside this read-path swap. The dicts
+    synthesised from coordination rows carry status ``"In Progress"``
+    and a single-element ``labels`` list with the matching mutex
+    resource_key — enough for the caller's
+    ``set(labels) & set(mutex_labels)`` intersection logic to surface
+    the right mutex name in the conflict report.
     """
+    if not mutex_labels:
+        return []
+
+    try:
+        from backend.agents import runner_coordination as rc
+
+        # If the coordination DB hasn't been bootstrapped yet, fall back
+        # immediately — saves a noisy stacktrace on fresh-install hosts
+        # where the table migration hasn't run.
+        if not rc._db_path().exists():
+            return _find_mutex_holders_jql(client, mutex_labels, exclude_key)
+
+        leases = rc.find_active_holders(
+            resource_keys=mutex_labels,
+            exclude_ticket=exclude_key,
+        )
+        return [_lease_to_mutex_holder_dict(lease) for lease in leases]
+    except Exception as exc:  # noqa: BLE001 - degraded mode must never raise
+        log.warning(
+            "find_mutex_holders: coordination-table read failed, "
+            "falling back to JQL; err=%s",
+            exc,
+        )
+        return _find_mutex_holders_jql(client, mutex_labels, exclude_key)
+
+
+_JQL_FALLBACK_DEPRECATION_WARNED = False
+
+
+def _find_mutex_holders_jql(
+    client: "DispatchClient",
+    mutex_labels: list[str],
+    exclude_key: str,
+) -> list[dict]:
+    """Pre-OP-1108 JIRA-label-JQL implementation of :func:`find_mutex_holders`.
+
+    Retained as the degraded-mode fallback path. Operates on the same
+    contract — list of ``{key, fields: {status, labels}}`` dicts.
+
+    OP-1110: this path is deprecated and will be removed one sprint after
+    Atlas closure. Each process logs a single deprecation warning the
+    first time it falls through here so operators can spot lingering
+    coordination-table outages from the runner logs.
+    """
+    global _JQL_FALLBACK_DEPRECATION_WARNED
+    if not _JQL_FALLBACK_DEPRECATION_WARNED:
+        log.warning(
+            "find_mutex_holders: JQL fallback path active — coordination "
+            "table read failed, using deprecated JIRA-label search. This "
+            "fallback will be removed one sprint after Sprint Atlas "
+            "closure. Investigate runner_claims table availability "
+            "(OMNISIGHT_DATABASE_PATH, alembic head, DB process)."
+        )
+        _JQL_FALLBACK_DEPRECATION_WARNED = True
     if not mutex_labels:
         return []
     label_clause = " OR ".join(f'labels = "{m}"' for m in mutex_labels)
@@ -2202,6 +3340,27 @@ def find_mutex_holders(
         "maxResults": 50,
     })
     return resp.get("issues", [])
+
+
+def _lease_to_mutex_holder_dict(lease) -> dict:
+    """Adapt a :class:`runner_coordination.ClaimLease` to the legacy
+    JIRA-issue dict shape consumed by :func:`pre_pickup_ok`'s error
+    formatter.
+
+    An active claim row always represents a ticket that has been
+    transitioned to In Progress (or is mid-pickup en route there), so
+    we synthesise ``status.name = "In Progress"`` rather than reading
+    JIRA. The synthesised ``labels`` list carries the matching
+    resource_key so the caller's mutex-label intersection logic
+    surfaces a stable label in the conflict report.
+    """
+    return {
+        "key": lease.ticket_key,
+        "fields": {
+            "status": {"name": "In Progress"},
+            "labels": [lease.resource_key],
+        },
+    }
 
 
 PartyMembershipCheck = Callable[[str], Optional[str]]
@@ -2255,11 +3414,74 @@ def _pickup_agent_from_labels(labels: Iterable[str]) -> str | None:
     return None
 
 
+def _bridge_health_pickup_reason(
+    snapshot: TicketSnapshot,
+    enabled_capabilities: Iterable[str] | None,
+    bridge_health_check: Callable[[], tuple[bool, float, Path]] | None,
+) -> str | None:
+    """Return a bridge-health refusal reason, or ``None`` when pickup may proceed.
+
+    OP-1113 / v2-X-4bc narrows the old fleet-wide bridge gate to the
+    Gerrit-finalizing capability bucket. Tickets without ``gerrit_push``
+    bypass the bridge-health gate entirely; review-yielding tickets with
+    explicit batch/glance labels may proceed during a stale window and
+    finalization is handled later by the runner/bridge lease path.
+    """
+    if enabled_capabilities is None:
+        return None
+    caps = frozenset(enabled_capabilities)
+    if "gerrit_push" not in caps:
+        return None
+
+    if bridge_health_check is None:
+        from backend.agents.gerrit_jira_bridge import check_bridge_heartbeat
+
+        bridge_health_check = check_bridge_heartbeat
+
+    _is_fresh, age_sec, path = bridge_health_check()
+    if age_sec <= BRIDGE_DEGRADED_AFTER_SECONDS:
+        return None
+    if set(snapshot.labels or ()) & BRIDGE_REVIEW_YIELDING_LABELS:
+        return None
+    if age_sec <= BRIDGE_STALE_AFTER_SECONDS:
+        return None
+
+    age_repr = "missing" if age_sec == float("inf") else f"{age_sec:.0f}s"
+    return (
+        "bridge_health_stale: Gerrit-finalizing pickup requires a fresh "
+        f"bridge heartbeat; heartbeat at {path} age={age_repr}"
+    )
+
+
+def _provider_task_for_pickup(
+    snapshot: TicketSnapshot,
+    agent_class: str,
+) -> provider_orchestrator.TaskSpec:
+    tier = "M"
+    areas: list[str] = []
+    for label in snapshot.labels:
+        if label.startswith("tier:"):
+            tier = label.split(":", 1)[1].strip().upper() or tier
+        elif label.startswith("area:"):
+            area = label.split(":", 1)[1].strip()
+            if area:
+                areas.append(area)
+    return provider_orchestrator.TaskSpec(
+        prompt=snapshot.key,
+        agent_class=agent_class,
+        tier=tier,
+        area=areas,
+        correlation_id=snapshot.key,
+    )
+
+
 def pre_pickup_ok(
     client: DispatchClient,
     snapshot: TicketSnapshot,
     worktree_path: Path | None = None,
     party_membership_check: "PartyMembershipCheck | None" = None,
+    enabled_capabilities: Iterable[str] | None = None,
+    bridge_health_check: Callable[[], tuple[bool, float, Path]] | None = None,
 ) -> tuple[bool, str]:
     """Combined pre-pickup gate. Returns (ok, reason).
 
@@ -2285,9 +3507,51 @@ def pre_pickup_ok(
     compatible — ``party_membership_check=None`` skips the gate, so
     existing callers (auto-runner-*.py) keep working until they opt
     in.
+
+    Bridge-health gate (OP-1113 / v2-X-4bc): when the caller provides
+    the resolved OP-855 capability set, stale bridge heartbeat state
+    blocks only Gerrit-finalizing pickups. Code-only tickets, and
+    review-yielding tickets carrying the explicit batch/glance envelope,
+    are allowed to proceed.
     """
     from backend.agents.live_state_check import evaluate, all_passed, format_failures
     from backend.agents.file_coordinator import has_unresolved_blockedby
+
+    # ADR-0033 §6 / S12.G v2 §3.6 — FIRST gate. Refuse operator-window-* /
+    # operator-rehearsal pickup before any other check (capability matrix,
+    # fencing-token claim, live-state). Primary filtering happens in
+    # :func:`fetch_pickable_tickets`; this branch is the defensive belt-and-
+    # suspenders for direct callers and label-added-after-fetch TOCTOU races.
+    refused, refusal_label = _runner_refuses_pickup(list(snapshot.labels))
+    if refused:
+        _emit_runner_refusal_audit(snapshot.key, refusal_label)
+        return False, f"runner_refusal_by_class:{refusal_label}"
+
+    # OP-1140: stoploss circuit-breaker — refuse any ticket whose §11-revert
+    # count has tripped the threshold. The label is added by
+    # :func:`backend.agents.runner_stoploss.register_revert` during the prior
+    # revert; an operator clears it by stripping the
+    # ``runner-stoploss:circuit-tripped-*`` label.
+    from backend.agents import runner_stoploss
+
+    stoploss_ok, stoploss_reason = runner_stoploss.pre_pickup_stoploss_ok(
+        list(snapshot.labels)
+    )
+    if not stoploss_ok:
+        return False, stoploss_reason
+
+    bridge_reason = _bridge_health_pickup_reason(
+        snapshot, enabled_capabilities, bridge_health_check
+    )
+    if bridge_reason is not None:
+        return False, bridge_reason
+
+    provider_decision = provider_orchestrator.pre_pickup_provider_decision(
+        _provider_task_for_pickup(snapshot, client.agent_class)
+    )
+    if not provider_decision.ok:
+        return False, provider_decision.reason
+
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)
 

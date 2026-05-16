@@ -1,0 +1,27 @@
+; OP-995 / AUDIT-29h — one-shot Published -> Archived retention sweep.
+;
+; Install alongside gerrit-jira-bridge.service in the same user-level
+; systemd scope so it reuses the bridge's JIRA/Gerrit bot credentials:
+;
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/gerrit-jira-archive-sweep.service ~/.config/systemd/user/
+;   cp deploy/systemd/gerrit-jira-archive-sweep.timer ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now gerrit-jira-archive-sweep.timer
+
+[Unit]
+Description=OmniSight JIRA Published-to-Archived sweep (OP-995)
+Documentation=https://soraapp.atlassian.net/browse/OP-995
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_ARCHIVE_AGE_DAYS=30
+Environment=OMNISIGHT_COORDINATOR_DECISION_LOG_DIR=/home/user/.config/omnisight/coordinator/decision-log
+ExecStart=/usr/bin/python3 -m backend.agents.gerrit_jira_bridge --agent-class subscription-claude --archive-sweep-once
+StandardOutput=append:/home/user/work/sora/logs/bridge/archive-sweep.log
+StandardError=append:/home/user/work/sora/logs/bridge/archive-sweep.log

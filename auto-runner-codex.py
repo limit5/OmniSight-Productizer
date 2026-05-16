@@ -28,6 +28,10 @@ Companion docs:
   * AGENTS.md            — Codex's L1 rule layer (must be present)
   * coordination.md      — section ownership + Tier rules + worktree layout
   * docs/operations/codex-collaboration.md — operator how-to
+
+JIRA-mode claim shadowing is controlled centrally by
+``OMNISIGHT_RUNNER_CLAIM_SHADOW`` in ``backend.agents.jira_dispatch``;
+this TODO-mode runner does not write JIRA claim labels.
 """
 
 from __future__ import annotations

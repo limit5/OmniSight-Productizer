@@ -42,10 +42,15 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
+from os import environ
 from threading import RLock
 from types import MappingProxyType
 
-from backend.agents.provider_quota_tracker import QuotaState
+from backend.agents.provider_quota_tracker import (
+    DEFAULT_5H_CAP_TOKENS,
+    DEFAULT_WEEKLY_CAP_TOKENS,
+    QuotaState,
+)
 from backend.agents.provider_quota_tracker import get_quota_state as _get_quota_state
 
 
@@ -58,6 +63,7 @@ class TaskSpec:
     tier: str
     area: list[str]
     correlation_id: str | None = None
+    prefer_agent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +97,15 @@ class ProviderRegistryEntry:
     provider_id: str
     status: str
     coming_version: str | None = None
+
+
+@dataclass(frozen=True)
+class PrePickupProviderDecision:
+    """Provider quota/circuit decision for runner pre-pickup gates."""
+
+    ok: bool
+    reason: str
+    provider_id: str | None = None
 
 
 class ProviderNotRegistered(Exception):
@@ -128,6 +143,16 @@ SUBSCRIPTION_VENDOR_REGISTRY = MappingProxyType({
     "grok": "grok-subscription",
     "openai": "openai-subscription",
     "xai": "xai-subscription",
+})
+_AGENT_CLASS_PROVIDER_PREFIXES = MappingProxyType({
+    "api-anthropic": ("anthropic",),
+    "api-gemini": ("gemini",),
+    "api-openai": ("openai",),
+    "api-xai": ("xai",),
+    "subscription-claude": ("anthropic",),
+    "subscription-codex": ("openai",),
+    "subscription-gemini": ("gemini",),
+    "subscription-xai": ("xai",),
 })
 
 
@@ -195,6 +220,57 @@ def subscription_adapter_id_for_vendor(vendor_id: str) -> str:
         raise ProviderNotRegistered(key) from exc
 
 
+def pre_pickup_provider_decision(task: TaskSpec) -> PrePickupProviderDecision:
+    """Return the provider quota/circuit gate decision before runner pickup.
+
+    This gate is intentionally narrower than routing: it does not rank
+    providers or probe health.  It only blocks when every provider matching the
+    task's ``agent_class`` has an explicit quota/circuit reason that would make
+    a cost-bearing dispatch fail after pickup.
+    """
+    blocked_reasons: list[str] = []
+    unavailable_reasons: list[str] = []
+    inspected = 0
+
+    for provider_id in list_adapters():
+        provider_id = _normalise_provider_id(provider_id)
+        if not _agent_class_allows_provider(task.agent_class, provider_id):
+            continue
+        inspected += 1
+        adapter = get_adapter(provider_id)
+        try:
+            state = adapter.get_quota_state()
+        except Exception as exc:  # noqa: BLE001 - preserve pickup if telemetry is down
+            unavailable_reasons.append(
+                f"provider_quota_unavailable:{provider_id}:{type(exc).__name__}"
+            )
+            continue
+
+        reason = _quota_or_circuit_block_reason(state)
+        if reason is None:
+            return PrePickupProviderDecision(
+                ok=True,
+                reason="pre-pickup provider checks passed",
+                provider_id=provider_id,
+            )
+        blocked_reasons.append(reason)
+
+    if inspected == 0:
+        return PrePickupProviderDecision(
+            ok=True,
+            reason="pre-pickup provider checks skipped: no matching provider",
+        )
+    if not blocked_reasons:
+        return PrePickupProviderDecision(
+            ok=True,
+            reason=(
+                "pre-pickup provider checks skipped: "
+                + "; ".join(unavailable_reasons)
+            ),
+        )
+    return PrePickupProviderDecision(ok=False, reason="; ".join(blocked_reasons))
+
+
 class CircuitBreaker:
     """Consecutive-failure breaker for one provider.
 
@@ -248,10 +324,53 @@ def _normalise_provider_id(provider_id: str) -> str:
     return out
 
 
+def _agent_class_allows_provider(agent_class: str, provider_id: str) -> bool:
+    prefixes = _AGENT_CLASS_PROVIDER_PREFIXES.get(agent_class.strip())
+    if prefixes is None:
+        return True
+    provider_prefix = provider_id.split("-", 1)[0]
+    return provider_prefix in prefixes
+
+
+def _quota_or_circuit_block_reason(state: QuotaState) -> str | None:
+    if state.circuit_state == "open":
+        return f"provider_circuit_open:{state.provider}"
+    if state.rolling_5h_tokens >= _cap_for(state.provider, "5h"):
+        return f"provider_quota_exhausted:{state.provider}:5h"
+    if state.weekly_tokens >= _cap_for(state.provider, "weekly"):
+        return f"provider_quota_exhausted:{state.provider}:weekly"
+    return None
+
+
+def _cap_for(provider_id: str, scope: str) -> int:
+    suffix = "5H" if scope == "5h" else "WEEKLY"
+    env_name = f"OMNISIGHT_PROVIDER_CAP_{_env_provider(provider_id)}_{suffix}"
+    raw = (environ.get(env_name) or "").strip()
+    if raw:
+        try:
+            cap = int(raw)
+        except ValueError:
+            cap = (
+                DEFAULT_5H_CAP_TOKENS
+                if scope == "5h"
+                else DEFAULT_WEEKLY_CAP_TOKENS
+            )
+        if cap > 0:
+            return cap
+    if scope == "5h":
+        return DEFAULT_5H_CAP_TOKENS
+    return DEFAULT_WEEKLY_CAP_TOKENS
+
+
+def _env_provider(provider_id: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in provider_id.upper())
+
+
 __all__ = [
     "CircuitBreaker",
     "DispatchResult",
     "HealthStatus",
+    "PrePickupProviderDecision",
     "ProviderAdapter",
     "ProviderNotRegistered",
     "ProviderRegistryEntry",
@@ -262,6 +381,7 @@ __all__ = [
     "list_adapters",
     "list_provider_entries",
     "list_subscription_vendors",
+    "pre_pickup_provider_decision",
     "register_adapter",
     "register_coming_provider",
     "subscription_adapter_id_for_vendor",

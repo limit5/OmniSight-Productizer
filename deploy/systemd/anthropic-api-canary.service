@@ -1,0 +1,29 @@
+; [OP-1066] Hourly Anthropic-API surface-drift canary.
+;
+; Drift fires Severity.DEGRADED via operator_notifier from inside the
+; script; the non-zero exit is the secondary signal. Both are
+; intentional — a failed notifier dispatch must not be the only way
+; drift surfaces.
+;
+; Install (user-level — must share ANTHROPIC_API_KEY with the runner):
+;   systemctl --user enable --now anthropic-api-canary.timer
+;
+; ANTHROPIC_API_KEY is intentionally NOT pinned here (CLAUDE.md L1) —
+; it is read at runtime from the user environment.
+
+[Unit]
+Description=OmniSight Anthropic-API surface-drift canary (OP-1066)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/work/sora/OmniSight-claude-worktree
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 %h/work/sora/OmniSight-claude-worktree/scripts/anthropic-api-canary.py
+StandardOutput=append:%h/work/sora/logs/anthropic-api-canary/canary.log
+StandardError=append:%h/work/sora/logs/anthropic-api-canary/canary.log
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

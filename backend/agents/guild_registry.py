@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import FrozenSet, Mapping
 
+from backend.agents import routing_policy
 from backend.sandbox_tier import Guild
 
 SECONDARY_GUILD_UNLOCK_LEVEL = 50
@@ -39,6 +40,15 @@ class SecondaryGuildChoice:
     primary_guild: Guild
     secondary_guild: Guild
     level: int
+
+
+@dataclass(frozen=True)
+class GuildModelPreference:
+    """RPG-facing import of BP.F's model mapping for one Guild."""
+
+    guild: Guild
+    model_spec: str
+    provider_family: str
 
 
 GUILD_DEFINITIONS: Mapping[Guild, GuildDefinition] = MappingProxyType(
@@ -222,6 +232,14 @@ class UnknownAgentClassError(KeyError):
     """Raised when an agent_class is absent from the RPG Guild matrix."""
 
 
+class UnknownGuildModelMappingError(KeyError):
+    """Raised when BP.F has no model mapping for a Guild."""
+
+
+class UnroutableGuildModelMappingError(ValueError):
+    """Raised when BP.F names a provider family MP routing does not consume."""
+
+
 class SecondaryGuildLockedError(ValueError):
     """Raised when an agent has not reached the secondary-Guild unlock."""
 
@@ -258,6 +276,43 @@ def agent_class_supports_guild(agent_class: str, guild: Guild) -> bool:
     """Whether ``agent_class`` may specialize into ``guild``."""
 
     return guild in eligible_guilds_for_agent_class(agent_class)
+
+
+def model_preference_for_guild(guild: Guild) -> GuildModelPreference:
+    """Return BP.F's model preference for ``guild`` using MP routing labels."""
+
+    guild_specs, _ = routing_policy._load_model_routing_matrix()
+    model_spec = guild_specs.get(guild.value)
+    if model_spec is None:
+        raise UnknownGuildModelMappingError(
+            f"No BP.F model mapping for Guild {guild.value!r}"
+        )
+
+    provider = routing_policy._provider_from_model_spec(model_spec)
+    provider_family = (
+        routing_policy._adr_vendor_label(provider) if provider is not None else None
+    )
+    if (
+        provider_family is None
+        or provider_family not in routing_policy.ROUTING_POLICY_CONSUMED_PROVIDER_LABELS
+    ):
+        raise UnroutableGuildModelMappingError(
+            "BP.F model mapping for Guild "
+            f"{guild.value!r} uses provider {provider!r}, but MP routing "
+            "does not consume that provider label"
+        )
+
+    return GuildModelPreference(
+        guild=guild,
+        model_spec=model_spec,
+        provider_family=provider_family,
+    )
+
+
+def list_guild_model_preferences() -> tuple[GuildModelPreference, ...]:
+    """Return BP.F model preferences for every Guild in canonical enum order."""
+
+    return tuple(model_preference_for_guild(guild) for guild in Guild)
 
 
 def secondary_guilds_for_agent_class(

@@ -1,0 +1,47 @@
+; [OP-965] AUDIT-17 — staging gate "smoke" status emitter.
+;
+; Runs scripts/prod_smoke_test.py against the develop-tip staging
+; deployment and appends a JSONL gate line to smoke-status.jsonl, which
+; scripts/release_milestone_checker.py reads for the R3 ``smoke_suite``
+; gate. The checker requires that record be < 4h old, so the matching
+; timer fires every 30 min (see staging-gate-smoke.timer) — comfortably
+; inside the window even after a missed tick.
+;
+; Default subset is ``dag1`` (compile-flash host_native fast path, ~60s);
+; override via OMNISIGHT_STAGING_SMOKE_SUBSET=both in the EnvironmentFile
+; to also run the heavy aarch64 cross-compile DAG.
+;
+; prod_smoke_test.py needs an operator credential — set OMNISIGHT_API_TOKEN
+; in /home/user/.config/omnisight/staging-gate.env (mode 0600).
+;
+; §6 audit trail + install instructions: see deploy/systemd/staging-gate-canary.service.
+
+[Unit]
+Description=OmniSight staging gate — smoke status emitter (OP-965)
+After=network-online.target
+Wants=network-online.target
+OnFailure=staging-gate-alert.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_GERRIT_SSH_HOST=codex-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
+Environment=OMNISIGHT_STAGING_URL=http://localhost:18080
+Environment=OMNISIGHT_RELEASE_SMOKE_LOG=/home/user/work/sora/logs/release-milestone/smoke-status.jsonl
+Environment=OMNISIGHT_STAGING_SMOKE_SUBSET=dag1
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
+EnvironmentFile=-/home/user/.config/omnisight/staging-gate.env
+ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/staging_gate.py --suite smoke
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/staging-gate.log
+StandardError=append:/home/user/work/sora/logs/release-milestone/staging-gate.log
+; The smoke DAG itself is bounded by --smoke-timeout (default 600 s).
+; 15 min gives margin for the dag1 path plus Gerrit develop-tip lookup.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

@@ -71,10 +71,27 @@ DO_BACKUP=0
 SKIP_INGRESS=0
 DRY_RUN=0
 FORCE=0
+declare -A GRACE_PERIODS=(
+  [postgres]=30
+  [pg-primary]=30
+  [backend]=40
+  [backend-a]=40
+  [backend-b]=40
+  [caddy]=15
+  [frontend]=15
+  [cloudflared]=15
+)
+DEFAULT_GRACE=10
+PG_WAL_SAFETY_TIMEOUT=25
 
 log() { printf '\033[36m[shutdown]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[shutdown]\033[0m %s\n' "$*" >&2; }
 err() { printf '\033[31m[shutdown]\033[0m %s\n' "$*" >&2; }
+jsonl_stop_result() {
+  local service="$1" grace="$2" method="$3" result="$4"
+  printf '{"service":"%s","grace_used":%s,"method":"%s","result":"%s"}\n' \
+    "$service" "$grace" "$method" "$result"
+}
 
 usage() {
   sed -n '1,55p' "$0" | sed 's/^# \{0,1\}//'
@@ -156,6 +173,11 @@ compose_cmd() {
   else
     echo "docker-compose"
   fi
+}
+
+service_grace() {
+  local service="$1"
+  echo "${GRACE_PERIODS[$service]:-$DEFAULT_GRACE}"
 }
 
 # ── systemd shutdown ──────────────────────────────────────────────
@@ -262,10 +284,15 @@ shutdown_compose() {
     err "docker not found — cannot use compose mode"
     return 2
   fi
-  local file cc
+  local file compose_path cc
   file=$(pick_compose_file)
+  if [[ "$file" == /* ]]; then
+    compose_path="$file"
+  else
+    compose_path="$ROOT/$file"
+  fi
   cc=$(compose_cmd)
-  if [[ ! -f "$ROOT/$file" ]]; then
+  if [[ ! -f "$compose_path" ]]; then
     err "compose file not found: $file"
     return 2
   fi
@@ -274,19 +301,14 @@ shutdown_compose() {
   # 1. Optional: stop ingress (caddy) first so new external traffic
   #    is rejected before the backends drain. Only present in prod.
   if (( SKIP_INGRESS == 0 )); then
-    if $cc -f "$file" ps --services 2>/dev/null | grep -qx caddy; then
-      log "stopping caddy (ingress) …"
-      run $cc -f "$file" stop -t 10 caddy || true
-    fi
+    stop_compose_service "$file" "$cc" cloudflared || return 1
+    stop_compose_service "$file" "$cc" caddy || return 1
   else
     log "skipping ingress stop (--skip-ingress)"
   fi
 
   # 2. frontend next (no drain) — pulls external browsers off the app.
-  if $cc -f "$file" ps --services 2>/dev/null | grep -qx frontend; then
-    log "stopping frontend …"
-    run $cc -f "$file" stop -t 15 frontend || true
-  fi
+  stop_compose_service "$file" "$cc" frontend || return 1
 
   # 3. Optional DB backup before the backend stops. If SQLite lives in a
   #    named volume we invoke sqlite3 inside the backend container; if
@@ -298,33 +320,126 @@ shutdown_compose() {
   # 4. backend replicas — lifecycle.py drain.  The compose stop -t value
   #    is the hard SIGKILL deadline; 40s is enough for the 30s in-flight
   #    drain + 10s buffer, matching the systemd unit.
-  local backends=()
   for svc in backend backend-a backend-b; do
-    if $cc -f "$file" ps --services 2>/dev/null | grep -qx "$svc"; then
-      backends+=("$svc")
-    fi
+    stop_compose_service "$file" "$cc" "$svc" || return 1
   done
-  if ((${#backends[@]} > 0)); then
-    log "stopping backends: ${backends[*]}"
-    run $cc -f "$file" stop -t 40 "${backends[@]}" || true
-  fi
 
   # 5. workers (dev compose only, via profile)
-  if $cc -f "$file" --profile workers ps --services 2>/dev/null | grep -qx worker; then
-    log "stopping worker (60s drain) …"
-    run $cc -f "$file" --profile workers stop -t 60 worker || true
-  fi
+  stop_compose_service "$file" "$cc" worker --profile workers || return 1
 
-  # 6. observability sidecars (prod only)
-  for svc in prometheus grafana; do
-    if $cc -f "$file" --profile observability ps --services 2>/dev/null | grep -qx "$svc"; then
-      log "stopping $svc …"
-      run $cc -f "$file" --profile observability stop -t 10 "$svc" || true
-    fi
+  # 6. datastore containers, when present in local compose fixtures.
+  for svc in postgres pg-primary; do
+    stop_compose_service "$file" "$cc" "$svc" || return 1
   done
 
-  # 7. verify
+  # 7. observability sidecars (prod only)
+  for svc in prometheus grafana; do
+    stop_compose_service "$file" "$cc" "$svc" --profile observability || return 1
+  done
+
+  # 8. verify
   verify_compose_down "$file" "$cc"
+}
+
+compose_service_exists() {
+  local file="$1" cc="$2" service="$3"
+  shift 3
+  $cc -f "$file" "$@" ps --services 2>/dev/null | grep -qx "$service"
+}
+
+compose_service_container() {
+  local file="$1" cc="$2" service="$3"
+  shift 3
+  $cc -f "$file" "$@" ps -q "$service" 2>/dev/null | head -n 1
+}
+
+container_running() {
+  local container="$1"
+  [[ "$(docker inspect --format='{{.State.Running}}' "$container" 2>/dev/null || echo false)" == "true" ]]
+}
+
+wait_container_exit() {
+  local container="$1" grace="$2" started now
+  started=$(date +%s)
+  while container_running "$container"; do
+    now=$(date +%s)
+    if (( now - started >= grace )); then
+      return 1
+    fi
+    sleep 1
+  done
+  return 0
+}
+
+stop_compose_service() {
+  local file="$1" cc="$2" service="$3"
+  shift 3
+  if ! compose_service_exists "$file" "$cc" "$service" "$@"; then
+    return 0
+  fi
+
+  local container grace
+  container=$(compose_service_container "$file" "$cc" "$service" "$@")
+  grace=$(service_grace "$service")
+  if [[ -z "$container" ]] || ! container_running "$container"; then
+    log "already exited: $service"
+    jsonl_stop_result "$service" "$grace" SIGTERM already_exited
+    return 0
+  fi
+
+  wait_pg_wal_safe "$file" "$cc" "$service" "$@" || return 1
+
+  log "stopping $service (grace=${grace}s) …"
+  if (( DRY_RUN )); then
+    run docker kill --signal=TERM "$container"
+    jsonl_stop_result "$service" "$grace" SIGTERM stopped
+    return 0
+  fi
+
+  docker kill --signal=TERM "$container" >/dev/null
+  if wait_container_exit "$container" "$grace"; then
+    jsonl_stop_result "$service" "$grace" SIGTERM stopped
+    return 0
+  fi
+
+  warn "$service still running after ${grace}s — sending SIGKILL"
+  docker kill --signal=KILL "$container" >/dev/null
+  if wait_container_exit "$container" 1; then
+    jsonl_stop_result "$service" "$grace" SIGKILL stopped
+    return 0
+  fi
+
+  err "$service did not stop after SIGKILL"
+  return 1
+}
+
+wait_pg_wal_safe() {
+  local file="$1" cc="$2" service="$3"
+  shift 3
+  if [[ "$service" != "postgres" && "$service" != "pg-primary" ]]; then
+    return 0
+  fi
+
+  local started now
+  started=$(date +%s)
+  log "waiting for $service WAL checkpoint and readiness (timeout=${PG_WAL_SAFETY_TIMEOUT}s) …"
+  if ! run $cc -f "$file" "$@" exec -T "$service" psql -c "CHECKPOINT;"; then
+    err "$service CHECKPOINT failed before shutdown"
+    return 1
+  fi
+
+  while true; do
+    if run $cc -f "$file" "$@" exec -T "$service" pg_isready >/dev/null 2>&1; then
+      log "$service pg_isready OK after checkpoint"
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - started >= PG_WAL_SAFETY_TIMEOUT )); then
+      err "$service pg_isready did not become OK within ${PG_WAL_SAFETY_TIMEOUT}s"
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 verify_compose_down() {

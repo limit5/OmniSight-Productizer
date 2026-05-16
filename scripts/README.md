@@ -28,7 +28,41 @@ MANUAL REBASE REQUIRED
 By default the script is idempotent and read-only. `--apply` creates a
 temporary local branch, cherry-picks the ordered patchset commits, and reports
 the first conflict point.
-=======
+
+## `jira-todo-backlog-triage.py`
+
+Triages the `migrated-from-todo` backlog dump (OP-1014) — the ~530 open OP
+tickets carrying `runner-needs-refinement`, `migrated-from-todo-bulk` or
+`migrated-from-todo` that were bulk-imported from `TODO.md` without
+refinement and are therefore invisible to the runner JQL but visible in every
+project-wide query.
+
+Read-only triage → Markdown report + JSONL decision file:
+
+```bash
+python3 scripts/jira-todo-backlog-triage.py triage \
+    --report docs/audit/$(date +%F)-todo-backlog-triage.md \
+    --decisions /tmp/op-1014-decisions.jsonl
+```
+
+Each open legacy-label ticket is classified `keep` (has a live signal:
+started / assigned / has fixVersion / non-bot comment / recently updated /
+younger than `--abandon-age-days`), `abandon` (old + cold + never started →
+Won't Do / Archived) or `duplicate` (shares a normalised summary with an
+older sibling — flagged for human confirmation, never auto-closed unless
+`--allow-duplicate-apply`). Tie-break: `keep` wins.
+
+The bulk action defaults to dry-run; pass `--execute` to comment + run the
+Won't Do transition on an operator-reviewed decision file, optionally batched:
+
+```bash
+python3 scripts/jira-todo-backlog-triage.py apply --decisions /tmp/op-1014-decisions.jsonl   # dry-run
+python3 scripts/jira-todo-backlog-triage.py apply --decisions /tmp/op-1014-decisions.jsonl --execute --limit 50
+```
+
+See anti-pattern #13 in `docs/sop/architecture-anti-patterns.md` and lesson
+`L-OP-1014` for why this inventory exists and how to avoid recreating it.
+
 ## `ship-pending.py`
 
 Manual Gerrit shipper for operator or interactive-Claude commits made

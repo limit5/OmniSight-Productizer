@@ -1,0 +1,92 @@
+## §0. Bottom-line v1.3 verdict (Q-4)
+file-ready-with-conditional
+
+v1.3 fixes the substantive round-1 blockers well enough to start filing most v2-* tickets, but not all tickets should file yet. The conditional fix is small and mechanical: repair the SD-1 evidence artifact so its commands are actually copy-pasteable from this branch or explicitly use `git show HEAD:` / `refs/remotes/gerrit/develop:`, update the stale version/title and ticket-count headings/effort estimates, and add boundary blocks for the two new v1.3 tickets before those tickets file. This is not another full v1.4 cycle; it is a short amendment pass.
+
+## §1. Per-finding amendment verification (Q-1)
+
+| Round-1 finding | v1.3 status | Verification |
+|---|---|---|
+| P0-1 Review corpus incomplete | addressed-with-caveat | §0.1 lines 40-59 now maps every missing reference and correctly explains that several docs are on `refs/remotes/gerrit/develop` or HEAD despite working-tree deletion. I spot-checked ADR-0023 via `git show refs/remotes/gerrit/develop:docs/adr/ADR-0023-foundation-rebuild.md`, and the parent spec via `git show HEAD:docs/sprint-s12/sprint-s12g-governance-engine-spec.md`; both are readable. Caveat: reviewers must know to ignore working-tree deletion status. v1.4 fix: add the exact `git show` commands for every non-working-tree corpus path, not just prose. |
+| P0-2 SD-1 self-compliance fail | partially addressed | §0.1 lines 61-89 adds an evidence block and the scope narrowing is reasonable: SD-1 should target historical novelty claims, not intra-document change descriptors. However, the six listed commands do not do what the block claims when run as written from this branch: commands 1/2/3/4/6 fail with missing files because the target docs/packages are deleted or absent in the working tree; command 5 exits with no output and does not substantiate the split claim about `fencing_token`. This conflicts with the schema at lines 176-184 requiring copy-pasteable commands. v1.4 fix: rewrite each `cmd:` to use `git show HEAD:<path> | grep ...`, `git grep <rev> -- <path>`, or `git show refs/remotes/gerrit/develop:<path> | grep ...`, and include actual result snippets/counts. |
+| P0-3 Integration tier:S violations | addressed cleanly | The four named tickets are actually tier:M now: `v2-AlertBridge-AMMigrationTest` line 229, `v2-⑦-Integration` line 464, `v2-⑨-Integration` line 511, and `v2-A7-Integration` line 583. Existing integration/soak tickets `v2-⑤/⑥/⑧-Integration` remain tier:L at lines 403, 437, 487. No other ticket named Integration remains tier:S. |
+| P0-4 Boundaries absent | addressed-with-caveat | §3.0.5 lines 235-373 adds 7 well-formed YAML-ish boundary blocks for the highest-blast-radius tickets. The selected seven are the right high-risk set, and `required_area_labels` are present. Caveat: the remaining-60 deferral is acceptable only because this is a planning spec; it must be a filing gate, not a vague future cycle. v1.4 fix: state “no child ticket may file until its own boundary block exists,” and add boundaries for new `v2-⑤-AutoRedeploy` and `v2-⑦-Reproduce-401`. |
+| P1-1 Family ⑥ recovery non-deterministic | addressed-with-caveat | §3.0.6 lines 405-417 gives 7 deterministic subcontracts, and each has a concrete contract test. This is a real improvement. Caveat: subcontract 2 says a build with 3 alembic heads “resolves to deterministic single head” (line 410); multi-head should probably fail the build unless there is an explicit merge-head policy. v1.4 fix: change image-head resolution to “exactly one head or build fails with remediation.” |
+| P1-2 ⑤ missing consumer-side auto-redeploy | addressed-with-caveat | New `v2-⑤-AutoRedeploy` at line 438 closes the OP-1035 consumer-side gap and includes a backward-drift invariant test. Cron-vs-Watchtower deferral is reasonable because it is explicitly operator-pending and defaults to lower-blast cron. Caveat: the ticket is tier:S despite prod compose recreate / scheduled redeploy. v1.4 fix: make it tier:M or add a boundary block justifying S with `operator-prepare-only` constraints. |
+| P1-3 ⑦ pre-refactor failing test | addressed cleanly | `v2-⑦-Reproduce-401` is inserted before `v2-⑦-1bc` and blocks it at lines 459-460. It includes reverse-proxy health path, `/api/v1/health` vs `/health`, WebSocket bypass, docs/OpenAPI exception paths, and mount-order discovery. |
+| P1-4 ⑧ D1/D2/D5 partial-without-tickets | addressed-with-caveat | Lines 470-474 now give explicit N/A rationales. D1 and D5 are honest: Windows-side forced shutdown and post-SIGKILL rescue are outside Productizer. D2 cross-family delegation to ⑤/⑥ alerts is plausible but narrow. v1.4 fix: make `v2-⑧-4a-Doc` explicitly include the operator-visible “last forced shutdown cannot be detected by Productizer” limitation so this does not silently disappear. |
+| P1-5 ⑨ daemon-hygiene lost | addressed-with-caveat | Line 501 records the punt explicitly and ties the one-shot local state to `v2-⑨-3a-Decision`. Caveat: it references the architecture memo §8 as “post-rc2 deferred,” but that memo’s §8 is “What this document is NOT,” not a concrete META. v1.4 fix: name the future META/ticket placeholder in this spec, even if unfiled. |
+| P1-6 v2-A3 too coarse | addressed cleanly | `v2-A3` is now tier:M and includes A3.a/A3.b/A3.c subscopes plus 12+ fixture classes at line 579. This is concrete enough to file as one M ticket. |
+| P1-7 AlertBridge byte-for-byte wrong | addressed cleanly | Line 229 changes the invariant to `canonical_envelope(P) == canonical_envelope(P')` and lists stripped and preserved fields. The preserved list matches the contract labels/annotations at lines 210-216. |
+| P2-1 Version inconsistency | NOT addressed | Frontmatter still says `version: v1 (draft ... pre-codex-review)` at line 3 and title still says `Ticket Spec v1` at line 17, although status says v1.3 at line 6. v1.4 fix: set `version: v1.3` and title suffix `Ticket Spec v1.3`. |
+| P2-2 §6 graph v2-⑨-2a typo | addressed cleanly | §6 now references `v2-⑨-3a-Decision` at line 620, matching the ticket at line 510. |
+| P2-3 §6 graph missing AlertBridge | addressed cleanly | §6 now inserts `v2-AlertBridge-Framework` between schema kernel and family fan-out at lines 611-614. |
+| P2-4 AlertBridge area_label not tied | addressed-with-caveat | `required_area_labels` appear in §3.0.5 for the AlertBridge critical implementation block at lines 298-312, and AlertRule rows include `area=deployment` in prose at lines 399 and 436. Caveat: the individual AlertRule tickets still lack boundary blocks. v1.4 fix: add per-ticket boundary blocks before filing each AlertRule. |
+
+## §2. New issues introduced (Q-2)
+
+1. P1 — SD-1 evidence commands are not copy-pasteable from this review branch (§0.1 lines 65-84; schema lines 176-184). Running them as written produced missing-file exits for the parent spec, phase-31g spec, and `backend/governance_engine/`. This is the only amendment that risks reintroducing a P0-shaped issue because it weakens the validator’s own evidence format. Concrete fix: replace working-tree paths with `git show HEAD:<path>` / `git show refs/remotes/gerrit/develop:<path>` commands and actual result snippets.
+
+2. P1 — New `v2-⑤-AutoRedeploy` is undersized as tier:S (line 438). It changes prod compose pull policy or adds a watcher/cron that recreates prod services, and it is operator-prepare-only with runtime consequences. Concrete fix: make it tier:M, or split into S spec + M operator-window implementation.
+
+3. P1 — The two new v1.3 tickets lack boundary blocks. `v2-⑤-AutoRedeploy` line 438 needs destructive/lifecycle boundaries; `v2-⑦-Reproduce-401` line 459 touches auth/security discovery and CI integration. Concrete fix: add §3.0.5 blocks for both before filing.
+
+4. P2 — Stale local counts/headings remain. Family ⑤ says “Tickets (7)” at line 427 but has 8 rows; Family ⑦ says “Tickets (6)” at line 454 but has 7 rows; Family ⑩ says “Tickets (16)” at line 543 but has 17 rows. Effort estimates at lines 636-637 still say 7 and 6 tickets for ⑤/⑦. Concrete fix: update headings and estimates to match §5 totals.
+
+5. P2 — Family ⑩ is directionally faithful to my self-audit, but several implementation tickets are tier:S despite cross-runner/DB/coordination blast radius (lines 549-552, 558-559). This is not a filing blocker because §5 counts Cutover/Integration as M and boundaries cover `v2-⑩-2d`/RescueCLI, but v1.4 should consider making `v2-⑩-1bc` M due to table + alembic + integration scope.
+
+6. P2 — Boundary schema mostly coheres with G.A-v0/G.A-v1 fields, but `required_area_labels` is introduced as a nested boundary field while the SOP path-to-area rule expects labels as filing metadata. Concrete fix: state that `required_area_labels` must be materialized as JIRA labels at filing time, not only stored in the YAML block.
+
+7. P2 — Cross-reference check found no remaining `v2-⑨-2a` typo. AlertBridge, `v2-⑤-AutoRedeploy`, and `v2-⑦-Reproduce-401` are consistently referenced in §5/§6. The unresolved references are external placeholders (`31.C`, `31.G`, `G.A-v0-A7`) rather than renamed local IDs.
+
+## §3. Re-run SOP discipline check (Q-3)
+
+| SOP check | Round 1 result | v1.3 result | Explanation |
+|---|---|---|---|
+| Atomic decomposition | partial | partial, improved | A3 is now M with subscopes and ⑥ is decomposed into deterministic subcontracts. The spec is still sprawling at 70 tickets and has some S tickets that look M-sized (`v2-⑤-AutoRedeploy`, maybe `v2-⑩-1bc`). |
+| Integration tier:M+ rule | fail | pass | The four round-1 tier:S integration/migration tickets are now M, and all other integration/soak tickets are M or L. |
+| File-path → area label | fail | partial | Seven critical boundary blocks now include `required_paths` and `required_area_labels`. Remaining tickets, including both new v1.3 tickets, still need blocks before filing. |
+| SD-1 self-compliance | fail (soft-fail pilot) | partial | The scope narrowing is good and the evidence block exists, but its commands fail as written from this branch. The validator’s own schema says commands must be copy-pasteable; this must be repaired. |
+| Cross-phase blocker shape | partial | partial, improved | §0.1 corpus mapping and §6 graph are clearer, and AlertBridge sequencing is fixed. Remaining caveat: 31.G/31.C dependencies still depend on external specs not read from this branch, and `v2-⑤-AutoRedeploy` has an operator decision pending. |
+
+No discipline check went backwards from pass to partial/fail. The biggest improvement is integration tiering; the biggest remaining weakness is SD-1 evidence fidelity.
+
+## §4. Diff vs round 1
+
+What got better:
+- The review corpus is now explicitly mapped, including branch/ref locations.
+- Integration tiers were corrected in the actual ticket tables.
+- The highest-risk boundary blocks are present and mostly usable.
+- Family ⑥ is no longer hand-wavy; it has seven testable subcontracts.
+- The ⑤ auto-redeploy and ⑦ reproduce-before-refactor gaps are real tickets now.
+- AlertBridge no longer promises byte-for-byte transport equivalence.
+- §6 filing graph now includes AlertBridge and the ⑨ typo is fixed.
+
+What got worse or remained rough:
+- The SD-1 evidence block is weaker than it looks because commands fail in the current checkout.
+- Version/title metadata still says v1/pre-review.
+- Ticket headings and effort estimates were not updated after adding v1.3 tickets.
+- The spec grew to 70 tickets; tier coherence is still acceptable, but the family is now a major program rather than a compact amendment.
+
+Net assessment: round-1 blockers are mostly resolved. v1.3 is substantially more fileable than v1.1, with a small conditional cleanup needed before filing the affected tickets.
+
+## §5. What v1.4 would need to add (if applicable)
+
+Small touch-up, not a full review cycle:
+- Fix §0.1 SD-1 evidence commands to be runnable from this branch using pinned refs and include actual counts/snippets.
+- Change frontmatter/title from v1 to v1.3.
+- Correct stale ticket-count headings and effort estimates for ⑤/⑦/⑩.
+- Add boundary blocks for `v2-⑤-AutoRedeploy` and `v2-⑦-Reproduce-401`.
+- State that remaining tickets cannot file until each has its own boundary block.
+- Decide whether `v2-⑤-AutoRedeploy` should be tier:M; my recommendation is tier:M.
+- Optionally tighten Family ⑥ image-head resolution: multi-head should fail build unless an explicit merge policy exists.
+
+Estimated cycle size: 0.5 day author cleanup + spot review. No need for another broad 1.5-2h independent review unless the author changes architecture rather than metadata/boundary details.
+
+## §6. Operator-decision points still open
+
+- Choose cron/pull-policy vs Watchtower-style sidecar for `v2-⑤-AutoRedeploy` (line 438). I recommend cron + explicit compose pull/recreate first because it is auditable and easier to gate with Option C fail-fast.
+- Decide whether `v2-⑤-AutoRedeploy` files as M or split S+M. I recommend M.
+- Confirm that the remaining-60 boundary deferral means “before each child files,” not “after JIRA filing starts.”
+- Decide whether Family ⑩ may fast-track in parallel with G.A-v1 completion as §6 says (lines 615 and 569); this is a prioritization decision, not a spec correctness issue.
+- Create or name the post-rc2 cross-stack daemon hygiene META so the Family ⑨ punt is traceable outside this spec.

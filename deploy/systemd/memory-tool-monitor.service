@@ -1,0 +1,17 @@
+; OP-908: Memory Tool cap, stale-file, and eviction-churn monitor.
+
+[Unit]
+Description=OmniSight Memory Tool monitor
+After=local-fs.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
+Environment=OMNISIGHT_MEMORY_TOOL_FLEETS=claude codex merger
+Environment=OMNISIGHT_MEMORY_TOOL_CAP_MB=100
+Environment=OMNISIGHT_MEMORY_TOOL_METRICS=/var/omnisight/memory/metrics.jsonl
+ExecStart=/usr/bin/env python3 scripts/memory_tool_monitor.py --audit-log /var/omnisight/progress.txt
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,168 @@
+{
+  "$defs": {
+    "CrossPhaseBlocker": {
+      "additionalProperties": false,
+      "properties": {
+        "blocker_artifact": {"title": "Blocker Artifact", "type": "string"},
+        "blocker_phase": {"title": "Blocker Phase", "type": "string"},
+        "reason": {"title": "Reason", "type": "string"}
+      },
+      "required": ["blocker_phase", "blocker_artifact", "reason"],
+      "title": "CrossPhaseBlocker",
+      "type": "object"
+    },
+    "DefenseContract": {
+      "additionalProperties": false,
+      "properties": {
+        "error_detection": {"$ref": "#/$defs/ErrorDetection"},
+        "exception_handling": {"$ref": "#/$defs/ExceptionHandling"},
+        "recovery_path": {"$ref": "#/$defs/RecoveryPath"},
+        "rescue_path": {"$ref": "#/$defs/RescuePath"},
+        "shutdown_contract": {"$ref": "#/$defs/ShutdownContract"}
+      },
+      "required": ["error_detection", "exception_handling", "shutdown_contract", "recovery_path", "rescue_path"],
+      "title": "DefenseContract",
+      "type": "object"
+    },
+    "ErrorDetection": {
+      "additionalProperties": false,
+      "properties": {
+        "alert_rule_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Alert Rule Id"},
+        "channel": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Channel"},
+        "detection_latency_p99": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Detection Latency P99"},
+        "observability_test": {"title": "Observability Test", "type": "string"},
+        "signal": {"enum": ["prometheus_metric", "structured_log", "exit_code", "endpoint_status", "none"], "title": "Signal", "type": "string"}
+      },
+      "required": ["signal", "channel", "detection_latency_p99", "observability_test", "alert_rule_id"],
+      "title": "ErrorDetection",
+      "type": "object"
+    },
+    "ExceptionHandling": {
+      "additionalProperties": false,
+      "properties": {
+        "enumerated_states": {"items": {"type": "string"}, "title": "Enumerated States", "type": "array"},
+        "fail_loudly": {"title": "Fail Loudly", "type": "boolean"},
+        "remediation_hint_contract": {"title": "Remediation Hint Contract", "type": "string"},
+        "user_facing": {"title": "User Facing", "type": "boolean"}
+      },
+      "required": ["enumerated_states", "remediation_hint_contract", "user_facing", "fail_loudly"],
+      "title": "ExceptionHandling",
+      "type": "object"
+    },
+    "L2Reason": {
+      "enum": ["execution-only", "witness-only", "approval-only", "credential-entry", "production-touch", "release-governance", "roster-mutation", "override-action", "destructive-action"],
+      "title": "L2Reason",
+      "type": "string"
+    },
+    "RecoveryPath": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_file": {"title": "Evidence File", "type": "string"},
+        "idempotent": {"title": "Idempotent", "type": "boolean"},
+        "rto_seconds_p99": {"title": "Rto Seconds P99", "type": "integer"},
+        "steps": {"items": {"type": "string"}, "title": "Steps", "type": "array"},
+        "trigger_condition": {"title": "Trigger Condition", "type": "string"}
+      },
+      "required": ["trigger_condition", "steps", "idempotent", "rto_seconds_p99", "evidence_file"],
+      "title": "RecoveryPath",
+      "type": "object"
+    },
+    "RescuePath": {
+      "additionalProperties": false,
+      "properties": {
+        "audit_trail": {"title": "Audit Trail", "type": "string"},
+        "authority_required": {"enum": ["L1", "L2", "L3", "none"], "title": "Authority Required", "type": "string"},
+        "operator_actions": {"items": {"type": "string"}, "title": "Operator Actions", "type": "array"},
+        "trigger_condition": {"title": "Trigger Condition", "type": "string"}
+      },
+      "required": ["trigger_condition", "operator_actions", "authority_required", "audit_trail"],
+      "title": "RescuePath",
+      "type": "object"
+    },
+    "ShutdownContract": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanup_sequence": {"items": {"type": "string"}, "title": "Cleanup Sequence", "type": "array"},
+        "drain_seconds_p99": {"anyOf": [{"type": "integer"}, {"type": "null"}], "title": "Drain Seconds P99"},
+        "forced_termination_safe": {"title": "Forced Termination Safe", "type": "boolean"},
+        "state_persistence": {"title": "State Persistence", "type": "string"}
+      },
+      "required": ["drain_seconds_p99", "cleanup_sequence", "forced_termination_safe", "state_persistence"],
+      "title": "ShutdownContract",
+      "type": "object"
+    },
+    "TicketClass": {"enum": ["subscription-claude", "subscription-codex", "operator-window-top", "operator-window-deputy", "operator-rehearsal"], "title": "TicketClass", "type": "string"}
+  },
+  "$id": "https://omnisight.example/schemas/ticket-contract/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authority_required": {"enum": ["L1", "L2", "L3"], "title": "Authority Required", "type": "string"},
+    "blocked_by": {"items": {"type": "string"}, "title": "Blocked By", "type": "array"},
+    "class": {"$ref": "#/$defs/TicketClass"},
+    "cross_phase_blockers": {"items": {"$ref": "#/$defs/CrossPhaseBlocker"}, "title": "Cross Phase Blockers", "type": "array"},
+    "defense_contract": {"anyOf": [{"$ref": "#/$defs/DefenseContract"}, {"type": "null"}], "default": null},
+    "dependency_artifacts": {"items": {"type": "string"}, "title": "Dependency Artifacts", "type": "array"},
+    "destructive_op_classes": {"items": {"type": "string"}, "title": "Destructive Op Classes", "type": "array"},
+    "destructive_op_scope": {"enum": ["none", "local", "staging", "production"], "title": "Destructive Op Scope", "type": "string"},
+    "environment_scope": {"enum": ["local", "staging", "production"], "title": "Environment Scope", "type": "string"},
+    "evidence_class": {"enum": ["unit", "integration", "operator", "audit-log", "structural", "behavioral-smoke", "semantic", "longitudinal"], "title": "Evidence Class", "type": "string"},
+    "execution_mode": {"enum": ["unit-testable", "integration", "operator-rehearsal"], "title": "Execution Mode", "type": "string"},
+    "external_payload_class": {"enum": ["operational", "sensitive", "public", "credential-material"], "title": "External Payload Class", "type": "string"},
+    "external_side_effect": {"enum": ["none", "read", "write", "irreversible"], "title": "External Side Effect", "type": "string"},
+    "external_systems": {"items": {"type": "string"}, "title": "External Systems", "type": "array"},
+    "files_touched_max": {"title": "Files Touched Max", "type": "integer"},
+    "forbidden_paths": {"items": {"type": "string"}, "title": "Forbidden Paths", "type": "array"},
+    "interface_contract": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Interface Contract"},
+    "l1_exclusive_reason": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "L1 Exclusive Reason"},
+    "l2_reason": {"anyOf": [{"$ref": "#/$defs/L2Reason"}, {"type": "null"}], "default": null},
+    "labels": {"items": {"type": "string"}, "title": "Labels", "type": "array"},
+    "loc_delta_max": {"title": "Loc Delta Max", "type": "integer"},
+    "mutex_with": {"items": {"type": "string"}, "title": "Mutex With", "type": "array"},
+    "non_goals": {"items": {"type": "string"}, "title": "Non Goals", "type": "array"},
+    "on_scope_creep": {"enum": ["file-followup", "abort", "escalate"], "title": "On Scope Creep", "type": "string"},
+    "phase_plugin_version": {"const": "v1", "title": "Phase Plugin Version", "type": "string"},
+    "required_paths": {"items": {"type": "string"}, "title": "Required Paths", "type": "array"},
+    "reversibility": {"enum": ["reversible", "irreversible", "destructive"], "title": "Reversibility", "type": "string"},
+    "runtime_capability": {"enum": ["unit-only", "integration", "operator-witnessed"], "title": "Runtime Capability", "type": "string"},
+    "schema_version": {"enum": ["v0", "v1"], "title": "Schema Version", "type": "string"},
+    "scope_components": {"items": {"type": "string"}, "title": "Scope Components", "type": "array"},
+    "scope_summary_max_chars": {"title": "Scope Summary Max Chars", "type": "integer"},
+    "tag_type": {"enum": ["story", "meta", "epic", "spike"], "title": "Tag Type", "type": "string"},
+    "test_scope": {"title": "Test Scope", "type": "string"},
+    "ticket_key": {"pattern": "^OP-[0-9]+$", "title": "Ticket Key", "type": "string"}
+  },
+  "required": [
+    "schema_version",
+    "class",
+    "loc_delta_max",
+    "files_touched_max",
+    "required_paths",
+    "forbidden_paths",
+    "non_goals",
+    "interface_contract",
+    "test_scope",
+    "destructive_op_classes",
+    "destructive_op_scope",
+    "scope_components",
+    "external_side_effect",
+    "external_payload_class",
+    "runtime_capability",
+    "dependency_artifacts",
+    "execution_mode",
+    "mutex_with",
+    "evidence_class",
+    "on_scope_creep",
+    "scope_summary_max_chars",
+    "tag_type",
+    "authority_required",
+    "reversibility",
+    "environment_scope",
+    "external_systems",
+    "ticket_key",
+    "labels",
+    "phase_plugin_version"
+  ],
+  "title": "TicketContractV1",
+  "type": "object"
+}

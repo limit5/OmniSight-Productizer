@@ -114,6 +114,10 @@ class SloThresholds:
 
     error_rate_max: float = 0.01           # AC #2: error rate < 1%
     p95_latency_ms_max: float = 500.0      # AC #2: p95 < 500ms
+    project_state_api_p95_ms_max: float = 2000.0
+    cognee_query_p95_ms_max: float = 800.0
+    graphiti_query_p95_ms_max: float = 600.0
+    failure_recall_p95_ms_max: float = 500.0
     error_rate_window_seconds: int = 60    # AC #2: 1-min window
     p95_window_seconds: int = 300          # AC #2: 5-min window
     sample_interval_seconds: int = 30      # AC #1: sample every 30s
@@ -128,6 +132,10 @@ class SloSample:
     error_rate: float
     p95_latency_ms: float
     observed_at: float
+    project_state_api_p95_ms: float = 0.0
+    cognee_query_p95_ms: float = 0.0
+    graphiti_query_p95_ms: float = 0.0
+    failure_recall_p95_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -161,7 +169,28 @@ class TickResult:
     sample: SloSample | None = None
     breached_metrics: tuple[str, ...] = ()
     rollback: RollbackOutcome | None = None
+    axis_status: dict[str, dict[str, Any]] = field(default_factory=dict)
     detail: str = ""
+
+
+CROSS_TASK_SLOS: tuple[tuple[str, str, str], ...] = (
+    (
+        "project_state_api_p95",
+        "project_state_api_p95_ms",
+        "project_state_api_p95_ms_max",
+    ),
+    ("cognee_query_p95", "cognee_query_p95_ms", "cognee_query_p95_ms_max"),
+    (
+        "graphiti_query_p95",
+        "graphiti_query_p95_ms",
+        "graphiti_query_p95_ms_max",
+    ),
+    (
+        "failure_recall_p95",
+        "failure_recall_p95_ms",
+        "failure_recall_p95_ms_max",
+    ),
+)
 
 
 # ─── Protocols (injected at construction) ─────────────────────────────
@@ -211,6 +240,27 @@ def load_thresholds(path: Path | str = DEFAULT_CONFIG_PATH) -> SloThresholds:
         error_rate_max=float(raw.get("error_rate_max", defaults.error_rate_max)),
         p95_latency_ms_max=float(
             raw.get("p95_latency_ms_max", defaults.p95_latency_ms_max)
+        ),
+        project_state_api_p95_ms_max=float(
+            raw.get(
+                "project_state_api_p95_ms_max",
+                defaults.project_state_api_p95_ms_max,
+            )
+        ),
+        cognee_query_p95_ms_max=float(
+            raw.get("cognee_query_p95_ms_max", defaults.cognee_query_p95_ms_max)
+        ),
+        graphiti_query_p95_ms_max=float(
+            raw.get(
+                "graphiti_query_p95_ms_max",
+                defaults.graphiti_query_p95_ms_max,
+            )
+        ),
+        failure_recall_p95_ms_max=float(
+            raw.get(
+                "failure_recall_p95_ms_max",
+                defaults.failure_recall_p95_ms_max,
+            )
         ),
         error_rate_window_seconds=int(
             raw.get(
@@ -331,17 +381,19 @@ class SloMonitor:
             )
 
         # AC #2: evaluate each SLO independently.
-        breached: list[str] = []
-        if sample.error_rate >= self.thresholds.error_rate_max:
-            breached.append("error_rate")
-        if sample.p95_latency_ms >= self.thresholds.p95_latency_ms_max:
-            breached.append("p95_latency_ms")
+        breached = self._breached_metrics(sample)
+        axis_status = self._axis_status(sample)
+        self._publish_status(sample=sample, axis_status=axis_status)
 
         if not breached:
             # Healthy tick -- clear any in-flight streak so a transient
             # spike doesn't accumulate across recoveries.
             self._first_breach_at = None
-            return TickResult(action=TickAction.ok, sample=sample)
+            return TickResult(
+                action=TickAction.ok,
+                sample=sample,
+                axis_status=axis_status,
+            )
 
         # AC #3: track sustain window. The streak starts at the FIRST
         # breaching sample, and we trigger only once ``now -
@@ -355,6 +407,7 @@ class SloMonitor:
                 action=TickAction.breach_pending,
                 sample=sample,
                 breached_metrics=tuple(breached),
+                axis_status=axis_status,
                 detail=(
                     f"breach_for_s={elapsed_breach:.0f} "
                     f"sustain_threshold_s={self.thresholds.breach_sustain_seconds}"
@@ -372,6 +425,7 @@ class SloMonitor:
             sample=sample,
             breached_metrics=tuple(breached),
             rollback=outcome,
+            axis_status=axis_status,
         )
 
     def maybe_rollback(self, reason: str) -> RollbackOutcome:
@@ -407,6 +461,47 @@ class SloMonitor:
 
     # ── internal ──
 
+    def _axis_status(self, sample: SloSample) -> dict[str, dict[str, Any]]:
+        status: dict[str, dict[str, Any]] = {}
+        for name, sample_attr, threshold_attr in CROSS_TASK_SLOS:
+            value = float(getattr(sample, sample_attr))
+            threshold = float(getattr(self.thresholds, threshold_attr))
+            status[name] = {
+                "value_ms": value,
+                "threshold_ms": threshold,
+                "ok": value < threshold,
+            }
+        return status
+
+    def _breached_metrics(self, sample: SloSample) -> list[str]:
+        breached: list[str] = []
+        if sample.error_rate >= self.thresholds.error_rate_max:
+            breached.append("error_rate")
+        if sample.p95_latency_ms >= self.thresholds.p95_latency_ms_max:
+            breached.append("p95_latency_ms")
+        for name, sample_attr, threshold_attr in CROSS_TASK_SLOS:
+            if (
+                float(getattr(sample, sample_attr))
+                >= float(getattr(self.thresholds, threshold_attr))
+            ):
+                breached.append(name)
+        return breached
+
+    def _publish_status(
+        self, *, sample: SloSample, axis_status: dict[str, dict[str, Any]],
+    ) -> None:
+        events.bus.publish(
+            "slo.status",
+            {
+                "error_rate": sample.error_rate,
+                "p95_latency_ms": sample.p95_latency_ms,
+                "error_rate_threshold": self.thresholds.error_rate_max,
+                "p95_latency_ms_threshold": self.thresholds.p95_latency_ms_max,
+                "axes": axis_status,
+            },
+            broadcast_scope="global",
+        )
+
     def _fire_rollback(
         self, *, sample: SloSample, breached: tuple[str, ...],
     ) -> RollbackOutcome:
@@ -427,6 +522,7 @@ class SloMonitor:
                 "p95_latency_ms": sample.p95_latency_ms,
                 "error_rate_threshold": self.thresholds.error_rate_max,
                 "p95_latency_ms_threshold": self.thresholds.p95_latency_ms_max,
+                "axes": self._axis_status(sample),
                 "breached_metrics": list(breached),
                 "rollback_mode": mode,
                 "reason": reason,
@@ -506,12 +602,20 @@ class _PrometheusMetricSource:
             "sum(rate(http_request_duration_seconds_bucket"
             f"[{lat_span}])) by (le)) * 1000"
         )
+        project_state_api_p95 = "project_state_api_p95_ms"
+        cognee_query_p95 = "cognee_query_p95_ms"
+        graphiti_query_p95 = "graphiti_query_p95_ms"
+        failure_recall_p95 = "failure_recall_p95_ms"
         total_value = _query(total)
         error_rate = 0.0 if total_value <= 0 else _query(errors) / total_value
         return SloSample(
             error_rate=error_rate,
             p95_latency_ms=_query(latency),
             observed_at=time.time(),
+            project_state_api_p95_ms=_query(project_state_api_p95),
+            cognee_query_p95_ms=_query(cognee_query_p95),
+            graphiti_query_p95_ms=_query(graphiti_query_p95),
+            failure_recall_p95_ms=_query(failure_recall_p95),
         )
 
 

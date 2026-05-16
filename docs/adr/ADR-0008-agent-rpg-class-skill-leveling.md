@@ -137,7 +137,7 @@ Per (`agent_id`, `skill_id`) pair, Lv 1-5 with thresholds `25 / 100 / 250 / 600 
 | 2 | `extended_thinking` enabled |
 | 3 | `parallel_subtask` enabled |
 | 4 | `prompt_overhead` reduced (skip preamble) |
-| 5 | `teach_other_agent` — Lv-5 holders can inject distilled summaries into same-Guild same-skill Lv ≤ 2 instances (one-shot +25 XP, cooldown 7 day) |
+| 5 | `teach_other_agent` — Lv-5 holders can inject distilled summaries into same-Guild same-skill Lv ≤ 2 instances (one-shot +25 XP, cooldown 7 day). The same-Guild + idle gate + distilled-summary write is implemented by `teach_distilled_summary` (W12.6 / OP-175) in `backend/agents/skill_teaching.py`; the per-skill +25 XP + cooldown stamp remains the W12.3 `teach_other_agent` primitive in `backend/agents/skill_leveling.py`. |
 
 **Branching at Lv 3**: each base skill forks 2 ways (e.g. `python` → `perf-tuning` / `type-correctness`). Operator chooses from Character Card; choice is immutable.
 

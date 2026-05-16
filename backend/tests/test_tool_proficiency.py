@@ -21,19 +21,26 @@ from pathlib import Path
 import pytest
 
 from backend.agents.mp_w17_telemetry_consumer import consume_batch, consume_event
+from backend.agents.mp_w17_telemetry_consumer import consume_invocation_log_line
+from backend.agents.mp_w17_telemetry_consumer import payload_from_invocation_log
 from backend.agents.tool_proficiency import (
     InMemoryToolProficiencyStore,
     LEVEL_REQUIREMENTS,
     MAX_TOOL_LEVEL,
     ProficiencyGateConfigMissing,
+    TOOL_LEVEL_SPECS,
+    ToolLevelSpec,
     ToolProficiencyState,
+    build_feature_unlock_gate,
     can_invoke_at_level,
     capability_for_level,
     compute_tool_level,
     get_required_level,
+    install_feature_unlock_gate,
     list_proficiencies,
     record_tool_invocation,
     reset_gate_config_cache_for_tests,
+    tool_level_spec,
 )
 
 
@@ -106,6 +113,41 @@ def test_capability_for_level_covers_full_ladder():
         capability_for_level(0)
     with pytest.raises(ValueError):
         capability_for_level(99)
+
+
+def test_tool_level_specs_pin_op179_ladder_semantics():
+    assert tuple(TOOL_LEVEL_SPECS) == (1, 2, 3, 4, 5)
+    assert tool_level_spec(1) == ToolLevelSpec(1, 0, 0.0, "basic_invoke")
+    assert tool_level_spec(2) == ToolLevelSpec(2, 10, 0.70, "chain_two_calls")
+    assert tool_level_spec(3) == ToolLevelSpec(3, 50, 0.80, "batch_ops")
+    assert tool_level_spec(4) == ToolLevelSpec(
+        4, 200, 0.85, "advanced_flags_cross_guild_a2a"
+    )
+    assert tool_level_spec(5) == ToolLevelSpec(
+        5, 500, 0.90, "author_new_mcp_wrapper"
+    )
+    assert all(
+        tool_level_spec(level).capability == capability_for_level(level)
+        for level in range(1, MAX_TOOL_LEVEL + 1)
+    )
+
+
+def test_tool_level_spec_rejects_out_of_range_level():
+    with pytest.raises(ValueError):
+        tool_level_spec(0)
+    with pytest.raises(ValueError):
+        tool_level_spec(6)
+
+
+def test_tool_level_spec_dataclass_validates_shape():
+    with pytest.raises(ValueError):
+        ToolLevelSpec(0, 0, 0.0, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, -1, 0.0, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, 0, 1.1, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, 0, 0.0, "   ")
 
 
 # ── record_tool_invocation ──────────────────────────────────────────
@@ -279,7 +321,8 @@ def test_get_required_level_missing_file_raises(tmp_path: Path):
 
 def test_shipped_gates_yaml_loads_with_top10_tools():
     # DoD — ``config/tool_proficiency_gates.yaml`` ships with the
-    # W17.2 hardened top-10 (Read/Edit/Bash/Grep/Glob/...).
+    # W17.2 hardened top-10 (Read/Edit/Bash/Grep/Glob/...) plus one
+    # representative OP-179 gate at each higher tool level.
     reset_gate_config_cache_for_tests()
     repo_root = Path(__file__).resolve().parents[2]
     shipped = repo_root / "config" / "tool_proficiency_gates.yaml"
@@ -287,9 +330,12 @@ def test_shipped_gates_yaml_loads_with_top10_tools():
     for tool in ("Read", "Edit", "Bash", "Grep", "Glob",
                  "Write", "Agent", "WebFetch", "Skill", "ToolSearch"):
         assert get_required_level(tool, config_path=shipped) == 1
+    assert get_required_level("Task", config_path=shipped) == 2
     assert get_required_level(
         "mcp__filesystem__write_multiple_files", config_path=shipped
     ) == 3
+    assert get_required_level("CrossGuildHandoff", config_path=shipped) == 4
+    assert get_required_level("AuthorMcpWrapper", config_path=shipped) == 5
 
 
 # ── W17.7 consumer + idempotent rebuild ─────────────────────────────
@@ -309,6 +355,62 @@ async def test_telemetry_consumer_consumes_w17_event_shape():
     )
     assert recorded is not None
     assert recorded.invocation_count == 1
+    assert recorded.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_detects_nested_invocation_and_outcome():
+    """OP-182 — W13 can derive proficiency from invocation + outcome payloads."""
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+            "invocation": {
+                "tool_name": TOOL,
+                "agent_id": AGENT,
+                "timestamp": T0.isoformat(),
+            },
+            "outcome": {"is_error": False},
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 1
+    assert recorded.success_count == 1
+
+    recorded = await consume_event(
+        store,
+        {
+            "invocation": {
+                "tool_name": TOOL,
+                "agent_id": AGENT,
+                "timestamp": T0.isoformat(),
+            },
+            "outcome": {"is_error": True},
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 2
+    assert recorded.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_detects_invocation_log_line():
+    """OP-182 — replaying logged tool_invocation JSON updates proficiency."""
+    store = InMemoryToolProficiencyStore()
+    line = (
+        'INFO events.tool_invocation {"agent_id": "agent-alpha", '
+        '"tool_name": "Read", "outcome": "success", '
+        '"timestamp": "2026-01-01T00:00:00+00:00"}'
+    )
+    payload = payload_from_invocation_log(line)
+    assert payload is not None
+    assert payload["agent_id"] == AGENT
+
+    recorded = await consume_invocation_log_line(store, line)
+
+    assert recorded is not None
+    assert recorded.agent_id == AGENT
+    assert recorded.tool_id == TOOL
     assert recorded.success_count == 1
 
 
@@ -432,6 +534,250 @@ async def test_dispatcher_proficiency_gate_allows_at_or_above_level():
     result = await dispatcher.execute("u-2", "Read", {"file_path": "/tmp/x"})
     assert not result.is_error
     assert result.content == "ok"
+
+
+# ── W13.3 (OP-180) feature-unlock gate factory + dispatcher install ─
+
+
+@pytest.mark.asyncio
+async def test_build_feature_unlock_gate_reads_required_level_from_yaml(
+    tmp_path: Path,
+):
+    """W13.3 — the factory closure must consult the YAML per-call.
+
+    A Lv-1 agent against ``mcp__filesystem__write_multiple_files`` (Lv 3)
+    refuses; the same agent against an un-listed tool (defaults to Lv 1)
+    is allowed. Both decisions ride through the same closure.
+    """
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text(
+        "gates:\n"
+        "  mcp__filesystem__write_multiple_files: 3\n"
+        "  Read: 1\n",
+        encoding="utf-8",
+    )
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    gate = build_feature_unlock_gate(store, config_path=config, now=T0)
+
+    # Lv-3 gate refuses a Lv-1 agent.
+    assert (
+        await gate("mcp__filesystem__write_multiple_files", AGENT)
+    ) is False
+    # Lv-1 gate (Read) allows the same agent.
+    assert await gate("Read", AGENT) is True
+    # Un-listed tool defaults to Lv 1 — allowed.
+    assert await gate("AnUnknownTool", AGENT) is True
+
+
+@pytest.mark.asyncio
+async def test_build_feature_unlock_gate_allows_when_agent_at_required_lv(
+    tmp_path: Path,
+):
+    """W13.3 — once the agent reaches the gate's Lv, the gate allows."""
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text(
+        "gates:\n  mcp__filesystem__write_multiple_files: 3\n",
+        encoding="utf-8",
+    )
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id="mcp__filesystem__write_multiple_files",
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+    gate = build_feature_unlock_gate(store, config_path=config, now=T0)
+    assert (
+        await gate("mcp__filesystem__write_multiple_files", AGENT)
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_install_feature_unlock_gate_wires_dispatcher_refusal(
+    tmp_path: Path,
+):
+    """W13.3 — ``install_feature_unlock_gate`` wires the dispatcher so a
+    Lv-1 agent attempting a Lv-3 gated tool surfaces a structured
+    ``tool_proficiency_insufficient`` ``tool_result`` instead of running
+    the handler.
+
+    This is the canonical W13.3 acceptance: a fresh agent attempts a
+    tool the YAML has gated at Lv 3 and the dispatcher refuses the call
+    instead of forwarding to the handler. The test uses ``Read`` as the
+    handler name (the dispatcher validates the name against the schema
+    registry on ``register``); the YAML in this test maps ``Read: 3`` to
+    re-create the same semantics as the shipped
+    ``mcp__filesystem__write_multiple_files: 3`` entry without needing
+    to register a new schema.
+    """
+    import json
+
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 3\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    dispatcher = ToolDispatcher()
+
+    handler_calls: list[dict] = []
+
+    async def _read_handler(payload):  # noqa: ANN001 - test handler
+        handler_calls.append(payload)
+        return "ok"
+
+    dispatcher.register("Read", _read_handler)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=AGENT,
+        config_path=config, now=T0,
+    )
+
+    # Lv-1 agent against a Lv-3-required tool → refused.
+    result = await dispatcher.execute("u-1", "Read", {"file_path": "/x"})
+    assert result.is_error
+    payload = json.loads(result.content)
+    assert payload["error"] == "tool_proficiency_insufficient"
+    assert payload["agent_id"] == AGENT
+    assert payload["tool_name"] == "Read"
+    assert handler_calls == []  # gate refused before handler ran
+
+
+@pytest.mark.asyncio
+async def test_install_feature_unlock_gate_allows_when_agent_qualified(
+    tmp_path: Path,
+):
+    """W13.3 — once the agent's proficiency clears the YAML gate, the
+    dispatcher forwards to the handler unchanged. YAML at ``Read: 3``,
+    seeded agent at Lv 3 → handler runs."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 3\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+
+    dispatcher = ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001
+        return "ok"
+
+    dispatcher.register("Read", _read)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=AGENT,
+        config_path=config, now=T0,
+    )
+
+    result = await dispatcher.execute("u-2", "Read", {"file_path": "/tmp/x"})
+    assert not result.is_error
+    assert result.content == "ok"
+
+
+def test_install_feature_unlock_gate_rejects_blank_agent_id(tmp_path: Path):
+    """W13.3 — install refuses an empty agent_id because the dispatcher
+    only consults the gate when ``_current_agent_id is not None``.
+    Letting a blank string slip through would silently bypass the gate
+    for every dispatch on that dispatcher instance."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 1\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    dispatcher = ToolDispatcher()
+    with pytest.raises(ValueError):
+        install_feature_unlock_gate(
+            dispatcher, store=store, agent_id="",
+            config_path=config, now=T0,
+        )
+
+
+def test_install_feature_unlock_gate_rescopes_to_new_agent(tmp_path: Path):
+    """W13.3 — re-installing with a different ``agent_id`` is the
+    supported way to re-scope an already-running dispatcher; the public
+    contract advertises this so a long-lived dispatcher can switch
+    between agents without rebuilding."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 1\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    dispatcher = ToolDispatcher()
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id="agent-one",
+        config_path=config, now=T0,
+    )
+    assert dispatcher._current_agent_id == "agent-one"
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id="agent-two",
+        config_path=config, now=T0,
+    )
+    assert dispatcher._current_agent_id == "agent-two"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_tool_invocation_telemetry_includes_agent_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """OP-182 — dispatcher telemetry carries the agent_id needed by W13."""
+    from backend.agents import tool_dispatcher as td
+
+    calls: list[dict[str, object]] = []
+
+    def _emit(
+        tool_name: str,
+        duration_ms: float,
+        success: bool,
+        args_size_bytes: int,
+        *,
+        agent_id: str | None = None,
+    ) -> None:
+        calls.append({
+            "tool_name": tool_name,
+            "success": success,
+            "agent_id": agent_id,
+        })
+
+    monkeypatch.setattr(td, "emit_tool_invocation", _emit)
+
+    dispatcher = td.ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001
+        return "ok"
+
+    dispatcher.register("Read", _read)
+    dispatcher.set_proficiency_gate(None, agent_id=AGENT)
+
+    result = await dispatcher.execute("u-op-182", "Read", {"file_path": "/tmp/x"})
+
+    assert not result.is_error
+    assert calls == [{
+        "tool_name": "Read",
+        "success": True,
+        "agent_id": AGENT,
+    }]
 
 
 # ── Constants sanity ─────────────────────────────────────────────────

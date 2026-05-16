@@ -7,7 +7,7 @@ in carrier form are skipped. ``api_keys.key_hash`` keeps a deterministic
 ``key_lookup_index`` so bearer validation can still use an indexed lookup
 after the stored hash is encrypted.
 
-Revision ID: 0203
+Revision ID: 0203a_kse  (OP-1046: renamed from 0203 to disambiguate from 0203_conflict_observations.py)
 Revises: 0202
 Create Date: 2026-05-08
 """
@@ -21,13 +21,19 @@ from alembic import op
 from sqlalchemy import text
 
 
-revision = "0203"
+# OP-1046: was revision="0203" — caused duplicate-revision collision with
+# 0203_conflict_observations.py (both filed 2026-05-08, conflict_observations
+# committed first at 15:37, this file at 16:03). 0204_deploy_audit's
+# down_revision="0203" canonically refers to conflict_observations now; this
+# migration becomes a parallel head off 0202 that gets unified by the
+# audit-29 merge migrations.
+revision = "0203a_kse"
 down_revision = "0202"
 branch_labels = None
 depends_on = None
 
 
-_log = logging.getLogger("alembic.0203")
+_log = logging.getLogger("alembic.0203a_kse")
 
 
 def _looks_like_carrier(value: str) -> bool:

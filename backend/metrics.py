@@ -706,6 +706,17 @@ if _AVAILABLE:
         "1 if alembic head on disk > applied revision, 0 if aligned",
         registry=REGISTRY,
     )
+    alembic_drift = Gauge(
+        "omnisight_alembic_drift",
+        "Alembic image-vs-DB drift state by direction",
+        labelnames=("direction",),
+        registry=REGISTRY,
+    )
+    alembic_drift_probe_errors_total = Counter(
+        "omnisight_alembic_drift_probe_errors_total",
+        "Alembic drift probe collection failures",
+        registry=REGISTRY,
+    )
 
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics.
     # Cardinality is bucketed via ``backend.metrics_labels.bucket_*``
@@ -763,6 +774,31 @@ if _AVAILABLE:
         labelnames=("dimension",),  # tenant | project | product_line
         registry=REGISTRY,
     )
+    capability_matrix_unexpected_fallback_total = Counter(
+        "omnisight_capability_matrix_unexpected_fallback_total",
+        "Capability matrix expected rows that fell back to read-only safe-default",
+        labelnames=("area", "tier", "issuetype"),
+        registry=REGISTRY,
+    )
+    runner_pre_pickup_cap_gate_blocked_total = Counter(
+        "omnisight_runner_pre_pickup_cap_gate_blocked_total",
+        "Runner pre-pickup capability gate blocks before CLI invocation",
+        labelnames=("area", "tier", "issuetype"),
+        registry=REGISTRY,
+    )
+    runner_comment_suppressed_total = Counter(
+        "omnisight_runner_comment_suppressed_total",
+        "Runner JIRA comments suppressed by the per-ticket dedupe wrapper",
+        labelnames=("ticket", "tag"),
+        registry=REGISTRY,
+    )
+    aux_service_available = Gauge(
+        "omnisight_aux_service_available",
+        "1 if an auxiliary service is available, 0 if unavailable, NaN before first probe",
+        labelnames=("service",),
+        registry=REGISTRY,
+    )
+    aux_service_available.labels(service="ai_core").set(float("nan"))
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -859,6 +895,8 @@ else:
     replica_lag_seconds = _NoOp()  # type: ignore
     readyz_latency_seconds = _NoOp()  # type: ignore
     readyz_migrations_pending = _NoOp()  # type: ignore
+    alembic_drift = _NoOp()  # type: ignore
+    alembic_drift_probe_errors_total = _NoOp()  # type: ignore
     # Y9 #285 row 4 — billing metrics with (tenant, project, product_line)
     billing_llm_calls_total = _NoOp()  # type: ignore
     billing_llm_input_tokens_total = _NoOp()  # type: ignore
@@ -867,6 +905,10 @@ else:
     billing_workflow_runs_total = _NoOp()  # type: ignore
     billing_workspace_gb_hours_total = _NoOp()  # type: ignore
     metrics_label_cap_used = _NoOp()  # type: ignore
+    capability_matrix_unexpected_fallback_total = _NoOp()  # type: ignore
+    runner_pre_pickup_cap_gate_blocked_total = _NoOp()  # type: ignore
+    runner_comment_suppressed_total = _NoOp()  # type: ignore
+    aux_service_available = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1316,6 +1358,7 @@ def reset_for_tests() -> None:
     global backend_instance_up, rolling_deploy_responses_total
     global rolling_deploy_5xx_rate, replica_lag_seconds, readyz_latency_seconds
     global readyz_migrations_pending
+    global alembic_drift, alembic_drift_probe_errors_total
     backend_instance_up = Gauge(
         "omnisight_backend_instance_up",
         "1 when this backend replica is serving traffic, 0 when draining/down",
@@ -1348,11 +1391,24 @@ def reset_for_tests() -> None:
         "1 if alembic head on disk > applied revision, 0 if aligned",
         registry=REGISTRY,
     )
+    alembic_drift = Gauge(
+        "omnisight_alembic_drift",
+        "Alembic image-vs-DB drift state by direction",
+        labelnames=("direction",),
+        registry=REGISTRY,
+    )
+    alembic_drift_probe_errors_total = Counter(
+        "omnisight_alembic_drift_probe_errors_total",
+        "Alembic drift probe collection failures",
+        registry=REGISTRY,
+    )
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics
     global billing_llm_calls_total, billing_llm_input_tokens_total
     global billing_llm_output_tokens_total, billing_llm_cost_usd_total
     global billing_workflow_runs_total, billing_workspace_gb_hours_total
-    global metrics_label_cap_used
+    global metrics_label_cap_used, capability_matrix_unexpected_fallback_total
+    global runner_pre_pickup_cap_gate_blocked_total
+    global runner_comment_suppressed_total, aux_service_available
     billing_llm_calls_total = Counter(
         "omnisight_billing_llm_calls_total",
         "LLM calls fan-outed to billing, by tenant/project/product_line/provider/model",
@@ -1398,3 +1454,28 @@ def reset_for_tests() -> None:
         labelnames=("dimension",),
         registry=REGISTRY,
     )
+    capability_matrix_unexpected_fallback_total = Counter(
+        "omnisight_capability_matrix_unexpected_fallback_total",
+        "Capability matrix expected rows that fell back to read-only safe-default",
+        labelnames=("area", "tier", "issuetype"),
+        registry=REGISTRY,
+    )
+    runner_pre_pickup_cap_gate_blocked_total = Counter(
+        "omnisight_runner_pre_pickup_cap_gate_blocked_total",
+        "Runner pre-pickup capability gate blocks before CLI invocation",
+        labelnames=("area", "tier", "issuetype"),
+        registry=REGISTRY,
+    )
+    runner_comment_suppressed_total = Counter(
+        "omnisight_runner_comment_suppressed_total",
+        "Runner JIRA comments suppressed by the per-ticket dedupe wrapper",
+        labelnames=("ticket", "tag"),
+        registry=REGISTRY,
+    )
+    aux_service_available = Gauge(
+        "omnisight_aux_service_available",
+        "1 if an auxiliary service is available, 0 if unavailable, NaN before first probe",
+        labelnames=("service",),
+        registry=REGISTRY,
+    )
+    aux_service_available.labels(service="ai_core").set(float("nan"))

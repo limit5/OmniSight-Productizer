@@ -1,0 +1,59 @@
+; [OP-965] AUDIT-17 — staging gate "canary" status emitter.
+;
+; Exercises the develop-tip staging deployment's HTTP surface
+; (/healthz + /readyz) and appends a JSONL gate line to
+; canary-status.jsonl, which scripts/release_milestone_checker.py reads
+; for the R3 ``ci_canary`` gate. Before this unit existed nothing in
+; production wrote that file (OP-925 R3 cascade, 2026-05-12).
+;
+; Triggered by staging-gate-canary.timer (every 10 min). On a red suite
+; the script exits 2, which fires the OnFailure= chain below; the JSONL
+; line is written *before* the non-zero exit so the milestone checker
+; still sees the (red) status against the current develop tip.
+;
+; §6 audit trail — backend.agents.staging_gate routes through
+; backend.audit.log, which connects via OMNISIGHT_DATABASE_URL. A systemd
+; unit does not inherit the login shell's environment, so the
+; EnvironmentFile below carries the release-audit DSN (same file the
+; auto-promote-develop.service uses; see deploy/systemd/auto-promote-develop.service).
+; The ``-`` prefix makes it optional — a dev box without the file still
+; runs, it just writes the audit row to the local SQLite default.
+;
+; Install (user-level — no sudo, mirrors release-milestone-checker.service):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/staging-gate-canary.{service,timer} ~/.config/systemd/user/
+;   cp deploy/systemd/staging-gate-alert.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now staging-gate-canary.timer
+;   loginctl enable-linger $USER
+
+[Unit]
+Description=OmniSight staging gate — canary status emitter (OP-965)
+After=network-online.target
+Wants=network-online.target
+OnFailure=staging-gate-alert.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_GERRIT_SSH_HOST=codex-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
+Environment=OMNISIGHT_STAGING_URL=http://localhost:18080
+Environment=OMNISIGHT_RELEASE_CANARY_LOG=/home/user/work/sora/logs/release-milestone/canary-status.jsonl
+; OP-965 / §6 — DSN for the release-audit trail (see header). Also a good
+; place to put OMNISIGHT_STAGING_URL / probe overrides for this host.
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
+EnvironmentFile=-/home/user/.config/omnisight/staging-gate.env
+ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/staging_gate.py --suite canary
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/staging-gate.log
+StandardError=append:/home/user/work/sora/logs/release-milestone/staging-gate.log
+; Cap pathological hangs (Gerrit unreachable, staging stuck mid-handshake).
+; 5 min >> the canary's own probe budget (5 attempts x 6 s x 2 paths ~= 1 min).
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

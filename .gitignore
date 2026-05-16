@@ -27,6 +27,8 @@ debug/
 .env*
 !.env.example
 !.env.test
+# OP-971: staging compose env template (placeholders only, no secrets)
+!infra/staging/.env.template
 
 # python
 backend/.venv/
@@ -138,3 +140,19 @@ deploy/blue-green/*.tmp.*
 # Phase-3 cutover pre-flight SQLite snapshots (rollback safety net)
 backups/
 metrics/
+
+# === OP-1111 RUNNER_RUNTIME_ARTIFACTS auto-mirror START ===
+# Files the runner writes inside a worktree as part of its own
+# bookkeeping. Source of truth: backend/agents/runner_artifacts.py
+# (RUNNER_RUNTIME_ARTIFACTS frozenset). Defense-in-depth: Python-layer
+# filter (so dirty-checks ignore them) + git-layer ignore (so they
+# never get accidentally staged). Reverses the SP-B-X-018 "filter-only"
+# decision per OP-1111.
+#
+# The lines between the START and END sentinels are pinned by
+# tests/test_runner_runtime_artifacts_consolidation.py — keep them in
+# sync with the frozenset.
+progress.txt
+progress.txt.tmp
+.runner-cwd-sentinel
+# === OP-1111 RUNNER_RUNTIME_ARTIFACTS auto-mirror END ===

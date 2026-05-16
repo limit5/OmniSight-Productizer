@@ -40,6 +40,17 @@ SCOPE_TO_PATHS: dict[str, set[str]] = {
 }
 
 
+# Files that have demonstrated repeat-conflict pattern (multiple tickets
+# touching same file within hours). Pre-PS claim-level mutex is extra
+# aggressive on these; see file_mutex_check's hot-file branch.
+HOT_FILES: frozenset[str] = frozenset({
+    "backend/agents/reflection_rag.py",       # OP-142 vs OP-143 conflict 2026-05-16
+    "docs/operations/agent-rpg-system.md",    # OP-130 vs OP-137 vs others 2026-05-16
+    "backend/metrics.py",                     # OP-1148/1165/1167/1168 codex pool storm 2026-05-16
+    "backend/agents/capability_matrix.py",    # OP-1148/1165 pair
+})
+
+
 # OP-800: Files / Paths section parser, lifted out of jira_dispatch so it can
 # be reused by predict_target_files and any future cross-PS overlap callers
 # without an import-cycle. The token regex requires a literal `.` in the file

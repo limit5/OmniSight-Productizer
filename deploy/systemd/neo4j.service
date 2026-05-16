@@ -1,0 +1,61 @@
+; [OP-1020] User-level Neo4j 5.24 graph store for Cognee.
+;
+; Install on the host that runs Cognee:
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/neo4j.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now neo4j.service
+;   loginctl enable-linger "$USER"
+;
+; Local state created by ExecStartPre:
+;   ~/.config/omnisight/neo4j/neo4j-password
+;   ~/.config/omnisight/neo4j/conf/neo4j.conf
+;   ~/.config/omnisight/neo4j/certificates/{bolt,https}/
+;   ~/.local/share/omnisight/neo4j/{data,logs,import,plugins}/
+;
+; Optional overrides:
+;   ~/.config/omnisight/neo4j.env
+;   OMNISIGHT_REPO_ROOT=/home/user/work/sora/OmniSight-Productizer
+;   OMNISIGHT_NEO4J_CONFIG_DIR=/home/user/.config/omnisight/neo4j
+;   OMNISIGHT_NEO4J_DATA_DIR=/home/user/.local/share/omnisight/neo4j
+;   OMNISIGHT_NEO4J_BOLT_PORT=7687
+;   OMNISIGHT_NEO4J_HTTPS_PORT=7473
+;   OMNISIGHT_NEO4J_BIND_ADDR=0.0.0.0
+;   OMNISIGHT_NEO4J_ADVERTISED_ADDRESS=localhost
+;   OMNISIGHT_NEO4J_IMAGE=neo4j:5.24-community
+;
+; Verify:
+;   systemctl --user status neo4j
+;   curl -kfsS https://127.0.0.1:7473/ >/dev/null
+;   docker exec omnisight-neo4j cypher-shell -u neo4j -p "$(cat ~/.config/omnisight/neo4j/neo4j-password)" "RETURN 1;"
+
+[Unit]
+Description=OmniSight Cognee Neo4j graph store (5.24, TLS) - OP-1020
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=OMNISIGHT_NEO4J_IMAGE=neo4j:5.24-community
+Environment=OMNISIGHT_NEO4J_CONTAINER=omnisight-neo4j
+Environment=OMNISIGHT_NEO4J_CONFIG_DIR=%h/.config/omnisight/neo4j
+Environment=OMNISIGHT_NEO4J_DATA_DIR=%h/.local/share/omnisight/neo4j
+Environment=OMNISIGHT_REPO_ROOT=%h/work/sora/OmniSight-Productizer
+Environment=OMNISIGHT_NEO4J_BOLT_PORT=7687
+Environment=OMNISIGHT_NEO4J_HTTPS_PORT=7473
+Environment=OMNISIGHT_NEO4J_BIND_ADDR=0.0.0.0
+EnvironmentFile=-%h/.config/omnisight/neo4j.env
+ExecStartPre=/bin/sh -c 'exec "$${OMNISIGHT_REPO_ROOT}/deploy/scripts/neo4j-user-preflight.sh"'
+ExecStartPre=-/usr/bin/docker rm -f ${OMNISIGHT_NEO4J_CONTAINER}
+ExecStart=/bin/sh -c 'password="$$(cat "$${OMNISIGHT_NEO4J_CONFIG_DIR}/neo4j-password")"; exec /usr/bin/docker run --rm --name "$${OMNISIGHT_NEO4J_CONTAINER}" --user "$$(id -u):$$(id -g)" --publish "$${OMNISIGHT_NEO4J_BIND_ADDR}:$${OMNISIGHT_NEO4J_HTTPS_PORT}:7473" --publish "$${OMNISIGHT_NEO4J_BIND_ADDR}:$${OMNISIGHT_NEO4J_BOLT_PORT}:7687" --volume "$${OMNISIGHT_NEO4J_CONFIG_DIR}/conf:/conf:ro" --volume "$${OMNISIGHT_NEO4J_CONFIG_DIR}/certificates:/ssl:ro" --volume "$${OMNISIGHT_NEO4J_DATA_DIR}/data:/data" --volume "$${OMNISIGHT_NEO4J_DATA_DIR}/logs:/logs" --volume "$${OMNISIGHT_NEO4J_DATA_DIR}/import:/var/lib/neo4j/import" --volume "$${OMNISIGHT_NEO4J_DATA_DIR}/plugins:/plugins" --env "NEO4J_AUTH=neo4j/$$password" "$${OMNISIGHT_NEO4J_IMAGE}"'
+ExecStop=/usr/bin/docker stop --time 60 ${OMNISIGHT_NEO4J_CONTAINER}
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=143
+TimeoutStartSec=300
+TimeoutStopSec=90
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

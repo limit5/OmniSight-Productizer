@@ -25,6 +25,9 @@ ENV:
   OMNISIGHT_RUNNER_TARGET      optional ticket key override (skip scheduler,
                                pickup specific ticket — for testing)
   OMNISIGHT_RUNNER_DRY_RUN     if "1", do everything except transition + invoke
+  OMNISIGHT_RUNNER_CLAIM_SHADOW
+                               if unset/"on", JIRA claim labels are shadow-written
+                               to runner_coordination (OP-1168 observation)
   OMNISIGHT_CODEX_WORKTREE     codex worktree override (defaults to
                                ../OmniSight-codex-worktree for default
                                instance; ../OmniSight-<bot>-worktree for
@@ -47,20 +50,27 @@ REPO = Path(__file__).resolve().parent
 sys.path.insert(0, str(REPO))
 
 from backend.agents import (
+    agent_feature_flags,
     capability_matrix,
     circuit_breaker,
     failure_graph,
-    feature_flags as agent_feature_flags,
+    jira_authority_check,
+    gerrit_jira_bridge,
+    live_state_check,
     memory_writeback,
     outcomes_consumer,
+    outcomes_grader,
     jira_dispatch,
     orphan_salvage,
+    runner_comment_dedupe,
     runner_metrics_recorder,
     runner_failure_classifier,
+    runner_progress,
     runner_sandbox,
     runner_workspace_safety,
     scheduler,
 )
+from backend.agents.operator_notifier import Severity, notify as operator_notify
 from backend.agents.loop_detector import (
     DEFAULT_GRADER_MODEL,
     OUTCOMES_GRADER_MODEL_ENV,
@@ -72,6 +82,7 @@ AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "default"
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
+_RUNNER_ACTIVE_ITERATION = 0
 
 # OP-858 (C8): pickup-time failure-graph context injection. Until C2's
 # runner_incidents Postgres table ships, the runner reads a JSON fixture
@@ -87,6 +98,35 @@ FAILURE_GRAPH_FIXTURE = os.environ.get(
 # (per AC §recovery / rollback). Default off so the feature stays on.
 OPS_ONLY_DISABLED = (
     os.environ.get("OMNISIGHT_RUNNER_OPS_ONLY_DISABLED", "0").strip() == "1"
+)
+RUNNER_BRANCH_SWEEP_DISABLED = (
+    os.environ.get("OMNISIGHT_RUNNER_BRANCH_SWEEP_DISABLED", "0").strip() == "1"
+)
+PRE_PICKUP_CAP_GATE_ENV = "OMNISIGHT_PRE_PICKUP_CAP_GATE"
+PRE_PICKUP_CAP_BLOCKED_TAG = "[runner-capability-pre-pickup-blocked]"
+
+# AUDIT-29b-6 (OP-1024) — the lesson-surface meta-mechanism. ``_build_prompt``
+# injects the top-N most relevant prior lessons (``cognee_recall`` flag) and the
+# architecture anti-patterns matching the ticket's area (``antipattern_inject``
+# flag) into every pickup. Both blocks degrade to an empty string when the
+# source is offline (Cognee KG down / lessons dir unreadable / cookbook missing)
+# — a pickup must never fail because lesson recall is unavailable.
+LESSONS_DIR = REPO / "docs" / "sop" / "lessons"
+ANTIPATTERNS_DOC = REPO / "docs" / "sop" / "architecture-anti-patterns.md"
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name, "") or "").strip()
+    try:
+        return int(raw) if raw else default
+    except ValueError:
+        return default
+
+
+LESSON_RECALL_TOP_K = _env_int("OMNISIGHT_LESSON_RECALL_TOP_K", 3)
+ANTIPATTERN_TOP_N = _env_int("OMNISIGHT_ANTIPATTERN_TOP_N", 2)
+ORPHAN_SALVAGE_BRANCH_THRESHOLD = int(
+    os.environ.get("OMNISIGHT_ORPHAN_SALVAGE_BRANCH_THRESHOLD", "50").strip()
 )
 
 # Recognised JIRA `area:<X>` label values. Exported so other tooling
@@ -135,6 +175,81 @@ def _default_worktree_for(agent_class: str) -> str:
         return os.path.normpath(os.path.join(REPO, "..", f"OmniSight-{suffix}"))
     bot = jira_dispatch.resolve_bot_username(agent_class, INSTANCE_ID)
     return os.path.normpath(os.path.join(REPO, "..", f"OmniSight-{bot}-worktree"))
+
+
+def sweep_stale_runner_branches(worktree_path: Path) -> None:
+    """Best-effort local branch sweep before orphan salvage threshold checks."""
+    if RUNNER_BRANCH_SWEEP_DISABLED:
+        return
+    script = REPO / "scripts" / "orphan-branch-triage.py"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            "--worktree",
+            str(worktree_path),
+            "--agent-class",
+            AGENT_CLASS,
+            "--delete-safe",
+            "--quiet",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(
+            "[runner] stale branch sweep failed; continuing without cleanup: "
+            f"rc={result.returncode} stderr={result.stderr.strip()[:300]}",
+            file=sys.stderr,
+        )
+    elif result.stderr.strip():
+        print(f"[runner] stale branch sweep: {result.stderr.strip()}")
+
+
+def configure_orphan_salvage_runtime() -> None:
+    """Apply runner-owned salvage threshold and branch-list normalization."""
+    orphan_salvage.MAX_ORPHAN_BRANCHES = ORPHAN_SALVAGE_BRANCH_THRESHOLD
+
+    def runner_branches(worktree_path: Path) -> list[str]:
+        worktrees = subprocess.run(
+            ["git", "-C", str(worktree_path), "worktree", "list", "--porcelain"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        checked_out = {
+            line.removeprefix("branch refs/heads/").strip()
+            for line in worktrees.stdout.splitlines()
+            if line.startswith("branch refs/heads/")
+        }
+        result = subprocess.run(
+            ["git", "-C", str(worktree_path), "branch", "--list", orphan_salvage.BRANCH_PATTERN],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        branches: list[str] = []
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            branch = line.strip().lstrip("*+ ").strip()
+            if branch in checked_out:
+                continue
+            branch_parts = branch.removeprefix("feature/").split("-")
+            ticket = "-".join(branch_parts[:2])
+            head_msg = subprocess.run(
+                ["git", "-C", str(worktree_path), "log", "-1", "--pretty=%B", branch],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if head_msg.returncode != 0 or ticket not in head_msg.stdout:
+                continue
+            branches.append(branch)
+        return branches
+
+    orphan_salvage._runner_branches = runner_branches
 
 
 def _file_mutex_skip_comment(reason: str) -> str:
@@ -277,6 +392,76 @@ def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
     return None
 
 
+# SP-B-X-009 (OP-1067) — C9 bridge-health pickup gate. The Gerrit/JIRA
+# bridge daemon owns the change-merged → Published transition; if its
+# heartbeat goes stale every freshly picked ticket will eventually wedge
+# at Approved waiting for a transition that will never arrive. Running
+# this gate before claim_ticket_atomic surrenders the tick early so we
+# do not burn a claim slot on work the rest of the pipeline cannot
+# finalise. The gate fires ``operator_notifier.notify(Severity.CRITICAL,
+# "bridge_down", ...)`` so the alert lands on the on-call channels per
+# the standard severity matrix; the JIRA comment side-effect is gated
+# behind ``OMNISIGHT_FLEET_HEALTH_CANARY_KEY`` so we don't pollute every
+# runner-host's ticket with bridge-down noise.
+def _bridge_health_pickup_gate(
+    client: jira_dispatch.DispatchClient,
+    *,
+    check_fn=gerrit_jira_bridge.check_bridge_heartbeat,
+    notify_fn=operator_notify,
+    comment_fn=jira_dispatch.add_comment,
+) -> bool:
+    """Return True if the bridge heartbeat is fresh; False otherwise.
+
+    On stale heartbeat (or missing file) emits a CRITICAL operator
+    notification and — only when ``OMNISIGHT_FLEET_HEALTH_CANARY_KEY``
+    is set — also posts a ``[runner-bridge-down]`` comment on that
+    canary ticket so the symptom is preserved in JIRA for the
+    incident retrospective.
+    """
+
+    is_fresh, age_sec, path = check_fn()
+    if is_fresh:
+        return True
+
+    age_repr = "missing" if age_sec == float("inf") else f"{age_sec:.0f}s"
+    print(
+        f"[runner] bridge_down: heartbeat stale at {path} (age={age_repr}); "
+        f"skipping pickup",
+        file=sys.stderr,
+    )
+    try:
+        notify_fn(
+            Severity.CRITICAL,
+            "bridge_down",
+            message=f"bridge heartbeat stale at {path}; runners blocked",
+            context={"heartbeat_path": str(path), "age_sec": age_sec},
+        )
+    except Exception as exc:  # noqa: BLE001 — notifier failure must not wedge the gate
+        print(
+            f"[runner] bridge_down notify failed: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+    canary_key = os.environ.get("OMNISIGHT_FLEET_HEALTH_CANARY_KEY", "").strip()
+    if canary_key and not DRY_RUN:
+        try:
+            comment_fn(
+                client,
+                canary_key,
+                (
+                    f"[runner-bridge-down] Pickup short-circuited: bridge "
+                    f"heartbeat stale at {path} (age={age_repr}). "
+                    f"Investigate per `docs/sop/runbooks/bridge-health-degraded.md`."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001 — canary post is best-effort
+            print(
+                f"[runner] bridge_down canary post failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+    return False
+
+
 def _check_pre_pickup_candidate(
     client: jira_dispatch.DispatchClient,
     snapshot: scheduler.TicketSnapshot,
@@ -296,6 +481,16 @@ def _check_pre_pickup_candidate(
     description = jira_dispatch.fetch_description(client, snapshot.key)
     ok, reason = jira_dispatch.file_mutex_check(snapshot, description=description)
     if ok:
+        ok, reason = _pre_pickup_capability_ok(
+            client, snapshot, _load_capability_matrix()
+        )
+        if not ok:
+            if stats is not None:
+                stats["other_blocked"] = stats.get("other_blocked", 0) + 1
+            _post_pre_pickup_capability_block(
+                client, snapshot, reason or "capability-mismatch"
+            )
+            return False
         if not DRY_RUN:
             jira_dispatch.remove_label(
                 client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL
@@ -320,6 +515,7 @@ _CAPABILITY_MATRIX: capability_matrix.CapabilityMatrix | None = None
 # process because each tick overwrites the previous entry.
 _LAST_RESOLVED_CAPABILITIES: dict[str, frozenset[str]] = {}
 _LAST_TICKET_METADATA: dict[str, dict[str, str]] = {}
+_LAST_AGENT_FEATURE_FLAGS: dict[str, dict[str, bool]] = {}
 
 
 def _load_capability_matrix() -> capability_matrix.CapabilityMatrix:
@@ -349,6 +545,115 @@ def _resolve_runner_capabilities(
             ticket_type, declared_areas, tier, labels=labels,
         )
     return matrix.resolve(ticket_type, "<no-area>", tier, labels=labels)
+
+
+def _pre_pickup_cap_gate_enabled() -> bool:
+    return os.environ.get(PRE_PICKUP_CAP_GATE_ENV, "on").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _required_capabilities_for(snapshot: scheduler.TicketSnapshot) -> frozenset[str]:
+    """Infer the minimum runner capabilities needed before CLI pickup."""
+    labels = {label.strip().lower() for label in getattr(snapshot, "labels", ())}
+    required = {"jira_update"}
+    if labels & {"type:feature", "type:bug", "type:docs"}:
+        required.add("code_edit")
+    if "type:meta" not in labels and "runner:no-commits-expected" not in labels:
+        required.add("gerrit_push")
+    return frozenset(required)
+
+
+def _capability_context_for_snapshot(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+) -> tuple[str, list[str], str, list[str]]:
+    issue = jira_dispatch._request(
+        client, "GET", f"/issue/{snapshot.key}?fields=labels,issuetype",
+    )
+    fields = issue.get("fields") or {}
+    labels = list(fields.get("labels") or getattr(snapshot, "labels", ()))
+    issuetype_raw = fields.get("issuetype") or {}
+    ticket_type = (
+        issuetype_raw.get("name", "Story")
+        if isinstance(issuetype_raw, dict)
+        else "Story"
+    )
+    declared_areas = sorted(
+        label.split(":", 1)[1] for label in labels if label.startswith("area:")
+    )
+    tier = next(
+        (label.split(":", 1)[1] for label in labels if label.startswith("tier:")),
+        "M",
+    )
+    return ticket_type, declared_areas, tier, labels
+
+
+def _increment_pre_pickup_cap_gate_metric(
+    areas: list[str],
+    tier: str,
+    issuetype: str,
+) -> None:
+    try:
+        from backend import metrics as _metrics
+
+        for area in areas or ["<no-area>"]:
+            _metrics.runner_pre_pickup_cap_gate_blocked_total.labels(
+                area=area, tier=tier, issuetype=issuetype,
+            ).inc()
+    except Exception:  # noqa: BLE001 - observability must not block pickup
+        log.debug("pre-pickup capability gate metric publish failed", exc_info=True)
+
+
+def _pre_pickup_capability_ok(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    matrix: capability_matrix.CapabilityMatrix,
+) -> tuple[bool, str | None]:
+    """Return whether matrix capabilities satisfy pre-CLI required caps."""
+    if not _pre_pickup_cap_gate_enabled():
+        return True, None
+    ticket_type, declared_areas, tier, labels = _capability_context_for_snapshot(
+        client, snapshot,
+    )
+    if declared_areas:
+        resolved = matrix.resolve_for_areas(
+            ticket_type, declared_areas, tier, labels=labels, ticket_id=snapshot.key,
+        )
+    else:
+        resolved = matrix.resolve(
+            ticket_type, "<no-area>", tier, labels=labels, ticket_id=snapshot.key,
+        )
+    required = _required_capabilities_for(snapshot)
+    if required <= resolved:
+        return True, None
+    _increment_pre_pickup_cap_gate_metric(declared_areas, tier, ticket_type)
+    need = ",".join(sorted(required - resolved))
+    have = ",".join(sorted(resolved)) or "(none)"
+    return False, f"capability-mismatch: need={need} have={have}"
+
+
+def _post_pre_pickup_capability_block(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    reason: str,
+) -> None:
+    print(f"[runner] pre-pickup capability blocked {snapshot.key}: {reason}")
+    if DRY_RUN:
+        return
+    runner_comment_dedupe.maybe_post_comment(
+        client,
+        snapshot.key,
+        PRE_PICKUP_CAP_BLOCKED_TAG,
+        (
+            f"{PRE_PICKUP_CAP_BLOCKED_TAG}\n\n"
+            "Pre-pickup capability gate failed; CLI was not invoked.\n\n"
+            f"{reason}\n\n"
+            "Operator: extend `config/capability_matrix.yaml` for this "
+            "ticket type / area / tier, or use `capability:enable=` for a "
+            "one-shot override."
+        ),
+    )
 
 
 def _require_runner_capability(
@@ -537,6 +842,115 @@ def _load_failure_graph_for_pickup() -> failure_graph.FailureGraph | None:
         return None
 
 
+def _build_lesson_recall_block(key: str, summary: str, description: str) -> str:
+    """AUDIT-29b-6 (OP-1024) — surface the top-N prior lessons for this ticket.
+
+    Gated by the ``cognee_recall`` agent flag (default off). Retrieval is
+    routed through the Cognee KG with the OP-848 BM25 index as the fallback,
+    so the block is shape-stable whether or not the optional KG is running.
+    Any retrieval error degrades to an empty block + a stderr log line —
+    pickup must never fail because lesson recall is unavailable.
+
+    Integration AC: the ``[runner] lesson_recall.*`` log line is what the
+    debug-mode pickup log shows to confirm a recall block was emitted.
+    """
+    if not agent_feature_flags.cognee_recall.enabled():
+        return ""
+    try:
+        from backend.agents.cognee_integration import retrieve_lessons_via_cognee
+
+        lessons = retrieve_lessons_via_cognee(
+            LESSONS_DIR,
+            ticket_title=summary,
+            acceptance_criteria=description,
+            top_k=LESSON_RECALL_TOP_K,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade on any retrieval error
+        print(f"[runner] lesson_recall.unavailable key={key} err={exc}", file=sys.stderr)
+        return ""
+    if not lessons:
+        print(f"[runner] lesson_recall.empty key={key}", file=sys.stderr)
+        return ""
+    ids = [getattr(item.path, "name", str(item.path)) for item in lessons]
+    print(
+        f"[runner] lesson_recall.surfaced key={key} count={len(lessons)} ids={ids}",
+        file=sys.stderr,
+    )
+    parts = [
+        "# Relevant lessons (AUDIT-29b lesson-surface)",
+        "",
+        "These prior lessons were retrieved by similarity to this ticket's",
+        "summary + acceptance criteria. Read them before you start — they",
+        "encode mistakes already made on adjacent work:",
+        "",
+    ]
+    for item in lessons:
+        name = getattr(item.path, "name", str(item.path))
+        body = (item.text or "").strip()
+        parts.append(f"## {name}\n\n{body}\n")
+    return "\n" + "\n".join(parts) + "\n"
+
+
+def _build_antipattern_block(
+    key: str, summary: str, description: str, declared_areas: list[str],
+) -> str:
+    """AUDIT-29b-6 (OP-1024) — surface architecture anti-patterns for this ticket.
+
+    Gated by the ``antipattern_inject`` agent flag (default off). Selection
+    is Cognee top-N similarity with a deterministic keyword fallback, biased
+    toward patterns whose ``Domains`` line intersects the ticket's ``area:``
+    labels (so e.g. an ``area:db`` migration ticket auto-surfaces pattern #10
+    "Migration ticket fighting in-flight tickets"). Any error degrades to an
+    empty block + a stderr log line.
+    """
+    if not agent_feature_flags.antipattern_inject.enabled():
+        return ""
+    try:
+        from backend.agents.cognee_integration import retrieve_antipatterns_via_cognee
+
+        matches = retrieve_antipatterns_via_cognee(
+            ANTIPATTERNS_DOC,
+            ticket_title=summary,
+            acceptance_criteria=description,
+            declared_areas=declared_areas,
+            top_k=ANTIPATTERN_TOP_N,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade on any retrieval error
+        print(
+            f"[runner] antipattern_inject.unavailable key={key} err={exc}",
+            file=sys.stderr,
+        )
+        return ""
+    if not matches:
+        print(f"[runner] antipattern_inject.empty key={key}", file=sys.stderr)
+        return ""
+    pattern_ids = [match.record.pattern_id for match in matches]
+    print(
+        f"[runner] antipattern_inject.surfaced key={key} count={len(matches)} "
+        f"patterns={pattern_ids} areas={sorted(declared_areas)}",
+        file=sys.stderr,
+    )
+    parts = [
+        "# Anti-patterns matching this ticket (AUDIT-29b lesson-surface)",
+        "",
+        "These entries from docs/sop/architecture-anti-patterns.md match this",
+        "ticket's area / subject. Before designing a fix, check whether you're",
+        "about to re-enter one — the Cure section already costed the way out:",
+        "",
+    ]
+    for match in matches:
+        area_tag = (
+            f" (area match: {', '.join(match.matched_domains)})"
+            if match.matched_domains
+            else ""
+        )
+        parts.append(
+            f"## Pattern #{match.record.pattern_id}: {match.record.title}{area_tag}\n\n"
+            f"{match.record.text.strip()}\n"
+        )
+    return "\n" + "\n".join(parts) + "\n"
+
+
 def _build_prompt(
     client: jira_dispatch.DispatchClient,
     key: str,
@@ -578,6 +992,9 @@ def _build_prompt(
     enabled_capabilities = _resolve_runner_capabilities(
         ticket_type, declared_areas, tier, list(labels),
     )
+    _LAST_AGENT_FEATURE_FLAGS[key] = {
+        "cognee_recall": agent_feature_flags.cognee_recall.enabled(),
+    }
     _LAST_RESOLVED_CAPABILITIES[key] = enabled_capabilities
     _LAST_TICKET_METADATA[key] = {
         "ticket_type": ticket_type,
@@ -627,6 +1044,17 @@ def _build_prompt(
             "your behalf when the CLI exits cleanly with no commits.\n"
         )
 
+    # AUDIT-29b-6 (OP-1024) — the lesson-surface meta-mechanism: feed the
+    # most relevant prior lessons + the architecture anti-patterns matching
+    # this ticket's area into the pickup prompt. Both are flag-gated (default
+    # off) and degrade to an empty string when the KG / cookbook is offline.
+    # They sit before the Documentation-rules / AC-verification sections so
+    # the CLI reads the context before it is told what to satisfy.
+    lessons_block = _build_lesson_recall_block(key, summary, description)
+    antipattern_block = _build_antipattern_block(
+        key, summary, description, declared_areas,
+    )
+
     return f"""You are working on JIRA ticket {key}.
 
 Component: {component_label}
@@ -641,7 +1069,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-{capabilities_block}{fg_block}{ps_block}{ops_only_block}
+{capabilities_block}{fg_block}{ps_block}{ops_only_block}{lessons_block}{antipattern_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
@@ -699,6 +1127,39 @@ CLAUDE_WORKTREE = os.environ.get(
     _default_worktree_for("subscription-claude"),
 )
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
+
+# OP-1138 / Sprint Boreas-C3 — Ephemeral-mode invariant.
+#
+# Sprint Boreas-C reframes the runner so each cycle gets a fresh git
+# clone at $workspace, and auto-runner-jira.py runs from INSIDE that
+# clone (not from a separately-checked-out main repo whose code can
+# drift, OP-1126/1124 overnight loop). The new wrapper
+# (scripts/runner-wrapper/run-ephemeral.sh, OP-1137) sets
+# ``OMNISIGHT_RUNNER_EPHEMERAL=1`` AND pins both
+# ``OMNISIGHT_{CODEX,CLAUDE}_WORKTREE`` to the workspace path.
+#
+# When the flag is set we assert the invariant: REPO (the directory
+# auto-runner-jira.py lives in, resolved via Path(__file__)) must
+# equal the active worktree. Mismatch means the wrapper plumbed
+# something wrong — fail loudly instead of running with drifted code.
+_RUNNER_EPHEMERAL = os.environ.get("OMNISIGHT_RUNNER_EPHEMERAL", "").strip() in ("1", "true", "yes", "on")
+if _RUNNER_EPHEMERAL:
+    _active_worktree = CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai") else CLAUDE_WORKTREE
+    _expected = str(REPO.resolve())
+    _got = str(Path(_active_worktree).resolve())
+    if _expected != _got:
+        raise SystemExit(
+            f"[runner] ephemeral-mode invariant failed: REPO ({_expected}) "
+            f"!= active worktree ({_got}). The wrapper at "
+            f"scripts/runner-wrapper/run-ephemeral.sh must set "
+            f"OMNISIGHT_{{CODEX,CLAUDE}}_WORKTREE to the workspace path "
+            f"that contains this script. Found mismatch — refusing to "
+            f"proceed (would drift like OP-1126/1124)."
+        )
+    print(
+        f"[runner] ephemeral-mode active (REPO={_expected}); "
+        f"OMNISIGHT_RUNNER_EPHEMERAL invariant satisfied"
+    )
 
 
 def _invoke_cli(
@@ -796,6 +1257,7 @@ def _finalize_under_review(
     client: "jira_dispatch.DispatchClient",
     key: str,
     gerrit_change_url: str,
+    change_number: int | None = None,
 ) -> None:
     """Phase 1.5 post-push idempotency block (OP-691).
 
@@ -820,8 +1282,23 @@ def _finalize_under_review(
         return
 
     try:
-        jira_dispatch.post_runner_pushed_comment(client, key, gerrit_change_url)
-        transitioned = jira_dispatch.transition_to_under_review_if_needed(client, key)
+        idem_key = jira_dispatch._under_review_idem_key(
+            key,
+            change_number=change_number,
+            change_url=gerrit_change_url,
+        )
+        jira_dispatch.post_runner_pushed_comment(
+            client,
+            key,
+            gerrit_change_url,
+            idem_key=f"{idem_key}-comment",
+        )
+        transitioned = jira_dispatch.transition_to_under_review_if_needed(
+            client,
+            key,
+            idem_key=idem_key,
+            change_number=change_number,
+        )
     except Exception as e:  # noqa: BLE001 — any 4xx etc → log skip, do not crash
         print(f"[runner] transition to Under Review failed ({type(e).__name__}: {e}); "
               f"Gerrit push already succeeded — logging skip comment", file=sys.stderr)
@@ -842,6 +1319,50 @@ def _finalize_under_review(
     else:
         print(f"[runner] {key} already Under Review at transition step (raced); "
               f"comment posted, transition skipped")
+
+
+def _release_ticket_claim_if_acquired(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    claim: "jira_dispatch.ClaimResult | None",
+) -> None:
+    """Best-effort claim release after a successful runner claim."""
+    if claim is None or not claim.ok:
+        return
+    token = None
+    prefix = f"{INSTANCE_ID}:"
+    if claim.claim_token and claim.claim_token.startswith(prefix):
+        token = claim.claim_token[len(prefix):]
+    jira_dispatch.release_ticket_claim(
+        client,
+        key,
+        INSTANCE_ID,
+        token,
+        coordination_lease_id=claim.coordination_lease_id,
+        coordination_fencing_token=claim.coordination_fencing_token,
+    )
+
+
+def _finalize_successful_push(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    push_result: "jira_dispatch.GerritPushResult",
+    claim: "jira_dispatch.ClaimResult | None" = None,
+) -> None:
+    _finalize_under_review(
+        client,
+        key,
+        push_result.change_url,
+        change_number=push_result.change_number,
+    )
+    _release_ticket_claim_if_acquired(client, key, claim)
+    if push_result.post_push_warning:
+        jira_dispatch.add_comment(
+            client,
+            key,
+            "[runner-pre-review-self-fix-warning] "
+            f"{push_result.post_push_warning}",
+        )
 
 
 def _run_memory_writeback(
@@ -904,16 +1425,72 @@ def _run_memory_writeback(
         )
 
 
-def _ops_only_active_for(snapshot: "scheduler.TicketSnapshot") -> bool:
+def _ops_only_active_for(
+    snapshot: "scheduler.TicketSnapshot",
+    *,
+    client: "jira_dispatch.DispatchClient | None" = None,
+) -> bool:
     """Return True if the OP-956 ops-only forward-transition path applies.
 
     Two gates: (1) the global ``OMNISIGHT_RUNNER_OPS_ONLY_DISABLED`` env
     knob is not set (AC §recovery — operator escape hatch), and (2) the
     ticket carries the ``runner:no-commits-expected`` sigil label.
+
+    OP-958 (``LabelsPropagationDrift``): ``snapshot.labels`` is a copy
+    frozen at ticket-*selection* time; it goes stale if the operator
+    adds the sigil after pickup (the OP-925 R3 cascade — operator tagged
+    the ticket mid-flight while the runner kept reverting it). When a
+    ``client`` is supplied we re-read the *live* label set from JIRA and
+    union it with the snapshot copy so a sigil added (or already present
+    but missing from a thin payload) is still seen. A live-fetch fault
+    degrades to the snapshot copy — i.e. never worse than the old
+    behaviour.
     """
     if OPS_ONLY_DISABLED:
         return False
-    return jira_dispatch.has_ops_only_label(getattr(snapshot, "labels", ()))
+    labels: set[str] = set(getattr(snapshot, "labels", ()) or ())
+    if client is not None:
+        try:
+            labels |= set(jira_dispatch.fetch_ticket_labels(client, snapshot.key))
+        except Exception as exc:  # noqa: BLE001 — degrade to snapshot copy
+            print(
+                f"[runner] ops-only live-label re-read failed for "
+                f"{snapshot.key}: {type(exc).__name__}: {exc}; "
+                f"falling back to selection-time snapshot labels",
+                file=sys.stderr,
+            )
+    return jira_dispatch.has_ops_only_label(labels)
+
+
+def _cli_self_reverted_to_todo(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+) -> bool:
+    """Return True when ``key`` is already back in To Do post-CLI.
+
+    OP-963 (AUDIT-15): the codex/claude CLI may itself transition the
+    ticket back to To Do mid-run — the §11 discovered-dependency
+    protocol does exactly that (it posts a ``[runner-discovered-
+    dependency]`` comment and calls ``transition_back_to_todo`` before
+    exiting 0). When that happened the post-CLI ``NoCommitsOnBranchError``
+    handler must NOT pile on a second ``[runner-no-commits-from-cli]``
+    revert — nor an ops-only forward-walk that would 400 from To Do —
+    because the ticket is already in the desired state. That dual-revert
+    was the OP-925 R3 11:05 noise. A live status re-read is the
+    authoritative signal; a re-read fault degrades to ``False`` — i.e.
+    the standard no-commits handler runs, never worse than before.
+    """
+    try:
+        status = jira_dispatch.get_issue_status(client, key)
+    except Exception as exc:  # noqa: BLE001 — degrade to standard handler
+        print(
+            f"[runner] {key}: could not re-read status to check for a "
+            f"CLI self-revert ({type(exc).__name__}: {exc}); proceeding "
+            f"with the standard no-commits handler",
+            file=sys.stderr,
+        )
+        return False
+    return status in jira_dispatch.TODO_STATUS_NAMES
 
 
 def _handle_ops_only_forward_transition(
@@ -1076,6 +1653,89 @@ def _handle_gerrit_push_failure(
     return category, action
 
 
+def _handle_toctou_abort(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    recheck: "live_state_check.BoundaryRecheckResult",
+    *,
+    phase: str,
+    claim: "jira_dispatch.ClaimResult | None" = None,
+) -> int:
+    """Apply the JIRA recovery action for a transition-boundary TOCTOU abort.
+
+    SP-B-X-004 (OP-1062). Posts a ``[runner-toctou:<phase>:<action>]``
+    audit comment unconditionally. Reverts to To Do for the mutation
+    classes where the runner is the one that has to step aside
+    (assignee swap, operator-window label added, new unresolved
+    Blocks dep). Leaves status untouched for the two classes where a
+    revert would either be redundant (already in To Do) or actively
+    wrong (ticket has already walked forward and a duplicate push
+    would land twice).
+    """
+    if recheck.action in (
+        "abort_assignee_changed",
+        "abort_reverted",
+        "abort_already_advanced",
+    ):
+        try:
+            change = jira_authority_check.latest_authority_change(client, key)
+        except Exception as exc:  # noqa: BLE001 — fall back to the C3a path
+            print(
+                f"[runner] authority changelog check failed for {key}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            change = None
+        if change is not None and change.author.kind == "human":
+            author_id = change.author.account_id or change.author.display_name
+            comment = (
+                f"[runner-yielded-to-human-authority] author={author_id} "
+                f"change={change.field} {change.old}→{change.new}; pausing."
+            )
+            print(
+                f"[runner] {key} yielding to human authority: {comment}",
+                file=sys.stderr,
+            )
+            try:
+                jira_dispatch.add_comment(client, key, comment)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] human-authority comment post failed for {key}: "
+                    f"{type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+            _release_ticket_claim_if_acquired(client, key, claim)
+            return 0
+
+    audit = f"[runner-toctou:{phase}:{recheck.action}] {recheck.reason}"
+    print(f"[runner] {key} toctou abort: {audit}", file=sys.stderr)
+    try:
+        jira_dispatch.add_comment(client, key, audit)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[runner] toctou audit-comment post failed for {key}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+    if recheck.action in ("abort_reverted", "abort_already_advanced"):
+        return 1
+    try:
+        jira_dispatch.transition_back_to_todo(client, key, audit)
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[runner] toctou revert failed for {key}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+    return 1
+
+
+def _runner_active_marker(ticket: str, phase: str) -> str:
+    global _RUNNER_ACTIVE_ITERATION
+    _RUNNER_ACTIVE_ITERATION += 1
+    return f"[runner-active: {ticket} {phase} {_RUNNER_ACTIVE_ITERATION}]"
+
+
 def _run_git_text(worktree_path: Path, args: list[str], *, timeout: int = 20) -> str:
     result = subprocess.run(
         ["git", *args],
@@ -1100,6 +1760,73 @@ def _collect_outcomes_context(worktree_path: Path, base_ref: str) -> tuple[str, 
         timeout=60,
     )
     return completion or "(no commit summary)", diff
+
+
+# OP-1141: env-gated strict-match AC-evidence grader. Off by default to
+# keep the feature opt-in until we have observed ≥1 real-positive on
+# production tickets (Exercised AC). Set to "1" to enable.
+AC_EVIDENCE_STRICT_ENABLED_ENV = "OMNISIGHT_AC_EVIDENCE_STRICT_ENABLED"
+
+
+def _ac_evidence_strict_enabled(env: "dict[str, str] | None" = None) -> bool:
+    env = env if env is not None else os.environ
+    return env.get(AC_EVIDENCE_STRICT_ENABLED_ENV, "0").strip() == "1"
+
+
+def _grade_ac_evidence_pre_push(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    worktree_path: Path,
+    base_ref: str,
+) -> "outcomes_grader.StrictGradeResult | None":
+    """Run the OP-1141 strict-match AC-evidence grader before Gerrit push.
+
+    Returns ``None`` when the gate is disabled (operator opt-in env not
+    set) or when context collection failed in a way that should NOT
+    block the push (e.g. the JIRA comments fetch errored — we degrade
+    rather than reject). Returns a :class:`StrictGradeResult` when the
+    grader ran; the caller decides whether to push based on
+    ``result.passed``.
+
+    The grader is intentionally fail-closed *only* when it produces a
+    real verdict — transport faults degrade open so a Gerrit-bound
+    push is never lost to runner-side noise. Compare with the LLM
+    outcomes-grader path which can refuse the entire ticket on a
+    grader-side fault; here the strict-match logic is local and
+    deterministic, so a missing JIRA fetch is the only degrade path.
+    """
+    if not _ac_evidence_strict_enabled():
+        return None
+
+    try:
+        resp = jira_dispatch._request(client, "GET", f"/issue/{key}/comment?maxResults=200")
+    except Exception as exc:  # noqa: BLE001 — degrade-open on JIRA fetch fault
+        print(
+            f"[ac-evidence-strict] {key}: JIRA comment fetch failed "
+            f"({type(exc).__name__}: {exc}); degrading open (no gate).",
+            file=sys.stderr,
+        )
+        return None
+
+    comments = list(resp.get("comments", []) or [])
+    comment_body = outcomes_grader.find_ac_verification_comment(comments, key)
+    try:
+        _, diff_text = _collect_outcomes_context(worktree_path, base_ref)
+    except Exception as exc:  # noqa: BLE001 — degrade-open on git fault
+        print(
+            f"[ac-evidence-strict] {key}: diff collection failed "
+            f"({type(exc).__name__}: {exc}); degrading open.",
+            file=sys.stderr,
+        )
+        return None
+
+    head_change_id = jira_dispatch._head_change_id(worktree_path)
+    return outcomes_grader.grade_ac_evidence(
+        comment_body=comment_body,
+        diff_text=diff_text,
+        head_change_id=head_change_id,
+        ticket_key=key,
+    )
 
 
 def _current_patchset_number(change_number: int, agent_class: str = AGENT_CLASS) -> str:
@@ -1213,6 +1940,7 @@ def main() -> int:
         f"[runner] agent_class={AGENT_CLASS}, instance_id={INSTANCE_ID}, "
         f"bot={_bot_username()}, dry_run={DRY_RUN}"
     )
+    print(_runner_active_marker(TARGET_OVERRIDE or "<selection>", "tick"))
     # OP-845: log sandbox state once at startup so journalctl shows the
     # operator whether bubblewrap is wired before any ticket is processed.
     _sandbox_enforce = os.environ.get(runner_sandbox.ENV_ENFORCE, "0")
@@ -1238,6 +1966,8 @@ def main() -> int:
     if DRY_RUN:
         print(f"[runner] DRY_RUN: would scan orphan commits in {worktree_path}")
     else:
+        sweep_stale_runner_branches(worktree_path)
+        configure_orphan_salvage_runtime()
         salvaged = orphan_salvage.salvage_orphan_commits(worktree_path, AGENT_CLASS)
         if salvaged:
             print(f"[runner] salvaged {salvaged} orphan commits before starting tick")
@@ -1253,6 +1983,14 @@ def main() -> int:
 
     client = jira_dispatch.make_client(AGENT_CLASS, INSTANCE_ID)
     print(f"[runner] authenticated as {client.bot_email} ({client.bot_account_id})")
+
+    # SP-B-X-009 (OP-1067) — bridge-health gate: if the Gerrit/JIRA
+    # bridge has gone silent, every freshly picked ticket will wedge at
+    # Approved waiting for a change-merged transition the bridge will
+    # never make. Surrender the tick now so the pipeline can recover
+    # before we burn claim slots and review cycles.
+    if not _bridge_health_pickup_gate(client):
+        return 0
 
     # Step 1: ticket selection
     if TARGET_OVERRIDE:
@@ -1281,6 +2019,7 @@ def main() -> int:
         snapshot = winner
 
     print(f"[runner] selected: {snapshot.key} (component={snapshot.component})")
+    print(_runner_active_marker(snapshot.key, "selected"))
 
     merged_info = already_merged_in_gerrit(snapshot.key)
     if merged_info:
@@ -1333,6 +2072,34 @@ def main() -> int:
             )
             return 1
 
+        # SP-B-X-002a / OP-1060 — C1 resume surface. After the worktree
+        # is synced (so `git stash list` reflects the real local state),
+        # cross-check progress.txt against the live stash listing and
+        # post the AC §C1 ``[progress-recovered]`` comment on a hit.
+        # Read failures + missing-progress are silently OK — this is a
+        # passive recovery surface, not a gate.
+        try:
+            recovered = runner_progress.find_recovered_snapshot(worktree_path)
+        except Exception as exc:  # noqa: BLE001 — recovery surface must not block pickup
+            print(
+                f"[runner] progress recovery probe failed for {snapshot.key}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            recovered = None
+        if recovered is not None:
+            try:
+                jira_dispatch.add_comment(
+                    client, snapshot.key,
+                    runner_progress.format_recovered_comment(recovered),
+                )
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] progress-recovered comment post failed for "
+                    f"{snapshot.key}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+
     # Step 3: pre-pickup check now runs against fresh worktree, not stale main repo.
     # OP-687: a "mutex conflict" reason means a sibling ticket holds the same
     # mutex:<path>; the dispatch loop already skipped to this candidate, so a
@@ -1382,6 +2149,15 @@ def main() -> int:
         return 0
     if not DRY_RUN:
         jira_dispatch.remove_label(client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL)
+
+    ok, reason = _pre_pickup_capability_ok(
+        client, snapshot, _load_capability_matrix()
+    )
+    if not ok:
+        _post_pre_pickup_capability_block(
+            client, snapshot, reason or "capability-mismatch",
+        )
+        return 0
 
     # Step 4: build prompt + transition + invoke
     try:
@@ -1489,6 +2265,37 @@ def main() -> int:
     print(f"[runner] transitioning {snapshot.key} → In Progress")
     jira_dispatch.transition_to_in_progress(client, snapshot.key)
 
+    # SP-B-X-002a / OP-1060 — C1 FSM boundary: idle → picking_up done.
+    # If the pickup-prep step (sentinel write, sync, hook install) left
+    # the worktree dirty, snapshot now so a kill -9 during the CLI run
+    # below preserves whatever the pre-CLI prep produced. The clean
+    # case writes a row with empty ref + label — that's truthful and
+    # the recovery probe correctly treats it as nothing-to-restore.
+    try:
+        runner_progress.record_phase(worktree_path, "picking_up", snapshot.key)
+    except Exception as exc:  # noqa: BLE001 — durability failure is logged but non-fatal
+        print(
+            f"[runner] progress.record_phase(picking_up) failed for "
+            f"{snapshot.key}: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+    # SP-B-X-004 / OP-1062: freeze a pickup-time view of the mutable
+    # JIRA fields (assignee, status, labels, Blocks issuelinks) so the
+    # phase-boundary rechecks below can diff against it and bail out
+    # on mid-flight operator mutations.
+    try:
+        toctou_snapshot = live_state_check.capture_transition_boundary_snapshot(
+            client, snapshot.key,
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade rather than wedge pickup
+        print(
+            f"[runner] toctou snapshot capture failed for {snapshot.key}: "
+            f"{type(exc).__name__}: {exc}; rechecks will be skipped.",
+            file=sys.stderr,
+        )
+        toctou_snapshot = None
+
     metric_meta = _LAST_TICKET_METADATA.get(snapshot.key, {})
     metric_id, metric_started_at = runner_metrics_recorder.record_pickup_sync(
         runner_metrics_recorder.RunnerMetricStart(
@@ -1542,6 +2349,13 @@ def main() -> int:
             failure_class="WORKTREE_DIRTY",
             area=metric_meta.get("area"),
         )
+        # OP-1109: ensure coordination lease is released on this terminal
+        # path. Without this, a workspace-tampered abort orphaned an
+        # active claim row that only the (currently still-missing) TTL
+        # sweeper could clean up. Symptom: post-incident `runner-rescue
+        # dump` showed stale `state=active` rows older than the original
+        # CLI run with no live owner process.
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         return 1
     runner_metrics_recorder.record_completion_sync(
         metric_id=metric_id,
@@ -1558,7 +2372,25 @@ def main() -> int:
         if not _require_runner_capability(
             client, snapshot, enabled_caps, "gerrit_push",
         ):
+            # OP-1109: capability-gate refusal is one of the 6 terminal
+            # paths the spec calls out. Releasing the lease here lets
+            # the next runner instance pick the ticket up on the next
+            # tick without waiting for TTL expiry.
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
+        # SP-B-X-004 / OP-1062 — TOCTOU reread #1: between `working` and
+        # `submitting`. If the operator reverted the ticket, advanced it,
+        # swapped assignees, tagged it for operator-window, or added a new
+        # unresolved Blocks dep while the agent CLI was running, abort
+        # before we touch Gerrit.
+        if toctou_snapshot is not None:
+            recheck = live_state_check.recheck_transition_boundary_state(
+                client, snapshot.key, toctou_snapshot,
+            )
+            if not recheck.ok:
+                return _handle_toctou_abort(
+                    client, snapshot.key, recheck, phase="pre-submit", claim=claim,
+                )
         # Phase 1 of OP-247: auto-push to Gerrit + transition Under Review.
         # Phase 3 SHIPPED in OP-689; events-stream consumer:
         # backend/agents/gerrit_jira_bridge.py.
@@ -1567,17 +2399,110 @@ def main() -> int:
             # ensure_change_ids rebases onto sync_result.develop_sha (Phase 1.5 fix per L16),
             # not local main; codex's commits get Change-Id via commit-msg hook.
             jira_dispatch.ensure_change_ids(worktree_path, base_ref=sync_result.develop_sha)
+            # SP-B-X-002a / OP-1060 — C1 FSM boundary: working → submitting.
+            # Placed AFTER ``ensure_change_ids`` on purpose: that helper
+            # raises ``WorktreeDirtyError`` on the OP-827 wedge (CLI
+            # wrote files without committing). Snapshotting *before*
+            # the dirty-check would silently sweep those uncommitted
+            # files into a stash and let the push proceed, masking the
+            # very signal OP-827 was filed to catch. After
+            # ``ensure_change_ids`` succeeds the worktree is canonically
+            # clean, so the snapshot is a no-op but the progress.txt
+            # row monotonically advances to "working" complete.
+            try:
+                runner_progress.record_phase(worktree_path, "working", snapshot.key)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] progress.record_phase(working) failed for "
+                    f"{snapshot.key}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
+            # SP-B-X-004 / OP-1062 — TOCTOU reread #2: between `committing`
+            # (ensure_change_ids stamped Change-Ids) and the actual push.
+            # Same mutation classes; rate-limit reuses the #1 fetch when
+            # the two boundaries hit inside the 60s TTL window.
+            if toctou_snapshot is not None:
+                recheck = live_state_check.recheck_transition_boundary_state(
+                    client, snapshot.key, toctou_snapshot,
+                )
+                if not recheck.ok:
+                    return _handle_toctou_abort(
+                        client, snapshot.key, recheck, phase="pre-push", claim=claim,
+                    )
+            # OP-1141 strict-match AC-evidence gate. Runs ONLY when the
+            # operator-opt-in env flag is set (default off). The gate is
+            # local + deterministic (no LLM call), so a verdict here is
+            # cheap and reliable; transport faults degrade open. The gate
+            # fires after the worktree is canonically clean (post
+            # ``ensure_change_ids``) so the diff we grade matches the
+            # commits the runner is about to push.
+            strict_result = _grade_ac_evidence_pre_push(
+                client, snapshot.key, worktree_path, sync_result.develop_sha,
+            )
+            if strict_result is not None and not strict_result.passed:
+                diag = outcomes_grader.format_failure_comment(snapshot.key, strict_result)
+                print(
+                    f"[ac-evidence-strict] {snapshot.key}: FAIL — reverting "
+                    f"to To Do before Gerrit push.",
+                    file=sys.stderr,
+                )
+                jira_dispatch.add_comment(client, snapshot.key, diag)
+                jira_dispatch.add_label(
+                    client, snapshot.key, "outcomes-grader-strict:fail",
+                )
+                try:
+                    jira_dispatch.transition_back_to_todo(
+                        client, snapshot.key,
+                        f"[outcomes-grader-strict:fail] "
+                        f"{strict_result.reasons[0] if strict_result.reasons else 'evidence failed'}"[:500],
+                        failure_class="AC_EVIDENCE_STRICT_FAIL",
+                        area=metric_meta.get("area"),
+                    )
+                except Exception as revert_err:  # noqa: BLE001
+                    print(
+                        f"[ac-evidence-strict] revert-to-TODO failed for "
+                        f"{snapshot.key}: {revert_err}",
+                        file=sys.stderr,
+                    )
+                _run_memory_writeback(
+                    client,
+                    snapshot.key,
+                    outcome=memory_writeback.OUTCOME_FAILURE,
+                    summary="ac-evidence-strict refused",
+                    failure_class="AC_EVIDENCE_STRICT_FAIL",
+                    area=metric_meta.get("area"),
+                )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+                return 1
             push_result = jira_dispatch.push_to_gerrit_for_review(
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
             )
         except jira_dispatch.NoCommitsOnBranchError as e:
+            # OP-963 (AUDIT-15): re-fetch the live ticket state before
+            # deciding anything. The CLI may have already bounced this
+            # ticket back to To Do itself — the §11 discovered-dependency
+            # protocol does precisely that (and leaves its own
+            # `[runner-discovered-dependency]` comment). If the ticket is
+            # already in To Do there is nothing left to revert: a second
+            # `[runner-no-commits-from-cli]` revert — or an ops-only
+            # forward-walk that would 400 from To Do — is pure noise
+            # (the OP-925 R3 11:05 dual-revert). Emit one coherent log
+            # line and exit clean; the codex comment already explains why.
+            if _cli_self_reverted_to_todo(client, snapshot.key):
+                print(
+                    f"[runner] {snapshot.key} already in To Do — CLI "
+                    f"self-reverted (discovered-dependency / §11); "
+                    f"no additional comment, exiting 0."
+                )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+                return 0
             # OP-956: ops-only ticket-type path. When the operator has
             # tagged the ticket as `runner:no-commits-expected`, the
             # zero-commits-from-CLI signal is the EXPECTED outcome
             # (operator/automation runbooks produce reports + audit
             # comments, not commits). Skip OP-827's always-revert path
             # entirely and forward-walk Submit → Approve → Deploy.
-            if _ops_only_active_for(snapshot):
+            if _ops_only_active_for(snapshot, client=client):
                 print(
                     f"[runner] {snapshot.key} CLI produced 0 commits + "
                     f"ops-only label present → forward-transitioning to 公開済み"
@@ -1597,6 +2522,7 @@ def main() -> int:
                     failure_class=None if rc_fwd == 0 else "OPS_ONLY_TRANSITION_REFUSED",
                     area=metric_meta.get("area"),
                 )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return rc_fwd
             # OP-827 fix: claude/codex CLI exited without committing. Posting AC
             # and exiting bypasses the commit, so there is nothing to push and
@@ -1617,6 +2543,7 @@ def main() -> int:
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except jira_dispatch.WorktreeDirtyError as e:
             # OP-827 fix: CLI wrote files but never committed (or skipped
@@ -1637,6 +2564,7 @@ def main() -> int:
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except Exception as e:
             print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
@@ -1645,10 +2573,23 @@ def main() -> int:
                 f"[runner-gerrit-setup-fail] Could not prepare Gerrit push:\n{type(e).__name__}: {e}\n\n"
                 f"Operator: review changes in `{worktree_path}`, push manually, then transition Under Review.",
             )
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
 
         if push_result.success:
             print(f"[runner] pushed Change #{push_result.change_number}: {push_result.change_url}")
+            # SP-B-X-002a / OP-1060 — C1 FSM boundary: submitting → completed.
+            # Post-push the worktree is normally clean (commits landed,
+            # rebase tidied); the clean-row case is the expected steady
+            # state and the recovery probe handles it correctly.
+            try:
+                runner_progress.record_phase(worktree_path, "submitting", snapshot.key)
+            except Exception as exc:  # noqa: BLE001
+                print(
+                    f"[runner] progress.record_phase(submitting) failed for "
+                    f"{snapshot.key}: {type(exc).__name__}: {exc}",
+                    file=sys.stderr,
+                )
             if push_result.recovery_note:
                 jira_dispatch.add_comment(
                     client,
@@ -1665,6 +2606,7 @@ def main() -> int:
                     push_result.change_number,
                 )
             except outcomes_consumer.OutcomesGraderRefused:
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 1
             if outcomes_status == "fail":
                 print(f"[runner] {snapshot.key} Outcomes grader failed; ticket reopened")
@@ -1676,15 +2618,16 @@ def main() -> int:
                     failure_class="OUTCOMES_GRADER_REFUSED",
                     area=metric_meta.get("area"),
                 )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 0
-            _finalize_under_review(client, snapshot.key, push_result.change_url)
+            _finalize_successful_push(client, snapshot.key, push_result, claim)
             # OP-956: OpsLabelButCommitsProduced — CLI was tagged ops-only
             # but produced commits anyway. AC error catalog says "Log
             # warning + still push the commits (don't lose work) +
             # forward-transition". The push above already landed the
             # commits and walked the ticket to Under Review; continue
             # the forward walk from there to 公開済み.
-            if _ops_only_active_for(snapshot):
+            if _ops_only_active_for(snapshot, client=client):
                 push_count = max(1, len(getattr(push_result, "change_numbers", []) or [push_result.change_number]))
                 _handle_ops_only_forward_transition(
                     client, snapshot.key, unexpected_commits=push_count,
@@ -1704,6 +2647,7 @@ def main() -> int:
                 push_result.detail,
                 agent_class=AGENT_CLASS,
             )
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
     elif rc == 99:
         print(f"[runner] {snapshot.key} skipped (API agent_class not yet wired in MVP)")

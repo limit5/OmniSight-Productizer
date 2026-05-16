@@ -1,13 +1,13 @@
 ---
 id: ADR-0018
 title: Event-driven release pipeline — webhook subscription matrix for L3 conductor
-status: Proposed
+status: Accepted
 date: 2026-05-12
 ---
 
 # ADR 0018 — Event-driven release pipeline: webhook subscription matrix for the L3 conductor
 
-**Status**: Proposed (2026-05-12, Sprint H — META OP-9xx via H1 / OP-946)
+**Status**: Accepted (2026-05-12, Sprint H — META OP-945 via H1 / OP-946; finalized by OP-954)
 
 **Decider**: sora (operator) + AI fleet
 
@@ -20,6 +20,11 @@ date: 2026-05-12
 - OP-882 (D10) — canary orchestrator emitting `canary.stage.{started,transitioned}` / `canary.gate.failed` / `canary.rolled_back` (`backend/orchestrator/canary.py:199,221,237,250`).
 - OP-884 (D12) + OP-911 (F13) — feature-flag-gated canary that emits `sprint_f.canary.*` SSE frames (`scripts/sprint_f_canary_orchestrator.py`).
 - OP-937 (G1) — release template engine that instantiates `RELEASE-vX.Y.Z` META + 13 children; the JIRA graph this ADR's L3 conductor walks.
+- OP-953 (H8) — synthetic dry-run and load test that validated the L3
+  event router, worker, state machine, approval seam, and ledger before
+  this ADR was finalized.
+- OP-954 (H9) — ADR finalization, Sprint H retrospective, L-OP lesson,
+  and event-driven release operator handoff.
 
 ---
 
@@ -85,6 +90,9 @@ rename this file and update the `id:` front-matter — there is no
 load-bearing reference to "ADR-0018" outside this document yet, so the
 rename is local. Future references in H2/H3/H4 will pin to whatever
 number lands.
+
+H9 rechecked `docs/adr/` before finalizing the ADR. ADR-0018 remains unique,
+so `ADRNumberCollision` did not fire during OP-954.
 
 ### Decision criteria
 
@@ -397,22 +405,73 @@ This is the same defence the G1 runbook describes in §0 (line 13):
 is truth. Out-of-order events cannot wedge the conductor because the
 graph encodes the actual dependency order via `blockedBy`.
 
+## Finalization: H8 Load-Test Verdict
+
+OP-953 ran the H8 synthetic dry-run and load test against the L3 stack
+described by this ADR. The harness exercised the durable event queue,
+worker dispatch, release state machine, approval router seam, and immutable
+ledger through public test seams against an isolated in-memory database.
+The report is checked in at
+`docs/research/h8-l3-load-test-2026-05.md`.
+
+The operator decision for Sprint H is **GO**: proceed to L3 production
+cutover while filing the two additive follow-ups below. The verdict does
+not claim that every release edge is fully event-driven in production; it
+claims that the event-driven plumbing is ready to cut over as a scheduler
+layer over the JIRA graph.
+
+### H8 evidence
+
+| Case | Result | Evidence |
+| --- | --- | --- |
+| Synthetic happy run | pass | `v0.99-h-rc1` walked `pending -> done` with 1 operator click, 0 JIRA touches, 10 pipeline events, H7 ledger intact. |
+| Five-release load | pass | 42 events emitted across one rc, two customer releases, and two hotfixes; 42 reached `done`; 0 failed/dead-letter rows. |
+| Latency target | pass | p95 event-to-handler latency 10.908 ms against the 1000 ms L3 coordination budget. |
+
+### Non-blocking follow-ups
+
+1. **Operator approval events need an explicit dispatch row.**
+   `operator.approval.{granted,aborted}` is persisted by the H4 approval
+   router but is not in the ADR-0018 matrix. The H8 harness stubbed it so
+   the approval click could be measured. The production follow-up should
+   add a thin acknowledgement handler so the dashboard and replay path
+   see a classified outcome instead of `UnknownEventType`.
+
+2. **Build, stage, and publish edges remain partly poll-driven.**
+   The H8 harness drove `pending -> building`, `building -> staging`, and
+   `canary_100 -> done` directly because only the canary stage transitions
+   flow through row #9 today. This is compatible with the ADR's "events are
+   hints over the graph" decision, but the full latency win requires later
+   subscribers for those edges.
+
+These follow-ups do not reject L3. They preserve the core decision: L3 is
+ready as an event-driven wakeup layer with G3 cron fallback and JIRA graph
+authority.
+
+### Load-test rejection path
+
+If H8 had produced event loss, dead-letter growth, or p95 latency above the
+coordination budget, the operator decision would have been
+`LoadTestVerdictReject`: close Sprint H with "L3 not production-ready",
+leave G3 cron as the supported release conductor, and reopen this ADR only
+after a new spike demonstrated zero event loss and bounded latency.
+
 ## Error catalog
 
 | Class | When raised | What L3 does |
 |-------|-------------|--------------|
-| `ADRConflictsExistingNumber` | Pre-check — at ADR-authoring time, if 0018 is already taken in `docs/adr/`. | The author renames the file and updates `id:` front-matter. Currently 0018 is free (verified 2026-05-12). |
+| `ADRNumberCollision` | Pre-check — at ADR-authoring time, if 0018 is already taken in `docs/adr/`. | The author renames the file and updates `id:` front-matter. Currently 0018 is the checked-in ADR id (verified 2026-05-12). |
+| `LoadTestVerdictReject` | H8 load test fails the event-loss, DLQ, or latency gate. | Close Sprint H with "L3 not production-ready", keep G3 cron as the operator-supported path, and file follow-up work before any L3 cutover. |
 | `WebhookSourceUnreachable` | Per-source heartbeat exceeded (Gerrit 5 min, JIRA 2 min). | Fall back to G3 cron path (H4). Emit `l3.source.stale(source=...)`. Page operator if the fallback itself fails. |
 | `EventSchemaMismatch` (additive) | A webhook payload is missing a required field (e.g. a Gerrit event with no `change.id`). | Log + 200 OK to the upstream (so it doesn't retry forever) + emit `l3.event.malformed`. Do not advance the graph. |
 | `IdempotencyStoreUnavailable` (additive) | Postgres unreachable while looking up `l3_seen_events`. | Log + 503 to the upstream (so it does retry). Do not advance the graph. Page operator if sustained > 1 min. |
 
-The two AC-named classes (`ADRConflictsExistingNumber`,
-`WebhookSourceUnreachable`) are non-negotiable per the ticket. The two
-additive classes (`EventSchemaMismatch`, `IdempotencyStoreUnavailable`)
-are flagged as additive because they emerged from the
-auth/idempotency design and are required to make the matrix
-implementable. H2/H3 may rename or refine them; the AC entries cannot
-be removed.
+The ticket-named classes (`ADRNumberCollision`, `LoadTestVerdictReject`,
+`WebhookSourceUnreachable`) are non-negotiable. The two additive classes
+(`EventSchemaMismatch`, `IdempotencyStoreUnavailable`) emerged from the
+auth/idempotency design and are required to make the matrix implementable.
+H2/H3 may refine the additive names; the ticket-named entries cannot be
+removed.
 
 ## Alternatives considered
 
@@ -489,8 +548,8 @@ that becomes a new row added by a follow-up ADR.
 - The operator dashboard gains real-time events — every stage
   transition fires an SSE frame the React side already knows how to
   render (D11 + D10/F13 already publish to the same bus).
-- The contracts are documented per-source, so future H-track tickets
-  (and the AI fleet implementing them) have an explicit answer for
+- The contracts are documented per-source, so H-track tickets
+  (and the AI fleet implementing them) had an explicit answer for
   "what auth does row N use" / "what idempotency key" / "what
   happens when row N fails."
 - The graph stays the source of truth; webhooks are hints. This
@@ -518,18 +577,13 @@ that becomes a new row added by a follow-up ADR.
   or for a future GitLab CI publish event) is an O(1) edit per row
   with no ripple effect — H2/H3/H4 are parameterised over the row
   count.
-- Row #11 (D9 prod-orchestrator) is a placeholder. The matrix locks
+- Row #11 (D9 prod-orchestrator) remains a placeholder. The matrix locks
   in the *shape* of the row but not the payload, so OP-881 can ship
   the publisher without re-opening this ADR.
 
 **Reversibility**
 
-The ADR is **revertable**. Until H2 lands, no code subscribes to the
-internal events on L3's behalf and no new endpoints exist on
-`/webhooks/gerrit` for rows #3/#4. A revert is a single-commit delete
-of this file.
-
-After H2/H3/H4 land, the revert path is staged:
+The ADR is **revertable**. After H2/H3/H4/H7, the revert path is staged:
 
 1. Disable the L3 subscriber registration in
    `backend.orchestrator.l3_conductor` (one boolean flag).
@@ -555,5 +609,9 @@ untouched.
   (24h SQLite); L3's inbound store mirrors its contract at the row
   level.
 - `backend/events.py` — in-process pub/sub bus.
+- `docs/research/h8-l3-load-test-2026-05.md` — H8 synthetic dry-run and
+  load-test verdict that finalized the ADR.
+- `docs/operations/event-driven-release-runbook.md` — H9 operator handoff
+  for L1/L2/L3 usage and escalation.
 - `docs/sop/jira-ticket-conventions.md` §10 — META auto-transition to
   Published on R13 completion (the terminal condition L3 honours).

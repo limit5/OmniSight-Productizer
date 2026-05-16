@@ -1,0 +1,31 @@
+# Hot-file mutex auto-inject allow-list (OP-1124)
+#
+# Files in this list trigger automatic injection of `mutex:<path>` into
+# the Prerequisites YAML `mutex_with:` block at filing time. The runner's
+# pre-pickup gate (backend/agents/jira_dispatch.py::find_mutex_holders)
+# then serialises concurrent edits across different tickets that touch
+# the same hot file, preventing the OP-1111/1116/1117-class import-block
+# merge conflicts in Gerrit.
+#
+# This is DATA, not code — operators may add/remove entries without a
+# Python change. Filing scripts read it via load_hot_files() in
+# scripts/jira_mutex_auto_inject.py. Per OP-1124 area boundary the file
+# lives under config/ rather than docs/sop/ (out of area for the filing
+# ticket); operators may relocate it later by updating the
+# HOT_FILES_ALLOWLIST_PATH constant in jira_mutex_auto_inject.py.
+#
+# Selection criterion (initial): file received >3 distinct edits in the
+# prior sprint, OR a documented merge-conflict incident references it.
+# Add new entries when a hot-file conflict pattern emerges; remove an
+# entry when sustained editing volume drops below the threshold for two
+# consecutive sprints.
+
+hot_files:
+  - backend/agents/jira_dispatch.py
+  - auto-runner-jira.py
+  - auto-runner-multi.py
+  - auto-runner-codex.py
+  - backend/agents/runner_coordination.py
+  - backend/agents/runner_progress.py
+  - backend/agents/scheduler.py
+  - backend/agents/capability_matrix.py

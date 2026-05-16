@@ -23,6 +23,7 @@ eligible for routing.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -56,10 +57,12 @@ import backend.agents.provider_adapters.xai_subscription  # noqa: F401,E402
 DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
 HIGH_QUOTA_RATIO = 0.50
 MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
-# RPG.W14 — feature flag for the talent-weight injection call site.
-# Off by default until RPG.W7.1 (`prefer_agent_id` routing) lands; the
-# helper :func:`talent_routing_weight_multiplier` short-circuits to
-# ``1.0`` while the flag is off so this row is shippable ahead of W7.1.
+# RPG.W14.4 (OP-188) — feature flag for the talent-weight injection
+# call site. Off by default until the RPG.W14 talent rollout is enabled;
+# the helper :func:`talent_routing_weight_multiplier` short-circuits to
+# ``1.0`` while the flag is off so the call site is safe to wire today
+# and "lights up" the moment the flag flips (typically alongside
+# RPG.W7.1 ``prefer_agent_id`` landing).
 TALENT_ROUTING_ENABLED_ENV = "OMNISIGHT_MP_TALENT_ROUTING_ENABLED"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
@@ -67,6 +70,7 @@ _ADR_0007_PATH = (
     _PROJECT_ROOT / "docs" / "adr" / "ADR-0007-multi-provider-subscription-orchestrator.md"
 )
 _ADR_VENDOR_MATRIX_HEADING = "## Vendor capability matrix (for routing policy)"
+LOG = logging.getLogger(__name__)
 
 ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS = {
     "anthropic": frozenset({"subscription-claude", "api-anthropic"}),
@@ -98,6 +102,7 @@ _RECENTLY_CAPPED_LOCK = RLock()
 _MODEL_ROUTING_CACHE: tuple[float | None, dict[str, str], set[str]] | None = None
 
 HumanAssignmentResolver = Callable[[TaskSpec], str | None]
+TierGateDecisionResolver = Callable[[TaskSpec, str], object | None]
 
 
 @dataclass(frozen=True)
@@ -120,6 +125,7 @@ class RoutingPolicy:
         now: Callable[[], float] = time.monotonic,
         utcnow: Callable[[], datetime] | None = None,
         human_assignment_resolver: HumanAssignmentResolver | None = None,
+        tier_gate_decision_resolver: TierGateDecisionResolver | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._now = now
@@ -127,6 +133,7 @@ class RoutingPolicy:
         self._human_assignment_resolver = (
             human_assignment_resolver or _default_human_assignment_resolver
         )
+        self._tier_gate_decision_resolver = tier_gate_decision_resolver
 
     def choose_provider(self, task: TaskSpec) -> list[ProviderAdapter]:
         """Return ranked acceptable providers for ``task``.
@@ -144,11 +151,36 @@ class RoutingPolicy:
 
         candidates = self._healthy_candidates(task)
         if assigned_provider_id is not None:
-            candidates = [
+            assigned_candidates = [
                 candidate
                 for candidate in candidates
                 if candidate.provider_id == assigned_provider_id
             ]
+            assigned_eligible = self._tier_gate_eligible_candidates(
+                task, assigned_candidates
+            )
+            if assigned_eligible:
+                candidates = assigned_eligible
+            elif assigned_candidates:
+                decision = self._tier_gate_decision(task, assigned_candidates[0])
+                LOG.warning(
+                    "routing preferred provider %s under-leveled; "
+                    "falling back to eligible candidates (reasons=%s)",
+                    assigned_provider_id,
+                    getattr(decision, "unmet_reasons", ()),
+                )
+                candidates = self._tier_gate_eligible_candidates(
+                    task,
+                    [
+                        candidate
+                        for candidate in candidates
+                        if candidate.provider_id != assigned_provider_id
+                    ],
+                )
+            else:
+                candidates = []
+        else:
+            candidates = self._tier_gate_eligible_candidates(task, candidates)
 
         if _normalise_tier(task.tier) == "L":
             high_quota = [
@@ -222,6 +254,28 @@ class RoutingPolicy:
                 )
             )
         return candidates
+
+    def _tier_gate_eligible_candidates(
+        self,
+        task: TaskSpec,
+        candidates: list[_Candidate],
+    ) -> list[_Candidate]:
+        return [
+            candidate
+            for candidate in candidates
+            if _tier_gate_decision_is_eligible(
+                self._tier_gate_decision(task, candidate)
+            )
+        ]
+
+    def _tier_gate_decision(
+        self,
+        task: TaskSpec,
+        candidate: _Candidate,
+    ) -> object | None:
+        if self._tier_gate_decision_resolver is None:
+            return None
+        return self._tier_gate_decision_resolver(task, candidate.provider_id)
 
     def _list_provider_ids(self) -> list[str]:
         return list(self._orchestrator.list_adapters())  # type: ignore[attr-defined]
@@ -354,6 +408,12 @@ def _difficulty_estimate_for_task(task: TaskSpec) -> TaskDifficultyEstimate | No
     if not difficulty_estimator.is_enabled():
         return None
     return difficulty_estimator.estimate_difficulty(task)
+
+
+def _tier_gate_decision_is_eligible(decision: object | None) -> bool:
+    if decision is None:
+        return True
+    return bool(getattr(decision, "eligible", True))
 
 
 def _predicted_cost_usd(task: TaskSpec, adapter: ProviderAdapter) -> float:
@@ -636,11 +696,10 @@ def is_enabled() -> bool:
 
 
 def is_talent_routing_enabled() -> bool:
-    """Return whether the RPG.W14 talent-weight injection is active.
+    """Return whether the RPG.W14.4 (OP-188) talent-weight injection is active.
 
-    Feature-flagged off by default — RPG.W7.1 (``prefer_agent_id``) is
-    not yet live, so the call site is wired but inert. Enabling the
-    flag activates the +20%-per-matching-talent multiplier from
+    Feature-flagged off by default. Enabling the flag activates the
+    +20%-per-matching-talent multiplier from
     :mod:`backend.agents.talent_tree`.
     """
     return feature_flags.resolve_env_backed_feature_flag(
@@ -656,13 +715,18 @@ def talent_routing_weight_multiplier(
     task_labels: tuple[str, ...],
     guild: str | None = None,
 ) -> float:
-    """RPG.W14 -- return the routing-weight multiplier for ``talent_choices``.
+    """RPG.W14.4 (OP-188) -- routing-weight multiplier for ``talent_choices``.
 
     Returns ``1.0`` unconditionally when
     :func:`is_talent_routing_enabled` is False, so the call site is
     safe to wire today and "lights up" the moment the feature flag
     flips. ``MP routing_policy unreachable`` (RoutingWeightInjectionFailed)
     degrades silently to ``1.0`` per OP-219's error-catalog spec.
+
+    Production callers that need to look up the agent's choices first
+    should reach for :func:`build_talent_routing_weight_resolver`
+    instead of composing ``store.list_choices`` + this helper
+    themselves.
     """
     if not is_talent_routing_enabled():
         return 1.0
@@ -674,6 +738,7 @@ def talent_routing_weight_multiplier(
         # many other modules at startup.
         from backend.agents.talent_tree import (
             RoutingWeightInjectionFailed,
+            TalentTreeError,
             routing_weight_multiplier_for_talents,
         )
     except ImportError:  # pragma: no cover — defensive
@@ -684,8 +749,89 @@ def talent_routing_weight_multiplier(
             task_labels=tuple(task_labels),
             guild=guild,
         )
-    except RoutingWeightInjectionFailed:
+    except (OSError, RoutingWeightInjectionFailed, TalentTreeError):
         return 1.0
+
+
+def build_talent_routing_weight_resolver(
+    store: Any,
+    *,
+    path: Path | str | None = None,
+) -> Callable[..., Any]:
+    """W14.4 (OP-188) -- closure that resolves the per-agent routing multiplier.
+
+    The returned closure has the shape
+    ``async (agent_id, *, task_labels, guild=None) -> float`` and is
+    the production-wiring surface for MP dispatch code that wants the
+    talent-weight bump without hand-rolling the
+    :meth:`TalentChoiceStore.list_choices` lookup:
+
+    .. code-block:: python
+
+        from backend.agents.routing_policy import (
+            build_talent_routing_weight_resolver,
+        )
+        from backend.agents.talent_tree import PostgresTalentChoiceStore
+
+        store = PostgresTalentChoiceStore(conn_factory)
+        resolve = build_talent_routing_weight_resolver(store)
+
+        bump = await resolve(
+            agent_id="agent-A",
+            task_labels=("security", "schema"),
+            guild=Guild.backend,
+        )
+        weighted_score = base_score * bump
+
+    The closure honours :func:`is_talent_routing_enabled` and degrades
+    silently to ``1.0`` on:
+
+    * the feature flag being off,
+    * an empty / missing per-agent talent set,
+    * any :class:`backend.agents.talent_tree.RoutingWeightInjectionFailed`
+      raised by the YAML loader (the W14.4 error-catalog contract),
+    * any other unexpected error inside ``store.list_choices`` -- the
+      MP dispatch path must never crash because the talent layer is
+      unreachable.
+
+    ``path`` is forwarded to
+    :func:`backend.agents.talent_tree.routing_weight_multiplier_for_talents`
+    so unit tests can pin the YAML to a fixture; production callers
+    leave it ``None`` and the talent_tree default is used.
+    """
+    from backend.agents.talent_tree import (
+        RoutingWeightInjectionFailed,
+        TALENT_TREE_PATH,
+        routing_weight_multiplier_for_talents,
+    )
+
+    resolved_path = path if path is not None else TALENT_TREE_PATH
+
+    async def _resolve(
+        agent_id: str,
+        *,
+        task_labels: tuple[str, ...],
+        guild: Any = None,
+    ) -> float:
+        if not is_talent_routing_enabled():
+            return 1.0
+        try:
+            choices = await store.list_choices(agent_id)
+        except Exception:  # noqa: BLE001 -- degrade-silently contract
+            return 1.0
+        if not choices:
+            return 1.0
+        try:
+            return routing_weight_multiplier_for_talents(
+                tuple(choices),
+                task_labels=tuple(task_labels),
+                path=resolved_path,
+                guild=guild,
+            )
+        except RoutingWeightInjectionFailed:
+            return 1.0
+
+    return _resolve
 
 
 def choose_provider(task: TaskSpec) -> list[ProviderAdapter]:
@@ -701,8 +847,12 @@ def on_cap_hit(provider_id: str, retry_after_s: int | None = None) -> None:
 __all__ = [
     "MP_ENABLED_ENV",
     "RoutingPolicy",
+    "TALENT_ROUTING_ENABLED_ENV",
     "_recently_capped",
+    "build_talent_routing_weight_resolver",
     "choose_provider",
     "is_enabled",
+    "is_talent_routing_enabled",
     "on_cap_hit",
+    "talent_routing_weight_multiplier",
 ]

@@ -24,6 +24,8 @@ Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
 Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
 Environment=OMNISIGHT_RELEASE_CANARY_LOG=/home/user/work/sora/logs/release-milestone/canary-status.jsonl
 Environment=OMNISIGHT_RELEASE_SMOKE_LOG=/home/user/work/sora/logs/release-milestone/smoke-status.jsonl
+Environment=OMNISIGHT_STAGING_AUDIT_VERIFY_URL=https://staging.sora.services/api/v1/audit/verify
+ExecStartPre=/usr/bin/bash -lc 'set -euo pipefail; /usr/bin/curl -fsS -H "Authorization: Bearer $$(cat /home/user/.config/omnisight/staging-audit-verify-token)" -o /dev/null "$$OMNISIGHT_STAGING_AUDIT_VERIFY_URL"'
 ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/release_milestone_checker.py
 StandardOutput=append:/home/user/work/sora/logs/release-milestone/systemd.log
 StandardError=append:/home/user/work/sora/logs/release-milestone/systemd.log

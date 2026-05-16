@@ -1,8 +1,18 @@
-"""RPG.W4.1 -- deterministic XP award calculation.
+"""RPG.W4.1 / W4.2 / W4.3 / W4.4 -- deterministic XP award calculation.
 
 This module implements the ADR-0008 XP curve and outcome multipliers without
 persistence. Callers pass the observed task outcome and receive the XP delta
 that should be applied to the agent's character card by a later storage layer.
+
+W4 sub-wave coverage in this module
+-----------------------------------
+- W4.1 (OP-132): ``award_xp`` -- the deterministic XpDelta entry point.
+- W4.2 (OP-133): ``level_threshold`` / ``level_for_xp`` -- the
+  ``100 * N**1.4`` cumulative-XP curve plus the ``MAX_LEVEL = 80`` hard cap
+  that delivers the ADR-0008 "sigmoid late-game" property.
+- W4.3 (OP-134): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
+  ``FIRST_TIME_SKILL_MULTIPLIER``.
+- W4.4 (OP-135): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
 
 Module-global state audit (per project SOP)
 -------------------------------------------
@@ -31,13 +41,35 @@ ClassXpTarget = Literal["primary", "secondary"]
 BASE_TASK_XP = 100
 MAX_LEVEL = 80
 LEVEL_CURVE_EXPONENT = 1.4
+# W4.3 (OP-134): Tier-L+ tasks earn a flat 2.0× XP bump on top of the
+# outcome multiplier per ADR-0008 §"Outcome multipliers" -- stacks
+# multiplicatively with success/partial/fail and with first-time-skill.
 TIER_L_PLUS_MULTIPLIER = 2.0
+# W4.3 (OP-134): The first task that exercises a new (agent, skill) pair
+# earns a 3.0× XP bump per ADR-0008 -- discovery reward, stacks with
+# outcome and Tier-L+ multipliers.
 FIRST_TIME_SKILL_MULTIPLIER = 3.0
+# W4.4 (OP-135): Anti-grinding clamp per ADR-0008 §"XP curve" -- when the
+# runner detects that the same canonical task hash has already been
+# awarded to this agent within the last 24h, the XP delta for the repeat
+# is multiplied by 0.2 (i.e. ×0.2, an 80% haircut). Stacks multiplicatively
+# with the W4.3 outcome / Tier-L+ / first-time-skill multipliers and with
+# the W15 buff/debuff multipliers. The "same task hash within 24h" decision
+# is made by the runner before calling :func:`award_xp`; this module treats
+# ``duplicate_task_within_24h`` as an explicit input flag and reads no
+# clock or task history (deterministic, pure). The skill XP path (W12)
+# carries a parallel ``ANTI_GRIND_MULTIPLIER`` constant with the same 0.2
+# value -- both literals MUST stay in lock-step with this constant.
 DUPLICATE_TASK_MULTIPLIER = 0.2
 SECONDARY_CLASS_FULL_XP_LEVEL = 30
 SECONDARY_CLASS_RAMP_MULTIPLIER = 0.5
 HYBRID_SYNERGY_PARTY_XP_MULTIPLIER = 1.15
 
+# W4.3 (OP-134): outcome → XP multiplier per ADR-0008 §"Outcome
+# multipliers". ``failed`` is an alias for ``fail`` (runner emits either
+# spelling); they MUST stay in lock-step. Tier-L+ and first-time-skill
+# bumps stack multiplicatively on top of this base multiplier inside
+# :func:`_outcome_multiplier`.
 OUTCOME_MULTIPLIERS: Mapping[str, float] = MappingProxyType(
     {
         "success": 1.0,
@@ -103,7 +135,16 @@ def award_xp(
 
 
 def level_threshold(level: int) -> int:
-    """Return cumulative XP required to reach ``level`` per ADR-0008."""
+    """RPG.W4.2 -- cumulative XP required to reach ``level`` per ADR-0008.
+
+    Returns ``ceil(BASE_TASK_XP * level ** LEVEL_CURVE_EXPONENT)``, i.e. the
+    ``100 * N**1.4`` curve from the ADR. The per-level marginal cost
+    ``level_threshold(N+1) - level_threshold(N)`` grows monotonically with
+    ``N`` (per-level grind gets heavier), and the absolute cap from
+    :func:`level_for_xp` flattens the curve past :data:`MAX_LEVEL` -- the
+    two together implement ADR-0008's "sigmoid late-game" so Lv 80 -> 81
+    is not trivially grindable (it is in fact unreachable).
+    """
     if not isinstance(level, int):
         raise TypeError("level must be an int")
     if level < 1:
@@ -112,7 +153,15 @@ def level_threshold(level: int) -> int:
 
 
 def level_for_xp(total_xp: int) -> int:
-    """Return the capped character level for cumulative ``total_xp``."""
+    """RPG.W4.2 -- capped character level for cumulative ``total_xp``.
+
+    Walks the :func:`level_threshold` ladder up to :data:`MAX_LEVEL`. XP
+    beyond ``level_threshold(MAX_LEVEL)`` is silently discarded by the
+    level computation -- callers persisting ``xp`` may still store the
+    raw total, but the derived level will never exceed the cap. This is
+    the hard half of the ADR-0008 sigmoid late-game contract; the curve
+    in :func:`level_threshold` is the soft half.
+    """
     if not isinstance(total_xp, int):
         raise TypeError("total_xp must be an int")
     if total_xp < 0:
@@ -268,6 +317,15 @@ def _validate_outcome(outcome: TaskOutcome) -> None:
 
 
 def _outcome_multiplier(outcome: TaskOutcome) -> float:
+    """RPG.W4.3 (OP-134) -- compose the per-task XP multiplier.
+
+    Stacking order is multiplicative and stable: outcome → Tier-L+ →
+    first-time-skill → W15 buffs → W15 debuffs → W4.4 anti-grind →
+    W18.2 secondary-class ramp → W17 hybrid synergy. The W4.3 contract
+    only constrains the *first three* terms (success/partial/fail/
+    Tier-L+/first-time-skill); later terms are layered by W4.4 / W15 /
+    W17 / W18 and documented in their own waves.
+    """
     multiplier = OUTCOME_MULTIPLIERS[outcome.status]
     if outcome.tier_l_plus:
         multiplier *= TIER_L_PLUS_MULTIPLIER
@@ -277,6 +335,10 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
         _clean_active_buff_ids(outcome.active_buff_ids)
     )
     multiplier *= xp_multiplier_for_debuff_ids(_effective_debuff_ids(outcome))
+    # W4.4 (OP-135): anti-grinding clamp -- same canonical task hash
+    # repeated within 24h takes a flat 0.2× haircut on top of every
+    # earlier multiplier. The flag is computed runner-side and passed
+    # in; see :data:`DUPLICATE_TASK_MULTIPLIER` for the contract.
     if outcome.duplicate_task_within_24h:
         multiplier *= DUPLICATE_TASK_MULTIPLIER
     if outcome.class_xp_target == "secondary":

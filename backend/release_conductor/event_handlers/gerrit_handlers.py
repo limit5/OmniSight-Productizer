@@ -31,6 +31,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from . import hotfix_label
+
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +133,9 @@ def on_label_added(event: dict[str, Any]) -> dict[str, Any]:
     change_id = _change_key(event)
     reviewer = (approval.get("by") or {}).get("username") or approval.get("by_id") or ""
     topic = (event.get("change") or {}).get("topic") or ""
+
+    if label.startswith("hotfix:cherry-pick-to="):
+        return hotfix_label.on_hotfix_label_added(event)
 
     if label == "Code-Review" and value_int >= 2:
         logger.info(

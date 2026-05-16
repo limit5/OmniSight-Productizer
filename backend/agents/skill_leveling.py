@@ -10,6 +10,34 @@ callers reach for (``award_skill_xp``, ``compute_level``,
 and the Postgres store is wired into ``agent_skill_state`` (alembic
 0226).
 
+W12 sub-wave coverage in this module
+------------------------------------
+The W12 module shipped in one bundle under OP-217; this table tracks
+the attribution of each sub-wave back to its dedicated TODO row so a
+future reader of git blame can resolve a symbol to its W12.x ticket.
+
+- W12.2 (OP-171): :data:`LEVEL_THRESHOLDS` / :data:`LEVEL_5_CAP_THRESHOLD`
+  + :func:`compute_level` / :func:`next_level_threshold` -- the
+  ``25 / 100 / 250 / 600 / 1500`` task-success-token curve from
+  ADR-0008 §"Skill leveling (W12)". Lv 1 starts at 0 XP; Lv 2-5 are
+  the cumulative thresholds to *reach* that level; the Lv-5 cap at
+  1500 is the decay floor (not a level gate) so a Lv-5 row cannot
+  decay below ``LEVEL_5_CAP_THRESHOLD - 1`` and demote out of cap.
+
+- W12.4 (OP-173): :data:`BRANCH_LOCK_LEVEL` + :func:`lock_branch_choice`
+  + :class:`SkillBranchAlreadyLocked` + the
+  ``branch_choice_required`` flag on :class:`SkillXpAward` --
+  ADR-0008 §"Skill leveling (W12)" 's "每個 base skill 在 Lv 3 分叉
+  2 條" rule. At Lv 3 every base skill forks into exactly two
+  branches declared in ``skill_matrix.yaml``; the operator picks one
+  from the Character Card "Skills" tab and the choice is
+  immutable per ``(agent_id, skill_id)``. ``award_skill_xp`` raises
+  ``branch_choice_required=True`` when an XP gain pushes the row
+  past Lv 3 with no branch locked yet, which is what the Character
+  Card uses to render the picker. The drift guard
+  (:func:`backend.agents.skill_matrix.assert_branch_choice_in_matrix`)
+  rejects a lock whose ``branch`` is not declared in the YAML.
+
 Module-global state audit (per project SOP)
 -------------------------------------------
 This module defines constants, dataclasses, exception classes, and
@@ -42,6 +70,10 @@ ConnFactory = Callable[[], Any]
 # ── Constants from ADR-0008 §"Skill leveling (W12)" ────────────────
 
 MAX_SKILL_LEVEL = 5
+# W12.4 (OP-173): the branching-tree fork level per ADR-0008
+# §"Skill leveling (W12)" — at Lv 3 every base skill forks into two
+# branches declared in ``skill_matrix.yaml`` and ``lock_branch_choice``
+# persists the operator's immutable pick.
 BRANCH_LOCK_LEVEL = 3
 TEACH_LEVEL = 5
 TEACH_COOLDOWN_DAYS = 7
@@ -52,8 +84,14 @@ LEVEL_OVERFLOW_GUARD_XP = 10 ** 9
 
 OutcomeStatus = str  # ``success`` | ``partial`` | ``fail``
 
-# Cumulative XP thresholds to *reach* a given level. ``LEVEL_THRESHOLDS[L]``
-# is the XP at which the agent transitions into Lv ``L``. Lv 1 starts at 0.
+# W12.2 (OP-171): cumulative XP thresholds to *reach* a given level
+# per ADR-0008 §"Skill leveling (W12)". ``LEVEL_THRESHOLDS[L]`` is the
+# task-success-token count at which the agent transitions into Lv ``L``;
+# Lv 1 starts at 0. The five curve points are ``25 / 100 / 250 / 600 /
+# 1500`` -- the first four are Lv 2-5 entry thresholds and the fifth
+# (:data:`LEVEL_5_CAP_THRESHOLD`) is the Lv-5 decay floor, not an entry
+# gate (a Lv-5 row's xp can grow past 1500 but :func:`apply_decay`
+# refuses to drop it below ``LEVEL_5_CAP_THRESHOLD - 1``).
 LEVEL_THRESHOLDS: Mapping[int, int] = MappingProxyType(
     {
         1: 0,
@@ -80,16 +118,17 @@ FIRST_TIME_SKILL_MULTIPLIER = 3.0
 ANTI_GRIND_MULTIPLIER = 0.2
 
 
-# ── Per-level unlock catalog (Lv 2-5) ──────────────────────────────
+# ── Per-level mastery-effect catalog (Lv 2-5) ──────────────────────
 
-LEVEL_UNLOCKS: Mapping[int, tuple[str, ...]] = MappingProxyType(
+MASTERY_EFFECTS_BY_LEVEL: Mapping[int, tuple[str, ...]] = MappingProxyType(
     {
-        2: ("extended_thinking_enabled",),
-        3: ("parallel_subtask_enabled",),
-        4: ("prompt_overhead_reduced",),
+        2: ("extended_thinking",),
+        3: ("parallel_subtask",),
+        4: ("prompt_overhead",),
         5: ("teach_other_agent",),
     }
 )
+LEVEL_UNLOCKS = MASTERY_EFFECTS_BY_LEVEL
 
 
 # ── Errors ──────────────────────────────────────────────────────────
@@ -154,7 +193,14 @@ class SkillState:
 
 @dataclass(frozen=True)
 class SkillXpAward:
-    """Return value of :func:`award_skill_xp`."""
+    """Return value of :func:`award_skill_xp`.
+
+    The ``branch_choice_required`` flag is the W12.4 (OP-173) signal
+    consumed by the Character Card "Skills" tab: ``True`` means the
+    row sits at or above :data:`BRANCH_LOCK_LEVEL` with no branch
+    locked yet, so the UI should render the two-option picker against
+    ``skill_matrix.yaml``.
+    """
 
     agent_id: str
     skill_id: str
@@ -172,6 +218,12 @@ class SkillXpAward:
 
 def compute_level(xp: int) -> int:
     """Return the W12 skill level (1-5) for ``xp``.
+
+    Implements the W12.2 (OP-171) curve: walks :data:`LEVEL_THRESHOLDS`
+    in ascending order and returns the highest level whose threshold
+    has been met. With the canonical ``25 / 100 / 250 / 600`` entry
+    points this maps 0-24 → Lv 1, 25-99 → Lv 2, 100-249 → Lv 3,
+    250-599 → Lv 4, ≥600 → Lv 5.
 
     Defensive: XP above :data:`LEVEL_OVERFLOW_GUARD_XP` raises
     :class:`LevelComputeOverflow`. Below that the curve is capped at
@@ -195,7 +247,8 @@ def compute_level(xp: int) -> int:
 def next_level_threshold(level: int) -> int:
     """Return the XP threshold for the next level above ``level``.
 
-    For Lv 5 (the cap) returns the configurable
+    Reads the W12.2 (OP-171) curve in :data:`LEVEL_THRESHOLDS`. For
+    Lv 5 (the cap) returns the configurable
     :data:`LEVEL_5_CAP_THRESHOLD` value; this is what
     :func:`_decay_xp_floor` uses to clamp decay against demotion at
     the cap.
@@ -211,7 +264,23 @@ def unlocks_for_level(level: int) -> tuple[str, ...]:
     """Return the unlock flags that fire on reaching ``level``."""
     if level < 1 or level > MAX_SKILL_LEVEL:
         raise ValueError(f"level must be 1..{MAX_SKILL_LEVEL}")
-    return LEVEL_UNLOCKS.get(level, ())
+    return MASTERY_EFFECTS_BY_LEVEL.get(level, ())
+
+
+def mastery_effects_for_skill(skill_id: str) -> Mapping[int, tuple[str, ...]]:
+    """Return the Lv 2-5 mastery-effect table for one canonical skill."""
+    _assert_skill_id_in_matrix(skill_id)
+    return MASTERY_EFFECTS_BY_LEVEL
+
+
+def mastery_effects_table() -> Mapping[str, Mapping[int, tuple[str, ...]]]:
+    """Return the mastery-effect table for every canonical RPG skill."""
+    return MappingProxyType(
+        {
+            skill_id: MASTERY_EFFECTS_BY_LEVEL
+            for skill_id in sorted(canonical_skill_ids())
+        }
+    )
 
 
 def unlocks_crossed(previous_level: int, new_level: int) -> tuple[str, ...]:
@@ -506,10 +575,22 @@ async def lock_branch_choice(
 ) -> SkillState:
     """Persist the immutable Lv-3 branch fork for ``(agent_id, skill_id)``.
 
+    W12.4 (OP-173) — implements the "operator picks from Character
+    Card" half of the branching-tree contract: the Character Card
+    "Skills" tab surfaces ``branch_choice_required`` when the row is
+    at or above :data:`BRANCH_LOCK_LEVEL`, the operator chooses one of
+    the two declared branches from ``skill_matrix.yaml``, and this
+    helper persists the pick on the existing ``agent_skill_state`` row
+    (alembic 0226).
+
     Idempotent on the *same* branch (returns the existing row unchanged)
     and refuses to overwrite a *different* branch with
     :class:`SkillBranchAlreadyLocked` — operators must spawn a new
-    instance for a fresh fork.
+    instance for a fresh fork. The branch string is validated against
+    the canonical ``skill_matrix.yaml`` by
+    :func:`backend.agents.skill_matrix.assert_branch_choice_in_matrix`
+    before the upsert; drift raises
+    :class:`backend.agents.skill_matrix.SkillMatrixDriftError`.
     """
     _assert_skill_id_in_matrix(skill_id)
     assert_branch_choice_in_matrix(skill_id, branch)
@@ -704,6 +785,7 @@ __all__ = [
     "LEVEL_THRESHOLDS",
     "LEVEL_UNLOCKS",
     "LevelComputeOverflow",
+    "MASTERY_EFFECTS_BY_LEVEL",
     "MAX_SKILL_LEVEL",
     "OUTCOME_MULTIPLIERS",
     "PostgresSkillStateStore",
@@ -726,6 +808,8 @@ __all__ = [
     "compute_xp_delta",
     "decay_idle_skills",
     "lock_branch_choice",
+    "mastery_effects_for_skill",
+    "mastery_effects_table",
     "next_level_threshold",
     "teach_other_agent",
     "unlocks_crossed",

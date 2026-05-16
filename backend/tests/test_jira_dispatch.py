@@ -270,6 +270,144 @@ def test_gerrit_push_result_success_shape() -> None:
     assert "/+/42" in result.change_url
 
 
+def test_push_to_gerrit_for_review_runs_pre_review_self_fix(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Successful runner pushes must verify Gerrit mergeability before review."""
+
+    from backend.agents import auto_rebase, pre_review_self_fix
+
+    key = tmp_path / "ssh-key"
+    key.write_text("placeholder", encoding="utf-8")
+    calls: dict[str, object] = {}
+
+    def fake_breaker_call(fn, args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="",
+            stderr=(
+                "remote:   https://sora.services:29420/c/"
+                "omnisight/OmniSight-Productizer/+/42 subject\n"
+            ),
+        )
+
+    def fake_self_fix(**kwargs):
+        calls.update(kwargs)
+        return pre_review_self_fix.SelfFixResult(
+            mergeable=True,
+            attempts=1,
+            rebased=True,
+            force_pushed=True,
+        )
+
+    monkeypatch.setattr(
+        jd,
+        "_gerrit_auth_for_instance",
+        lambda agent_class, instance_id=None: ("codex-bot", key),
+    )
+    monkeypatch.setattr(jd, "_head_change_id", lambda worktree_path: None)
+    monkeypatch.setattr(jd.BREAKERS["gerrit_ssh"], "call", fake_breaker_call)
+    monkeypatch.setattr(auto_rebase, "load_owner_http_password", lambda user: "secret")
+    monkeypatch.setattr(pre_review_self_fix, "self_fix_mergeability", fake_self_fix)
+
+    result = jd.push_to_gerrit_for_review(tmp_path, "subscription-codex")
+
+    assert result.success is True
+    assert result.change_number == 42
+    assert calls["change_number"] == 42
+    assert calls["username"] == "codex-bot"
+    assert calls["http_password"] == "secret"
+    assert calls["target"] == "develop"
+    assert "Pre-review self-fix rebased and force-pushed" in result.recovery_note
+
+
+def test_push_to_gerrit_for_review_files_exhaustion_ticket(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Three failed self-fix attempts file the coordinator escalation ticket."""
+
+    from backend.agents import auto_rebase, pre_review_self_fix
+
+    key = tmp_path / "ssh-key"
+    key.write_text("placeholder", encoding="utf-8")
+    requests: list[tuple[str, str, dict | None]] = []
+
+    def fake_breaker_call(fn, args, **kwargs):
+        return subprocess.CompletedProcess(
+            args,
+            0,
+            stdout="",
+            stderr=(
+                "remote:   https://sora.services:29420/c/"
+                "omnisight/OmniSight-Productizer/+/42 subject\n"
+            ),
+        )
+
+    def fake_self_fix(**kwargs):
+        return pre_review_self_fix.SelfFixResult(
+            mergeable=False,
+            attempts=3,
+            rebased=True,
+            force_pushed=True,
+            cap_exhausted=True,
+            detail="mergeable=false after 3 self-fix attempt(s)",
+        )
+
+    client = jd.DispatchClient(
+        agent_class="subscription-codex",
+        base_url="https://jira.example.test/rest/api/3",
+        project_key="OP",
+        auth_header="Basic token",
+        bot_account_id="bot-account",
+        bot_email="bot@example.test",
+    )
+
+    def fake_request(client, method, path, body=None, idem_key=None):
+        requests.append((method, path, body))
+        return {"key": "OP-2000"}
+
+    monkeypatch.setattr(
+        jd,
+        "_gerrit_auth_for_instance",
+        lambda agent_class, instance_id=None: ("codex-bot", key),
+    )
+    monkeypatch.setattr(jd, "_head_change_id", lambda worktree_path: "Iabc123")
+    monkeypatch.setattr(jd, "_infer_ticket_key_from_worktree", lambda worktree_path: "OP-1039")
+    monkeypatch.setattr(
+        jd,
+        "_pre_review_self_fix_diff_context",
+        lambda worktree_path, target: "diff --git a/backend/a.py b/backend/a.py",
+    )
+    monkeypatch.setattr(jd, "make_client", lambda agent_class, instance_id=None: client)
+    monkeypatch.setattr(jd, "_request", fake_request)
+    monkeypatch.setattr(jd.BREAKERS["gerrit_ssh"], "call", fake_breaker_call)
+    monkeypatch.setattr(auto_rebase, "load_owner_http_password", lambda user: "secret")
+    monkeypatch.setattr(pre_review_self_fix, "self_fix_mergeability", fake_self_fix)
+
+    result = jd.push_to_gerrit_for_review(tmp_path, "subscription-codex")
+
+    assert result.success is True
+    assert result.post_push_warning is not None
+    assert "Filed escalation ticket OP-2000" in result.post_push_warning
+    assert len(requests) == 1
+    assert requests[0][0] == "POST"
+    assert requests[0][1] == "/issue"
+    fields = requests[0][2]["fields"]
+    assert fields["summary"] == "pre-review-self-fix-exhausted: OP-1039 Change 42"
+    assert fields["labels"] == [
+        "needs-coordinator",
+        "pre-review-self-fix-exhausted",
+        "class:operator",
+    ]
+    description = fields["description"]["content"][0]["content"][0]["text"]
+    assert "@coordinator" in description
+    assert "@operator fallback" in description
+    assert "Change-Id: Iabc123" in description
+    assert "Self-fix attempts: 3" in description
+    assert "diff --git a/backend/a.py b/backend/a.py" in description
+
+
 def test_transition_ids_includes_under_review() -> None:
     """OP-247 Phase 1 added to_under_review = '3' per §10 mapping."""
     assert jd.TRANSITION_IDS["to_under_review"] == "3"
@@ -705,6 +843,114 @@ def test_pre_pickup_ok_default_worktree_path_is_none() -> None:
     assert sig.parameters["worktree_path"].default is None
 
 
+# ── OP-1113: capability-scoped bridge-health gate ─────────────────
+
+
+def _allow_pre_pickup_common(monkeypatch) -> None:
+    from backend.agents import file_coordinator
+
+    monkeypatch.setattr(jd, "fetch_description", lambda c, k: "## Goal\nNo prereqs.\n")
+    monkeypatch.setattr(
+        jd,
+        "migration_freeze_check",
+        lambda c, s, description=None: (True, "no freeze"),
+    )
+    monkeypatch.setattr(
+        file_coordinator,
+        "has_unresolved_blockedby",
+        lambda c, s: (False, "none"),
+    )
+
+
+def test_pre_pickup_ok_allows_code_only_ticket_when_bridge_stale(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1067/OP-1077 regression: stale bridge must not block code-only pickup."""
+    _allow_pre_pickup_common(monkeypatch)
+    calls: list[str] = []
+
+    def stale_bridge():
+        calls.append("bridge")
+        return False, 1200.0, tmp_path / "heartbeat"
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(key="OP-1067"),
+        enabled_capabilities={"code_edit", "run_tests", "run_lint", "jira_update"},
+        bridge_health_check=stale_bridge,
+    )
+
+    assert ok is True
+    assert reason == "pre-pickup checks passed"
+    assert calls == [], "code-only pickups bypass bridge-health probing"
+
+
+def test_pre_pickup_ok_blocks_gerrit_finalizing_ticket_when_bridge_stale(
+    tmp_path,
+) -> None:
+    def stale_bridge():
+        return False, 1200.0, tmp_path / "heartbeat"
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(key="OP-1113"),
+        enabled_capabilities={"code_edit", "gerrit_push", "jira_update"},
+        bridge_health_check=stale_bridge,
+    )
+
+    assert ok is False
+    assert reason.startswith("bridge_health_stale:")
+    assert "Gerrit-finalizing pickup" in reason
+    assert "age=1200s" in reason
+
+
+def test_pre_pickup_ok_allows_review_yielding_ticket_when_bridge_stale(
+    monkeypatch, tmp_path
+) -> None:
+    _allow_pre_pickup_common(monkeypatch)
+
+    def stale_bridge():
+        return False, float("inf"), tmp_path / "missing-heartbeat"
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(
+            key="OP-1077",
+            labels=("runner-batch-merge-candidate",),
+        ),
+        enabled_capabilities={"code_edit", "gerrit_push", "jira_update"},
+        bridge_health_check=stale_bridge,
+    )
+
+    assert ok is True
+    assert reason == "pre-pickup checks passed"
+
+
+def test_pre_pickup_ok_blocks_provider_quota_before_description(monkeypatch) -> None:
+    """OP-1116: quota exhaustion short-circuits before any partial pickup work."""
+    monkeypatch.setattr(
+        jd.provider_orchestrator,
+        "pre_pickup_provider_decision",
+        lambda task: jd.provider_orchestrator.PrePickupProviderDecision(
+            ok=False,
+            reason="provider_quota_exhausted:openai-subscription:5h",
+        ),
+    )
+    monkeypatch.setattr(
+        jd,
+        "fetch_description",
+        lambda c, k: pytest.fail("description fetch must not run after quota block"),
+    )
+
+    ok, reason = jd.pre_pickup_ok(
+        _fake_dispatch_client(),
+        _snapshot(labels=("class:subscription-codex", "tier:S", "area:backend")),
+    )
+
+    assert ok is False
+    assert reason == "provider_quota_exhausted:openai-subscription:5h"
+
+
 # ── OP-687: mutex enforcement at pre-pickup ───────────────────────
 
 
@@ -756,8 +1002,10 @@ def test_find_mutex_holders_empty_labels_skips_jql(monkeypatch) -> None:
     assert called == []
 
 
-def test_find_mutex_holders_jql_excludes_self_and_filters_holding_statuses(monkeypatch) -> None:
-    """JQL must scope to project, holding statuses, mutex labels (OR'd), exclude self."""
+def test_find_mutex_holders_jql_legacy_excludes_self_and_filters_holding_statuses(monkeypatch) -> None:
+    """JQL fallback path: must scope to project, holding statuses, mutex labels
+    (OR'd), exclude self. Pre-OP-1108 this was the only path; now it's the
+    degraded-mode fallback when the coordination table is unavailable."""
     captured: dict = {}
 
     def fake_request(client, method, path, body=None):
@@ -767,7 +1015,7 @@ def test_find_mutex_holders_jql_excludes_self_and_filters_holding_statuses(monke
         return {"issues": []}
 
     monkeypatch.setattr(jd, "_request", fake_request)
-    jd.find_mutex_holders(
+    jd._find_mutex_holders_jql(
         _fake_dispatch_client(),
         ["mutex:backend/foo.py", "mutex:alembic-chain-head"],
         exclude_key="OP-555",
@@ -781,6 +1029,422 @@ def test_find_mutex_holders_jql_excludes_self_and_filters_holding_statuses(monke
     assert 'mutex:alembic-chain-head' in jql
     assert ' OR ' in jql
     assert '"In Progress"' in jql and '"Under Review"' in jql
+
+
+# ── OP-1108 (v2-Ⅹ-2bc): find_mutex_holders reads from coordination table ──
+
+
+def test_find_mutex_holders_reads_coordination_table_when_db_present(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108: when the coordination DB exists, find_mutex_holders queries
+    the runner_claims table (not JIRA JQL) and converts ClaimLease results
+    back to the legacy issue-dict shape consumed by pre_pickup_ok."""
+    import sqlite3
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+
+    # Bootstrap the runner_claims table inline (mirrors alembic 0236)
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active',
+            phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    # Plant one active claim on mutex:backend/foo.py held by OP-100
+    conn.execute(
+        "INSERT INTO runner_claims "
+        "(lease_id, ticket_key, resource_key, owner_agent_class, "
+        " owner_instance_id, fencing_token) VALUES (?, ?, ?, ?, ?, ?)",
+        ("lease-1", "OP-100", "mutex:backend/foo.py",
+         "subscription-codex", "codex-1", "claim:codex-1:0-aaaa"),
+    )
+    conn.commit()
+    conn.close()
+
+    # Fail loudly if find_mutex_holders touches JIRA — should hit table only
+    def _no_jql(*a, **kw):
+        raise AssertionError("JIRA JQL should not be called when table is present")
+    monkeypatch.setattr(jd, "_request", _no_jql)
+
+    holders = jd.find_mutex_holders(
+        _fake_dispatch_client(),
+        ["mutex:backend/foo.py"],
+        exclude_key="OP-555",
+    )
+    assert len(holders) == 1
+    h = holders[0]
+    assert h["key"] == "OP-100"
+    assert h["fields"]["status"]["name"] == "In Progress"
+    assert h["fields"]["labels"] == ["mutex:backend/foo.py"]
+
+
+def test_find_mutex_holders_excludes_self_via_table_query(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108: exclude_key filters out the caller's own row when the table
+    has it (e.g., shadow-write already recorded the caller as pending)."""
+    import sqlite3
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active', phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    # Self claim — should be excluded
+    conn.execute(
+        "INSERT INTO runner_claims (lease_id, ticket_key, resource_key, "
+        "owner_agent_class, owner_instance_id, fencing_token) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("self-1", "OP-555", "mutex:backend/foo.py", "claude", "claude-1",
+         "claim:claude-1:0-self"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(jd, "_request", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("table path should not fall through to JQL")))
+
+    holders = jd.find_mutex_holders(
+        _fake_dispatch_client(),
+        ["mutex:backend/foo.py"],
+        exclude_key="OP-555",
+    )
+    assert holders == []
+
+
+def test_find_mutex_holders_falls_back_to_jql_when_db_missing(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108 degraded mode: DB not yet bootstrapped → fast-fail to JQL."""
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(tmp_path / "missing.db"))
+
+    captured: dict = {}
+
+    def fake_request(client, method, path, body=None):
+        captured["used_jql"] = True
+        return {"issues": [{"key": "OP-fallback", "fields": {
+            "status": {"name": "In Progress"},
+            "labels": ["mutex:backend/foo.py"],
+        }}]}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    holders = jd.find_mutex_holders(
+        _fake_dispatch_client(),
+        ["mutex:backend/foo.py"],
+        exclude_key="OP-555",
+    )
+    assert captured.get("used_jql") is True
+    assert len(holders) == 1
+    assert holders[0]["key"] == "OP-fallback"
+
+
+def test_find_mutex_holders_falls_back_to_jql_on_table_exception(
+    monkeypatch, tmp_path, caplog
+) -> None:
+    """OP-1108 degraded mode: table read raises (DB locked / corrupt) →
+    fall back to JQL and log a warning."""
+    db = tmp_path / "rc.db"
+    db.write_bytes(b"not a real sqlite database")
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+
+    used_jql = []
+
+    def fake_request(client, method, path, body=None):
+        used_jql.append(True)
+        return {"issues": []}
+
+    monkeypatch.setattr(jd, "_request", fake_request)
+    import logging
+    with caplog.at_level(logging.WARNING, logger="backend.agents.jira_dispatch"):
+        holders = jd.find_mutex_holders(
+            _fake_dispatch_client(),
+            ["mutex:backend/foo.py"],
+            exclude_key="OP-555",
+        )
+    assert used_jql == [True], "JQL must be exercised when table read fails"
+    assert holders == []
+    # Warning logged so operators can spot degraded-mode incidents
+    assert any("coordination-table read failed" in m for m in caplog.messages)
+
+
+def _bootstrap_runner_claims_db(tmp_path, monkeypatch):
+    """Shared helper: stand up an empty runner_claims SQLite DB and point
+    OMNISIGHT_DATABASE_PATH at it. Used by OP-1108 and OP-1110 tests."""
+    import sqlite3
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active', phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    conn.commit()
+    conn.close()
+    return db
+
+
+# ── OP-1168 shadow phase: claim labels stay load-bearing ─────────────
+
+
+class _ClaimFakeJira:
+    def __init__(self, *, labels=(), assignee: str | None = None) -> None:
+        self.labels = set(labels)
+        self.assignee = assignee
+        self.calls: list[tuple[str, str, dict | None]] = []
+
+    def request(self, client, method, path, body=None):
+        self.calls.append((method, path, body))
+        if method == "GET" and path.startswith("/issue/"):
+            return {
+                "fields": {
+                    "assignee": (
+                        {"accountId": self.assignee} if self.assignee else None
+                    ),
+                    "labels": sorted(self.labels),
+                }
+            }
+        if method == "PUT" and path.startswith("/issue/"):
+            fields = (body or {}).get("fields") or {}
+            if "assignee" in fields:
+                assignee = fields["assignee"]
+                self.assignee = (assignee or {}).get("accountId") if assignee else None
+            for op in ((body or {}).get("update") or {}).get("labels", []):
+                if "add" in op:
+                    self.labels.add(op["add"])
+                if "remove" in op:
+                    self.labels.discard(op["remove"])
+            return {}
+        raise AssertionError(f"unexpected request {method} {path}")
+
+
+def test_claim_ticket_atomic_shadow_writes_table_and_label(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1168: default mode keeps JIRA labels and shadow-writes table."""
+    monkeypatch.setenv("OMNISIGHT_RUNNER_CLAIM_SHADOW", "on")
+    _bootstrap_runner_claims_db(tmp_path, monkeypatch)
+    fake = _ClaimFakeJira()
+    monkeypatch.setattr(jd, "_request", fake.request)
+
+    result = jd.claim_ticket_atomic(_fake_dispatch_client(), "OP-cut-1", "claude-1")
+
+    assert result.ok is True
+    assert result.coordination_lease_id is not None
+    assert result.coordination_fencing_token is not None
+    assert any(label.startswith("claim:claude-1:") for label in fake.labels)
+    put_bodies = [body for method, _, body in fake.calls if method == "PUT"]
+    assert len(put_bodies) == 1
+    body = put_bodies[0] or {}
+    assert "fields" in body and "assignee" in body["fields"]
+    assert any(
+        op.get("add", "").startswith("claim:claude-1:")
+        for op in body["update"]["labels"]
+    )
+
+
+def test_claim_ticket_atomic_table_block_does_not_block_label_path(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1168: shadow table conflicts are observed but non-blocking."""
+    monkeypatch.setenv("OMNISIGHT_RUNNER_CLAIM_SHADOW", "on")
+    db = _bootstrap_runner_claims_db(tmp_path, monkeypatch)
+
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "INSERT INTO runner_claims (lease_id, ticket_key, resource_key, "
+        "owner_agent_class, owner_instance_id, fencing_token) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("other-1", "OP-cut-2", "ticket:OP-cut-2",
+         "subscription-codex", "codex-1", "claim:codex-1:0-other"),
+    )
+    conn.commit()
+    conn.close()
+
+    fake = _ClaimFakeJira()
+    monkeypatch.setattr(jd, "_request", fake.request)
+
+    result = jd.claim_ticket_atomic(_fake_dispatch_client(), "OP-cut-2", "claude-1")
+    assert result.ok is True
+    assert result.coordination_lease_id is None
+    assert any(label.startswith("claim:claude-1:") for label in fake.labels)
+
+
+def test_claim_ticket_atomic_table_unavailable_does_not_block_label_path(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1168: DB unavailable is a shadow failure, not a claim failure."""
+    monkeypatch.setenv("OMNISIGHT_RUNNER_CLAIM_SHADOW", "on")
+    bad = tmp_path / "broken.db"
+    bad.write_text("not a sqlite db")
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(bad))
+
+    fake = _ClaimFakeJira()
+    monkeypatch.setattr(jd, "_request", fake.request)
+
+    result = jd.claim_ticket_atomic(_fake_dispatch_client(), "OP-cut-3", "claude-1")
+
+    assert result.ok is True
+    assert result.coordination_lease_id is None
+    assert any(label.startswith("claim:claude-1:") for label in fake.labels)
+
+
+def test_release_ticket_claim_clears_label_and_shadow_table(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1168: release clears JIRA label and coordination shadow row."""
+    monkeypatch.setenv("OMNISIGHT_RUNNER_CLAIM_SHADOW", "on")
+    _bootstrap_runner_claims_db(tmp_path, monkeypatch)
+
+    from backend.agents import runner_coordination as rc
+    lease = rc.acquire_claim(
+        ticket_key="OP-rel-1",
+        resource_key="ticket:OP-rel-1",
+        owner_agent_class="subscription-claude",
+        owner_instance_id="claude-1",
+    )
+    fake = _ClaimFakeJira(labels=("claim:claude-1:0000000000000001-aaaaaaaa",))
+    monkeypatch.setattr(jd, "_request", fake.request)
+
+    jd.release_ticket_claim(
+        _fake_dispatch_client(), "OP-rel-1", "claude-1",
+        token="0000000000000001-aaaaaaaa",
+        coordination_lease_id=lease.lease_id,
+        coordination_fencing_token=lease.fencing_token,
+    )
+
+    assert not any(label.startswith("claim:claude-1") for label in fake.labels)
+    holders = rc.find_active_holders(resource_keys=["ticket:OP-rel-1"])
+    assert holders == []
+
+
+def test_jql_fallback_emits_deprecation_warning_once(monkeypatch, caplog) -> None:
+    """OP-1110: first call into the JQL fallback path emits a deprecation
+    warning; subsequent calls in the same process stay quiet."""
+    import logging
+
+    monkeypatch.setattr(jd, "_JQL_FALLBACK_DEPRECATION_WARNED", False, raising=False)
+
+    captured: list = []
+    monkeypatch.setattr(jd, "_request",
+                        lambda *a, **kw: captured.append(1) or {"issues": []})
+
+    with caplog.at_level(logging.WARNING, logger="backend.agents.jira_dispatch"):
+        jd._find_mutex_holders_jql(_fake_dispatch_client(), ["mutex:foo"], "OP-1")
+        jd._find_mutex_holders_jql(_fake_dispatch_client(), ["mutex:foo"], "OP-2")
+        jd._find_mutex_holders_jql(_fake_dispatch_client(), ["mutex:foo"], "OP-3")
+
+    deprecation_msgs = [
+        m for m in caplog.messages
+        if "deprecated" in m.lower() or "will be removed" in m.lower()
+    ]
+    assert len(deprecation_msgs) == 1, \
+        f"expected 1 deprecation warning, got {len(deprecation_msgs)}: {deprecation_msgs}"
+    assert len(captured) == 3, "all 3 calls should run; warning doesn't short-circuit work"
+
+
+def test_find_mutex_holders_4_concurrent_pickups_see_first_winner(
+    monkeypatch, tmp_path
+) -> None:
+    """OP-1108 Code AC: 4-runner concurrent pickup of same ticket — exactly
+    1 actually claims (per OP-1106 acquire_claim race), and subsequent
+    find_mutex_holders calls from the other 3 all see the winner.
+
+    The atomic-acquire race itself is tested in
+    test_runner_coordination.test_race_4_concurrent_acquires_exactly_one_wins.
+    This test pins the *read-side* visibility: after one runner wins,
+    pre_pickup_ok-equivalent reads from the other 3 see the winner."""
+    import sqlite3, threading
+    db = tmp_path / "rc.db"
+    monkeypatch.setenv("OMNISIGHT_DATABASE_PATH", str(db))
+    conn = sqlite3.connect(str(db))
+    conn.executescript("""
+        CREATE TABLE runner_claims (
+            lease_id TEXT PRIMARY KEY, ticket_key TEXT NOT NULL,
+            resource_key TEXT NOT NULL, owner_agent_class TEXT NOT NULL,
+            owner_instance_id TEXT NOT NULL, fencing_token TEXT NOT NULL UNIQUE,
+            state TEXT NOT NULL DEFAULT 'active', phase TEXT NOT NULL DEFAULT 'pickup',
+            heartbeat_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            released_at TEXT, release_reason TEXT,
+            external_refs TEXT NOT NULL DEFAULT '{}',
+            CHECK (state IN ('active', 'released'))
+        );
+        CREATE UNIQUE INDEX uq_runner_claims_resource_active
+            ON runner_claims (resource_key) WHERE state = 'active';
+    """)
+    # Simulate one runner having won the race for ticket:OP-target
+    conn.execute(
+        "INSERT INTO runner_claims (lease_id, ticket_key, resource_key, "
+        "owner_agent_class, owner_instance_id, fencing_token) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("won-1", "OP-target", "ticket:OP-target", "subscription-claude",
+         "claude-1", "claim:claude-1:0-won"),
+    )
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(jd, "_request", lambda *a, **kw: (_ for _ in ()).throw(
+        AssertionError("table should be authoritative here")))
+
+    results: list = []
+    lock = threading.Lock()
+
+    def reader(idx: int):
+        # The 3 losing runners check whether anyone holds ticket:OP-target
+        # by querying find_mutex_holders with that resource key in mutex_labels.
+        holders = jd.find_mutex_holders(
+            _fake_dispatch_client(),
+            ["ticket:OP-target"],
+            exclude_key=f"OP-loser-{idx}",
+        )
+        with lock:
+            results.append((idx, len(holders), [h["key"] for h in holders]))
+
+    threads = [threading.Thread(target=reader, args=(i,)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    # All 3 losing readers see the same winner
+    assert all(r[1] == 1 for r in results), f"expected 1 holder each, got {results}"
+    assert all(r[2] == ["OP-target"] for r in results), f"winner mismatch: {results}"
 
 
 def test_pre_pickup_ok_blocks_when_mutex_held_by_in_progress_sibling(monkeypatch) -> None:

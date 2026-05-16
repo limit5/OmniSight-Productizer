@@ -1,0 +1,92 @@
+; [OP-973] AUDIT-19c — continuous develop -> staging sync.
+;
+; Wraps scripts/sync_staging_to_develop.sh: every tick (see
+; staging-sync.timer — every 10 min, matching the OP-965 canary cadence)
+; it resolves the develop tip, and if staging is not already on it, runs
+; the OP-878 blue-green deployer (scripts/staging_deploy.sh), the alembic
+; upgrade, and a post-deploy health re-check — reverting to the previous
+; image and alerting on any failure. On success it writes one `release_audit`
+; row (detail.kind=staging_sync). See the script header for the full pipeline,
+; the error catalog, and the `release_audit` schema caveat.
+;
+; Why this exists: before it, nothing kept staging tracking develop, so the
+; OP-965 staging-gate probes (canary/smoke) had nothing real to probe and
+; scripts/release_milestone_checker.py's R3 gates only ever saw operator
+; force-override JSONL lines (OP-925 v0.5.0-rc1 emergency). This unit + the
+; OP-965 gate timers together close that loop.
+;
+; §6 audit trail — the `release_audit` row is written through
+; OMNISIGHT_DATABASE_URL (the same release-audit DSN auto-promote-develop.service
+; / staging-gate-*.service / staging-pg-snapshot.service use). A systemd unit
+; does not inherit the login shell's environment, so the EnvironmentFile below
+; carries it; the `-` prefix makes it optional (a box without the file still
+; runs — it just skips the DB row and logs the record).
+;
+; OnFailure -> staging-gate-alert.service (shared with the OP-965 gate
+; emitters): re-emits a structured DEGRADED journal line the T1 alerter
+; (OP-722) routes to the operator channel. The script's own alert() also
+; POSTs to OMNISIGHT_STAGING_ALERT_WEBHOOK if set (the same Slack webhook
+; scripts/staging_deploy.sh uses).
+;
+; Install (user-level — no sudo; mirrors the staging-gate-* / staging-compose
+; / staging-pg-snapshot units):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/staging-sync.{service,timer} ~/.config/systemd/user/
+;   cp deploy/systemd/staging-gate-alert.service   ~/.config/systemd/user/   # if not already there
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now staging-sync.timer
+;   loginctl enable-linger "$USER"
+;
+; ── This ticket's DoD also flips ON the OP-965 gate timers ──────────────────
+;   cp deploy/systemd/staging-gate-{canary,smoke}.{service,timer} ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now staging-gate-canary.timer staging-gate-smoke.timer
+; If systemd refuses (GateTimerEnableFailed — e.g. missing EnvironmentFile path,
+; bad unit syntax): `systemctl --user status staging-gate-canary.timer` +
+; `journalctl --user -u staging-gate-canary` give the diagnostic; the operator
+; fixes the named cause and re-runs `enable --now`. Until the gate timers are
+; enabled the milestone checker keeps seeing the stale force-override JSONL.
+;
+; Verify (AC #1 / #3 / #4):
+;   systemctl --user start staging-sync.service          # run one sync cycle now
+;   journalctl --user -u staging-sync -n 50
+;   systemctl --user list-timers 'staging-*'             # sync@10min, gate-canary@10min, gate-smoke@30min
+;   systemctl --user start release-milestone-checker.service
+;   tail -n5 /home/user/work/sora/logs/release-milestone/systemd.log   # milestone_ready from a non manual-override-* run_id
+
+[Unit]
+Description=OmniSight continuous develop -> staging sync (OP-973)
+Documentation=https://soraapp.atlassian.net/browse/OP-973
+After=network-online.target omnisight-staging-compose.service
+Wants=network-online.target
+OnFailure=staging-gate-alert.service
+StartLimitIntervalSec=1800
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=SYNC_REPO=/home/user/sora-bridge
+Environment=SYNC_REMOTE=origin
+Environment=SYNC_BRANCH=develop
+Environment=STAGING_DEPLOY_SH=/home/user/sora-bridge/scripts/staging_deploy.sh
+Environment=OMNISIGHT_STAGING_STATE_DIR=/var/lib/omnisight/staging
+Environment=OMNISIGHT_STAGING_URL=https://staging.sora.services
+Environment=OMNISIGHT_STAGING_HEALTHZ_PATH=/health
+Environment=OMNISIGHT_STAGING_COMPOSE_FILE=/home/user/sora-bridge/deploy/staging/docker-compose.yml
+Environment=OMNISIGHT_STAGING_ENV_FILE=/home/user/sora-bridge/deploy/staging/.env
+; OP-964 / AUDIT-16 — DSN for the `release_audit` durable trail (see header).
+; Also a good place for OMNISIGHT_STAGING_ALERT_WEBHOOK / per-host overrides.
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
+EnvironmentFile=-/home/user/.config/omnisight/staging-sync.env
+ExecStart=/usr/bin/bash /home/user/sora-bridge/scripts/sync_staging_to_develop.sh
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/staging-sync.log
+StandardError=append:/home/user/work/sora/logs/release-milestone/staging-sync.log
+; A blue-green deploy (image pull + standby up + health wait + Caddy switch +
+; drain) plus an alembic upgrade: staging_deploy.sh's own ceilings are ~3 min
+; health + 60 s drain; 15 min gives margin for a cold image pull on top.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

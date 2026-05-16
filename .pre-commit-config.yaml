@@ -31,3 +31,15 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+      - id: omnisight-jira-ticket-spec-devops-activation
+        name: OmniSight JIRA ticket specs validate labels and devops activation AC
+        entry: python3 scripts/lint-jira-ticket-spec.py
+        language: system
+        files: ^(.*jira.*ticket.*\.(md|txt|ya?ml)|.*ticket.*spec.*\.(py|md|txt|ya?ml))$
+        pass_filenames: true
+      - id: omnisight-systemd-service-directives
+        name: OmniSight new systemd services require startup directives
+        entry: python3 scripts/check_systemd_service_directives.py
+        language: system
+        files: \.service$
+        pass_filenames: true

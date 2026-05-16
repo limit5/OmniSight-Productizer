@@ -1,0 +1,82 @@
+# Golden positive case for the G.A-v1 ticket-contract kernel (OP-1082).
+#
+# Hand-crafted payload that exercises every v1 field with a non-default
+# value. Enum-valued fields deliberately pick non-default options so the
+# round-trip catches accidental enum widening: the parameterised
+# coverage tests in test_v1_json_schema_round_trip.py then cycle every
+# enum value of every closed-enum field to satisfy the
+# "every enum value exercised at least once" AC.
+#
+# Round-trips through:
+#   * governance_engine.schema.v1.TicketContractV1.model_validate
+#   * jsonschema.validate against TicketContractV1.model_json_schema()
+#
+# Source: OP-1082 G.A-v1-4 AC, S12.G v2 spec §3.2.
+schema_version: v1
+class: operator-window-deputy
+authority_required: L3
+l1_exclusive_reason: null
+l2_reason: destructive-action
+
+# v1 operational fields (S12.G v2 spec §3.2 + §0 lines 56-58, 45).
+ticket_key: OP-9999
+labels:
+  - phase:31.X
+  - class:operator-window-deputy
+  - tier:L
+blocked_by:
+  - OP-1079
+  - OP-1080
+cross_phase_blockers:
+  - blocker_phase: "31.E"
+    blocker_artifact: image-publish
+    reason: image SHA must land before this ticket runs
+  - blocker_phase: "31.F"
+    blocker_artifact: roster-rollout
+    reason: roster GPG verifier must be live before destructive sweep
+phase_plugin_version: v1
+
+# v2 boundary fields.
+loc_delta_max: 250
+files_touched_max: 3
+required_paths:
+  - governance_engine/tests/fixtures/v1_ticket_golden.yaml
+  - governance_engine/tests/test_v1_json_schema_round_trip.py
+forbidden_paths:
+  - governance_engine/schema/
+  - scripts/governance/
+non_goals:
+  - "DO NOT touch v0 fixtures (v0 owns its own golden)"
+  - "DO NOT test cross-phase preflight (V1-16 owns)"
+test_scope: round-trip-pydantic-and-jsonschema
+destructive_op_classes:
+  - filesystem
+  - git-history
+destructive_op_scope: staging
+execution_mode: operator-rehearsal
+# v1-exclusive evidence_class — exercises §0 lines 64-65 extension.
+evidence_class: longitudinal
+on_scope_creep: escalate
+
+# Remaining schema fields required for round-trip.
+interface_contract: >-
+  outputs: round-trip parity (pydantic ↔ jsonschema) verified for the v1
+  contract; inputs: TicketContractV1 schema + golden YAML
+scope_components:
+  - backend
+  - tests
+external_side_effect: write
+# v1-exclusive external_payload_class — exercises §0 line 63 extension.
+external_payload_class: credential-material
+runtime_capability: operator-witnessed
+dependency_artifacts:
+  - "jsonschema (PyPI)"
+mutex_with:
+  - OP-1099
+scope_summary_max_chars: 500
+tag_type: spike
+reversibility: irreversible
+environment_scope: production
+external_systems:
+  - jira
+  - gerrit

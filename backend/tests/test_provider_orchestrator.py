@@ -14,11 +14,13 @@ from backend.agents.provider_orchestrator import (
     CircuitBreaker,
     DispatchResult,
     HealthStatus,
+    PrePickupProviderDecision,
     ProviderAdapter,
     ProviderNotRegistered,
     TaskSpec,
 )
 from backend.agents.provider_quota_tracker import QuotaState
+from backend.agents.tier_gate import TierGateDecision
 
 
 class _FakeAdapter(ProviderAdapter):
@@ -128,6 +130,7 @@ def _task(
     *,
     agent_class: str = "api-anthropic",
     tier: str = "M",
+    prefer_agent_id: str | None = None,
 ) -> TaskSpec:
     return TaskSpec(
         prompt="run OP-20",
@@ -135,6 +138,7 @@ def _task(
         tier=tier,
         area=["backend", "tests"],
         correlation_id="op-20",
+        prefer_agent_id=prefer_agent_id,
     )
 
 
@@ -144,11 +148,13 @@ def _policy(
     now=lambda: 1000.0,
     missing: set[str] | None = None,
     human_assignment_resolver=None,
+    tier_gate_decision_resolver=None,
 ) -> routing_policy.RoutingPolicy:
     return routing_policy.RoutingPolicy(
         orchestrator=_FakeOrchestrator(adapters, missing),
         now=now,
         human_assignment_resolver=human_assignment_resolver,
+        tier_gate_decision_resolver=tier_gate_decision_resolver,
     )
 
 
@@ -218,6 +224,12 @@ def test_task_spec_is_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         task.prompt = "changed"  # type: ignore[misc]
+
+
+def test_task_spec_accepts_optional_prefer_agent_id() -> None:
+    task = _task(prefer_agent_id="openai-subscription")
+
+    assert task.prefer_agent_id == "openai-subscription"
 
 
 def test_dispatch_result_is_immutable() -> None:
@@ -373,6 +385,66 @@ def test_circuit_breaker_rejects_empty_provider_id() -> None:
         CircuitBreaker(" ")
 
 
+# Pre-pickup provider gate contract
+
+
+def test_pre_pickup_blocks_quota_exhausted_provider(monkeypatch) -> None:
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+    orchestrator.register_adapter(
+        _FakeAdapter(
+            "openai-subscription",
+            quota_state=_quota_state("openai-subscription", rolling_5h_tokens=100),
+        )
+    )
+
+    decision = orchestrator.pre_pickup_provider_decision(
+        _task(agent_class="api-openai", tier="S")
+    )
+
+    assert decision == PrePickupProviderDecision(
+        ok=False,
+        reason="provider_quota_exhausted:openai-subscription:5h",
+    )
+
+
+def test_pre_pickup_blocks_open_circuit_provider() -> None:
+    orchestrator.register_adapter(
+        _FakeAdapter(
+            "anthropic-subscription",
+            quota_state=_quota_state("anthropic-subscription", circuit_state="open"),
+        )
+    )
+
+    decision = orchestrator.pre_pickup_provider_decision(
+        _task(agent_class="api-anthropic", tier="S")
+    )
+
+    assert decision == PrePickupProviderDecision(
+        ok=False,
+        reason="provider_circuit_open:anthropic-subscription",
+    )
+
+
+def test_pre_pickup_allows_healthy_provider(monkeypatch) -> None:
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+    orchestrator.register_adapter(
+        _FakeAdapter(
+            "openai-subscription",
+            quota_state=_quota_state("openai-subscription", rolling_5h_tokens=99),
+        )
+    )
+
+    decision = orchestrator.pre_pickup_provider_decision(
+        _task(agent_class="api-openai", tier="S")
+    )
+
+    assert decision == PrePickupProviderDecision(
+        ok=True,
+        reason="pre-pickup provider checks passed",
+        provider_id="openai-subscription",
+    )
+
+
 # Routing policy contract
 
 
@@ -508,6 +580,20 @@ def test_routing_tier_x_allows_human_assigned_provider() -> None:
     assert chosen == [adapter]
 
 
+def test_routing_tier_x_allows_prefer_agent_id_on_task() -> None:
+    adapter = _FakeAdapter("anthropic-subscription")
+
+    chosen = _policy([adapter]).choose_provider(
+        _task(
+            agent_class="api-anthropic",
+            tier="X",
+            prefer_agent_id="anthropic-subscription",
+        )
+    )
+
+    assert chosen == [adapter]
+
+
 def test_routing_human_assignment_filters_to_requested_provider() -> None:
     anthropic = _FakeAdapter("anthropic-subscription")
     openai = _FakeAdapter("openai-subscription")
@@ -518,6 +604,60 @@ def test_routing_human_assignment_filters_to_requested_provider() -> None:
     ).choose_provider(_task(agent_class="api-openai"))
 
     assert chosen == [openai]
+
+
+def test_routing_prefer_agent_id_filters_to_requested_provider() -> None:
+    openai_subscription = _FakeAdapter("openai-subscription")
+    openai_api = _FakeAdapter("openai-api")
+
+    chosen = _policy([openai_subscription, openai_api]).choose_provider(
+        _task(agent_class="api-openai", prefer_agent_id="openai-api")
+    )
+
+    assert chosen == [openai_api]
+
+
+def test_routing_prefer_agent_id_falls_back_when_preferred_underleveled(caplog) -> None:
+    preferred = _FakeAdapter("anthropic-beta")
+    fallback = _FakeAdapter("anthropic-alpha")
+
+    def _tier_gate_decision(_task: TaskSpec, provider_id: str) -> TierGateDecision:
+        if provider_id == "anthropic-beta":
+            return TierGateDecision(
+                eligible=False,
+                tier="X",
+                agent_level=49,
+                skill_level=3,
+                skill_id="backend",
+                unmet_reasons=("tier_x_agent_level_below_50:49",),
+            )
+        return TierGateDecision(
+            eligible=True,
+            tier="X",
+            agent_level=50,
+            skill_level=3,
+            skill_id="backend",
+            unmet_reasons=(),
+        )
+
+    with caplog.at_level("WARNING", logger="backend.agents.routing_policy"):
+        chosen = _policy(
+            [fallback, preferred],
+            tier_gate_decision_resolver=_tier_gate_decision,
+        ).choose_provider(
+            _task(
+                agent_class="api-anthropic",
+                tier="X",
+                prefer_agent_id="anthropic-beta",
+            )
+        )
+
+    assert chosen == [fallback]
+    assert any(
+        "routing preferred provider anthropic-beta under-leveled" in rec.message
+        and "tier_x_agent_level_below_50:49" in rec.message
+        for rec in caplog.records
+    )
 
 
 def test_routing_on_cap_hit_suppresses_provider_until_retry_after() -> None:

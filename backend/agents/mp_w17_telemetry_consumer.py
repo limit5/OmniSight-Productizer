@@ -30,6 +30,7 @@ schema probes). Events with malformed timestamps fall back to "now".
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -43,6 +44,7 @@ from backend.agents.tool_proficiency import (
 
 
 LOG = logging.getLogger(__name__)
+INVOCATION_LOG_PREFIX = "events.tool_invocation "
 
 
 @dataclass(frozen=True)
@@ -70,17 +72,48 @@ def _parse_timestamp(raw: Any) -> datetime:
 
 
 def _coerce_outcome(payload: Mapping[str, Any]) -> str:
-    """Map the W17.7 payload's ``success`` flag to a W13 outcome string."""
+    """Map W17.7 outcome shapes to a W13 outcome string."""
     success = payload.get("success")
     if isinstance(success, bool):
         return "success" if success else "fail"
+    outcome = payload.get("outcome")
+    if isinstance(outcome, Mapping):
+        nested = _coerce_outcome(outcome)
+        if nested == "success":
+            return "success"
+        is_error = outcome.get("is_error")
+        if isinstance(is_error, bool):
+            return "fail" if is_error else "success"
+    if isinstance(outcome, str) and outcome.strip().lower() in {
+        "success", "ok", "passed", "done"
+    }:
+        return "success"
     # Some upstream producers send free-form ``status`` instead — be lenient.
     status = payload.get("status")
     if isinstance(status, str) and status.strip().lower() in {
         "success", "ok", "passed", "done"
     }:
         return "success"
+    is_error = payload.get("is_error")
+    if isinstance(is_error, bool):
+        return "fail" if is_error else "success"
     return "fail"
+
+
+def payload_from_invocation_log(line: str) -> dict[str, Any] | None:
+    """Extract the JSON payload from one ``events.tool_invocation`` log line."""
+    if not isinstance(line, str):
+        return None
+    raw = line.strip()
+    if INVOCATION_LOG_PREFIX in raw:
+        raw = raw.split(INVOCATION_LOG_PREFIX, 1)[1].strip()
+    if not raw.startswith("{"):
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 async def consume_event(
@@ -94,8 +127,15 @@ async def consume_event(
     ``agent_id`` / ``tool_name``). Callers should treat ``None`` as a
     non-error skip, not a failure.
     """
-    tool_id = payload.get("tool_name") or payload.get("tool_id")
-    agent_id = payload.get("agent_id")
+    invocation = payload.get("invocation")
+    invocation_payload = invocation if isinstance(invocation, Mapping) else {}
+    tool_id = (
+        payload.get("tool_name")
+        or payload.get("tool_id")
+        or invocation_payload.get("tool_name")
+        or invocation_payload.get("tool_id")
+    )
+    agent_id = payload.get("agent_id") or invocation_payload.get("agent_id")
     if not isinstance(tool_id, str) or not tool_id.strip():
         LOG.debug("mp_w17 telemetry event missing tool_name; dropping")
         return None
@@ -103,11 +143,24 @@ async def consume_event(
         LOG.debug("mp_w17 telemetry event missing agent_id; dropping")
         return None
 
-    when = _parse_timestamp(payload.get("timestamp"))
+    when = _parse_timestamp(
+        payload.get("timestamp") or invocation_payload.get("timestamp")
+    )
     outcome = _coerce_outcome(payload)
     return await record_tool_invocation(
         store, agent_id, tool_id, outcome, now=when
     )
+
+
+async def consume_invocation_log_line(
+    store: ToolProficiencyStore,
+    line: str,
+) -> ToolInvocationRecorded | None:
+    """Apply one logged ``events.tool_invocation`` JSON payload if present."""
+    payload = payload_from_invocation_log(line)
+    if payload is None:
+        return None
+    return await consume_event(store, payload)
 
 
 async def consume_batch(
@@ -121,8 +174,15 @@ async def consume_batch(
     dropped_missing_tool = 0
     level_ups = 0
     for payload in payloads:
-        tool_id = payload.get("tool_name") or payload.get("tool_id")
-        agent_id = payload.get("agent_id")
+        invocation = payload.get("invocation")
+        invocation_payload = invocation if isinstance(invocation, Mapping) else {}
+        tool_id = (
+            payload.get("tool_name")
+            or payload.get("tool_id")
+            or invocation_payload.get("tool_name")
+            or invocation_payload.get("tool_id")
+        )
+        agent_id = payload.get("agent_id") or invocation_payload.get("agent_id")
         if not isinstance(tool_id, str) or not tool_id.strip():
             dropped_missing_tool += 1
             continue
@@ -148,4 +208,6 @@ __all__ = [
     "TelemetryConsumerStats",
     "consume_batch",
     "consume_event",
+    "consume_invocation_log_line",
+    "payload_from_invocation_log",
 ]

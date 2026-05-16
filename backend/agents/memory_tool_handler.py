@@ -681,6 +681,7 @@ class MemoryToolHandler:
                 "used_bytes": used,
                 "incoming_bytes": incoming_bytes,
                 "cap_bytes": cap_bytes,
+                "fleet": self.config.fleet_id,
             },
         )
         # Oldest-first eviction.
@@ -716,7 +717,7 @@ class MemoryToolHandler:
             self._audit(
                 op="evict",
                 key=f"{MEMORY_PATH_PREFIX}/{rel.as_posix()}",
-                extra={"bytes": size},
+                extra={"bytes": size, "fleet": self.config.fleet_id},
             )
         if used + incoming_bytes > cap_bytes:
             raise MemoryStorageFull(
