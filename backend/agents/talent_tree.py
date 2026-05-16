@@ -220,6 +220,85 @@ def available_talents(
     return tree[guild_enum].options_by_milestone[milestone_int]
 
 
+def milestones_crossed(
+    previous_level: int,
+    new_level: int,
+) -> tuple[int, ...]:
+    """Return the milestone levels crossed by a ``previous_level → new_level`` transition.
+
+    W14.1 (OP-185): the talent-fork trigger half of ADR-0008 §"Talent
+    tree (W14)". A level transition from ``previous_level`` to
+    ``new_level`` "crosses" milestone ``M`` iff ``previous_level < M <=
+    new_level`` — i.e. the agent has just *reached or passed* the gate.
+    The returned tuple preserves ascending milestone order so the
+    earliest commitment fires first (mirrors the ordering contract of
+    :func:`backend.agents.skill_leveling.unlocks_crossed`).
+
+    Returns ``()`` for any non-increasing transition (``new_level <=
+    previous_level``) — the helper is pure and never raises on this
+    case so callers can ask "did the latest XP award cross a
+    milestone?" without first checking direction. Demotion is not a
+    real state on the W4 character-level path (XP only grows; decay
+    erodes XP, not level), but the function tolerates it for symmetry
+    with the skill-leveling test pattern.
+    """
+    if not isinstance(previous_level, int) or isinstance(previous_level, bool):
+        raise TypeError("previous_level must be an int")
+    if not isinstance(new_level, int) or isinstance(new_level, bool):
+        raise TypeError("new_level must be an int")
+    if new_level <= previous_level:
+        return ()
+    return tuple(
+        milestone
+        for milestone in MILESTONE_LEVELS
+        if previous_level < milestone <= new_level
+    )
+
+
+def pending_milestone_forks(
+    agent_level: int,
+    choices: tuple[TalentChoice, ...] | tuple[int, ...],
+) -> tuple[int, ...]:
+    """Return milestones the agent has reached but not yet locked a talent for.
+
+    W14.1 (OP-185): this is the "talent fork required" signal consumed
+    by the Character Card "Talents" tab (W14.5 modal) and the
+    ``GET /agents/{agent_id}/talents`` endpoint. A milestone ``M`` is
+    *pending* iff ``agent_level >= M`` and no
+    :class:`TalentChoice` row exists for ``M`` in ``choices``.
+
+    ``choices`` accepts either a tuple of :class:`TalentChoice` rows
+    (the canonical store-emitted shape from
+    :meth:`TalentChoiceStore.list_choices`) or a tuple of integer
+    ``milestone_level`` values (the de-normalised shape some routers
+    pass after projecting the rows down).
+
+    The returned tuple is in ascending milestone order so the UI can
+    surface the earliest unresolved fork first. Returns ``()`` for any
+    agent below the first milestone or whose every reached milestone is
+    already locked.
+    """
+    if not isinstance(agent_level, int) or isinstance(agent_level, bool):
+        raise TypeError("agent_level must be an int")
+    if agent_level < 1:
+        raise ValueError("agent_level must be >= 1")
+    locked: set[int] = set()
+    for entry in choices:
+        if isinstance(entry, TalentChoice):
+            locked.add(int(entry.milestone_level))
+        elif isinstance(entry, int) and not isinstance(entry, bool):
+            locked.add(entry)
+        else:
+            raise TypeError(
+                "choices entries must be TalentChoice or int milestone_level"
+            )
+    return tuple(
+        milestone
+        for milestone in MILESTONE_LEVELS
+        if agent_level >= milestone and milestone not in locked
+    )
+
+
 def capstone_for_guild(
     guild: Guild | str,
     *,
@@ -818,6 +897,8 @@ __all__ = [
     "load_talent_tree",
     "lock_capstone_ability",
     "lock_talent",
+    "milestones_crossed",
+    "pending_milestone_forks",
     "prompt_reminders_for_talents",
     "routing_weight_multiplier_for_talents",
 ]

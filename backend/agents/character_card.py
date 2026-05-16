@@ -687,6 +687,27 @@ def _emit_level_up_safely(previous: CharacterCard, updated: CharacterCard) -> No
         )
     except Exception:
         pass
+    # W14.1 (OP-185): fire a talent-fork trigger for every
+    # Lv-10/30/50/80 milestone crossed by this transition so the
+    # Character Card "Talents" tab (W14.5) can surface the picker
+    # modal that blocks task assignment until the operator commits.
+    # Best-effort — the level-up emit above is what drives the
+    # animation; talent-fork is the *operator decision* signal and
+    # must never block the character-card update path.
+    try:
+        from backend.agents.talent_tree import milestones_crossed
+        from backend.events import emit_rpg_talent_fork_required
+
+        for milestone in milestones_crossed(previous.level, updated.level):
+            emit_rpg_talent_fork_required(
+                updated.agent_id,
+                milestone=milestone,
+                agent_level=updated.level,
+                guild=updated.guild,
+                broadcast_scope="global",
+            )
+    except Exception:
+        pass
 
 
 assert_character_card_guilds_within_registry()
