@@ -30,8 +30,8 @@ from backend.agents.talent_tree import (
     InMemoryTalentChoiceStore,
     MILESTONE_LEVELS,
     MilestoneNotReached,
+    PostgresTalentChoiceStore,
     ROUTING_WEIGHT_TALENT_MATCH,
-    TALENT_TREE_PATH,
     TalentAlreadyLocked,
     TalentChoice,
     TalentIdNotInTree,
@@ -49,6 +49,42 @@ from backend.sandbox_tier import Guild
 
 
 T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+class _FakeAsyncpgContext:
+    def __init__(self, conn: "_FakeTalentChoiceConn") -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> "_FakeTalentChoiceConn":
+        return self._conn
+
+    async def __aexit__(self, *_exc: object) -> None:
+        return None
+
+
+class _FakeTalentChoiceConn:
+    def __init__(self) -> None:
+        self.rows: dict[tuple[str, int], dict[str, object]] = {}
+        self.sql: list[str] = []
+
+    async def fetchrow(self, sql: str, *args: object) -> dict[str, object] | None:
+        self.sql.append(sql)
+        if "INSERT INTO agent_talent_choice" in sql:
+            agent_id, milestone_level, talent_id, chosen_at = args
+            key = (str(agent_id), int(milestone_level))
+            if key in self.rows:
+                return None
+            self.rows[key] = {
+                "agent_id": agent_id,
+                "milestone_level": milestone_level,
+                "talent_id": talent_id,
+                "chosen_at": chosen_at,
+            }
+            return self.rows[key]
+        if "FROM agent_talent_choice" in sql:
+            agent_id, milestone_level = args
+            return self.rows.get((str(agent_id), int(milestone_level)))
+        raise AssertionError(f"unexpected SQL: {sql}")
 
 
 # ── YAML loader + shape contract ────────────────────────────────────
@@ -175,6 +211,44 @@ async def test_lock_talent_refuses_different_talent_rewrite():
         await lock_talent(
             store, "agent-A", Guild.backend, 10, "performance-first", agent_level=10, now=T0,
         )
+
+
+@pytest.mark.asyncio
+async def test_in_memory_talent_choice_store_keeps_first_row_immutable():
+    store = InMemoryTalentChoiceStore()
+    first = TalentChoice("agent-A", 10, "schema-first", T0)
+    second = TalentChoice(
+        "agent-A",
+        10,
+        "performance-first",
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert await store.upsert_choice(first) == first
+    assert await store.upsert_choice(second) == first
+    assert await store.get_choice("agent-A", 10) == first
+
+
+@pytest.mark.asyncio
+async def test_postgres_talent_choice_store_insert_only_on_conflict():
+    conn = _FakeTalentChoiceConn()
+    store = PostgresTalentChoiceStore(lambda: _FakeAsyncpgContext(conn))
+    first = TalentChoice("agent-A", 10, "schema-first", T0)
+    second = TalentChoice(
+        "agent-A",
+        10,
+        "performance-first",
+        datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+
+    assert await store.upsert_choice(first) == first
+    assert await store.upsert_choice(second) == first
+
+    insert_sql = "\n".join(
+        sql for sql in conn.sql if "INSERT INTO agent_talent_choice" in sql
+    )
+    assert "ON CONFLICT (agent_id, milestone_level) DO NOTHING" in insert_sql
+    assert "DO UPDATE" not in insert_sql
 
 
 # ── Capstone gate ───────────────────────────────────────────────────
