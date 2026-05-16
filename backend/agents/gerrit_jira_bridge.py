@@ -1649,6 +1649,14 @@ async def _run_with_db_pool(agent_class: str = "subscription-claude") -> None:
     but proactive merger audit writes still use ``backend.audit.log``.
     Initialise the process-global pool here before any stream event can
     spawn merger work.
+
+    OP-1190: also pre-warm ``GerritClient``'s account-resolution cache.
+    Per-event handler threads call ``asyncio.run(...)`` and therefore
+    run in a fresh event loop; the asyncpg pool created above is bound
+    to THIS (main) loop and cannot be acquired from those worker loops.
+    Pre-warming here lets ``_proactive_merger_check`` and
+    ``_ai_reviewer_check`` resolve the Gerrit account synchronously from
+    the cache without touching the pool from a different loop.
     """
     dsn = _resolve_pg_dsn()
     if not dsn:
@@ -1656,6 +1664,8 @@ async def _run_with_db_pool(agent_class: str = "subscription-claude") -> None:
             "Gerrit/JIRA bridge requires a Postgres DSN for audit logging"
         )
     await db_pool.init_pool(dsn)
+    from backend.gerrit import GerritClient
+    await GerritClient.prewarm_for_daemon()
     try:
         build_bridge(agent_class).stream_forever()
     finally:
