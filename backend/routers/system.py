@@ -69,6 +69,13 @@ _BASH_TIMEOUT = 5
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _PLATFORMS_DIR = _PROJECT_ROOT / "configs" / "platforms"
 _TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
+_IMAGE_MANIFEST_PATH = Path("/app/MANIFEST.json")
+_IMAGE_MANIFEST_VERSION_FIELDS = (
+    "image_sha",
+    "build_time",
+    "git_ref",
+    "alembic_head_in_image",
+)
 
 _COST_ESTIMATE_DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-20250514",
@@ -618,12 +625,37 @@ class ReleaseRequest(BaseModel):
     upload_gitlab: bool = False
 
 
+def _load_image_manifest_version_fields(path: Path | None = None) -> dict[str, str]:
+    """Read v2-⑤-1a image identity fields when the baked manifest exists."""
+    path = path or _IMAGE_MANIFEST_PATH
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        logger.warning("Failed to read release image manifest from %s", path)
+        return {}
+    if not isinstance(raw, dict):
+        logger.warning("Release image manifest at %s is not a JSON object", path)
+        return {}
+    return {
+        key: value
+        for key in _IMAGE_MANIFEST_VERSION_FIELDS
+        if isinstance((value := raw.get(key)), str)
+    }
+
+
 @router.get("/release/version")
 async def get_release_version():
     """Get the current resolved version."""
     from backend.release import resolve_version
     version = await resolve_version()
-    return {"version": version}
+    # v2-⑤-1a contract: surface immutable image identity from /app/MANIFEST.json
+    # while preserving the existing release-version response fields.
+    return {
+        "version": version,
+        **_load_image_manifest_version_fields(),
+    }
 
 
 @router.get("/release/manifest")
