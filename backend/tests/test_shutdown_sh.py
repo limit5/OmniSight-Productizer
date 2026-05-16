@@ -11,7 +11,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SHUTDOWN_SH = REPO_ROOT / "scripts" / "shutdown.sh"
 
 
-def _write_fake_docker(tmp_path: Path, *, services: list[str], hung: set[str] | None = None) -> Path:
+def _write_fake_docker(
+    tmp_path: Path,
+    *,
+    services: list[str],
+    hung: set[str] | None = None,
+) -> Path:
     bin_dir = tmp_path / "bin"
     state_dir = tmp_path / "state"
     bin_dir.mkdir()
@@ -40,10 +45,18 @@ def _write_fake_docker(tmp_path: Path, *, services: list[str], hung: set[str] | 
                 case "$1" in
                   -f) shift 2 ;;
                   --profile) shift 2 ;;
+                  exec) shift; break ;;
                   ps) shift; break ;;
                   *) shift ;;
                 esac
               done
+              if [[ "${1:-}" == "-T" ]]; then
+                shift
+                service="${1:-}"
+                shift
+                printf '%s %s\\n' "$service" "$*" >> "$state/execs"
+                exit 0
+              fi
               if [[ "${1:-}" == "--services" ]]; then
                 cat "$state/services"
                 exit 0
