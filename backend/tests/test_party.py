@@ -30,6 +30,7 @@ from backend.agents.party import (
     MAX_PARTY_SIZE,
     MemberAlreadyInParty,
     PartyActiveTaskExists,
+    PartyError,
     PartySizeInvalid,
     Party,
     PartyMember,
@@ -39,9 +40,11 @@ from backend.agents.party import (
     create_party,
     list_active_parties,
     member_is_gated,
+    release_task,
     task_complete,
 )
 from backend.agents.synergy_registry import (
+    SynergyComputeFailed,
     load_synergy_matrix,
     synergy_for_members,
     synergy_for_pair,
@@ -83,6 +86,117 @@ def test_synergy_for_pair_is_order_insensitive():
 
 def test_synergy_for_pair_returns_none_for_same_guild():
     assert synergy_for_pair("backend", "backend") is None
+
+
+def test_synergy_for_pair_normalises_case_and_whitespace():
+    entry = synergy_for_pair("  BACKEND ", " Frontend ")
+    assert entry is not None
+    assert entry.label == "fullstack"
+
+
+def test_synergy_for_pair_returns_none_for_invalid_slug_type():
+    assert synergy_for_pair("backend", 123) is None  # type: ignore[arg-type]
+
+
+def test_synergy_for_members_selects_highest_xp_bonus_candidate():
+    entry = synergy_for_members(["backend", "frontend", "security"])
+    assert entry is not None
+    assert entry.label == "fullstack"
+    assert entry.xp_bonus == pytest.approx(0.15)
+
+
+def test_synergy_for_members_tie_breaks_by_skill_bonus_then_label(tmp_path):
+    matrix_path = tmp_path / "synergy.yaml"
+    matrix_path.write_text(
+        """
+schema_version: 1
+synergies:
+  - guilds: [backend, frontend]
+    label: alpha
+    display_name: Alpha
+    xp_bonus: 0.10
+    skill_bonus_target: data
+    skill_bonus: 0.05
+    summary: Alpha entry.
+  - guilds: [backend, security]
+    label: beta
+    display_name: Beta
+    xp_bonus: 0.10
+    skill_bonus_target: data
+    skill_bonus: 0.20
+    summary: Beta entry.
+  - guilds: [frontend, security]
+    label: aardvark
+    display_name: Aardvark
+    xp_bonus: 0.10
+    skill_bonus_target: data
+    skill_bonus: 0.20
+    summary: Aardvark entry.
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    entry = synergy_for_members(
+        ["backend", "frontend", "security"], path=matrix_path
+    )
+    assert entry is not None
+    assert entry.label == "aardvark"
+
+
+def test_load_synergy_matrix_rejects_duplicate_label(tmp_path):
+    matrix_path = tmp_path / "synergy.yaml"
+    matrix_path.write_text(
+        """
+schema_version: 1
+synergies:
+  - guilds: [backend, frontend]
+    label: duplicate
+    display_name: One
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: One.
+  - guilds: [backend, security]
+    label: duplicate
+    display_name: Two
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: Two.
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SynergyComputeFailed, match="duplicate label"):
+        load_synergy_matrix(matrix_path)
+
+
+def test_load_synergy_matrix_rejects_duplicate_pair_in_reverse_order(tmp_path):
+    matrix_path = tmp_path / "synergy.yaml"
+    matrix_path.write_text(
+        """
+schema_version: 1
+synergies:
+  - guilds: [backend, frontend]
+    label: first
+    display_name: First
+    xp_bonus: 0.10
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: First.
+  - guilds: [frontend, backend]
+    label: second
+    display_name: Second
+    xp_bonus: 0.20
+    skill_bonus_target: null
+    skill_bonus: null
+    summary: Second.
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SynergyComputeFailed, match="duplicate Guild pair"):
+        load_synergy_matrix(matrix_path)
 
 
 # ── create_party — happy path, 2 / 3 / 4 / 5 members ────────────────
@@ -207,6 +321,58 @@ async def test_assign_task_refuses_second_concurrent_task():
     await assign_task(store, party.state.party_id, "OP-T1", now=T0)
     with pytest.raises(PartyActiveTaskExists):
         await assign_task(store, party.state.party_id, "OP-T2", now=T0)
+
+
+@pytest.mark.asyncio
+async def test_assign_task_allows_new_task_after_completion_releases_old_one():
+    store = InMemoryPartyStore()
+    party = await create_party(
+        store,
+        name="A",
+        member_agent_ids=["agent-A", "agent-B"],
+        member_guilds=_guilds_for(["agent-A", "agent-B"]),
+        now=T0,
+    )
+    await assign_task(store, party.state.party_id, "OP-T1", now=T0)
+    await task_complete(store, party.state.party_id, total_xp=100, now=T0)
+
+    state = await assign_task(store, party.state.party_id, "OP-T2", now=T0)
+    assert state.active_task_id == "OP-T2"
+
+
+@pytest.mark.asyncio
+async def test_assign_task_rejects_missing_party():
+    store = InMemoryPartyStore()
+    with pytest.raises(PartyError, match="does not exist"):
+        await assign_task(store, "party-missing", "OP-T1", now=T0)
+
+
+@pytest.mark.asyncio
+async def test_assign_task_rejects_disbanded_party():
+    store = InMemoryPartyStore()
+    party = await create_party(
+        store,
+        name="A",
+        member_agent_ids=["agent-A", "agent-B"],
+        member_guilds=_guilds_for(["agent-A", "agent-B"]),
+        now=T0,
+    )
+    await store.upsert_state(
+        PartyState(
+            party_id=party.state.party_id,
+            name=party.state.name,
+            synergy_label=party.state.synergy_label,
+            synergy_xp_bonus=party.state.synergy_xp_bonus,
+            active_task_id=None,
+            active_task_assigned_at=None,
+            created_at=party.state.created_at,
+            updated_at=T0,
+            disbanded_at=T0,
+        )
+    )
+
+    with pytest.raises(PartyError, match="is disbanded"):
+        await assign_task(store, party.state.party_id, "OP-T1", now=T0)
 
 
 # ── assign_task — idempotent re-pickup (#11) ───────────────────────
@@ -346,6 +512,164 @@ def test_compute_party_xp_distribution_no_synergy_returns_base_xp():
         assert share.party_share == 100
         assert share.synergy_bonus == 0
         assert share.total == 100
+
+
+def test_compute_party_xp_distribution_floors_remainder():
+    state = PartyState(
+        party_id="p1",
+        name="X",
+        synergy_label=None,
+        synergy_xp_bonus=0.0,
+        active_task_id="OP-T1",
+        active_task_assigned_at=T0,
+        created_at=T0,
+        updated_at=T0,
+        disbanded_at=None,
+    )
+    members = (
+        PartyMember(party_id="p1", member_agent_id="agent-A", joined_at=T0),
+        PartyMember(party_id="p1", member_agent_id="agent-B", joined_at=T0),
+    )
+    party = Party(state=state, members=members, synergy=None)
+    distribution = compute_party_xp_distribution(party, total_xp=101)
+
+    assert distribution.total_xp_pool == 101
+    assert [share.party_share for share in distribution.shares] == [50, 50]
+    assert [share.total for share in distribution.shares] == [50, 50]
+
+
+def test_compute_party_xp_distribution_empty_party_has_no_shares():
+    state = PartyState(
+        party_id="p1",
+        name="X",
+        synergy_label=None,
+        synergy_xp_bonus=0.0,
+        active_task_id=None,
+        active_task_assigned_at=None,
+        created_at=T0,
+        updated_at=T0,
+        disbanded_at=None,
+    )
+    party = Party(state=state, members=(), synergy=None)
+    distribution = compute_party_xp_distribution(party, total_xp=200)
+
+    assert distribution.total_xp_pool == 0
+    assert distribution.shares == ()
+
+
+def test_compute_party_xp_distribution_clamps_negative_personal_xp_to_zero():
+    state = PartyState(
+        party_id="p1",
+        name="X",
+        synergy_label=None,
+        synergy_xp_bonus=0.0,
+        active_task_id="OP-T1",
+        active_task_assigned_at=T0,
+        created_at=T0,
+        updated_at=T0,
+        disbanded_at=None,
+    )
+    members = (
+        PartyMember(party_id="p1", member_agent_id="agent-A", joined_at=T0),
+        PartyMember(party_id="p1", member_agent_id="agent-B", joined_at=T0),
+    )
+    party = Party(state=state, members=members, synergy=None)
+    distribution = compute_party_xp_distribution(
+        party, total_xp=100, personal_xp_by_member={"agent-A": -10}
+    )
+    shares = {share.member_agent_id: share for share in distribution.shares}
+
+    assert shares["agent-A"].personal_xp == 0
+    assert shares["agent-A"].total == 50
+    assert shares["agent-B"].personal_xp == 0
+
+
+def test_compute_party_xp_distribution_clamps_negative_synergy_bonus_to_zero():
+    state = PartyState(
+        party_id="p1",
+        name="X",
+        synergy_label="legacy_bad_bonus",
+        synergy_xp_bonus=-0.25,
+        active_task_id="OP-T1",
+        active_task_assigned_at=T0,
+        created_at=T0,
+        updated_at=T0,
+        disbanded_at=None,
+    )
+    members = (
+        PartyMember(party_id="p1", member_agent_id="agent-A", joined_at=T0),
+        PartyMember(party_id="p1", member_agent_id="agent-B", joined_at=T0),
+    )
+    party = Party(state=state, members=members, synergy=None)
+    distribution = compute_party_xp_distribution(party, total_xp=100)
+
+    assert [share.synergy_bonus for share in distribution.shares] == [0, 0]
+    assert [share.total for share in distribution.shares] == [50, 50]
+
+
+def test_compute_party_xp_distribution_rejects_bool_total_xp():
+    state = PartyState(
+        party_id="p1",
+        name="X",
+        synergy_label=None,
+        synergy_xp_bonus=0.0,
+        active_task_id=None,
+        active_task_assigned_at=None,
+        created_at=T0,
+        updated_at=T0,
+        disbanded_at=None,
+    )
+    members = (
+        PartyMember(party_id="p1", member_agent_id="agent-A", joined_at=T0),
+        PartyMember(party_id="p1", member_agent_id="agent-B", joined_at=T0),
+    )
+    party = Party(state=state, members=members, synergy=None)
+
+    with pytest.raises(TypeError, match="total_xp must be an int"):
+        compute_party_xp_distribution(party, total_xp=True)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_task_complete_returns_distribution_and_releases_task():
+    store = InMemoryPartyStore()
+    party = await create_party(
+        store,
+        name="A",
+        member_agent_ids=["agent-A", "agent-B"],
+        member_guilds=_guilds_for(["agent-A", "agent-B"]),
+        now=T0,
+    )
+    await assign_task(store, party.state.party_id, "OP-T1", now=T0)
+    distribution = await task_complete(
+        store,
+        party.state.party_id,
+        total_xp=100,
+        personal_xp_by_member={"agent-A": 10},
+        now=T0,
+    )
+    state = await store.get_state(party.state.party_id)
+    shares = {share.member_agent_id: share for share in distribution.shares}
+
+    assert state is not None
+    assert state.active_task_id is None
+    assert shares["agent-A"].total == 60
+    assert shares["agent-B"].total == 50
+
+
+@pytest.mark.asyncio
+async def test_release_task_is_idempotent_when_no_active_task():
+    store = InMemoryPartyStore()
+    party = await create_party(
+        store,
+        name="A",
+        member_agent_ids=["agent-A", "agent-B"],
+        member_guilds=_guilds_for(["agent-A", "agent-B"]),
+        now=T0,
+    )
+
+    state = await release_task(store, party.state.party_id, now=T0)
+    assert state.active_task_id is None
+    assert state.active_task_assigned_at is None
 
 
 # ── Synergy degradation — missing matrix file degrades to base XP ──
