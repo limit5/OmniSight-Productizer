@@ -57,9 +57,9 @@ DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
 HIGH_QUOTA_RATIO = 0.50
 MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
 # RPG.W14 — feature flag for the talent-weight injection call site.
-# Off by default until RPG.W7.1 (`prefer_agent_id` routing) lands; the
-# helper :func:`talent_routing_weight_multiplier` short-circuits to
-# ``1.0`` while the flag is off so this row is shippable ahead of W7.1.
+# Off by default until the RPG.W14 talent rollout is enabled; the helper
+# :func:`talent_routing_weight_multiplier` short-circuits to ``1.0`` while
+# the flag is off.
 TALENT_ROUTING_ENABLED_ENV = "OMNISIGHT_MP_TALENT_ROUTING_ENABLED"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
@@ -638,9 +638,8 @@ def is_enabled() -> bool:
 def is_talent_routing_enabled() -> bool:
     """Return whether the RPG.W14 talent-weight injection is active.
 
-    Feature-flagged off by default — RPG.W7.1 (``prefer_agent_id``) is
-    not yet live, so the call site is wired but inert. Enabling the
-    flag activates the +20%-per-matching-talent multiplier from
+    Feature-flagged off by default. Enabling the flag activates the
+    +20%-per-matching-talent multiplier from
     :mod:`backend.agents.talent_tree`.
     """
     return feature_flags.resolve_env_backed_feature_flag(

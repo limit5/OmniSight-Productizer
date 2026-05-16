@@ -129,6 +129,7 @@ def _task(
     *,
     agent_class: str = "api-anthropic",
     tier: str = "M",
+    prefer_agent_id: str | None = None,
 ) -> TaskSpec:
     return TaskSpec(
         prompt="run OP-20",
@@ -136,6 +137,7 @@ def _task(
         tier=tier,
         area=["backend", "tests"],
         correlation_id="op-20",
+        prefer_agent_id=prefer_agent_id,
     )
 
 
@@ -219,6 +221,12 @@ def test_task_spec_is_immutable() -> None:
 
     with pytest.raises(FrozenInstanceError):
         task.prompt = "changed"  # type: ignore[misc]
+
+
+def test_task_spec_accepts_optional_prefer_agent_id() -> None:
+    task = _task(prefer_agent_id="openai-subscription")
+
+    assert task.prefer_agent_id == "openai-subscription"
 
 
 def test_dispatch_result_is_immutable() -> None:
@@ -569,6 +577,20 @@ def test_routing_tier_x_allows_human_assigned_provider() -> None:
     assert chosen == [adapter]
 
 
+def test_routing_tier_x_allows_prefer_agent_id_on_task() -> None:
+    adapter = _FakeAdapter("anthropic-subscription")
+
+    chosen = _policy([adapter]).choose_provider(
+        _task(
+            agent_class="api-anthropic",
+            tier="X",
+            prefer_agent_id="anthropic-subscription",
+        )
+    )
+
+    assert chosen == [adapter]
+
+
 def test_routing_human_assignment_filters_to_requested_provider() -> None:
     anthropic = _FakeAdapter("anthropic-subscription")
     openai = _FakeAdapter("openai-subscription")
@@ -579,6 +601,17 @@ def test_routing_human_assignment_filters_to_requested_provider() -> None:
     ).choose_provider(_task(agent_class="api-openai"))
 
     assert chosen == [openai]
+
+
+def test_routing_prefer_agent_id_filters_to_requested_provider() -> None:
+    openai_subscription = _FakeAdapter("openai-subscription")
+    openai_api = _FakeAdapter("openai-api")
+
+    chosen = _policy([openai_subscription, openai_api]).choose_provider(
+        _task(agent_class="api-openai", prefer_agent_id="openai-api")
+    )
+
+    assert chosen == [openai_api]
 
 
 def test_routing_on_cap_hit_suppresses_provider_until_retry_after() -> None:
