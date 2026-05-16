@@ -497,6 +497,8 @@ These 7 subcontracts are the implementation contract for **v2-⑥-2bc** (forward
 
 ### Family ⑦ — Auth middleware allowlist single-source-of-truth
 
+**Contract spec doc** (filed 2026-05-16, OP-1146): [`docs/sprint-s12/2026-05-16-v2-family7-allowlist-contract.md`](2026-05-16-v2-family7-allowlist-contract.md) — full bug-class definition, Path A/B/C decision rationale, `PUBLIC_PATH_ALLOWLIST` + `is_public()` contract, consumer list (5 middlewares), drift-CI-contract outline, migration plan. Downstream Family ⑦ tickets cite that doc's §-anchors in their AC.
+
 **Why**: today's `/health` 401 traces to a 4-of-5 whitelist drift; the symptom is benign but the underlying anti-pattern is dangerous (any auth endpoint policy change risks the same drift).
 
 **Defense dimensions covered**: D2 (exception with remediation — new). D1/D3/D4/D5 N/A.
