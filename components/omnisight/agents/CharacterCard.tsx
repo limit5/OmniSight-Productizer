@@ -453,6 +453,7 @@ export function CharacterCard({
       )}
       data-agent-id={agentId}
       data-agent-guild={guild}
+      data-testid="character-card"
     >
       <div className="grid gap-4 p-4 sm:grid-cols-[8rem_1fr]">
         <div
@@ -460,6 +461,7 @@ export function CharacterCard({
             "relative flex min-h-32 items-center justify-center rounded-md border bg-gradient-to-br p-3",
             visual.portraitClass,
           )}
+          data-testid="character-card-portrait"
         >
           <Avatar className="size-24 rounded-md border bg-background shadow-sm">
             {portraitUrl ? (
@@ -477,6 +479,7 @@ export function CharacterCard({
               visual.toneClass,
             )}
             title={visual.label}
+            data-testid="character-card-guild-crest"
           >
             <GuildIcon className="size-5" aria-hidden="true" />
             <span className="sr-only">{visual.crestLabel}</span>
@@ -552,7 +555,7 @@ export function CharacterCard({
           ) : null}
 
           <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
-            <div className="min-w-0">
+            <div className="min-w-0" data-testid="character-card-level">
               <div className="mb-1.5 flex items-center justify-between gap-3 text-xs">
                 <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
                   <Medal className="size-3.5 text-amber-500" aria-hidden="true" />
@@ -578,7 +581,10 @@ export function CharacterCard({
               </div>
             </div>
 
-            <div className="rounded-md border bg-muted/30 px-3 py-2 sm:min-w-40">
+            <div
+              className="rounded-md border bg-muted/30 px-3 py-2 sm:min-w-40"
+              data-testid="character-card-specialization"
+            >
               <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase text-muted-foreground">
                 <Sparkles className="size-3 text-amber-500" aria-hidden="true" />
                 Specialization
