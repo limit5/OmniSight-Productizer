@@ -878,6 +878,76 @@ Source symbols (per W13.6 attribution):
 | `data-testid="character-card-tool-gate-blocked"` (banner anchor) | `components/omnisight/agents/CharacterCard.tsx` |
 | `getLevelProgressPercent` (shared 0-100 clamp) | `components/omnisight/agents/CharacterCard.tsx` |
 | Contract tests (lock the row shape + gate banner) | `test/components/character-card-tools.test.tsx` |
+### Peer-handoff + cross-Guild gating (W13.4 / OP-181)
+
+The Lv-4 row of the W13 ladder — *"advanced flags + cross-Guild A2A
+handoff"* in ADR-0008 §"MCP/A2A tool proficiency (W13)" — is the
+A2A-specific sub-wave. W13.4 ships the domain-shaped facade so the
+A2A dispatcher and the Character Card UI don't have to hard-code the
+tool_id strings or the magic Lv-4 threshold. Peer-handoff success
+rate accrues on two stable tool_ids; cross-Guild handoff is gated at
+Lv 4 by the shipped YAML (canonical sample: `mcp__a2a__cross_guild_handoff: 4`).
+
+| Helper | Purpose |
+|---|---|
+| `is_cross_guild_handoff(sender_guild, receiver_guild)` | Pure helper: case/whitespace-tolerant Guild-slug comparison; raises on blank slugs |
+| `peer_handoff_tool_id(*, cross_guild)` | Returns the tool_id the W13.4 facade buckets the outcome under |
+| `await record_peer_handoff_outcome(store, sender_agent_id, *, cross_guild, outcome, now=None)` | Wrapper over `record_tool_invocation` that picks the right tool_id; sender-side accrual only |
+| `await peer_handoff_success_rate(store, sender_agent_id, *, cross_guild)` | Returns `PeerHandoffSuccessRate(agent_id, cross_guild, invocations, successes, success_ratio, level)` |
+| `await can_perform_cross_guild_handoff(store, sender_agent_id, *, now=None)` | In-process pre-check; thin wrapper over `can_invoke_at_level` keyed on `mcp__a2a__cross_guild_handoff` with required Lv 4 |
+
+Constants (importable for callers that want to avoid the YAML
+round-trip):
+
+| Constant | Value |
+|---|---|
+| `TOOL_ID_PEER_HANDOFF` | `"mcp__a2a__peer_handoff"` |
+| `TOOL_ID_CROSS_GUILD_HANDOFF` | `"mcp__a2a__cross_guild_handoff"` |
+| `CROSS_GUILD_HANDOFF_REQUIRED_LEVEL` | `4` |
+
+Production wiring per A2A handoff dispatch:
+
+```python
+from backend.agents.tool_proficiency import (
+    is_cross_guild_handoff,
+    record_peer_handoff_outcome,
+    can_perform_cross_guild_handoff,
+)
+
+cross_guild = is_cross_guild_handoff(
+    sender_card.guild, receiver_card.guild
+)
+if cross_guild and not await can_perform_cross_guild_handoff(
+    store, sender_card.agent_id
+):
+    raise CrossGuildHandoffRefused(sender_card.agent_id)
+
+outcome = await dispatch_a2a_handoff(envelope)  # "success" | "fail"
+await record_peer_handoff_outcome(
+    store,
+    sender_card.agent_id,
+    cross_guild=cross_guild,
+    outcome=outcome,
+)
+```
+
+The dispatcher path (via `install_feature_unlock_gate`) gives the
+same refusal end-to-end — the in-process pre-check exists so the UI
+can grey out the cross-Guild handoff affordance on Character Card
+before the agent attempts the call. Both paths read the same YAML.
+
+Source symbols (per W13.4 attribution):
+
+| Symbol | File |
+|---|---|
+| `TOOL_ID_PEER_HANDOFF` / `TOOL_ID_CROSS_GUILD_HANDOFF` / `CROSS_GUILD_HANDOFF_REQUIRED_LEVEL` | `backend/agents/tool_proficiency.py` |
+| `PeerHandoffSuccessRate` (dataclass) | `backend/agents/tool_proficiency.py` |
+| `is_cross_guild_handoff` / `peer_handoff_tool_id` | `backend/agents/tool_proficiency.py` |
+| `record_peer_handoff_outcome` | `backend/agents/tool_proficiency.py` |
+| `peer_handoff_success_rate` | `backend/agents/tool_proficiency.py` |
+| `can_perform_cross_guild_handoff` | `backend/agents/tool_proficiency.py` |
+| `mcp__a2a__peer_handoff: 1` (same-Guild bootstrap entry) | `config/tool_proficiency_gates.yaml` |
+| `mcp__a2a__cross_guild_handoff: 4` (canonical Lv-4 sample) | `config/tool_proficiency_gates.yaml` |
 
 ### Telemetry consumer
 
