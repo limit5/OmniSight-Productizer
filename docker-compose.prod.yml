@@ -260,7 +260,12 @@ services:
     command:
       - "sh"
       - "-c"
-      - "WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS --no-access-log"
+      # OP-1127 (Boreas-A2): drift gate runs BEFORE uvicorn binds :8001.
+      # Same contract as the baked Dockerfile.backend CMD on backend-a;
+      # this override re-states the gate so port-8001 replica also fails
+      # closed on image-vs-DB head drift instead of starting a stale image
+      # against a newer schema.
+      - "python -m backend.alembic_drift_gate && WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')} && exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 --workers $$WORKERS --no-access-log"
     ports:
       - "8001:8001"
     volumes:

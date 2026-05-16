@@ -15,6 +15,19 @@
 ; drain coordinator (G1 #1): stop accepting new requests, flush SSE, close DB,
 ; wait up to 30s for in-flight tasks. TimeoutStopSec=40 = 30s drain + 10s buffer
 ; before systemd escalates to SIGKILL.
+;
+; OP-1127 (Boreas-A2) drift gate diagnostic location:
+;   journalctl -u omnisight-backend -n 200 --no-pager | grep alembic_drift_gate
+;
+; The ExecStartPre below runs ``python3 -m backend.alembic_drift_gate``. On
+; image-vs-DB head mismatch it emits a single-line JSON record with keys
+; ``image_head``, ``db_head``, ``drift_direction`` and exits 1 — systemd
+; refuses to run ExecStart, the unit goes to ``failed`` state, and
+; Restart=on-failure surfaces it instead of looping. Override (emergency):
+;   systemctl set-environment OMNISIGHT_SKIP_ALEMBIC_DRIFT_GATE=1
+;   systemctl restart omnisight-backend
+; then ``unset-environment`` after the operator-led DB upgrade or image
+; rollback so the next reboot re-arms the gate.
 
 [Unit]
 Description=OmniSight backend (FastAPI / uvicorn)
@@ -30,6 +43,9 @@ WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
 EnvironmentFile=/home/USER_HOME/work/sora/OmniSight-Productizer/.env
 Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
 Environment=OMNISIGHT_MEMORY_TOOL_CAP_MB=100
+; OP-1127 (Boreas-A2) — refuse to start when migration head shipped in the
+; image diverges from alembic_version in the live DB. See header block.
+ExecStartPre=/usr/bin/python3 -m backend.alembic_drift_gate
 ExecStart=/bin/sh -c '\
     WORKERS=$${OMNISIGHT_WORKERS:-$$(python3 -c "import os; print(max(2, os.cpu_count() // 2))")}; \
     exec python3 -m uvicorn backend.main:app \
