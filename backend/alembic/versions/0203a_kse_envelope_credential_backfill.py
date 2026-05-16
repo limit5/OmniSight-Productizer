@@ -116,7 +116,94 @@ def _ensure_lookup_columns(conn) -> None:
         )
 
 
+def _would_be_lookup(key_hash: str, lookup: str | None) -> str | None:
+    """Return the ``key_lookup_index`` value the main loop would write
+    for this row, or ``None`` if it would skip.
+
+    Mirrors the three branches in ``_backfill_api_keys`` so dedupe can
+    decide collisions BEFORE the UPDATE runs and trips the unique index:
+
+    * already-populated lookup → that value (idempotent skip in loop)
+    * carrier with NULL lookup → ``tok`` extracted from the carrier
+    * legacy plaintext         → the bare sha256 hex sitting in ``key_hash``
+    """
+    if lookup:
+        return lookup
+    if _looks_like_carrier(key_hash):
+        try:
+            return _token_from_binding(_unpack_ks_payload(key_hash))
+        except Exception:
+            return None
+    return key_hash
+
+
+def _dedupe_legacy_bearer_duplicates(conn) -> int:
+    """Resolve duplicate-secret ``api_keys`` rows that would collide on
+    ``idx_api_keys_lookup``. Returns the number of stub rows deleted.
+
+    Root cause (OP-1177 forensic audit, L-OP-1176 lesson): pre-Task-#106
+    ``migrate_legacy_bearer`` (api_keys.py, before 2026-04-21) raced
+    across uvicorn workers and inserted one ``ak-<random-uuid>`` row per
+    worker per legacy secret. Task #106 made the id deterministic
+    (``ak-legacy-<sha256(secret)[:12]>`` + ``ON CONFLICT (id) DO
+    NOTHING``) but did NOT retroactively dedupe the historical stubs.
+    When ``_backfill_api_keys`` later walks the table, every row that
+    encodes the same legacy secret resolves to the same
+    ``key_lookup_index`` value (the bare ``sha256(legacy_secret)``) and
+    the second UPDATE trips the unique index that this same migration
+    just created in ``_ensure_lookup_columns``.
+
+    Policy: keep the canonical ``ak-legacy-<sha[:12]>`` row, delete the
+    pre-#106 stubs. Only acts on duplicate groups that contain a
+    canonical row whose id stem matches the group's actual sha256 — for
+    any other duplicate shape we leave the table alone so the migration
+    trips loudly and an operator files a ticket rather than silently
+    losing data.
+    """
+    rows = conn.exec_driver_sql(
+        "SELECT id, key_hash, key_lookup_index FROM api_keys"
+    ).fetchall()
+    by_lookup: dict[str, list[str]] = {}
+    for key_id, key_hash, lookup in rows:
+        if not isinstance(key_hash, str) or not key_hash:
+            continue
+        would_be = _would_be_lookup(key_hash, lookup)
+        if not would_be:
+            continue
+        by_lookup.setdefault(would_be, []).append(key_id)
+
+    deleted = 0
+    for lookup, ids in by_lookup.items():
+        if len(ids) < 2:
+            continue
+        canonical_id = f"ak-legacy-{lookup[:12]}"
+        if canonical_id not in ids:
+            _log.warning(
+                "0203a_kse: api_keys duplicate at key_lookup_index=%s has no "
+                "canonical %s row; leaving for main loop to trip so the operator "
+                "can investigate (see OP-1177 / L-OP-1176).",
+                lookup, canonical_id,
+            )
+            continue
+        for key_id in ids:
+            if key_id == canonical_id:
+                continue
+            conn.execute(
+                text("DELETE FROM api_keys WHERE id = :id"),
+                {"id": key_id},
+            )
+            _log.warning(
+                "0203a_kse: removed pre-Task-#106 duplicate api_keys row id=%s "
+                "in favour of canonical %s (same sha256(legacy_secret)); "
+                "see OP-1177 / L-OP-1176.",
+                key_id, canonical_id,
+            )
+            deleted += 1
+    return deleted
+
+
 def _backfill_api_keys(conn) -> tuple[int, int]:
+    _dedupe_legacy_bearer_duplicates(conn)
     rows = conn.exec_driver_sql(
         "SELECT id, COALESCE(tenant_id, 't-default') AS tenant_id, "
         "key_hash, key_lookup_index FROM api_keys"
