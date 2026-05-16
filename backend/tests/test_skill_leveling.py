@@ -41,12 +41,14 @@ from backend.agents.skill_leveling import (
     compute_xp_delta,
     decay_idle_skills,
     lock_branch_choice,
+    mastery_effects_for_skill,
+    mastery_effects_table,
     next_level_threshold,
     teach_other_agent,
     unlocks_crossed,
     unlocks_for_level,
 )
-from backend.agents.skill_matrix import SkillMatrixDriftError
+from backend.agents.skill_matrix import SkillMatrixDriftError, canonical_skill_ids
 
 
 SKILL_ID = "enterprise_web"
@@ -81,13 +83,29 @@ def test_next_level_threshold_lv5_caps_at_cap_threshold():
 def test_unlocks_crossed_emits_per_level_flags():
     crossed = unlocks_crossed(1, 5)
     assert crossed == (
-        "extended_thinking_enabled",
-        "parallel_subtask_enabled",
-        "prompt_overhead_reduced",
+        "extended_thinking",
+        "parallel_subtask",
+        "prompt_overhead",
         "teach_other_agent",
     )
     assert unlocks_crossed(4, 5) == unlocks_for_level(5)
     assert unlocks_crossed(3, 3) == ()
+
+
+def test_mastery_effects_table_covers_every_canonical_skill():
+    table = mastery_effects_table()
+    assert set(table) == set(canonical_skill_ids())
+    assert table[SKILL_ID] == {
+        2: ("extended_thinking",),
+        3: ("parallel_subtask",),
+        4: ("prompt_overhead",),
+        5: ("teach_other_agent",),
+    }
+
+
+def test_mastery_effects_for_skill_rejects_skill_id_not_in_matrix():
+    with pytest.raises(SkillIdNotInMatrix):
+        mastery_effects_for_skill("does_not_exist")
 
 
 # ── compute_xp_delta (pure multiplier math) ─────────────────────────
@@ -130,7 +148,7 @@ async def test_award_skill_xp_lv1_to_lv2_transition_emits_extended_thinking():
     assert award.new_xp == 30
     assert award.previous_level == 1
     assert award.new_level == 2
-    assert "extended_thinking_enabled" in award.unlocks
+    assert "extended_thinking" in award.unlocks
     assert award.branch_choice_required is False
 
 
@@ -143,7 +161,7 @@ async def test_award_skill_xp_lv2_to_lv3_emits_branch_choice_required():
     )
     assert award.new_xp == 105
     assert award.new_level == 3
-    assert "parallel_subtask_enabled" in award.unlocks
+    assert "parallel_subtask" in award.unlocks
     assert award.branch_choice_required is True
 
 
