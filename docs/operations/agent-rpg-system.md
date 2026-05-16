@@ -1111,6 +1111,9 @@ The backend helper surface is `backend/agents/party.py`:
 | `await assign_task(store, party_id, task_id, tier=...)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists`. W17.4 (OP-195): refuses sub-L tiers with `PartyTaskTierTooLow` when `tier` is supplied |
 | `compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)` | Even split + per-member personal XP + synergy bonus |
 | `await task_complete(store, party_id, total_xp, ...)` | Composes the W17 state transition: distribute XP + release task |
+| `await assign_task(store, party_id, task_id)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists` |
+| `compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)` | Even split + per-member personal XP + synergy bonus (W17.5 — see below) |
+| `await task_complete(store, party_id, total_xp, ...)` | Composes the W17 state transition: distribute XP (W17.5) + release task |
 | `await member_is_gated(store, agent_id)` | Pre-pickup probe consumed by `jira_dispatch.pre_pickup_ok` |
 
 ### Synergy matrix
@@ -1194,6 +1197,55 @@ Source symbols (per W17.2 attribution):
 | `PartySizeInvalid` / `MemberAlreadyInParty` (refusal classes) | `backend/agents/party.py` |
 | `agent_party_state` CHECK constraint (storage-layer bound) | `backend/alembic/versions/0230_agent_party.py` |
 | Lock-in tests (size happy / below / above / cross-Guild / same-Guild / degraded YAML) | `backend/tests/test_party.py` |
+### Party XP distribution (W17.5 / OP-196)
+
+When a party's Tier L+ task completes, the
+`compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)`
+helper in `backend/agents/party.py` produces one `MemberXpShare`
+per member with four numeric fields. The ADR-0008 promise is that
+"party play doesn't penalise individual progression" — so the pool
+splits evenly *and* each member also accrues their own personal XP
+on top:
+
+| Field | Source | Notes |
+|---|---|---|
+| `party_share` | `total_xp // N` | Integer floor over the N party members; the remainder is left on the table (audit-trail visible via `PartyXpDistribution.total_xp_pool`) |
+| `synergy_bonus` | `round(party_share * synergy_xp_bonus)` | Applied to the party share only; clamped to `>= 0`. Sourced from `agent_party_state.synergy_xp_bonus` (resolved via the W17 matrix in `create_party`). |
+| `personal_xp` | `personal_xp_by_member[agent_id]` | Per-member task contribution from the caller; clamped to `>= 0`; never split. A missing key means "no personal accrual this round". |
+| `total` | `party_share + synergy_bonus + personal_xp` | The XP delta the persistence layer should write to the member's character card. |
+
+Worked example (3-member party, fullstack synergy +15%, pool 300):
+
+| Member | party_share | synergy_bonus | personal_xp | total |
+|---|---|---|---|---|
+| `agent-A` (backend) | 100 | 15 | 50 | 165 |
+| `agent-B` (frontend) | 100 | 15 | 0 | 115 |
+| `agent-C` (devops) | 100 | 15 | 25 | 140 |
+
+Key invariants the helper enforces (covered by the contract tests in
+`backend/tests/test_party.py`):
+
+- Pool divides evenly across members; remainder stays on the table
+  (`total_xp_pool` reports the input pool, not the sum of shares).
+- A missing or zero `synergy_xp_bonus` cleanly degrades to
+  `party_share + personal_xp` — synergy never applies to personal XP.
+- Negative `synergy_xp_bonus` (from a malformed state row) and
+  negative `personal_xp` inputs are both clamped to `0` so a bad
+  payload cannot net out the party share.
+- Empty party returns `()` shares + `total_xp_pool=0`, never raises.
+
+The pool itself is constructed in
+`backend/agents/xp_engine.party_total_xp_pool(base_xp_per_member,
+party_size, synergy_xp_bonus=...)` — that helper is the *party-side*
+half of the W17.5 payout contract, while `compute_party_xp_distribution`
+is the *distribution* half. The per-member `personal_xp` half is
+accrued separately by the caller (per-task contribution) and is never
+folded into the pool.
+
+The HTTP surface at `POST /agents/parties/{party_id}/task/complete`
+accepts `{"total_xp": int, "personal_xp_by_member": {agent_id: int}}`
+and returns the full breakdown verbatim, so the operator UI can
+attribute each delta back to its source.
 
 ### Per-task exclusivity (pre-pickup gate)
 
