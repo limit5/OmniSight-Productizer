@@ -90,6 +90,17 @@ class ArbiterReason(str, Enum):
     merger_refused_test_failure = "merger_refused_test_failure"
     merger_refused_escalated = "merger_refused_escalated"
     merger_refused_other = "merger_refused_other"
+    # OP-1196 phase 3 — the merger resolved the conflict (LLM produced
+    # resolved_text at adequate confidence) but the caller asked the
+    # backend NOT to push (``MergeConflictTask.push_locally=False``).
+    # The caller (daemon) must read ``merger_outcome.resolved_text``,
+    # apply it to its own workspace, amend as merger-agent-bot,
+    # push, and post the +2 vote. Backend does NOT open a JIRA
+    # abstain ticket in this path — the caller is expected to
+    # complete the resolution; if the caller-side push later fails,
+    # the caller is responsible for surfacing that failure (via SSE,
+    # a fresh POST back into backend, or operator notification).
+    merger_resolved_pending_caller_push = "merger_resolved_pending_caller_push"
 
     submitted = "submitted"
     human_disagreed_merger_withdrew = "human_disagreed_merger_withdrew"
@@ -114,6 +125,14 @@ class MergeConflictTask:
     additional_files: list[str] = field(default_factory=list)
     jira_ticket: str = ""                # parent story (for abstain ticket)
     catc_owner: str = ""                 # original CATC assignee
+    # OP-1196 phase 3 — when False, the merger pipeline runs through
+    # the LLM and populates ``ResolutionOutcome.resolved_text`` but
+    # the in-process push step is SKIPPED. The caller (typically the
+    # gerrit-jira-bridge daemon) is then responsible for applying
+    # the resolution + amending + pushing as merger-agent-bot using
+    # its own workspace + SSH key. See OP-1196 α-vs-C analysis for
+    # why this split exists.
+    push_locally: bool = True
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "MergeConflictTask":
@@ -130,6 +149,10 @@ class MergeConflictTask:
             additional_files=list(d.get("additional_files") or []),
             jira_ticket=str(d.get("jira_ticket") or ""),
             catc_owner=str(d.get("catc_owner") or ""),
+            # OP-1196 phase 3 — default True for backwards compat. The
+            # daemon sets this to False; older clients that don't
+            # know about the field stay on the in-process push path.
+            push_locally=bool(d.get("push_locally", True)),
         )
 
 
@@ -377,6 +400,8 @@ async def on_merge_conflict_webhook(
         patchset_revision=task.patchset_revision,
         workspace=task.workspace,
         additional_files=list(task.additional_files),
+        # OP-1196 phase 3 — pass through the deferred-push flag.
+        push_locally=task.push_locally,
     )
     merger_outcome = await deps.merger(req)
     return await _route_merger_outcome(task, merger_outcome, deps)
@@ -435,6 +460,27 @@ async def _route_merger_outcome(
             ),
             merger_outcome=outcome.to_dict(),
             awaiting_human_since=now,
+        )
+
+    # OP-1196 phase 3 — deferred-push: the LLM produced a resolution
+    # (confidence already passed the gate) but the caller asked the
+    # backend NOT to push. Return the resolution back so the caller
+    # can apply + amend + push as merger-agent-bot using its own
+    # workspace + SSH key. Backend does NOT open a JIRA abstain
+    # ticket here — the caller will complete the resolution.
+    if outcome.reason is ma.MergerReason.deferred_push_to_caller:
+        return ArbiterOutcome(
+            change_id=task.change_id,
+            reason=ArbiterReason.merger_resolved_pending_caller_push,
+            detail=(
+                f"Merger LLM produced a resolution at confidence "
+                f"{outcome.confidence:.2f}; backend deferred the push "
+                f"to the caller (push_locally=False). Caller is "
+                f"responsible for applying merger_outcome.resolved_text "
+                f"to its workspace, amending as merger-agent-bot, "
+                f"pushing to refs/for/<branch>, and posting the +2 vote."
+            ),
+            merger_outcome=outcome.to_dict(),
         )
 
     # Any non-+2 outcome — branch by reason.

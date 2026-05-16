@@ -150,6 +150,16 @@ class MergerReason(str, Enum):
     refused_escalated = "refused_escalated"
     refused_push_failed = "refused_push_failed"
     refused_new_logic_detected = "refused_new_logic_detected"
+    # OP-1196 phase 3 — daemon-side push wiring (Option C). When the
+    # caller (e.g., the gerrit-jira-bridge daemon) sets
+    # ``request.push_locally=False``, the merger runs through all the
+    # decision gates + LLM call but SKIPS the in-process pusher step
+    # and returns this reason. The outcome carries ``resolved_text``
+    # so the caller can perform the push + +2 itself using its own
+    # workspace + credentials (the daemon has both — backend
+    # container has neither). This is the "secrets stay on host"
+    # design choice from the OP-1196 α-vs-β-vs-C analysis.
+    deferred_push_to_caller = "deferred_push_to_caller"
 
 
 class LabelVote(int, Enum):
@@ -191,6 +201,20 @@ class ConflictRequest:
     # field exists so a multi-file resolution can be explicitly opted
     # into and routed through the abstain-for-human path.
     additional_files: list[str] = field(default_factory=list)
+    # OP-1196 phase 3 — daemon-side push wiring (Option C). When True
+    # (default — backwards-compatible), the merger does its own push
+    # and +2 vote via the in-process GitPatchsetPusher + reviewer.
+    # When False, the merger runs everything up to + including the
+    # LLM call, populates ResolutionOutcome.resolved_text, but skips
+    # the push step entirely and returns MergerReason.
+    # deferred_push_to_caller. The caller (typically the
+    # gerrit-jira-bridge daemon) inspects the response, applies the
+    # resolved_text to its own workspace, amends as merger-agent-bot,
+    # pushes, and posts the +2 vote. This is the "secrets stay on
+    # host" architecture decided in the OP-1196 α-vs-C analysis —
+    # the backend container has the LLM + asyncpg pool but NEITHER
+    # the merger-bot SSH key NOR a workspace; the daemon has both.
+    push_locally: bool = True
 
 
 @dataclass
@@ -220,6 +244,14 @@ class ResolutionOutcome:
     failure_count: int = 0
     test_result: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    # OP-1196 phase 3 — full resolved file content (NOT just diff preview),
+    # populated whenever the LLM produces a confident-enough resolution.
+    # Used by callers that opted into deferred-push mode
+    # (``ConflictRequest.push_locally=False``) to apply the resolution
+    # to their own workspace before amending + pushing as
+    # merger-agent-bot. Empty when the merger short-circuited before
+    # the LLM step (abstain gates) or when the LLM refused.
+    resolved_text: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -1010,6 +1042,32 @@ async def resolve_conflict(
 
     # ── 9. Push patchset ────────────────────────────────────────
     commit_message = _build_patchset_message(request, resolution)
+
+    # OP-1196 phase 3 — caller-side push handoff (Option C). The
+    # gerrit-jira-bridge daemon sets ``push_locally=False`` because the
+    # backend container has neither a workspace nor the merger-bot SSH
+    # key, and the daemon (running on host) has both. Return the
+    # fully-LLM-resolved file content so the caller can apply +
+    # amend + push using its own credentials.
+    if not request.push_locally:
+        outcome = _build_abstain(
+            request,
+            reason=MergerReason.deferred_push_to_caller,
+            confidence=resolution.confidence,
+            rationale=(
+                f"LLM produced a resolution at confidence "
+                f"{resolution.confidence:.2f}; backend deferring push "
+                f"to caller per push_locally=False (caller is "
+                f"responsible for applying, amending as merger-agent-bot, "
+                f"pushing, and posting the +2 vote)."
+            ),
+            diff_preview=resolution.diff,
+        )
+        outcome.resolved_text = resolution.resolved_text
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
     push = await deps.pusher.push(
         change_id=change_id,
         project=request.project,

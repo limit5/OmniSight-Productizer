@@ -803,3 +803,137 @@ class TestOp694HashtagOnSuccess:
         ))
         assert result.ok is False
         assert "add_hashtag" in result.reason
+
+
+# ──────────────────────────────────────────────────────────────
+#  OP-1196 phase 3 — push_locally=False deferred-push path
+# ──────────────────────────────────────────────────────────────
+
+
+class TestPushLocallyDeferredToCaller:
+    """When the caller (gerrit-jira-bridge daemon) sets
+    ``ConflictRequest.push_locally=False``, the merger pipeline must:
+
+      * Run through every gate + the LLM call as normal.
+      * Populate ``ResolutionOutcome.resolved_text`` with the
+        LLM-produced file content.
+      * SKIP the in-process pusher step.
+      * SKIP the in-process reviewer step.
+      * Return ``MergerReason.deferred_push_to_caller`` so the caller
+        knows to do the push + +2 vote itself.
+
+    Backwards-compat: a request with default ``push_locally=True``
+    still runs through the pusher (existing tests assert this; this
+    test class only asserts the new opt-in path).
+    """
+
+    def test_deferred_push_skips_pusher_returns_resolved_text(self):
+        llm = _FakeLLM({
+            "resolved_block": "x = 42  # merger\n",
+            "confidence": 0.97,
+            "rationale": "picked HEAD; INCOMING was stale",
+            "new_logic_detected": False,
+        })
+
+        # Pusher MUST NOT be called. Use a stub that raises if invoked
+        # so we get a clear failure rather than a silent regression.
+        class _ExplodingPusher:
+            async def push(self, **kwargs):
+                raise AssertionError(
+                    "OP-1196 phase 3 regression: pusher invoked despite "
+                    "push_locally=False"
+                )
+
+        # Reviewer MUST NOT be called either.
+        class _ExplodingReviewer:
+            async def post_review(self, **kwargs):
+                raise AssertionError(
+                    "OP-1196 phase 3 regression: reviewer invoked "
+                    "despite push_locally=False"
+                )
+
+        events, audit = _audit_sink()
+        deps = ma.MergerDeps(
+            llm=llm, pusher=_ExplodingPusher(), reviewer=_ExplodingReviewer(),
+            test_runner=_test_runner(True), audit=audit,
+        )
+
+        req = _base_request()
+        req.push_locally = False
+
+        outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+        assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+        assert int(outcome.voted_score) == 0  # not voted yet
+        assert outcome.confidence == 0.97
+        # Critical: resolved_text MUST be populated so the caller can
+        # apply it. The text is the FULL FILE with the conflict block
+        # replaced by the LLM's resolved_block — not just the
+        # resolved_block alone (the in-process pusher writes the FULL
+        # FILE to the workspace too; the daemon-side push will do the
+        # same).
+        assert outcome.resolved_text, (
+            "resolved_text must be populated for deferred-push path"
+        )
+        assert "x = 42  # merger" in outcome.resolved_text
+        # Conflict markers must be GONE from the resolved file (that's
+        # the whole point — the LLM replaced the conflict region).
+        assert "<<<<<<<" not in outcome.resolved_text
+        assert ">>>>>>>" not in outcome.resolved_text
+        # diff_preview also surfaces for human-readable display.
+        assert outcome.diff_preview  # non-empty
+
+    def test_push_locally_true_still_calls_pusher(self):
+        """Backwards-compat: the default path is unchanged."""
+        llm = _FakeLLM({
+            "resolved_block": "ok\n", "confidence": 0.95,
+            "rationale": "", "new_logic_detected": False,
+        })
+        pusher = _FakePusher()
+        reviewer = _FakeReviewer()
+        deps = ma.MergerDeps(
+            llm=llm, pusher=pusher, reviewer=reviewer,
+            test_runner=_test_runner(True),
+        )
+        req = _base_request()  # push_locally default True
+
+        outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+        assert outcome.reason is ma.MergerReason.plus_two_voted
+        assert len(pusher.calls) == 1     # pusher WAS called
+        assert outcome.push_sha == pusher.sha
+
+    def test_deferred_push_includes_resolved_text_in_to_dict(self):
+        """The JSON-serialised outcome (sent back to the daemon over
+        HTTP) must include resolved_text — otherwise the daemon has
+        nothing to push."""
+        llm = _FakeLLM({
+            "resolved_block": "FINAL CONTENT\n", "confidence": 0.96,
+            "rationale": "", "new_logic_detected": False,
+        })
+
+        class _ExplodingPusher:
+            async def push(self, **kwargs):
+                raise AssertionError("pusher should be skipped")
+
+        class _ExplodingReviewer:
+            async def post_review(self, **kwargs):
+                raise AssertionError("reviewer should be skipped")
+
+        deps = ma.MergerDeps(
+            llm=llm, pusher=_ExplodingPusher(),
+            reviewer=_ExplodingReviewer(), test_runner=_test_runner(True),
+        )
+        req = _base_request()
+        req.push_locally = False
+
+        outcome = _run(ma.resolve_conflict(req, deps=deps))
+        d = outcome.to_dict()
+        assert d["reason"] == "deferred_push_to_caller"
+        # resolved_text contains the resolved_block embedded in the
+        # surrounding file body (the merger overwrites the WHOLE file
+        # on the workspace, not just the conflict region).
+        assert "FINAL CONTENT" in d["resolved_text"]
+        assert "<<<<<<<" not in d["resolved_text"]
+        assert d["voted_score"] == 0
+        assert d["push_sha"] == ""    # no push was attempted
