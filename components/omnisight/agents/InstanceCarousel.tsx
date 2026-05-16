@@ -8,8 +8,8 @@
  */
 
 import { ChevronLeft, ChevronRight, Layers3 } from "lucide-react"
-import type { ReactElement } from "react"
-import { useMemo, useState } from "react"
+import type { KeyboardEvent, ReactElement } from "react"
+import { useMemo, useRef, useState } from "react"
 
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
@@ -82,6 +82,7 @@ export function InstanceCarousel({
   className,
 }: InstanceCarouselProps): ReactElement {
   const orderedInstances = useMemo(() => normalizeInstances(instances), [instances])
+  const tabRefs = useRef<Partial<Record<AgentInstanceSuffix, HTMLButtonElement>>>({})
   const [internalInstance, setInternalInstance] = useState<AgentInstanceSuffix | null>(
     () => findInitialInstance(orderedInstances, defaultInstance)?.instanceSuffix ?? null,
   )
@@ -101,7 +102,36 @@ export function InstanceCarousel({
 
   function selectOffset(offset: number): void {
     if (orderedInstances.length === 0 || selectedIndex === -1) return
-    selectInstance(orderedInstances[wrapIndex(selectedIndex + offset, orderedInstances.length)])
+    const nextInstance =
+      orderedInstances[wrapIndex(selectedIndex + offset, orderedInstances.length)]
+    selectInstance(nextInstance)
+    tabRefs.current[nextInstance.instanceSuffix]?.focus()
+  }
+
+  function selectBoundary(boundary: "first" | "last"): void {
+    if (orderedInstances.length === 0) return
+    const nextInstance =
+      boundary === "first" ? orderedInstances[0] : orderedInstances[orderedInstances.length - 1]
+    selectInstance(nextInstance)
+    tabRefs.current[nextInstance.instanceSuffix]?.focus()
+  }
+
+  function onTabsKeyDown(event: KeyboardEvent<HTMLDivElement>): void {
+    if (orderedInstances.length < 2) return
+
+    if (event.key === "ArrowLeft") {
+      event.preventDefault()
+      selectOffset(-1)
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault()
+      selectOffset(1)
+    } else if (event.key === "Home") {
+      event.preventDefault()
+      selectBoundary("first")
+    } else if (event.key === "End") {
+      event.preventDefault()
+      selectBoundary("last")
+    }
   }
 
   return (
@@ -144,6 +174,8 @@ export function InstanceCarousel({
           <div
             role="tablist"
             aria-label="Agent instance selector"
+            onKeyDown={onTabsKeyDown}
+            tabIndex={-1}
             className="grid grid-cols-3 overflow-hidden rounded-md border bg-muted/25"
           >
             {INSTANCE_ORDER.map((suffix) => {
@@ -153,10 +185,15 @@ export function InstanceCarousel({
               return (
                 <button
                   key={suffix}
+                  ref={(element) => {
+                    if (element) tabRefs.current[suffix] = element
+                    else delete tabRefs.current[suffix]
+                  }}
                   type="button"
                   role="tab"
                   aria-selected={selected}
                   aria-controls={instance ? `instance-card-${suffix}` : undefined}
+                  tabIndex={selected ? 0 : -1}
                   disabled={!instance}
                   onClick={() => {
                     if (instance) selectInstance(instance)
