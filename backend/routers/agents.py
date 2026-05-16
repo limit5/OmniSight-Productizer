@@ -13,6 +13,8 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
 from backend.agents.character_card import (
+    CharacterCard,
+    CharacterCardNotFoundError,
     CharacterCardRegistry,
     CharacterCardRosterEntry,
     CharacterCardSort,
@@ -169,15 +171,26 @@ async def list_agents():
     return list(_agents.values())
 
 
+def get_character_card_registry(
+    conn: asyncpg.Connection = Depends(get_conn),
+) -> CharacterCardRegistry:
+    """DI seam for character-card reads.
+
+    Tests override this via ``app.dependency_overrides`` to swap in an
+    ``InMemoryCharacterCardStore``-backed registry without standing up
+    Postgres.
+    """
+    return CharacterCardRegistry(
+        PostgresCharacterCardStore(lambda: _borrowed_conn(conn))
+    )
+
+
 @router.get("/cards")
 async def list_agent_cards(
     guild: str | None = None,
     sort_by: CharacterCardSort = "level",
-    conn: asyncpg.Connection = Depends(get_conn),
+    registry: CharacterCardRegistry = Depends(get_character_card_registry),
 ):
-    registry = CharacterCardRegistry(
-        PostgresCharacterCardStore(lambda: _borrowed_conn(conn))
-    )
     try:
         entries = await registry.list_cards(guild=guild, sort_by=sort_by)
     except ValueError as exc:
@@ -212,6 +225,27 @@ async def get_guild_hall_roster(
             return _guild_hall_guild_to_dict(guild_row)
 
     raise HTTPException(status_code=404, detail="Guild not found")
+
+
+@router.get("/{agent_id}/card")
+async def get_agent_card(
+    agent_id: str,
+    registry: CharacterCardRegistry = Depends(get_character_card_registry),
+):
+    """RPG.W1.3: return the Layer-1 stat sheet JSON for one agent.
+
+    Per ADR-0008 the stat sheet is the ``agent_character_card`` row keyed
+    by ``agent_id`` — guild, level, xp, specialization, style fingerprint.
+    Skill (W12) and talent (W14) detail live behind sibling endpoints.
+    """
+    try:
+        card = await registry.get_card(agent_id, require_exists=True)
+    except CharacterCardNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    assert card is not None
+    return _card_to_dict(card)
 
 
 @router.get("/{agent_id}/skills")
@@ -709,8 +743,7 @@ async def _borrowed_conn(conn: asyncpg.Connection):
     yield conn
 
 
-def _roster_entry_to_dict(entry: CharacterCardRosterEntry) -> dict:
-    card = entry.card
+def _card_to_dict(card: CharacterCard) -> dict:
     return {
         "agent_id": card.agent_id,
         "agent_class": card.agent_class,
@@ -721,6 +754,12 @@ def _roster_entry_to_dict(entry: CharacterCardRosterEntry) -> dict:
         "specialization_label": card.specialization_label,
         "style_fingerprint": card.style_fingerprint,
         "created_at": card.created_at,
+    }
+
+
+def _roster_entry_to_dict(entry: CharacterCardRosterEntry) -> dict:
+    return {
+        **_card_to_dict(entry.card),
         "last_activity_at": entry.last_activity_at,
     }
 
