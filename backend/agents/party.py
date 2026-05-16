@@ -598,8 +598,9 @@ async def create_party(
         active = await store.active_party_for_member(member_id)
         if active is not None:
             raise MemberAlreadyInParty(
-                f"agent {member_id!r} is already in active party "
-                f"{active.party_id!r}"
+                f"create_party: agent {member_id!r} is already in active party "
+                f"{active.party_id!r} (active_task_id={active.active_task_id!r}); "
+                f"cannot add to new party {clean_name!r}"
             )
 
     # Synergy lookup — degrade on failure per AC #3.
@@ -665,9 +666,16 @@ async def assign_task(
         _assert_party_eligible_tier(tier, task_id=clean_task_id)
     state = await store.get_state(clean_party_id)
     if state is None:
-        raise PartyError(f"party {clean_party_id!r} does not exist")
+        raise PartyError(
+            f"assign_task: party {clean_party_id!r} does not exist "
+            f"(task_id={clean_task_id!r})"
+        )
     if state.disbanded_at is not None:
-        raise PartyError(f"party {clean_party_id!r} is disbanded")
+        raise PartyError(
+            f"assign_task: party {clean_party_id!r} is disbanded "
+            f"(disbanded_at={state.disbanded_at.isoformat()}; "
+            f"cannot assign task_id={clean_task_id!r})"
+        )
     if state.active_task_id is not None and state.active_task_id != clean_task_id:
         raise PartyActiveTaskExists(
             f"party {clean_party_id!r} already holds active task "
@@ -700,7 +708,9 @@ async def release_task(
     clean_party_id = _required("party_id", party_id)
     state = await store.get_state(clean_party_id)
     if state is None:
-        raise PartyError(f"party {clean_party_id!r} does not exist")
+        raise PartyError(
+            f"release_task: party {clean_party_id!r} does not exist"
+        )
     if state.active_task_id is None:
         return state
     moment = _utc(now or datetime.now(timezone.utc))
@@ -749,9 +759,15 @@ def compute_party_xp_distribution(
     written through :mod:`backend.agents.character_card`.
     """
     if not isinstance(total_xp, int) or isinstance(total_xp, bool):
-        raise TypeError("total_xp must be an int")
+        raise TypeError(
+            f"total_xp must be an int; got {type(total_xp).__name__} "
+            f"(party_id={party.state.party_id!r})"
+        )
     if total_xp < 0:
-        raise ValueError("total_xp must be >= 0")
+        raise ValueError(
+            f"total_xp must be >= 0; got {total_xp} "
+            f"(party_id={party.state.party_id!r})"
+        )
 
     members = party.members
     if not members:
@@ -822,7 +838,10 @@ async def task_complete(
     """
     state = await store.get_state(party_id)
     if state is None:
-        raise PartyError(f"party {party_id!r} does not exist")
+        raise PartyError(
+            f"task_complete: party {party_id!r} does not exist "
+            f"(total_xp={total_xp})"
+        )
     members = await store.list_members(party_id)
     party = Party(state=state, members=members, synergy=None)
     distribution = compute_party_xp_distribution(
@@ -901,7 +920,10 @@ def _validate_members(member_agent_ids: Sequence[str]) -> tuple[str, ...]:
     within the proposed list.
     """
     if not isinstance(member_agent_ids, (list, tuple)):
-        raise TypeError("member_agent_ids must be a sequence of strings")
+        raise TypeError(
+            f"member_agent_ids must be a sequence of strings; "
+            f"got {type(member_agent_ids).__name__}"
+        )
     cleaned: list[str] = []
     seen: set[str] = set()
     for index, raw in enumerate(member_agent_ids):
@@ -911,7 +933,10 @@ def _validate_members(member_agent_ids: Sequence[str]) -> tuple[str, ...]:
             )
         clean = raw.strip()
         if not clean:
-            raise ValueError(f"member_agent_ids[{index}] is empty")
+            raise ValueError(
+                f"member_agent_ids[{index}] is empty "
+                f"(raw value={raw!r})"
+            )
         if clean in seen:
             raise MemberAlreadyInParty(
                 f"member {clean!r} appears twice in member_agent_ids"
@@ -941,16 +966,21 @@ def _validate_member_guilds(
     member's ``character_card.guild`` before invoking.
     """
     if not isinstance(member_guilds, Mapping):
-        raise TypeError("member_guilds must be a mapping member_agent_id -> guild_slug")
+        raise TypeError(
+            f"member_guilds must be a mapping member_agent_id -> guild_slug; "
+            f"got {type(member_guilds).__name__}"
+        )
     for member_id in members:
         guild = member_guilds.get(member_id)
         if guild is None:
             raise PartyError(
-                f"member_guilds is missing a guild slug for member {member_id!r}"
+                f"member_guilds is missing a guild slug for member {member_id!r} "
+                f"(known keys={sorted(member_guilds.keys())!r})"
             )
         if not isinstance(guild, str) or not guild.strip():
             raise PartyError(
-                f"member_guilds[{member_id!r}] must be a non-empty guild slug"
+                f"member_guilds[{member_id!r}] must be a non-empty guild slug; "
+                f"got {guild!r} (type {type(guild).__name__})"
             )
 
 
@@ -963,10 +993,15 @@ def _assert_party_eligible_tier(tier: str, *, task_id: str) -> None:
     ``"L"`` both clear the gate.
     """
     if not isinstance(tier, str):
-        raise TypeError("tier must be a string")
+        raise TypeError(
+            f"tier must be a string; got {type(tier).__name__} "
+            f"(task_id={task_id!r})"
+        )
     clean = tier.strip().upper()
     if not clean:
-        raise ValueError("tier is required")
+        raise ValueError(
+            f"tier is required (task_id={task_id!r}); got {tier!r}"
+        )
     if clean not in PARTY_ELIGIBLE_TIERS:
         eligible = ", ".join(sorted(PARTY_ELIGIBLE_TIERS))
         raise PartyTaskTierTooLow(
@@ -990,7 +1025,12 @@ def _resolve_synergy(
     try:
         return synergy_for_members(guilds, path=path)
     except SynergyComputeFailed as exc:
-        LOG.warning("synergy_compute_failed; degrading to no-bonus base XP: %s", exc)
+        LOG.warning(
+            "synergy_compute_failed; degrading to no-bonus base XP "
+            "(matrix_path=%r): %s",
+            str(path),
+            exc,
+        )
         return None
 
 
@@ -1026,10 +1066,14 @@ def _row_to_member(row: Any) -> PartyMember:
 
 def _required(field_name: str, value: Any) -> str:
     if not isinstance(value, str):
-        raise TypeError(f"{field_name} must be a string")
+        raise TypeError(
+            f"{field_name} must be a string; got {type(value).__name__}"
+        )
     clean = value.strip()
     if not clean:
-        raise ValueError(f"{field_name} is required")
+        raise ValueError(
+            f"{field_name} is required (got empty/whitespace value {value!r})"
+        )
     return clean
 
 
