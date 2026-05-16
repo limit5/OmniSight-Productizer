@@ -16,6 +16,8 @@ W4 sub-wave coverage in this module
 - W4.4 (OP-135): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
 - W18.2 (OP-1389): secondary-class XP earns 0.5× before Lv 30 and
   returns to 1.0× from Lv 30 onward.
+- W18.3 (OP-1390): dual-class agents in party tasks earn the hybrid
+  synergy XP bonus.
 
 Module-global state audit (per project SOP)
 -------------------------------------------
@@ -327,7 +329,7 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
 
     Stacking order is multiplicative and stable: outcome → Tier-L+ →
     first-time-skill → W15 buffs → W15 debuffs → W4.4 anti-grind →
-    W18.2 secondary-class ramp → W17 hybrid synergy. The W4.3 contract
+    W18.2 secondary-class ramp → W18.3 hybrid synergy. The W4.3 contract
     only constrains the *first three* terms (success/partial/fail/
     Tier-L+/first-time-skill); later terms are layered by W4.4 / W15 /
     W17 / W18 and documented in their own waves.
@@ -350,6 +352,8 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
     if outcome.class_xp_target == "secondary":
         multiplier *= secondary_class_xp_multiplier(outcome.secondary_class_level)
     if outcome.dual_class_agent and outcome.party_task:
+        # RPG.W18.3 (OP-1390): dual-class agents receive the hybrid
+        # synergy bump only while participating in a party task.
         multiplier *= HYBRID_SYNERGY_PARTY_XP_MULTIPLIER
     return multiplier
 
