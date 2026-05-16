@@ -14,6 +14,7 @@ from backend.alerting.bridge import (
     CardinalityLimitExceeded,
     CardinalityValidator,
     DedupeKeyGen,
+    JsonFileAdapter,
     SmtpConfig,
     StdoutEmailAdapter,
     canonical_envelope,
@@ -224,3 +225,58 @@ def test_synthetic_alert_fires_through_bridge_preserving_contract_fields() -> No
     assert payload["dedupe_key"] == envelope.dedupe_key
     assert json.loads(sent[0].get_content()) == payload
 
+
+def test_jsonfile_adapter_writes_canonical_envelope_per_alert(tmp_path) -> None:
+    adapter = JsonFileAdapter.from_env({"OMNISIGHT_ALERT_JSONFILE_DIR": str(tmp_path)})
+    envelope = _envelope()
+
+    adapter.deliver(envelope)
+
+    path = tmp_path / "2026-05-14.jsonl"
+    assert path.read_text(encoding="utf-8").splitlines() == [json.dumps(canonical_envelope(envelope))]
+
+
+def test_jsonfile_adapter_appends_not_overwrites(tmp_path) -> None:
+    adapter = JsonFileAdapter.from_env({"OMNISIGHT_ALERT_JSONFILE_DIR": str(tmp_path)})
+    envelopes = [_envelope(f"runner-{i}") for i in range(3)]
+
+    for envelope in envelopes:
+        adapter.deliver(envelope)
+
+    path = tmp_path / "2026-05-14.jsonl"
+    assert path.read_text(encoding="utf-8").splitlines() == [
+        json.dumps(canonical_envelope(envelope)) for envelope in envelopes
+    ]
+
+
+def test_jsonfile_adapter_path_uses_env_override(tmp_path) -> None:
+    json_dir = tmp_path / "json-alerts"
+    stdout = io.StringIO()
+    stdout_bridge = AlertBridge(
+        StdoutEmailAdapter(stream=stdout),
+        validator=CardinalityValidator(clock=lambda: FIXED_NOW),
+        clock=lambda: FIXED_NOW,
+    )
+    json_bridge = AlertBridge(
+        JsonFileAdapter.from_env({"OMNISIGHT_ALERT_JSONFILE_DIR": str(json_dir)}),
+        validator=CardinalityValidator(clock=lambda: FIXED_NOW),
+        clock=lambda: FIXED_NOW,
+    )
+    kwargs = {
+        "alertname": "runner_claim_stale",
+        "severity": "info",
+        "area": "runner",
+        "family": "10",
+        "defense_dimension": "D1",
+        "labels": _labels(),
+        "annotations": _annotations(),
+        "critical_labels": ("instance",),
+    }
+
+    stdout_envelope = stdout_bridge.fire(**kwargs)  # type: ignore[arg-type]
+    json_envelope = json_bridge.fire(**kwargs)  # type: ignore[arg-type]
+
+    path = json_dir / "2026-05-14.jsonl"
+    assert path.exists()
+    assert json.loads(stdout.getvalue()) == canonical_envelope(stdout_envelope)
+    assert path.read_text(encoding="utf-8").splitlines() == [json.dumps(canonical_envelope(json_envelope))]
