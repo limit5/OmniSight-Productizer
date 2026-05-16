@@ -14,6 +14,8 @@ W4 sub-wave coverage in this module
 - W4.3 (OP-134): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
   ``FIRST_TIME_SKILL_MULTIPLIER``.
 - W4.4 (OP-135): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
+- W18.2 (OP-1389): secondary-class XP earns 0.5× before Lv 30 and
+  returns to 1.0× from Lv 30 onward.
 
 Module-global state audit (per project SOP)
 -------------------------------------------
@@ -178,6 +180,8 @@ def level_for_xp(total_xp: int) -> int:
 def secondary_class_xp_multiplier(secondary_class_level: int) -> float:
     """Return W18.2's XP multiplier for a secondary class at ``level``."""
     _clean_level(secondary_class_level, field="secondary_class_level")
+    # RPG.W18.2 (OP-1389): secondary-class ramp is half-speed until
+    # Lv 30, then returns to the normal class XP rate.
     if secondary_class_level >= SECONDARY_CLASS_FULL_XP_LEVEL:
         return 1.0
     return SECONDARY_CLASS_RAMP_MULTIPLIER
