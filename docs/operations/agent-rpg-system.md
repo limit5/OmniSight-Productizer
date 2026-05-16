@@ -40,7 +40,8 @@ target ship).
 | W19.1  | `backend/agents/skill_fusion.py` — Lv5 fusion preview                    | **Live**                  |
 | W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title` |
 | W3.x   | Daily style fingerprint cron                                  | **Deferred** — fingerprint column exists; recompute job not scheduled |
-| W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred**               |
+| W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred** (W7.2 tier gate landed standalone — see "Tier gating (W7.2)" below) |
+| W7.2   | `backend/agents/tier_gate.py` — Tier X requires Lv ≥ 50 + skill ≥ Lv 3 | **Live** (OP-147) — pure helper + async resolver; W7.1 wires the call site once `prefer_agent_id` lands |
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
 | W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
 | W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1 |
@@ -701,6 +702,73 @@ either, treat the failure as an integrity issue, not a flake.
 
 ---
 
+## Tier gating (W7.2 — live as of 2026-05-16 / OP-147)
+
+ADR-0008 §"Routing integration" pins one Tier-X rule:
+
+> Tier X tasks require Lv ≥ 50 + relevant skill ≥ Lv 3
+
+`backend/agents/tier_gate.py` is the canonical home for that rule.
+The module ships pure helpers plus an async resolver that fetches
+inputs from the W1 character-card store and the W12 skill-state
+store; Tier S / M / L are an unconditional pass (ADR-0008 places no
+explicit floor on them — W7.3 will layer the BP.C T-shirt minimum-
+level table on top later without touching the Tier X policy).
+
+### Public helpers
+
+| Helper | When to use |
+|---|---|
+| `is_eligible_for_tier(*, tier, agent_level, skill_level) -> bool` | You already hold both levels in hand. |
+| `tier_gate_unmet_reasons(*, tier, agent_level, skill_level) -> tuple[str, ...]` | You want to log / surface *why* a candidate failed. Reason strings are stable for telemetry — format `tier_x_agent_level_below_50:46`. |
+| `assert_eligible_for_tier(*, tier, agent_level, skill_level, agent_id=None, skill_id=None)` | You want the call site to throw on violation; raises `TierGateViolation` carrying the structured reasons. |
+| `await evaluate_tier_gate(card_store, skill_store, *, agent_id, tier, skill_id) -> TierGateDecision` | You only have the `agent_id` / `tier` / `skill_id` triple; this fetches both rows and returns a structured decision. |
+
+### Pre-pickup wire-up
+
+The clean attachment point is the pre-pickup / dispatch path — any
+caller resolving a candidate `agent_id` for a task can call
+`evaluate_tier_gate` and consult `TierGateDecision.eligible` before
+handing the task off. Tier S / M / L short-circuit without touching
+either store, so the gate is cheap to call unconditionally; only the
+Tier X branch reads the W1 + W12 rows.
+
+The pure helpers are deliberately importable without an event loop so
+synchronous routing-policy code that already holds the levels in hand
+(e.g. W7.1's `prefer_agent_id` site once it lands) can compose them
+without crossing the sync/async boundary.
+
+### Edge cases the gate handles by design
+
+- **Missing character card** → `eligible=False` with reason
+  `tier_x_character_card_missing:<agent_id>`. An agent with no card
+  has no level and is not a legal Tier X target.
+- **Tier X without a `skill_id`** → `eligible=False` with reason
+  `tier_x_skill_id_missing`. ADR-0008 names the second floor as "該
+  skill" — the caller must say which one.
+- **Missing skill-state row** → treated as Lv 0, fails the `≥ 3`
+  floor. The W12 store does not auto-create rows on first use; an
+  agent who has never accrued XP on a skill is not Tier X-eligible
+  for it.
+- **Tier S / M / L** → unconditional pass, regardless of card or
+  skill state. Future W7.3 work layers a per-Tier minimum-level
+  table on top; that landing point must not regress the W7.2
+  contract for Tier X.
+
+### Constants
+
+The two floors are exported as module-level constants so call sites
+and operator dashboards reference the same numbers:
+
+- `TIER_X_MIN_AGENT_LEVEL = 50`
+- `TIER_X_MIN_SKILL_LEVEL = 3`
+
+A future ADR amendment that moves the floors must update the
+constants in `tier_gate.py` and the ADR-0008 line in the same change
+— the helpers carry no fallback for stale values.
+
+---
+
 ## Operator escalation paths
 
 | Symptom                                            | First diagnostic                                  | If unresolved                |
@@ -733,7 +801,7 @@ last surface to learn about the drift.
 | W4   | XP accrual rule + level curve                          | "XP curve" subsection                                      |
 | W5   | Layer 1 (stat sheet PG) + Layer 2 (BP.M dim memory)    | "Memory hierarchy" L1 + L2 rows                            |
 | W6   | Layer 3 reflection RAG                                 | "Memory hierarchy" L3 row                                  |
-| W7   | Routing integration                                    | "Routing integration" subsection                           |
+| W7   | Routing integration (W7.2 tier gate live via OP-147)   | "Routing integration" subsection                           |
 | W8   | Frontend Character Card panel                          | "Operator-facing surfaces" — Character Card                |
 | W9   | Guild Hall view                                        | "Operator-facing surfaces" — Guild Hall                    |
 | W10  | Operator-facing onboarding                             | "Operator-facing surfaces" — Onboarding                    |
