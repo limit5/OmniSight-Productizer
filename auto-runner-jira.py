@@ -56,6 +56,7 @@ from backend.agents import (
     live_state_check,
     memory_writeback,
     outcomes_consumer,
+    outcomes_grader,
     jira_dispatch,
     orphan_salvage,
     runner_metrics_recorder,
@@ -1636,6 +1637,73 @@ def _collect_outcomes_context(worktree_path: Path, base_ref: str) -> tuple[str, 
     return completion or "(no commit summary)", diff
 
 
+# OP-1141: env-gated strict-match AC-evidence grader. Off by default to
+# keep the feature opt-in until we have observed ≥1 real-positive on
+# production tickets (Exercised AC). Set to "1" to enable.
+AC_EVIDENCE_STRICT_ENABLED_ENV = "OMNISIGHT_AC_EVIDENCE_STRICT_ENABLED"
+
+
+def _ac_evidence_strict_enabled(env: "dict[str, str] | None" = None) -> bool:
+    env = env if env is not None else os.environ
+    return env.get(AC_EVIDENCE_STRICT_ENABLED_ENV, "0").strip() == "1"
+
+
+def _grade_ac_evidence_pre_push(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    worktree_path: Path,
+    base_ref: str,
+) -> "outcomes_grader.StrictGradeResult | None":
+    """Run the OP-1141 strict-match AC-evidence grader before Gerrit push.
+
+    Returns ``None`` when the gate is disabled (operator opt-in env not
+    set) or when context collection failed in a way that should NOT
+    block the push (e.g. the JIRA comments fetch errored — we degrade
+    rather than reject). Returns a :class:`StrictGradeResult` when the
+    grader ran; the caller decides whether to push based on
+    ``result.passed``.
+
+    The grader is intentionally fail-closed *only* when it produces a
+    real verdict — transport faults degrade open so a Gerrit-bound
+    push is never lost to runner-side noise. Compare with the LLM
+    outcomes-grader path which can refuse the entire ticket on a
+    grader-side fault; here the strict-match logic is local and
+    deterministic, so a missing JIRA fetch is the only degrade path.
+    """
+    if not _ac_evidence_strict_enabled():
+        return None
+
+    try:
+        resp = jira_dispatch._request(client, "GET", f"/issue/{key}/comment?maxResults=200")
+    except Exception as exc:  # noqa: BLE001 — degrade-open on JIRA fetch fault
+        print(
+            f"[ac-evidence-strict] {key}: JIRA comment fetch failed "
+            f"({type(exc).__name__}: {exc}); degrading open (no gate).",
+            file=sys.stderr,
+        )
+        return None
+
+    comments = list(resp.get("comments", []) or [])
+    comment_body = outcomes_grader.find_ac_verification_comment(comments, key)
+    try:
+        _, diff_text = _collect_outcomes_context(worktree_path, base_ref)
+    except Exception as exc:  # noqa: BLE001 — degrade-open on git fault
+        print(
+            f"[ac-evidence-strict] {key}: diff collection failed "
+            f"({type(exc).__name__}: {exc}); degrading open.",
+            file=sys.stderr,
+        )
+        return None
+
+    head_change_id = jira_dispatch._head_change_id(worktree_path)
+    return outcomes_grader.grade_ac_evidence(
+        comment_body=comment_body,
+        diff_text=diff_text,
+        head_change_id=head_change_id,
+        ticket_key=key,
+    )
+
+
 def _current_patchset_number(change_number: int, agent_class: str = AGENT_CLASS) -> str:
     user, ssh_key = jira_dispatch._gerrit_auth_for_instance(agent_class, INSTANCE_ID)
     cmd = [
@@ -2227,6 +2295,51 @@ def main() -> int:
                     return _handle_toctou_abort(
                         client, snapshot.key, recheck, phase="pre-push", claim=claim,
                     )
+            # OP-1141 strict-match AC-evidence gate. Runs ONLY when the
+            # operator-opt-in env flag is set (default off). The gate is
+            # local + deterministic (no LLM call), so a verdict here is
+            # cheap and reliable; transport faults degrade open. The gate
+            # fires after the worktree is canonically clean (post
+            # ``ensure_change_ids``) so the diff we grade matches the
+            # commits the runner is about to push.
+            strict_result = _grade_ac_evidence_pre_push(
+                client, snapshot.key, worktree_path, sync_result.develop_sha,
+            )
+            if strict_result is not None and not strict_result.passed:
+                diag = outcomes_grader.format_failure_comment(snapshot.key, strict_result)
+                print(
+                    f"[ac-evidence-strict] {snapshot.key}: FAIL — reverting "
+                    f"to To Do before Gerrit push.",
+                    file=sys.stderr,
+                )
+                jira_dispatch.add_comment(client, snapshot.key, diag)
+                jira_dispatch.add_label(
+                    client, snapshot.key, "outcomes-grader-strict:fail",
+                )
+                try:
+                    jira_dispatch.transition_back_to_todo(
+                        client, snapshot.key,
+                        f"[outcomes-grader-strict:fail] "
+                        f"{strict_result.reasons[0] if strict_result.reasons else 'evidence failed'}"[:500],
+                        failure_class="AC_EVIDENCE_STRICT_FAIL",
+                        area=metric_meta.get("area"),
+                    )
+                except Exception as revert_err:  # noqa: BLE001
+                    print(
+                        f"[ac-evidence-strict] revert-to-TODO failed for "
+                        f"{snapshot.key}: {revert_err}",
+                        file=sys.stderr,
+                    )
+                _run_memory_writeback(
+                    client,
+                    snapshot.key,
+                    outcome=memory_writeback.OUTCOME_FAILURE,
+                    summary="ac-evidence-strict refused",
+                    failure_class="AC_EVIDENCE_STRICT_FAIL",
+                    area=metric_meta.get("area"),
+                )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+                return 1
             push_result = jira_dispatch.push_to_gerrit_for_review(
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
             )
