@@ -606,6 +606,8 @@ This matches operator's earlier empirical numbers from this session (22.4 labels
 
 **This family unblocks SP-B-X-META**: SP-B-X-META closure criteria require "at least 1 alert from {C9 bridge-health, C10 instance drift, C11 human-authority-yield, C12 state-authority precedence}". v2-⑩-AlertRule provides those alerts. SP-B-X-META can finally close on top of this family.
 
+**Contract spec doc (v2-⑩-1a / OP-1156, 2026-05-16)**: the binding state-separation contract, A-class/B-class label taxonomy, `runner_claims` schema, function-API contract, strangler-pattern sequence, validation contract, 5 lived-failure-mode analysis, bridge-health graded contract (v2-⑩-4a stake), capability registry shape (v2-⑩-5a stake), pre-flight survey of already-shipped pieces, SP-B-X-META 1-of-4-alert unblocker, and ADR-0037 cross-link live at `docs/sprint-s12/2026-05-16-v2-family10-runner-defense-contract.md`. All 16 downstream Family ⑩ tickets cite that doc's §-anchors per its §13.4 consumer map.
+
 **Tickets** (17):
 
 | # | ID | Title | Tier | Class | Defense dim | blockedBy |
