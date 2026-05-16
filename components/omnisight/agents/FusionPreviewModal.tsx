@@ -25,6 +25,8 @@ import { cn } from "@/lib/utils"
 
 import { CharacterCard } from "./CharacterCard"
 import type { CharacterCardProps } from "./CharacterCard"
+import { SkillFusionPreview } from "./SkillFusionPreview"
+import type { SkillFusionPreviewProps } from "./SkillFusionPreview"
 import { SkillRadarChart } from "./SkillRadarChart"
 import type { SkillRadarAxis } from "./SkillRadarChart"
 
@@ -43,6 +45,7 @@ export interface FusionPreviewModalProps {
   open: boolean
   sourceAgents: [FusionSourceAgent, FusionSourceAgent]
   previewAgent: FusionPreviewAgent
+  skillFusion?: Pick<SkillFusionPreviewProps, "components" | "hybrid"> | null
   onClose: () => void
   onConfirm?: () => void
   confirmDisabled?: boolean
@@ -96,6 +99,7 @@ export function FusionPreviewModal({
   open,
   sourceAgents,
   previewAgent,
+  skillFusion,
   onClose,
   onConfirm,
   confirmDisabled,
@@ -191,6 +195,14 @@ export function FusionPreviewModal({
                 guildName={previewAgent.fusionClassName ?? "Projected fusion"}
               />
             </div>
+
+            {skillFusion ? (
+              <SkillFusionPreview
+                components={skillFusion.components}
+                hybrid={skillFusion.hybrid}
+                className="border-amber-500/25 bg-amber-500/5 shadow-none"
+              />
+            ) : null}
           </section>
         </div>
 
