@@ -414,3 +414,88 @@ def test_check_change_ready_matches_evaluator():
     assert d1.allow is True
     d2 = arb.check_change_ready([merger_vote()])
     assert d2.allow is False
+
+
+# ──────────────────────────────────────────────────────────────────
+#  OP-1196 phase 3 — deferred-push routing
+# ──────────────────────────────────────────────────────────────────
+
+
+def _deferred_push_outcome(task: arb.MergeConflictTask) -> ma.ResolutionOutcome:
+    """A merger outcome where the LLM produced resolved_text but the
+    in-process pusher was skipped because push_locally=False."""
+    o = ma.ResolutionOutcome(
+        change_id=task.change_id,
+        file_path=task.file_path,
+        reason=ma.MergerReason.deferred_push_to_caller,
+        voted_score=ma.LabelVote.abstain,
+        confidence=0.93,
+        rationale="LLM picked HEAD; deferring push to caller",
+        diff_preview="--- (conflict)\n+++ (resolved)\n@@ ... @@\n+x = 42\n",
+    )
+    o.resolved_text = "x = 42  # resolved\n"
+    return o
+
+
+class TestDeferredPushRouting:
+    """OP-1196 phase 3 — arbiter must route MergerReason.deferred_
+    push_to_caller to ArbiterReason.merger_resolved_pending_caller_push,
+    carrying merger_outcome (with resolved_text) back to the caller.
+    Must NOT open a JIRA abstain ticket (the caller will complete the
+    resolution and is responsible for surfacing failures).
+    """
+
+    def test_deferred_push_routes_to_pending_caller_push(self):
+        task = _task()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_push_outcome(task)),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_resolved_pending_caller_push
+        # The merger_outcome dict must include resolved_text so the
+        # daemon caller can apply it.
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome.get("resolved_text") == "x = 42  # resolved\n"
+        assert outcome.merger_outcome.get("reason") == "deferred_push_to_caller"
+
+    def test_deferred_push_does_NOT_open_jira_abstain_ticket(self):
+        """The caller is expected to complete the resolution. Opening
+        an abstain ticket here would create confusing noise — the
+        flow is mid-execution, not abandoned."""
+        task = _task()
+        stub_jira = _StubJira()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_push_outcome(task)),
+            jira=stub_jira,
+            notifier=_StubNotifier(),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_resolved_pending_caller_push
+        assert len(stub_jira.calls) == 0, (
+            "deferred-push path must not open a JIRA abstain ticket"
+        )
+        assert outcome.jira_ticket_created is None
+
+    def test_push_locally_default_true_unaffected(self):
+        """Backwards-compat: omitting push_locally in the request keeps
+        the default in-process push pathway."""
+        task = _task()  # default push_locally=True per dataclass default
+        assert task.push_locally is True
+        # from_dict() with no push_locally key keeps the default True
+        roundtrip = arb.MergeConflictTask.from_dict({
+            "change_id": "X", "project": "p", "file_path": "f",
+            "conflict_text": "...",
+        })
+        assert roundtrip.push_locally is True
+        # explicit False roundtrips correctly
+        rt2 = arb.MergeConflictTask.from_dict({
+            "change_id": "X", "project": "p", "file_path": "f",
+            "conflict_text": "...", "push_locally": False,
+        })
+        assert rt2.push_locally is False
