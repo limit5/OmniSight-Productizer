@@ -52,6 +52,7 @@ from backend.agents.party import (
     PartyActiveTaskExists,
     PartyError,
     PartySizeInvalid,
+    PartyTaskTierTooLow,
     PostgresPartyStore,
     assign_task as assign_party_task,
     create_party,
@@ -554,17 +555,25 @@ async def assign_party_task_endpoint(
 ):
     """RPG.W17: assign a Tier L+ task to the party.
 
-    Refuses with 409 (``PartyActiveTaskExists``) if the party already
-    holds another active task.
+    Body shape: ``{"task_id": str, "tier": "L"|"X"}`` — ``tier`` is
+    required per W17.4 (OP-195). Refuses with 422
+    (``PartyTaskTierTooLow``) when ``tier`` is below L, with 409
+    (``PartyActiveTaskExists``) if the party already holds another
+    active task, and with 404 for an unknown / disbanded party.
     """
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     task_id = body.get("task_id")
     if not isinstance(task_id, str) or not task_id.strip():
         raise HTTPException(status_code=400, detail="task_id is required")
+    tier = body.get("tier")
+    if not isinstance(tier, str) or not tier.strip():
+        raise HTTPException(status_code=400, detail="tier is required")
     store = PostgresPartyStore(lambda: _borrowed_conn(conn))
     try:
-        state = await assign_party_task(store, party_id, task_id)
+        state = await assign_party_task(store, party_id, task_id, tier=tier)
+    except PartyTaskTierTooLow as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PartyActiveTaskExists as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PartyError as exc:

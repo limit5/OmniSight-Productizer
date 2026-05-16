@@ -982,7 +982,7 @@ The backend helper surface is `backend/agents/party.py`:
 | Helper | Purpose |
 |---|---|
 | `await create_party(store, name, member_agent_ids, member_guilds=...)` | Validate 2-5 members, compute synergy, persist |
-| `await assign_task(store, party_id, task_id)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists` |
+| `await assign_task(store, party_id, task_id, tier=...)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists`. W17.4 (OP-195): refuses sub-L tiers with `PartyTaskTierTooLow` when `tier` is supplied |
 | `compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)` | Even split + per-member personal XP + synergy bonus |
 | `await task_complete(store, party_id, total_xp, ...)` | Composes the W17 state transition: distribute XP + release task |
 | `await member_is_gated(store, agent_id)` | Pre-pickup probe consumed by `jira_dispatch.pre_pickup_ok` |
@@ -1014,6 +1014,20 @@ string as `MemberInActiveParty:<agent_id> gated by party <party_id>
 …`. Runners parse this prefix the same way they parse `mutex conflict:`
 (OP-687) and fall through to the next pickup candidate.
 
+### Tier-L+ eligibility gate (W17.4 / OP-195)
+
+ADR-0008 §"Routing integration" pins party-eligible tasks to **Tier L+**
+(see `PARTY_ELIGIBLE_TIERS = {"L", "X"}`). `assign_task` enforces this
+when the caller supplies a `tier`: a Tier S/M task raises
+`PartyTaskTierTooLow` *before* the exclusivity check, so an accidental
+sub-L assignment cannot block an otherwise-idle party. The router
+endpoint `POST /agents/parties/{party_id}/task` requires `tier` in the
+body and surfaces the refusal as HTTP 422 with the offending tier in
+the error message. Callers that pre-date W17.4 (and the in-process
+helper itself when `tier=None`) skip the gate for backward
+compatibility — the runner wires the live `tier:` Jira label through,
+so production traffic never hits the legacy `None` path.
+
 ### Operator-facing surface
 
 `components/omnisight/agents/PartyHall.tsx` renders the active-party
@@ -1031,7 +1045,7 @@ synergy badge from `PartyBadge.tsx`. The fetch is `GET
 | `GET`  | `/agents/parties/synergies` | Full synergy matrix legend |
 | `POST` | `/agents/parties` | Create a party `{name, member_agent_ids, member_guilds}` |
 | `GET`  | `/agents/parties/{party_id}` | Single party + members + synergy |
-| `POST` | `/agents/parties/{party_id}/task` | Assign a Tier L+ `{task_id}` (idempotent on same id) |
+| `POST` | `/agents/parties/{party_id}/task` | Assign a Tier L+ `{task_id, tier}` (idempotent on same id; 422 when `tier` < L per W17.4) |
 | `POST` | `/agents/parties/{party_id}/task/complete` | Distribute XP + release task |
 
 ### Recovery

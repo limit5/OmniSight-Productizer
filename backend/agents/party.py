@@ -23,6 +23,11 @@ This module owns:
   fifth error, :class:`SynergyComputeFailed`, is re-exported from
   :mod:`backend.agents.synergy_registry` because that's where it's
   raised — see AC #3.)
+* The W17.4 (OP-195) tier-eligibility gate on :func:`assign_task` —
+  ADR-0008 §"Routing integration" pins party-eligible tasks to Tier L+
+  (see :data:`PARTY_ELIGIBLE_TIERS`). Sub-L tasks raise
+  :class:`PartyTaskTierTooLow` so they fall back to the individual
+  pickup loop instead of consuming a whole party's exclusivity slot.
 
 Module-global state audit (per project SOP)
 -------------------------------------------
@@ -61,6 +66,12 @@ ConnFactory = Callable[[], Any]
 MIN_PARTY_SIZE = 2
 MAX_PARTY_SIZE = 5
 
+#: ADR-0008 §"Routing integration": "Tier L+ tasks can target a party".
+#: Maps to ADR-0005 review-authority letters (the `tier:` Jira label).
+#: W17.4 (OP-195) wires this gate into :func:`assign_task` so a party
+#: cannot be saddled with Tier S/M chores — those are pickup-loop work.
+PARTY_ELIGIBLE_TIERS = frozenset({"L", "X"})
+
 
 # ── Errors (OP-220 §"Error catalog") ───────────────────────────────
 
@@ -79,6 +90,18 @@ class MemberAlreadyInParty(PartyError):
 
 class PartyActiveTaskExists(PartyError):
     """Refuse assigning a second concurrent task to one party."""
+
+
+class PartyTaskTierTooLow(PartyError):
+    """Refuse assigning a sub-L tier task to a party. W17.4 (OP-195)
+    enforces ADR-0008 §"Routing integration": party-eligible tasks are
+    Tier L+ (i.e., :data:`PARTY_ELIGIBLE_TIERS`). Carries the offending
+    tier label as :attr:`tier` so the router can echo it back in the
+    HTTP 422 detail."""
+
+    def __init__(self, message: str, *, tier: str):
+        super().__init__(message)
+        self.tier = tier
 
 
 class MemberInActiveParty(PartyError):
@@ -418,6 +441,7 @@ async def assign_task(
     party_id: str,
     task_id: str,
     *,
+    tier: str | None = None,
     now: datetime | None = None,
 ) -> PartyState:
     """Assign a single Tier L+ task to ``party_id``.
@@ -426,9 +450,21 @@ async def assign_task(
     :class:`PartyActiveTaskExists` if the party already holds another
     active task. Idempotent on the *same* task — re-assigning the
     same ``task_id`` returns the existing state row unchanged.
+
+    W17.4 (OP-195): when ``tier`` is supplied, enforce ADR-0008
+    §"Routing integration" — only Tier L+ (see
+    :data:`PARTY_ELIGIBLE_TIERS`) are party-eligible. Sub-L tiers raise
+    :class:`PartyTaskTierTooLow` *before* the exclusivity check so an
+    accidental Tier S/M assignment cannot block a party that is still
+    idle. ``tier=None`` skips the gate for backward compatibility with
+    callers that have not yet been wired through the new label
+    pipeline; the FastAPI router (which sees the ``tier:`` Jira label)
+    always passes a value.
     """
     clean_party_id = _required("party_id", party_id)
     clean_task_id = _required("task_id", task_id)
+    if tier is not None:
+        _assert_party_eligible_tier(tier, task_id=clean_task_id)
     state = await store.get_state(clean_party_id)
     if state is None:
         raise PartyError(f"party {clean_party_id!r} does not exist")
@@ -689,6 +725,28 @@ def _validate_member_guilds(
             )
 
 
+def _assert_party_eligible_tier(tier: str, *, task_id: str) -> None:
+    """W17.4 gate (OP-195): refuse anything below Tier L for a party.
+
+    Normalises the label the same way :mod:`backend.agents.jira_dispatch`
+    does (``label.split(":", 1)[1].strip().upper()``) so a router
+    passing the raw ``tier:l`` suffix and a programmatic caller passing
+    ``"L"`` both clear the gate.
+    """
+    if not isinstance(tier, str):
+        raise TypeError("tier must be a string")
+    clean = tier.strip().upper()
+    if not clean:
+        raise ValueError("tier is required")
+    if clean not in PARTY_ELIGIBLE_TIERS:
+        eligible = ", ".join(sorted(PARTY_ELIGIBLE_TIERS))
+        raise PartyTaskTierTooLow(
+            f"task {task_id!r} tier {clean!r} is not party-eligible; "
+            f"expected one of {{{eligible}}} (ADR-0008 §Routing integration)",
+            tier=clean,
+        )
+
+
 def _resolve_synergy(
     guilds: Iterable[str],
     *,
@@ -759,6 +817,7 @@ __all__ = [
     "MemberAlreadyInParty",
     "MemberInActiveParty",
     "MemberXpShare",
+    "PARTY_ELIGIBLE_TIERS",
     "Party",
     "PartyActiveTaskExists",
     "PartyError",
@@ -766,6 +825,7 @@ __all__ = [
     "PartySizeInvalid",
     "PartyState",
     "PartyStore",
+    "PartyTaskTierTooLow",
     "PartyXpDistribution",
     "PostgresPartyStore",
     "SynergyComputeFailed",
