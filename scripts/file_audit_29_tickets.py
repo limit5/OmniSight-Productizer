@@ -44,6 +44,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - import path used by tests
     from scripts.jira_label_validator import format_issues, validate
 
+try:
+    from jira_mutex_auto_inject import auto_inject_for_filing
+except ModuleNotFoundError:  # pragma: no cover - import path used by tests
+    from scripts.jira_mutex_auto_inject import auto_inject_for_filing
+
 CRED_DIR = Path("~/.config/omnisight").expanduser()
 STATE_FILE = Path("~/.cache/omnisight/audit-29-bootstrap-state.json").expanduser()
 USER_AGENT = "OmniSight-audit-29-bootstrap/2.0"
@@ -1184,10 +1189,18 @@ def ensure_fix_version(site: str, project: str, auth: str, name: str) -> str:
 
 def create_issue(site: str, project: str, auth: str, spec: TicketSpec, force: bool = False) -> str:
     _validate_spec_or_exit(spec, force=force)
+    description_text = build_description(spec)
+    injection = auto_inject_for_filing(description_text)
+    if injection.added_mutexes:
+        print(
+            f"{spec.alias}: OP-1124 auto-injected mutex_with: "
+            f"{', '.join(injection.added_mutexes)}",
+            file=sys.stderr,
+        )
     fields: dict[str, Any] = {
         "project": {"key": project},
         "summary": spec.summary,
-        "description": _adf(build_description(spec)),
+        "description": _adf(injection.description),
         "issuetype": {"name": spec.issue_type},
         "priority": {"name": spec.priority},
         "labels": spec.labels,

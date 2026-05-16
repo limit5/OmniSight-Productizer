@@ -29,6 +29,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - import path used by tests
     from scripts.jira_label_validator import format_issues, validate
 
+try:
+    from jira_mutex_auto_inject import auto_inject_for_filing
+except ModuleNotFoundError:  # pragma: no cover - import path used by tests
+    from scripts.jira_mutex_auto_inject import auto_inject_for_filing
+
 VALID_AREAS = {
     "backend",
     "frontend",
@@ -188,9 +193,27 @@ def _validate_or_exit(args: argparse.Namespace, description_text: str) -> None:
         print(f"WARN: {warning}", file=sys.stderr)
 
 
+def maybe_inject_hot_file_mutexes(description_text: str) -> str:
+    """Run the OP-1124 hot-file mutex auto-inject before filing.
+
+    Pure pass-through if the description references no hot files. When
+    injection fires, the rewritten description is what we POST to JIRA
+    so the runner's pre-pickup gate sees the new ``mutex_with`` entries.
+    """
+    result = auto_inject_for_filing(description_text)
+    if result.added_mutexes:
+        print(
+            "INFO: OP-1124 auto-injected mutex_with for hot-file edits: "
+            f"{', '.join(result.added_mutexes)}",
+            file=sys.stderr,
+        )
+    return result.description
+
+
 def file_ticket(args: argparse.Namespace, description_text: str) -> str:
     """POST a Story issue to JIRA and return the created issue key."""
     _validate_or_exit(args, description_text)
+    description_text = maybe_inject_hot_file_mutexes(description_text)
     site, project, auth_header = _jira_config(args.cls)
     body = {
         "fields": {
