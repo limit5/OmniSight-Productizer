@@ -560,6 +560,7 @@ Per-`(agent_id, skill_id)` rows live in `agent_skill_state` (alembic
 | `compute_level(xp)` | Pure: returns Lv 1-5 per the W12.2 curve below |
 | `await lock_branch_choice(store, agent_id, skill_id, branch)` | Idempotent + refuses re-write (immutable at Lv 3) |
 | `await teach_other_agent(store, teacher, student, skill_id)` | Lv-5 only; one-shot +25 XP injection, 7-day cooldown |
+| `await teach_distilled_summary(store, …, embedder, vector_store)` | W12.6 (OP-175): same-Guild + idle gate around `teach_other_agent` plus distilled-summary write into BP.M dim memory |
 | `await decay_idle_skills(store, now=...)` | Sweep: 5%/week on rows idle >= 30 days |
 
 ### Skill XP curve (W12.2 / OP-171)
@@ -645,6 +646,43 @@ YAML returns 422 (`SkillMatrixDriftError`).
 | `assert_branch_choice_in_matrix(skill_id, branch_id)`           | `backend/agents/skill_matrix.py`              |
 | `CharacterSkillEntry.branch_choice_required`                    | `backend/agents/character_card.py`            |
 | `POST /agents/{id}/skills/{skill_id}/branch`                    | `backend/routers/agents.py`                   |
+
+### Distilled-summary teach (W12.6 / OP-175)
+
+The W12.3 `teach_other_agent` primitive owns the per-skill `+25 XP`
++ `7-day cooldown` + `Lv 5 teacher → Lv ≤ 2 student` semantics.
+ADR-0008 §"Skill leveling (W12)" line 140 narrows that primitive to
+*same-Guild* pairs, requires the teacher be *idle* at the moment of
+injection, and pairs the XP delta with a *distilled summary* write
+into BP.M dim memory. W12.6 ships that thicker contract as
+`teach_distilled_summary` in `backend/agents/skill_teaching.py` —
+the W12.3 primitive remains the atomic engine underneath.
+
+| Gate                                  | Where it lives                                    | What it does                                                                  |
+| ------------------------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------- |
+| Same-Guild check                      | `_require_guild` + `TeachGuildMismatch`           | Both card guilds must resolve to the same `GUILDS` slug; pre-write gate       |
+| Teacher idle gate                     | `_assert_teacher_idle` + `TeachTeacherNotIdle`    | `now - teacher_last_dispatch_at >= TEACH_IDLE_MIN_SECONDS` (default 30 min)   |
+| Atomic +25 XP + cooldown stamp        | `teach_other_agent` (W12.3 primitive)             | Lv 5 teacher / Lv ≤ 2 student / 7-day cooldown / `last_taught_at` UPSERT      |
+| Distilled summary into BP.M dim memory | `vectorize_distilled_skills` (W5.1)              | One pgvector upsert tagged `(student_agent_id, skill_id, source_skill_draft_id?)` |
+
+Ordering invariant: the W12.3 XP write commits *before* the summary
+upsert. A partial failure therefore leaves the +25 XP awarded with
+`summary_written=False` on the returned `DistilledTeachOutcome` — the
+caller can replay the summary write without re-running the teach.
+The reverse — summary written but XP refused — never happens, because
+the teach primitive is the gate.
+
+#### Source symbols (per W12.6 attribution)
+
+| Symbol                                                   | Source                                  |
+| -------------------------------------------------------- | --------------------------------------- |
+| `TEACH_IDLE_MIN_SECONDS = 1800`                          | `backend/agents/skill_teaching.py`       |
+| `teach_distilled_summary(skill_store, …)`                | `backend/agents/skill_teaching.py`       |
+| `TeachGuildMismatch` / `TeachTeacherNotIdle`             | `backend/agents/skill_teaching.py`       |
+| `DistilledTeachOutcome.summary_written`                  | `backend/agents/skill_teaching.py`       |
+| `teach_other_agent` (atomic XP + cooldown gate)          | `backend/agents/skill_leveling.py`       |
+| `vectorize_distilled_skills` (BP.M dim memory write)     | `backend/agents/skill_memory.py`         |
+| `GUILDS` (same-Guild registry source of truth)           | `backend/agents/guild_registry.py`       |
 
 ### Decay sweep
 
