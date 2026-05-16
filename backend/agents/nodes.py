@@ -1,13 +1,44 @@
 """Agent nodes for the LangGraph topology.
 
-Each node is a plain function that receives GraphState, does its work,
-and returns a partial state update.  When an LLM is not configured the
-nodes fall back to rule-based logic so the system stays functional.
+Each node is a plain function that receives ``GraphState``, does its
+work, and returns a *partial* state update (a dict that LangGraph
+merges via its reducers — never mutate ``state`` directly). When an
+LLM is not configured the nodes fall back to rule-based logic so the
+system stays functional in offline / dev environments.
 
-Tool integration:
- - Specialist nodes can request tool calls via state.tool_calls
- - The tool_executor node runs them and writes results to state.tool_results
- - The summarizer node reads tool_results and produces the final answer
+Graph topology (high level)
+---------------------------
+1. ``orchestrator_node`` — decides conversational vs task and, for
+   tasks, picks the primary specialist (firmware / software /
+   validator / reporter / reviewer / general).
+2. Specialist nodes (built by :func:`_specialist_node_factory` and
+   exported as ``firmware_node``, ``software_node``, …) — plan the
+   work and either answer directly or emit ``tool_calls``.
+3. ``tool_executor_node`` — runs the requested tools (in the agent's
+   isolated workspace if one is set) and records ``tool_results``.
+4. ``error_check_node`` — self-healing gate: classifies tool errors
+   vs verification ``[FAIL]`` outputs, drives retry / loop-breaker /
+   auto-fix / RAG pre-fetch hint logic.
+5. ``context_compression_gate`` — L2 memory: compresses the message
+   history when it nears the model's context window.
+6. ``summarizer_node`` — synthesises ``tool_results`` into the final
+   answer that the UI shows.
+7. ``conversation_node`` — parallel path for direct Q&A without
+   tool execution; runs the chat-layer security stack (R20).
+
+The factory :func:`external_agent_node_factory` produces an A2A
+"bring-your-own-agent" node that invokes an operator-registered
+external endpoint instead of an in-process specialist.
+
+State conventions
+-----------------
+* Each node returns a partial dict; LangGraph's ``add_messages``
+  reducer (for ``messages``) processes ``RemoveMessage`` and append
+  semantics for callers.
+* ``actions`` carry status updates that the runtime relays to the
+  UI / DB; nodes never write to the DB directly.
+* ``tool_calls`` (request) and ``tool_results`` (response) are the
+  hand-off contract between specialists and ``tool_executor_node``.
 """
 
 from __future__ import annotations
@@ -173,6 +204,15 @@ _ERR_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
 
 def _sanitize_error_for_prompt(err: str) -> str:
+    """Defang an error string before splicing it into a prompt.
+
+    Strips ANSI escapes, collapses real newlines into the literal
+    ``\\n`` (so the error stays a single logical line and can't
+    introduce blank-line breaks the LLM might read as a new
+    instruction block), and truncates at ``_ERR_TRUNCATE_LEN`` so a
+    runaway stack trace cannot dominate the prompt. Empty input
+    returns ``""`` so the caller can splice unconditionally.
+    """
     if not err:
         return ""
     # Strip ANSI so terminal-escape sequences don't smuggle bytes.
@@ -188,7 +228,34 @@ def _sanitize_error_for_prompt(err: str) -> str:
 
 
 def orchestrator_node(state: GraphState) -> dict:
-    """Parse the user command: conversation vs task, then route accordingly."""
+    """Decide conversational vs task and pick the primary specialist.
+
+    The orchestrator is the entry node of the graph. It inspects
+    ``state.user_command`` (and the message history) and chooses
+    between two mutually exclusive paths:
+
+    * **Conversational** — the user is asking a question or seeking
+      advice. ``is_conversational=True`` is set on the returned
+      partial state and the graph routes to :func:`conversation_node`.
+    * **Task** — the user wants something executed. ``routed_to`` is
+      set to the chosen specialist (one of ``firmware``, ``software``,
+      ``validator``, ``reporter``, ``reviewer``, ``general``) and
+      ``secondary_routes`` lists any other specialists whose keywords
+      also fired (used for compound commands and the
+      ``[RECOMMENDATION]`` line emitted by the summarizer).
+
+    Routing strategy:
+
+    1. If an LLM is available, ask it to classify (``CONVERSATIONAL``
+       or comma-separated agent names). Invalid replies fall through
+       to the rule-based router.
+    2. Otherwise, use :func:`_is_question` (regex on EN + CJK question
+       markers) to detect questions, then :func:`_rule_based_route`
+       for keyword scoring against ``_ROUTE_KEYWORDS`` merged with
+       any role-skill keywords declared by ``prompt_loader``.
+
+    Emits a ``routing`` pipeline phase event for the UI.
+    """
     cmd = state.user_command
 
     secondary: list[str] = []
@@ -482,7 +549,34 @@ def _maybe_emit_vite_retry_budget(state: GraphState) -> dict:
 
 
 def _specialist_node_factory(agent_type: str):
-    """Create a specialist node that can request tool calls."""
+    """Build a specialist node bound to ``agent_type``.
+
+    Produces the async coroutine exported as e.g. ``firmware_node``
+    or ``software_node``. The returned node:
+
+    * Builds the agent-specific system prompt via
+      :func:`build_system_prompt` (which folds in handoff context,
+      task skill context, the W11 clone-spec block when present,
+      the last Vite-error banner, and the Cognee KG / B8 repo-map
+      preamble).
+    * Prepends a sanitised ``<previous_error>`` or
+      ``<verification_failure>`` block on retry turns so jailbreak
+      markers smuggled inside error text stay inside an
+      XML-tagged untrusted-content envelope (paired with the
+      Security Guardrails preamble — C2/M3 audit, 2026-04-19).
+    * Supports the B15 #350 lazy-skill-loading inner loop: if the
+      LLM emits ``[LOAD_SKILL: <name>]`` markers, fetches the skill
+      body and re-invokes up to ``_MAX_SKILL_LOAD_ITERATIONS`` times
+      before forcing a decision.
+    * Calls :func:`_handle_llm_error` on LLM exceptions for
+      classify / backoff / failover, then falls through to
+      :func:`_rule_based_tool_calls` and finally to a static
+      per-agent answer from ``_FALLBACK_ANSWERS``.
+
+    The returned function has ``__name__`` set to
+    ``<agent_type>_node`` so LangGraph debugging output is
+    meaningful.
+    """
 
     async def node(state: GraphState) -> dict:
         cmd = state.user_command
@@ -779,12 +873,39 @@ _FALLBACK_ANSWERS = {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def tool_executor_node(state: GraphState) -> dict:
-    """Execute all pending tool calls and record their results.
+    """Execute every pending ``ToolCall`` in ``state.tool_calls``.
 
-    If the graph state has a workspace_path, tools operate inside that
-    isolated workspace instead of the global project root.
+    For each call this node:
 
-    Emits real-time SSE events for each tool (start → done/error).
+    1. Looks up the tool in ``TOOL_MAP`` and emits a ``start``
+       progress event. Unknown tool names produce a ``[ERROR]``
+       ``ToolResult`` and skip to the next call.
+    2. Optionally injects ``task_id`` (for report tools).
+    3. Submits the call to the **PEP gateway** (#306) for tier-aware
+       policy evaluation. A ``deny`` short-circuits with a
+       ``[BLOCKED]`` result; unexpected gateway exceptions fall
+       through conservatively (the gateway's own circuit breaker
+       will fail-closed on the next call).
+    4. Runs the tool via ``ainvoke``, optionally compressing the
+       output via :func:`backend.output_compressor.compress_output`
+       (skipped when ``state.rtk_bypass`` is set), and classifies
+       success by checking for any ``_TOOL_ERROR_PREFIXES`` prefix.
+    5. Best-effort: flushes a scratchpad checkpoint after each
+       successful tool call so a crash mid-turn leaves a recoverable
+       progress trail (#309). Scratchpad failures are swallowed.
+
+    Workspace handling: when ``state.workspace_path`` is set, the
+    active workspace is switched for the duration of the loop so
+    tools see the agent's isolated tree (and container routing
+    activates if applicable). The ``finally`` block guarantees the
+    workspace is reset to ``None`` even on cancellation, which
+    matters because ``set_active_workspace`` writes to a
+    module-global used by every tool.
+
+    Returns a partial state update with ``tool_results`` (one per
+    call), an empty ``tool_calls`` list (consumed), and one
+    ``ToolMessage`` per call appended to ``messages`` so the LLM
+    sees the tool output on the next turn.
     """
     from pathlib import Path
 
@@ -900,10 +1021,46 @@ def external_agent_node_factory(
 ) -> Callable[[GraphState], Awaitable[dict]]:
     """Build a LangGraph node that invokes an operator-registered A2A agent.
 
-    Module-global state audit (SOP Step 1): the factory stores no module-level
-    mutable state. Each node closes over its workflow configuration and the
-    injected registry; durable cross-worker consistency remains owned by that
-    registry implementation, matching ``ExternalAgentRegistry``.
+    The returned coroutine resolves the endpoint and builds a client
+    via the injected ``registry`` (which owns durable cross-worker
+    state — endpoint enablement, tenant scoping, token rotation),
+    sends the payload built by ``payload_builder`` (defaulting to
+    :func:`_default_external_agent_payload`), and converts the A2A
+    response into a ``ToolResult`` + ``ToolMessage`` pair so the
+    rest of the graph (summarizer, error_check) treats it like any
+    other tool invocation.
+
+    Success is determined by :func:`_a2a_payload_success` — a status
+    field of ``failed`` / ``error`` / ``cancelled`` or a non-empty
+    ``last_error`` flips the result to ``success=False``, which lets
+    ``error_check_node`` apply the standard retry policy.
+
+    Args:
+        agent_id: External agent identifier registered with the
+            ``registry``. Leading / trailing whitespace is stripped.
+            An empty value raises ``ValueError`` at factory time
+            (fail-fast rather than at first invocation).
+        registry: Object exposing ``get_endpoint`` and
+            ``build_client``; typically
+            ``backend.agents.external_agent_registry.ExternalAgentRegistry``.
+        tenant_id: Tenant scope passed to ``build_client``. Empty
+            raises ``ValueError``.
+        bearer_token: Optional bearer token override. Empty string
+            means the registry-stored token is used.
+        payload_builder: Optional callable that maps ``GraphState``
+            to the JSON-serialisable request body. Defaults to
+            :func:`_default_external_agent_payload`.
+
+    Returns:
+        An async LangGraph node. Its ``__name__`` is set to
+        ``external_agent_<agent_id>_node`` so LangGraph's debug
+        output and DAG visualisation show a meaningful label.
+
+    Module-global state audit (SOP Step 1): the factory stores no
+    module-level mutable state. Each node closes over its workflow
+    configuration and the injected registry; durable cross-worker
+    consistency remains owned by that registry implementation,
+    matching ``ExternalAgentRegistry``.
     """
     clean_agent_id = agent_id.strip()
     if not clean_agent_id:
@@ -967,6 +1124,13 @@ def external_agent_node_factory(
 
 
 def _default_external_agent_payload(state: GraphState) -> dict[str, Any]:
+    """Default A2A request body when no ``payload_builder`` was injected.
+
+    Carries the minimum context an external agent needs to act on a
+    handoff: the user command, ticket id, routing decision, the
+    workspace path it should target, and a serialised view of any
+    ``tool_results`` accumulated earlier in the graph.
+    """
     return {
         "command": state.user_command,
         "task_id": state.task_id,
@@ -981,6 +1145,14 @@ def _default_external_agent_payload(state: GraphState) -> dict[str, Any]:
 
 
 def _a2a_payload_success(payload: dict[str, Any]) -> bool:
+    """Decide whether an A2A response should count as success.
+
+    Treats a ``status`` of ``failed`` / ``error`` / ``cancelled`` /
+    ``canceled`` (US + UK spelling) or any non-empty ``last_error``
+    field as failure; anything else is success. Returning ``False``
+    here funnels the call into the standard retry policy in
+    :func:`error_check_node`.
+    """
     status = str(payload.get("status", "")).lower()
     if status in {"failed", "error", "cancelled", "canceled"}:
         return False
@@ -1002,14 +1174,51 @@ def _extract_error_key(error_summary: str) -> str:
 
 
 async def error_check_node(state: GraphState) -> dict:
-    """Check tool results for failures with loop detection.
+    """Self-healing gate that classifies failures and drives retry.
 
-    Two separate loops:
-    1. Tool execution errors (retry_count) — tool crashed or timed out
-    2. Verification failures (verification_loop_iteration) — tool ran OK but
-       returned [FAIL] (e.g., simulation tests failed)
+    Two independent retry loops are tracked, with tool-execution
+    errors taking priority over verification failures:
 
-    Detects stuck loops via error_history comparison.
+    1. **Tool execution errors** (``retry_count`` / ``max_retries``)
+       — the tool crashed, was denied by PEP, or timed out. Each
+       failure increments ``retry_count`` and pushes the error key
+       onto ``error_history`` (capped at 50 entries to bound state
+       size during long runs).
+    2. **Verification failures** (``verification_loop_iteration`` /
+       ``max_verification_iterations``) — the tool ran cleanly but
+       its output starts with ``[FAIL]`` (e.g. a simulation that
+       compiled but failed an assertion). Only counted when no tool
+       errors are present in the same batch.
+
+    Side-effects layered on top of the basic retry counter:
+
+    * **Permission auto-fix** (``permission_errors``) — recognised
+      env errors (permission denied, missing dir, etc.) are
+      auto-fixed in place, and the H8 loop guard caps each category
+      at 2 attempts per run so a re-occurring external issue
+      (file mode reset by another process) escalates instead of
+      looping forever.
+    * **RTK fallback** (:func:`update_rtk_fallback_history`) — for
+      ``run_bash`` / ``Bash`` failures, decides whether to bypass
+      the retry tool kit on the next turn and folds a human-readable
+      message into the error summary.
+    * **Stuck-loop detection** — when the same error key repeats
+      ≥ 2 times the loop breaker fires (``loop_breaker_triggered``)
+      and the conditional edge :func:`_should_retry` will route to
+      the summarizer instead of looping forever. A
+      ``stuck_loop`` debug finding is emitted for the UI.
+    * **RAG pre-fetch (#67-E)** — on the first retry only, a
+      similar past sandbox-error fix may be pre-fetched (cosine
+      > 0.85, SDK-version hard-lock, 1000-token cap) and rendered
+      as a ``<system_auto_prefetch>`` block on the next turn so the
+      agent's retry prompt opens with a structured hint.
+
+    Returns a partial state update encoding the next-turn decision:
+    incremented counters and a populated ``last_error`` /
+    ``last_verification_failure`` if the graph should retry, or
+    cleared fields plus an ``actions=[update_status:
+    awaiting_confirmation]`` when retries are exhausted (which the
+    runtime renders as a human-review handoff).
     """
     # Separate tool execution errors from verification failures
     tool_errors = [r for r in state.tool_results if not r.success]
@@ -1497,10 +1706,32 @@ def _get_context_window(model_name: str = "") -> int:
 
 
 def context_compression_gate(state: GraphState) -> dict:
-    """L2 Memory gate: compress conversation history if context budget is exceeded.
+    """L2 memory gate: compress message history when it nears the
+    model's context window.
 
-    Runs before the summarizer. If messages exceed 90% of context window,
-    compresses older messages (keeping the most recent 4) into a digest.
+    Estimates current usage via :func:`_estimate_context_tokens`
+    (``len(content) // _CHARS_PER_TOKEN``, conservative for mixed
+    EN / CJK) against the per-model window from
+    :func:`_get_context_window`. Two thresholds:
+
+    * ``_L2_WARN_THRESHOLD`` (80 %) — logs a warning event but takes
+      no action; visible in the UI so operators can shorten the
+      conversation.
+    * ``_L2_COMPRESS_THRESHOLD`` (90 %) — collapses every message
+      *except the last 4* into a single ``[L2 COMPRESSED HISTORY]``
+      digest. The digest is built by an LLM when one is available
+      and by a rule-based extractor (lines containing ``[OK]``,
+      ``[FAIL]``, ``[ERROR]``, ``AGENT]``, etc.) when not.
+
+    Compression is expressed as ``RemoveMessage`` ops + one
+    ``AIMessage`` so the ``add_messages`` reducer rewrites history
+    by id (otherwise the reducer would *append* the digest while
+    keeping the originals, defeating compression). Messages without
+    a stable ``id`` are left in place — better to undercount than
+    to corrupt history.
+
+    Returns an empty dict (no-op) when usage is below the compress
+    threshold or there are fewer than 7 messages total.
     """
     est_tokens = _estimate_context_tokens(state)
     ctx_window = _get_context_window(state.model_name)
@@ -1580,7 +1811,29 @@ def context_compression_gate(state: GraphState) -> dict:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def summarizer_node(state: GraphState) -> dict:
-    """Synthesize tool results into a final answer."""
+    """Synthesise ``tool_results`` into the final answer for the user.
+
+    Terminal node of the task path. Behaviour:
+
+    * Always emits a ``emit_turn_tool_stats`` event so the UI can
+      clear any stale "failed N" badge from the agent card — even
+      on the pass-through case where the specialist answered
+      directly without calling any tools.
+    * If ``state.answer`` is already populated and there are no
+      ``tool_results``, returns ``{}`` (the specialist's direct
+      answer is already in ``state``).
+    * If an LLM is available and there *are* tool results, asks it
+      to summarise the results in the specialist's voice and
+      ensures the response is prefixed with ``[<AGENT> AGENT]``.
+    * Otherwise falls back to a deterministic ``[OK] / [FAILED]``
+      bullet list per tool, truncated at 500 characters per output.
+
+    When ``state.secondary_routes`` is non-empty, appends a
+    ``[RECOMMENDATION]`` line suggesting related specialists — this
+    surfaces the compound-command information that the orchestrator
+    picked up but didn't act on (we only execute the primary route
+    in a single turn).
+    """
     agent_type = state.routed_to
     prefix = f"[{agent_type.upper()} AGENT]"
 
