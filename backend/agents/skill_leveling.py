@@ -16,7 +16,7 @@ The W12 module shipped in one bundle under OP-217; this table tracks
 the attribution of each sub-wave back to its dedicated TODO row so a
 future reader of git blame can resolve a symbol to its W12.x ticket.
 
-- W12.2 (OP-171): :data:`LEVEL_THRESHOLDS` / :data:`LEVEL_5_CAP_THRESHOLD`
+- W12.2 (OP-171 / OP-1381): :data:`LEVEL_THRESHOLDS` / :data:`LEVEL_5_CAP_THRESHOLD`
   + :func:`compute_level` / :func:`next_level_threshold` -- the
   ``25 / 100 / 250 / 600 / 1500`` task-success-token curve from
   ADR-0008 §"Skill leveling (W12)". Lv 1 starts at 0 XP; Lv 2-5 are
@@ -84,7 +84,7 @@ LEVEL_OVERFLOW_GUARD_XP = 10 ** 9
 
 OutcomeStatus = str  # ``success`` | ``partial`` | ``fail``
 
-# W12.2 (OP-171): cumulative XP thresholds to *reach* a given level
+# W12.2 (OP-171 / OP-1381): cumulative XP thresholds to *reach* a given level
 # per ADR-0008 §"Skill leveling (W12)". ``LEVEL_THRESHOLDS[L]`` is the
 # task-success-token count at which the agent transitions into Lv ``L``;
 # Lv 1 starts at 0. The five curve points are ``25 / 100 / 250 / 600 /
@@ -219,7 +219,7 @@ class SkillXpAward:
 def compute_level(xp: int) -> int:
     """Return the W12 skill level (1-5) for ``xp``.
 
-    Implements the W12.2 (OP-171) curve: walks :data:`LEVEL_THRESHOLDS`
+    Implements the W12.2 (OP-171 / OP-1381) curve: walks :data:`LEVEL_THRESHOLDS`
     in ascending order and returns the highest level whose threshold
     has been met. With the canonical ``25 / 100 / 250 / 600`` entry
     points this maps 0-24 → Lv 1, 25-99 → Lv 2, 100-249 → Lv 3,
@@ -247,7 +247,7 @@ def compute_level(xp: int) -> int:
 def next_level_threshold(level: int) -> int:
     """Return the XP threshold for the next level above ``level``.
 
-    Reads the W12.2 (OP-171) curve in :data:`LEVEL_THRESHOLDS`. For
+    Reads the W12.2 (OP-171 / OP-1381) curve in :data:`LEVEL_THRESHOLDS`. For
     Lv 5 (the cap) returns the configurable
     :data:`LEVEL_5_CAP_THRESHOLD` value; this is what
     :func:`_decay_xp_floor` uses to clamp decay against demotion at
