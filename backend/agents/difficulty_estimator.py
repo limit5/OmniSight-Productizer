@@ -136,6 +136,14 @@ _TRIVIAL_KEYWORD_CAP = 3.0
 # score units, a 2k-char prompt ~2.0, and a 20k-char prompt ~3.0.
 _PROMPT_LENGTH_DIVISOR = 200.0
 _PROMPT_LENGTH_MAX = 4.0
+# Multiplier on the log10 term that maps each decade of prompt length to
+# roughly one score unit (so a 10x longer prompt adds ~1.0 to the score).
+_PROMPT_LENGTH_LOG_SCALE = 2.0
+
+# Decimal precision for the publicly-exposed ``score`` field on
+# ``TaskDifficultyEstimate``. Three digits is enough for routing-policy
+# debug logs without leaking float-noise into ticket comments / dashboards.
+_SCORE_ROUND_DIGITS = 3
 
 
 @dataclass(frozen=True)
@@ -165,7 +173,7 @@ def estimate_difficulty(task: Any) -> TaskDifficultyEstimate:
     difficulty = _score_to_difficulty(score)
     return TaskDifficultyEstimate(
         difficulty=difficulty,
-        score=round(score, 3),
+        score=round(score, _SCORE_ROUND_DIGITS),
         recommended_provider_families=DIFFICULTY_PROVIDER_PREFERENCE[difficulty],
     )
 
@@ -246,7 +254,7 @@ def _prompt_length_score(task: Any) -> float:
     chars = len(prompt)
     if chars <= 0:
         return 0.0
-    raw = math.log10(max(chars / _PROMPT_LENGTH_DIVISOR, 1.0) + 1.0) * 2.0
+    raw = math.log10(max(chars / _PROMPT_LENGTH_DIVISOR, 1.0) + 1.0) * _PROMPT_LENGTH_LOG_SCALE
     return min(raw, _PROMPT_LENGTH_MAX)
 
 
