@@ -986,6 +986,277 @@ class GerritJiraBridge:
         self._spawn_proactive_merger_thread(event)
         self._spawn_ai_reviewer_thread(event)
 
+    # ─── OP-1196 phase 3b — startup conflict backfill ────────────────
+    #
+    # The daemon's `_handle_patchset_created` only fires on LIVE Gerrit
+    # stream events. Conflicts that already exist when the daemon starts
+    # (or are created during a daemon downtime window) never reach
+    # `_proactive_merger_check` — they sit on Gerrit with no
+    # Merger-Proactive-PS<n> hashtag, neither attempted nor resolved.
+    #
+    # `backfill_existing_conflicts` closes that gap at startup: it queries
+    # Gerrit for open changes, filters down to "this is a real conflict
+    # the merger pipeline hasn't seen yet", and synthesizes a
+    # patchset-created event for each — feeding them into the same
+    # ``_spawn_proactive_merger_thread`` path that live events use. From
+    # the merger's perspective the backfilled event is indistinguishable
+    # from a live one (same threading model, same skip-checks, same
+    # POST-to-backend flow, same daemon-side push if backend returns
+    # ``merger_resolved_pending_caller_push``).
+    #
+    # Filter rules — a change is a backfill candidate iff:
+    #
+    #   * `mergeable == False` in the gerrit query response (the merger
+    #     wouldn't have anything to do if mergeable=True);
+    #   * the change is `status:open` and `-is:wip`;
+    #   * NO hashtag matching `Merger-Proactive-PS*` is set (would mean
+    #     the merger already attempted this PS — daemon's throttle would
+    #     skip it anyway, but we save the round-trip);
+    #   * NO `Merge-Conflict-Resolved` hashtag (merger already succeeded;
+    #     change is awaiting human +2);
+    #   * the current patchset uploader is NOT merger-agent-bot itself
+    #     (loop prevention — same check `_proactive_merger_check` does
+    #     for live events, applied earlier here to avoid a wasted
+    #     thread spawn);
+    #
+    # Skipped changes are counted + logged but otherwise silent —
+    # operators grep the `backfill_complete` line to see how the scan
+    # decomposed.
+
+    @staticmethod
+    def _select_backfill_candidates(
+        gerrit_query_output: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        """Pure function — parse the ``gerrit query --current-patch-set
+        --format=JSON`` output, apply the backfill filter rules, and
+        return ``(candidate_change_dicts, counters_by_skip_reason)``.
+
+        Split out from the orchestrator below so it can be unit-tested
+        without mocking subprocess or threading. Each element of the
+        returned candidates list is the FULL change dict from gerrit
+        — the caller synthesizes the event envelope from it.
+        """
+        import json as _json
+
+        counters = {
+            "scanned": 0,
+            "skipped_mergeable": 0,
+            "skipped_already_attempted": 0,
+            "skipped_resolved_awaiting_human": 0,
+            "skipped_uploader_is_merger": 0,
+            "skipped_no_current_patchset": 0,
+            "skipped_unparseable": 0,
+            "candidates": 0,
+        }
+        candidates: list[dict[str, Any]] = []
+
+        for raw in gerrit_query_output.splitlines():
+            if not raw.strip():
+                continue
+            try:
+                obj = _json.loads(raw)
+            except Exception:
+                counters["skipped_unparseable"] += 1
+                continue
+
+            # gerrit query emits a stats line at the end like
+            # {"type":"stats","rowCount":N,...}. Skip non-change rows.
+            if obj.get("type") == "stats" or "rowCount" in obj:
+                continue
+            if not obj.get("id") or not obj.get("number"):
+                continue
+
+            counters["scanned"] += 1
+
+            # Mergeable → nothing to do.
+            if obj.get("mergeable") is True:
+                counters["skipped_mergeable"] += 1
+                continue
+
+            hashtags = obj.get("hashtags") or []
+            if any(
+                h.startswith("Merger-Proactive-PS") for h in hashtags
+            ):
+                counters["skipped_already_attempted"] += 1
+                continue
+            if "Merge-Conflict-Resolved" in hashtags:
+                counters["skipped_resolved_awaiting_human"] += 1
+                continue
+
+            cps = obj.get("currentPatchSet") or {}
+            if not cps.get("revision") or not cps.get("number"):
+                counters["skipped_no_current_patchset"] += 1
+                continue
+
+            uploader = cps.get("uploader") or {}
+            uploader_username = (uploader.get("username") or "").lower()
+            uploader_name = (uploader.get("name") or "").lower()
+            uploader_email = (uploader.get("email") or "").lower()
+            if (
+                "merger-agent-bot" in uploader_username
+                or "merger-agent-bot" in uploader_name
+                or "merger-bot" in uploader_email
+            ):
+                counters["skipped_uploader_is_merger"] += 1
+                continue
+
+            counters["candidates"] += 1
+            candidates.append(obj)
+
+        return candidates, counters
+
+    @staticmethod
+    def _synthesize_patchset_created_event(
+        change_obj: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Convert a `gerrit query --current-patch-set` change dict into
+        the same event envelope shape `_handle_patchset_created` expects
+        from a live stream event. The merger code paths read change.*
+        and patchSet.* keys; we populate the ones they touch + a few
+        extras (branch / subject / owner) for log-line clarity."""
+        cps = change_obj.get("currentPatchSet") or {}
+        return {
+            "type": "patchset-created",
+            "change": {
+                "id": change_obj.get("id"),
+                "number": change_obj.get("number"),
+                "project": change_obj.get("project"),
+                "branch": change_obj.get("branch"),
+                "subject": change_obj.get("subject"),
+                "owner": change_obj.get("owner") or {},
+                "url": change_obj.get("url"),
+                "hashtags": change_obj.get("hashtags") or [],
+            },
+            "patchSet": {
+                "number": cps.get("number"),
+                "revision": cps.get("revision"),
+                "uploader": cps.get("uploader") or {},
+                "parents": cps.get("parents") or [],
+                "ref": cps.get("ref"),
+            },
+        }
+
+    def backfill_existing_conflicts(self) -> int:
+        """OP-1196 phase 3b — synthesize patchset-created events for
+        pre-existing conflicts the daemon hasn't seen yet.
+
+        Returns the number of events synthesized (= threads spawned).
+        Never raises — backfill failure must not block the main stream
+        loop. Designed to be called ONCE at startup, after the asyncpg
+        pool + GerritClient prewarm cache are initialised.
+
+        Subprocess uses ``self.run_command`` (the same injection point
+        the rest of the bridge uses for testability) — tests pass a
+        fake ``run_command`` that returns a stub gerrit query output.
+        """
+        # Lazy import — settings has heavy module-load side effects that
+        # tests + unit-mode invocations otherwise pay needlessly. The
+        # backfill is one-shot at daemon startup, so the import cost
+        # here is negligible.
+        try:
+            from backend.config import settings as _settings
+        except Exception:                                 # pragma: no cover
+            _settings = None  # type: ignore[assignment]
+
+        project = (
+            os.environ.get("OMNISIGHT_GERRIT_PROJECT", "").strip()
+            or (getattr(_settings, "gerrit_project", "") if _settings else "")
+        )
+        if not project:
+            self.log(
+                "WARN", "backfill_skipped",
+                reason="OMNISIGHT_GERRIT_PROJECT not configured",
+            )
+            return 0
+
+        ssh_host = (
+            os.environ.get("OMNISIGHT_GERRIT_SSH_HOST", "").strip()
+            or (getattr(_settings, "gerrit_ssh_host", "") if _settings else "")
+        )
+        ssh_port_raw = (
+            os.environ.get("OMNISIGHT_GERRIT_SSH_PORT", "").strip()
+            or str(
+                getattr(_settings, "gerrit_ssh_port", 29418) or 29418
+                if _settings else 29418
+            )
+        )
+        try:
+            ssh_port = int(ssh_port_raw)
+        except ValueError:
+            ssh_port = 29418
+        ssh_key = (
+            os.environ.get("OMNISIGHT_GIT_SSH_KEY_PATH", "").strip()
+            or (getattr(_settings, "git_ssh_key_path", "") if _settings else "")
+        )
+
+        if not ssh_host:
+            self.log("WARN", "backfill_skipped",
+                     reason="OMNISIGHT_GERRIT_SSH_HOST not configured")
+            return 0
+
+        args: list[str] = ["ssh"]
+        if ssh_key:
+            args.extend(["-i", str(ssh_key)])
+        args.extend([
+            "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
+            "-p", str(ssh_port),
+            ssh_host,
+            "gerrit", "query",
+            f"project:{project}",
+            "status:open",
+            "-is:wip",
+            "--current-patch-set",
+            "--format=JSON",
+        ])
+
+        try:
+            proc = self.run_command(
+                args, capture_output=True, text=True, timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            self.log("WARN", "backfill_gerrit_query_timeout")
+            return 0
+        except Exception as exc:                         # pragma: no cover
+            self.log(
+                "ERROR", "backfill_gerrit_query_raised",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+            return 0
+
+        if proc.returncode != 0:
+            self.log(
+                "WARN", "backfill_gerrit_query_failed",
+                rc=proc.returncode,
+                err=(proc.stderr or "").strip()[:300],
+            )
+            return 0
+
+        candidates, counters = self._select_backfill_candidates(
+            proc.stdout or "",
+        )
+
+        for change_obj in candidates:
+            event = self._synthesize_patchset_created_event(change_obj)
+            self.log(
+                "INFO", "backfill_synthesize_event",
+                change_id=str(change_obj.get("number") or ""),
+                ps=str(
+                    (change_obj.get("currentPatchSet") or {}).get(
+                        "number") or ""
+                ),
+                hashtags=change_obj.get("hashtags") or [],
+            )
+            self._spawn_proactive_merger_thread(event)
+
+        self.log(
+            "INFO", "backfill_complete",
+            project=project,
+            **counters,
+        )
+        return counters["candidates"]
+
     def _spawn_proactive_merger_thread(self, event: dict[str, Any]) -> None:
         """OP-715 — fire the proactive merger pipeline in a daemon thread."""
         try:
@@ -1666,8 +1937,25 @@ async def _run_with_db_pool(agent_class: str = "subscription-claude") -> None:
     await db_pool.init_pool(dsn)
     from backend.gerrit import GerritClient
     await GerritClient.prewarm_for_daemon()
+    bridge = build_bridge(agent_class)
+    # OP-1196 phase 3b — one-shot scan of pre-existing conflicts that
+    # never received a live stream event. After this returns, live
+    # `_handle_patchset_created` events take over normally. Backfill
+    # failure does NOT block the main stream loop — it's logged and
+    # swallowed via the bridge.backfill_existing_conflicts internal
+    # try/except, returning 0 on any error.
     try:
-        build_bridge(agent_class).stream_forever()
+        bridge.backfill_existing_conflicts()
+    except Exception as exc:                              # pragma: no cover
+        # Defensive — the method already swallows its own errors, but if
+        # something genuinely catastrophic escapes (e.g., missing
+        # subprocess module) we still want stream_forever to run.
+        structured_log(
+            "ERROR", "backfill_unexpected_exception",
+            err=f"{type(exc).__name__}: {exc}",
+        )
+    try:
+        bridge.stream_forever()
     finally:
         await db_pool.close_pool()
 
