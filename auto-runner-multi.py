@@ -20,6 +20,9 @@ ENV:
                              subscription-codex,subscription-claude
   OMNISIGHT_RUNNER_TARGET    optional ticket key override
   OMNISIGHT_RUNNER_DRY_RUN   if "1", no transition, invoke, or push
+  OMNISIGHT_RUNNER_CLAIM_SHADOW
+                             if unset/"on", JIRA claim labels are shadow-written
+                             to runner_coordination (OP-1168 observation)
   OMNISIGHT_CODEX_WORKTREE   codex worktree override
   OMNISIGHT_CLAUDE_WORKTREE  claude worktree override
 """

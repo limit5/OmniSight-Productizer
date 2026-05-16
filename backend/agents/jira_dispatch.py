@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 import uuid
 from base64 import b64encode
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -2386,10 +2386,9 @@ _CLAIM_READBACK_DELAY_S = 0.2
 
 # Rollback flag — see module header.
 _LEGACY_CLAIM_ENV = "OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY"
-# OP-1110 cutover rollback: set to "1" to restore the dual-write (label +
-# coordination-table) path. Default mode is coordination-table-only writes;
-# labels are read-only for backwards compat (with deprecation warning).
-_LABEL_CUTOVER_ROLLBACK_ENV = "OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY"
+# OP-1168 shadow-write flag. Default-on: labels remain authoritative while
+# runner_coordination receives best-effort shadow writes for observation.
+_CLAIM_SHADOW_ENV = "OMNISIGHT_RUNNER_CLAIM_SHADOW"
 
 
 @dataclass(frozen=True)
@@ -2431,27 +2430,53 @@ def _shadow_acquire_claim(
     client: DispatchClient,
     key: str,
     instance_id: str,
+    *,
+    label_fencing_token: str | None = None,
 ) -> runner_coordination.ClaimLease | None:
-    """Best-effort OP-1107 shadow table claim.
+    """Best-effort OP-1168 shadow table claim.
 
     The JIRA label path remains load-bearing during the observation
     period, so coordination-table write failures are logged but do not
     change pickup behaviour.
     """
-    if not runner_coordination._db_path().exists():
+    if not _claim_shadow_enabled():
         return None
     try:
+        refs = {"source": "jira_dispatch.claim_ticket_atomic"}
+        if label_fencing_token is not None:
+            refs["label_fencing_token"] = label_fencing_token
         return runner_coordination.acquire_claim(
             ticket_key=key,
             resource_key=_coordination_resource_key(key),
             owner_agent_class=getattr(client, "agent_class", "unknown"),
             owner_instance_id=instance_id,
             phase="pickup",
-            external_refs={"source": "jira_dispatch.claim_ticket_atomic"},
+            external_refs=refs,
         )
     except Exception as exc:  # noqa: BLE001 - shadow write must not alter label path
         log.warning("runner_coordination.acquire_claim shadow failed key=%s err=%s", key, exc)
         return None
+
+
+def _shadow_record_phase(
+    lease: runner_coordination.ClaimLease | None,
+    phase: str,
+) -> None:
+    if lease is None or not _claim_shadow_enabled():
+        return
+    try:
+        runner_coordination.record_phase(
+            lease_id=lease.lease_id,
+            fencing_token=lease.fencing_token,
+            phase=phase,
+        )
+    except Exception as exc:  # noqa: BLE001 - shadow write must not alter label path
+        log.warning(
+            "runner_coordination.record_phase shadow failed lease_id=%s phase=%s err=%s",
+            lease.lease_id,
+            phase,
+            exc,
+        )
 
 
 def _shadow_release_claim(
@@ -2459,7 +2484,7 @@ def _shadow_release_claim(
     fencing_token: str | None,
     reason: str,
 ) -> None:
-    if not lease_id or not fencing_token:
+    if not lease_id or not fencing_token or not _claim_shadow_enabled():
         return
     try:
         runner_coordination.release_claim(
@@ -2517,18 +2542,11 @@ def _legacy_claim_mode() -> bool:
     return os.environ.get(_LEGACY_CLAIM_ENV, "").strip().lower() not in ("", "0", "false", "no")
 
 
-def _label_cutover_rollback_mode() -> bool:
-    """True iff ``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY`` enables OP-1110
-    emergency rollback to label-based claim writes (dual-write era).
-
-    Default (env unset or 0) is the table-only write mode shipped with the
-    OP-1110 cutover. Setting this flag re-enables the pre-cutover behaviour
-    where every claim acquire + release also writes ``claim:*`` labels via
-    the legacy/fenced atomic-claim algorithm — used only to ride out a
-    coordination-DB outage that bypasses the runner_coordination layer's
-    own degraded-mode tolerance.
-    """
-    return os.environ.get(_LABEL_CUTOVER_ROLLBACK_ENV, "").strip().lower() not in ("", "0", "false", "no")
+def _claim_shadow_enabled() -> bool:
+    """True unless ``OMNISIGHT_RUNNER_CLAIM_SHADOW`` explicitly disables it."""
+    return os.environ.get(_CLAIM_SHADOW_ENV, "on").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
 
 def _our_claim_label(instance_id: str) -> str:
@@ -2649,53 +2667,18 @@ def claim_ticket_atomic(
 ) -> ClaimResult:
     """Atomically claim ``key`` before ``transition_to_in_progress``.
 
-    OP-1110 cutover: by default the coordination table
-    (:func:`runner_coordination.acquire_claim`) is the sole authority for
-    the per-ticket-ownership claim. Label writes have been dropped; the
-    JIRA assignee is still set as a human-visible observability marker but
-    is no longer load-bearing for correctness.
-
-    Rollback: set ``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1`` to restore the
-    pre-cutover dual-write path (label add via the AUDIT-24 fenced
-    algorithm, or the OP-838 legacy bare-label path when
-    ``OMNISIGHT_RUNNER_ATOMIC_CLAIM_LEGACY=1`` is also set).
+    OP-1168 shadow phase: JIRA claim labels remain the load-bearing
+    ownership path. When ``OMNISIGHT_RUNNER_CLAIM_SHADOW`` is unset or
+    ``on``, the same acquire/release lifecycle is also written
+    best-effort to :mod:`runner_coordination` for observation. Shadow
+    failures are logged and swallowed.
 
     Raises :class:`RunnerMutexAPIError` for transport failures during the
     claim sequence. Returns :class:`ClaimResult` for the mutex-lost path.
     """
-    if not _label_cutover_rollback_mode():
-        return _claim_ticket_atomic_table_only(client, key, instance_id)
-
-    # ── Rollback path: legacy dual-write (pre-OP-1110) ────────────────
-    coordination_lease = _shadow_acquire_claim(client, key, instance_id)
-    try:
-        if _legacy_claim_mode():
-            result = _claim_ticket_atomic_legacy(client, key, instance_id)
-        else:
-            result = _claim_ticket_atomic_fenced(client, key, instance_id)
-    except Exception:
-        if coordination_lease is not None:
-            _shadow_release_claim(
-                coordination_lease.lease_id,
-                coordination_lease.fencing_token,
-                "label-claim-error",
-            )
-        raise
-
-    if coordination_lease is None:
-        return result
-    if not result.ok:
-        _shadow_release_claim(
-            coordination_lease.lease_id,
-            coordination_lease.fencing_token,
-            "label-claim-lost",
-        )
-        return result
-    return replace(
-        result,
-        coordination_lease_id=coordination_lease.lease_id,
-        coordination_fencing_token=coordination_lease.fencing_token,
-    )
+    if _legacy_claim_mode():
+        return _claim_ticket_atomic_legacy(client, key, instance_id)
+    return _claim_ticket_atomic_fenced(client, key, instance_id)
 
 
 def _claim_ticket_atomic_table_only(
@@ -2840,6 +2823,13 @@ def _claim_ticket_atomic_fenced(
             ok=False, lost_to=f"assignee:{pre_assignee_id}", claim_token=our_claim_token
         )
 
+    coordination_lease = _shadow_acquire_claim(
+        client,
+        key,
+        instance_id,
+        label_fencing_token=token,
+    )
+
     # Step 2: atomic PUT — add our fenced label (+ assignee), GC the rest.
     update_ops: list[dict] = [{"add": our_label}]
     for label in dict.fromkeys(stale_to_remove):  # de-dup, preserve order
@@ -2853,6 +2843,12 @@ def _claim_ticket_atomic_fenced(
             },
         )
     except (RuntimeError, urllib.error.URLError, OSError) as e:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-error",
+            )
         raise RunnerMutexAPIError(key, "PUT", e) from e
 
     # Step 3: post-GET readback, with the eventual-consistency retry loop.
@@ -2873,12 +2869,24 @@ def _claim_ticket_atomic_fenced(
     else:
         # JIRAPutEventualConsistencyDelay exceeded — do not proceed on
         # inconsistent state; the caller retries on the next tick.
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(
             ok=False, lost_to="claim-label-missing-from-readback", claim_token=our_claim_token
         )
 
     # Step 4a: cross-bot guard — assignee is single-valued, last-writer-wins.
     if post_assignee_id != client.bot_account_id:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(
             ok=False, lost_to=f"assignee:{post_assignee_id}", claim_token=our_claim_token
         )
@@ -2895,17 +2903,40 @@ def _claim_ticket_atomic_fenced(
         and not _claim_token_is_stale(p[1], now_us, _STALE_CLAIM_MAX_AGE_S)
     ]
     if foreign_live:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(ok=False, lost_to=min(foreign_live), claim_token=our_claim_token)
 
     # Step 4c: lowest live token among our instance's claims wins (AC #1).
     winning_token = _lowest_uuid_claim_winner(post_labels, instance_id, now_us=now_us)
     if winning_token is not None and winning_token != token:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(
             ok=False,
             lost_to=_fenced_claim_label(instance_id, winning_token),
             claim_token=our_claim_token,
         )
-    return ClaimResult(ok=True, lost_to=None, claim_token=our_claim_token)
+    _shadow_record_phase(coordination_lease, "label-claimed")
+    return ClaimResult(
+        ok=True,
+        lost_to=None,
+        claim_token=our_claim_token,
+        coordination_lease_id=(
+            coordination_lease.lease_id if coordination_lease is not None else None
+        ),
+        coordination_fencing_token=(
+            coordination_lease.fencing_token if coordination_lease is not None else None
+        ),
+    )
 
 
 def _claim_ticket_atomic_legacy(
@@ -2958,6 +2989,13 @@ def _claim_ticket_atomic_legacy(
             claim_token=our_token,
         )
 
+    coordination_lease = _shadow_acquire_claim(
+        client,
+        key,
+        instance_id,
+        label_fencing_token=utc_iso,
+    )
+
     # Step b: atomic PUT — assignee + label add in one request.
     try:
         _request(
@@ -2968,6 +3006,12 @@ def _claim_ticket_atomic_legacy(
             },
         )
     except (RuntimeError, urllib.error.URLError, OSError) as e:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-error",
+            )
         raise RunnerMutexAPIError(key, "PUT", e) from e
 
     # Step c: post-GET readback.
@@ -2984,6 +3028,12 @@ def _claim_ticket_atomic_legacy(
     # and last-writer-wins. Two concurrent PUTs from different bots end
     # with exactly one bot account in the readback; everybody else loses.
     if post_assignee_id != client.bot_account_id:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(
             ok=False,
             lost_to=f"assignee:{post_assignee_id}",
@@ -2994,13 +3044,30 @@ def _claim_ticket_atomic_legacy(
     # readback means the PUT was rejected or partial — treat as a loss so
     # the caller doesn't proceed on inconsistent state.
     if our_label not in post_labels:
+        if coordination_lease is not None:
+            _shadow_release_claim(
+                coordination_lease.lease_id,
+                coordination_lease.fencing_token,
+                "label-claim-lost",
+            )
         return ClaimResult(
             ok=False,
             lost_to="claim-label-missing-from-readback",
             claim_token=our_token,
         )
 
-    return ClaimResult(ok=True, lost_to=None, claim_token=our_token)
+    _shadow_record_phase(coordination_lease, "label-claimed")
+    return ClaimResult(
+        ok=True,
+        lost_to=None,
+        claim_token=our_token,
+        coordination_lease_id=(
+            coordination_lease.lease_id if coordination_lease is not None else None
+        ),
+        coordination_fencing_token=(
+            coordination_lease.fencing_token if coordination_lease is not None else None
+        ),
+    )
 
 
 def release_ticket_claim(
@@ -3014,30 +3081,11 @@ def release_ticket_claim(
 ) -> None:
     """Release this instance's claim on ``key``.
 
-    OP-1110 cutover: by default the coordination-table lease is the
-    authoritative state; releasing it (via
-    :func:`runner_coordination.release_claim`) is the only required step.
-    No JIRA label removal happens in cutover mode — because none were
-    added on acquire.
-
-    Rollback (``OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1``): the legacy GC
-    path runs (sweep all ``claim:{instance_id}:*`` fenced labels + the
-    legacy bare ``claim:{instance_id}`` label via a GET-then-PUT) in
-    addition to the table release. Best-effort: label-GC transport
-    failures are logged + swallowed.
+    OP-1168 shadow phase: sweep all ``claim:{instance_id}:*`` fenced
+    labels plus the legacy bare ``claim:{instance_id}`` label via the
+    existing JIRA label path, then best-effort release the coordination
+    table lease when one was captured during acquire.
     """
-    if not _label_cutover_rollback_mode():
-        # OP-1110 default: only the table lease needs releasing. Label
-        # write paths were stripped on acquire, so there is nothing to
-        # remove from JIRA.
-        _shadow_release_claim(
-            coordination_lease_id,
-            coordination_fencing_token,
-            "released",
-        )
-        return
-
-    # ── Rollback path: pre-OP-1110 label-GC + table release ──────────
     targets: list[str] = []
     try:
         cur = _request(client, "GET", f"/issue/{key}?fields=labels")
