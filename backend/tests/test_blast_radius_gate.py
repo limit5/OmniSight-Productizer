@@ -11,6 +11,7 @@ from backend.agents.blast_radius_gate import (
     BlastRadiusMetrics,
     LocatorCandidate,
     PeerPatchSet,
+    assert_worktree_cwd,
     evaluate_blast_radius,
 )
 
@@ -146,6 +147,54 @@ def test_missing_area_uses_strict_default_and_comments(worktree: Path) -> None:
     assert any("missing area label" in comment for comment in result.comments)
 
 
+def test_unknown_area_label_falls_back_to_default_threshold(worktree: Path) -> None:
+    for idx in range(4):
+        _write(worktree, f"backend/{idx}.py")
+
+    result = _eval(
+        worktree,
+        labels=("area:unknown",),
+        candidates=tuple(LocatorCandidate(f"backend/{idx}.py") for idx in range(4)),
+    )
+
+    assert result.status == "oversize_refuse"
+    assert result.threshold == {"files": 3, "loc": 300, "depth": 4}
+    assert result.comments == []
+    assert result.errors == []
+
+
+def test_threshold_yaml_without_default_inserts_strict_default(
+    worktree: Path,
+    tmp_path: Path,
+) -> None:
+    _write(worktree, "backend/a.py")
+    thresholds = tmp_path / "thresholds.yaml"
+    thresholds.write_text(
+        "area:tests:\n  files: 9\n  loc: 900\n  depth: 9\n",
+        encoding="utf-8",
+    )
+
+    result = _eval(worktree, labels=(), thresholds_path=thresholds)
+
+    assert result.threshold == {"files": 3, "loc": 300, "depth": 4}
+    assert any("missing area label" in comment for comment in result.comments)
+    assert result.errors == []
+
+
+def test_unknown_language_without_parser_counts_file_lines(worktree: Path) -> None:
+    _write(worktree, "backend/a.txt", "one\ntwo\nthree\n")
+
+    result = _eval(
+        worktree,
+        candidates=(LocatorCandidate("backend/a.txt"),),
+        parser=None,
+    )
+
+    assert result.status == "within_threshold"
+    assert result.metrics.total_loc == 3
+    assert result.errors == []
+
+
 def test_parse_fail_counts_candidate_as_200_loc_and_comments(worktree: Path) -> None:
     _write(worktree, "backend/a.py")
 
@@ -154,6 +203,26 @@ def test_parse_fail_counts_candidate_as_200_loc_and_comments(worktree: Path) -> 
     assert result.metrics.total_loc == 200
     assert "tree_sitter_parse_fail" in result.errors
     assert any("counted as 200 LOC" in comment for comment in result.comments)
+
+
+def test_same_ticket_peer_is_ignored(worktree: Path) -> None:
+    _write(worktree, "backend/a.py")
+
+    result = _eval(
+        worktree,
+        peer_lookup=lambda path: [
+            PeerPatchSet(
+                file=path,
+                change_number="335",
+                ticket_key="OP-841",
+                owner="codex-bot",
+            )
+        ],
+    )
+
+    assert result.status == "within_threshold"
+    assert result.peer_conflict is None
+    assert result.errors == []
 
 
 def test_cross_ticket_peer_detect_returns_peer_conflict(worktree: Path) -> None:
@@ -213,3 +282,13 @@ def test_worktree_cwd_assertion_rejects_main_repo_cwd(
             parser_factory=lambda language: _CleanParser(),
             peer_lookup=lambda path: [],
         )
+
+
+def test_worktree_cwd_assertion_rejects_nested_non_root_cwd(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    nested = repo / "nested"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+
+    with pytest.raises(RuntimeError, match="worktree_cwd_mismatch"):
+        assert_worktree_cwd(nested, cwd=nested)
