@@ -10,14 +10,17 @@ Currently supports Gerrit Code Review events:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import hmac
 import json
 import logging
+import os
 import re
 import uuid
 
 import asyncpg
+import httpx
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
@@ -720,6 +723,104 @@ _MERGER_BOT_NAMES = ("merger-agent-bot",)
 _PROACTIVE_HASHTAG_PREFIX = "Merger-Proactive-PS"
 _RESOLVED_HASHTAG = "Merge-Conflict-Resolved"
 
+# OP-718 — daemon → backend HTTP delegate. Default targets the local
+# backend container; operators override via OMNISIGHT_BACKEND_URL when
+# the daemon ships on a different host than the FastAPI app.
+_MERGER_HTTP_DEFAULT_BACKEND = "http://localhost:8000"
+_MERGER_HTTP_PATH = "/api/v1/orchestrator/merge-conflict"
+_MERGER_HTTP_TIMEOUT_SECONDS = 120.0
+
+
+async def _post_merge_conflict_to_backend(
+    task: "MergeConflictTask",  # noqa: F821 — forward ref to local import
+) -> dict:
+    """OP-718 — delegate merger invocation to the running backend over HTTP.
+
+    Replaces the OP-714/OP-717 in-process ``on_merge_conflict_webhook``
+    call. The daemon process (gerrit_jira_bridge) does not initialise
+    the asyncpg pool, LLM provider, or JIRA client, so the in-process
+    path short-circuits every backend-init-dependent step (audit
+    logging, abstain-ticket creation, hashtag write). Routing the
+    invocation back to the already-initialised backend over HTTP keeps
+    a single source of truth for those deps.
+
+    Auth model mirrors the merger endpoint at
+    ``backend.routers.orchestrator.merge_conflict_endpoint``:
+
+      * ``Authorization: Bearer <OMNISIGHT_GERRIT_WEBHOOK_API_KEY>`` —
+        satisfies ``require_operator`` (an API-key bearer).
+      * ``X-Jira-Webhook-Secret: <OMNISIGHT_JIRA_WEBHOOK_SECRET>`` —
+        satisfies ``_verify_jira_signature``.
+
+    Returns a dict that always carries a ``reason`` key so callers can
+    log a uniform ``merger_outcome reason=...`` line. On infrastructure
+    failure (missing creds / network / non-2xx), the synthetic
+    ``reason=merger_http_*`` value flags the problem without raising.
+    """
+    api_key = (os.environ.get("OMNISIGHT_GERRIT_WEBHOOK_API_KEY") or "").strip()
+    jira_secret = (
+        os.environ.get("OMNISIGHT_JIRA_WEBHOOK_SECRET") or ""
+    ).strip()
+    if not api_key or not jira_secret:
+        return {
+            "ok": False,
+            "reason": "merger_http_missing_credentials",
+            "detail": (
+                "OMNISIGHT_GERRIT_WEBHOOK_API_KEY and "
+                "OMNISIGHT_JIRA_WEBHOOK_SECRET must be set in the "
+                "daemon environment to delegate to backend"
+            ),
+        }
+
+    backend_url = (
+        os.environ.get("OMNISIGHT_BACKEND_URL")
+        or _MERGER_HTTP_DEFAULT_BACKEND
+    ).rstrip("/")
+    url = f"{backend_url}{_MERGER_HTTP_PATH}"
+
+    payload = dataclasses.asdict(task)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "X-Jira-Webhook-Secret": jira_secret,
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with httpx.AsyncClient(
+            timeout=_MERGER_HTTP_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.post(url, json=payload, headers=headers)
+    except httpx.HTTPError as exc:
+        return {
+            "ok": False,
+            "reason": "merger_http_request_error",
+            "detail": f"{type(exc).__name__}: {exc}"[:300],
+        }
+
+    if response.status_code != 200:
+        return {
+            "ok": False,
+            "reason": f"merger_http_status_{response.status_code}",
+            "detail": response.text[:300],
+        }
+
+    try:
+        body = response.json()
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "reason": "merger_http_invalid_json",
+            "detail": str(exc)[:200],
+        }
+    if not isinstance(body, dict):
+        return {
+            "ok": False,
+            "reason": "merger_http_invalid_body",
+            "detail": "response body is not a JSON object",
+        }
+    body.setdefault("reason", "unknown")
+    return body
+
 
 def _is_merger_uploader(uploader: dict) -> bool:
     """Loop prevention — recognise merger-agent-bot's own patchset uploads."""
@@ -868,15 +969,18 @@ async def _proactive_merger_check(event: dict) -> None:
             logger.warning("%s set_hashtag_failed hashtag=%s err=%s",
                            log_prefix, marker_hashtag, exc)
 
-        # ── 6. Invoke merger via arbiter ──────────────────────────
-        # OP-717: build MergeConflictTask from the FIRST conflict file
-        # (alphabetical). additional_files lists the rest so the merger
-        # has scope context. The merger's existing pipeline will
-        # resolve the primary file via LLM, push a resolved patchset,
-        # and set Merge-Conflict-Resolved hashtag on success.
-        from backend.merge_arbiter import (
-            MergeConflictTask, on_merge_conflict_webhook,
-        )
+        # ── 6. Invoke merger via backend HTTP delegate (OP-718) ───
+        # OP-717 built the MergeConflictTask from the FIRST conflict
+        # file (alphabetical); additional_files lists the rest so the
+        # merger has scope context. OP-718 replaces the prior
+        # in-process ``on_merge_conflict_webhook`` call with an httpx
+        # POST to the running backend so the merger pipeline runs in a
+        # context that already has the asyncpg pool, LLM provider, and
+        # JIRA client initialised — closing the runtime-init gap that
+        # the in-process daemon path hit (every backend-init-dependent
+        # step short-circuited: audit log, LLM call, JIRA write,
+        # Gerrit hashtag).
+        from backend.merge_arbiter import MergeConflictTask
 
         subject = change_data.get("subject", "")
         ticket_match = re.search(r"\bOP-\d+\b", subject)
@@ -905,15 +1009,11 @@ async def _proactive_merger_check(event: dict) -> None:
             primary.path, len(additional),
         )
         try:
-            outcome = await on_merge_conflict_webhook(task)
-            outcome_reason = getattr(outcome, "reason", None)
-            outcome_label = (
-                outcome_reason.value if hasattr(outcome_reason, "value")
-                else str(outcome_reason)
-            )
+            outcome = await _post_merge_conflict_to_backend(task)
+            outcome_reason = outcome.get("reason", "unknown")
             logger.info(
                 "%s merger_outcome reason=%s",
-                log_prefix, outcome_label,
+                log_prefix, outcome_reason,
             )
         except Exception as exc:
             logger.exception(

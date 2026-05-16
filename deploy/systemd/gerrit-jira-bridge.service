@@ -77,6 +77,24 @@ Environment=OMNISIGHT_BRIDGE_CURSOR_FILE=/home/user/.local/state/omnisight-bridg
 ;   echo OMNISIGHT_RUNNER_SANDBOX_ENFORCE=1 >> runner-claude@.service
 ;   journalctl --user -u runner-claude@default | grep sandbox=wrapped
 ; See docs/operations/runner-sandbox.md for the full DoD.
+; OP-718: the proactive-merger pipeline delegates merger invocation to
+; the running backend over HTTP (``/api/v1/orchestrator/merge-conflict``)
+; instead of calling the merger in-process. The backend endpoint
+; enforces a dual-header auth (Bearer for ``require_operator`` + an HMAC
+; secret for the JIRA webhook signature check); without BOTH env vars
+; the POST short-circuits to ``reason=merger_http_missing_credentials``
+; and no merger runs, so set these (the values already live in
+; /home/user/.config/omnisight/gerrit-webhook.env from OP-693 deploy):
+;   OMNISIGHT_GERRIT_WEBHOOK_API_KEY → Bearer token (require_operator)
+;   OMNISIGHT_JIRA_WEBHOOK_SECRET    → X-Jira-Webhook-Secret value
+; OMNISIGHT_BACKEND_URL overrides the default localhost:8000 target
+; (set it when the daemon ships on a different host than the backend
+; container — defaults to local-host because the operator-of-record
+; deployment co-locates daemon + backend on the same node).
+EnvironmentFile=-/home/user/.config/omnisight/gerrit-webhook.env
+;Environment=OMNISIGHT_GERRIT_WEBHOOK_API_KEY=__rotate_me__
+;Environment=OMNISIGHT_JIRA_WEBHOOK_SECRET=__rotate_me__
+;Environment=OMNISIGHT_BACKEND_URL=http://localhost:8000
 ExecStart=/usr/bin/python3 /home/user/sora-bridge/scripts/run_gerrit_jira_bridge.py --agent-class subscription-claude
 Restart=always
 RestartSec=5
