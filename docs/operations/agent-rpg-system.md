@@ -513,6 +513,52 @@ Crossing Lv 3 with no `branch_choice` set raises
 shows the picker the operator clicks to choose a fork from
 `skill_matrix.yaml`.
 
+### Branching tree (W12.4 / OP-173)
+
+At Lv 3 every base skill forks into **exactly two** branches declared
+under `branches:` in `skill_matrix.yaml`. The operator picks one from
+the Character Card "Skills" tab; the choice is immutable per
+`(agent_id, skill_id)` row (alembic 0226). Worked example: the
+`backend.enterprise_web` skill forks into `perf_tuning` /
+`type_correctness` — once an operator locks `perf_tuning`, that row
+cannot be re-pointed to `type_correctness`; a fresh fork requires a
+new agent instance (per `SkillBranchAlreadyLocked`).
+
+The "exactly two" invariant is enforced at `skill_matrix.yaml` load
+time by `BRANCHES_PER_SKILL = 2` in
+`backend/agents/skill_matrix.py`. A YAML edit that adds a third
+option, drops one, or otherwise diverges fails module import with
+`SkillMatrixError` — the assertion fires before any router can serve
+a stale matrix.
+
+#### Operator picker flow
+
+| Step                                              | Surface                                                                   |
+| ------------------------------------------------- | ------------------------------------------------------------------------- |
+| Skill XP crosses the Lv-3 entry threshold (100)   | `award_skill_xp` returns `branch_choice_required=True` on the `SkillXpAward` |
+| Character Card "Skills" tab fetches state         | `GET /api/v1/agents/{agent_id}/skills` — `branch_choice_required: true` is the picker trigger |
+| Operator picks one of the two declared branches   | UI lists `canonical_branches_for_skill(skill_id)` from `skill_matrix.yaml` |
+| Frontend POSTs the choice                         | `POST /api/v1/agents/{agent_id}/skills/{skill_id}/branch` body `{"branch": "perf_tuning"}` |
+| Backend persists immutably                        | `lock_branch_choice(store, agent_id, skill_id, branch)` → `agent_skill_state.branch_choice` |
+
+Idempotency: re-POSTing the *same* branch returns 200 with the
+existing row unchanged. POSTing a *different* branch returns 409
+(`SkillBranchAlreadyLocked`). A branch that is not declared in the
+YAML returns 422 (`SkillMatrixDriftError`).
+
+#### Source symbols (per W12.4 attribution)
+
+| Symbol                                                          | Source                                       |
+| --------------------------------------------------------------- | -------------------------------------------- |
+| `BRANCH_LOCK_LEVEL = 3`                                         | `backend/agents/skill_leveling.py`            |
+| `BRANCHES_PER_SKILL = 2`                                        | `backend/agents/skill_matrix.py`              |
+| `lock_branch_choice(store, agent_id, skill_id, branch)`         | `backend/agents/skill_leveling.py`            |
+| `SkillBranchAlreadyLocked` (409 on differing re-write)          | `backend/agents/skill_leveling.py`            |
+| `canonical_branches_for_skill(skill_id) → (Definition, …)`      | `backend/agents/skill_matrix.py`              |
+| `assert_branch_choice_in_matrix(skill_id, branch_id)`           | `backend/agents/skill_matrix.py`              |
+| `CharacterSkillEntry.branch_choice_required`                    | `backend/agents/character_card.py`            |
+| `POST /agents/{id}/skills/{skill_id}/branch`                    | `backend/routers/agents.py`                   |
+
 ### Decay sweep
 
 Driven by `deploy/systemd/rpg-skill-decay.{service,timer}` (Mondays

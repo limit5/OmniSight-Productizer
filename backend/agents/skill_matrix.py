@@ -4,6 +4,26 @@ ADR-0008 names the canonical skill matrix YAML as the owner of the RPG
 ``skill_id`` namespace. This module keeps that source of truth under the RPG
 backend package and exposes a small validator hidden/CI drift guards can call
 without importing routers or touching persistent state.
+
+W12.4 (OP-173) — branching tree
+-------------------------------
+The matrix also owns the Lv-3 branching tree contract from ADR-0008
+§"Skill leveling (W12)": every base ``skill_id`` declares exactly
+:data:`BRANCHES_PER_SKILL` branches under ``branches:`` (e.g. python
+→ ``perf_tuning`` / ``type_correctness``). The operator picks one
+from the Character Card "Skills" tab via
+:func:`backend.agents.skill_leveling.lock_branch_choice`; the
+choice is immutable per ``(agent_id, skill_id)``. The W12.4 symbols
+in this module are:
+
+* :class:`SkillBranchDefinition` — one of the two Lv-3 fork options.
+* :data:`BRANCHES_PER_SKILL` — the spec constant (= 2) enforced by
+  :func:`_parse_branches` so a YAML edit that adds a third option or
+  drops one is rejected at module import.
+* :func:`canonical_branches_for_skill` — read the canonical two
+  options for a ``skill_id``.
+* :func:`assert_branch_choice_in_matrix` — drift guard rejecting any
+  ``branch_choice`` not declared in the YAML.
 """
 
 from __future__ import annotations
@@ -24,6 +44,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SKILL_ID_SCAN_ROOTS = (
     REPO_ROOT / "configs",
 )
+
+# W12.4 (OP-173): every base skill forks into exactly two branches at
+# Lv 3 per ADR-0008 §"Skill leveling (W12)" ("每個 base skill 在 Lv 3
+# 分叉 2 條"). ``_parse_branches`` rejects YAML rows that violate this
+# count so a stray third option or a missing second option is caught at
+# module-import time rather than at first lock attempt.
+BRANCHES_PER_SKILL = 2
 
 _SKILL_ID_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _YAML_SUFFIXES = frozenset({".yaml", ".yml"})
@@ -279,6 +306,11 @@ def _parse_branches(
         raise SkillMatrixError(
             f"RPG skill {skill_id!r} branches must be a non-empty list when present"
         )
+    if len(value) != BRANCHES_PER_SKILL:
+        raise SkillMatrixError(
+            f"RPG skill {skill_id!r} must declare exactly {BRANCHES_PER_SKILL} "
+            f"branches (W12.4 / ADR-0008 §'Skill leveling (W12)'); got {len(value)}"
+        )
     seen: set[str] = set()
     parsed: list[SkillBranchDefinition] = []
     for entry in value:
@@ -318,6 +350,7 @@ assert_skill_id_space_within_matrix()
 
 
 __all__ = [
+    "BRANCHES_PER_SKILL",
     "DEFAULT_SKILL_ID_SCAN_ROOTS",
     "SKILL_MATRIX_PATH",
     "SkillBranchDefinition",
