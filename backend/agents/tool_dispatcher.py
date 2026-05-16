@@ -203,6 +203,7 @@ class ToolDispatcher:
                 (time.perf_counter() - started_at) * 1000,
                 False,
                 input_size,
+                agent_id=self._current_agent_id,
             )
             return ToolResult(
                 tool_use_id=tool_use_id,
@@ -234,6 +235,7 @@ class ToolDispatcher:
                     (time.perf_counter() - started_at) * 1000,
                     False,
                     input_size,
+                    agent_id=self._current_agent_id,
                 )
                 return _error_result(
                     tool_use_id=tool_use_id,
@@ -267,6 +269,7 @@ class ToolDispatcher:
                 (time.perf_counter() - started_at) * 1000,
                 False,
                 input_size,
+                agent_id=self._current_agent_id,
             )
             return _error_result(
                 tool_use_id=tool_use_id,
@@ -299,6 +302,7 @@ class ToolDispatcher:
             (time.perf_counter() - started_at) * 1000,
             True,
             input_size,
+            agent_id=self._current_agent_id,
         )
         return ToolResult(tool_use_id=tool_use_id, content=content, is_error=False)
 

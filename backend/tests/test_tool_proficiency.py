@@ -21,6 +21,8 @@ from pathlib import Path
 import pytest
 
 from backend.agents.mp_w17_telemetry_consumer import consume_batch, consume_event
+from backend.agents.mp_w17_telemetry_consumer import consume_invocation_log_line
+from backend.agents.mp_w17_telemetry_consumer import payload_from_invocation_log
 from backend.agents.tool_proficiency import (
     InMemoryToolProficiencyStore,
     LEVEL_REQUIREMENTS,
@@ -311,6 +313,62 @@ async def test_telemetry_consumer_consumes_w17_event_shape():
     )
     assert recorded is not None
     assert recorded.invocation_count == 1
+    assert recorded.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_detects_nested_invocation_and_outcome():
+    """OP-182 — W13 can derive proficiency from invocation + outcome payloads."""
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+            "invocation": {
+                "tool_name": TOOL,
+                "agent_id": AGENT,
+                "timestamp": T0.isoformat(),
+            },
+            "outcome": {"is_error": False},
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 1
+    assert recorded.success_count == 1
+
+    recorded = await consume_event(
+        store,
+        {
+            "invocation": {
+                "tool_name": TOOL,
+                "agent_id": AGENT,
+                "timestamp": T0.isoformat(),
+            },
+            "outcome": {"is_error": True},
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 2
+    assert recorded.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_detects_invocation_log_line():
+    """OP-182 — replaying logged tool_invocation JSON updates proficiency."""
+    store = InMemoryToolProficiencyStore()
+    line = (
+        'INFO events.tool_invocation {"agent_id": "agent-alpha", '
+        '"tool_name": "Read", "outcome": "success", '
+        '"timestamp": "2026-01-01T00:00:00+00:00"}'
+    )
+    payload = payload_from_invocation_log(line)
+    assert payload is not None
+    assert payload["agent_id"] == AGENT
+
+    recorded = await consume_invocation_log_line(store, line)
+
+    assert recorded is not None
+    assert recorded.agent_id == AGENT
+    assert recorded.tool_id == TOOL
     assert recorded.success_count == 1
 
 
@@ -635,6 +693,49 @@ def test_install_feature_unlock_gate_rescopes_to_new_agent(tmp_path: Path):
         config_path=config, now=T0,
     )
     assert dispatcher._current_agent_id == "agent-two"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_tool_invocation_telemetry_includes_agent_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """OP-182 — dispatcher telemetry carries the agent_id needed by W13."""
+    from backend.agents import tool_dispatcher as td
+
+    calls: list[dict[str, object]] = []
+
+    def _emit(
+        tool_name: str,
+        duration_ms: float,
+        success: bool,
+        args_size_bytes: int,
+        *,
+        agent_id: str | None = None,
+    ) -> None:
+        calls.append({
+            "tool_name": tool_name,
+            "success": success,
+            "agent_id": agent_id,
+        })
+
+    monkeypatch.setattr(td, "emit_tool_invocation", _emit)
+
+    dispatcher = td.ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001
+        return "ok"
+
+    dispatcher.register("Read", _read)
+    dispatcher.set_proficiency_gate(None, agent_id=AGENT)
+
+    result = await dispatcher.execute("u-op-182", "Read", {"file_path": "/tmp/x"})
+
+    assert not result.is_error
+    assert calls == [{
+        "tool_name": "Read",
+        "success": True,
+        "agent_id": AGENT,
+    }]
 
 
 # ── Constants sanity ─────────────────────────────────────────────────

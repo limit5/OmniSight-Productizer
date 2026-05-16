@@ -15,6 +15,8 @@ def emit_tool_invocation(
     duration_ms: float,
     success: bool,
     args_size_bytes: int,
+    *,
+    agent_id: str | None = None,
 ) -> None:
     """Emit one best-effort telemetry event for a completed tool call."""
     payload = {
@@ -24,6 +26,8 @@ def emit_tool_invocation(
         "args_size_bytes": int(args_size_bytes),
         "timestamp": datetime.now().isoformat(),
     }
+    if isinstance(agent_id, str) and agent_id.strip():
+        payload["agent_id"] = agent_id.strip()
     try:
         from backend.events import bus
 
