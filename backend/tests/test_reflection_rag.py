@@ -326,3 +326,116 @@ def test_render_reflection_context_empty_hits_returns_empty():
 def test_render_reflection_context_validates_max_bytes():
     with pytest.raises(ValueError, match="max_bytes must be positive"):
         rr.render_reflection_context([], max_bytes=0)
+
+
+def test_render_reflection_lesson_block_formats_hits_within_prompt_budget():
+    hit = rr.ReflectionSearchHit(
+        ticket_key="OP-100",
+        outcome=rr.REFLECTION_OUTCOME_FAILURE,
+        summary="rerun pytest after changing metadata filters",
+        failure_type="test",
+        score=0.91234,
+    )
+
+    block = rr.render_reflection_lesson_block((hit,), max_chars=2000)
+
+    assert block.startswith(rr.REFLECTION_LESSON_PROMPT_HEADER)
+    assert "OP-100 | outcome=failure | score=0.912 | failure_type=test" in block
+    assert "Lesson: rerun pytest after changing metadata filters" in block
+    assert len(block) <= 2000
+
+
+def test_render_reflection_lesson_block_truncates_to_adr_budget():
+    hit = rr.ReflectionSearchHit(
+        ticket_key="OP-101",
+        outcome=rr.REFLECTION_OUTCOME_SUCCESS,
+        summary="x" * (rr.DEFAULT_REFLECTION_PROMPT_BUDGET * 2),
+        score=0.5,
+    )
+
+    block = rr.render_reflection_lesson_block((hit,))
+
+    assert len(block) <= rr.DEFAULT_REFLECTION_PROMPT_BUDGET
+    assert block.endswith("...[truncated]")
+
+
+def test_inject_reflection_lesson_block_appends_when_present():
+    prompt = "base prompt\n"
+    block = f"{rr.REFLECTION_LESSON_PROMPT_HEADER}\nlesson"
+
+    injected = rr.inject_reflection_lesson_block(prompt, block)
+
+    assert injected == f"base prompt\n\n{block}"
+    assert rr.inject_reflection_lesson_block(prompt, "") == prompt
+
+
+@pytest.mark.asyncio
+async def test_build_reflection_lesson_injection_queries_top_k_and_renders_block():
+    store = FakeStore(
+        [
+            rag.VectorHit(
+                chunk_id="c1",
+                tenant_id="t-acme",
+                source_path="reflection://OP-100/failure",
+                chunk_text="metadata filters fixed the reflection retrieval test",
+                score=0.9,
+                metadata={
+                    "kind": rr.REFLECTION_RAG_KIND,
+                    "ticket_key": "OP-100",
+                    "outcome": rr.REFLECTION_OUTCOME_FAILURE,
+                },
+            ),
+            rag.VectorHit(
+                chunk_id="c2",
+                tenant_id="t-acme",
+                source_path="reflection://OP-99/success",
+                chunk_text="reuse existing vector-store contracts",
+                score=0.8,
+                metadata={
+                    "kind": rr.REFLECTION_RAG_KIND,
+                    "ticket_key": "OP-99",
+                    "outcome": rr.REFLECTION_OUTCOME_SUCCESS,
+                },
+            ),
+        ]
+    )
+    embedder = FakeEmbedder()
+
+    block = await rr.build_reflection_lesson_injection(
+        tenant_id="t-acme",
+        ticket_key="OP-142",
+        ticket_summary="Pre-task hook",
+        ticket_description="query top-K relevant past lessons",
+        embedder=embedder,
+        store=store,
+        top_k=2,
+    )
+
+    assert "OP-100" in block
+    assert "OP-99" in block
+    assert embedder.queries == [
+        "ticket: OP-142\n"
+        "summary: Pre-task hook\n"
+        "description: query top-K relevant past lessons"
+    ]
+    query = store.queries[0]
+    assert query.limit == 2
+    assert query.metadata_filter == {"kind": rr.REFLECTION_RAG_KIND}
+
+
+@pytest.mark.asyncio
+async def test_build_reflection_lesson_injection_degrades_when_retrieval_fails():
+    class BrokenStore(FakeStore):
+        async def query(self, query: rag.VectorQuery) -> list[rag.VectorHit]:
+            raise RuntimeError("pgvector offline")
+
+    block = await rr.build_reflection_lesson_injection(
+        tenant_id="t-acme",
+        ticket_key="OP-142",
+        ticket_summary="Pre-task hook",
+        ticket_description="query top-K relevant past lessons",
+        embedder=FakeEmbedder(),
+        store=BrokenStore(),
+    )
+
+    assert block == ""

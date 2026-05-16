@@ -16,6 +16,7 @@ workers do not share mutable process-local truth.
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Literal
 
@@ -37,8 +38,12 @@ VALID_REFLECTION_OUTCOMES = frozenset(
     {REFLECTION_OUTCOME_SUCCESS, REFLECTION_OUTCOME_FAILURE}
 )
 DEFAULT_REFLECTION_TOP_K = 5
-DEFAULT_REFLECTION_INJECTION_MAX_BYTES = 2048
+DEFAULT_REFLECTION_INJECTION_MAX_BYTES = 2048   # OP-143: byte-budget for render_reflection_context()
+DEFAULT_REFLECTION_PROMPT_BUDGET = 2048         # OP-142: char-budget for render_reflection_lesson_block()
 REFLECTION_SOURCE_PREFIX = "reflection://"
+REFLECTION_LESSON_PROMPT_HEADER = "Reflection RAG lessons (RPG.W6)"
+
+log = logging.getLogger(__name__)
 
 ReflectionOutcome = Literal["success", "failure"]
 
@@ -208,7 +213,7 @@ def render_reflection_context(
     *,
     max_bytes: int = DEFAULT_REFLECTION_INJECTION_MAX_BYTES,
 ) -> str:
-    """Render retrieved reflections as a bounded task prompt block.
+    """Render retrieved reflections as a bounded task prompt block (OP-143 / W6.3).
 
     Returns an empty string when no hits are supplied.  The final UTF-8 encoded
     block is capped to ``max_bytes`` so reflection RAG cannot bloat each task's
@@ -243,6 +248,96 @@ def render_reflection_context(
     return _truncate_utf8("\n".join(lines), max_bytes)
 
 
+async def build_reflection_lesson_injection(
+    *,
+    tenant_id: str,
+    ticket_key: str,
+    ticket_summary: str,
+    ticket_description: str,
+    embedder: EmbeddingProvider,
+    store: VectorStore,
+    top_k: int = DEFAULT_REFLECTION_TOP_K,
+    max_chars: int = DEFAULT_REFLECTION_PROMPT_BUDGET,
+) -> str:
+    """Return the pre-task reflection lesson block for a fresh pickup.
+
+    W6.2 is the prompt-facing half of W6.1: the caller supplies the
+    ticket context plus the pgvector dependencies, this hook queries the
+    top-K relevant prior reflection summaries, then renders the bounded
+    lesson block that can be injected into the agent prompt.
+
+    Retrieval failures degrade to an empty block.  The runner should not
+    lose a pickup just because the semantic lesson layer is temporarily
+    unavailable.
+    """
+
+    query_text = _reflection_query_text(
+        ticket_key=ticket_key,
+        ticket_summary=ticket_summary,
+        ticket_description=ticket_description,
+    )
+    try:
+        hits = await retrieve_reflection_summaries(
+            tenant_id=tenant_id,
+            query_text=query_text,
+            embedder=embedder,
+            store=store,
+            top_k=top_k,
+        )
+    except Exception as exc:  # pragma: no cover - defensive degradation path
+        log.warning(
+            "reflection lesson retrieval unavailable: ticket=%s err=%s",
+            ticket_key,
+            exc,
+        )
+        return ""
+    return render_reflection_lesson_block(hits, max_chars=max_chars)
+
+
+def inject_reflection_lesson_block(prompt: str, lesson_block: str) -> str:
+    """Append a rendered reflection lesson block to an existing prompt."""
+
+    block = lesson_block.strip()
+    if not block:
+        return prompt
+    if not prompt:
+        return block
+    return f"{prompt.rstrip()}\n\n{block}"
+
+
+def render_reflection_lesson_block(
+    hits: Iterable[ReflectionSearchHit],
+    *,
+    max_chars: int = DEFAULT_REFLECTION_PROMPT_BUDGET,
+) -> str:
+    """Render retrieved reflection hits as a bounded pre-task lesson block."""
+
+    if max_chars < 1:
+        raise ValueError("max_chars must be positive")
+    batch = tuple(hits)
+    if not batch:
+        return ""
+
+    parts = [
+        REFLECTION_LESSON_PROMPT_HEADER,
+        "",
+        "Top relevant prior success/fail summaries for this pickup:",
+        "",
+    ]
+    for index, hit in enumerate(batch, start=1):
+        bits = [
+            f"{index}. {hit.ticket_key or '<unknown ticket>'}",
+            f"outcome={hit.outcome or '<unknown>'}",
+            f"score={hit.score:.3f}",
+        ]
+        if hit.failure_type:
+            bits.append(f"failure_type={hit.failure_type}")
+        summary = " ".join(hit.summary.split())
+        parts.append(f"{' | '.join(bits)}\n   Lesson: {summary}")
+
+    return _truncate_prompt_block("\n".join(parts).rstrip(), max_chars=max_chars)
+
+
 def _chunk_id(summary: ReflectionSummary) -> str:
     digest = hashlib.sha256(summary.text_for_embedding().encode("utf-8")).hexdigest()
     return (
@@ -264,6 +359,33 @@ def _search_hit_from_vector(hit: VectorHit) -> ReflectionSearchHit:
     )
 
 
+def _reflection_query_text(
+    *,
+    ticket_key: str,
+    ticket_summary: str,
+    ticket_description: str,
+) -> str:
+    bits = [
+        f"ticket: {_required('ticket_key', ticket_key)}",
+    ]
+    summary = ticket_summary.strip()
+    if summary:
+        bits.append(f"summary: {summary}")
+    description = ticket_description.strip()
+    if description:
+        bits.append(f"description: {description}")
+    return "\n".join(bits)
+
+
+def _truncate_prompt_block(text: str, *, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    marker = "\n...[truncated]"
+    if max_chars <= len(marker):
+        return text[:max_chars]
+    return text[: max_chars - len(marker)].rstrip() + marker
+
+
 def _required(name: str, value: str) -> str:
     clean = value.strip()
     if not clean:
@@ -281,16 +403,21 @@ def _truncate_utf8(text: str, max_bytes: int) -> str:
 __all__ = [
     "DEFAULT_REFLECTION_INJECTION_MAX_BYTES",
     "DEFAULT_REFLECTION_TOP_K",
+    "DEFAULT_REFLECTION_PROMPT_BUDGET",
     "REFLECTION_OUTCOME_FAILURE",
     "REFLECTION_OUTCOME_SUCCESS",
+    "REFLECTION_LESSON_PROMPT_HEADER",
     "REFLECTION_RAG_KIND",
     "REFLECTION_SOURCE_PREFIX",
     "ReflectionOutcome",
     "ReflectionSearchHit",
     "ReflectionSummary",
     "VALID_REFLECTION_OUTCOMES",
+    "build_reflection_lesson_injection",
+    "inject_reflection_lesson_block",
     "pgvector_reflection_store",
     "render_reflection_context",
+    "render_reflection_lesson_block",
     "retrieve_reflection_summaries",
     "vectorize_reflection_summaries",
 ]
