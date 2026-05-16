@@ -7,11 +7,17 @@ import pytest
 from backend.agents.nodes import (
     _rule_based_route,
     _rule_based_tool_calls,
+    context_compression_gate,
+    conversation_node,
     error_check_node,
+    external_agent_node_factory,
+    orchestrator_node,
+    summarizer_node,
     tool_executor_node,
     _should_retry,
 )
 from backend.agents.state import GraphState, ToolCall, ToolResult
+from backend.llm_adapter import HumanMessage
 from backend.rtk_fallback import compile_failure_signature
 
 
@@ -530,3 +536,259 @@ class TestSkillOnDemandReActLoop:
         # The second "[LOAD_SKILL: ghost]" is filtered by the dedup set so
         # we break immediately after the miss — only 2 LLM calls total.
         assert len(fake_llm.calls) == 2
+
+
+# ─── OP-1291: public node input-validation audit ───
+
+
+class TestPublicNodeInputValidation:
+    """Stress direct public node calls with invalid and boundary inputs.
+
+    The nodes currently rely on ``GraphState`` / Python attribute access for
+    input validation, so invalid direct calls should fail loudly while empty or
+    large valid state values should remain bounded and deterministic.
+    """
+
+    def test_orchestrator_rejects_none_input(self):
+        with pytest.raises(AttributeError):
+            orchestrator_node(None)  # type: ignore[arg-type]
+
+    def test_orchestrator_rejects_wrong_type_input(self):
+        with pytest.raises(AttributeError):
+            orchestrator_node({"user_command": "run tests"})  # type: ignore[arg-type]
+
+    def test_orchestrator_handles_empty_command(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: None)
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+
+        update = orchestrator_node(GraphState(user_command=""))
+
+        assert update["routed_to"] == "general"
+        assert update["secondary_routes"] == []
+
+    def test_orchestrator_handles_very_large_command(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: None)
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+
+        update = orchestrator_node(GraphState(user_command="firmware " + ("x" * 100_000)))
+
+        assert update["routed_to"] == "firmware"
+
+    @pytest.mark.asyncio
+    async def test_tool_executor_rejects_none_input(self):
+        with pytest.raises(AttributeError):
+            await tool_executor_node(None)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_tool_executor_rejects_wrong_type_input(self):
+        with pytest.raises(AttributeError):
+            await tool_executor_node(["not", "state"])  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_tool_executor_handles_empty_tool_collection(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+        monkeypatch.setattr(_nodes, "set_active_workspace", lambda *a, **kw: None)
+
+        update = await tool_executor_node(GraphState(tool_calls=[]))
+
+        assert update["tool_results"] == []
+        assert update["tool_calls"] == []
+        assert update["messages"] == []
+
+    @pytest.mark.asyncio
+    async def test_tool_executor_handles_very_large_unknown_tool_collection(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+        monkeypatch.setattr(_nodes, "emit_tool_progress", lambda *a, **kw: None)
+        monkeypatch.setattr(_nodes, "set_active_workspace", lambda *a, **kw: None)
+
+        calls = [
+            ToolCall(tool_name=f"unknown_{i}", arguments={})
+            for i in range(1_000)
+        ]
+        update = await tool_executor_node(GraphState(tool_calls=calls))
+
+        assert len(update["tool_results"]) == 1_000
+        assert all(result.success is False for result in update["tool_results"])
+
+    def test_external_agent_factory_rejects_none_agent_id(self):
+        with pytest.raises(AttributeError):
+            external_agent_node_factory(  # type: ignore[arg-type]
+                None,
+                registry=object(),
+                tenant_id="tenant-a",
+            )
+
+    def test_external_agent_factory_rejects_empty_agent_id(self):
+        with pytest.raises(ValueError, match="agent_id is required"):
+            external_agent_node_factory(
+                "",
+                registry=object(),
+                tenant_id="tenant-a",
+            )
+
+    def test_external_agent_factory_rejects_wrong_type_tenant_id(self):
+        with pytest.raises(AttributeError):
+            external_agent_node_factory(  # type: ignore[arg-type]
+                "agent-a",
+                registry=object(),
+                tenant_id=None,
+            )
+
+    def test_external_agent_factory_accepts_very_large_agent_id(self):
+        node = external_agent_node_factory(
+            "agent-" + ("x" * 5_000),
+            registry=object(),
+            tenant_id="tenant-a",
+        )
+
+        assert callable(node)
+        assert node.__name__.startswith("external_agent_agent_")
+
+    @pytest.mark.asyncio
+    async def test_error_check_rejects_none_input(self):
+        with pytest.raises(AttributeError):
+            await error_check_node(None)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_error_check_rejects_wrong_type_input(self):
+        with pytest.raises(AttributeError):
+            await error_check_node("not-state")  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_error_check_handles_empty_tool_results(self):
+        update = await error_check_node(GraphState(tool_results=[]))
+
+        assert update == {
+            "last_error": "",
+            "last_verification_failure": "",
+            "rtk_bypass": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_error_check_truncates_very_large_failed_output(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+
+        update = await error_check_node(
+            GraphState(
+                tool_results=[
+                    ToolResult(
+                        tool_name="run_bash",
+                        output="[ERROR] " + ("x" * 50_000),
+                        success=False,
+                    ),
+                ],
+                retry_count=0,
+                max_retries=2,
+            )
+        )
+
+        assert update["retry_count"] == 1
+        assert len(update["last_error"]) < 300
+
+    @pytest.mark.asyncio
+    async def test_conversation_rejects_none_input(self):
+        with pytest.raises(AttributeError):
+            await conversation_node(None)  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_conversation_rejects_wrong_type_input(self):
+        with pytest.raises(AttributeError):
+            await conversation_node({"messages": []})  # type: ignore[arg-type]
+
+    @pytest.mark.asyncio
+    async def test_conversation_handles_empty_messages_offline(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: None)
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+
+        update = await conversation_node(GraphState(messages=[]))
+
+        assert update["answer"].startswith("[OFFLINE]")
+
+    @pytest.mark.asyncio
+    async def test_conversation_handles_very_large_message_offline(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: None)
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+
+        update = await conversation_node(
+            GraphState(messages=[HumanMessage(content="status " + ("x" * 100_000))])
+        )
+
+        assert update["answer"].startswith("[OFFLINE]")
+
+    def test_context_compression_gate_rejects_none_input(self):
+        with pytest.raises(AttributeError):
+            context_compression_gate(None)  # type: ignore[arg-type]
+
+    def test_context_compression_gate_rejects_wrong_type_input(self):
+        with pytest.raises(AttributeError):
+            context_compression_gate({"messages": []})  # type: ignore[arg-type]
+
+    def test_context_compression_gate_handles_empty_messages(self):
+        assert context_compression_gate(GraphState(messages=[])) == {}
+
+    def test_context_compression_gate_compresses_very_large_history(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: None)
+        monkeypatch.setattr(_nodes, "emit_pipeline_phase", lambda *a, **kw: None)
+
+        messages = [HumanMessage(content=f"msg-{i} " + ("x" * 20_000)) for i in range(8)]
+        update = context_compression_gate(GraphState(messages=messages, model_name="ollama:test"))
+
+        assert "messages" in update
+        assert update["messages"][-1].content.startswith("[L2 COMPRESSED HISTORY]")
+
+    def test_summarizer_rejects_none_input(self):
+        with pytest.raises(AttributeError):
+            summarizer_node(None)  # type: ignore[arg-type]
+
+    def test_summarizer_rejects_wrong_type_input(self):
+        with pytest.raises(AttributeError):
+            summarizer_node(("not", "state"))  # type: ignore[arg-type]
+
+    def test_summarizer_handles_empty_tool_results(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: None)
+        monkeypatch.setattr(_nodes, "emit_turn_tool_stats", lambda *a, **kw: None)
+
+        update = summarizer_node(GraphState(tool_results=[]))
+
+        assert update["answer"].startswith("[GENERAL AGENT] Tool execution complete.")
+
+    def test_summarizer_truncates_very_large_tool_result(self, monkeypatch):
+        from backend.agents import nodes as _nodes
+
+        monkeypatch.setattr(_nodes, "_get_llm", lambda **kw: None)
+        monkeypatch.setattr(_nodes, "emit_turn_tool_stats", lambda *a, **kw: None)
+
+        update = summarizer_node(
+            GraphState(
+                routed_to="validator",
+                tool_results=[
+                    ToolResult(
+                        tool_name="run_bash",
+                        output="x" * 50_000,
+                        success=True,
+                    )
+                ],
+            )
+        )
+
+        assert update["answer"].startswith("[VALIDATOR AGENT]")
+        assert len(update["answer"]) < 700
+        assert update["answer"].endswith("...\n")
