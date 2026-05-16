@@ -30,7 +30,14 @@ from __future__ import annotations
 
 # revision identifiers used by Alembic
 revision = "m_2026_05_16_3head"
-down_revision = ("0203", "0237", "m_audit_29_final")
+# OP-1189 (2026-05-16): drop transitively-reachable "0203" from the original
+# triple-parent. At the time this merge applies, alembic's head-set only
+# contains 0237 + m_audit_29_final — 0203 is absorbed through 0237's lineage
+# (0237 → ... → 0203), so listing it explicitly makes head_maintainer raise
+# KeyError when trying to remove it from the head-set. 0237 and
+# m_audit_29_final share 0234 as a common ancestor but neither descends from
+# the other, so BOTH must remain as parents to actually collapse the heads.
+down_revision = ("0237", "m_audit_29_final")
 branch_labels = None
 depends_on = None
 
