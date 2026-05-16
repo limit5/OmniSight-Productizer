@@ -1,0 +1,26 @@
+; OP-1136 / Sprint Boreas-C1 — Periodic fetch into the runner bare mirror.
+;
+; Oneshot service paired with runner-mirror-fetch.timer. Each fire:
+;   git -C ~/git-mirror/omnisight.git remote update --prune
+;
+; Idempotent + cheap when there's nothing to pull (network round-trip
+; only). Keep the timer interval short (30s default) so per-cycle
+; ephemeral clones (OP-1137) reflect develop tip quickly.
+
+[Unit]
+Description=Refresh the runner bare mirror at ~/git-mirror/omnisight.git
+Documentation=https://soraapp.atlassian.net/browse/OP-1136
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=USERNAME
+WorkingDirectory=/home/USER_HOME
+Environment=GIT_SSH_COMMAND=ssh -i /home/USER_HOME/.config/omnisight/gerrit-claude-bot-ed25519 -o IdentitiesOnly=yes -o StrictHostKeyChecking=no
+ExecStart=/usr/bin/git -C /home/USER_HOME/git-mirror/omnisight.git remote update --prune
+; Best-effort: a fetch failure (transient SSH / Gerrit hiccup) should
+; not block subsequent fires. The timer keeps retrying.
+SuccessExitStatus=0 1
+; Tight timeout — if fetch hangs >2 min something is wrong, give up.
+TimeoutStartSec=120
