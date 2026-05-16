@@ -63,6 +63,9 @@ def _install_fakes(monkeypatch: pytest.MonkeyPatch, drift_payloads):
     payload_iter = iter(drift_payloads)
 
     monkeypatch.setattr(hook, "create_engine", lambda *a, **kw: engine)
+    monkeypatch.setattr(
+        hook, "verify_alembic_version_table_integrity", lambda db_url: None,
+    )
     monkeypatch.setattr(hook, "_check_drift", lambda db_url: next(payload_iter))
     monkeypatch.setattr(
         hook, "_upgrade_head", lambda db_url: upgrades.append(db_url),
@@ -182,6 +185,7 @@ class _SharedLockEngine:
 def _lock_holder(ready, release, lock, out) -> None:  # noqa: ANN001
     owned = mp.Value("b", False)
     hook.create_engine = lambda *a, **kw: _SharedLockEngine(lock, owned)
+    hook.verify_alembic_version_table_integrity = lambda db_url: None
     hook._check_drift = lambda db_url: {
         "reason": "heads_match",
         "drift_direction": "match",
@@ -215,6 +219,9 @@ def test_lock_acquire_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
             hook,
             "create_engine",
             lambda *a, **kw: _SharedLockEngine(lock, owned),
+        )
+        monkeypatch.setattr(
+            hook, "verify_alembic_version_table_integrity", lambda db_url: None,
         )
         monkeypatch.setattr(hook, "_check_drift", lambda db_url: {})
         monkeypatch.setattr(hook, "_upgrade_head", lambda db_url: None)

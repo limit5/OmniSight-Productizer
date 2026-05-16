@@ -82,6 +82,7 @@ declare -A GRACE_PERIODS=(
   [cloudflared]=15
 )
 DEFAULT_GRACE=10
+PG_WAL_SAFETY_TIMEOUT=25
 
 log() { printf '\033[36m[shutdown]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[shutdown]\033[0m %s\n' "$*" >&2; }
@@ -386,6 +387,8 @@ stop_compose_service() {
     return 0
   fi
 
+  wait_pg_wal_safe "$file" "$cc" "$service" "$@" || return 1
+
   log "stopping $service (grace=${grace}s) …"
   if (( DRY_RUN )); then
     run docker kill --signal=TERM "$container"
@@ -408,6 +411,35 @@ stop_compose_service() {
 
   err "$service did not stop after SIGKILL"
   return 1
+}
+
+wait_pg_wal_safe() {
+  local file="$1" cc="$2" service="$3"
+  shift 3
+  if [[ "$service" != "postgres" && "$service" != "pg-primary" ]]; then
+    return 0
+  fi
+
+  local started now
+  started=$(date +%s)
+  log "waiting for $service WAL checkpoint and readiness (timeout=${PG_WAL_SAFETY_TIMEOUT}s) …"
+  if ! run $cc -f "$file" "$@" exec -T "$service" psql -c "CHECKPOINT;"; then
+    err "$service CHECKPOINT failed before shutdown"
+    return 1
+  fi
+
+  while true; do
+    if run $cc -f "$file" "$@" exec -T "$service" pg_isready >/dev/null 2>&1; then
+      log "$service pg_isready OK after checkpoint"
+      return 0
+    fi
+    now=$(date +%s)
+    if (( now - started >= PG_WAL_SAFETY_TIMEOUT )); then
+      err "$service pg_isready did not become OK within ${PG_WAL_SAFETY_TIMEOUT}s"
+      return 1
+    fi
+    sleep 1
+  done
 }
 
 verify_compose_down() {

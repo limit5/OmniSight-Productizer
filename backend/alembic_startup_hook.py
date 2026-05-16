@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,10 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.pool import NullPool
 
 from backend import alembic_drift_gate
+from backend.pg_integrity_probe import (
+    AlembicVersionIntegrityError,
+    verify_alembic_version_table_integrity,
+)
 
 SCRIPT_DIR = Path(__file__).resolve().parent / "alembic"
 MANIFEST_HEAD_KEY = "alembic_head_in_image"
@@ -69,6 +74,10 @@ def maybe_run_startup_upgrade(
     """Run ``alembic upgrade head`` on forward drift, then return DB head."""
 
     image_head = _read_image_head(Path(image_head_path))
+    try:
+        verify_alembic_version_table_integrity(db_url)
+    except AlembicVersionIntegrityError as exc:
+        _exit_78_on_integrity_failure(exc)
     engine = create_engine(db_url, poolclass=NullPool)
     with engine.connect() as conn:
         _acquire_advisory_lock(conn, lock_timeout_s=lock_timeout_s)
@@ -150,6 +159,12 @@ def _check_drift(db_url: str) -> dict[str, Any]:
     payload = dict(payload)
     payload["exit_code"] = code
     return payload
+
+
+def _exit_78_on_integrity_failure(exc: AlembicVersionIntegrityError) -> None:
+    sys.stderr.write(json.dumps(exc.to_log_payload(), sort_keys=True) + "\n")
+    sys.stderr.flush()
+    raise SystemExit(78) from exc
 
 
 def _upgrade_head(db_url: str) -> None:
