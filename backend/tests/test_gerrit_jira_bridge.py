@@ -11,12 +11,36 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from backend.agents import gerrit_jira_bridge as bridge
 from backend.agents import jira_dispatch
+
+SAFE_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",)),
+    max_size=2048,
+)
+JSON_VALUES = st.recursive(
+    st.none()
+    | st.booleans()
+    | st.integers(min_value=-(10**9), max_value=10**9)
+    | st.floats(allow_nan=False, allow_infinity=False, width=32)
+    | SAFE_TEXT,
+    lambda children: st.lists(children, max_size=8)
+    | st.dictionaries(SAFE_TEXT, children, max_size=8),
+    max_leaves=32,
+)
+OP_KEYS = st.from_regex(r"OP-[1-9][0-9]{0,5}", fullmatch=True)
+CHANGE_NUMBERS = st.from_regex(r"[1-9][0-9]{0,8}", fullmatch=True)
+UTC_DATETIMES = st.datetimes(
+    min_value=datetime(1970, 1, 1),
+    max_value=datetime(2100, 12, 31),
+    timezones=st.just(timezone.utc),
+)
 
 
 def _client() -> jira_dispatch.DispatchClient:
@@ -85,6 +109,169 @@ def _merged_event(subject: str = "[OP-19] implement bridge", change_id: str = "I
             "number": 19,
         },
     })
+
+
+@settings(max_examples=75, deadline=None)
+@given(payload=JSON_VALUES)
+def test_parse_stream_line_property_json_objects_round_trip(payload: Any) -> None:
+    line = json.dumps(payload)
+    parsed = bridge.parse_stream_line(line)
+
+    assert parsed == bridge.parse_stream_line(line)
+    if isinstance(payload, dict):
+        assert parsed == payload
+        assert isinstance(parsed, dict)
+    else:
+        assert parsed is None
+
+
+@settings(max_examples=75, deadline=None)
+@given(line=SAFE_TEXT)
+def test_parse_stream_line_property_never_returns_non_dict(line: str) -> None:
+    parsed = bridge.parse_stream_line(line)
+
+    assert parsed is None or isinstance(parsed, dict)
+
+
+@settings(max_examples=75, deadline=None)
+@given(keys=st.lists(OP_KEYS, max_size=25))
+def test_extract_ticket_keys_property_bracketed_subject_dedupes_in_order(
+    keys: list[str],
+) -> None:
+    subject = " ".join(
+        f"[{key}/backend] title" if idx % 2 else f"[{key}] title"
+        for idx, key in enumerate(keys)
+    )
+
+    assert bridge.extract_ticket_keys_from_subject(subject) == list(dict.fromkeys(keys))
+
+
+@settings(max_examples=75, deadline=None)
+@given(keys=st.lists(OP_KEYS, max_size=25))
+def test_extract_ticket_keys_property_plain_subject_dedupes_in_order(
+    keys: list[str],
+) -> None:
+    subject = " ".join(f"fix {key}" for key in keys)
+
+    assert bridge.extract_ticket_keys_from_subject(subject) == list(dict.fromkeys(keys))
+
+
+@settings(max_examples=75, deadline=None)
+@given(numbers=st.lists(CHANGE_NUMBERS, max_size=25))
+def test_extract_change_numbers_property_runner_comments_only_dedupe(
+    numbers: list[str],
+) -> None:
+    comments = []
+    for number in numbers:
+        url = f"https://sora.services:29420/c/omnisight/OmniSight-Productizer/+/{number}"
+        comments.append(_comment(f"ordinary comment {url}"))
+        comments.append(_comment(f"[runner-pushed-to-gerrit] Patchset on Gerrit: {url}"))
+
+    assert bridge.extract_change_numbers_from_comments(comments) == list(
+        dict.fromkeys(numbers)
+    )
+
+
+@settings(max_examples=75, deadline=None)
+@given(dt=UTC_DATETIMES)
+def test_parse_jira_datetime_property_returns_utc_datetime(dt: datetime) -> None:
+    parsed = bridge.parse_jira_datetime(dt.isoformat())
+
+    assert parsed == dt
+    assert parsed is not None
+    assert parsed.tzinfo == timezone.utc
+    assert bridge.parse_jira_datetime(dt.isoformat().replace("+00:00", "Z")) == dt
+
+
+@settings(max_examples=75, deadline=None)
+@given(value=st.integers(min_value=-10_000, max_value=10_000))
+def test_heartbeat_stale_after_seconds_property_clamps_integer_env(value: int) -> None:
+    assert bridge.heartbeat_stale_after_seconds(
+        {"OMNISIGHT_BRIDGE_STALE_AFTER_SEC": str(value)}
+    ) == max(1, value)
+
+
+@settings(max_examples=75, deadline=None)
+@given(value=st.integers(min_value=0, max_value=10_000))
+def test_archive_age_days_from_env_property_accepts_non_negative_integer(
+    value: int,
+) -> None:
+    assert bridge.archive_age_days_from_env(
+        {"OMNISIGHT_ARCHIVE_AGE_DAYS": str(value)}
+    ) == value
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    key=OP_KEYS,
+    insertions=st.integers(min_value=-1_000_000, max_value=1_000_000),
+    deletions=st.integers(min_value=-1_000_000, max_value=1_000_000),
+    patchset_number=st.integers(min_value=-1_000, max_value=1_000),
+    approvals=st.lists(st.integers(min_value=-3, max_value=3), max_size=12),
+)
+def test_compute_ps_merged_metrics_property_preserves_schema_and_counts(
+    key: str,
+    insertions: int,
+    deletions: int,
+    patchset_number: int,
+    approvals: list[int],
+) -> None:
+    event = {
+        "change": {
+            "id": "Iproperty",
+            "number": 123,
+            "subject": f"[{key}] property test",
+            "createdOn": 100,
+            "lastUpdated": 250,
+            "currentPatchSet": {
+                "number": patchset_number,
+                "sizeInsertions": insertions,
+                "sizeDeletions": deletions,
+                "approvals": [
+                    {"type": "Verified", "value": value}
+                    for value in approvals
+                ],
+            },
+        },
+    }
+
+    metrics = bridge.compute_ps_merged_metrics(event)
+
+    assert set(metrics) == {
+        "change_id",
+        "change_number",
+        "ticket",
+        "lifetime_min",
+        "patchset_count",
+        "rebase_count",
+        "rework_count",
+        "changed_files",
+        "final_diff_size",
+        "verified_minus_one_count",
+    }
+    assert metrics == bridge.compute_ps_merged_metrics(event)
+    assert metrics["ticket"] == key
+    assert metrics["lifetime_min"] == 2.5
+    assert metrics["patchset_count"] == patchset_number
+    assert metrics["final_diff_size"] == abs(insertions) + abs(deletions)
+    assert metrics["verified_minus_one_count"] == len(
+        [value for value in approvals if value <= -1]
+    )
+
+
+def test_public_helpers_handle_empty_none_and_large_edges() -> None:
+    large_text = "x" * 10_000
+
+    assert bridge.parse_stream_line("") is None
+    assert bridge.parse_stream_line(large_text) is None
+    assert bridge.parse_jira_datetime("") is None
+    assert bridge.parse_jira_datetime(None) is None  # type: ignore[arg-type]
+    assert bridge.extract_ticket_keys_from_subject("") == []
+    assert bridge.extract_ticket_keys_from_subject(large_text) == []
+    assert bridge.flatten_adf_text(None) == ""
+    assert bridge.extract_change_numbers_from_comments([]) == []
+    assert bridge.heartbeat_stale_after_seconds({}) == bridge.DEFAULT_BRIDGE_STALE_AFTER_SEC
+    assert bridge.archive_age_days_from_env({}) == bridge.DEFAULT_ARCHIVE_AGE_DAYS
 
 
 def test_parse_stream_line_handles_malformed_and_non_object() -> None:
