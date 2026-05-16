@@ -173,6 +173,8 @@ Milestone gates at **Lv 10 / 30 / 50 / 80**. At each gate, operator picks a tale
 
 Lv 80 capstone is a single signature ability per Guild — the deliberate end-state of long-running agents (e.g. `code-archaeologist` reads 1M-context legacy code and proposes surgical refactor in ≤ 3 commit).
 
+**Signature-ability runtime surface (W14.6 — OP-190).** The capstone is not a passive trophy: each Guild capstone in `config/talent_tree.yaml` carries three runtime fields beyond the descriptive `ability_id` / `display_name` / `summary` triple — `signature_label` (routing keyword consumed by `routing_policy.capstone_routing_weight_multiplier`, **+50%** on match, strictly larger than the per-talent +20% so the single Lv-80 ability outweighs any single fork; shares the W14 talent-routing feature flag so one env var rolls out both effects), `signature_prompt` (multi-line block injected at task start by `prompt_builder.enrich_system_prompt_with_capstone` under a dedicated `Signature ability (per RPG.W14 capstone):` header — distinct from the per-talent `Talent reminders` header so operators reading the prompt log can tell at a glance whether the agent is executing a Lv-80 signature move), and an optional `commit_budget` (operator-facing advisory commit ceiling — the canonical backend `code_archaeologist` carries `commit_budget: 3` to encode the "≤ 3 commit" surgical-refactor discipline this paragraph names). The drift guard rejects a capstone block missing the required signature fields at boot.
+
 ### Party / Synergy system (W17)
 
 `agent_party` table holds 2-5 member rows per party. Cross-Guild composition triggers a synergy bonus from a fixed matrix:

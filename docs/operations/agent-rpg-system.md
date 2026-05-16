@@ -47,6 +47,7 @@ target ship).
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
 | W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
 | W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219; W14.1 OP-185) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1; W14.1 trigger fires `rpg.talent_fork_required` on level-up |
+| W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1; Lv-80 signature-ability surface live via OP-190 (W14.6 — `signature_label` / `signature_prompt` / `commit_budget` per Guild capstone) |
 | W17    | `backend/agents/party.py` + `backend/agents/synergy_registry.py` + `config/synergy_matrix.yaml` + alembic 0230 | **Live** (OP-220) — party CRUD + synergy lookup + pre-pickup gate live |
 
 If a runbook step below names a surface that is "Deferred" in this
@@ -1115,6 +1116,41 @@ Lv-80 unlocks a Guild capstone ability (e.g. backend Guild =
 proposal). The capstone lock is gated by **both** Lv 80 AND the Lv-80
 milestone talent being already locked — attempting `POST /agents/{id}/talents/capstone`
 before either gate is met returns `409 CapstoneRequiresLv80`.
+
+#### Signature-ability runtime surface (W14.6 — OP-190)
+
+The capstone is more than a trophy — once locked it carries a
+runtime "single signature ability" that materialises on every
+dispatch:
+
+* **`signature_label`** — routing keyword consumed by
+  `routing_policy.capstone_routing_weight_multiplier()`. A task whose
+  labels include the signature_label (case-insensitive) earns a +50%
+  weight bump for any capstone-locked candidate — strictly larger
+  than the per-talent +20% so the single Lv-80 ability outweighs any
+  single fork. Shares the `OMNISIGHT_MP_TALENT_ROUTING_ENABLED`
+  feature flag with the per-talent multiplier (one flag, both
+  effects).
+* **`signature_prompt`** — multi-line prompt block injected at task
+  start by `prompt_builder.enrich_system_prompt_with_capstone()` under
+  the dedicated header `Signature ability (per RPG.W14 capstone):`.
+  Distinct from the `Talent reminders` header so operators reading
+  the prompt log can tell at a glance whether the agent is executing
+  a Lv-80 signature move; the talent reminders + signature block
+  compose (talent ladder first, capstone payload below).
+* **`commit_budget`** — operator-facing advisory commit ceiling
+  appended to the signature block. The canonical backend example
+  (`code_archaeologist`) carries `commit_budget: 3` per ADR-0008
+  §"Talent tree (W14)" — "single signature ability surgical refactor
+  in ≤ 3 commit". Optional: omit the field to leave the budget
+  unasserted.
+
+Shipped today: `backend` Guild `code_archaeologist` (`legacy-audit`
+label, 3-commit budget) and `frontend` Guild
+`pixel_perfect_synthesizer` (`design-synthesis` label, 3-commit
+budget). New Guild capstones populate the same three fields in
+`config/talent_tree.yaml`; the drift guard rejects a capstone block
+that omits `signature_label` / `signature_prompt` at boot.
 
 ### Recovery
 

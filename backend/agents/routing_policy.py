@@ -832,6 +832,45 @@ def build_talent_routing_weight_resolver(
             return 1.0
 
     return _resolve
+def capstone_routing_weight_multiplier(
+    capstone_lock,
+    *,
+    task_labels: tuple[str, ...],
+    guild: str | None = None,
+) -> float:
+    """RPG.W14.6 -- routing weight multiplier for a Lv-80 capstone lock.
+
+    Returns ``1.0`` when :func:`is_talent_routing_enabled` is False
+    (shares the W14 feature flag — capstone routing rides the same
+    rollout switch as per-talent routing so operators flip one env
+    var, not two). ``capstone_lock`` may be ``None`` (agent below
+    Lv 80) — also returns ``1.0``. The actual multiplier
+    (:data:`~backend.agents.talent_tree.ROUTING_WEIGHT_CAPSTONE_MATCH`,
+    ``+50%``) is applied only when the capstone's ``signature_label``
+    matches one of ``task_labels``.
+
+    YAML / IO failures degrade silently to ``1.0`` (mirrors
+    :func:`talent_routing_weight_multiplier`).
+    """
+    if not is_talent_routing_enabled():
+        return 1.0
+    if capstone_lock is None:
+        return 1.0
+    try:
+        from backend.agents.talent_tree import (
+            RoutingWeightInjectionFailed,
+            capstone_routing_weight_multiplier as _impl,
+        )
+    except ImportError:  # pragma: no cover — defensive
+        return 1.0
+    try:
+        return _impl(
+            capstone_lock,
+            task_labels=tuple(task_labels),
+            guild=guild,
+        )
+    except RoutingWeightInjectionFailed:
+        return 1.0
 
 
 def choose_provider(task: TaskSpec) -> list[ProviderAdapter]:
