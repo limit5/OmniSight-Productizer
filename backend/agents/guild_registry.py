@@ -9,6 +9,30 @@ This module keeps the RPG-side registry deliberately small: immutable
 metadata for every Guild plus a conservative ``agent_class`` -> Guild
 eligibility table that later routing, character-card, and party code can
 read without copying BP.B values.
+
+Public surface
+--------------
+* :class:`GuildDefinition`, :data:`GUILD_DEFINITIONS`, :data:`GUILDS`,
+  :func:`get_guild_definition`, :func:`list_guild_definitions` --
+  immutable per-Guild RPG metadata keyed off the BP.B enum.
+* :class:`GuildModelPreference`, :func:`model_preference_for_guild`,
+  :func:`list_guild_model_preferences` -- RPG-facing view of BP.F's
+  per-Guild model mapping, validated against the MP routing provider
+  matrix in :mod:`backend.agents.routing_policy`.
+* :data:`AGENT_CLASS_GUILD_MATRIX`,
+  :func:`eligible_guilds_for_agent_class`,
+  :func:`agent_class_supports_guild`,
+  :func:`list_agent_class_guild_mappings` -- the conservative
+  ``agent_class`` -> Guild eligibility table.
+* :data:`SECONDARY_GUILD_UNLOCK_LEVEL`,
+  :class:`SecondaryGuildChoice`,
+  :func:`secondary_guilds_for_agent_class`,
+  :func:`choose_secondary_guild` -- W18 secondary-Guild (multi-class)
+  selection gated at Lv 50.
+
+All registries are exposed as ``MappingProxyType`` views so callers
+cannot mutate them, and the module asserts its registry-complete and
+matrix-shape invariants at import time.
 """
 
 from __future__ import annotations
@@ -25,7 +49,14 @@ SECONDARY_GUILD_UNLOCK_LEVEL = 50
 
 @dataclass(frozen=True)
 class GuildDefinition:
-    """RPG-facing metadata for one canonical Guild."""
+    """RPG-facing metadata for one canonical Guild.
+
+    Attributes:
+        guild: Canonical Guild enum member owned by
+            :mod:`backend.sandbox_tier` (BP.B).
+        display_name: Short title-case label suitable for UI/API output.
+        summary: One-sentence description of the Guild's domain of work.
+    """
 
     guild: Guild
     display_name: str
@@ -34,7 +65,22 @@ class GuildDefinition:
 
 @dataclass(frozen=True)
 class SecondaryGuildChoice:
-    """Validated Lv 50 secondary-Guild selection for one agent class."""
+    """Validated Lv 50 secondary-Guild selection for one agent class.
+
+    Returned by :func:`choose_secondary_guild` once the ``agent_class``,
+    ``primary_guild``, ``secondary_guild`` and ``level`` inputs have all
+    been cross-checked against :data:`AGENT_CLASS_GUILD_MATRIX` and the
+    :data:`SECONDARY_GUILD_UNLOCK_LEVEL` gate.
+
+    Attributes:
+        agent_class: Whitespace-stripped agent class slug.
+        primary_guild: Eligible primary Guild for that agent class.
+        secondary_guild: Newly chosen secondary Guild; distinct from
+            ``primary_guild`` and present in the agent class eligibility
+            set.
+        level: Caller-supplied agent level at the time of the choice
+            (always ``>= SECONDARY_GUILD_UNLOCK_LEVEL``).
+    """
 
     agent_class: str
     primary_guild: Guild
@@ -44,7 +90,21 @@ class SecondaryGuildChoice:
 
 @dataclass(frozen=True)
 class GuildModelPreference:
-    """RPG-facing import of BP.F's model mapping for one Guild."""
+    """RPG-facing import of BP.F's model mapping for one Guild.
+
+    Produced by :func:`model_preference_for_guild`. Carries the
+    ``model_spec`` verbatim plus the ADR-0007 vendor label so callers
+    can index into MP routing tables without re-parsing the raw spec.
+
+    Attributes:
+        guild: Guild this preference applies to.
+        model_spec: Verbatim ``provider:model`` string from BP.F's
+            ``configs/model_mapping.yaml``.
+        provider_family: ADR-0007 vendor label (e.g. ``anthropic``,
+            ``openai``) derived from ``model_spec`` and confirmed to be
+            in
+            :data:`backend.agents.routing_policy.ROUTING_POLICY_CONSUMED_PROVIDER_LABELS`.
+    """
 
     guild: Guild
     model_spec: str
@@ -249,19 +309,38 @@ class SecondaryGuildChoiceError(ValueError):
 
 
 def get_guild_definition(guild: Guild) -> GuildDefinition:
-    """Return RPG-facing metadata for ``guild``."""
+    """Return RPG-facing metadata for ``guild``.
+
+    Raises:
+        KeyError: ``guild`` is missing from :data:`GUILD_DEFINITIONS`.
+            The registry-complete invariant asserted at import time
+            means this only fires when a new ``Guild`` enum member is
+            added without a matching :class:`GuildDefinition`.
+    """
 
     return GUILD_DEFINITIONS[guild]
 
 
 def list_guild_definitions() -> tuple[GuildDefinition, ...]:
-    """Return all Guild definitions in canonical enum order."""
+    """Return all Guild definitions in canonical enum (BP.B) order.
+
+    Order matches ``Guild`` enum iteration so UI/API consumers can rely
+    on a stable presentation order without sorting client-side.
+    """
 
     return tuple(GUILD_DEFINITIONS[guild] for guild in Guild)
 
 
 def eligible_guilds_for_agent_class(agent_class: str) -> FrozenSet[Guild]:
-    """Return the Guilds an ``agent_class`` may specialize into."""
+    """Return the Guilds an ``agent_class`` may specialize into.
+
+    Lookup is whitespace-tolerant: leading/trailing whitespace on
+    ``agent_class`` is stripped before matching the registry.
+
+    Raises:
+        UnknownAgentClassError: stripped ``agent_class`` is not a key in
+            :data:`AGENT_CLASS_GUILD_MATRIX`.
+    """
 
     key = agent_class.strip()
     try:
@@ -273,13 +352,31 @@ def eligible_guilds_for_agent_class(agent_class: str) -> FrozenSet[Guild]:
 
 
 def agent_class_supports_guild(agent_class: str, guild: Guild) -> bool:
-    """Whether ``agent_class`` may specialize into ``guild``."""
+    """Whether ``agent_class`` may specialize into ``guild``.
+
+    Raises:
+        UnknownAgentClassError: ``agent_class`` is not a key in
+            :data:`AGENT_CLASS_GUILD_MATRIX` (propagated from
+            :func:`eligible_guilds_for_agent_class`).
+    """
 
     return guild in eligible_guilds_for_agent_class(agent_class)
 
 
 def model_preference_for_guild(guild: Guild) -> GuildModelPreference:
-    """Return BP.F's model preference for ``guild`` using MP routing labels."""
+    """Return BP.F's model preference for ``guild`` using MP routing labels.
+
+    Reads the per-Guild ``model_spec`` from BP.F's routing matrix and
+    resolves its provider into the ADR-0007 vendor label, so the result
+    is directly usable as a key into MP routing tables.
+
+    Raises:
+        UnknownGuildModelMappingError: BP.F has no entry for ``guild``.
+        UnroutableGuildModelMappingError: BP.F's mapping for ``guild``
+            resolves to a provider that MP routing does not consume
+            (i.e. not in
+            :data:`backend.agents.routing_policy.ROUTING_POLICY_CONSUMED_PROVIDER_LABELS`).
+    """
 
     guild_specs, _ = routing_policy._load_model_routing_matrix()
     model_spec = guild_specs.get(guild.value)
@@ -310,7 +407,17 @@ def model_preference_for_guild(guild: Guild) -> GuildModelPreference:
 
 
 def list_guild_model_preferences() -> tuple[GuildModelPreference, ...]:
-    """Return BP.F model preferences for every Guild in canonical enum order."""
+    """Return BP.F model preferences for every Guild in canonical enum order.
+
+    Fail-fast over the entire BP.B Guild enum: surfaces any drift where
+    BP.F is missing a mapping or names an unroutable provider.
+
+    Raises:
+        UnknownGuildModelMappingError: BP.F is missing a mapping for any
+            Guild in the BP.B enum.
+        UnroutableGuildModelMappingError: BP.F names a provider for some
+            Guild that MP routing does not consume.
+    """
 
     return tuple(model_preference_for_guild(guild) for guild in Guild)
 
@@ -323,7 +430,27 @@ def secondary_guilds_for_agent_class(
     """Return Lv 50 secondary-Guild choices for an agent class.
 
     The primary Guild is excluded so W18 multi-classing always adds a second
-    specialization rather than re-selecting the current one.
+    specialization rather than re-selecting the current one. Returns an
+    empty set when ``level`` is below :data:`SECONDARY_GUILD_UNLOCK_LEVEL`
+    so callers can call unconditionally and treat "not unlocked yet" the
+    same as "unlocked but no other Guilds available".
+
+    Args:
+        agent_class: Agent class slug; whitespace is stripped.
+        primary_guild: Current primary Guild for the agent. Accepts
+            either a :class:`~backend.sandbox_tier.Guild` member or its
+            slug string.
+        level: Agent's current level. Must be a non-bool ``int >= 1``.
+
+    Raises:
+        TypeError: ``level`` is not an ``int`` (booleans are rejected),
+            or ``primary_guild`` is neither a ``Guild`` nor a string.
+        ValueError: ``level`` is ``< 1``, or ``primary_guild`` is an
+            empty/unknown slug.
+        UnknownAgentClassError: ``agent_class`` is not a key in
+            :data:`AGENT_CLASS_GUILD_MATRIX`.
+        SecondaryGuildChoiceError: ``primary_guild`` is not in the
+            eligible set for ``agent_class``.
     """
 
     _validate_level(level)
@@ -346,7 +473,33 @@ def choose_secondary_guild(
     secondary_guild: Guild | str,
     level: int,
 ) -> SecondaryGuildChoice:
-    """Validate and return an agent's Lv 50 secondary-Guild choice."""
+    """Validate and return an agent's Lv 50 secondary-Guild choice.
+
+    Cross-checks the level gate, both Guild coercions, and the
+    ``agent_class`` eligibility matrix before returning an immutable
+    :class:`SecondaryGuildChoice` record.
+
+    Args:
+        agent_class: Agent class slug; whitespace is stripped in the
+            returned record.
+        primary_guild: Current primary Guild. ``Guild`` member or slug.
+        secondary_guild: Newly chosen secondary Guild. ``Guild`` member
+            or slug.
+        level: Agent's current level. Must be a non-bool ``int >= 1``.
+
+    Raises:
+        TypeError: ``level`` is not an ``int``, or either Guild argument
+            is neither a ``Guild`` nor a string.
+        ValueError: ``level`` is ``< 1``, or a Guild argument is empty
+            or an unknown slug.
+        SecondaryGuildLockedError: ``level`` is below
+            :data:`SECONDARY_GUILD_UNLOCK_LEVEL`.
+        UnknownAgentClassError: ``agent_class`` is not a key in
+            :data:`AGENT_CLASS_GUILD_MATRIX`.
+        SecondaryGuildChoiceError: ``primary_guild`` is not eligible for
+            ``agent_class``, ``secondary_guild`` equals ``primary_guild``,
+            or ``secondary_guild`` is not in the eligible set.
+    """
 
     _validate_level(level)
     if level < SECONDARY_GUILD_UNLOCK_LEVEL:
@@ -384,7 +537,13 @@ def choose_secondary_guild(
 
 
 def list_agent_class_guild_mappings() -> tuple[tuple[str, tuple[Guild, ...]], ...]:
-    """Return stable ``agent_class`` -> Guild rows for UI/API consumers."""
+    """Return stable ``agent_class`` -> Guild rows for UI/API consumers.
+
+    Each row is ``(agent_class, tuple[Guild, ...])``. Both the outer
+    rows (by agent_class slug) and the inner Guilds (by Guild slug) are
+    sorted so the result is deterministic and independent of dict
+    insertion order.
+    """
 
     rows: list[tuple[str, tuple[Guild, ...]]] = []
     for agent_class in sorted(AGENT_CLASS_GUILD_MATRIX):
