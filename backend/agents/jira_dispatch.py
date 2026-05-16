@@ -1959,6 +1959,21 @@ def transition_back_to_todo(
         f"{base_key}-transition",
     )
 
+    # OP-1140: stoploss circuit-breaker recording — best-effort.
+    # A recorder fault (network blip, label-fetch 404 on a freshly-created
+    # ticket, ...) must NEVER prevent the §11-revert from completing; the
+    # operator still needs the ticket re-armed for triage even if the
+    # counter slips one tick.
+    try:
+        from backend.agents import runner_stoploss
+
+        labels_now = fetch_labels(client, key)
+        runner_stoploss.register_revert(client, key, labels_now)
+    except Exception as exc:  # noqa: BLE001 — best-effort wiring
+        log.warning(
+            "jira_dispatch.register_revert_failed key=%s err=%s", key, exc,
+        )
+
 
 def add_comment(client: DispatchClient, key: str, text: str, idem_key: str | None = None) -> None:
     idem_key = idem_key or f"comment-{key}-{uuid.uuid4().hex[:12]}"
@@ -2009,6 +2024,13 @@ def dependency_waiting_labels(labels: Iterable[str]) -> list[str]:
 
 
 # ── Description / Prerequisites parsing ───────────────────────────
+
+
+def fetch_labels(client: DispatchClient, key: str) -> list[str]:
+    """Return the current label list for ``key``. Stoploss callers need this
+    after a §11-revert to count recent revert labels (OP-1140)."""
+    issue = _request(client, "GET", f"/issue/{key}?fields=labels")
+    return list((issue.get("fields") or {}).get("labels") or [])
 
 
 def fetch_description(client: DispatchClient, key: str) -> str:
@@ -3379,6 +3401,19 @@ def pre_pickup_ok(
     if refused:
         _emit_runner_refusal_audit(snapshot.key, refusal_label)
         return False, f"runner_refusal_by_class:{refusal_label}"
+
+    # OP-1140: stoploss circuit-breaker — refuse any ticket whose §11-revert
+    # count has tripped the threshold. The label is added by
+    # :func:`backend.agents.runner_stoploss.register_revert` during the prior
+    # revert; an operator clears it by stripping the
+    # ``runner-stoploss:circuit-tripped-*`` label.
+    from backend.agents import runner_stoploss
+
+    stoploss_ok, stoploss_reason = runner_stoploss.pre_pickup_stoploss_ok(
+        list(snapshot.labels)
+    )
+    if not stoploss_ok:
+        return False, stoploss_reason
 
     bridge_reason = _bridge_health_pickup_reason(
         snapshot, enabled_capabilities, bridge_health_check
