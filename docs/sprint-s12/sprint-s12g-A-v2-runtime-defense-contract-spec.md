@@ -434,6 +434,8 @@ boundaries:
 
 ### Family ⑥ — Image-vs-DB alembic head drift  ⚠ HIGHEST PRIORITY
 
+**Contract spec doc** (filed 2026-05-16, OP-1153): [`docs/sprint-s12/2026-05-16-v2-family6-image-db-drift-contract.md`](2026-05-16-v2-family6-image-db-drift-contract.md) — full drift class definition (AHEAD / EQUAL / BEHIND), Option C asymmetric-upgrade rationale with A/B/D/E alternatives + rejections, always-on `alembic_drift` Prometheus gauge contract decoupled from `/readyz`, `/readyz` 503 `remediation` field schema (forward / backward / unknown variants), forward startup hook contract (advisory lock + idempotent upgrade + 60 s lock-timeout), rescue CLI scope hand-off (subcontracts 5-7 are `v2-⑥-RescueCLI`'s implementation surface), §3.0.6 seven-deterministic-subcontracts re-enumeration with stable indices for downstream AC citation, build-time multi-head fail-build invariant, cross-family delegation map (Family ⑧ does NOT detect drift; Family ⑤ audit is a redundant out-of-band detector), pre-rc2 vs post-rc2 phasing diagram. Companion ADR-0036 (`docs/architecture/ADR-0036-forward-only-deploy-invariant.md`) is the binding statement of the forward-only-deploy invariant — image is the advance vector, DB follows; rescue CLI is the ONLY supported downgrade path. Downstream Family ⑥ tickets cite that doc's §-anchors and subcontract indices in their AC.
+
 **Why highest priority**: this is the gap that produced today's outage; affects every prod restart; biggest design blind spot in S12 (S12 implicitly assumes drift is impossible).
 
 **Defense dimensions covered**: D1 (detection) ✓ partial → full; D2 (exception with remediation) → new; D3 (shutdown gate already via /readyz) ✓; D4 (recovery) → new; D5 (rescue) → new.
