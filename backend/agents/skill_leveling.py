@@ -10,6 +10,20 @@ callers reach for (``award_skill_xp``, ``compute_level``,
 and the Postgres store is wired into ``agent_skill_state`` (alembic
 0226).
 
+W12 sub-wave coverage in this module
+------------------------------------
+The W12 module shipped in one bundle under OP-217; this table tracks
+the attribution of each sub-wave back to its dedicated TODO row so a
+future reader of git blame can resolve a symbol to its W12.x ticket.
+
+- W12.2 (OP-171): :data:`LEVEL_THRESHOLDS` / :data:`LEVEL_5_CAP_THRESHOLD`
+  + :func:`compute_level` / :func:`next_level_threshold` -- the
+  ``25 / 100 / 250 / 600 / 1500`` task-success-token curve from
+  ADR-0008 §"Skill leveling (W12)". Lv 1 starts at 0 XP; Lv 2-5 are
+  the cumulative thresholds to *reach* that level; the Lv-5 cap at
+  1500 is the decay floor (not a level gate) so a Lv-5 row cannot
+  decay below ``LEVEL_5_CAP_THRESHOLD - 1`` and demote out of cap.
+
 Module-global state audit (per project SOP)
 -------------------------------------------
 This module defines constants, dataclasses, exception classes, and
@@ -52,8 +66,14 @@ LEVEL_OVERFLOW_GUARD_XP = 10 ** 9
 
 OutcomeStatus = str  # ``success`` | ``partial`` | ``fail``
 
-# Cumulative XP thresholds to *reach* a given level. ``LEVEL_THRESHOLDS[L]``
-# is the XP at which the agent transitions into Lv ``L``. Lv 1 starts at 0.
+# W12.2 (OP-171): cumulative XP thresholds to *reach* a given level
+# per ADR-0008 §"Skill leveling (W12)". ``LEVEL_THRESHOLDS[L]`` is the
+# task-success-token count at which the agent transitions into Lv ``L``;
+# Lv 1 starts at 0. The five curve points are ``25 / 100 / 250 / 600 /
+# 1500`` -- the first four are Lv 2-5 entry thresholds and the fifth
+# (:data:`LEVEL_5_CAP_THRESHOLD`) is the Lv-5 decay floor, not an entry
+# gate (a Lv-5 row's xp can grow past 1500 but :func:`apply_decay`
+# refuses to drop it below ``LEVEL_5_CAP_THRESHOLD - 1``).
 LEVEL_THRESHOLDS: Mapping[int, int] = MappingProxyType(
     {
         1: 0,
@@ -173,6 +193,12 @@ class SkillXpAward:
 def compute_level(xp: int) -> int:
     """Return the W12 skill level (1-5) for ``xp``.
 
+    Implements the W12.2 (OP-171) curve: walks :data:`LEVEL_THRESHOLDS`
+    in ascending order and returns the highest level whose threshold
+    has been met. With the canonical ``25 / 100 / 250 / 600`` entry
+    points this maps 0-24 → Lv 1, 25-99 → Lv 2, 100-249 → Lv 3,
+    250-599 → Lv 4, ≥600 → Lv 5.
+
     Defensive: XP above :data:`LEVEL_OVERFLOW_GUARD_XP` raises
     :class:`LevelComputeOverflow`. Below that the curve is capped at
     Lv 5 (per ADR-0008 §"Skill leveling (W12)").
@@ -195,7 +221,8 @@ def compute_level(xp: int) -> int:
 def next_level_threshold(level: int) -> int:
     """Return the XP threshold for the next level above ``level``.
 
-    For Lv 5 (the cap) returns the configurable
+    Reads the W12.2 (OP-171) curve in :data:`LEVEL_THRESHOLDS`. For
+    Lv 5 (the cap) returns the configurable
     :data:`LEVEL_5_CAP_THRESHOLD` value; this is what
     :func:`_decay_xp_floor` uses to clamp decay against demotion at
     the cap.
