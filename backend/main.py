@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 import hashlib
 from html.parser import HTMLParser
 import json
+import os
 import re
 import secrets
 import sys
@@ -244,6 +245,22 @@ async def lifespan(app: FastAPI):
                 "[K6] Legacy bearer env migrated to api_keys row %s. "
                 "Create per-service keys and remove OMNISIGHT_DECISION_BEARER.",
                 legacy_key.id,
+            )
+        # FX2.D4.4 (OP-237, 2026-05-16): even when the migrate helper
+        # short-circuits because a prior boot already wrote the row,
+        # surface a clear deprecation banner every time the env var is
+        # still present — otherwise the migration message is shown once
+        # and the operator never sees that the var is sunset-tracked.
+        # Removal target: next major. Until then the legacy fallback in
+        # auth.py / auth_baseline.py / routers/{decisions,audit,profile}.py
+        # continues to honour the env value.
+        elif (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip():
+            _log.warning(
+                "[DEPRECATION] OMNISIGHT_DECISION_BEARER is set but already "
+                "migrated to api_keys (K6). This env var is scheduled for "
+                "removal in the next major release — create per-service "
+                "keys via Admin UI > API Keys and unset the env var. See "
+                "docs/ops/security_baseline.md §3."
             )
         # Phase 5-5 (#multi-account-forge): one-shot move of legacy
         # ``Settings.{github,gitlab}_token{,_map}`` / ``gerrit_instances``

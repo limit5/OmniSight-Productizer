@@ -346,6 +346,14 @@ async def _has_valid_bearer_token(request: Request) -> bool:
     # Legacy fallback: OMNISIGHT_DECISION_BEARER env (pre-K6 single
     # shared secret). Mirror backend.auth._legacy_bearer_matches so
     # baseline acceptance matches what current_user would accept.
+    #
+    # FX2.D4.4 (OP-237, 2026-05-16): this branch is on the sunset
+    # path. Removal targeted at next major; lifespan
+    # ``api_keys.migrate_legacy_bearer`` writes a hashed
+    # ``ak-legacy-<sha[:12]>`` api_keys row at boot so the deployment
+    # can drop the env once Admin-UI-created per-service keys take
+    # over. Keep the fallback for the deprecation window so a single
+    # service-to-service script doesn't 401 mid-migration.
     import secrets as _secrets
     expected = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if expected and _secrets.compare_digest(raw, expected):

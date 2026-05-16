@@ -64,6 +64,12 @@ MODE 同时控制系统并行执行 agent 的数量。pill 旁会显示
 此控制对所有能连到后端的网络地址开放 — 单人本地部署 OK，
 多人共用不建议。
 
+> **弃用（FX2.D4.4 / OP-237, 2026-05-16）**：
+> `OMNISIGHT_DECISION_BEARER` 将在下一个主版本移除。请在
+> **Admin UI → API Keys** 内签发 per-service 的 `omni_*` bearer
+> (K6 方案)，然后取消环境变量。启动时环境变量值自动迁移到
+> `api_keys` 行，迁移期间已有调用方不会被 401。
+
 ## 内部实现
 
 - 前端：`components/omnisight/mode-selector.tsx` — 分段 pill + SSE

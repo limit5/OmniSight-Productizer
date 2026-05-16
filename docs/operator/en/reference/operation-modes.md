@@ -72,6 +72,14 @@ takes the token from local storage). Otherwise the control is open to
 anyone with network access — acceptable for a single-user local
 deployment, not for shared instances.
 
+> **Deprecation (FX2.D4.4 / OP-237, 2026-05-16)**:
+> `OMNISIGHT_DECISION_BEARER` is on the sunset path and will be
+> removed in the next major release. Issue per-service tokens via
+> **Admin UI → API Keys** (K6 `omni_*` bearers) and unset the env var
+> once they're in place. The legacy env value is auto-migrated to a
+> hashed `api_keys` row on first boot, so existing callers don't 401
+> mid-migration.
+
 ## Under the hood
 
 - Frontend: `components/omnisight/mode-selector.tsx` — the segmented

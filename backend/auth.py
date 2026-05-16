@@ -5,7 +5,9 @@ Three modes (chosen by env `OMNISIGHT_AUTH_MODE`):
   open     (default)  no auth required; every request is treated as
                        admin. Preserves the pre-Phase-54 single-user
                        dev flow. Bearer token (legacy
-                       OMNISIGHT_DECISION_BEARER) still honoured.
+                       OMNISIGHT_DECISION_BEARER — DEPRECATED, sunset
+                       targeted for next major per FX2.D4.4 / OP-237;
+                       migrate to K6 api_keys rows) still honoured.
   session              cookie-based session required for mutators;
                        reads remain open. Bearer token still works
                        as a service-to-service backdoor.
@@ -1762,7 +1764,12 @@ def _extract_bearer(req: Request) -> str:
 async def _validate_api_key(req: Request) -> "ApiKey | None":  # noqa: F821
     """Check if the request carries a valid per-key bearer token (K6).
     Falls back to legacy OMNISIGHT_DECISION_BEARER env for backwards compat
-    during migration window."""
+    during migration window.
+
+    FX2.D4.4 (OP-237, 2026-05-16): the env-var fallback below is on
+    the sunset path — removal targeted at next major. Until then we
+    keep honouring it AND emit a per-request deprecation log so any
+    caller still relying on it is visible in audit triage."""
     raw = _extract_bearer(req)
     if not raw:
         return None
@@ -1774,8 +1781,10 @@ async def _validate_api_key(req: Request) -> "ApiKey | None":  # noqa: F821
     expected = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if expected and secrets.compare_digest(raw, expected):
         logger.warning(
-            "[AUTH] Request authenticated via legacy OMNISIGHT_DECISION_BEARER env. "
-            "Migrate to per-key API tokens via Admin UI."
+            "[AUTH][DEPRECATION] Request authenticated via legacy "
+            "OMNISIGHT_DECISION_BEARER env (sunset target: next major, "
+            "FX2.D4.4 / OP-237). Migrate to per-key API tokens via "
+            "Admin UI > API Keys."
         )
         return None  # signal to caller: legacy match
     return None
@@ -1793,7 +1802,14 @@ _ANON_ADMIN = User(id="anonymous", email="anonymous@local", name="(anonymous)",
 
 
 def _legacy_bearer_matches(req: Request) -> bool:
-    """Backwards-compat check for the old single-env bearer."""
+    """Backwards-compat check for the old single-env bearer.
+
+    DEPRECATED — FX2.D4.4 / OP-237 (2026-05-16) puts this path on the
+    sunset list. Removal targeted at next major; until then the
+    function stays so existing deployments and the K6 migration
+    handshake (boot once with the env set, let
+    ``api_keys.migrate_legacy_bearer`` write the row, then drop the
+    env) continue to work."""
     expected = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if not expected:
         return False

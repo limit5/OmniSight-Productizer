@@ -14,6 +14,11 @@ Orchestrator AI panel の log 流れ (REPORTER VORTEX) と backend stderr を確
   フロントエンド保存の token が誤っているか欠落。
 - **対処**: Settings → provider タブで bearer を再入力、または単機
   ローカル運用なら `.env` の `OMNISIGHT_DECISION_BEARER` を解除。
+- **注 (FX2.D4.4 / OP-237, 2026-05-16)**: `OMNISIGHT_DECISION_BEARER`
+  は **非推奨**、次のメジャーで削除予定。Admin UI → API Keys から
+  per-service の `omni_*` bearer を発行する K6 方式に移行してください。
+  起動時に `api_keys` 行へ自動移行されるため、env var を外しても
+  既存サービスは継続動作します。
 
 ### `[RATE LIMITED] ...`
 スライディングウィンドウ制限発動 (デフォルト クライアント IP あたり

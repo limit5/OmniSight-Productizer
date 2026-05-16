@@ -50,7 +50,13 @@ def _require_audit_token(authorization: str | None = Header(default=None)) -> No
     configured (per-key api_keys table or legacy env) we require it.
     The actual validation happens in current_user(); this gate only
     checks that a bearer is present when the legacy env is set (for
-    backwards compat). Per-key callers are validated by current_user."""
+    backwards compat). Per-key callers are validated by current_user.
+
+    FX2.D4.4 (OP-237, 2026-05-16): the env-var probe below is on the
+    sunset path — removal targeted at next major, per AS.0.4 Track B.
+    Once the K6 ``api_keys`` migration is fully adopted (and AS.6 ports
+    this router to ``Depends(_au.require_api_key)``) the env check
+    here disappears entirely."""
     expected = os.environ.get("OMNISIGHT_DECISION_BEARER", "").strip()
     if not expected:
         return

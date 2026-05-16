@@ -286,6 +286,16 @@ async def migrate_legacy_bearer() -> ApiKey | None:
     preserved). The RETURNING tells us whether we inserted (row) or
     hit the conflict (None) — on conflict we skip the log line so
     only one worker's startup surfaces the "migrated" warning.
+
+    FX2.D4.4 (OP-237, 2026-05-16): this helper is the migration path
+    for the SUNSET ``OMNISIGHT_DECISION_BEARER`` env var. Removal of
+    the env-var fallback is targeted at the next major release; this
+    helper stays in tree for the deprecation window so existing
+    deployments boot once with the env var set, get their row, and
+    then can drop the env var.  After the contract phase
+    (per ``docs/security/as_0_4_credential_refactor_migration_plan.md``
+    Track B) both this helper and the inline router-level fallbacks
+    can be deleted together.
     """
     legacy = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if not legacy:
