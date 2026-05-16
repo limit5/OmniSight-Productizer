@@ -62,6 +62,7 @@ from backend.agents import (
     outcomes_grader,
     jira_dispatch,
     orphan_salvage,
+    runner_comment_dedupe,
     runner_metrics_recorder,
     runner_failure_classifier,
     runner_progress,
@@ -101,6 +102,8 @@ OPS_ONLY_DISABLED = (
 RUNNER_BRANCH_SWEEP_DISABLED = (
     os.environ.get("OMNISIGHT_RUNNER_BRANCH_SWEEP_DISABLED", "0").strip() == "1"
 )
+PRE_PICKUP_CAP_GATE_ENV = "OMNISIGHT_PRE_PICKUP_CAP_GATE"
+PRE_PICKUP_CAP_BLOCKED_TAG = "[runner-capability-pre-pickup-blocked]"
 
 # AUDIT-29b-6 (OP-1024) — the lesson-surface meta-mechanism. ``_build_prompt``
 # injects the top-N most relevant prior lessons (``cognee_recall`` flag) and the
@@ -478,6 +481,16 @@ def _check_pre_pickup_candidate(
     description = jira_dispatch.fetch_description(client, snapshot.key)
     ok, reason = jira_dispatch.file_mutex_check(snapshot, description=description)
     if ok:
+        ok, reason = _pre_pickup_capability_ok(
+            client, snapshot, _load_capability_matrix()
+        )
+        if not ok:
+            if stats is not None:
+                stats["other_blocked"] = stats.get("other_blocked", 0) + 1
+            _post_pre_pickup_capability_block(
+                client, snapshot, reason or "capability-mismatch"
+            )
+            return False
         if not DRY_RUN:
             jira_dispatch.remove_label(
                 client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL
@@ -532,6 +545,115 @@ def _resolve_runner_capabilities(
             ticket_type, declared_areas, tier, labels=labels,
         )
     return matrix.resolve(ticket_type, "<no-area>", tier, labels=labels)
+
+
+def _pre_pickup_cap_gate_enabled() -> bool:
+    return os.environ.get(PRE_PICKUP_CAP_GATE_ENV, "on").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+def _required_capabilities_for(snapshot: scheduler.TicketSnapshot) -> frozenset[str]:
+    """Infer the minimum runner capabilities needed before CLI pickup."""
+    labels = {label.strip().lower() for label in getattr(snapshot, "labels", ())}
+    required = {"jira_update"}
+    if labels & {"type:feature", "type:bug", "type:docs"}:
+        required.add("code_edit")
+    if "type:meta" not in labels and "runner:no-commits-expected" not in labels:
+        required.add("gerrit_push")
+    return frozenset(required)
+
+
+def _capability_context_for_snapshot(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+) -> tuple[str, list[str], str, list[str]]:
+    issue = jira_dispatch._request(
+        client, "GET", f"/issue/{snapshot.key}?fields=labels,issuetype",
+    )
+    fields = issue.get("fields") or {}
+    labels = list(fields.get("labels") or getattr(snapshot, "labels", ()))
+    issuetype_raw = fields.get("issuetype") or {}
+    ticket_type = (
+        issuetype_raw.get("name", "Story")
+        if isinstance(issuetype_raw, dict)
+        else "Story"
+    )
+    declared_areas = sorted(
+        label.split(":", 1)[1] for label in labels if label.startswith("area:")
+    )
+    tier = next(
+        (label.split(":", 1)[1] for label in labels if label.startswith("tier:")),
+        "M",
+    )
+    return ticket_type, declared_areas, tier, labels
+
+
+def _increment_pre_pickup_cap_gate_metric(
+    areas: list[str],
+    tier: str,
+    issuetype: str,
+) -> None:
+    try:
+        from backend import metrics as _metrics
+
+        for area in areas or ["<no-area>"]:
+            _metrics.runner_pre_pickup_cap_gate_blocked_total.labels(
+                area=area, tier=tier, issuetype=issuetype,
+            ).inc()
+    except Exception:  # noqa: BLE001 - observability must not block pickup
+        log.debug("pre-pickup capability gate metric publish failed", exc_info=True)
+
+
+def _pre_pickup_capability_ok(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    matrix: capability_matrix.CapabilityMatrix,
+) -> tuple[bool, str | None]:
+    """Return whether matrix capabilities satisfy pre-CLI required caps."""
+    if not _pre_pickup_cap_gate_enabled():
+        return True, None
+    ticket_type, declared_areas, tier, labels = _capability_context_for_snapshot(
+        client, snapshot,
+    )
+    if declared_areas:
+        resolved = matrix.resolve_for_areas(
+            ticket_type, declared_areas, tier, labels=labels, ticket_id=snapshot.key,
+        )
+    else:
+        resolved = matrix.resolve(
+            ticket_type, "<no-area>", tier, labels=labels, ticket_id=snapshot.key,
+        )
+    required = _required_capabilities_for(snapshot)
+    if required <= resolved:
+        return True, None
+    _increment_pre_pickup_cap_gate_metric(declared_areas, tier, ticket_type)
+    need = ",".join(sorted(required - resolved))
+    have = ",".join(sorted(resolved)) or "(none)"
+    return False, f"capability-mismatch: need={need} have={have}"
+
+
+def _post_pre_pickup_capability_block(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    reason: str,
+) -> None:
+    print(f"[runner] pre-pickup capability blocked {snapshot.key}: {reason}")
+    if DRY_RUN:
+        return
+    runner_comment_dedupe.maybe_post_comment(
+        client,
+        snapshot.key,
+        PRE_PICKUP_CAP_BLOCKED_TAG,
+        (
+            f"{PRE_PICKUP_CAP_BLOCKED_TAG}\n\n"
+            "Pre-pickup capability gate failed; CLI was not invoked.\n\n"
+            f"{reason}\n\n"
+            "Operator: extend `config/capability_matrix.yaml` for this "
+            "ticket type / area / tier, or use `capability:enable=` for a "
+            "one-shot override."
+        ),
+    )
 
 
 def _require_runner_capability(
@@ -2027,6 +2149,15 @@ def main() -> int:
         return 0
     if not DRY_RUN:
         jira_dispatch.remove_label(client, snapshot.key, jira_dispatch.FILE_COLLISION_SKIP_LABEL)
+
+    ok, reason = _pre_pickup_capability_ok(
+        client, snapshot, _load_capability_matrix()
+    )
+    if not ok:
+        _post_pre_pickup_capability_block(
+            client, snapshot, reason or "capability-mismatch",
+        )
+        return 0
 
     # Step 4: build prompt + transition + invoke
     try:
