@@ -186,4 +186,11 @@ EXPOSE 8000
 # out real request signals. Structured request observability lives in
 # structlog middleware + explicit handler logs — uvicorn's TCP-style
 # access log adds no value on top.
-CMD ["sh", "-c", "WORKERS=${OMNISIGHT_WORKERS:-$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')}; exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers $WORKERS --no-access-log"]
+#
+# OP-1127 (Boreas-A2): the leading ``python -m backend.alembic_drift_gate``
+# runs BEFORE uvicorn binds :8000. On image-vs-DB head drift it emits a
+# structured JSON diagnostic to stderr and exits 1, so the shell short-
+# circuits and ``restart_policy`` / systemd surface the failure. No
+# recovery attempt — operator picks DB upgrade or image rollback per the
+# diagnostic. Override (emergency only): OMNISIGHT_SKIP_ALEMBIC_DRIFT_GATE=1.
+CMD ["sh", "-c", "python -m backend.alembic_drift_gate && WORKERS=${OMNISIGHT_WORKERS:-$(python3 -c 'import os; print(max(2, os.cpu_count() // 2))')} && exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --workers $WORKERS --no-access-log"]
