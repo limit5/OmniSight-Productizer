@@ -27,10 +27,12 @@ from backend.agents.tool_proficiency import (
     MAX_TOOL_LEVEL,
     ProficiencyGateConfigMissing,
     ToolProficiencyState,
+    build_feature_unlock_gate,
     can_invoke_at_level,
     capability_for_level,
     compute_tool_level,
     get_required_level,
+    install_feature_unlock_gate,
     list_proficiencies,
     record_tool_invocation,
     reset_gate_config_cache_for_tests,
@@ -432,6 +434,207 @@ async def test_dispatcher_proficiency_gate_allows_at_or_above_level():
     result = await dispatcher.execute("u-2", "Read", {"file_path": "/tmp/x"})
     assert not result.is_error
     assert result.content == "ok"
+
+
+# ── W13.3 (OP-180) feature-unlock gate factory + dispatcher install ─
+
+
+@pytest.mark.asyncio
+async def test_build_feature_unlock_gate_reads_required_level_from_yaml(
+    tmp_path: Path,
+):
+    """W13.3 — the factory closure must consult the YAML per-call.
+
+    A Lv-1 agent against ``mcp__filesystem__write_multiple_files`` (Lv 3)
+    refuses; the same agent against an un-listed tool (defaults to Lv 1)
+    is allowed. Both decisions ride through the same closure.
+    """
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text(
+        "gates:\n"
+        "  mcp__filesystem__write_multiple_files: 3\n"
+        "  Read: 1\n",
+        encoding="utf-8",
+    )
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    gate = build_feature_unlock_gate(store, config_path=config, now=T0)
+
+    # Lv-3 gate refuses a Lv-1 agent.
+    assert (
+        await gate("mcp__filesystem__write_multiple_files", AGENT)
+    ) is False
+    # Lv-1 gate (Read) allows the same agent.
+    assert await gate("Read", AGENT) is True
+    # Un-listed tool defaults to Lv 1 — allowed.
+    assert await gate("AnUnknownTool", AGENT) is True
+
+
+@pytest.mark.asyncio
+async def test_build_feature_unlock_gate_allows_when_agent_at_required_lv(
+    tmp_path: Path,
+):
+    """W13.3 — once the agent reaches the gate's Lv, the gate allows."""
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text(
+        "gates:\n  mcp__filesystem__write_multiple_files: 3\n",
+        encoding="utf-8",
+    )
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id="mcp__filesystem__write_multiple_files",
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+    gate = build_feature_unlock_gate(store, config_path=config, now=T0)
+    assert (
+        await gate("mcp__filesystem__write_multiple_files", AGENT)
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_install_feature_unlock_gate_wires_dispatcher_refusal(
+    tmp_path: Path,
+):
+    """W13.3 — ``install_feature_unlock_gate`` wires the dispatcher so a
+    Lv-1 agent attempting a Lv-3 gated tool surfaces a structured
+    ``tool_proficiency_insufficient`` ``tool_result`` instead of running
+    the handler.
+
+    This is the canonical W13.3 acceptance: a fresh agent attempts a
+    tool the YAML has gated at Lv 3 and the dispatcher refuses the call
+    instead of forwarding to the handler. The test uses ``Read`` as the
+    handler name (the dispatcher validates the name against the schema
+    registry on ``register``); the YAML in this test maps ``Read: 3`` to
+    re-create the same semantics as the shipped
+    ``mcp__filesystem__write_multiple_files: 3`` entry without needing
+    to register a new schema.
+    """
+    import json
+
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 3\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    dispatcher = ToolDispatcher()
+
+    handler_calls: list[dict] = []
+
+    async def _read_handler(payload):  # noqa: ANN001 - test handler
+        handler_calls.append(payload)
+        return "ok"
+
+    dispatcher.register("Read", _read_handler)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=AGENT,
+        config_path=config, now=T0,
+    )
+
+    # Lv-1 agent against a Lv-3-required tool → refused.
+    result = await dispatcher.execute("u-1", "Read", {"file_path": "/x"})
+    assert result.is_error
+    payload = json.loads(result.content)
+    assert payload["error"] == "tool_proficiency_insufficient"
+    assert payload["agent_id"] == AGENT
+    assert payload["tool_name"] == "Read"
+    assert handler_calls == []  # gate refused before handler ran
+
+
+@pytest.mark.asyncio
+async def test_install_feature_unlock_gate_allows_when_agent_qualified(
+    tmp_path: Path,
+):
+    """W13.3 — once the agent's proficiency clears the YAML gate, the
+    dispatcher forwards to the handler unchanged. YAML at ``Read: 3``,
+    seeded agent at Lv 3 → handler runs."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 3\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+
+    dispatcher = ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001
+        return "ok"
+
+    dispatcher.register("Read", _read)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=AGENT,
+        config_path=config, now=T0,
+    )
+
+    result = await dispatcher.execute("u-2", "Read", {"file_path": "/tmp/x"})
+    assert not result.is_error
+    assert result.content == "ok"
+
+
+def test_install_feature_unlock_gate_rejects_blank_agent_id(tmp_path: Path):
+    """W13.3 — install refuses an empty agent_id because the dispatcher
+    only consults the gate when ``_current_agent_id is not None``.
+    Letting a blank string slip through would silently bypass the gate
+    for every dispatch on that dispatcher instance."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 1\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    dispatcher = ToolDispatcher()
+    with pytest.raises(ValueError):
+        install_feature_unlock_gate(
+            dispatcher, store=store, agent_id="",
+            config_path=config, now=T0,
+        )
+
+
+def test_install_feature_unlock_gate_rescopes_to_new_agent(tmp_path: Path):
+    """W13.3 — re-installing with a different ``agent_id`` is the
+    supported way to re-scope an already-running dispatcher; the public
+    contract advertises this so a long-lived dispatcher can switch
+    between agents without rebuilding."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 1\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    dispatcher = ToolDispatcher()
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id="agent-one",
+        config_path=config, now=T0,
+    )
+    assert dispatcher._current_agent_id == "agent-one"
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id="agent-two",
+        config_path=config, now=T0,
+    )
+    assert dispatcher._current_agent_id == "agent-two"
 
 
 # ── Constants sanity ─────────────────────────────────────────────────
