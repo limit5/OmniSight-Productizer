@@ -13,6 +13,10 @@
  * `data-testid` strings on each section name the conceptual tab so a
  * future tabbed refactor only re-parents the existing JSX):
  *
+ * - W15.3 (OP-1384): active buff / debuff icons render in the card
+ *   header from `CharacterBuff`, with kind / polarity / label metadata
+ *   kept on each icon for operator tooling and UI tests.
+ *
  * - W13.6 (OP-183): the `data-testid="character-card-tools"` section
  *   below — per-tool row rendered from `CharacterTool` with the Lv
  *   header, invocation count, success-rate bar, and the
@@ -537,6 +541,7 @@ export function CharacterCard({
                       buffVisual.toneClass,
                     )}
                     data-buff-kind={buff.kind}
+                    data-buff-label={label}
                     data-buff-polarity={buff.polarity ?? ""}
                     data-testid="character-card-buff"
                     title={buffTitle(buff, buffVisual.label)}
