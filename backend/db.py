@@ -3418,6 +3418,15 @@ async def insert_episodic_memory(conn, data: dict) -> None:
         q,  # decayed_score seeded from quality_score
     )
 
+    # RPG.W5.2 [OP-138]: auto-distil a <=200 token summary for the L2
+    # dim-memory layer (ADR-0008 *Memory hierarchy*).  Best-effort:
+    # distillation failure must never poison the lesson write above.
+    try:
+        from backend.agents.lessons_distiller import on_lesson_written
+        await on_lesson_written(data)
+    except Exception as exc:
+        logger.debug("lessons_distiller hook failed: %s", exc)
+
 
 async def rebuild_episodic_fts(conn) -> int:
     """Reindex the episodic_memory GIN index on the tsvector column.
