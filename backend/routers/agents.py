@@ -203,6 +203,7 @@ async def list_agent_cards(
 @router.get("/guild-hall/{guild}/roster")
 async def get_guild_hall_roster(
     guild: str,
+    sort_by: CharacterCardSort = "level",
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     try:
@@ -216,12 +217,12 @@ async def get_guild_hall_roster(
     try:
         entries = await registry.list_cards(
             guild=selected_guild.value,
-            sort_by="level",
+            sort_by=sort_by,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    view = build_guild_hall_view(entry.card for entry in entries)
+    view = build_guild_hall_view(entries, sort_by=sort_by)
     for guild_row in view.guilds:
         if guild_row.guild == selected_guild.value:
             return _guild_hall_guild_to_dict(guild_row)
@@ -868,4 +869,3 @@ def _party_to_dict(party: Party) -> dict:
             else None
         ),
     }
-
