@@ -213,6 +213,8 @@ Pilot enforcement: 4-week soft-fail (warning only, no rejection) starting at v2-
 
 ### Shared infrastructure (precedes ⑤ and ⑥) — `v2-AlertBridge-Framework`
 
+**Contract spec**: [`docs/sprint-s12/2026-05-16-v2-alertbridge-framework-contract.md`](./2026-05-16-v2-alertbridge-framework-contract.md) (OP-1144). The full contract surface (required schema, severity enum, dedupe formula, cardinality cap, channel-adapter ABI, canonical-envelope normalisation rules, AM-bridge migration contract) lives there; this section carries only the rationale and ticket breakdown.
+
 **Why**: Q6 operator decision = file AlertRule tickets BEFORE 31.G ships, but design them so the future AM bridge connection is a zero-surprise swap. Both v2-⑤-AlertRule and v2-⑥-AlertRule (and any future v2-* alert) consume this framework, so it's a single shared piece, not duplicated per family.
 
 **Design forward-compat checklist** (the 7 AM-integration pitfalls we plan around now):
