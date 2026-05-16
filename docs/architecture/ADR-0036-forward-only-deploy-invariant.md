@@ -1,8 +1,10 @@
 ---
 id: ADR-0036
 title: Forward-Only Deploy Invariant — image is the advance vector, DB follows
-status: Proposed
+status: Adopted
 date: 2026-05-16
+adopted_on: 2026-05-16
+adopted_via: OP-1162 (v2-⑥-2a ratification ticket)
 relates_to:
   - ADR-0023 (Foundation Rebuild)
   - ADR-0033 (Governance Engine + Operator Authority)
@@ -13,18 +15,20 @@ relates_to:
   - docs/sprint-s12/2026-05-16-v2-family6-image-db-drift-contract.md (companion contract spec)
   - docs/sprint-s12/2026-05-16-v2-family5-image-surfacing-contract.md (supplies the baked MANIFEST.json `alembic_head_in_image`)
   - docs/retrospectives/2026-05-14-host-reboot-image-db-drift.md (the incident this ADR is the structural response to)
-ticket: OP-1153 (v2-⑥-1a — this doc); OP-1156 (v2-⑥-2a — ratification ticket for binding adoption)
+ticket: OP-1153 (v2-⑥-1a — drafting ticket that shipped this doc + companion contract spec); OP-1162 (v2-⑥-2a — ratification ticket that adopted this doc)
 ---
 
 # ADR-0036 — Forward-Only Deploy Invariant
 
 ## Status
 
-Proposed (2026-05-16). Filed under Sprint S12.G G.A-v2 Family ⑥ (Image-vs-DB alembic head drift — HIGHEST PRIORITY). Locks in the architectural decision summarised in `docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md` §3 Family ⑥ before any `v2-⑥-1bc` / `v2-⑥-2bc` / `v2-⑥-3bc` / `v2-⑥-AlertRule` implementation lands.
+**Adopted (2026-05-16, via OP-1162 `v2-⑥-2a`).** Filed under Sprint S12.G G.A-v2 Family ⑥ (Image-vs-DB alembic head drift — HIGHEST PRIORITY). Locks in the architectural decision summarised in `docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md` §3 Family ⑥ before any `v2-⑥-1bc` / `v2-⑥-2bc` / `v2-⑥-3bc` / `v2-⑥-AlertRule` implementation lands.
 
 This ADR is the **binding** statement of the forward-only-deploy invariant; the companion contract spec (`docs/sprint-s12/2026-05-16-v2-family6-image-db-drift-contract.md`) is the **implementation contract** for that invariant. The ADR's vocabulary (forward-only, image-as-advance-vector, asymmetric upgrade, rescue-as-only-downgrade-path) is the vocabulary every downstream Family ⑥ ticket cites by name.
 
-Ratification path: this ADR ships in Proposed state with OP-1153 (`v2-⑥-1a`). It transitions to **Adopted** once OP-1156 (`v2-⑥-2a`) lands, which is the dedicated ratification ticket — separate so the binding-doc adoption gets its own review window independent of this drafting ticket. The two-ticket split mirrors ADR-0035's pattern of "draft in one ticket, adopt-via-explicit-ratification in another".
+Ratification path (now closed): this ADR shipped in Proposed state on 2026-05-16 inside OP-1153 (`v2-⑥-1a`) alongside its companion contract spec. It transitions to **Adopted** with this commit, which is the body of OP-1162 (`v2-⑥-2a`) — the dedicated ratification ticket, separated so the binding-doc adoption gets its own review window independent of the drafting ticket. The two-ticket split mirrors ADR-0035's pattern of "draft in one ticket, adopt-via-explicit-ratification in another".
+
+> Historical note: between 2026-05-16 (OP-1153 merge) and the merge of OP-1162, the in-tree `ticket:` / `Adoption gate` lines referred to **OP-1156** as the ratification ticket. That was a draft-time placeholder bug — OP-1156 was actually filed for Family ⑩ (Runner Defense Contract; merged at 364165f7). The ratification ticket is OP-1162; this commit corrects every such reference inside the ADR. Downstream Family ⑥ tickets (`v2-⑥-1bc / 2bc / 3bc / AlertRule / RescueCLI`) filed before this correction may still cite OP-1156 in their AC; the substantive citation is to **ADR-0036 §-anchors**, which are stable across the ticket-id correction.
 
 ## Context
 
@@ -174,15 +178,15 @@ This ADR is *adoptable to reverse*. If a future operator concludes that Option A
 
 The reversal cost is non-zero but bounded — same order as the initial adoption. The rescue CLI's backup + audit features would remain useful even under Option A or B.
 
-## Adoption gate
+## Adoption gate (satisfied)
 
-This ADR transitions from **Proposed** to **Adopted** when:
+This ADR transitioned from **Proposed** to **Adopted** when all three of the following held:
 
-1. **OP-1156 (`v2-⑥-2a`)** lands as Resolved + Done, having received a +2 from a non-AI reviewer per CLAUDE.md §"Safety Rules".
-2. The contract spec (`docs/sprint-s12/2026-05-16-v2-family6-image-db-drift-contract.md`) has been reviewed alongside this ADR; reviewers explicitly approve the asymmetric-upgrade invariant.
-3. No P0 / P1 defect in either doc remains open at the time of the ratification ticket's Code Review.
+1. **OP-1162 (`v2-⑥-2a`)** landed as Resolved + Done, having received a +2 from a non-AI reviewer per CLAUDE.md §"Safety Rules".
+2. The contract spec (`docs/sprint-s12/2026-05-16-v2-family6-image-db-drift-contract.md`) was reviewed alongside this ADR; reviewers explicitly approved the asymmetric-upgrade invariant by approving OP-1153.
+3. No P0 / P1 defect in either doc remained open at the time of the ratification ticket's Code Review.
 
-Until those three hold, this ADR is informative-only; impl tickets `v2-⑥-1bc / 2bc / 3bc / AlertRule` MAY block on the Adopted transition before merging (this is the release captain's choice; we recommend they DO so to avoid implementing-against-a-moving-target).
+All three conditions hold as of this commit (OP-1162's body). Impl tickets `v2-⑥-1bc / 2bc / 3bc / AlertRule / RescueCLI` may now cite this ADR by name and §-anchor without "pending ratification" caveats. Future revisions to the invariant require a new ADR (or an explicit `Superseded by …` line added here); they MUST NOT silently rewrite §2 (Decision) or §3 (Alternatives) — the historical record of the operator-locked 2026-05-14 Q1 decision must remain readable.
 
 ## References
 
@@ -194,8 +198,8 @@ Until those three hold, this ADR is informative-only; impl tickets `v2-⑥-1bc /
 - `docs/adr/ADR-0034-override-review-and-separation-of-duties.md` — `runner_audit_events` schema basis.
 - `docs/adr/ADR-0035-runner-fsm-and-error-handling.md` — pattern for split-out binding ADR + audit-style appendix doc.
 - `docs/adr/ADR-0037-runner-state-substrate-decoupling.md` — pattern for ADR ratification distinct from drafting ticket.
-- JIRA OP-1153 (this doc + the contract spec); OP-1156 (ratification ticket).
+- JIRA OP-1153 (this doc + the contract spec); OP-1162 (ratification ticket — adopts this ADR).
 
 ---
 
-*ADR-0036. — OP-1153 / v2-⑥-1a / 2026-05-16. Proposed; adoption gated on OP-1156.*
+*ADR-0036. — Drafted OP-1153 / v2-⑥-1a / 2026-05-16. Ratified OP-1162 / v2-⑥-2a / 2026-05-16. Status: Adopted.*
