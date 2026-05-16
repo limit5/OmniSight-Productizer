@@ -23,6 +23,7 @@ export interface SkillRadarAxis {
 
 export interface SkillRadarChartProps {
   axes: SkillRadarAxis[]
+  guild?: SkillRadarGuild
   guildName?: string
   maxLevel?: number
   className?: string
@@ -41,9 +42,43 @@ interface SkillRadarDatum {
   xp?: number
 }
 
+export type SkillRadarGuild = "algo_cv" | "backend" | "bsp" | "hal" | "isp"
+
 const DEFAULT_MAX_LEVEL = 5
 export const COMPONENT_FUSION_LEVEL_COST = 1
 export const HYBRID_FUSION_START_LEVEL = 3
+
+const CANONICAL_GUILD_SKILLS: Record<
+  SkillRadarGuild,
+  ReadonlyArray<Pick<SkillRadarAxis, "id" | "label">>
+> = {
+  algo_cv: [
+    { id: "barcode_scanner", label: "Barcode Scanner" },
+    { id: "depth_sensing", label: "Depth Sensing" },
+  ],
+  backend: [{ id: "enterprise_web", label: "Enterprise Web" }],
+  bsp: [
+    { id: "connectivity-5g", label: "5G Connectivity" },
+    { id: "connectivity-ethernet", label: "Ethernet Connectivity" },
+  ],
+  hal: [
+    { id: "connectivity-ble", label: "BLE Connectivity" },
+    { id: "connectivity-can", label: "CAN Connectivity" },
+    { id: "connectivity-modbus", label: "Modbus Connectivity" },
+    { id: "connectivity-opcua", label: "OPC UA Connectivity" },
+    { id: "connectivity-wifi", label: "Wi-Fi Connectivity" },
+  ],
+  isp: [
+    { id: "ipcam", label: "IP Camera" },
+    { id: "uvc", label: "UVC" },
+  ],
+}
+
+const SKILL_GUILD_LOOKUP = new Map(
+  Object.entries(CANONICAL_GUILD_SKILLS).flatMap(([guild, skills]) =>
+    skills.map((skill) => [skill.id, guild as SkillRadarGuild] as const),
+  ),
+)
 
 function clampLevel(level: number, maxLevel: number): number {
   if (!Number.isFinite(level)) return 0
@@ -54,17 +89,54 @@ function formatLevel(level: number, maxLevel: number): string {
   return `${level.toFixed(level % 1 === 0 ? 0 : 1)} / ${maxLevel}`
 }
 
-function toRadarData(axes: SkillRadarAxis[], fallbackMaxLevel: number): SkillRadarDatum[] {
-  return axes.map((axis) => {
-    const maxLevel = axis.maxLevel ?? fallbackMaxLevel
+function resolveCanonicalGuild(
+  axes: SkillRadarAxis[],
+  guild?: SkillRadarGuild,
+): SkillRadarGuild | undefined {
+  if (guild) return guild
 
-    return {
-      id: axis.id,
-      label: axis.label,
-      level: clampLevel(axis.level, maxLevel),
-      maxLevel,
-      xp: axis.xp,
-    }
+  const matchedGuilds = new Set<SkillRadarGuild>()
+
+  for (const axis of axes) {
+    const matchedGuild = SKILL_GUILD_LOOKUP.get(axis.id)
+    if (!matchedGuild) return undefined
+    if (matchedGuild) matchedGuilds.add(matchedGuild)
+  }
+
+  return matchedGuilds.size === 1 ? [...matchedGuilds][0] : undefined
+}
+
+function toRadarDatum(axis: SkillRadarAxis, fallbackMaxLevel: number): SkillRadarDatum {
+  const maxLevel = axis.maxLevel ?? fallbackMaxLevel
+
+  return {
+    id: axis.id,
+    label: axis.label,
+    level: clampLevel(axis.level, maxLevel),
+    maxLevel,
+    xp: axis.xp,
+  }
+}
+
+function toRadarData(
+  axes: SkillRadarAxis[],
+  fallbackMaxLevel: number,
+  guild?: SkillRadarGuild,
+): SkillRadarDatum[] {
+  const canonicalGuild = resolveCanonicalGuild(axes, guild)
+
+  if (!canonicalGuild) {
+    return axes.map((axis) => toRadarDatum(axis, fallbackMaxLevel))
+  }
+
+  const axesById = new Map(axes.map((axis) => [axis.id, axis]))
+
+  return CANONICAL_GUILD_SKILLS[canonicalGuild].map((canonicalAxis) => {
+    const axis = axesById.get(canonicalAxis.id)
+    const normalizedAxis = axis
+      ? { ...axis, ...canonicalAxis }
+      : { ...canonicalAxis, level: 0 }
+    return toRadarDatum(normalizedAxis, fallbackMaxLevel)
   })
 }
 
@@ -136,11 +208,12 @@ function SkillRadarTooltip({
 
 export function SkillRadarChart({
   axes,
+  guild,
   guildName,
   maxLevel = DEFAULT_MAX_LEVEL,
   className,
 }: SkillRadarChartProps) {
-  const data = toRadarData(axes, maxLevel)
+  const data = toRadarData(axes, maxLevel, guild)
   const domainMax = Math.max(maxLevel, ...data.map((axis) => axis.maxLevel))
   const title = guildName ? `${guildName} skill radar` : "Skill radar"
 
@@ -195,7 +268,7 @@ export function SkillRadarChart({
         </thead>
         <tbody>
           {data.map((axis) => (
-            <tr key={axis.id}>
+            <tr key={axis.id} data-skill-id={axis.id}>
               <th scope="row">{axis.label}</th>
               <td>{formatLevel(axis.level, axis.maxLevel)}</td>
               <td>{typeof axis.xp === "number" ? axis.xp : "N/A"}</td>
@@ -205,7 +278,11 @@ export function SkillRadarChart({
       </table>
       <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
         {data.map((axis) => (
-          <div key={axis.id} className="min-w-0 rounded-md border border-border/70 px-3 py-2">
+          <div
+            key={axis.id}
+            className="min-w-0 rounded-md border border-border/70 px-3 py-2"
+            data-skill-id={axis.id}
+          >
             <div className="truncate text-xs font-medium text-foreground">{axis.label}</div>
             <div className="mt-1 font-mono text-xs text-muted-foreground">
               {formatLevel(axis.level, axis.maxLevel)}
