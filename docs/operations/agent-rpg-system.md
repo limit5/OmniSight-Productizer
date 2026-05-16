@@ -950,12 +950,13 @@ operator missed the live event.
 
 ### YAML layout
 
-`config/talent_tree.yaml` is the source of truth for the 3 options per
-Guild × milestone. The drift guard in `talent_tree.py` validates the
-shape at module import — a malformed YAML raises `TalentTreeError` at
-boot. Today the file populates **backend** and **frontend** Guilds at
-all four milestones; adding a new Guild only requires populating four
-milestones + the capstone block.
+`config/talent_tree.yaml` is the source of truth for curated Guild
+wording. The loader in `talent_tree.py` overlays that YAML on
+deterministic defaults for the full 21-Guild enum, so
+`available_talents(agent_id, guild, milestone)` returns exactly 3
+options for every Guild at Lv 10 / 30 / 50 / 80. The drift guard
+validates the effective tree at load time — a malformed YAML override
+raises `TalentTreeError` at boot.
 
 ### Effects of a locked talent
 

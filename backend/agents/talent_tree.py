@@ -11,7 +11,8 @@ task start).
 This module owns:
 
 * The YAML loader + drift guard (mirroring the W11.2 ``skill_matrix``
-  pattern but for talents).
+  pattern but for talents), with deterministic defaults for Guilds not
+  explicitly curated in YAML.
 * The :class:`TalentChoiceStore` Protocol with an in-memory store for
   dev / tests and a Postgres store wired to alembic 0228.
 * The capstone ability store (alembic 0229) and the Lv-80 gate that
@@ -86,7 +87,9 @@ future reader of git blame can resolve a symbol to its W14.x ticket.
 Module-global state audit (per project SOP)
 -------------------------------------------
 The module reads ``config/talent_tree.yaml`` lazily on each
-``available_talents`` / drift call; the YAML is the source of truth.
+``available_talents`` / drift call; the YAML is the source of truth
+for curated Guilds and the compiled defaults cover the remaining Guild
+enum members.
 There is no in-process cache because the talent tree is small (Guilds
 × 4 milestones × 3 options ≈ kilobytes) and we want operators editing
 the YAML to see effects on the next call without a restart. Mutable
@@ -122,6 +125,123 @@ task label matches a locked talent's ``routing_label``. ``+20%`` per
 ADR-0008 §"Routing integration"; feature-flagged on
 ``OMNISIGHT_MP_TALENT_ROUTING_ENABLED`` so RPG.W7.1
 (``prefer_agent_id``) can drop in cleanly."""
+
+_DEFAULT_TALENT_SUFFIXES: Mapping[int, tuple[str, str, str]] = MappingProxyType(
+    {
+        10: ("first", "guard", "path"),
+        30: ("model", "planner", "connector"),
+        50: ("stabilizer", "optimizer", "observer"),
+        80: ("master", "architect", "synthesizer"),
+    }
+)
+
+_DEFAULT_GUILD_TALENT_FOCI: Mapping[Guild, tuple[str, ...]] = MappingProxyType(
+    {
+        Guild.architect: (
+            "system", "adr", "tradeoff", "boundary", "roadmap", "integration",
+            "migration", "resilience", "platform", "portfolio", "governance",
+            "evolution",
+        ),
+        Guild.sa_sd: (
+            "interface", "sequence", "modularity", "contract", "state",
+            "dependency", "reuse", "failure", "maintainability", "domain",
+            "review", "integration",
+        ),
+        Guild.ux: (
+            "research", "accessibility", "flow", "information", "prototype",
+            "content", "usability", "mobile", "handoff", "delight", "journey",
+            "system",
+        ),
+        Guild.pm: (
+            "outcome", "scope", "risk", "stakeholder", "priority",
+            "acceptance", "dependency", "release", "metrics", "strategy",
+            "roadmap", "feedback",
+        ),
+        Guild.gateway: (
+            "protocol", "throttle", "routing", "a2a", "mcp", "backpressure",
+            "compatibility", "observability", "failover", "traffic", "policy",
+            "control",
+        ),
+        Guild.bsp: (
+            "boot", "devicetree", "kernel", "board", "crosscompile",
+            "peripheral", "bringup", "power", "storage", "secureboot",
+            "factory", "recovery",
+        ),
+        Guild.hal: (
+            "abstraction", "driver", "register", "vendor", "timing", "dma",
+            "interrupt", "portability", "testbench", "lowpower",
+            "compatibility", "diagnostic",
+        ),
+        Guild.algo_cv: (
+            "dataset", "accuracy", "latency", "robustness", "calibration",
+            "tracking", "benchmark", "edgecase", "pipeline", "fusion",
+            "optimization", "explainability",
+        ),
+        Guild.optical: (
+            "lens", "focus", "illumination", "calibration", "distortion",
+            "thermal", "mtf", "alignment", "ircut", "tolerance", "lab",
+            "field",
+        ),
+        Guild.isp: (
+            "exposure", "color", "noise", "sharpness", "hdr", "awb", "ae",
+            "af", "tuning", "artifact", "sensor", "pipeline",
+        ),
+        Guild.audio: (
+            "aec", "noise", "latency", "codec", "beamforming", "gain",
+            "wakeword", "jitter", "room", "dsp", "quality", "diagnostic",
+        ),
+        Guild.frontend: (
+            "accessibility", "motion", "typescript", "design-system", "ssr",
+            "state", "web-perf", "visual-regression", "i18n",
+            "ui-architecture", "dx", "design-engineering",
+        ),
+        Guild.backend: (
+            "schema", "performance", "security", "distributed", "data-model",
+            "api-contract", "incident", "refactor", "observability", "legacy",
+            "platform", "cost",
+        ),
+        Guild.sre: (
+            "slo", "incident", "capacity", "deployment", "alert", "runbook",
+            "rollback", "observability", "errorbudget", "resilience", "cost",
+            "oncall",
+        ),
+        Guild.qa: (
+            "contract", "regression", "fixture", "coverage", "e2e",
+            "exploratory", "matrix", "flake", "performance", "release",
+            "risk", "traceability",
+        ),
+        Guild.auditor: (
+            "evidence", "chain", "policy", "readmodel", "control", "finding",
+            "retention", "sampling", "attestation", "compliance", "exception",
+            "signoff",
+        ),
+        Guild.red_team: (
+            "injection", "authz", "exfiltration", "sandbox", "fuzzing",
+            "supplychain", "bypass", "privacy", "abusecase", "persistence",
+            "detection", "reporting",
+        ),
+        Guild.forensics: (
+            "timeline", "log", "artifact", "rootcause", "containment",
+            "correlation", "snapshot", "replay", "blast", "recovery",
+            "lesson", "chain",
+        ),
+        Guild.intel: (
+            "cve", "vendor", "feed", "exploit", "dependency", "threatmodel",
+            "freshness", "triage", "advisory", "signal", "watchlist",
+            "briefing",
+        ),
+        Guild.reporter: (
+            "summary", "release", "changelog", "audience", "evidence",
+            "timeline", "translation", "runbook", "narrative", "executive",
+            "operator", "archive",
+        ),
+        Guild.custom: (
+            "charter", "constraint", "routing", "template", "boundary",
+            "handoff", "validation", "metric", "integration", "operator",
+            "extension", "review",
+        ),
+    }
+)
 
 
 # ── YAML path resolution ───────────────────────────────────────────
@@ -254,6 +374,10 @@ def load_talent_tree(
             options_by_milestone=MappingProxyType(milestones),
             capstone=capstone,
         )
+    for guild in Guild:
+        out.setdefault(guild, _default_guild_talent_tree(guild))
+    _assert_talent_tree_complete(out)
+    _assert_global_talent_ids_unique(out)
     return MappingProxyType(out)
 
 
@@ -708,7 +832,7 @@ def routing_weight_multiplier_for_talents(
     behind the :func:`backend.agents.routing_policy.is_talent_routing_enabled`
     feature flag and degrade silently
     (:class:`RoutingWeightInjectionFailed`) on import/IO errors. ``guild``
-    is optional: when omitted we scan every Guild's tree (cheap, ≤ 2
+    is optional: when omitted we scan every Guild's tree (cheap, 21
     guilds × 4 milestones × 3 options today).
 
     See :func:`backend.agents.routing_policy.build_talent_routing_weight_resolver`
@@ -943,6 +1067,104 @@ def _parse_capstone(raw: Any, guild: Guild) -> CapstoneAbility:
         display_name=_required_text(raw.get("display_name"), "display_name"),
         summary=_required_text(raw.get("summary"), "summary"),
     )
+
+
+def _default_guild_talent_tree(guild: Guild) -> GuildTalentTree:
+    """Build deterministic default talent options for Guilds not in YAML."""
+    foci = _DEFAULT_GUILD_TALENT_FOCI[guild]
+    options_by_milestone: dict[int, tuple[TalentOption, ...]] = {}
+    focus_offset = 0
+    for milestone in MILESTONE_LEVELS:
+        suffixes = _DEFAULT_TALENT_SUFFIXES[milestone]
+        options: list[TalentOption] = []
+        for suffix in suffixes:
+            focus = foci[focus_offset]
+            focus_offset += 1
+            option_slug = f"{_slug(guild.value)}-{_slug(focus)}-{suffix}"
+            options.append(
+                TalentOption(
+                    talent_id=option_slug,
+                    display_name=_title(f"{focus} {suffix}"),
+                    summary=(
+                        f"Bias toward {_words(focus)} decisions for the "
+                        f"{_title(guild.value)} Guild."
+                    ),
+                    routing_label=_slug(focus),
+                    prompt_reminder=(
+                        f"For {_words(guild.value)} work, foreground "
+                        f"{_words(focus)} tradeoffs before choosing an "
+                        "implementation path."
+                    ),
+                )
+            )
+        options_by_milestone[milestone] = tuple(options)
+    return GuildTalentTree(
+        guild=guild,
+        options_by_milestone=MappingProxyType(options_by_milestone),
+        capstone=CapstoneAbility(
+            ability_id=f"{_slug(guild.value)}-capstone",
+            display_name=f"{_title(guild.value)} Capstone",
+            summary=(
+                f"Dedicated Lv-80 capstone for the {_words(guild.value)} "
+                "Guild, reserved for high-context specialist execution."
+            ),
+        ),
+    )
+
+
+def _assert_talent_tree_complete(tree: Mapping[Guild, GuildTalentTree]) -> None:
+    missing = sorted(guild.value for guild in set(Guild) - set(tree))
+    if missing:
+        raise TalentTreeError(f"talent_tree missing Guild defaults: {missing}")
+
+
+def _assert_global_talent_ids_unique(
+    tree: Mapping[Guild, GuildTalentTree],
+) -> None:
+    seen: dict[str, Guild] = {}
+    for guild, guild_tree in tree.items():
+        for options in guild_tree.options_by_milestone.values():
+            for option in options:
+                owner = seen.setdefault(option.talent_id, guild)
+                if owner != guild:
+                    raise TalentTreeError(
+                        f"talent_tree talent_id {option.talent_id!r} is reused "
+                        f"by both {owner.value!r} and {guild.value!r}"
+                    )
+
+
+def _slug(value: str) -> str:
+    return value.replace("_", "-").lower()
+
+
+def _words(value: str) -> str:
+    return value.replace("_", " ").replace("-", " ")
+
+
+def _title(value: str) -> str:
+    acronyms = {
+        "a2a",
+        "adr",
+        "ae",
+        "aec",
+        "af",
+        "awb",
+        "cve",
+        "dma",
+        "dsp",
+        "e2e",
+        "hdr",
+        "i18n",
+        "ircut",
+        "mcp",
+        "mtf",
+        "slo",
+        "ssr",
+    }
+    words: list[str] = []
+    for word in _words(value).split():
+        words.append(word.upper() if word.lower() in acronyms else word.title())
+    return " ".join(words)
 
 
 def _required_text(value: Any, field_name: str) -> str:

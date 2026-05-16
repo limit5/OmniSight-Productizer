@@ -28,9 +28,11 @@
 #
 # Operator notes
 # --------------
-# Adding a new Guild only requires populating four milestones + the
-# capstone block. The drift guard in talent_tree.py validates the shape
-# at module import — a malformed YAML raises TalentTreeError at boot.
+# This file carries curated overrides for Guilds whose choices need
+# hand-written wording. backend/agents/talent_tree.py fills any missing
+# Guild enum member with deterministic defaults, then validates that the
+# effective tree covers all 21 Guilds. A malformed YAML override raises
+# TalentTreeError at boot.
 
 schema_version: 1
 guilds:
