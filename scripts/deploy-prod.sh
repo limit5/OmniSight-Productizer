@@ -11,6 +11,10 @@
 #   ./scripts/deploy-prod.sh --tag v1.2.0       # 部署特定 tag
 #   ./scripts/deploy-prod.sh --skip-build       # 跳過 build（已有 GHCR image）
 #   ./scripts/deploy-prod.sh --dry-run          # 只印步驟不執行
+#   ./scripts/deploy-prod.sh --gerrit-source=gerrit
+#                                               # 從 Gerrit remote fetch（預設自動偵測）
+#   ./scripts/deploy-prod.sh --alembic-mode=pg-clone
+#                                               # 在 PG clone 上 dry-validate migrations
 #   ./scripts/deploy-prod.sh --insecure-skip-verify
 #                                               # FX.7.9 emergency escape
 #                                               # hatch — bypass ref allow-
@@ -25,6 +29,8 @@ TAG=""
 SKIP_BUILD=false
 DRY_RUN=false
 INSECURE_SKIP_VERIFY=false
+GERRIT_SOURCE="${OMNISIGHT_GERRIT_SOURCE:-}"
+ALEMBIC_MODE="${OMNISIGHT_ALEMBIC_MODE:-apply}"
 HEALTH_RETRIES=30
 HEALTH_INTERVAL=3
 
@@ -42,12 +48,21 @@ for arg in "$@"; do
         --branch=*) BRANCH="${arg#*=}" ;;
         --skip-build) SKIP_BUILD=true ;;
         --dry-run) DRY_RUN=true ;;
+        --gerrit-source=*) GERRIT_SOURCE="${arg#*=}" ;;
+        --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
+        --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
         --insecure-skip-verify) INSECURE_SKIP_VERIFY=true ;;
         --help|-h)
-            echo "Usage: $0 [--branch=main] [--tag=v1.2.0] [--skip-build] [--dry-run] [--insecure-skip-verify]"
+            echo "Usage: $0 [--branch=main] [--tag=v1.2.0] [--skip-build] [--dry-run] [--gerrit-source=REMOTE] [--alembic-mode=apply|pg-clone] [--insecure-skip-verify]"
             exit 0 ;;
+        *) err "Unknown argument: $arg" ;;
     esac
 done
+
+case "$ALEMBIC_MODE" in
+    apply|pg-clone) ;;
+    *) err "Unknown --alembic-mode=$ALEMBIC_MODE (expected apply or pg-clone)" ;;
+esac
 
 _run() {
     if [ "$DRY_RUN" = true ]; then
@@ -55,6 +70,43 @@ _run() {
     else
         eval "$@"
     fi
+}
+
+_run_cmd() {
+    if [ "$DRY_RUN" = true ]; then
+        printf '  [dry-run]'
+        printf ' %q' "$@"
+        printf '\n'
+    else
+        "$@"
+    fi
+}
+
+_detect_gerrit_source() {
+    if [ -n "$GERRIT_SOURCE" ]; then
+        git remote get-url "$GERRIT_SOURCE" >/dev/null 2>&1 || \
+            err "--gerrit-source=$GERRIT_SOURCE is not a configured git remote"
+        printf '%s\n' "$GERRIT_SOURCE"
+        return 0
+    fi
+
+    if git remote get-url gerrit >/dev/null 2>&1; then
+        printf 'gerrit\n'
+        return 0
+    fi
+
+    local remote
+    while IFS= read -r remote; do
+        local url
+        url="$(git remote get-url "$remote" 2>/dev/null || true)"
+        case "$url" in
+            *gerrit*|*sora.services*|*29418*)
+                printf '%s\n' "$remote"
+                return 0 ;;
+        esac
+    done < <(git remote)
+
+    err "No Gerrit git remote found. Add a 'gerrit' remote or pass --gerrit-source=<remote>; refusing to fetch from a possibly stale mirror."
 }
 
 _upsert_env() {
@@ -77,9 +129,104 @@ _upsert_env() {
     fi
 }
 
+_env_file_value() {
+    local key="$1"
+    grep -E "^${key}=" .env 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+_prod_database_url() {
+    local url="${SQLALCHEMY_URL:-${OMNISIGHT_DATABASE_URL:-${DATABASE_URL:-}}}"
+    if [ -z "$url" ]; then
+        url="$(_env_file_value SQLALCHEMY_URL)"
+    fi
+    if [ -z "$url" ]; then
+        url="$(_env_file_value OMNISIGHT_DATABASE_URL)"
+    fi
+    if [ -z "$url" ]; then
+        url="$(_env_file_value DATABASE_URL)"
+    fi
+    case "$url" in
+        postgresql://*|postgresql+*://*) printf '%s\n' "$url" ;;
+        "") err "--alembic-mode=pg-clone requires SQLALCHEMY_URL, OMNISIGHT_DATABASE_URL, or DATABASE_URL in env/.env" ;;
+        *) err "--alembic-mode=pg-clone requires a PostgreSQL URL, got scheme from configured DB URL" ;;
+    esac
+}
+
+_db_name_from_url() {
+    local url_no_query="${1%%\?*}"
+    local db_name="${url_no_query##*/}"
+    [ -n "$db_name" ] && [ "$db_name" != "$url_no_query" ] || \
+        err "Could not parse database name from configured PostgreSQL URL"
+    printf '%s\n' "$db_name"
+}
+
+_clone_url_for_db() {
+    local url="$1"
+    local clone_db="$2"
+    local base="${url%%\?*}"
+    local query=""
+    if [ "$base" != "$url" ]; then
+        query="?${url#*\?}"
+    fi
+    printf '%s/%s%s\n' "${base%/*}" "$clone_db" "$query"
+}
+
+_run_alembic_apply() {
+    if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+            -e PYTHONSAFEPATH=1 -w /app/backend \
+            backend-a python -m alembic upgrade heads; then
+        err "Alembic upgrade heads 失敗 — 中止部署。修正 migration 後重跑 deploy-prod.sh。"
+    fi
+    log "Alembic upgrade heads 完成"
+}
+
+_run_alembic_pg_clone() {
+    local live_url live_db clone_db clone_url
+    live_url="$(_prod_database_url)"
+    live_db="$(_db_name_from_url "$live_url")"
+    clone_db="${OMNISIGHT_ALEMBIC_CLONE_DB:-omnisight_alembic_dryrun_$(date +%Y%m%d%H%M%S)_$$}"
+    clone_url="$(_clone_url_for_db "$live_url" "$clone_db")"
+
+    step "Step 2.5: Alembic dry-validation on PG clone"
+    echo "建立 live PG database 的一次性 clone，對 clone 執行 alembic upgrade heads；live DB 不套 migration。"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "  [dry-run] docker exec omnisight-pg-primary drop/create/pg_dump/pg_restore clone '$clone_db' from '$live_db'"
+        echo "  [dry-run] docker compose -f $COMPOSE_FILE run --rm --no-deps -e PYTHONSAFEPATH=1 -e SQLALCHEMY_URL=<clone-url> -w /app/backend backend-a python -m alembic upgrade heads"
+        echo "  [dry-run] docker exec omnisight-pg-primary dropdb clone '$clone_db'"
+        return 0
+    fi
+
+    docker inspect omnisight-pg-primary >/dev/null 2>&1 || \
+        err "omnisight-pg-primary container not found; cannot create PG clone for Alembic validation."
+
+    docker exec -e CLONE_DB="$clone_db" -e LIVE_DB="$live_db" omnisight-pg-primary sh -lc '
+        set -eu
+        dropdb --if-exists -U "$POSTGRES_USER" "$CLONE_DB"
+        createdb -U "$POSTGRES_USER" "$CLONE_DB"
+        pg_dump -U "$POSTGRES_USER" -d "$LIVE_DB" -Fc | pg_restore -U "$POSTGRES_USER" -d "$CLONE_DB" --no-owner
+    ' || err "PG clone 建立失敗 — live DB 未修改。"
+
+    if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+            -e PYTHONSAFEPATH=1 \
+            -e SQLALCHEMY_URL="$clone_url" \
+            -w /app/backend \
+            backend-a python -m alembic upgrade heads; then
+        docker exec -e CLONE_DB="$clone_db" omnisight-pg-primary sh -lc \
+            'dropdb --if-exists -U "$POSTGRES_USER" "$CLONE_DB"' >/dev/null 2>&1 || true
+        err "Alembic PG clone dry-validation 失敗 — live DB 未修改。"
+    fi
+
+    docker exec -e CLONE_DB="$clone_db" omnisight-pg-primary sh -lc \
+        'dropdb --if-exists -U "$POSTGRES_USER" "$CLONE_DB"' || \
+        warn "PG clone '$clone_db' cleanup failed; drop it manually after inspection."
+    log "Alembic PG clone dry-validation 完成（live DB 未修改）"
+}
+
 step "OmniSight Production 零停機部署"
 echo "Compose: $COMPOSE_FILE"
 echo "Branch:  ${TAG:-$BRANCH}"
+echo "Alembic: $ALEMBIC_MODE"
 echo ""
 
 # ── Step 1: Pull latest code ──
@@ -98,15 +245,17 @@ if [ "$DRY_RUN" = true ]; then
 elif [ "$INSECURE_SKIP_VERIFY" = true ]; then
     verify_args+=("--insecure-skip-verify")
 fi
+GERRIT_SOURCE="$(_detect_gerrit_source)"
+echo "Git source: $GERRIT_SOURCE"
 
 if [ -n "$TAG" ]; then
-    _run "git fetch origin --tags"
+    _run_cmd git fetch "$GERRIT_SOURCE" --tags
     scripts/check_deploy_ref.sh --kind tag --ref "$TAG" "${verify_args[@]}"
-    _run "git checkout '$TAG'"
+    _run_cmd git checkout "$TAG"
 else
-    _run "git fetch origin $BRANCH"
+    _run_cmd git fetch "$GERRIT_SOURCE" "$BRANCH"
     scripts/check_deploy_ref.sh --kind branch --ref "$BRANCH" "${verify_args[@]}"
-    _run "git merge origin/$BRANCH --ff-only"
+    _run_cmd git merge "$GERRIT_SOURCE/$BRANCH" --ff-only
 fi
 log "Code 更新完成：$(git log --oneline -1)"
 
@@ -211,18 +360,21 @@ fi
 # single migration is atomic; a multi-migration batch may stop part-
 # way and resume on the next run). Operator re-runs `deploy-prod.sh`
 # after fixing the bad migration.
-step "Step 2.5: Alembic upgrade heads"
-echo "在 rolling restart 之前用新 image 套 schema（FX.9.5 — 避免 readyz fail）..."
+if [ "$ALEMBIC_MODE" = "apply" ]; then
+    step "Step 2.5: Alembic upgrade heads"
+    echo "在 rolling restart 之前用新 image 套 schema（FX.9.5 — 避免 readyz fail）..."
+fi
 
 if [ "$DRY_RUN" = false ]; then
-    if ! docker compose -f $COMPOSE_FILE run --rm --no-deps \
-            -e PYTHONSAFEPATH=1 -w /app/backend \
-            backend-a python -m alembic upgrade heads; then
-        err "Alembic upgrade heads 失敗 — 中止部署。修正 migration 後重跑 deploy-prod.sh。"
-    fi
-    log "Alembic upgrade heads 完成"
+    case "$ALEMBIC_MODE" in
+        apply) _run_alembic_apply ;;
+        pg-clone) _run_alembic_pg_clone ;;
+    esac
 else
-    echo "  [dry-run] docker compose -f $COMPOSE_FILE run --rm --no-deps backend-a python -m alembic upgrade heads"
+    case "$ALEMBIC_MODE" in
+        apply) echo "  [dry-run] docker compose -f $COMPOSE_FILE run --rm --no-deps backend-a python -m alembic upgrade heads" ;;
+        pg-clone) _run_alembic_pg_clone ;;
+    esac
 fi
 
 # ── Step 3: Rolling restart backend-a ──
