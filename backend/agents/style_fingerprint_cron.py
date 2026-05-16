@@ -47,6 +47,7 @@ from typing import Protocol
 
 from backend.agents.character_card import (
     CharacterCard,
+    CharacterCardRosterEntry,
     CharacterCardUpdate,
 )
 from backend.agents.style_fingerprint import (
@@ -83,7 +84,9 @@ class CardListAndUpdateStore(Protocol):
     cache-wrapped) only has to satisfy the two methods used here.
     """
 
-    async def list_cards(self) -> Sequence[CharacterCard]:  # pragma: no cover - protocol
+    async def list_cards(  # pragma: no cover - protocol
+        self,
+    ) -> Sequence[CharacterCard | CharacterCardRosterEntry]:
         ...
 
     async def update_card(
@@ -167,7 +170,8 @@ async def recompute_style_fingerprints(
 
     log = logger or LOG
     reports: list[StyleDriftReport] = []
-    for card in await card_store.list_cards():
+    for card_listing in await card_store.list_cards():
+        card = _card_from_listing(card_listing)
         history = tuple(await task_history_provider(card.agent_id))
         window = history[-last_n:]
         new_fingerprint = compute_style_fingerprint(window, last_n=last_n)
@@ -241,6 +245,14 @@ def _canonical_signature(sample: TaskStyleSignals) -> tuple[str, str, str]:
         canonical["test_pattern"],
         canonical["refactor_tendency"],
     )
+
+
+def _card_from_listing(
+    listing: CharacterCard | CharacterCardRosterEntry,
+) -> CharacterCard:
+    if isinstance(listing, CharacterCardRosterEntry):
+        return listing.card
+    return listing
 
 
 def _validate_threshold(value: float) -> None:
