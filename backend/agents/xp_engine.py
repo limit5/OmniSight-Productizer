@@ -49,6 +49,17 @@ TIER_L_PLUS_MULTIPLIER = 2.0
 # earns a 3.0× XP bump per ADR-0008 -- discovery reward, stacks with
 # outcome and Tier-L+ multipliers.
 FIRST_TIME_SKILL_MULTIPLIER = 3.0
+# W4.4 (OP-135): Anti-grinding clamp per ADR-0008 §"XP curve" -- when the
+# runner detects that the same canonical task hash has already been
+# awarded to this agent within the last 24h, the XP delta for the repeat
+# is multiplied by 0.2 (i.e. ×0.2, an 80% haircut). Stacks multiplicatively
+# with the W4.3 outcome / Tier-L+ / first-time-skill multipliers and with
+# the W15 buff/debuff multipliers. The "same task hash within 24h" decision
+# is made by the runner before calling :func:`award_xp`; this module treats
+# ``duplicate_task_within_24h`` as an explicit input flag and reads no
+# clock or task history (deterministic, pure). The skill XP path (W12)
+# carries a parallel ``ANTI_GRIND_MULTIPLIER`` constant with the same 0.2
+# value -- both literals MUST stay in lock-step with this constant.
 DUPLICATE_TASK_MULTIPLIER = 0.2
 SECONDARY_CLASS_FULL_XP_LEVEL = 30
 SECONDARY_CLASS_RAMP_MULTIPLIER = 0.5
@@ -324,6 +335,10 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
         _clean_active_buff_ids(outcome.active_buff_ids)
     )
     multiplier *= xp_multiplier_for_debuff_ids(_effective_debuff_ids(outcome))
+    # W4.4 (OP-135): anti-grinding clamp -- same canonical task hash
+    # repeated within 24h takes a flat 0.2× haircut on top of every
+    # earlier multiplier. The flag is computed runner-side and passed
+    # in; see :data:`DUPLICATE_TASK_MULTIPLIER` for the contract.
     if outcome.duplicate_task_within_24h:
         multiplier *= DUPLICATE_TASK_MULTIPLIER
     if outcome.class_xp_target == "secondary":

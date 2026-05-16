@@ -30,7 +30,7 @@ target ship).
 | W1.2   | `backend/agents/character_card.py` — CRUD + first-task create | **Live** (in-memory + Postgres store) |
 | W1.1   | `agent_character_card` Alembic migration                      | **Pending** — module references the table; migration not yet checked in |
 | W2.1   | `backend/agents/guild_registry.py` — Guild metadata + class eligibility | **Live**          |
-| W4.1   | `backend/agents/xp_engine.py` — XP curve + outcome multipliers + buff/debuff multipliers | **Live** (no persistence layer; callers apply XpDelta themselves) |
+| W4.1   | `backend/agents/xp_engine.py` — XP curve + outcome multipliers + buff/debuff multipliers + W4.4 anti-grinding clamp | **Live** (no persistence layer; callers apply XpDelta themselves) |
 | W9.4   | `backend/agents/guild_hall.py` — roster view-model                                       | **Live** (consumed by Guild Hall UI) |
 | W11.2  | `backend/agents/skill_matrix.py` + `skill_matrix.yaml` — canonical skill registry + drift guard | **Live**     |
 | W11.3  | This document                                                 | **Live**                   |
@@ -294,6 +294,74 @@ runner.
 writes, no clock reads. The caller is responsible for applying the
 returned delta to the character card. Today, that caller is internal
 runner code only; there is no operator endpoint to award XP by hand.
+
+### Anti-grinding (W4.4 / OP-135)
+
+Per ADR-0008 §"XP curve", repeating an identical task to farm XP is
+clamped to a flat **×0.2** multiplier (an 80% haircut) when the runner
+detects the *same canonical task hash* has already paid out to this
+agent within the **last 24h**. This is the W4.4 contract — the
+anti-grind term in the eight-step stack listed under "Outcome
+multipliers" above.
+
+Source-of-truth constants:
+
+| Layer                | Constant                                | Where                                            |
+| -------------------- | --------------------------------------- | ------------------------------------------------ |
+| Agent-level XP (W4.1)| `DUPLICATE_TASK_MULTIPLIER = 0.2`       | `backend/agents/xp_engine.py`                    |
+| Skill XP (W12)       | `ANTI_GRIND_MULTIPLIER = 0.2`           | `backend/agents/skill_leveling.py`               |
+
+The two constants are deliberately parallel — the same anti-grind
+contract is applied at both the W4.1 character-level XP path and the
+W12 per-skill XP path. Any future tweak to the multiplier MUST update
+both files in the same change set; there is no shared import because
+the two engines are otherwise decoupled.
+
+Input contract — the flag is **runner-computed**, not engine-computed:
+
+- `xp_engine.award_xp(...)` reads `TaskOutcome.duplicate_task_within_24h`
+  (also accepted as `same_task_hash_within_24h` on the mapping/dict
+  shape — the two spellings are aliases and both round-trip through
+  `_normalise_task_outcome`).
+- `skill_leveling.compute_xp_delta(...)` and `award_skill_xp(...)`
+  accept `same_task_hash_within_24h=...` directly.
+- Neither helper reads a clock or queries a task-history table; the
+  *decision* of whether two tasks share a canonical hash and whether
+  the 24h window is open lives in the runner's dispatch path, not in
+  the XP engines (this is what makes both `award_xp` and
+  `compute_xp_delta` deterministic / unit-testable).
+
+Stacking — anti-grind is **multiplicative** and slots in *after* W15
+buffs and debuffs but *before* the W18 secondary-class ramp and the
+W17 hybrid-synergy bump (see the eight-step table in "Outcome
+multipliers (W4.3 / OP-134)" above).
+
+Worked example: a brand-new-skill `success` task on a Tier-L+ ticket
+that *would* have earned `floor(100 × 1.0 × 2.0 × 3.0) = 600` XP earns
+only `floor(100 × 1.0 × 2.0 × 3.0 × 0.2) = 120` XP if the same task
+hash was already awarded to this agent inside the rolling 24h window.
+The first-time-skill bonus stacks but the anti-grind clamp dwarfs it
+— intentional, because re-running the same task is exactly the
+exploit the clamp guards against.
+
+Edge cases the operator may hit:
+
+- **A task that legitimately recurs every day** (e.g. a daily report).
+  The clamp will haircut it ×0.2 on the second-and-later run inside
+  any 24h window. This is by design — the W4.4 contract is hash-only,
+  not intent-only. If you need a recurring task to pay full XP, give
+  each instance a distinct task body (or change the hashing rule
+  upstream; the XP engine has no opinion).
+- **The flag is `True` but the task differs subtly.** The hash is
+  computed runner-side; if the operator believes the clamp fired on a
+  *different* task, the discrepancy is in the hashing rule, not in
+  `xp_engine`. Reproduce by calling `award_xp` directly with the
+  observed `TaskOutcome` — the multiplier line in the returned
+  `XpDelta` will show the exact stack.
+- **Skill XP shows the clamp but agent XP does not (or vice versa).**
+  Both engines accept the flag independently; the runner is
+  responsible for passing it to both paths consistently. If only one
+  side fires, look at the runner's dispatch site, not at the engines.
 
 ### Common XP-related questions
 
