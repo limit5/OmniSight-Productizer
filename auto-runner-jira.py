@@ -1002,6 +1002,39 @@ CLAUDE_WORKTREE = os.environ.get(
 )
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
 
+# OP-1138 / Sprint Boreas-C3 — Ephemeral-mode invariant.
+#
+# Sprint Boreas-C reframes the runner so each cycle gets a fresh git
+# clone at $workspace, and auto-runner-jira.py runs from INSIDE that
+# clone (not from a separately-checked-out main repo whose code can
+# drift, OP-1126/1124 overnight loop). The new wrapper
+# (scripts/runner-wrapper/run-ephemeral.sh, OP-1137) sets
+# ``OMNISIGHT_RUNNER_EPHEMERAL=1`` AND pins both
+# ``OMNISIGHT_{CODEX,CLAUDE}_WORKTREE`` to the workspace path.
+#
+# When the flag is set we assert the invariant: REPO (the directory
+# auto-runner-jira.py lives in, resolved via Path(__file__)) must
+# equal the active worktree. Mismatch means the wrapper plumbed
+# something wrong — fail loudly instead of running with drifted code.
+_RUNNER_EPHEMERAL = os.environ.get("OMNISIGHT_RUNNER_EPHEMERAL", "").strip() in ("1", "true", "yes", "on")
+if _RUNNER_EPHEMERAL:
+    _active_worktree = CODEX_WORKTREE if AGENT_CLASS in ("subscription-codex", "api-openai") else CLAUDE_WORKTREE
+    _expected = str(REPO.resolve())
+    _got = str(Path(_active_worktree).resolve())
+    if _expected != _got:
+        raise SystemExit(
+            f"[runner] ephemeral-mode invariant failed: REPO ({_expected}) "
+            f"!= active worktree ({_got}). The wrapper at "
+            f"scripts/runner-wrapper/run-ephemeral.sh must set "
+            f"OMNISIGHT_{{CODEX,CLAUDE}}_WORKTREE to the workspace path "
+            f"that contains this script. Found mismatch — refusing to "
+            f"proceed (would drift like OP-1126/1124)."
+        )
+    print(
+        f"[runner] ephemeral-mode active (REPO={_expected}); "
+        f"OMNISIGHT_RUNNER_EPHEMERAL invariant satisfied"
+    )
+
 
 def _invoke_cli(
     agent_class: str,
