@@ -32,6 +32,8 @@ import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
+import { SkillBranchTree } from "./SkillBranchTree"
+
 export type AgentGuild =
   | "backend"
   | "frontend"
@@ -573,7 +575,6 @@ export function CharacterCard({
                 {visibleSkills.map((skill) => {
                   const skillProgress = getLevelProgressPercent(skill.xp, skill.nextLevelXp)
                   const branchLocked = Boolean(skill.branchChoice)
-                  const needsBranch = Boolean(skill.branchChoiceRequired) && !branchLocked
                   return (
                     <li
                       key={skill.skillId}
@@ -612,29 +613,8 @@ export function CharacterCard({
                         >
                           Branch: <span className="font-mono text-foreground">{skill.branchChoice}</span> (locked)
                         </p>
-                      ) : needsBranch ? (
-                        <div
-                          className="mt-1 flex flex-wrap items-center gap-1.5"
-                          data-testid="character-card-skill-branch-picker"
-                        >
-                          <span className="text-[10px] font-medium text-amber-700 dark:text-amber-300">
-                            Pick a branch:
-                          </span>
-                          {(skill.branchOptions ?? []).map((option) => (
-                            <button
-                              key={option.branchId}
-                              type="button"
-                              onClick={() => onLockBranch?.(skill.skillId, option.branchId)}
-                              className="rounded border bg-background px-2 py-0.5 text-[10px] font-mono hover:bg-muted"
-                              data-testid="character-card-skill-branch-option"
-                              data-branch-id={option.branchId}
-                              title={option.summary ?? option.displayName}
-                            >
-                              {option.displayName}
-                            </button>
-                          ))}
-                        </div>
                       ) : null}
+                      <SkillBranchTree skill={skill} onLockBranch={onLockBranch} />
                     </li>
                   )
                 })}

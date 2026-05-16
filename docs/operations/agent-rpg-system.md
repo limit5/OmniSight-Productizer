@@ -684,6 +684,43 @@ the teach primitive is the gate.
 | `vectorize_distilled_skills` (BP.M dim memory write)     | `backend/agents/skill_memory.py`         |
 | `GUILDS` (same-Guild registry source of truth)           | `backend/agents/guild_registry.py`       |
 
+#### Frontend visualization (W12.7 / OP-176)
+
+The Character Card "Skills" tab (the second tab on the card, per
+ADR-0008) renders each forkable skill as an explicit **branching
+tree** rather than a flat button row. The tree makes the structure
+of the W12.4 fork legible at a glance: the operator can see the
+parent skill, the Lv-3 fork point, and the two canonical leaves
+side-by-side, with the locked branch highlighted and the unchosen
+alternate dimmed.
+
+Component: `components/omnisight/agents/SkillBranchTree.tsx`. It is
+nested inside the Skills section (`components/omnisight/agents/CharacterCard.tsx`)
+so the existing W8 identity / level / specialization shell remains
+the first tab and the tree lives on the second tab alongside the
+per-skill XP bars.
+
+| Tree node                                                     | Test ID                                          | State encoding |
+| ------------------------------------------------------------- | ------------------------------------------------ | -------------- |
+| Tree container (also serves as picker for prior W12.4 tests)  | `character-card-skill-branch-picker`             | `data-branch-tree-locked`, `data-branch-tree-pickable` |
+| Tree body                                                     | `character-card-skill-branch-tree`               | — |
+| Root node (parent skill_id + Lv)                              | `character-card-skill-branch-tree-root`          | `data-skill-id` |
+| Fork node (anchors the Lv-3 split point)                      | `character-card-skill-branch-tree-fork`          | — |
+| Leaf node × 2 (canonical branches from `skill_matrix.yaml`)   | `character-card-skill-branch-option`             | `data-branch-id`, `data-branch-leaf-chosen`, `data-branch-leaf-alternate`, `aria-selected` |
+| Immutability prompt (only when a pick is required)            | `character-card-skill-branch-tree-prompt`        | — |
+
+Tree state encoding for a skill with two declared branches:
+
+| `branchChoice` | `branchChoiceRequired` | Tree behaviour |
+| -------------- | ---------------------- | -------------- |
+| `null`         | `true`                 | Both leaves clickable; prompt visible (operator must pick) |
+| set            | `false`                | Both leaves disabled; chosen leaf highlighted, alternate dimmed (W12.4 immutability) |
+| `null`         | `false`                | Both leaves disabled (skill below Lv 3 — fork not yet reached) |
+
+The tree renders only when `branch_options` carries `≥ 2` entries —
+a level-2 skill row therefore collapses cleanly to its XP bar, with
+no tree shell.
+
 ### Decay sweep
 
 Driven by `deploy/systemd/rpg-skill-decay.{service,timer}` (Mondays
