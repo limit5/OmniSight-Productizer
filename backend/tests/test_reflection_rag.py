@@ -244,6 +244,21 @@ async def test_retrieve_reflection_summaries_filters_kind_outcome_and_failure_ty
 
 
 @pytest.mark.asyncio
+async def test_retrieve_reflection_summaries_defaults_to_top_five():
+    store = FakeStore()
+    embedder = FakeEmbedder()
+
+    await rr.retrieve_reflection_summaries(
+        tenant_id="t-acme",
+        query_text="pytest metadata filter regression",
+        embedder=embedder,
+        store=store,
+    )
+
+    assert store.queries[0].limit == rr.DEFAULT_REFLECTION_TOP_K == 5
+
+
+@pytest.mark.asyncio
 async def test_retrieve_reflection_summaries_validates_query_inputs():
     with pytest.raises(ValueError, match="tenant_id is required"):
         await rr.retrieve_reflection_summaries(
@@ -283,3 +298,31 @@ def test_pgvector_reflection_store_reuses_existing_pgvector_adapter():
 
     assert isinstance(store, rag.PgvectorStore)
     assert store._db is conn
+
+
+def test_render_reflection_context_caps_injection_to_two_kibibytes():
+    hits = [
+        rr.ReflectionSearchHit(
+            ticket_key=f"OP-{index}",
+            outcome=rr.REFLECTION_OUTCOME_FAILURE,
+            failure_type="test",
+            summary=("pytest failed on a long assertion " * 20) + "tail",
+            score=0.9 - (index / 100),
+        )
+        for index in range(10)
+    ]
+
+    block = rr.render_reflection_context(hits)
+
+    assert "Reflection RAG context" in block
+    assert len(block.encode("utf-8")) <= rr.DEFAULT_REFLECTION_INJECTION_MAX_BYTES
+    assert block.encode("utf-8").decode("utf-8") == block
+
+
+def test_render_reflection_context_empty_hits_returns_empty():
+    assert rr.render_reflection_context([]) == ""
+
+
+def test_render_reflection_context_validates_max_bytes():
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        rr.render_reflection_context([], max_bytes=0)

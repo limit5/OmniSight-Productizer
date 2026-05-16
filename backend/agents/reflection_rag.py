@@ -37,6 +37,7 @@ VALID_REFLECTION_OUTCOMES = frozenset(
     {REFLECTION_OUTCOME_SUCCESS, REFLECTION_OUTCOME_FAILURE}
 )
 DEFAULT_REFLECTION_TOP_K = 5
+DEFAULT_REFLECTION_INJECTION_MAX_BYTES = 2048
 REFLECTION_SOURCE_PREFIX = "reflection://"
 
 ReflectionOutcome = Literal["success", "failure"]
@@ -202,6 +203,46 @@ async def retrieve_reflection_summaries(
     return tuple(_search_hit_from_vector(hit) for hit in hits)
 
 
+def render_reflection_context(
+    hits: Iterable[ReflectionSearchHit],
+    *,
+    max_bytes: int = DEFAULT_REFLECTION_INJECTION_MAX_BYTES,
+) -> str:
+    """Render retrieved reflections as a bounded task prompt block.
+
+    Returns an empty string when no hits are supplied.  The final UTF-8 encoded
+    block is capped to ``max_bytes`` so reflection RAG cannot bloat each task's
+    injected context.
+    """
+
+    if max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+
+    batch = list(hits)
+    if not batch:
+        return ""
+
+    lines = [
+        "# Reflection RAG context",
+        "",
+        "Relevant prior success/failure summaries:",
+    ]
+    for hit in batch:
+        prefix = f"- {hit.ticket_key} outcome={hit.outcome}"
+        if hit.failure_type:
+            prefix += f" failure_type={hit.failure_type}"
+        lines.append(f"{prefix} score={hit.score:.3f}")
+        lines.append(f"  summary: {hit.summary.strip()}")
+    lines.extend(
+        [
+            "",
+            "Use these as prior examples only; verify the current task with its "
+            "own tests before signing off.",
+        ]
+    )
+    return _truncate_utf8("\n".join(lines), max_bytes)
+
+
 def _chunk_id(summary: ReflectionSummary) -> str:
     digest = hashlib.sha256(summary.text_for_embedding().encode("utf-8")).hexdigest()
     return (
@@ -230,7 +271,15 @@ def _required(name: str, value: str) -> str:
     return clean
 
 
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    return raw[:max_bytes].decode("utf-8", errors="ignore").rstrip()
+
+
 __all__ = [
+    "DEFAULT_REFLECTION_INJECTION_MAX_BYTES",
     "DEFAULT_REFLECTION_TOP_K",
     "REFLECTION_OUTCOME_FAILURE",
     "REFLECTION_OUTCOME_SUCCESS",
@@ -241,6 +290,7 @@ __all__ = [
     "ReflectionSummary",
     "VALID_REFLECTION_OUTCOMES",
     "pgvector_reflection_store",
+    "render_reflection_context",
     "retrieve_reflection_summaries",
     "vectorize_reflection_summaries",
 ]
