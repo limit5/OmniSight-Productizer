@@ -746,6 +746,58 @@ exercise on a fresh agent is reproducible. Tools absent from the
 YAML default to Lv 1 (permissive); a missing file raises
 `ProficiencyGateConfigMissing` at first read.
 
+### Feature unlock gating (W13.3 / OP-180)
+
+The "drives feature-unlock gating: a low-Lv agent literally cannot
+call high-Lv-only flags" clause in ADR-0008 §"MCP/A2A tool
+proficiency (W13)" is implemented as a thin production-wiring layer
+on top of `get_required_level` + `can_invoke_at_level`. The W12.4
+attribution pattern applies: the helper surface for backend callers
+adds two functions but no new persistence, no new YAML, no new
+telemetry.
+
+| Helper | Purpose |
+|---|---|
+| `build_feature_unlock_gate(store, *, config_path=None, now=None)` | Returns a closure `async (tool_name, agent_id) -> bool` that reads the YAML per-call and consults `can_invoke_at_level` against the per-agent row |
+| `install_feature_unlock_gate(dispatcher, *, store, agent_id, config_path=None, now=None)` | Builds the closure and installs it on `dispatcher.set_proficiency_gate(...)` |
+
+Production wiring per agent dispatch (api-anthropic agent class —
+the W13 owner per ADR-0008 §"Implementation split"):
+
+```python
+from backend.agents.tool_dispatcher import get_default_dispatcher
+from backend.agents.tool_proficiency import (
+    PostgresToolProficiencyStore,
+    install_feature_unlock_gate,
+)
+
+store = PostgresToolProficiencyStore(conn_factory=app_pool.acquire)
+install_feature_unlock_gate(
+    get_default_dispatcher(),
+    store=store,
+    agent_id=current_agent_id,
+)
+```
+
+The canonical W13.3 sample is the Lv-3 batch op:
+`mcp__filesystem__write_multiple_files: 3` in
+`config/tool_proficiency_gates.yaml`. A fresh agent at Lv 1 on that
+tool gets a structured `tool_proficiency_insufficient` `tool_result`
+from the dispatcher (and a `tool:gate:blocked` SSE event), forcing
+the agent to demonstrate single-file `Write` competence first. Tools
+absent from the YAML stay at Lv 1 required, so adding the gate to a
+new MCP tool is a one-line YAML edit — the install helper does not
+need to be re-touched.
+
+Source symbols (per W13.3 attribution):
+
+| Symbol | File |
+|---|---|
+| `build_feature_unlock_gate` | `backend/agents/tool_proficiency.py` |
+| `install_feature_unlock_gate` | `backend/agents/tool_proficiency.py` |
+| `ToolDispatcher.set_proficiency_gate` (callee) | `backend/agents/tool_dispatcher.py` |
+| `mcp__filesystem__write_multiple_files: 3` (canonical sample) | `config/tool_proficiency_gates.yaml` |
+
 ### Telemetry consumer
 
 `backend/agents/mp_w17_telemetry_consumer.py` reads the W17.7

@@ -151,6 +151,16 @@ class ToolDispatcher:
         ``agent_id`` is ``None`` the gate is bypassed entirely — this is
         the default for backwards compatibility with callers that have
         not yet wired W13.
+
+        Production callers should not hand-roll the closure. The W13.3
+        (OP-180) feature-unlock gate is built and installed by
+        :func:`backend.agents.tool_proficiency.install_feature_unlock_gate`,
+        which reads ``config/tool_proficiency_gates.yaml`` for the
+        per-tool required Lv and consults
+        :func:`backend.agents.tool_proficiency.can_invoke_at_level`
+        against the per-agent row — re-installing with a different
+        ``agent_id`` is the supported way to re-scope an already-running
+        dispatcher to a different agent.
         """
         self._proficiency_gate = gate
         self._current_agent_id = agent_id
