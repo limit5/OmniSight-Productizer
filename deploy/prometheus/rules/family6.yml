@@ -1,0 +1,83 @@
+# OP-1170 — v2-⑥-AlertRule — Family 6 alembic image/DB drift rule.
+#
+# Canonical-form rule file per the v2-AlertBridge contract
+# (`docs/sop/alert-rule-contract.md` / source-of-truth
+# `docs/sprint-s12/2026-05-16-v2-alertbridge-framework-contract.md`).
+# The `__bridge` block on each rule is framework metadata consumed by
+# `scripts/promote-alert-rule.py` (v2-AlertBridge-2bc) and stripped
+# before Prometheus parses the file.
+#
+# Pre-flight (per ticket OP-1170 §Pre-flight):
+#   $ git ls-tree refs/remotes/origin/develop -- deploy/prometheus/rules/
+#     100644 blob 70316c23…  deploy/prometheus/rules/runner_atlas.yml
+#     → only runner_atlas.yml present on develop; no family6 rules yet.
+#   $ git grep -l 'OmniSightAlembicDrift' refs/remotes/origin/develop
+#     → matches only in docs (specs, contracts, ADRs) — no rule file
+#       defines OmniSightAlembicDrift; this file ships it.
+#
+# Required-field schema (AlertBridge contract §1, §2):
+#   labels:      severity / area / family / defense_dimension
+#   annotations: summary / description / runbook_url / remediation_hint
+# Severity enum (§3): {page, warn, info}; backward drift is `page`
+# because it is a production-refuse-to-start outage class
+# (ADR-0036 forward-only-deploy invariant).
+#
+# Producer metrics consumed (shipped by OP-1163 v2-⑥-1bc, merged):
+#   - omnisight_alembic_drift{direction}   gauge; 1 when drift in direction
+#   - omnisight_readyz_migrations_pending  gauge; 1 when /readyz migration
+#                                          probe is failing (per-poll redundant
+#                                          surface for the same drift class)
+#
+# Sprint reference:
+#   docs/sprint-s12/2026-05-16-v2-family6-image-db-drift-contract.md
+#   §4 (detection contract) + §4.5 (AlertRule shape).
+#   docs/architecture/ADR-0036-forward-only-deploy-invariant.md (page
+#   severity rationale: backward-drift refuses to start; rescue CLI is the
+#   only downgrade path).
+
+groups:
+  - name: omnisight-family6-alembic-drift
+    interval: 30s
+    rules:
+      # ── OmniSightAlembicDrift ─────────────────────────────────────────
+      # PAGE: backward image/DB drift detected — the backend image's
+      # baked alembic head is BEHIND the live DB head, so the container
+      # will refuse to start (exit 78, EX_CONFIG) per ADR-0036. Also
+      # fires when /readyz's per-poll migration probe surfaces the same
+      # drift class via `omnisight_readyz_migrations_pending == 1`; the
+      # `OR` ensures detection is independent of whether AlertBridge
+      # observes the always-on gauge or the readyz-derived gauge first.
+      # `for: 5m` lets a transient post-deploy gap close (Family ⑥
+      # §4.6) before paging.
+      - alert: OmniSightAlembicDrift
+        expr: |
+          max by (instance) (
+            (omnisight_alembic_drift{direction="backward"} == 1)
+            or
+            (omnisight_readyz_migrations_pending == 1)
+          )
+        for: 5m
+        labels:
+          severity: page
+          area: deployment
+          family: "6"
+          defense_dimension: D1
+        annotations:
+          summary: "Alembic image-DB drift detected (backward — backend cannot start)"
+          description: |
+            instance={{ $labels.instance }}: backend image's baked alembic
+            head is BEHIND the live database head, or /readyz is reporting
+            migrations_pending. Per ADR-0036 (forward-only-deploy
+            invariant), the backend image is the advance vector for the
+            schema — an image whose alembic_head_in_image < db_head is
+            structurally unable to apply the missing migrations forward
+            and will refuse to start (exit 78). Source gauges:
+            omnisight_alembic_drift{direction="backward"} (always-on
+            collector, OP-1163) and omnisight_readyz_migrations_pending
+            (per-poll /readyz probe).
+          runbook_url: "https://docs.sora.services/runbooks/omnisight-alembic-drift"
+          remediation_hint: "Deploy a newer backend image whose alembic head is >= db_head (preferred per ADR-0036); OR run `omnisight rescue drift --confirm --target <known-safe-rev>` from the deploy host (operator-only, requires L2 fingerprint per ADR-0033). See docs/sop/runbook-family6-alembic-drift.md."
+        __bridge:
+          critical_labels: [instance]
+          cardinality_caps:
+            instance: 10
