@@ -36,8 +36,8 @@ either directly (compute helper) or via the closure built by
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
 
 from backend.agents.talent_tree import (
     CAPSTONE_SIGNATURE_HEADER,
@@ -96,7 +96,7 @@ def build_talent_prompt_enricher(
     store: TalentChoiceStore,
     *,
     path: Path | str | None = None,
-) -> Any:
+) -> Callable[..., Awaitable[str]]:
     """W14.4 (OP-188) -- closure that fetches + enriches in one call.
 
     The returned closure has the shape
