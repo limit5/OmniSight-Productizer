@@ -231,6 +231,10 @@ class Settings(BaseSettings):
     gerrit_instances: str = ""
 
     # ── Webhook Secrets (External → Internal) ──
+    # Empty default is intentional: the gate below in
+    # ``validate_startup_config()`` (FX2.D4.5 / OP-238) only requires
+    # each secret when its integration is explicitly opted into, so
+    # dev boxes keep booting on zero config.
     gerrit_webhook_secret: str = ""     # Default Gerrit webhook secret (fallback)
     github_webhook_secret: str = ""     # HMAC-SHA256 signature verification
     gitlab_webhook_secret: str = ""     # X-Gitlab-Token header verification
@@ -1325,6 +1329,67 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             "have HTTPS (Cloudflare Tunnel terminates TLS, so this is "
             "the right value behind it)."
         )
+
+    # ── FX2.D4.5 (#238): webhook secret fail-fast at app startup ──
+    # The webhook handlers in backend/routers/webhooks.py historically
+    # returned 503 at request time when the env-side secret was empty;
+    # operators only discovered a missing secret *after* an external
+    # event reached the endpoint (Stripe retries, GitHub redelivery
+    # queues, etc.). Hoist that check to boot: when an integration is
+    # explicitly enabled, the matching webhook secret MUST be set, or
+    # we refuse to start under strict mode.
+    #
+    # Gating choice: opt-in only — empty defaults stay benign on dev
+    # boxes that never enabled the integration. The per-instance
+    # ``git_accounts.webhook_secret`` overlay (Phase 5-7/5-8) is a
+    # runtime resolver; we validate only the env-side scalar fallback
+    # here because that's what the operator controls at deploy time.
+    _webhook_secret_gates: list[tuple[str, str, str, bool]] = [
+        (
+            "gerrit_webhook_secret",
+            "OMNISIGHT_GERRIT_WEBHOOK_SECRET",
+            "gerrit_enabled=true",
+            bool(settings.gerrit_enabled),
+        ),
+        (
+            "github_webhook_secret",
+            "OMNISIGHT_GITHUB_WEBHOOK_SECRET",
+            "ci_github_actions_enabled=true or github_repo set",
+            bool(settings.ci_github_actions_enabled)
+            or bool((settings.github_repo or "").strip()),
+        ),
+        (
+            "gitlab_webhook_secret",
+            "OMNISIGHT_GITLAB_WEBHOOK_SECRET",
+            "ci_gitlab_enabled=true or gitlab_project_id set",
+            bool(settings.ci_gitlab_enabled)
+            or bool((settings.gitlab_project_id or "").strip()),
+        ),
+        (
+            "jira_webhook_secret",
+            "OMNISIGHT_JIRA_WEBHOOK_SECRET",
+            "notification_jira_url set",
+            bool((settings.notification_jira_url or "").strip()),
+        ),
+        (
+            "stripe_webhook_secret",
+            "OMNISIGHT_STRIPE_WEBHOOK_SECRET",
+            "stripe_secret_key set",
+            bool((settings.stripe_secret_key or "").strip()),
+        ),
+    ]
+    for field, env_name, gate_desc, enabled in _webhook_secret_gates:
+        if not enabled:
+            continue
+        if (getattr(settings, field, "") or "").strip():
+            continue
+        msg = (
+            f"{env_name} is empty but {gate_desc} — the matching "
+            "webhook endpoint would return 503 to every external "
+            "delivery. Set the secret at deploy time so the failure "
+            "surfaces at boot rather than on the first inbound event."
+        )
+        (hard_errors if strict else warnings).append(msg)
 
     # ── Masked summary at startup ──
     _startup_logger.info(
