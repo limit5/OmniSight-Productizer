@@ -1,4 +1,4 @@
-"""OP-714 — unit tests for proactive merger trigger logic.
+"""OP-714 / OP-717 / OP-718 — unit tests for proactive merger trigger logic.
 
 Tests the pure decision logic of ``_proactive_merger_check`` and
 ``_is_merger_uploader`` without needing the FastAPI test client, the
@@ -9,7 +9,15 @@ so we exercise:
   * Hashtag short-circuit (Merger-Proactive-PS* + Merge-Conflict-Resolved)
   * WIP / private skip
   * Mergeable=true → skip without invoking merger
-  * Mergeable=false → set hashtag + invoke merger
+  * Mergeable=false → set hashtag + delegate to backend via HTTP (OP-718)
+
+OP-718 transport change: the merger invocation is no longer an
+in-process ``on_merge_conflict_webhook`` call — the daemon process
+lacks the backend's runtime init (asyncpg pool, LLM provider, JIRA
+client), so every backend-init-dependent step short-circuited. We now
+POST the ``MergeConflictTask`` JSON to the backend merger endpoint
+and assert on the httpx call shape (URL, dual-header auth, payload)
+instead of the arbiter signature.
 
 This file deliberately skips the auth-refactor end-to-end test (the
 shared ``client`` fixture needs OMNI_TEST_PG_URL to init the pool;
@@ -26,11 +34,66 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from backend.routers.webhooks import (
+    _MERGER_HTTP_PATH,
     _PROACTIVE_HASHTAG_PREFIX,
     _RESOLVED_HASHTAG,
     _is_merger_uploader,
+    _post_merge_conflict_to_backend,
     _proactive_merger_check,
 )
+
+
+# ──────────────────────────────────────────────────────────────────
+# Shared httpx-mock helpers (OP-718)
+# ──────────────────────────────────────────────────────────────────
+
+
+def _make_httpx_response(
+    *, status_code: int = 200, json_body: dict | None = None,
+    text: str = "",
+):
+    """Build a stand-in for an ``httpx.Response`` carrying just the
+    attributes ``_post_merge_conflict_to_backend`` reads."""
+    response = MagicMock()
+    response.status_code = status_code
+    response.json = MagicMock(
+        return_value=json_body if json_body is not None else {},
+    )
+    response.text = text or (
+        "" if json_body is None else "<json body>"
+    )
+    return response
+
+
+def _patch_httpx_post(response_or_exc) -> "patch":
+    """Patch ``httpx.AsyncClient`` so the ``async with`` block in
+    ``_post_merge_conflict_to_backend`` returns a client whose ``post``
+    coroutine yields the supplied response (or raises the supplied
+    exception)."""
+    client_mock = MagicMock()
+    if isinstance(response_or_exc, BaseException):
+        client_mock.post = AsyncMock(side_effect=response_or_exc)
+    else:
+        client_mock.post = AsyncMock(return_value=response_or_exc)
+
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=client_mock)
+    cm.__aexit__ = AsyncMock(return_value=None)
+
+    factory = MagicMock(return_value=cm)
+    return patch(
+        "backend.routers.webhooks.httpx.AsyncClient", factory,
+    ), client_mock
+
+
+@pytest.fixture
+def merger_http_env(monkeypatch):
+    """Configure the dual-header auth env vars the OP-718 HTTP delegate
+    requires. Tests that need the absence path override individually."""
+    monkeypatch.setenv("OMNISIGHT_GERRIT_WEBHOOK_API_KEY", "test-api-key")
+    monkeypatch.setenv("OMNISIGHT_JIRA_WEBHOOK_SECRET", "test-jira-secret")
+    monkeypatch.delenv("OMNISIGHT_BACKEND_URL", raising=False)
+    yield
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -122,17 +185,16 @@ class TestProactiveMergerSkipConditions:
         })
         mock_client.add_hashtag = AsyncMock()
 
-        mock_arbiter = AsyncMock()
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response())
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 
         assert any("skip_reason=hashtag_already_attempted" in r.message
                    for r in caplog.records)
-        mock_arbiter.assert_not_called()
+        http_client.post.assert_not_called()
         mock_client.add_hashtag.assert_not_called()
 
     async def test_skip_when_resolved_hashtag_set(self, caplog):
@@ -142,17 +204,17 @@ class TestProactiveMergerSkipConditions:
             "hashtags": [_RESOLVED_HASHTAG],
             "subject": "[OP-X] x",
         })
-        mock_arbiter = AsyncMock()
+
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response())
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 
         assert any("skip_reason=hashtag_resolved" in r.message
                    for r in caplog.records)
-        mock_arbiter.assert_not_called()
+        http_client.post.assert_not_called()
 
     async def test_skip_when_work_in_progress(self, caplog):
         mock_client = MagicMock()
@@ -161,17 +223,17 @@ class TestProactiveMergerSkipConditions:
             "wip": True,
             "subject": "[OP-X] x",
         })
-        mock_arbiter = AsyncMock()
+
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response())
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 
         assert any("skip_reason=work_in_progress" in r.message
                    for r in caplog.records)
-        mock_arbiter.assert_not_called()
+        http_client.post.assert_not_called()
 
     async def test_skip_when_mergeable_true(self, caplog):
         """Clean change — no merger needed (OP-717: enrichment returns
@@ -180,14 +242,14 @@ class TestProactiveMergerSkipConditions:
         mock_client.query_change = AsyncMock(return_value={
             "hashtags": [], "subject": "[OP-X] x",
         })
-        mock_arbiter = AsyncMock()
 
         from backend.agents.conflict_enrichment import EnrichmentResult
         clean_result = EnrichmentResult(mergeable=True)
 
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response())
+
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
                    AsyncMock(return_value=clean_result)), \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
@@ -195,15 +257,18 @@ class TestProactiveMergerSkipConditions:
 
         assert any("skip_reason=mergeable" in r.message
                    for r in caplog.records)
-        mock_arbiter.assert_not_called()
+        http_client.post.assert_not_called()
 
 
 @pytest.mark.asyncio
 class TestProactiveMergerInvokes:
 
-    async def test_invokes_merger_when_mergeable_false(self, caplog):
+    async def test_invokes_merger_when_mergeable_false(
+        self, caplog, merger_http_env,
+    ):
         """The happy-path: stale base change → enrichment finds the
-        conflict block → merger called with real conflict_text."""
+        conflict block → merger reached via httpx POST (OP-718) with
+        real conflict_text + dual-header auth."""
         mock_client = MagicMock()
         mock_client.query_change = AsyncMock(return_value={
             "hashtags": [], "subject": "[OP-92] mergeable=false test",
@@ -230,14 +295,13 @@ class TestProactiveMergerInvokes:
             incoming_subject="incoming subj",
         )
 
-        # Mock the arbiter outcome so we don't call into LLM.
-        mock_outcome = MagicMock()
-        mock_outcome.reason = MagicMock(value="plus_two_voted")
-        mock_arbiter = AsyncMock(return_value=mock_outcome)
+        # Mock backend response so we don't call into LLM.
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={"ok": True, "reason": "plus_two_voted"},
+        ))
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
                    AsyncMock(return_value=enrichment)), \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
@@ -249,24 +313,42 @@ class TestProactiveMergerInvokes:
         assert call.kwargs["hashtag"] == f"{_PROACTIVE_HASHTAG_PREFIX}1"
         assert call.kwargs["change_id"] == "92"
 
-        # Verify merger was called with the enriched task shape (OP-717)
-        mock_arbiter.assert_awaited_once()
-        task = mock_arbiter.await_args.args[0]
-        assert task.change_id == "92"
-        assert task.patchset_revision == "d386745be2"
-        assert task.jira_ticket == "OP-92"
-        # NEW: file_path + conflict_text now non-empty
-        assert task.file_path == "src/preferences.py"
-        assert "<<<<<<< HEAD" in task.conflict_text
-        assert ">>>>>>> branch" in task.conflict_text
-        assert task.head_commit_message == "head subj"
+        # OP-718: merger reached via httpx POST to backend, NOT in-process.
+        http_client.post.assert_awaited_once()
+        post_kwargs = http_client.post.await_args.kwargs
+        post_args = http_client.post.await_args.args
+
+        # URL points at the backend merger endpoint.
+        url = post_args[0] if post_args else post_kwargs.get("url")
+        assert url.endswith(_MERGER_HTTP_PATH)
+
+        # Dual-header auth shape.
+        headers = post_kwargs["headers"]
+        assert headers["Authorization"] == "Bearer test-api-key"
+        assert headers["X-Jira-Webhook-Secret"] == "test-jira-secret"
+
+        # JSON payload mirrors the MergeConflictTask the in-process call
+        # would have built.
+        payload = post_kwargs["json"]
+        assert payload["change_id"] == "92"
+        assert payload["patchset_revision"] == "d386745be2"
+        assert payload["jira_ticket"] == "OP-92"
+        assert payload["file_path"] == "src/preferences.py"
+        assert "<<<<<<< HEAD" in payload["conflict_text"]
+        assert ">>>>>>> branch" in payload["conflict_text"]
+        assert payload["head_commit_message"] == "head subj"
 
         assert any("decision=invoke_merger" in r.message
                    for r in caplog.records)
         assert any("primary_file=src/preferences.py" in r.message
                    for r in caplog.records)
+        # OP-718: outcome line now carries the backend-reported reason.
+        assert any("merger_outcome reason=plus_two_voted" in r.message
+                   for r in caplog.records)
 
-    async def test_invokes_merger_with_additional_files(self, caplog):
+    async def test_invokes_merger_with_additional_files(
+        self, caplog, merger_http_env,
+    ):
         """Multi-file conflict → primary file is alphabetically-first,
         additional_files lists the rest."""
         mock_client = MagicMock()
@@ -284,25 +366,29 @@ class TestProactiveMergerInvokes:
         ]
         enrichment = EnrichmentResult(mergeable=False, conflict_files=cfs)
 
-        mock_outcome = MagicMock()
-        mock_outcome.reason = MagicMock(value="abstained_low_confidence")
-        mock_arbiter = AsyncMock(return_value=mock_outcome)
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={"ok": True, "reason": "abstained_low_confidence"},
+        ))
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
                    AsyncMock(return_value=enrichment)), \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 
-        task = mock_arbiter.await_args.args[0]
-        assert task.file_path == "a.py"
-        assert task.additional_files == ["b.py", "c.md"]
+        http_client.post.assert_awaited_once()
+        payload = http_client.post.await_args.kwargs["json"]
+        assert payload["file_path"] == "a.py"
+        assert payload["additional_files"] == ["b.py", "c.md"]
         assert any("additional_count=2" in r.message
                    for r in caplog.records)
+        assert any(
+            "merger_outcome reason=abstained_low_confidence" in r.message
+            for r in caplog.records
+        )
 
-    async def test_skips_too_many_conflicts(self, caplog):
+    async def test_skips_too_many_conflicts(self, caplog, merger_http_env):
         """If enrichment caps out (>5 files) → set hashtag, no merger call."""
         mock_client = MagicMock()
         mock_client.query_change = AsyncMock(return_value={
@@ -319,11 +405,12 @@ class TestProactiveMergerInvokes:
             mergeable=False, too_many=True, conflict_files=many,
         )
 
-        mock_arbiter = AsyncMock()
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={"ok": True, "reason": "plus_two_voted"},
+        ))
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
                    AsyncMock(return_value=enrichment)), \
              caplog.at_level("INFO", logger="backend.routers.webhooks"):
@@ -331,11 +418,11 @@ class TestProactiveMergerInvokes:
 
         # Hashtag was set (so we don't re-attempt) but merger NOT called.
         mock_client.add_hashtag.assert_awaited_once()
-        mock_arbiter.assert_not_called()
+        http_client.post.assert_not_called()
         assert any("skip_reason=too_many_conflicts" in r.message
                    for r in caplog.records)
 
-    async def test_skip_on_enrichment_error(self, caplog):
+    async def test_skip_on_enrichment_error(self, caplog, merger_http_env):
         """Enrichment infrastructure failure → skip safely (next event retries)."""
         mock_client = MagicMock()
         mock_client.query_change = AsyncMock(return_value={
@@ -347,30 +434,31 @@ class TestProactiveMergerInvokes:
         broken = EnrichmentResult(
             mergeable=False, error="fetch develop failed: network down",
         )
-        mock_arbiter = AsyncMock()
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response())
 
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
                    AsyncMock(return_value=broken)), \
              caplog.at_level("WARNING", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 
-        mock_arbiter.assert_not_called()
+        http_client.post.assert_not_called()
         mock_client.add_hashtag.assert_not_called()
         assert any("skip_reason=enrichment_error" in r.message
                    for r in caplog.records)
 
-    async def test_swallows_arbiter_exception(self, caplog):
-        """Arbiter failure must NOT propagate — webhook already returned."""
+    async def test_swallows_http_exception(self, caplog, merger_http_env):
+        """OP-718: backend HTTP error must NOT propagate — the daemon
+        keeps running and the next patchset re-runs the pipeline. The
+        helper now folds httpx failures into a synthetic reason= line
+        instead of raising, so the outcome row is still emitted."""
+        import httpx as _httpx
         mock_client = MagicMock()
         mock_client.query_change = AsyncMock(return_value={
             "hashtags": [], "subject": "[OP-92] x",
         })
         mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
-
-        mock_arbiter = AsyncMock(side_effect=RuntimeError("arbiter blew up"))
 
         from backend.agents.conflict_enrichment import (
             ConflictFile, EnrichmentResult,
@@ -384,19 +472,27 @@ class TestProactiveMergerInvokes:
             )],
         )
 
+        http_patch, http_client = _patch_httpx_post(
+            _httpx.ConnectError("backend down"),
+        )
+
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
                    AsyncMock(return_value=enrichment)), \
-             caplog.at_level("ERROR", logger="backend.routers.webhooks"):
-            # Must not raise
+             caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            # Must not raise.
             await _proactive_merger_check(_event())
 
-        assert any("merger_invocation_failed" in r.message
-                   for r in caplog.records)
+        http_client.post.assert_awaited_once()
+        assert any(
+            "merger_outcome reason=merger_http_request_error" in r.message
+            for r in caplog.records
+        )
 
-    async def test_continues_when_set_hashtag_fails(self, caplog):
+    async def test_continues_when_set_hashtag_fails(
+        self, caplog, merger_http_env,
+    ):
         """Throttle marker is best-effort — merger still runs even if it fails."""
         mock_client = MagicMock()
         mock_client.query_change = AsyncMock(return_value={
@@ -406,10 +502,6 @@ class TestProactiveMergerInvokes:
             side_effect=RuntimeError("ssh unreachable"),
         )
 
-        mock_outcome = MagicMock()
-        mock_outcome.reason = MagicMock(value="abstained_low_confidence")
-        mock_arbiter = AsyncMock(return_value=mock_outcome)
-
         from backend.agents.conflict_enrichment import (
             ConflictFile, EnrichmentResult,
         )
@@ -422,15 +514,129 @@ class TestProactiveMergerInvokes:
             )],
         )
 
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={"ok": True, "reason": "abstained_low_confidence"},
+        ))
+
         with patch("backend.gerrit.gerrit_client", mock_client), \
-             patch("backend.merge_arbiter.on_merge_conflict_webhook",
-                   mock_arbiter), \
+             http_patch, \
              patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
                    AsyncMock(return_value=enrichment)), \
              caplog.at_level("WARNING", logger="backend.routers.webhooks"):
             await _proactive_merger_check(_event())
 
         # Merger still invoked despite the hashtag failure
-        mock_arbiter.assert_awaited_once()
+        http_client.post.assert_awaited_once()
         assert any("set_hashtag_failed" in r.message
                    for r in caplog.records)
+
+
+# ──────────────────────────────────────────────────────────────────
+# OP-718 — _post_merge_conflict_to_backend (HTTP delegate unit tests)
+# ──────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestPostMergeConflictToBackend:
+    """Direct tests on the HTTP-delegate helper so the auth + URL +
+    error-branch logic is covered without going through the full
+    proactive-merger decision flow."""
+
+    def _task(self):
+        from backend.merge_arbiter import MergeConflictTask
+        return MergeConflictTask(
+            change_id="92",
+            project="omnisight/Productizer",
+            file_path="src/x.py",
+            conflict_text="<<<<<<< a\n=======\n>>>>>>> b\n",
+            patchset_revision="abc123",
+            jira_ticket="OP-92",
+        )
+
+    async def test_missing_api_key_short_circuits(self, monkeypatch):
+        """No OMNISIGHT_GERRIT_WEBHOOK_API_KEY → return synthetic error
+        without making any network call. Reproduces the pre-OP-718
+        symptom where daemon env was missing the credential."""
+        monkeypatch.delenv(
+            "OMNISIGHT_GERRIT_WEBHOOK_API_KEY", raising=False,
+        )
+        monkeypatch.setenv("OMNISIGHT_JIRA_WEBHOOK_SECRET", "s")
+
+        factory = MagicMock()
+        with patch(
+            "backend.routers.webhooks.httpx.AsyncClient", factory,
+        ):
+            outcome = await _post_merge_conflict_to_backend(self._task())
+
+        assert outcome["reason"] == "merger_http_missing_credentials"
+        assert outcome["ok"] is False
+        factory.assert_not_called()
+
+    async def test_missing_jira_secret_short_circuits(self, monkeypatch):
+        monkeypatch.setenv("OMNISIGHT_GERRIT_WEBHOOK_API_KEY", "k")
+        monkeypatch.delenv(
+            "OMNISIGHT_JIRA_WEBHOOK_SECRET", raising=False,
+        )
+
+        factory = MagicMock()
+        with patch(
+            "backend.routers.webhooks.httpx.AsyncClient", factory,
+        ):
+            outcome = await _post_merge_conflict_to_backend(self._task())
+
+        assert outcome["reason"] == "merger_http_missing_credentials"
+        factory.assert_not_called()
+
+    async def test_uses_backend_url_override(self, merger_http_env, monkeypatch):
+        """OMNISIGHT_BACKEND_URL overrides the default localhost target."""
+        monkeypatch.setenv("OMNISIGHT_BACKEND_URL", "http://omni:9000/")
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={"ok": True, "reason": "plus_two_voted"},
+        ))
+        with http_patch:
+            outcome = await _post_merge_conflict_to_backend(self._task())
+
+        url = http_client.post.await_args.args[0]
+        assert url == "http://omni:9000/api/v1/orchestrator/merge-conflict"
+        assert outcome["reason"] == "plus_two_voted"
+
+    async def test_non_200_response_folds_to_status_reason(
+        self, merger_http_env,
+    ):
+        """A 401 (bad bearer) becomes ``reason=merger_http_status_401``
+        so operators see the auth failure in the daemon log instead of a
+        silent miss."""
+        http_patch, _ = _patch_httpx_post(_make_httpx_response(
+            status_code=401, text="Invalid Jira webhook secret",
+        ))
+        with http_patch:
+            outcome = await _post_merge_conflict_to_backend(self._task())
+
+        assert outcome["reason"] == "merger_http_status_401"
+        assert outcome["ok"] is False
+
+    async def test_invalid_json_response_folds_to_reason(
+        self, merger_http_env,
+    ):
+        """A 200 with a non-JSON body still produces a structured
+        reason= so the caller's logger line stays uniform."""
+        response = _make_httpx_response(status_code=200, text="<html>")
+        response.json.side_effect = ValueError("not json")
+        http_patch, _ = _patch_httpx_post(response)
+        with http_patch:
+            outcome = await _post_merge_conflict_to_backend(self._task())
+
+        assert outcome["reason"] == "merger_http_invalid_json"
+
+    async def test_request_error_folds_to_reason(self, merger_http_env):
+        """Network failure (ConnectError / TimeoutException) folds to
+        the synthetic reason instead of raising."""
+        import httpx as _httpx
+        http_patch, _ = _patch_httpx_post(
+            _httpx.ConnectError("connection refused"),
+        )
+        with http_patch:
+            outcome = await _post_merge_conflict_to_backend(self._task())
+
+        assert outcome["reason"] == "merger_http_request_error"
+        assert "ConnectError" in outcome["detail"]
