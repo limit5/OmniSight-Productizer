@@ -24,6 +24,38 @@ from backend.models import Notification, NotificationLevel, Severity
 logger = logging.getLogger(__name__)
 
 
+def _create_dispatch_task(coro, task_name: str) -> asyncio.Task:
+    """Create a fire-and-forget notification dispatch task with metering."""
+    task = asyncio.create_task(coro)
+    task.add_done_callback(
+        lambda done: _record_dispatch_task_result(done, task_name),
+    )
+    return task
+
+
+def _record_dispatch_task_result(task: asyncio.Task, task_name: str) -> None:
+    """Log + meter unexpected notification dispatch task failures."""
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    if exc is None:
+        return
+
+    logger.warning(
+        "notifications: background %s task failed: %s",
+        task_name, exc,
+    )
+    try:
+        from backend import metrics as _m
+        _m.persist_failure_total.labels(module="notifications").inc()
+    except Exception as metric_exc:  # pragma: no cover - metric must not break dispatch
+        logger.debug(
+            "notifications: dispatch task failure metric bump failed: %s",
+            metric_exc,
+        )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  R9 row 2940 (#315): L1 log + email digest module-global state
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -171,14 +203,14 @@ async def notify(
     #    levels, but P3 is informational and would otherwise be dropped
     #    by the legacy level-only gate.
     if level_str in ("warning", "action", "critical") or severity_str or is_red_card:
-        asyncio.create_task(_dispatch_external(notif))
+        _create_dispatch_task(_dispatch_external(notif), "external dispatch")
 
     # R1 (#307): interactive mirror to ChatOps bridge. Non-fatal if
     # bridge is unavailable — notification already persisted + SSE'd.
     if interactive:
-        asyncio.create_task(_dispatch_chatops(
+        _create_dispatch_task(_dispatch_chatops(
             notif, interactive_channel, interactive_buttons or [],
-        ))
+        ), "chatops dispatch")
 
     # 4. Log — R9 row 2940 (#315) attaches ``[severity:P*]`` tag inline
     #    so log scrapers / SIEM rules can filter on it without needing
@@ -434,12 +466,15 @@ async def send_notification(
     if L2_CHATOPS_INTERACTIVE in tier_set:
         if interactive and interactive_buttons:
             # R1 explicit surface — caller-supplied buttons + channel.
-            asyncio.create_task(_dispatch_chatops(
+            _create_dispatch_task(_dispatch_chatops(
                 notif, interactive_channel, interactive_buttons,
-            ))
+            ), "chatops dispatch")
         else:
             # Default surface — broadcast w/ ack/hint/logs button set.
-            asyncio.create_task(_dispatch_chatops_severity(notif))
+            _create_dispatch_task(
+                _dispatch_chatops_severity(notif),
+                "chatops severity dispatch",
+            )
 
     # L1 log + email digest — synchronous (deque.append + log line);
     # NOT counted toward dispatch_status for the same best-effort
@@ -622,7 +657,10 @@ async def _dispatch_external(notif: Notification) -> None:
     # transient bridge hiccup doesn't mark the whole notification as
     # ``dispatch_status=failed`` (Jira leg already covers durability).
     if fire_chatops:
-        asyncio.create_task(_dispatch_chatops_severity(notif))
+        _create_dispatch_task(
+            _dispatch_chatops_severity(notif),
+            "chatops severity dispatch",
+        )
 
     # R9 row 2940: L1 log + email digest. Synchronous (microseconds —
     # appends to a deque + emits one log line); not counted toward
