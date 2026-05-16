@@ -34,10 +34,22 @@ CLASS="$2"
 
 LOG="/tmp/runner-$INSTANCE.log"
 
+# Auto-detect bot identity from agent_class. Operator can still pin any
+# of these via the matching OMNISIGHT_* env var (e.g., for testing or
+# per-instance accounts when those land).
+case "$CLASS" in
+    subscription-codex|api-openai)
+        DEFAULT_BOT="codex-bot"
+        ;;
+    *)
+        DEFAULT_BOT="claude-bot"
+        ;;
+esac
+
 WORKSPACE_ROOT="${OMNISIGHT_RUNNER_WORKSPACE_ROOT:-/tmp/runner-workspaces}"
 MIRROR_DIR="${OMNISIGHT_GIT_MIRROR_DIR:-$HOME/git-mirror/omnisight.git}"
-GERRIT_URL="${OMNISIGHT_GERRIT_URL:-ssh://claude-bot@sora.services:29418/omnisight/OmniSight-Productizer}"
-SSH_KEY="${OMNISIGHT_GERRIT_SSH_KEY:-$HOME/.config/omnisight/gerrit-claude-bot-ed25519}"
+GERRIT_URL="${OMNISIGHT_GERRIT_URL:-ssh://${DEFAULT_BOT}@sora.services:29418/omnisight/OmniSight-Productizer}"
+SSH_KEY="${OMNISIGHT_GERRIT_SSH_KEY:-$HOME/.config/omnisight/gerrit-${DEFAULT_BOT}-ed25519}"
 CLONE_DEPTH="${OMNISIGHT_RUNNER_CLONE_DEPTH:-50}"
 CYCLE_SLEEP_S="${OMNISIGHT_RUNNER_CYCLE_SLEEP_S:-30}"
 
@@ -97,8 +109,8 @@ while true; do
     # right identity even if no global git config is set.
     git -C "$workspace" config core.repositoryformatversion 1
     git -C "$workspace" config extensions.worktreeConfig true
-    git_user_name="${OMNISIGHT_GIT_USER_NAME:-claude-bot}"
-    git_user_email="${OMNISIGHT_GIT_USER_EMAIL:-rt3628+claude-bot@gmail.com}"
+    git_user_name="${OMNISIGHT_GIT_USER_NAME:-${DEFAULT_BOT}}"
+    git_user_email="${OMNISIGHT_GIT_USER_EMAIL:-rt3628+${DEFAULT_BOT}@gmail.com}"
     git -C "$workspace" config user.name "$git_user_name"
     git -C "$workspace" config user.email "$git_user_email"
 
