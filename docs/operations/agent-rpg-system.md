@@ -835,6 +835,50 @@ Source symbols (per W13.3 attribution):
 | `ToolDispatcher.set_proficiency_gate` (callee) | `backend/agents/tool_dispatcher.py` |
 | `mcp__filesystem__write_multiple_files: 3` (canonical sample) | `config/tool_proficiency_gates.yaml` |
 
+### Tool proficiency bars on the Character Card (W13.6 / OP-183)
+
+ADR-0008 §"Implementation split" line 191 lists "tool proficiency
+bars" as the third conceptual tab on the Character Card panel
+("Stats / Skills / Tools"). W13.6 is the *frontend* surface for the
+W13 backend: each row in the Tools section is one
+`agent_tool_proficiency` row (alembic 0227) rendered as a Lv header
++ invocation counter + success-rate bar + gate-blocked banner.
+
+The bars ship as an inline section on the W8.1 Character Card shell
+(rather than a real tab panel) — the section's `data-testid`
+strings already encode the conceptual tab id so a future tabbed
+refactor only re-parents the existing JSX. The W12.4 attribution
+pattern applies: no new persistence, no new API, no new YAML —
+W13.6 is the read-only render of the data
+`/api/v1/agents/{agent_id}/tools` already serves from the W13
+ship.
+
+| Row element                                | Surface                                                                |
+| ------------------------------------------ | ---------------------------------------------------------------------- |
+| Per-tool Lv header                         | `CharacterTool.level` (Lv 1-5 per W13 thresholds)                      |
+| Invocation count + success-rate text       | `CharacterTool.invocationCount` / `CharacterTool.successCount`         |
+| Success-rate progress bar                  | `<div role="progressbar" aria-valuenow="…">` (percent, clamped 0-100)  |
+| Gate-blocked banner ("requires Lv N")      | Visible when `level < requiredLevel`; sourced from the W13.3 YAML gate |
+| `data-tool-blocked` attribute              | `"true"` mirrors the dispatcher's `tool_proficiency_insufficient` SSE  |
+
+Operator-facing invariant: rows that the dispatcher would refuse
+**still render** — the banner explains the refusal rather than
+hiding the tool. This is what keeps the SSE `tool:gate:blocked`
+event interpretable on the Character Card: an operator who sees
+"refused" on the SSE bus can scroll the panel and find the row
+that names the same `tool_id` with the gate level called out.
+
+Source symbols (per W13.6 attribution):
+
+| Symbol | File |
+|---|---|
+| `CharacterTool` (row interface) | `components/omnisight/agents/CharacterCard.tsx` |
+| `data-testid="character-card-tools"` (section anchor) | `components/omnisight/agents/CharacterCard.tsx` |
+| `data-testid="character-card-tool"` (per-row anchor) | `components/omnisight/agents/CharacterCard.tsx` |
+| `data-testid="character-card-tool-gate-blocked"` (banner anchor) | `components/omnisight/agents/CharacterCard.tsx` |
+| `getLevelProgressPercent` (shared 0-100 clamp) | `components/omnisight/agents/CharacterCard.tsx` |
+| Contract tests (lock the row shape + gate banner) | `test/components/character-card-tools.test.tsx` |
+
 ### Telemetry consumer
 
 `backend/agents/mp_w17_telemetry_consumer.py` reads the W17.7
