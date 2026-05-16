@@ -109,6 +109,43 @@ LEVEL_CAPABILITIES: Mapping[int, str] = MappingProxyType(
 )
 
 
+@dataclass(frozen=True)
+class ToolLevelSpec:
+    """Static ADR-0008 semantics for one tool-proficiency level."""
+
+    level: int
+    min_success_count: int
+    min_success_ratio: float
+    capability: str
+
+    def __post_init__(self) -> None:
+        if self.level < 1 or self.level > MAX_TOOL_LEVEL:
+            raise ValueError(f"level must be 1..{MAX_TOOL_LEVEL}")
+        if self.min_success_count < 0:
+            raise ValueError("min_success_count must be >= 0")
+        if self.min_success_ratio < 0.0 or self.min_success_ratio > 1.0:
+            raise ValueError("min_success_ratio must be 0.0..1.0")
+        if not isinstance(self.capability, str):
+            raise TypeError("capability must be a string")
+        capability = self.capability.strip()
+        if not capability:
+            raise ValueError("capability is required")
+        object.__setattr__(self, "capability", capability)
+
+
+TOOL_LEVEL_SPECS: Mapping[int, ToolLevelSpec] = MappingProxyType(
+    {
+        level: ToolLevelSpec(
+            level=level,
+            min_success_count=requirement[0],
+            min_success_ratio=requirement[1],
+            capability=LEVEL_CAPABILITIES[level],
+        )
+        for level, requirement in LEVEL_REQUIREMENTS.items()
+    }
+)
+
+
 TELEMETRY_LAG_THRESHOLD = timedelta(hours=24)
 
 
@@ -204,9 +241,14 @@ def compute_tool_level(invocation_count: int, success_count: int) -> int:
 
 def capability_for_level(level: int) -> str:
     """Return the per-level capability label (see ``LEVEL_CAPABILITIES``)."""
+    return tool_level_spec(level).capability
+
+
+def tool_level_spec(level: int) -> ToolLevelSpec:
+    """Return the pinned Lv 1-5 requirements and unlock semantics."""
     if level < 1 or level > MAX_TOOL_LEVEL:
         raise ValueError(f"level must be 1..{MAX_TOOL_LEVEL}")
-    return LEVEL_CAPABILITIES[level]
+    return TOOL_LEVEL_SPECS[level]
 
 
 # ── Dataclasses ─────────────────────────────────────────────────────
@@ -783,8 +825,10 @@ __all__ = [
     "PostgresToolProficiencyStore",
     "ProficiencyGateConfigMissing",
     "TELEMETRY_LAG_THRESHOLD",
+    "TOOL_LEVEL_SPECS",
     "TelemetryConsumerLag",
     "ToolInvocationRecorded",
+    "ToolLevelSpec",
     "ToolNotInProficiencyTable",
     "ToolProficiencyError",
     "ToolProficiencyInsufficient",
@@ -799,4 +843,5 @@ __all__ = [
     "list_proficiencies",
     "record_tool_invocation",
     "reset_gate_config_cache_for_tests",
+    "tool_level_spec",
 ]

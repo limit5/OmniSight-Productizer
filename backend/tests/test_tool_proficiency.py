@@ -28,6 +28,8 @@ from backend.agents.tool_proficiency import (
     LEVEL_REQUIREMENTS,
     MAX_TOOL_LEVEL,
     ProficiencyGateConfigMissing,
+    TOOL_LEVEL_SPECS,
+    ToolLevelSpec,
     ToolProficiencyState,
     build_feature_unlock_gate,
     can_invoke_at_level,
@@ -38,6 +40,7 @@ from backend.agents.tool_proficiency import (
     list_proficiencies,
     record_tool_invocation,
     reset_gate_config_cache_for_tests,
+    tool_level_spec,
 )
 
 
@@ -110,6 +113,41 @@ def test_capability_for_level_covers_full_ladder():
         capability_for_level(0)
     with pytest.raises(ValueError):
         capability_for_level(99)
+
+
+def test_tool_level_specs_pin_op179_ladder_semantics():
+    assert tuple(TOOL_LEVEL_SPECS) == (1, 2, 3, 4, 5)
+    assert tool_level_spec(1) == ToolLevelSpec(1, 0, 0.0, "basic_invoke")
+    assert tool_level_spec(2) == ToolLevelSpec(2, 10, 0.70, "chain_two_calls")
+    assert tool_level_spec(3) == ToolLevelSpec(3, 50, 0.80, "batch_ops")
+    assert tool_level_spec(4) == ToolLevelSpec(
+        4, 200, 0.85, "advanced_flags_cross_guild_a2a"
+    )
+    assert tool_level_spec(5) == ToolLevelSpec(
+        5, 500, 0.90, "author_new_mcp_wrapper"
+    )
+    assert all(
+        tool_level_spec(level).capability == capability_for_level(level)
+        for level in range(1, MAX_TOOL_LEVEL + 1)
+    )
+
+
+def test_tool_level_spec_rejects_out_of_range_level():
+    with pytest.raises(ValueError):
+        tool_level_spec(0)
+    with pytest.raises(ValueError):
+        tool_level_spec(6)
+
+
+def test_tool_level_spec_dataclass_validates_shape():
+    with pytest.raises(ValueError):
+        ToolLevelSpec(0, 0, 0.0, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, -1, 0.0, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, 0, 1.1, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, 0, 0.0, "   ")
 
 
 # ── record_tool_invocation ──────────────────────────────────────────
@@ -283,7 +321,8 @@ def test_get_required_level_missing_file_raises(tmp_path: Path):
 
 def test_shipped_gates_yaml_loads_with_top10_tools():
     # DoD — ``config/tool_proficiency_gates.yaml`` ships with the
-    # W17.2 hardened top-10 (Read/Edit/Bash/Grep/Glob/...).
+    # W17.2 hardened top-10 (Read/Edit/Bash/Grep/Glob/...) plus one
+    # representative OP-179 gate at each higher tool level.
     reset_gate_config_cache_for_tests()
     repo_root = Path(__file__).resolve().parents[2]
     shipped = repo_root / "config" / "tool_proficiency_gates.yaml"
@@ -291,9 +330,12 @@ def test_shipped_gates_yaml_loads_with_top10_tools():
     for tool in ("Read", "Edit", "Bash", "Grep", "Glob",
                  "Write", "Agent", "WebFetch", "Skill", "ToolSearch"):
         assert get_required_level(tool, config_path=shipped) == 1
+    assert get_required_level("Task", config_path=shipped) == 2
     assert get_required_level(
         "mcp__filesystem__write_multiple_files", config_path=shipped
     ) == 3
+    assert get_required_level("CrossGuildHandoff", config_path=shipped) == 4
+    assert get_required_level("AuthorMcpWrapper", config_path=shipped) == 5
 
 
 # ── W17.7 consumer + idempotent rebuild ─────────────────────────────
