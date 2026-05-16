@@ -120,6 +120,13 @@ _BATCH_RUN_COLS = (
     "metadata, created_by, created_at"
 )
 
+# Row cap for ``find_result_by_task_id``. Paired with
+# ``ORDER BY completed_at DESC NULLS LAST`` + ``conn.fetchrow`` to return
+# only the most-recent batch result for a given task_id. Promoted to a
+# named module-level constant so the "latest-one" semantic is explicit at
+# the constant — a bare ``LIMIT 1`` in SQL reads as a generic cap.
+_FIND_RESULT_LATEST_ROW_LIMIT = 1
+
 
 class PostgresBatchPersistence:
     """``BatchPersistence`` backed by alembic 0181."""
@@ -248,12 +255,12 @@ class PostgresBatchPersistence:
             )
         async with _acquire(self._factory) as conn:
             row = await conn.fetchrow(
-                """
+                f"""
                 SELECT batch_run_id, custom_id, task_id, status, response, error,
                        final_text, input_tokens, output_tokens,
                        cache_read_tokens, cache_creation_tokens, completed_at
                 FROM batch_results WHERE task_id = $1
-                ORDER BY completed_at DESC NULLS LAST LIMIT 1
+                ORDER BY completed_at DESC NULLS LAST LIMIT {_FIND_RESULT_LATEST_ROW_LIMIT}
                 """,
                 task_id,
             )
