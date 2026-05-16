@@ -1194,6 +1194,23 @@ class GerritJiraBridge:
                      reason="OMNISIGHT_GERRIT_SSH_HOST not configured")
             return 0
 
+        # OP-1196 phase 3b hotfix (2026-05-17 ~03:07): the search
+        # expression MUST be passed as a single SHELL-QUOTED token to
+        # the remote `gerrit query` CLI — otherwise `-is:wip` (a
+        # Gerrit search NEGATION, not a CLI option) is interpreted by
+        # Gerrit's argparser as an unknown CLI option and aborts with
+        # `fatal: "-is:wip" is not a valid option`. Verified live:
+        #   $ ssh ... gerrit query project:X status:open -is:wip
+        #   fatal: "-is:wip" is not a valid option
+        #   $ ssh ... "gerrit query 'project:X status:open -is:wip'"
+        #   {"number":685,...}                     ← works
+        # SSH concatenates the argv after the host into a single
+        # command string for the remote shell, which re-tokenises by
+        # whitespace. shlex.quote() preserves the search expression
+        # as one token across that round-trip.
+        import shlex as _shlex
+        search_expr = f"project:{project} status:open -is:wip"
+
         args: list[str] = ["ssh"]
         if ssh_key:
             args.extend(["-i", str(ssh_key)])
@@ -1204,11 +1221,9 @@ class GerritJiraBridge:
             "-p", str(ssh_port),
             ssh_host,
             "gerrit", "query",
-            f"project:{project}",
-            "status:open",
-            "-is:wip",
             "--current-patch-set",
             "--format=JSON",
+            _shlex.quote(search_expr),
         ])
 
         try:

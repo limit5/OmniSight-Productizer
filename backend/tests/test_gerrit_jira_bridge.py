@@ -1258,6 +1258,60 @@ class TestBackfillExistingConflicts:
         assert len(skipped_logs) >= 1
         assert skipped_logs[0][0] == "WARN"
 
+    def test_backfill_search_expression_is_shell_quoted(
+        self, tmp_path, monkeypatch,
+    ):
+        """OP-1196 phase 3b hotfix regression — the search expression
+        handed to ``gerrit query`` MUST be shell-quoted BEFORE SSH
+        concatenates argv into the remote command string. Without
+        quoting, ``-is:wip`` is parsed as a stray CLI option by
+        gerrit's argparser and the query aborts with
+        ``fatal: "-is:wip" is not a valid option``. Observed in
+        prod-like deploy 2026-05-17 ~03:07 BEFORE this fix landed.
+        """
+        import subprocess as _sub
+        monkeypatch.setenv("OMNISIGHT_GERRIT_PROJECT", "omnisight/x")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_HOST", "claude-bot@host")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_PORT", "29418")
+        monkeypatch.setenv("OMNISIGHT_GIT_SSH_KEY_PATH", "/dev/null")
+
+        captured_args: list[str] = []
+        def fake_run(args, **kwargs):
+            captured_args.extend(args)
+            return _sub.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr="",
+            )
+
+        b = bridge.GerritJiraBridge(
+            _client(),
+            bridge.BridgeConfig(cursor_file=tmp_path / "event-cursor.json"),
+            sleep=lambda _: None,
+            run_command=fake_run,
+            logger=lambda *a, **kw: None,
+        )
+        b._spawn_proactive_merger_thread = (  # type: ignore[method-assign]
+            lambda event: None
+        )
+
+        b.backfill_existing_conflicts()
+
+        # The shlex-quoted search expression must appear as a SINGLE
+        # argv element, NOT as separate `project:...`, `status:open`,
+        # `-is:wip` tokens. (SSH concatenates argv with spaces; the
+        # remote shell re-tokenises; the quote chars preserve the
+        # expression as one token.)
+        assert "'project:omnisight/x status:open -is:wip'" in captured_args, (
+            f"argv lacks the shell-quoted search expression — "
+            f"captured: {captured_args!r}"
+        )
+        # No bare `-is:wip` token (would be interpreted as a CLI
+        # option by gerrit's argparser, aborting the query).
+        assert "-is:wip" not in captured_args, captured_args
+        # And `project:...` / `status:open` must NOT be standalone
+        # argv elements either — they're embedded in the quoted expr.
+        assert "project:omnisight/x" not in captured_args, captured_args
+        assert "status:open" not in captured_args, captured_args
+
     def test_backfill_handles_gerrit_query_failure_gracefully(
         self, tmp_path, monkeypatch,
     ):
