@@ -35,7 +35,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
@@ -292,7 +292,11 @@ class InMemoryTalentChoiceStore:
         )
 
     async def upsert_choice(self, choice: TalentChoice) -> TalentChoice:
-        self._rows[(choice.agent_id, choice.milestone_level)] = choice
+        key = (choice.agent_id, choice.milestone_level)
+        existing = self._rows.get(key)
+        if existing is not None:
+            return existing
+        self._rows[key] = choice
         return choice
 
 
@@ -358,10 +362,7 @@ class PostgresTalentChoiceStore:
                     created_at, updated_at
                 )
                 VALUES ($1, $2, $3, $4, NOW(), NOW())
-                ON CONFLICT (agent_id, milestone_level) DO UPDATE
-                    SET talent_id = EXCLUDED.talent_id,
-                        chosen_at = EXCLUDED.chosen_at,
-                        updated_at = NOW()
+                ON CONFLICT (agent_id, milestone_level) DO NOTHING
                 RETURNING agent_id, milestone_level, talent_id, chosen_at
                 """,
                 choice.agent_id,
@@ -369,6 +370,16 @@ class PostgresTalentChoiceStore:
                 choice.talent_id,
                 choice.chosen_at,
             )
+            if row is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT agent_id, milestone_level, talent_id, chosen_at
+                    FROM agent_talent_choice
+                    WHERE agent_id = $1 AND milestone_level = $2
+                    """,
+                    choice.agent_id,
+                    choice.milestone_level,
+                )
         return _row_to_choice(row)
 
 
