@@ -1021,7 +1021,13 @@ grid for the operator. Each card shows member portraits, the
 currently-assigned Tier L+ task (or "Idle — no active task"), and the
 synergy badge from `PartyBadge.tsx`. The fetch is `GET
 /agents/parties`; synergy metadata is exposed independently at `GET
-/agents/parties/synergies` for the legend.
+/agents/parties/synergies` and is rendered by
+`components/omnisight/agents/SynergyMatrixLegend.tsx` (OP-194 / W17.3)
+as a reference table — one row per cross-Guild combination with the
+Guild pair, label, headline XP/skill bonus, and one-line summary. Both
+components are presentational and share the `PartySynergy` shape from
+`PartyBadge.tsx`, so the Party Hall page composes them side-by-side
+without remapping the payload.
 
 ### Endpoints
 
