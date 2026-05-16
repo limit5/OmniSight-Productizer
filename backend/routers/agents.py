@@ -818,6 +818,7 @@ def _guild_hall_guild_to_dict(guild: GuildHallGuild) -> dict:
                 "instance_suffix": member.instance_suffix,
                 "level": member.level,
                 "xp": member.xp,
+                "spec": member.spec,
                 "specialization_label": member.specialization_label,
             }
             for member in guild.members
