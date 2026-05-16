@@ -356,3 +356,103 @@ async def test_binary_file_marked_binary(tmp_path, monkeypatch):
     assert len(result.conflict_files) == 1
     assert result.conflict_files[0].binary is True
     assert result.conflict_files[0].conflict_text == "<binary file>"
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  OP-1197 — _project_lock works across asyncio.run() boundaries
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_project_lock_works_across_separate_event_loops():
+    """OP-1197 regression — the bridge daemon's per-event threads
+    each call ``asyncio.run(...)``, creating a fresh event loop per
+    thread. Before this fix, ``_LOCKS_GUARD`` + ``_LOCKS[project]``
+    were ``asyncio.Lock`` objects bound at first-acquire to a
+    specific loop; subsequent acquire from a different loop raised
+    ``RuntimeError: <asyncio.locks.Lock ...> is bound to a different
+    event loop``. With ``threading.Lock`` they work loop-agnostically.
+
+    This test simulates the daemon's pattern: acquire the lock in
+    Loop A, dispose Loop A, acquire again in fresh Loop B. The
+    original asyncio.Lock implementation would have raised; the
+    threading.Lock implementation should not.
+    """
+    import asyncio
+    from backend.agents import conflict_enrichment as ce
+
+    # Reset module-global state so the test runs deterministically
+    # regardless of prior test order.
+    ce._LOCKS.clear()
+    # _LOCKS_GUARD is a threading.Lock now — needs no reset (it's
+    # not loop-bound by construction).
+
+    async def acquire_and_release(project: str):
+        async with ce._project_lock(project):
+            # In real use, this is where git clone/fetch/merge runs.
+            # For the test, just confirm we got in + can release.
+            return True
+
+    # Loop A — first acquire creates the per-project Lock + uses it.
+    result_a = asyncio.run(acquire_and_release("omnisight/x"))
+    assert result_a is True
+    assert "omnisight/x" in ce._LOCKS
+
+    # Loop A has been disposed by asyncio.run. Loop B is a fresh
+    # event loop — this is the scenario that previously raised
+    # `bound to a different event loop`.
+    result_b = asyncio.run(acquire_and_release("omnisight/x"))
+    assert result_b is True
+
+    # Same project key, same threading.Lock object reused.
+    # (Sanity-check the lock dict didn't double-up entries.)
+    assert len([k for k in ce._LOCKS if k == "omnisight/x"]) == 1
+
+
+def test_project_lock_serialises_concurrent_threads():
+    """Multiple threads acquiring the same project lock should
+    serialise — only one thread holds the lock at a time."""
+    import asyncio
+    import threading
+    import time
+    from backend.agents import conflict_enrichment as ce
+
+    ce._LOCKS.clear()
+
+    holders: list[str] = []
+    barrier = threading.Barrier(3)  # 3 threads + main = 3 (main not in barrier)
+
+    async def hold_briefly(thread_id: str):
+        async with ce._project_lock("omnisight/x"):
+            holders.append(f"enter-{thread_id}")
+            # Small sleep so concurrent threads have a chance to
+            # try the acquire — proves serialisation.
+            await asyncio.sleep(0.01)
+            holders.append(f"exit-{thread_id}")
+
+    def worker(thread_id: str):
+        barrier.wait()  # release all 3 workers at once
+        asyncio.run(hold_briefly(thread_id))
+
+    threads = [
+        threading.Thread(target=worker, args=(str(i),))
+        for i in range(3)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive(), "thread hung — lock probably deadlocked"
+
+    # 6 entries: enter-N then exit-N for each N, no interleaving.
+    assert len(holders) == 6
+    # Check pairings — for each enter, the very next entry must be
+    # the matching exit (no interleaving == serialised).
+    for i in range(0, 6, 2):
+        enter = holders[i]
+        exit_ = holders[i + 1]
+        assert enter.startswith("enter-")
+        assert exit_.startswith("exit-")
+        assert enter[len("enter-"):] == exit_[len("exit-"):], (
+            f"thread interleaving detected at index {i}: "
+            f"{enter} then {exit_} — lock did not serialise"
+        )

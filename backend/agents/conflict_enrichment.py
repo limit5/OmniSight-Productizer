@@ -60,10 +60,12 @@ purely SSH-protocol auth.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import re
 import shutil
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -114,15 +116,60 @@ class EnrichmentResult:
 # Per-project locks so two concurrent calls on the same project
 # don't fight over the same git checkout. Process-local; daemon is
 # single-process.
-_LOCKS: dict[str, asyncio.Lock] = {}
-_LOCKS_GUARD = asyncio.Lock()
+#
+# OP-1197 (2026-05-17 ~04:30) — switched from `asyncio.Lock` to
+# `threading.Lock`. The bridge daemon's per-event handler threads
+# each call ``asyncio.run(...)`` which creates a fresh event loop.
+# ``asyncio.Lock`` objects retain a binding to whichever event loop
+# they were FIRST acquired in; subsequent acquire from a different
+# loop raises ``RuntimeError: <asyncio.locks.Lock ...> is bound to
+# a different event loop``. The OP-1196 phase 3b backfill scanner
+# triggered this on every backfilled candidate because it spawns N
+# threads in rapid succession at startup — empirically observed on
+# 2026-05-17 ~03:23 across all 10 backfilled candidates (685/686/
+# 694/695/696/697/698/699/700/702). Live patchset-created events
+# hit the same bug less often (only when two events arrive close
+# enough that the first event's loop is still active) — the bug was
+# always latent.
+#
+# ``threading.Lock`` is loop-agnostic. The critical section the lock
+# protects is subprocess calls (git clone/fetch/merge/abort) which
+# already block the calling thread anyway — the async-ness of
+# ``asyncio.Lock`` added no concurrency benefit. We acquire the
+# threading.Lock via ``asyncio.to_thread`` so the surrounding code
+# stays async-friendly and the event loop isn't blocked while
+# waiting for the lock (to_thread offloads the blocking acquire to
+# the default executor).
+_LOCKS: dict[str, "threading.Lock"] = {}
+_LOCKS_GUARD = threading.Lock()
 
 
-async def _lock_for(project: str) -> asyncio.Lock:
-    async with _LOCKS_GUARD:
+async def _lock_for(project: str) -> "threading.Lock":
+    # threading.Lock acquire is microseconds-fast with no contention;
+    # the GUARD just serialises the dict mutation. We acquire via
+    # to_thread so the call is non-blocking from the loop's pov.
+    await asyncio.to_thread(_LOCKS_GUARD.acquire)
+    try:
         if project not in _LOCKS:
-            _LOCKS[project] = asyncio.Lock()
+            _LOCKS[project] = threading.Lock()
         return _LOCKS[project]
+    finally:
+        _LOCKS_GUARD.release()
+
+
+@contextlib.asynccontextmanager
+async def _project_lock(project: str):
+    """``async with _project_lock(project):`` — serialises enrich
+    callers per-project across threads + event loops. Built atop
+    ``threading.Lock`` so it works correctly when callers use
+    ``asyncio.run`` per-thread (each thread has its own loop, but
+    threading.Lock is shared)."""
+    lock = await _lock_for(project)
+    await asyncio.to_thread(lock.acquire)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -174,8 +221,7 @@ async def enrich_via_local_merge(
 async def _run(
     change_id: str, revision: str, project: str, ps_number: str,
 ) -> EnrichmentResult:
-    lock = await _lock_for(project)
-    async with lock:
+    async with _project_lock(project):
         repo_dir = _repo_dir_for(project)
         ssh_url = _ssh_url_for(project)
         ssh_command = _ssh_cmd_string()
