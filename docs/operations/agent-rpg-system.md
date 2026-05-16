@@ -40,7 +40,8 @@ target ship).
 | W19.1  | `backend/agents/skill_fusion.py` — Lv5 fusion preview                    | **Live**                  |
 | W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title` |
 | W3.x   | Daily style fingerprint cron                                  | **Deferred** — fingerprint column exists; recompute job not scheduled |
-| W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred** (W7.2 tier gate landed standalone — see "Tier gating (W7.2)" below) |
+| W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred** (W5.1 BP.M dim-memory scoping + W7.2 tier gate landed standalone — see "BP.M dim memory scoping (W5.1)" and "Tier gating (W7.2)" below) |
+| W5.1   | `backend/agents/skill_memory.py` — `(agent_id, skill_id)`-tagged BP.M dim memory adapter over pgvector | **Live** (OP-137) — `vectorize_distilled_skills` + `retrieve_distilled_skills` ship; W5.2 auto-distil hook + W5.3 latency tests follow |
 | W7.2   | `backend/agents/tier_gate.py` — Tier X requires Lv ≥ 50 + skill ≥ Lv 3 | **Live** (OP-147) — pure helper + async resolver; W7.1 wires the call site once `prefer_agent_id` lands |
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
 | W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
@@ -770,6 +771,90 @@ either, treat the failure as an integrity issue, not a flake.
 
 ---
 
+## BP.M dim memory scoping (W5.1 — live as of 2026-05-16 / OP-137)
+
+ADR-0008 §"Memory hierarchy" pins Layer 2 (distilled skills) on
+*BP.M dim memory tagged with `(agent_id, skill_id)`* with a top-K
+vector lookup. `backend/agents/skill_memory.py` is the canonical
+adapter for that rule. It wraps each distilled summary as a
+tenant-scoped `VectorDocument` over the existing BP.Q
+`embedding_chunks` pgvector table; **no new schema lands with this
+row** — the L2 storage reuses the column shape from BP.Q.4 and W6
+reflection RAG, with `kind` / `agent_id` / `skill_id` in the `metadata`
+JSONB column so the `metadata @>` filter can pin retrieval.
+
+W5.2 owns the trigger that auto-distils a ≤200-token summary on
+`lessons_learned` write; W5.3 owns the latency-budget tests (L1 <
+50ms, L2 < 300ms). W5.1 only ships the data model + scoping API.
+
+### Public helpers
+
+| Helper | When to use |
+|---|---|
+| `DistilledSkillMemoryEntry(tenant_id, agent_id, skill_id, summary, source_skill_draft_id=None, metadata={})` | Construct one entry. `source_skill_draft_id` ties the row back to a BP.M.1 `auto_distilled_skills` review-queue row when the summary was distilled there; omit it when W5.2 distils directly from `lessons_learned`. |
+| `await vectorize_distilled_skills(entries, *, embedder, store) -> int` | Embed and upsert a one-tenant batch. Mixed-tenant batches are rejected to keep the BP.Q tenant-scope invariant; empty input is a no-op. |
+| `await retrieve_distilled_skills(*, tenant_id, query_text, embedder, store, agent_id=None, skill_id=None, top_k=5)` | Run a top-K semantic query, scoped by `agent_id` and/or `skill_id`. `kind` is always pinned so other vector payloads (BP.Q content RAG, W6 reflection summaries) cannot leak into a skill retrieval. |
+| `pgvector_skill_memory_store(conn_or_pool)` | Build a `PgvectorStore` against the default `embedding_chunks` table. Same adapter the W6 reflection RAG uses; no new table. |
+
+### Scoping semantics
+
+`agent_id` and `skill_id` are *optional and additive* on retrieval:
+
+- Both `None` → returns every distilled skill in the tenant
+  (`kind = distilled_skill_summary` only).
+- `agent_id` set → one agent's accumulated skill library.
+- `skill_id` set → cross-agent distillations for a single skill
+  (useful for W5-W17 teach / synergy flows that ask "what does the
+  fleet know about `python`?").
+- Both set → the intersection — what *this* agent has learned about
+  *this* skill.
+
+The `source_path` for each row is
+`distilled-skill://<agent_id>/<skill_id>`, so callers can also reach
+the BP.Q list/delete-by-source-path surface to bulk-evict one
+`(agent_id, skill_id)` pair without re-walking metadata.
+
+### Chunk identity
+
+Each entry's `chunk_id` is
+`distilled-skill:<tenant_id>:<agent_id>:<skill_id>:<identity>` where
+`<identity>` is the `source_skill_draft_id` when supplied, falling
+back to a 16-hex-char SHA-256 of the trimmed summary. This makes
+re-vectorising the same draft idempotent (the upsert lands on the
+same row) while allowing multiple distinct summaries to coexist for
+the same `(agent_id, skill_id)` pair when callers omit the source id.
+
+### Why no new schema
+
+The L2 storage is **reuse, not extension**:
+
+- The pgvector table (`embedding_chunks`, BP.Q.4) already carries
+  `tenant_id` + `metadata JSONB` + RLS enforcement + the `metadata
+  @>` GIN index path; W6 reflection RAG already established the
+  `kind`-pinned-metadata pattern for multi-payload coexistence.
+- Adding columns for `agent_id` / `skill_id` would force an alembic
+  migration, an RLS revision, and a drift guard — none of which buy
+  retrieval semantics that the metadata filter already gives us.
+- W5.1's `kind = "distilled_skill_summary"` is reserved alongside W6's
+  `kind = "reflection_summary"` in the same table. New kinds added
+  later (Lv-5 teach injections, fusion-skill drafts) must pick a
+  distinct `kind` value so retrievers can pin them without leaking.
+
+### Constants
+
+The kind tag and source prefix are exported so call sites and operator
+dashboards reference the same strings:
+
+- `DISTILLED_SKILL_RAG_KIND = "distilled_skill_summary"`
+- `DISTILLED_SKILL_SOURCE_PREFIX = "distilled-skill://"`
+- `DEFAULT_DISTILLED_SKILL_TOP_K = 5`
+
+W5.3 will assert the `< 300ms` retrieval budget against the same
+helper; the budget is a *contract* for this layer, not a soft target,
+and changing it requires an ADR-0008 amendment.
+
+---
+
 ## Tier gating (W7.2 — live as of 2026-05-16 / OP-147)
 
 ADR-0008 §"Routing integration" pins one Tier-X rule:
@@ -867,7 +952,7 @@ last surface to learn about the drift.
 | W2   | Guild + class registry                                 | "Guild" paragraph + MUST table row 2                       |
 | W3   | Instance suffix + style fingerprint generator          | "Style fingerprint" + MUST table row 3                     |
 | W4   | XP accrual rule + level curve                          | "XP curve" subsection                                      |
-| W5   | Layer 1 (stat sheet PG) + Layer 2 (BP.M dim memory)    | "Memory hierarchy" L1 + L2 rows                            |
+| W5   | Layer 1 (stat sheet PG) + Layer 2 (BP.M dim memory; W5.1 scoping live via OP-137) | "Memory hierarchy" L1 + L2 rows                            |
 | W6   | Layer 3 reflection RAG                                 | "Memory hierarchy" L3 row                                  |
 | W7   | Routing integration (W7.2 tier gate live via OP-147)   | "Routing integration" subsection                           |
 | W8   | Frontend Character Card panel                          | "Operator-facing surfaces" — Character Card                |
