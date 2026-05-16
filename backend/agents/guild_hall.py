@@ -39,6 +39,7 @@ class GuildHallMember:
     instance_suffix: str
     level: int
     xp: int
+    spec: str
     specialization_label: str
 
 
@@ -138,6 +139,7 @@ def _member_from_card(card: CharacterCard) -> GuildHallMember:
         instance_suffix=card.instance_suffix,
         level=card.level,
         xp=card.xp,
+        spec=card.specialization_label,
         specialization_label=card.specialization_label,
     )
 
