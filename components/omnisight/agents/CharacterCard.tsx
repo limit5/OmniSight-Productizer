@@ -6,6 +6,31 @@
  * Scope: the compact RPG-style identity card only. Data loading,
  * instance switching, skill radar, talent tree, and tool proficiency
  * tabs are separate W8 follow-ups per ADR-0008.
+ *
+ * Sub-wave coverage (newest first — these blocks ship as inline
+ * sections on the W8.1 shell. ADR-0008 §"Implementation split" line
+ * 191 calls these the "Stats / Skills / Tools" three-tab layout; the
+ * `data-testid` strings on each section name the conceptual tab so a
+ * future tabbed refactor only re-parents the existing JSX):
+ *
+ * - W13.6 (OP-183): the `data-testid="character-card-tools"` section
+ *   below — per-tool row rendered from `CharacterTool` with the Lv
+ *   header, invocation count, success-rate bar, and the
+ *   gate-blocked banner that surfaces when `level < requiredLevel`.
+ *   The required-level number on each row mirrors the YAML row in
+ *   `config/tool_proficiency_gates.yaml` (W13.3 / OP-180 ship); the
+ *   bar's `aria-valuenow` is the success-rate percent so screen
+ *   readers hear the same number an operator sees. The
+ *   `getLevelProgressPercent` clamp is reused for the row bar so the
+ *   tools section honours the same NaN / overflow behaviour as the
+ *   header level bar — see `character-card-tools.test.tsx` for the
+ *   contract.
+ *
+ * - Future W8.x tabs: when the three-tab layout lands, each section
+ *   below moves into a tab panel keyed by `character-card-{stats,
+ *   skills,tools}`. The `data-testid` strings on each section already
+ *   match the conceptual tab id, so the refactor is a re-parent, not
+ *   a rewrite.
  */
 
 import {
@@ -91,6 +116,19 @@ export interface CharacterCapstone {
   locked?: boolean | null
 }
 
+/**
+ * One row in the Character Card "Tools" tab (W13.6 / OP-183).
+ *
+ * Mirrors `agent_tool_proficiency` (alembic 0227): `level` is the Lv
+ * 1-5 derived per ADR-0008 thresholds, `invocationCount` /
+ * `successCount` are the raw counters that feed the success-rate bar,
+ * and `requiredLevel` is the per-tool YAML gate from
+ * `config/tool_proficiency_gates.yaml` (W13.3 / OP-180). When the
+ * agent's `level` on the row falls below `requiredLevel`, the row
+ * renders the gate-blocked banner instead of suppressing the row, so
+ * operators can see *why* the dispatcher refused without diffing the
+ * tool_proficiency_insufficient SSE event against the YAML.
+ */
 export interface CharacterTool {
   toolId: string
   displayName?: string | null
@@ -642,6 +680,7 @@ export function CharacterCard({
             </section>
           ) : null}
 
+          {/* Tools tab (W13.6 / OP-183) — see module docstring. */}
           {visibleTools.length > 0 ? (
             <section
               aria-label="Agent tool proficiency"
