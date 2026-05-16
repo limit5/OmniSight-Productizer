@@ -20,6 +20,7 @@ from backend.agents.provider_orchestrator import (
     TaskSpec,
 )
 from backend.agents.provider_quota_tracker import QuotaState
+from backend.agents.tier_gate import TierGateDecision
 
 
 class _FakeAdapter(ProviderAdapter):
@@ -147,11 +148,13 @@ def _policy(
     now=lambda: 1000.0,
     missing: set[str] | None = None,
     human_assignment_resolver=None,
+    tier_gate_decision_resolver=None,
 ) -> routing_policy.RoutingPolicy:
     return routing_policy.RoutingPolicy(
         orchestrator=_FakeOrchestrator(adapters, missing),
         now=now,
         human_assignment_resolver=human_assignment_resolver,
+        tier_gate_decision_resolver=tier_gate_decision_resolver,
     )
 
 
@@ -612,6 +615,49 @@ def test_routing_prefer_agent_id_filters_to_requested_provider() -> None:
     )
 
     assert chosen == [openai_api]
+
+
+def test_routing_prefer_agent_id_falls_back_when_preferred_underleveled(caplog) -> None:
+    preferred = _FakeAdapter("anthropic-beta")
+    fallback = _FakeAdapter("anthropic-alpha")
+
+    def _tier_gate_decision(_task: TaskSpec, provider_id: str) -> TierGateDecision:
+        if provider_id == "anthropic-beta":
+            return TierGateDecision(
+                eligible=False,
+                tier="X",
+                agent_level=49,
+                skill_level=3,
+                skill_id="backend",
+                unmet_reasons=("tier_x_agent_level_below_50:49",),
+            )
+        return TierGateDecision(
+            eligible=True,
+            tier="X",
+            agent_level=50,
+            skill_level=3,
+            skill_id="backend",
+            unmet_reasons=(),
+        )
+
+    with caplog.at_level("WARNING", logger="backend.agents.routing_policy"):
+        chosen = _policy(
+            [fallback, preferred],
+            tier_gate_decision_resolver=_tier_gate_decision,
+        ).choose_provider(
+            _task(
+                agent_class="api-anthropic",
+                tier="X",
+                prefer_agent_id="anthropic-beta",
+            )
+        )
+
+    assert chosen == [fallback]
+    assert any(
+        "routing preferred provider anthropic-beta under-leveled" in rec.message
+        and "tier_x_agent_level_below_50:49" in rec.message
+        for rec in caplog.records
+    )
 
 
 def test_routing_on_cap_hit_suppresses_provider_until_retry_after() -> None:
