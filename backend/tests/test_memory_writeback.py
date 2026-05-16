@@ -9,12 +9,15 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from backend.agents import incident_recorder, memory_writeback
 from backend.agents.failure_class import FailureClass
+from backend.agents.incident_recorder import RunnerIncidentRecord
 from backend.agents.memory_tool_handler import (
     MemoryToolConfig,
     MemoryToolHandler,
@@ -37,7 +40,7 @@ from backend.agents.memory_writeback import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_buffers() -> None:
+def _reset_buffers() -> Iterator[None]:
     memory_writeback.reset_for_tests()
     incident_recorder.reset_for_tests()
     yield
@@ -66,7 +69,7 @@ def cognee_calls() -> list[str]:
 
 
 @pytest.fixture
-def cognee_emitter(cognee_calls: list[str]):
+def cognee_emitter(cognee_calls: list[str]) -> Callable[[str], None]:
     def _emit(ticket_key: str) -> None:
         cognee_calls.append(ticket_key)
 
@@ -79,7 +82,7 @@ def cognee_emitter(cognee_calls: list[str]):
 def test_success_writeback_appends_lesson_and_tickles_cognee(
     tmp_path: Path,
     memory_tool: MemoryToolHandler,
-    cognee_emitter,
+    cognee_emitter: Callable[[str], None],
     cognee_calls: list[str],
 ) -> None:
     wb = MemoryWriteback(
@@ -117,7 +120,7 @@ def test_success_writeback_appends_lesson_and_tickles_cognee(
 def test_failure_writeback_inserts_incident_and_tickles_cognee(
     tmp_path: Path,
     memory_tool: MemoryToolHandler,
-    cognee_emitter,
+    cognee_emitter: Callable[[str], None],
     cognee_calls: list[str],
 ) -> None:
     wb = MemoryWriteback(
@@ -159,7 +162,7 @@ def test_failure_writeback_inserts_incident_and_tickles_cognee(
 def test_idempotent_rewrite_returns_cached_result(
     tmp_path: Path,
     memory_tool: MemoryToolHandler,
-    cognee_emitter,
+    cognee_emitter: Callable[[str], None],
     cognee_calls: list[str],
 ) -> None:
     wb = MemoryWriteback(
@@ -196,7 +199,7 @@ def test_idempotent_rewrite_returns_cached_result(
 def test_store_down_degrades_gracefully(tmp_path: Path) -> None:
     """One failing collaborator must not block the others or raise."""
 
-    def boom_incident_writer(**_kwargs):
+    def boom_incident_writer(**_kwargs: Any) -> RunnerIncidentRecord:
         raise RuntimeError("simulated Postgres outage")
 
     cognee_calls: list[str] = []
@@ -237,7 +240,7 @@ def test_store_down_degrades_gracefully(tmp_path: Path) -> None:
 def test_lesson_classification_falls_back_when_no_keyword_matches(
     tmp_path: Path,
     memory_tool: MemoryToolHandler,
-    cognee_emitter,
+    cognee_emitter: Callable[[str], None],
 ) -> None:
     """Heuristic miss → no memory_tool entry, success path still completes."""
     wb = MemoryWriteback(
@@ -297,9 +300,9 @@ def test_cognee_tickle_is_fire_and_forget(tmp_path: Path) -> None:
         # incident/memory results.
         release.wait(timeout=3.0)
 
-    incident_calls: list[dict] = []
+    incident_calls: list[dict[str, Any]] = []
 
-    def fast_incident_writer(**kwargs):
+    def fast_incident_writer(**kwargs: Any) -> RunnerIncidentRecord:
         incident_calls.append(kwargs)
         return incident_recorder.record_runner_incident(
             ticket_key=kwargs["ticket_key"],
@@ -348,7 +351,7 @@ def test_cognee_tickle_is_fire_and_forget(tmp_path: Path) -> None:
 def test_success_outcome_positive_feedback_writes_incident_row(
     tmp_path: Path,
     memory_tool: MemoryToolHandler,
-    cognee_emitter,
+    cognee_emitter: Callable[[str], None],
 ) -> None:
     """``record_success_outcome=True`` writes a SUCCESS_OUTCOME-tagged row.
 
