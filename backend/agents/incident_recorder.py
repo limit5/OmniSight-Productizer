@@ -148,7 +148,13 @@ def _persist_audit(record: IncidentRecord) -> None:
     except Exception as exc:  # noqa: BLE001 — fail-open contract
         from backend.agents.memory_tool_handler import MemoryAuditWriteFailed
 
-        raise MemoryAuditWriteFailed(str(exc)) from exc
+        raise MemoryAuditWriteFailed(
+            f"incident_recorder._persist_audit: failed to append IncidentRecord("
+            f"failure_class={record.failure_class.value}, "
+            f"query_fleet={record.query_fleet!r}, "
+            f"target_fleet={record.target_fleet!r}, "
+            f"tier={record.tier!r}) to in-memory buffer: {exc}"
+        ) from exc
 
 
 def get_recorded_events(
@@ -305,8 +311,10 @@ def recall_similar_incidents(
     priors = candidates[: max(0, top_k)]
     if not priors:
         raise FailureClassRecallEmpty(
-            f"no prior incidents for ticket={ticket_key} "
-            f"area={area} failure_class={failure_class.value}"
+            f"incident_recorder.recall_similar_incidents: no prior incidents "
+            f"for ticket={ticket_key!r} area={area!r} "
+            f"failure_class={failure_class.value} tier={tier!r} "
+            f"top_k={top_k}"
         )
     return priors
 
