@@ -529,6 +529,8 @@ Rejected: Path A (cheapest but doesn't address the drift class); Path B (normali
 
 ### Family ⑧ — WSL2 graceful shutdown contract
 
+**Contract spec doc** (filed 2026-05-16, OP-1158): [`docs/sprint-s12/2026-05-16-v2-family8-graceful-shutdown-contract.md`](2026-05-16-v2-family8-graceful-shutdown-contract.md) — service classification (PG=30, backend=40, caddy/frontend/cloudflared=15, other=10), `scripts/shutdown.sh` graduated SIGTERM→SIGKILL contract + idempotency + verification loop, `omnisight-compose-prod.service` `ExecStop` wiring + `TimeoutStopSec=180` mathematical derivation, `docker-compose.prod.yml` `stop_grace_period` per-service invariants, PG WAL safety pre-stop probe + post-restart `alembic_version` integrity probe (cross-link to Family ⑥), WSL2 `RB_POWER_OFF` 10 s hard-limit + mandatory "Productizer cannot detect last forced shutdown" §8.4 limitation paragraph (per codex P1-4 caveat), cross-family delegation map (D1/D2/D5 N/A — delegated to Family ⑤ + Family ⑥), `v2-⑧-DRDrill` chaos test scenarios, `v2-⑧-Integration` 14-day soak invariants (RTO < 60 s, 0 corruption, weekly synthetic shutdown). Downstream Family ⑧ tickets cite that doc's §-anchors in their AC.
+
 **Why**: today's host reboot exposed that `scripts/shutdown.sh` exists with proper graduated timeouts but is NOT wired; `TimeoutStopSec=60` is mathematically insufficient; no PG `stop_grace_period`.
 
 **Defense dimensions covered**: D3 (shutdown — new) + D4 (recovery — new). **D1/D2/D5 explicitly N/A in v1.3 (codex P1-4 fix)**:
