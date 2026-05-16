@@ -48,6 +48,7 @@ from backend.agents.scope_to_paths import (
     ALWAYS_TOUCHED,
     ALWAYS_TOUCHED_TEMPLATE,
     FILES_SECTION_RE,
+    HOT_FILES,
     PATH_TOKEN_RE,
     SCOPE_TO_PATHS,
     parse_files_section,
@@ -2189,6 +2190,50 @@ def _paths_overlap(targets: set[str], in_flight: set[str]) -> set[str]:
     return overlaps
 
 
+def _agent_class_from_snapshot(snapshot: TicketSnapshot) -> str:
+    """Resolve the runner class label carried by a scheduler snapshot."""
+    for label in getattr(snapshot, "labels", ()):
+        if isinstance(label, str) and label.startswith("class:"):
+            return label.split(":", 1)[1]
+    return "subscription-codex"
+
+
+def _check_active_claim_hot_overlap(
+    snapshot: TicketSnapshot,
+    hot_in_target: set[str],
+) -> tuple[bool, str]:
+    """Block hot-file pickup when another claimed ticket declares same path."""
+    client = make_client(_agent_class_from_snapshot(snapshot), _instance_id_from_env())
+    jql = (
+        f'project = "{client.project_key}" '
+        f'AND labels ~ "{CLAIM_LABEL_PREFIX}*" '
+        f'AND key != "{snapshot.key}"'
+    )
+    resp = _request(client, "POST", "/search/jql", {
+        "jql": jql,
+        "fields": ["labels"],
+        "maxResults": 50,
+    })
+    for issue in resp.get("issues", []):
+        key = issue.get("key", "?")
+        labels = ((issue.get("fields") or {}).get("labels")) or []
+        if not any(isinstance(label, str) and label.startswith(CLAIM_LABEL_PREFIX) for label in labels):
+            continue
+        description = fetch_description(client, key)
+        overlap = _paths_overlap(hot_in_target, parse_files_section(description))
+        if not overlap:
+            continue
+        first = sorted(overlap)[0]
+        return (
+            False,
+            (
+                f"hot-file claim collision: {first} already claimed by {key}; "
+                f"[runner-hot-file-mutex] pre-PS claim-level mutex blocked pickup"
+            ),
+        )
+    return True, "no active hot-file claim collision"
+
+
 def migration_scope_globs(labels: Iterable[str]) -> tuple[str, ...]:
     """Extract ``migration:scope=<glob>`` labels from a JIRA label list."""
     scopes: list[str] = []
@@ -2284,12 +2329,44 @@ def file_mutex_check(
 
     overlap = _paths_overlap(target, set(in_flight_owners))
     if not overlap:
+        hot_in_target = target & HOT_FILES
+        if hot_in_target:
+            try:
+                ok, reason = _check_active_claim_hot_overlap(snapshot, hot_in_target)
+            except Exception as exc:  # noqa: BLE001 - hot-file JIRA probe fails open
+                log.warning(
+                    "hot-file claim mutex query failed for %s: %s: %s",
+                    snapshot.key,
+                    type(exc).__name__,
+                    exc,
+                )
+                return (
+                    True,
+                    "no open-PS collision; hot-file claim query failed - "
+                    f"pre-PS mutex skipped: {type(exc).__name__}: {exc}",
+                )
+            if not ok:
+                return False, reason
         return True, "no collision"
 
     first_path = sorted(overlap)[0]
     owner = in_flight_owners[first_path][0]
 
     if FILE_OVERLAP_OVERRIDE_LABEL in set(getattr(snapshot, "labels", ())):
+        hot_in_target = target & HOT_FILES
+        if hot_in_target:
+            try:
+                ok, reason = _check_active_claim_hot_overlap(snapshot, hot_in_target)
+            except Exception as exc:  # noqa: BLE001 - hot-file JIRA probe fails open
+                log.warning(
+                    "hot-file claim mutex query failed for %s: %s: %s",
+                    snapshot.key,
+                    type(exc).__name__,
+                    exc,
+                )
+                ok = True
+            if not ok:
+                return False, reason
         return (
             True,
             f"file-overlap override: {FILE_OVERLAP_OVERRIDE_LABEL} bypassed "
