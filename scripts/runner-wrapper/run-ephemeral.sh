@@ -111,6 +111,7 @@ while true; do
     PATH="/home/user/.nvm/versions/node/v24.14.1/bin:$PATH" \
     OMNISIGHT_RUNNER_CLASS="$CLASS" \
     OMNISIGHT_RUNNER_EPHEMERAL=1 \
+    OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1 \
     OMNISIGHT_CODEX_WORKTREE="$workspace" \
     OMNISIGHT_CLAUDE_WORKTREE="$workspace" \
     python3 -u "$workspace/auto-runner-jira.py" >> "$LOG" 2>&1
