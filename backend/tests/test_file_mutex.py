@@ -361,6 +361,7 @@ def test_synthetic_pickup_skips_colliding_ticket_and_picks_next(
     candidates = [_snapshot("OP-A"), _snapshot("OP-B")]
     calls: dict[str, list] = {"labels": [], "comments": []}
 
+    monkeypatch.setenv(mod.PRE_PICKUP_CAP_GATE_ENV, "off")
     monkeypatch.setattr(mod, "DRY_RUN", False)
     monkeypatch.setattr(mod.jira_dispatch, "pre_pickup_ok", lambda c, s: (True, "ok"))
     monkeypatch.setattr(mod.jira_dispatch, "fetch_description", lambda c, k: f"desc for {k}")
@@ -417,6 +418,7 @@ def test_dependency_blocked_candidate_gets_waiting_label_and_comment(
     calls: dict[str, list] = {"labels": [], "comments": []}
     snapshot = _snapshot("OP-B")
 
+    monkeypatch.setenv(mod.PRE_PICKUP_CAP_GATE_ENV, "off")
     monkeypatch.setattr(mod, "DRY_RUN", False)
     monkeypatch.setattr(
         mod.jira_dispatch,
@@ -451,6 +453,7 @@ def test_dependency_waiting_label_removed_after_blocker_resolves(
     comments: list[tuple[str, str]] = []
     snapshot = _snapshot("OP-B", labels=("runner-blocked:waiting-OP-A", "scope:runner-pipeline"))
 
+    monkeypatch.setenv(mod.PRE_PICKUP_CAP_GATE_ENV, "off")
     monkeypatch.setattr(mod, "DRY_RUN", False)
     monkeypatch.setattr(mod.jira_dispatch, "pre_pickup_ok", lambda c, s: (True, "pre-pickup checks passed"))
     monkeypatch.setattr(mod.jira_dispatch, "fetch_description", lambda c, k: "## Goal\n")
@@ -485,9 +488,14 @@ def test_runner_main_all_candidates_blocked_by_file_mutex_returns_zero(
     mod = _load_jira_runner()
     snapshots = [_snapshot("OP-A"), _snapshot("OP-B")]
 
+    monkeypatch.setenv(mod.PRE_PICKUP_CAP_GATE_ENV, "off")
     monkeypatch.setattr(mod, "TARGET_OVERRIDE", "")
     monkeypatch.setattr(mod, "DRY_RUN", False)
-    monkeypatch.setattr(mod.jira_dispatch, "make_client", lambda cls: _client())
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "make_client",
+        lambda cls, instance_id=None: _client(),
+    )
     monkeypatch.setattr(mod.jira_dispatch, "fetch_pickable_tickets", lambda c: [{"key": s.key, "fields": {}} for s in snapshots])
     monkeypatch.setattr(mod.jira_dispatch, "to_snapshot", lambda issue: next(s for s in snapshots if s.key == issue["key"]))
     monkeypatch.setattr(mod.scheduler, "load_weights", lambda: scheduler.SchedulerWeights(

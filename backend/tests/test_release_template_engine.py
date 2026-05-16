@@ -212,7 +212,11 @@ def test_idempotency_main_exit_code_is_one(
     monkeypatch, patch_jira, template_path, meta_desc_path,
 ) -> None:
     patch_jira["existing_meta"] = ("OP-9999", "In Progress")
-    monkeypatch.setattr(engine.jira_dispatch, "make_client", lambda cls: _fake_client())
+    monkeypatch.setattr(
+        engine.jira_dispatch,
+        "make_client",
+        lambda cls, instance_id=None: _fake_client(),
+    )
     rc = engine.main([
         "--version", "v0.5.1-rc1",
         "--template", str(template_path),
@@ -403,7 +407,11 @@ def test_blocked_by_wiring_failure_main_exit_code_is_three(
         raise RuntimeError("simulated JIRA 500 on issueLink")
 
     monkeypatch.setattr(file_coordinator, "add_blocked_by", explode)
-    monkeypatch.setattr(engine.jira_dispatch, "make_client", lambda cls: _fake_client())
+    monkeypatch.setattr(
+        engine.jira_dispatch,
+        "make_client",
+        lambda cls, instance_id=None: _fake_client(),
+    )
     rc = engine.main([
         "--version", "v0.5.1-rc1",
         "--template", str(template_path),
@@ -698,7 +706,11 @@ def test_g2_jql_query_failed_main_exit_code_is_four(
         raise RuntimeError("simulated JIRA 500 on /search/jql")
 
     stub_jql["responses"] = [explode]
-    monkeypatch.setattr(engine.jira_dispatch, "make_client", lambda cls: _fake_client())
+    monkeypatch.setattr(
+        engine.jira_dispatch,
+        "make_client",
+        lambda cls, instance_id=None: _fake_client(),
+    )
     rc = engine.main([
         "--version", "v0.5.1-rc1",
         "--template", str(template_path),
@@ -752,7 +764,11 @@ def test_g2_state_ambiguous_main_exit_code_is_five(
         },
         lambda jql, fields, mr: {"issues": []},  # noqa: ARG005
     ]
-    monkeypatch.setattr(engine.jira_dispatch, "make_client", lambda cls: _fake_client())
+    monkeypatch.setattr(
+        engine.jira_dispatch,
+        "make_client",
+        lambda cls, instance_id=None: _fake_client(),
+    )
     rc = engine.main([
         "--version", "v0.5.1-rc1",
         "--template", str(template_path),
