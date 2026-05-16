@@ -775,6 +775,13 @@ if _AVAILABLE:
         labelnames=("ticket", "tag"),
         registry=REGISTRY,
     )
+    aux_service_available = Gauge(
+        "omnisight_aux_service_available",
+        "1 if an auxiliary service is available, 0 if unavailable, NaN before first probe",
+        labelnames=("service",),
+        registry=REGISTRY,
+    )
+    aux_service_available.labels(service="ai_core").set(float("nan"))
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -881,6 +888,7 @@ else:
     metrics_label_cap_used = _NoOp()  # type: ignore
     capability_matrix_unexpected_fallback_total = _NoOp()  # type: ignore
     runner_comment_suppressed_total = _NoOp()  # type: ignore
+    aux_service_available = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1367,7 +1375,7 @@ def reset_for_tests() -> None:
     global billing_llm_output_tokens_total, billing_llm_cost_usd_total
     global billing_workflow_runs_total, billing_workspace_gb_hours_total
     global metrics_label_cap_used, capability_matrix_unexpected_fallback_total
-    global runner_comment_suppressed_total
+    global runner_comment_suppressed_total, aux_service_available
     billing_llm_calls_total = Counter(
         "omnisight_billing_llm_calls_total",
         "LLM calls fan-outed to billing, by tenant/project/product_line/provider/model",
@@ -1425,3 +1433,10 @@ def reset_for_tests() -> None:
         labelnames=("ticket", "tag"),
         registry=REGISTRY,
     )
+    aux_service_available = Gauge(
+        "omnisight_aux_service_available",
+        "1 if an auxiliary service is available, 0 if unavailable, NaN before first probe",
+        labelnames=("service",),
+        registry=REGISTRY,
+    )
+    aux_service_available.labels(service="ai_core").set(float("nan"))
