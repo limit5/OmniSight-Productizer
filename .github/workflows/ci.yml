@@ -366,6 +366,25 @@ jobs:
       - name: validate configs/embedded_catalog/*.yaml
         run: python3 scripts/check_catalog_schema.py
 
+  alert-rule-lint:
+    # OP-1151 — v2-AlertBridge rule-promotion lint. Keep this as a
+    # focused YAML gate so malformed deploy/prometheus/rules/*.y*ml
+    # files fail before the heavier backend matrix starts.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - name: install yaml parser
+        run: pip install "pyyaml==6.0.3"
+      - name: lint deploy/prometheus/rules/*.y*ml
+        run: |
+          set -eu
+          find deploy/prometheus/rules -maxdepth 1 -type f -name '*.y*ml' -print0 \
+            | sort -z \
+            | xargs -0 -r -n1 python3 scripts/promote-alert-rule.py
+
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 8
