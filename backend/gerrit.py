@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from backend.config import settings
@@ -85,62 +86,105 @@ class GerritClient:
 
     @classmethod
     async def prewarm_for_daemon(cls) -> None:
-        """OP-1190 — pre-cache the gerrit account registry at daemon startup.
+        """OP-1190 + OP-1193 — populate the daemon's gerrit-account cache.
 
-        The ``gerrit-jira-bridge`` daemon initialises the asyncpg pool
-        once in its main event loop (see ``_run_with_db_pool`` in
-        ``backend.agents.gerrit_jira_bridge``). When a Gerrit
-        ``patchset-created`` event arrives, ``_handle_patchset_created``
-        spawns a per-event thread that calls
-        ``asyncio.run(_proactive_merger_check(event))``. That ``asyncio.run``
-        creates a NEW event loop inside the worker thread, and
-        ``_proactive_merger_check`` then asks Gerrit for change data
-        via ``gerrit_client.query_change`` → ``_resolve_account`` →
-        ``git_credentials.pick_default`` → ``pool.acquire()``. The pool's
-        internal futures are bound to the daemon's main loop, so the
-        worker-thread acquire raises ``RuntimeError: Task got Future
-        attached to a different loop`` and the merger flow short-circuits
-        with ``skip_reason=gerrit_query_error`` — the symptom that
-        OP-1185 exposed and this method fixes.
+        Background — the layered fix
+        ----------------------------
+        OP-1190 introduced this method to sidestep the asyncpg
+        "different loop" RuntimeError raised when a per-event worker
+        thread (spawned by ``_handle_patchset_created``) calls
+        ``asyncio.run(_proactive_merger_check(event))`` and the inner
+        ``_resolve_account`` tries to acquire from the pool bound to
+        the daemon's main loop. The fix populates a class-level cache
+        in the main loop, then ``_resolve_account`` serves the cache
+        synchronously without ever calling ``pool.acquire()``.
 
-        Calling this in the main loop pre-resolves the registry +
-        default account through the valid pool, then stashes the results
-        on the class so ``_resolve_account`` can answer synchronously
-        from worker threads without touching the pool.
+        OP-1193 rewrites the cache SOURCE (this method) — the
+        OP-1190-era implementation read from the DB via
+        ``pick_default("gerrit")`` and stashed whatever first-default
+        row it found. But the only gerrit row in ``git_accounts`` is
+        ``merger-agent-bot``'s (ga-23a020393575, from OP-693), and
+        loading it into the daemon's account slot conflated identities:
+        the daemon (claude-bot, with its own SSH key + ``user@host``
+        in env) ended up authenticating reads against Gerrit AS the
+        merger-bot — and crashed in practice because the row's
+        ``ssh_host`` lacks the ``user@`` prefix and ``ssh_key`` is the
+        decrypted PEM content rather than a filesystem path. The
+        2026-05-17 OP-1185 re-run (Gerrit Change #716, abandoned)
+        observed ``Gerrit query failed: user@sora.services: Permission
+        denied (publickey)`` — local-OS-user fallback because no
+        ``user@`` prefix was present.
 
-        Idempotent: safe to call multiple times. The cache is reset only
-        by an explicit ``invalidate_prewarm_cache`` call (operator-driven
-        when credentials rotate) — the daemon is restarted on credential
-        changes anyway, which re-runs this method.
+        New design — env-sourced identity
+        ---------------------------------
+        Build the cached default account from THE DAEMON'S OWN env
+        (``OMNISIGHT_GERRIT_SSH_HOST`` carries ``claude-bot@host``,
+        ``OMNISIGHT_GIT_SSH_KEY_PATH`` is a real filesystem path,
+        ``OMNISIGHT_GERRIT_PROJECT`` is the project root). This mirrors
+        the legacy ``default-gerrit (legacy scalar)`` row that
+        ``backend.git_credentials`` synthesises when no real DB row
+        exists — see ``git_credentials.py`` around the
+        ``entry_id="default-gerrit"`` shim block. The DB rows remain
+        reachable for OTHER consumers (e.g., merger-bot's own resolution
+        push) via explicit ``pick_account_for_url`` / ``pick_by_id``
+        calls; only this daemon-identity cache changes.
+
+        Pool init is no longer a prerequisite — kept the call site
+        after ``db_pool.init_pool`` only because other daemon
+        subsystems (audit log, JIRA write) still need the pool.
+
+        Idempotent: safe to call multiple times. The cache is reset
+        only by an explicit ``invalidate_prewarm_cache`` call — daemon
+        restart re-runs this method.
         """
-        from backend.git_credentials import (
-            get_credential_registry_async, pick_default,
+        ssh_host = (
+            (settings.gerrit_ssh_host or "").strip()
+            or os.environ.get("OMNISIGHT_GERRIT_SSH_HOST", "").strip()
+        )
+        ssh_port_str = (
+            str(settings.gerrit_ssh_port).strip()
+            if settings.gerrit_ssh_port
+            else os.environ.get("OMNISIGHT_GERRIT_SSH_PORT", "29418").strip()
         )
         try:
-            registry = await get_credential_registry_async()
-        except Exception as exc:  # pragma: no cover — defensive
+            ssh_port = int(ssh_port_str or "29418")
+        except ValueError:
+            ssh_port = 29418
+        ssh_key = (
+            (settings.git_ssh_key_path or "").strip()
+            or os.environ.get("OMNISIGHT_GIT_SSH_KEY_PATH", "").strip()
+        )
+        project = (
+            (settings.gerrit_project or "").strip()
+            or os.environ.get("OMNISIGHT_GERRIT_PROJECT", "").strip()
+        )
+
+        if not ssh_host:
             logger.warning(
-                "GerritClient.prewarm_for_daemon: registry read failed (%s); "
-                "cache not populated, daemon worker threads will hit asyncpg "
-                "different-loop error", type(exc).__name__,
+                "GerritClient.prewarm_for_daemon: no SSH host configured "
+                "(settings.gerrit_ssh_host empty AND OMNISIGHT_GERRIT_SSH_HOST "
+                "env unset) — cache stays empty; daemon worker threads will "
+                "fall back to the async DB path and likely hit OP-1190 or "
+                "the merger-bot-identity mismatch."
             )
             return
-        try:
-            default = await pick_default("gerrit", touch=False)
-        except Exception as exc:  # pragma: no cover — defensive
-            logger.warning(
-                "GerritClient.prewarm_for_daemon: pick_default failed (%s)",
-                type(exc).__name__,
-            )
-            default = None
-        cls._cached_registry = registry
-        cls._cached_default = default
-        gerrit_count = sum(1 for e in registry if e.get("platform") == "gerrit")
+
+        account: dict = {
+            "id": "daemon-env",
+            "platform": "gerrit",
+            "ssh_host": ssh_host,        # contract: 'user@host' or bare 'host'
+            "ssh_port": ssh_port,
+            "ssh_key": ssh_key,          # contract: filesystem PATH (not PEM)
+            "project": project,
+            "is_default": True,
+        }
+        cls._cached_default = account
+        cls._cached_registry = [account]
         logger.info(
-            "GerritClient.prewarm_for_daemon: cached registry=%d entries "
-            "(gerrit=%d) default_account=%s",
-            len(registry), gerrit_count,
-            "set" if default else "none",
+            "GerritClient.prewarm_for_daemon: cache populated from env "
+            "(ssh_host=%s ssh_port=%d project=%s ssh_key=%s)",
+            ssh_host, ssh_port, project,
+            "set" if ssh_key else "MISSING",
         )
 
     @classmethod

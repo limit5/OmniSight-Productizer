@@ -300,3 +300,217 @@ class TestGerritClientPrewarmCache:
         assert "error" not in result_holder, \
             f"worker thread raised: {result_holder.get('error')!r}"
         assert result_holder["account"] is cached_row
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OP-1193 — prewarm builds cache from ENV identity, not DB merger-bot row.
+#
+# OP-1190 introduced the cache; OP-1193 changes the SOURCE. The daemon
+# is its own identity (env-vared OMNISIGHT_GERRIT_SSH_HOST +
+# OMNISIGHT_GIT_SSH_KEY_PATH), distinct from any DB row. Previously
+# (OP-1190 implementation) ``prewarm_for_daemon`` called
+# ``pick_default("gerrit")`` which returned the merger-bot row, causing
+# SSH auth failure (``user@host: Permission denied (publickey)``) when
+# the daemon used those creds for read-only queries.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestGerritClientPrewarmFromEnv:
+
+    def setup_method(self):
+        GerritClient.invalidate_prewarm_cache()
+
+    def teardown_method(self):
+        GerritClient.invalidate_prewarm_cache()
+
+    def _set_settings(self, monkeypatch, **kw):
+        """Helper to override settings.gerrit_* + git_ssh_key_path."""
+        from backend.config import settings
+        for k, v in kw.items():
+            monkeypatch.setattr(settings, k, v, raising=False)
+
+    def test_prewarm_uses_settings_when_present(self, monkeypatch):
+        """When settings.gerrit_ssh_host etc. are populated, prewarm
+        builds the cached row from them rather than calling pick_default."""
+        import asyncio
+        from backend import git_credentials
+
+        # Sabotage pick_default + registry to make sure they're NOT called.
+        async def _boom(*a, **kw):
+            raise AssertionError(
+                "prewarm_for_daemon called the DB path — OP-1193 regression"
+            )
+        monkeypatch.setattr(git_credentials, "pick_default", _boom)
+        monkeypatch.setattr(
+            git_credentials, "get_credential_registry_async", _boom,
+        )
+
+        self._set_settings(
+            monkeypatch,
+            gerrit_ssh_host="claude-bot@sora.services",
+            gerrit_ssh_port=29418,
+            git_ssh_key_path="/home/user/.config/omnisight/gerrit-claude-bot-ed25519",
+            gerrit_project="omnisight/OmniSight-Productizer",
+        )
+
+        asyncio.run(GerritClient.prewarm_for_daemon())
+
+        assert GerritClient._cached_default is not None
+        cached = GerritClient._cached_default
+        assert cached["id"] == "daemon-env"
+        assert cached["platform"] == "gerrit"
+        assert cached["ssh_host"] == "claude-bot@sora.services"
+        assert cached["ssh_port"] == 29418
+        assert cached["ssh_key"] == "/home/user/.config/omnisight/gerrit-claude-bot-ed25519"
+        assert cached["project"] == "omnisight/OmniSight-Productizer"
+        assert cached["is_default"] is True
+        assert GerritClient._cached_registry == [cached]
+
+    def test_prewarm_falls_back_to_env_when_settings_empty(self, monkeypatch):
+        """If settings fields are empty strings, env vars are consulted."""
+        import asyncio
+        self._set_settings(
+            monkeypatch,
+            gerrit_ssh_host="",
+            gerrit_ssh_port=0,
+            git_ssh_key_path="",
+            gerrit_project="",
+        )
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_HOST", "claude-bot@env-host")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_PORT", "29999")
+        monkeypatch.setenv("OMNISIGHT_GIT_SSH_KEY_PATH", "/tmp/fake-key")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_PROJECT", "env/Project")
+
+        asyncio.run(GerritClient.prewarm_for_daemon())
+
+        cached = GerritClient._cached_default
+        assert cached is not None
+        assert cached["ssh_host"] == "claude-bot@env-host"
+        assert cached["ssh_port"] == 29999
+        assert cached["ssh_key"] == "/tmp/fake-key"
+        assert cached["project"] == "env/Project"
+
+    def test_prewarm_empty_ssh_host_logs_warn_and_leaves_cache_empty(
+        self, monkeypatch, caplog,
+    ):
+        """Without an SSH host, prewarm warns and leaves cache None.
+        The daemon then falls back to the async DB path on demand."""
+        import asyncio
+        import logging
+        self._set_settings(
+            monkeypatch, gerrit_ssh_host="", gerrit_ssh_port=0,
+            git_ssh_key_path="", gerrit_project="",
+        )
+        monkeypatch.delenv("OMNISIGHT_GERRIT_SSH_HOST", raising=False)
+        monkeypatch.delenv("OMNISIGHT_GERRIT_SSH_PORT", raising=False)
+        monkeypatch.delenv("OMNISIGHT_GIT_SSH_KEY_PATH", raising=False)
+        monkeypatch.delenv("OMNISIGHT_GERRIT_PROJECT", raising=False)
+
+        with caplog.at_level(logging.WARNING, logger="backend.gerrit"):
+            asyncio.run(GerritClient.prewarm_for_daemon())
+
+        assert GerritClient._cached_default is None
+        assert GerritClient._cached_registry is None
+        assert any(
+            "no SSH host configured" in rec.message
+            for rec in caplog.records
+        ), f"expected warning log; got {[r.message for r in caplog.records]}"
+
+    def test_prewarm_default_port_when_not_specified(self, monkeypatch):
+        """Default port 29418 when no port set in settings or env."""
+        import asyncio
+        self._set_settings(
+            monkeypatch,
+            gerrit_ssh_host="x@y", gerrit_ssh_port=0,
+            git_ssh_key_path="", gerrit_project="",
+        )
+        monkeypatch.delenv("OMNISIGHT_GERRIT_SSH_PORT", raising=False)
+
+        asyncio.run(GerritClient.prewarm_for_daemon())
+
+        cached = GerritClient._cached_default
+        assert cached is not None
+        assert cached["ssh_port"] == 29418
+
+    def test_prewarm_settings_dominate_env_when_both_present(self, monkeypatch):
+        """Settings field takes precedence over env (matches the
+        legacy default-gerrit shim's settings-first ordering)."""
+        import asyncio
+        self._set_settings(
+            monkeypatch,
+            gerrit_ssh_host="settings@host",
+            gerrit_ssh_port=29418,
+            git_ssh_key_path="",
+            gerrit_project="",
+        )
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_HOST", "env@host")
+
+        asyncio.run(GerritClient.prewarm_for_daemon())
+
+        cached = GerritClient._cached_default
+        assert cached["ssh_host"] == "settings@host"
+
+    def test_ssh_args_for_cached_account_produces_correct_argv(
+        self, monkeypatch, tmp_path,
+    ):
+        """The cached row's _ssh_args_for should produce argv that matches
+        what an operator would type to ssh manually: ssh -i <key> -p 29418
+        -o opts <user@host>."""
+        import asyncio
+        key_file = tmp_path / "fake-key"
+        key_file.write_text("# stub")
+        self._set_settings(
+            monkeypatch,
+            gerrit_ssh_host="claude-bot@sora.services",
+            gerrit_ssh_port=29418,
+            git_ssh_key_path=str(key_file),
+            gerrit_project="omnisight/OmniSight-Productizer",
+        )
+
+        asyncio.run(GerritClient.prewarm_for_daemon())
+
+        client = GerritClient()
+        cached = client._resolve_account_from_cache("")
+        assert cached is not None
+        argv = client._ssh_args_for(cached)
+        # Must produce a valid ssh command targeting user@host with the key.
+        assert argv[0] == "ssh"
+        assert "-i" in argv
+        assert str(key_file) in argv
+        assert "-p" in argv
+        assert "29418" in argv
+        assert "claude-bot@sora.services" in argv
+        assert "BatchMode=yes" in argv
+        assert "StrictHostKeyChecking=accept-new" in argv
+
+    def test_no_db_calls_in_prewarm_path(self, monkeypatch):
+        """OP-1193 regression: the new prewarm must not import from
+        backend.git_credentials at all. (The old impl did.)"""
+        import asyncio
+        from backend import git_credentials
+
+        get_called = {"flag": False}
+        pick_called = {"flag": False}
+
+        async def _watch_registry(*a, **kw):
+            get_called["flag"] = True
+            return []
+
+        async def _watch_pick(*a, **kw):
+            pick_called["flag"] = True
+            return None
+
+        monkeypatch.setattr(
+            git_credentials, "get_credential_registry_async", _watch_registry,
+        )
+        monkeypatch.setattr(git_credentials, "pick_default", _watch_pick)
+        self._set_settings(
+            monkeypatch,
+            gerrit_ssh_host="x@y", gerrit_ssh_port=29418,
+            git_ssh_key_path="/tmp/k", gerrit_project="p",
+        )
+
+        asyncio.run(GerritClient.prewarm_for_daemon())
+
+        assert not get_called["flag"], "prewarm must not call get_credential_registry_async"
+        assert not pick_called["flag"], "prewarm must not call pick_default"
