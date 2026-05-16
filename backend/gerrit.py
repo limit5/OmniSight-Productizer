@@ -69,11 +69,121 @@ class GerritClient:
     the SSH argv. See module docstring for the resolution strategy.
     """
 
+    # OP-1190 prewarm cache. Populated by ``prewarm_for_daemon`` from
+    # the gerrit-jira-bridge daemon's main event loop AFTER
+    # ``db_pool.init_pool`` has succeeded. Once set, ``_resolve_account``
+    # serves from this cache instead of touching the asyncpg pool — which
+    # is required because the daemon's per-event handler threads call
+    # ``asyncio.run(...)`` and therefore run in a different event loop
+    # than the one the pool was created in.
+    #
+    # Class-level state (not instance) so the module-global
+    # ``gerrit_client`` singleton and any test instances share the same
+    # warm cache. None means "no cache; fall back to async DB read".
+    _cached_registry: list[dict] | None = None
+    _cached_default: dict | None = None
+
+    @classmethod
+    async def prewarm_for_daemon(cls) -> None:
+        """OP-1190 — pre-cache the gerrit account registry at daemon startup.
+
+        The ``gerrit-jira-bridge`` daemon initialises the asyncpg pool
+        once in its main event loop (see ``_run_with_db_pool`` in
+        ``backend.agents.gerrit_jira_bridge``). When a Gerrit
+        ``patchset-created`` event arrives, ``_handle_patchset_created``
+        spawns a per-event thread that calls
+        ``asyncio.run(_proactive_merger_check(event))``. That ``asyncio.run``
+        creates a NEW event loop inside the worker thread, and
+        ``_proactive_merger_check`` then asks Gerrit for change data
+        via ``gerrit_client.query_change`` → ``_resolve_account`` →
+        ``git_credentials.pick_default`` → ``pool.acquire()``. The pool's
+        internal futures are bound to the daemon's main loop, so the
+        worker-thread acquire raises ``RuntimeError: Task got Future
+        attached to a different loop`` and the merger flow short-circuits
+        with ``skip_reason=gerrit_query_error`` — the symptom that
+        OP-1185 exposed and this method fixes.
+
+        Calling this in the main loop pre-resolves the registry +
+        default account through the valid pool, then stashes the results
+        on the class so ``_resolve_account`` can answer synchronously
+        from worker threads without touching the pool.
+
+        Idempotent: safe to call multiple times. The cache is reset only
+        by an explicit ``invalidate_prewarm_cache`` call (operator-driven
+        when credentials rotate) — the daemon is restarted on credential
+        changes anyway, which re-runs this method.
+        """
+        from backend.git_credentials import (
+            get_credential_registry_async, pick_default,
+        )
+        try:
+            registry = await get_credential_registry_async()
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "GerritClient.prewarm_for_daemon: registry read failed (%s); "
+                "cache not populated, daemon worker threads will hit asyncpg "
+                "different-loop error", type(exc).__name__,
+            )
+            return
+        try:
+            default = await pick_default("gerrit", touch=False)
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning(
+                "GerritClient.prewarm_for_daemon: pick_default failed (%s)",
+                type(exc).__name__,
+            )
+            default = None
+        cls._cached_registry = registry
+        cls._cached_default = default
+        gerrit_count = sum(1 for e in registry if e.get("platform") == "gerrit")
+        logger.info(
+            "GerritClient.prewarm_for_daemon: cached registry=%d entries "
+            "(gerrit=%d) default_account=%s",
+            len(registry), gerrit_count,
+            "set" if default else "none",
+        )
+
+    @classmethod
+    def invalidate_prewarm_cache(cls) -> None:
+        """OP-1190 — clear the prewarm cache.
+
+        Tests use this between cases to force a fresh resolution. Prod
+        code shouldn't need it: the daemon re-prewarms on each restart,
+        and credential rotation requires a daemon restart anyway.
+        """
+        cls._cached_registry = None
+        cls._cached_default = None
+
+    def _resolve_account_from_cache(self, project: str = "") -> dict | None:
+        """OP-1190 — synchronous account resolution using the prewarm cache.
+
+        Returns ``None`` if the cache is not populated (caller must fall
+        back to the async DB-read path). Returns the resolved account
+        dict otherwise, applying the same project-aware → default
+        precedence as :meth:`_resolve_account`.
+        """
+        registry = type(self)._cached_registry
+        if registry is None:
+            return None
+        if project:
+            needle = project.strip().lower()
+            for entry in registry:
+                if entry.get("platform") != "gerrit":
+                    continue
+                if (entry.get("project") or "").strip().lower() == needle:
+                    return entry
+        return type(self)._cached_default
+
     async def _resolve_account(self, project: str = "") -> dict | None:
         """Pick the right ``git_accounts(platform='gerrit')`` row.
 
         Resolution order:
 
+        0. **OP-1190** — if :meth:`prewarm_for_daemon` has populated the
+           class-level cache, serve from it synchronously. This is the
+           daemon-worker-thread path: the asyncpg pool is bound to the
+           daemon's main loop and cannot be acquired from per-event
+           ``asyncio.run`` worker loops.
         1. If *project* is non-empty, scan the tenant-scoped registry
            for a gerrit row whose ``project`` field matches
            case-insensitive — direct hit for multi-project tenants.
@@ -85,6 +195,13 @@ class GerritClient:
         either source. Callers should surface ``"Gerrit not
         configured"`` to the user in that case.
         """
+        cached = self._resolve_account_from_cache(project)
+        if cached is not None or type(self)._cached_registry is not None:
+            # Cache populated → trust it. cached==None means "registry was
+            # cached but no gerrit row matches", which is the same answer
+            # the async path would give without burning a pool acquire.
+            return cached
+
         from backend.git_credentials import (
             get_credential_registry_async, pick_default,
         )

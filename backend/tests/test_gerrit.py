@@ -94,3 +94,209 @@ class TestGerritToolRestrictions:
             assert "[BLOCKED]" in result
         finally:
             settings.gerrit_enabled = orig
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OP-1190 — daemon prewarm-cache regression tests.
+#
+# The bridge daemon's per-event handler threads call ``asyncio.run(...)``
+# to enter a fresh event loop. The asyncpg pool initialised in the
+# daemon's main loop cannot be acquired from those worker loops without
+# raising ``RuntimeError: Task got Future attached to a different loop``.
+# ``GerritClient.prewarm_for_daemon`` pre-resolves the registry +
+# default account in the main loop so that ``_resolve_account`` can
+# serve worker threads synchronously from the class-level cache.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestGerritClientPrewarmCache:
+
+    def setup_method(self):
+        # Always start each test with a clean cache.
+        GerritClient.invalidate_prewarm_cache()
+
+    def teardown_method(self):
+        GerritClient.invalidate_prewarm_cache()
+
+    def test_cache_starts_empty(self):
+        """Default state — no prewarm has run."""
+        assert GerritClient._cached_registry is None
+        assert GerritClient._cached_default is None
+
+    def test_cached_resolve_returns_none_when_cache_empty(self):
+        """Without prewarm, the cache-only resolver returns None
+        (caller falls through to async DB path)."""
+        client = GerritClient()
+        assert client._resolve_account_from_cache("") is None
+        assert client._resolve_account_from_cache("any-project") is None
+
+    def test_cached_resolve_returns_default_when_no_project(self):
+        """With cache populated and no project filter, return the
+        cached default account."""
+        default_row = {
+            "platform": "gerrit", "acct_id": "ga-default",
+            "ssh_host": "review.example.com", "is_default": True,
+        }
+        GerritClient._cached_registry = [default_row]
+        GerritClient._cached_default = default_row
+
+        client = GerritClient()
+        result = client._resolve_account_from_cache("")
+        assert result is default_row
+        assert result["acct_id"] == "ga-default"
+
+    def test_cached_resolve_project_match_wins_over_default(self):
+        """Project-aware lookup beats the default — exactly mirrors
+        the async path's precedence."""
+        default_row = {
+            "platform": "gerrit", "acct_id": "ga-default",
+            "ssh_host": "review.example.com",
+            "project": "", "is_default": True,
+        }
+        project_row = {
+            "platform": "gerrit", "acct_id": "ga-special",
+            "ssh_host": "review2.example.com",
+            "project": "omnisight/Special",
+        }
+        GerritClient._cached_registry = [default_row, project_row]
+        GerritClient._cached_default = default_row
+
+        client = GerritClient()
+        result = client._resolve_account_from_cache("omnisight/Special")
+        assert result is project_row, "project-aware lookup must beat default"
+
+    def test_cached_resolve_project_match_case_insensitive(self):
+        """Project match is case-insensitive, matching async path."""
+        project_row = {
+            "platform": "gerrit", "acct_id": "ga-mixed",
+            "project": "Org/Repo-Name",
+        }
+        GerritClient._cached_registry = [project_row]
+        GerritClient._cached_default = None
+
+        client = GerritClient()
+        assert client._resolve_account_from_cache("org/repo-name") is project_row
+        assert client._resolve_account_from_cache("ORG/REPO-NAME") is project_row
+        assert client._resolve_account_from_cache("Org/Repo-Name") is project_row
+
+    def test_cached_resolve_no_project_match_falls_back_to_default(self):
+        """If the project filter doesn't match any cached row, return
+        the cached default rather than failing."""
+        default_row = {
+            "platform": "gerrit", "acct_id": "ga-default", "is_default": True,
+        }
+        other_row = {
+            "platform": "gerrit", "acct_id": "ga-other",
+            "project": "other/repo",
+        }
+        GerritClient._cached_registry = [default_row, other_row]
+        GerritClient._cached_default = default_row
+
+        client = GerritClient()
+        result = client._resolve_account_from_cache("nonexistent/project")
+        assert result is default_row
+
+    def test_cached_resolve_filters_non_gerrit_rows(self):
+        """The registry contains rows for multiple platforms; the
+        cache-aware lookup must filter to platform=gerrit only."""
+        github_row = {
+            "platform": "github", "acct_id": "ga-github",
+            "project": "org/repo",
+        }
+        gerrit_row = {
+            "platform": "gerrit", "acct_id": "ga-gerrit",
+            "project": "org/repo",
+        }
+        GerritClient._cached_registry = [github_row, gerrit_row]
+        GerritClient._cached_default = None
+
+        client = GerritClient()
+        # Same project name on both platforms — must return gerrit.
+        result = client._resolve_account_from_cache("org/repo")
+        assert result is gerrit_row
+
+    def test_invalidate_clears_cache(self):
+        """``invalidate_prewarm_cache`` resets both attributes."""
+        GerritClient._cached_registry = [{"platform": "gerrit"}]
+        GerritClient._cached_default = {"platform": "gerrit"}
+
+        GerritClient.invalidate_prewarm_cache()
+
+        assert GerritClient._cached_registry is None
+        assert GerritClient._cached_default is None
+
+    def test_resolve_account_serves_from_cache_without_db(self, monkeypatch):
+        """OP-1190 the regression test: with the cache populated,
+        ``_resolve_account`` must NOT call into asyncpg via
+        ``get_credential_registry_async`` or ``pick_default``."""
+        import asyncio
+        from backend import gerrit as gerrit_mod
+
+        cached_row = {
+            "platform": "gerrit", "acct_id": "ga-cached",
+            "ssh_host": "review.example.com", "is_default": True,
+        }
+        GerritClient._cached_registry = [cached_row]
+        GerritClient._cached_default = cached_row
+
+        # Sabotage the async path — if _resolve_account falls through
+        # to the DB, these will raise instead of silently passing.
+        async def _boom(*a, **kw):
+            raise AssertionError(
+                "_resolve_account fell through to async DB path despite "
+                "populated cache — this is the OP-1190 regression"
+            )
+
+        monkeypatch.setattr(
+            "backend.git_credentials.get_credential_registry_async", _boom,
+        )
+        monkeypatch.setattr(
+            "backend.git_credentials.pick_default", _boom,
+        )
+
+        client = GerritClient()
+        result = asyncio.run(client._resolve_account(""))
+        assert result is cached_row, "must serve from cache"
+
+        # Same when called with a project filter.
+        result_p = asyncio.run(
+            client._resolve_account("any/project")
+        )
+        # No project match in cache → returns cached default.
+        assert result_p is cached_row
+
+    def test_resolve_account_works_from_different_event_loop(self):
+        """OP-1190 root-cause regression: the daemon's per-event thread
+        creates a fresh event loop via ``asyncio.run(...)``. Once the
+        cache is populated (typically by the main loop's prewarm),
+        ``_resolve_account`` must succeed from a different loop without
+        touching the asyncpg pool."""
+        import asyncio
+        import threading
+
+        cached_row = {
+            "platform": "gerrit", "acct_id": "ga-from-cache",
+        }
+        GerritClient._cached_registry = [cached_row]
+        GerritClient._cached_default = cached_row
+
+        result_holder: dict = {}
+
+        def worker():
+            client = GerritClient()
+            try:
+                # Mirrors the daemon's _runner: a fresh asyncio.run
+                # in a worker thread, creating a NEW event loop.
+                result_holder["account"] = asyncio.run(
+                    client._resolve_account("")
+                )
+            except Exception as exc:
+                result_holder["error"] = exc
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join(timeout=10)
+        assert not t.is_alive(), "worker thread hung"
+        assert "error" not in result_holder, \
+            f"worker thread raised: {result_holder.get('error')!r}"
+        assert result_holder["account"] is cached_row
