@@ -374,7 +374,7 @@ class AnthropicClient:
         self.beta_headers = tuple(beta_headers) if beta_headers else ()
 
     @property
-    def messages(self):  # noqa: ANN201 - returns SDK proxy, dynamic
+    def messages(self) -> Any:
         """Expose the SDK `messages` namespace for low-level access (batches, etc)."""
         return self._client.messages
 
@@ -448,7 +448,7 @@ class AnthropicClient:
 
         Good fit for: routine classification, scoring, summarization.
         """
-        kwargs = {
+        kwargs: dict[str, Any] = {
             "model": model or self.default_model,
             "max_tokens": max_tokens or self.max_tokens_default,
             "temperature": temperature,
