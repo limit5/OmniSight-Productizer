@@ -155,14 +155,35 @@ class Trace:
 
 @dataclass(frozen=True)
 class Via:
-    """One via connecting layers for a net."""
+    """One via connecting two layers for a net.
+
+    ``layer_from`` / ``layer_to`` are stack_order indices and may be
+    given in either order; analyzers that care about Z-axis direction
+    should take ``min``/``max``. ``type`` distinguishes manufacturing
+    style (through-hole vs blind vs buried) which HD.2.5 stub analysis
+    uses to compute unused-stub length above DDR4 / PCIe frequency
+    thresholds.
+    """
 
     net: str
+    """Net name this via carries."""
+
     layer_from: int
+    """One endpoint, as a Layer ``stack_order``."""
+
     layer_to: int
+    """Other endpoint, as a Layer ``stack_order``."""
+
     type: ViaType = "through"
+    """Manufacturing style. ``through`` spans the whole board, ``blind``
+    connects an outer layer to an inner, ``buried`` lives between two
+    inner layers and is invisible from outside."""
+
     diameter_mm: float = 0.6
+    """Outer pad diameter."""
+
     drill_mm: float = 0.3
+    """Drilled hole diameter (must be < ``diameter_mm``)."""
 
 
 @dataclass(frozen=True)
@@ -199,18 +220,47 @@ class HDIR:
     coverage_overall: CoverageLevel = "full"
 
     def net_by_name(self, name: str) -> Net | None:
+        """Return the Net whose ``name`` matches, or None if absent.
+
+        Linear scan — HDIR is a frozen value object, not an indexed
+        store. Analyzers that need repeated lookups should build their
+        own dict, but for typical HD.2 rule passes (a few dozen lookups
+        per analysis) the linear scan is cheaper than maintaining an
+        auxiliary index.
+        """
         for n in self.nets:
             if n.name == name:
                 return n
         return None
 
     def traces_for_net(self, net_name: str) -> tuple[Trace, ...]:
+        """Return every Trace segment belonging to ``net_name``.
+
+        Order matches insertion order in ``self.traces``; callers that
+        need geometric ordering (e.g. trace-chain reconstruction) must
+        sort themselves. Returns empty tuple if the net has no routed
+        traces — including for purely schematic nets.
+        """
         return tuple(t for t in self.traces if t.net == net_name)
 
     def total_length_mm_for_net(self, net_name: str) -> float:
+        """Sum the ``length_mm`` of every trace segment on ``net_name``.
+
+        Used by HD.2.2 differential-pair length matching. Excludes via
+        Z-axis contribution — vias are tracked separately on ``Trace``
+        as ``via_count`` and modelled by HD.2.5 stub analysis, not by
+        this helper.
+        """
         return sum(t.length_mm for t in self.traces if t.net == net_name)
 
     def planes_on_layer(self, layer: int) -> tuple[Plane, ...]:
+        """Return every Plane region whose ``layer`` stack_order matches.
+
+        Multiple planes per layer is legitimate — a mixed layer can
+        carry several power-rail islands plus a ground pour. HD.2.3
+        reference-plane integrity walks this tuple to decide whether
+        a signal layer has a usable return path on the adjacent layer.
+        """
         return tuple(p for p in self.planes if p.layer == layer)
 
     def diff_pair_partners(self) -> tuple[tuple[Net, Net], ...]:
