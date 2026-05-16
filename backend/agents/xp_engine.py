@@ -41,13 +41,24 @@ ClassXpTarget = Literal["primary", "secondary"]
 BASE_TASK_XP = 100
 MAX_LEVEL = 80
 LEVEL_CURVE_EXPONENT = 1.4
+# W4.3 (OP-134): Tier-L+ tasks earn a flat 2.0× XP bump on top of the
+# outcome multiplier per ADR-0008 §"Outcome multipliers" -- stacks
+# multiplicatively with success/partial/fail and with first-time-skill.
 TIER_L_PLUS_MULTIPLIER = 2.0
+# W4.3 (OP-134): The first task that exercises a new (agent, skill) pair
+# earns a 3.0× XP bump per ADR-0008 -- discovery reward, stacks with
+# outcome and Tier-L+ multipliers.
 FIRST_TIME_SKILL_MULTIPLIER = 3.0
 DUPLICATE_TASK_MULTIPLIER = 0.2
 SECONDARY_CLASS_FULL_XP_LEVEL = 30
 SECONDARY_CLASS_RAMP_MULTIPLIER = 0.5
 HYBRID_SYNERGY_PARTY_XP_MULTIPLIER = 1.15
 
+# W4.3 (OP-134): outcome → XP multiplier per ADR-0008 §"Outcome
+# multipliers". ``failed`` is an alias for ``fail`` (runner emits either
+# spelling); they MUST stay in lock-step. Tier-L+ and first-time-skill
+# bumps stack multiplicatively on top of this base multiplier inside
+# :func:`_outcome_multiplier`.
 OUTCOME_MULTIPLIERS: Mapping[str, float] = MappingProxyType(
     {
         "success": 1.0,
@@ -295,6 +306,15 @@ def _validate_outcome(outcome: TaskOutcome) -> None:
 
 
 def _outcome_multiplier(outcome: TaskOutcome) -> float:
+    """RPG.W4.3 (OP-134) -- compose the per-task XP multiplier.
+
+    Stacking order is multiplicative and stable: outcome → Tier-L+ →
+    first-time-skill → W15 buffs → W15 debuffs → W4.4 anti-grind →
+    W18.2 secondary-class ramp → W17 hybrid synergy. The W4.3 contract
+    only constrains the *first three* terms (success/partial/fail/
+    Tier-L+/first-time-skill); later terms are layered by W4.4 / W15 /
+    W17 / W18 and documented in their own waves.
+    """
     multiplier = OUTCOME_MULTIPLIERS[outcome.status]
     if outcome.tier_l_plus:
         multiplier *= TIER_L_PLUS_MULTIPLIER

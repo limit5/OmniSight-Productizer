@@ -246,17 +246,42 @@ the absolute cap together produce the operator-facing S-shape. The
 character-level field is monotonic by construction (it can rise but
 never drop -- see "Common XP-related questions" below).
 
-Outcome multipliers (stack with each other and with buff/debuff):
+### Outcome multipliers (W4.3 / OP-134)
 
-| Status                                  | ×                                        |
-| --------------------------------------- | ---------------------------------------- |
-| `success`                               | 1.0                                      |
-| `partial`                               | 0.4                                      |
-| `fail` / `failed`                       | 0.1                                      |
-| `tier_l_plus = True`                    | 2.0 (multiplicative on top of outcome)   |
-| `first_time_skill_use = True`           | 3.0                                      |
-| `duplicate_task_within_24h = True`      | 0.2 (anti-grinding clamp)                |
-| Secondary class below Lv 30             | 0.5 ramp until `SECONDARY_CLASS_FULL_XP_LEVEL` |
+Per ADR-0008 §"Outcome multipliers", the W4.3 contract defines three
+multiplier slots that stack multiplicatively in this fixed order:
+outcome status (`success` 1.0 / `partial` 0.4 / `fail` 0.1, mutually
+exclusive), Tier-L+ task (2.0×), and first-time skill use (3.0×).
+W4.4 / W15 / W17 / W18 layer additional multipliers on top -- those
+are listed in the wider table below for cross-reference but are not
+part of the W4.3 contract.
+
+Listed in code-application order (multiplication is commutative, so the
+order does not affect the result -- but reading the table top-down
+matches the sequence in `_outcome_multiplier`):
+
+| Status                                  | ×                                              | Wave   |
+| --------------------------------------- | ---------------------------------------------- | ------ |
+| `success`                               | 1.0                                            | W4.3   |
+| `partial`                               | 0.4                                            | W4.3   |
+| `fail` / `failed`                       | 0.1                                            | W4.3   |
+| `tier_l_plus = True`                    | 2.0 (multiplicative on top of outcome)         | W4.3   |
+| `first_time_skill_use = True`           | 3.0                                            | W4.3   |
+| Active buff IDs                         | per `buff_registry.xp_multiplier_for_buff_ids` | W15    |
+| Active debuff IDs                       | per `debuff_registry.xp_multiplier_for_debuff_ids` | W15 |
+| `duplicate_task_within_24h = True`      | 0.2 (anti-grinding clamp)                      | W4.4   |
+| Secondary class below Lv 30             | 0.5 ramp until `SECONDARY_CLASS_FULL_XP_LEVEL` | W18.2  |
+| Dual-class agent in party task          | 1.15 hybrid-synergy bump                       | W17    |
+
+Worked example: a Tier-L+ task that exercises a brand-new skill and
+completes with `partial` status earns `0.4 × 2.0 × 3.0 = 2.4×` of
+`BASE_TASK_XP` -- i.e. `floor(100 × 2.4) = 240` XP, before any W15
+buff/debuff or W4.4 anti-grind layering.
+
+The `fail` / `failed` duplication is intentional: the runner emits
+either spelling depending on which call site classifies the outcome,
+and `xp_engine` accepts both with the same 0.1× multiplier. Operators
+adding a new outcome value MUST update both keys in lock-step.
 
 Buff / debuff multipliers come from
 `buff_registry.xp_multiplier_for_buff_ids()` and
