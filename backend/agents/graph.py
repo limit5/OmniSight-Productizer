@@ -111,7 +111,11 @@ def _select_graph_for_state(state: GraphState):
     return _TOPOLOGY_GRAPHS[state.size]
 
 
-GRAPH_TIMEOUT = 300  # 5 minutes max per graph execution
+# Hard upper bound on a single graph execution, in seconds. Long enough
+# to cover legitimate multi-tool reasoning runs; short enough to free a
+# worker before queues back up under load. Expressed as ``5 * 60`` so the
+# 5-minute intent is evident from the literal, not just the comment.
+GRAPH_TIMEOUT = 5 * 60
 
 
 async def _enforce_user_facing_firewall(
