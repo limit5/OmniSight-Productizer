@@ -85,6 +85,35 @@ def test_classify_falls_back_to_other_for_unknown_traceback():
     assert classify_from_traceback("   \n  ") is FailureClass.OTHER
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        None,
+        [],
+        {},
+        42,
+        object(),
+        "x" * 1_000_000,
+    ],
+    ids=[
+        "none",
+        "empty-list",
+        "empty-dict",
+        "int",
+        "object",
+        "very-large-unmatched",
+    ],
+)
+def test_classify_input_validation_routes_malformed_values_to_other(raw):
+    assert classify_from_traceback(raw) is FailureClass.OTHER
+
+
+def test_classify_input_validation_handles_very_large_matching_traceback():
+    raw = ("noise " * 100_000) + " pytest backend/tests/test_foo.py FAILED"
+
+    assert classify_from_traceback(raw) is FailureClass.TEST_FAILURE
+
+
 def test_failure_class_enum_has_eleven_runner_members_plus_audit():
     """AC #1 — 10 + OTHER catch-all = 11 runner failure-class values."""
     # 10 specific members + OTHER == 11; MEMORY_RECALL_AUDIT is a C6
@@ -110,6 +139,29 @@ def test_coerce_unknown_string_routes_to_other():
     assert FailureClass.coerce("LINT_FAILURE") is FailureClass.LINT_FAILURE
     # idempotent: enum in → enum out
     assert FailureClass.coerce(FailureClass.TEST_FAILURE) is FailureClass.TEST_FAILURE
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "",
+        [],
+        {},
+        42,
+        object(),
+        "x" * 1_000_000,
+    ],
+    ids=[
+        "empty-string",
+        "empty-list",
+        "empty-dict",
+        "int",
+        "object",
+        "very-large-unregistered",
+    ],
+)
+def test_coerce_input_validation_routes_malformed_values_to_other(raw):
+    assert FailureClass.coerce(raw) is FailureClass.OTHER
 
 
 def test_strict_record_runner_incident_raises_for_unregistered():
