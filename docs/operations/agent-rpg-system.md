@@ -39,7 +39,8 @@ target ship).
 | W16.1  | `backend/agents/achievement_registry.py` + unlock daemon                 | **Live**                  |
 | W19.1  | `backend/agents/skill_fusion.py` — Lv5 fusion preview                    | **Live**                  |
 | W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title` |
-| W3.x   | Daily style fingerprint cron                                  | **Deferred** — fingerprint column exists; recompute job not scheduled |
+| W3.2   | `backend/agents/style_fingerprint.py` — pure SHA-256 generator over last-N `(commit_style / test_pattern / refactor_tendency)` | **Live** (OP-129) |
+| W3.3   | `backend/agents/style_fingerprint_cron.py` — daily recompute sweep + drift logging | **Live** (OP-130) — helper + drift threshold live; systemd timer wiring still owned by devops |
 | W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred** (W5.1 BP.M dim-memory scoping + W7.2 tier gate landed standalone — see "BP.M dim memory scoping (W5.1)" and "Tier gating (W7.2)" below) |
 | W5.1   | `backend/agents/skill_memory.py` — `(agent_id, skill_id)`-tagged BP.M dim memory adapter over pgvector | **Live** (OP-137) — `vectorize_distilled_skills` + `retrieve_distilled_skills` ship; W5.2 auto-distil hook + W5.3 latency tests follow |
 | W7.2   | `backend/agents/tier_gate.py` — Tier X requires Lv ≥ 50 + skill ≥ Lv 3 | **Live** (OP-147) — pure helper + async resolver; W7.1 wires the call site once `prefer_agent_id` lands |
@@ -458,6 +459,92 @@ The `campaign_progress.py` module computes per-campaign chapter state
 (open / in-progress / closed). There is no UI for campaign management
 today; create campaigns by setting `rpg_campaign_id` on the task row
 directly when dispatching.
+
+---
+
+## Style fingerprint daily recompute (W3.3 — live as of 2026-05-16 / OP-130)
+
+The per-instance Character Card carries a `style_fingerprint` —
+ADR-0008 §"Style fingerprint" describes it as a daily-recomputed
+SHA-256 over the last N tasks' `(commit_style / test_pattern /
+refactor_tendency)` tuple. The W3.2 generator
+(`backend/agents/style_fingerprint.py`) is the pure hash; the W3.3
+helper (`backend/agents/style_fingerprint_cron.py`) is the
+cron-side sweep that walks every card, recomputes the hash, logs
+per-agent drift, and writes the fresh value back when it changed.
+
+### Public helpers
+
+| Helper | Purpose |
+|---|---|
+| `style_drift_ratio(samples)` | Pure: fraction of canonical tuples in a window that differ from the dominant tuple. Range `[0.0, 1.0)`; `0.0` = uniform style, approaches `1.0` as the window splits across many distinct styles. |
+| `await recompute_style_fingerprints(card_store, task_history_provider, *, drift_threshold=0.5, last_n=20)` | The sweep itself. Walks every Character Card, recomputes via W3.2, persists when changed, emits one log line per card, returns a tuple of `StyleDriftReport` for caller-side audit. |
+| `summarize_drift(reports)` | Aggregate counters (`visited / unchanged / drifted / above_threshold`) for operator dashboards. |
+
+### Drift threshold semantics
+
+The hash is binary — it either matches or doesn't — so the
+threshold sits on top of an axis-level metric, **not** on the hash
+itself. `style_drift_ratio` counts how many of the N tasks in the
+window carry a canonical tuple that differs from the window's
+*dominant* canonical tuple, divided by the window size. A fresh
+fingerprint that has zero canonical-tuple variance (e.g. the
+rolling window slid by one task but every sample shares the same
+style) is still a real fingerprint change — but it logs at `INFO`
+because the agent's style isn't actually drifting; only its
+position in history is.
+
+| Outcome | Log level | Log message |
+|---|---|---|
+| Hash matched the card | `INFO` | `style_fingerprint_unchanged` |
+| Hash changed, drift ratio `< drift_threshold` | `INFO` | `style_fingerprint_drift` |
+| Hash changed, drift ratio `>= drift_threshold` | `WARNING` | `style_fingerprint_drift_above_threshold` |
+
+The default `drift_threshold = 0.5` means: at least half the
+last-N window has to disagree with the dominant style before the
+sweep escalates. Operators tuning the noise can pass a different
+threshold without touching W3.2 — the hash contract is unchanged.
+
+### Wiring
+
+The module is intentionally IO-free. The runner-side glue:
+
+1. Build an asyncpg-backed `CharacterCardStore` against
+   `agent_character_card` (same store W1 uses).
+2. Implement a `task_history_provider: agent_id -> Sequence[TaskStyleSignals]`
+   that pulls the last 20 completed tasks' commit / test / refactor
+   signals from the runner's task ledger.
+3. `await recompute_style_fingerprints(store, provider)` once a
+   day from a cron entrypoint (devops-owned `.timer` unit — not
+   shipped in this ticket; until that lands, operators can invoke
+   the sweep ad-hoc from a Python shell against the prod DB pool).
+
+The sweep is idempotent: re-running back-to-back is a no-op on the
+second pass because all fingerprints already match. There is no
+"force" mode — to recompute against a different `last_n` window,
+pass `last_n=...` explicitly.
+
+### Edge cases the sweep handles by design
+
+- **Card with empty `style_fingerprint`** → first run populates
+  it; the per-card log line is `style_fingerprint_drift` (not
+  `_above_threshold`) when the new window is internally uniform.
+- **Agent with zero task history** → `compute_style_fingerprint`
+  returns `""`; if the stored fingerprint is also `""` the sweep
+  no-ops with `drift_ratio=0.0`. Once the agent's first task
+  lands, the next sweep populates the field.
+- **Last-N exceeding history length** → the window is silently
+  clamped to whatever the provider returns; `samples_considered`
+  on the report tells operators how many tasks actually
+  contributed.
+
+### Recovery
+
+The fingerprint is fully derivable from task history; corruption
+recovers on the next sweep. There is no persisted drift log
+beyond the structlog stream — operator dashboards consuming the
+JSON log (`style_fingerprint_drift_above_threshold` events) are
+the durable surface.
 
 ---
 
@@ -980,6 +1067,8 @@ constants in `tier_gate.py` and the ADR-0008 line in the same change
 | Tool proficiency missing                           | W13 live as of 2026-05-11 — check alembic 0227 applied + `config/tool_proficiency_gates.yaml` parses | Re-run `scripts/rpg_rebuild_tool_proficiency.py` if rows are missing |
 | Talent feature missing                             | W14 live as of 2026-05-11 — check alembic 0228/0229 applied; `config/talent_tree.yaml` present | Verify `GET /agents/{id}/talents` returns the milestone array |
 | Party feature missing                              | W17 live as of 2026-05-11 — check alembic 0230 applied + `config/synergy_matrix.yaml` parses | Verify `GET /agents/parties` returns the active-party list; re-form a party via `POST /agents/parties` if rows are missing |
+| Style fingerprint never refreshes                  | W3.3 live as of 2026-05-16 — check the daily cron wrapper is invoking `recompute_style_fingerprints`; inspect the structlog stream for `style_fingerprint_unchanged` / `_drift` events | Run the sweep ad-hoc from a Python shell against the prod DB pool; persistent absence of log lines means the cron isn't wired |
+| `style_fingerprint_drift_above_threshold` spikes   | Cross-reference the agent_id with recent task history — half the window disagreeing with the dominant style is the threshold | Lower `drift_threshold` only if the agent legitimately mixes styles; otherwise treat as a routing-quality signal and open a ticket |
 
 ---
 
