@@ -19,6 +19,8 @@ import logging
 from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from backend.agents.skills_loader import (
     SKILLS_LOADER_ENABLED_ENV,
@@ -29,6 +31,23 @@ from backend.agents.skills_loader import (
     parse_skill_file,
     render_catalog_for_prompt,
     watch_project_scopes,
+)
+
+
+SAFE_SKILL_NAME = st.from_regex(
+    r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,40}",
+    fullmatch=True,
+)
+SAFE_DESCRIPTION = st.from_regex(
+    r"[A-Za-z0-9][A-Za-z0-9 _./:-]{0,120}",
+    fullmatch=True,
+)
+SAFE_BODY = st.text(
+    alphabet=st.characters(
+        blacklist_categories=("Cs",),
+        blacklist_characters="\x00\r",
+    ),
+    max_size=4096,
 )
 
 
@@ -116,6 +135,69 @@ def test_parse_keywords_csv_string(tmp_path: Path) -> None:
     assert sk.keywords == ("a", "b", "c")
 
 
+@settings(
+    max_examples=75,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    name=SAFE_SKILL_NAME,
+    description=SAFE_DESCRIPTION,
+    keywords=st.lists(SAFE_SKILL_NAME, max_size=8),
+    body=SAFE_BODY,
+)
+def test_parse_frontmatter_property_preserves_metadata_and_is_idempotent(
+    tmp_path: Path,
+    name: str,
+    description: str,
+    keywords: list[str],
+    body: str,
+) -> None:
+    f = tmp_path / "SKILL.md"
+    f.write_text(
+        "---\n"
+        f"name: {name}\n"
+        f"description: {description}\n"
+        f"keywords: [{', '.join(keywords)}]\n"
+        "---\n"
+        f"{body}",
+        encoding="utf-8",
+    )
+
+    first = parse_skill_file(f, "project")
+    second = parse_skill_file(f, "project")
+
+    assert first == second
+    assert isinstance(first, Skill)
+    assert first.name == name
+    assert first.description == description.strip()
+    assert first.keywords == tuple(keywords)
+    assert first.body == body.lstrip("\n")
+    assert first.source_path == f
+    assert first.scope == "project"
+
+
+@settings(
+    max_examples=75,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(
+    whitespace=st.text(
+        alphabet=st.sampled_from([" ", "\t", "\n", "\r"]),
+        max_size=4096,
+    )
+)
+def test_parse_empty_or_whitespace_property_returns_none(
+    tmp_path: Path,
+    whitespace: str,
+) -> None:
+    f = tmp_path / "SKILL.md"
+    f.write_text(whitespace, encoding="utf-8")
+
+    assert parse_skill_file(f, "project") is None
+
+
 # ─── Registry shadowing ─────────────────────────────────────────
 
 
@@ -174,6 +256,49 @@ def test_registry_basic_ops() -> None:
     assert len(reg) == 3
     listed = reg.list_all()
     assert [s.name for s in listed] == ["a", "m", "z"]
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    entries=st.lists(
+        st.tuples(SAFE_SKILL_NAME, st.integers(min_value=0, max_value=500), SAFE_BODY),
+        min_size=1,
+        max_size=30,
+    )
+)
+def test_registry_property_highest_rank_wins_and_reads_are_idempotent(
+    entries: list[tuple[str, int, str]],
+) -> None:
+    reg = SkillRegistry()
+    winners: dict[str, tuple[int, str]] = {}
+
+    for name, provider_rank, body in entries:
+        accepted = reg.add(
+            Skill(
+                name=name,
+                description=f"{name} desc",
+                body=body,
+                scope="project",
+            ),
+            provider_rank=provider_rank,
+        )
+        previous = winners.get(name)
+        should_accept = previous is None or provider_rank > previous[0]
+        assert accepted is should_accept
+        if should_accept:
+            winners[name] = (provider_rank, body)
+
+    assert reg.names() == sorted(winners)
+    assert [skill.name for skill in reg.list_all()] == reg.names()
+    assert len(reg) == len(winners)
+
+    for name, (provider_rank, body) in winners.items():
+        assert reg.has(name)
+        assert reg.provider_rank(name) == provider_rank
+        skill = reg.get(name)
+        assert skill is not None
+        assert reg.get(name) == skill
+        assert skill.body == body
 
 
 # ─── Scope walking ──────────────────────────────────────────────
@@ -676,6 +801,49 @@ def test_skill_handler_empty_name_raises_valueerror() -> None:
         h({"skill": ""})
 
 
+@settings(max_examples=75, deadline=None)
+@given(name=SAFE_SKILL_NAME, body=SAFE_BODY, args=st.one_of(st.none(), SAFE_BODY))
+def test_skill_handler_property_returns_body_and_preserves_args_contract(
+    name: str,
+    body: str,
+    args: str | None,
+) -> None:
+    reg = SkillRegistry()
+    reg.add(Skill(name=name, description="d", body=body, scope="bundled"))
+    handler = make_skill_handler(reg)
+    payload: dict[str, object] = {"skill": f"  {name}  "}
+    if args is not None:
+        payload["args"] = args
+
+    out = handler(payload)
+
+    assert isinstance(out, str)
+    if args is not None and args.strip():
+        assert out.startswith(f"_(invoked with args: {args.strip()})_")
+        assert out.endswith(body)
+    else:
+        assert out == body
+
+
+@pytest.mark.parametrize(
+    ("payload", "exc_type", "match"),
+    [
+        ({}, ValueError, "non-empty"),
+        ({"skill": ""}, ValueError, "non-empty"),
+        ({"skill": None}, KeyError, "Unknown skill"),
+    ],
+)
+def test_skill_handler_edge_payloads_raise_contract_errors(
+    payload: dict[str, object],
+    exc_type: type[Exception],
+    match: str,
+) -> None:
+    handler = make_skill_handler(SkillRegistry())
+
+    with pytest.raises(exc_type, match=match):
+        handler(payload)
+
+
 # ─── Catalog rendering ─────────────────────────────────────────
 
 
@@ -705,6 +873,33 @@ def test_render_catalog_truncates_over_max() -> None:
     assert "**s02**" in out
     assert "**s09**" not in out
     assert "還有 7 個未列出" in out
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    names=st.lists(SAFE_SKILL_NAME, unique=True, max_size=100),
+    max_entries=st.integers(min_value=0, max_value=120),
+)
+def test_render_catalog_property_is_deterministic_and_respects_max_entries(
+    names: list[str],
+    max_entries: int,
+) -> None:
+    reg = SkillRegistry()
+    for name in names:
+        reg.add(Skill(name=name, description=f"{name} desc", body="b"))
+
+    out = render_catalog_for_prompt(reg, max_entries=max_entries)
+
+    assert out == render_catalog_for_prompt(reg, max_entries=max_entries)
+    if not names:
+        assert out == ""
+        return
+    assert f"共 {len(names)} 個 skill" in out
+    assert out.count("- **") == min(len(names), max_entries)
+    if len(names) > max_entries:
+        assert f"還有 {len(names) - max_entries} 個未列出" in out
+    else:
+        assert "個未列出" not in out
 
 
 # ─── Real-world smoke against this repo ────────────────────────
