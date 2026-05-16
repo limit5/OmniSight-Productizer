@@ -24,6 +24,30 @@ This module owns:
   :mod:`backend.agents.synergy_registry` because that's where it's
   raised — see AC #3.)
 
+W17 sub-wave coverage
+---------------------
+The W17 ship is split across TODO.md sub-waves; the rows live in
+this module:
+
+* **W17.2 (OP-193) — Party formation rules**: the size bound (2-5
+  members), the per-member Guild requirement, and the cross-Guild
+  synergy lookup that gates the "synergy bonus" attached to the
+  party. The contract is pinned by :data:`MIN_PARTY_SIZE`,
+  :data:`MAX_PARTY_SIZE`, :class:`PartyFormationRules`,
+  :func:`party_formation_rules`, and the pure pre-flight
+  :func:`preview_party_formation` (mirrors OP-179's ``ToolLevelSpec``
+  / OP-180's ``build_feature_unlock_gate`` attribution pattern — no
+  new persistence, no new YAML; just exposes the existing
+  ``_validate_members`` / ``_validate_member_guilds`` /
+  ``_resolve_synergy`` contract as a structured, raising-free surface
+  for the W17.6 Party Builder UI). Tests live in
+  :mod:`backend.tests.test_party` (size happy + below/above bounds +
+  fullstack matrix lookup + uniform-Guild → no synergy + missing
+  YAML degrades).
+* W17.4 (per-task exclusivity) lives in :func:`assign_task`.
+* W17.5 (shared XP + personal accrual) lives in
+  :func:`compute_party_xp_distribution`.
+
 Module-global state audit (per project SOP)
 -------------------------------------------
 The module declares no module-level mutable state. Every store
@@ -58,6 +82,9 @@ ConnFactory = Callable[[], Any]
 
 # ── Constants from ADR-0008 §"Party / Synergy system (W17)" ────────
 
+# W17.2 (OP-193) party formation bounds. Mirrored by the
+# ``agent_party_state`` CHECK constraint in alembic 0230, so a manual
+# DB write also cannot violate the bound.
 MIN_PARTY_SIZE = 2
 MAX_PARTY_SIZE = 5
 
@@ -146,6 +173,46 @@ class PartyXpDistribution:
     synergy_label: str | None
     synergy_xp_bonus: float
     shares: tuple[MemberXpShare, ...]
+
+
+@dataclass(frozen=True)
+class PartyFormationRules:
+    """Pinned W17.2 (OP-193) formation contract.
+
+    Returned by :func:`party_formation_rules`. Mirrors the
+    ``ToolLevelSpec`` pattern from OP-179 — a frozen, read-only
+    catalog of the static contract so the Party Builder UI (W17.6)
+    and the API legend can render the bounds without hard-coding
+    them out of band.
+    """
+
+    min_size: int
+    max_size: int
+    synergy_matrix_path: Path
+
+
+@dataclass(frozen=True)
+class PartyFormationPreview:
+    """Pre-flight result of :func:`preview_party_formation`.
+
+    ``issues`` is a tuple of human-readable refusal strings — empty
+    iff the formation is acceptable to :func:`create_party` modulo
+    the runtime "is anyone already in an active party" check, which
+    only :func:`create_party` can perform because it needs the store
+    handle. ``synergy`` is the entry that *would* apply at the time
+    of preview; it is ``None`` for same-Guild parties, for parties
+    whose Guild list is not covered by any matrix entry, and when
+    the synergy YAML cannot be loaded (degraded per AC #3).
+    """
+
+    member_agent_ids: tuple[str, ...]
+    synergy: SynergyEntry | None
+    issues: tuple[str, ...]
+
+    @property
+    def is_valid(self) -> bool:
+        """True iff no formation rule is violated."""
+        return not self.issues
 
 
 # ── Store Protocols ────────────────────────────────────────────────
@@ -339,6 +406,74 @@ class PostgresPartyStore:
 # ── Public helpers ─────────────────────────────────────────────────
 
 
+def party_formation_rules(
+    *,
+    synergy_path: Path | str = SYNERGY_MATRIX_PATH,
+) -> PartyFormationRules:
+    """Return the pinned W17.2 (OP-193) formation contract.
+
+    Pure accessor — no I/O, no synergy YAML read. Consumers (the
+    Party Builder UI legend, the ``/agents/parties/formation-rules``
+    legend, pre-flight admission gates) use this to surface the
+    contract bounds without hard-coding the integers out of band.
+    """
+    return PartyFormationRules(
+        min_size=MIN_PARTY_SIZE,
+        max_size=MAX_PARTY_SIZE,
+        synergy_matrix_path=Path(synergy_path),
+    )
+
+
+def preview_party_formation(
+    member_agent_ids: Sequence[str],
+    member_guilds: Mapping[str, str],
+    *,
+    synergy_path: Path | str = SYNERGY_MATRIX_PATH,
+) -> PartyFormationPreview:
+    """Pre-flight check for the W17.2 (OP-193) formation contract.
+
+    Runs the size + per-member Guild + cross-Guild synergy lookup
+    that :func:`create_party` performs, *without* touching a store or
+    raising — every refusal is reported through
+    :attr:`PartyFormationPreview.issues` instead. The W17.6 Party
+    Builder UI calls this on each form keystroke to render live
+    validation; the authoritative refusal still happens server-side
+    in :func:`create_party`, because only that path can probe the
+    store for "is this member already in an active party?".
+
+    Synergy lookup degrades to ``None`` if the YAML cannot be loaded,
+    matching the AC #3 degradation contract — a YAML edit accident
+    must not block formation previews.
+    """
+    members: tuple[str, ...]
+    issues: list[str] = []
+    try:
+        members = _validate_members(member_agent_ids)
+    except (PartySizeInvalid, MemberAlreadyInParty, ValueError, TypeError) as exc:
+        normalised = (
+            tuple(m for m in member_agent_ids if isinstance(m, str))
+            if isinstance(member_agent_ids, (list, tuple))
+            else ()
+        )
+        return PartyFormationPreview(
+            member_agent_ids=normalised,
+            synergy=None,
+            issues=(str(exc),),
+        )
+    try:
+        _validate_member_guilds(members, member_guilds)
+    except (PartyError, TypeError) as exc:
+        issues.append(str(exc))
+    synergy: SynergyEntry | None = None
+    if not issues:
+        synergy = _resolve_synergy(member_guilds.values(), path=synergy_path)
+    return PartyFormationPreview(
+        member_agent_ids=members,
+        synergy=synergy,
+        issues=tuple(issues),
+    )
+
+
 async def create_party(
     store: PartyStore,
     name: str,
@@ -351,10 +486,17 @@ async def create_party(
 ) -> Party:
     """Create a new party.
 
-    Validates size, refuses duplicate members or members already in
-    another active party, and computes the synergy bonus from
-    ``config/synergy_matrix.yaml`` via
-    :func:`backend.agents.synergy_registry.synergy_for_members`.
+    Orchestrates the W17.2 (OP-193) formation contract:
+
+    * :func:`_validate_members` enforces the 2-5 size bound and
+      refuses duplicates,
+    * :func:`_validate_member_guilds` requires a per-member Guild
+      slug,
+    * the store's ``active_party_for_member`` probe refuses members
+      already in another active party,
+    * :func:`_resolve_synergy` consults the cross-Guild matrix and
+      attaches the synergy bonus (or ``None`` for same-Guild parties
+      / parties not covered by any matrix entry).
 
     Per AC #3 ``SynergyComputeFailed`` from the registry is **caught
     here** and degraded to "no synergy + log warning"; the party is
@@ -364,7 +506,9 @@ async def create_party(
     ``member_guilds`` is a per-member Guild lookup keyed by
     ``member_agent_id`` — supplied by the caller so this helper stays
     storage-agnostic (the router resolves it from the agent's
-    character_card.guild before calling).
+    character_card.guild before calling). For client-side live
+    validation without a store round-trip, see
+    :func:`preview_party_formation` (W17.2 pre-flight helper).
     """
     clean_name = _required("name", name)
     members = _validate_members(member_agent_ids)
@@ -642,6 +786,12 @@ async def list_active_parties(store: PartyStore) -> tuple[Party, ...]:
 
 
 def _validate_members(member_agent_ids: Sequence[str]) -> tuple[str, ...]:
+    """Enforce the W17.2 (OP-193) size bound + duplicate-member check.
+
+    Raises :class:`PartySizeInvalid` outside ``[MIN_PARTY_SIZE,
+    MAX_PARTY_SIZE]`` and :class:`MemberAlreadyInParty` on duplicates
+    within the proposed list.
+    """
     if not isinstance(member_agent_ids, (list, tuple)):
         raise TypeError("member_agent_ids must be a sequence of strings")
     cleaned: list[str] = []
@@ -675,6 +825,13 @@ def _validate_member_guilds(
     members: tuple[str, ...],
     member_guilds: Mapping[str, str],
 ) -> None:
+    """Enforce the W17.2 (OP-193) per-member Guild requirement.
+
+    Every member must have a non-empty Guild slug in
+    ``member_guilds`` so the cross-Guild synergy lookup has a
+    well-defined Guild bag. The caller resolves slugs from the
+    member's ``character_card.guild`` before invoking.
+    """
     if not isinstance(member_guilds, Mapping):
         raise TypeError("member_guilds must be a mapping member_agent_id -> guild_slug")
     for member_id in members:
@@ -694,8 +851,12 @@ def _resolve_synergy(
     *,
     path: Path | str,
 ) -> SynergyEntry | None:
-    """Wrap :func:`synergy_for_members` so AC #3 ("degrade to no-bonus
-    base XP + log warning") fires uniformly across call sites."""
+    """W17.2 (OP-193) cross-Guild synergy lookup.
+
+    Wrap :func:`synergy_for_members` so AC #3 ("degrade to no-bonus
+    base XP + log warning") fires uniformly across call sites
+    (``create_party`` and :func:`preview_party_formation`).
+    """
     try:
         return synergy_for_members(guilds, path=path)
     except SynergyComputeFailed as exc:
@@ -762,6 +923,8 @@ __all__ = [
     "Party",
     "PartyActiveTaskExists",
     "PartyError",
+    "PartyFormationPreview",
+    "PartyFormationRules",
     "PartyMember",
     "PartySizeInvalid",
     "PartyState",
@@ -775,6 +938,8 @@ __all__ = [
     "get_party",
     "list_active_parties",
     "member_is_gated",
+    "party_formation_rules",
+    "preview_party_formation",
     "release_task",
     "task_complete",
 ]
