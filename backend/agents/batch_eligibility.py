@@ -42,6 +42,31 @@ from backend.agents.batch_dispatcher import BatchableTask, LaneType, PriorityLev
 logger = logging.getLogger(__name__)
 
 
+# ─── Tunable constants ───────────────────────────────────────────
+# Auto-batch flush thresholds applied to ``DEFAULT_ROUTING`` entries.
+# Sized to balance the Anthropic 50%-discount sweet spot against AB.4
+# dispatcher pressure: small waves for low-volume multi-component work,
+# larger waves for nightly CI sweeps that produce thousands of tasks.
+
+# Multi-component diff / AVL substitution — moderately bulky.
+AUTO_BATCH_THRESHOLD_SMALL_WAVE = 5
+# HD parsers (KiCad, Altium, ODB, Eagle), firmware DTS / linker parse,
+# bulk TODO routine processing — the standard bulk-friendly wave size.
+AUTO_BATCH_THRESHOLD_STANDARD = 10
+# Datasheet KB extraction / CVE impact backfill — non-urgent backlog
+# work where we wait for a deeper wave before paying the API call.
+AUTO_BATCH_THRESHOLD_BACKLOG = 20
+# Per-PR adversarial robustness CI — high volume from a single trigger.
+AUTO_BATCH_THRESHOLD_PR_CI = 30
+# Nightly determinism regression — highest volume, lowest urgency.
+AUTO_BATCH_THRESHOLD_NIGHTLY_CI = 50
+
+# Default age-based flush trigger for ``AutoBatchAccumulator``. Prevents
+# low-volume buckets from stalling forever waiting for the count
+# threshold that never arrives. Caller can override per-instance.
+DEFAULT_AUTO_BATCH_MAX_AGE_SECONDS = 60.0
+
+
 @dataclass(frozen=True)
 class EligibilityRule:
     """Static routing metadata for one ``task_kind``.
@@ -82,70 +107,70 @@ DEFAULT_ROUTING: dict[str, EligibilityRule] = {
         batch_eligible=True,
         batch_priority="P2",
         reason="EDA parsing — long-running, no UI dependency",
-        auto_batch_threshold=10,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_STANDARD,
     ),
     "hd_parse_altium": EligibilityRule(
         task_kind="hd_parse_altium",
         batch_eligible=True,
         batch_priority="P2",
         reason="Altium binary parse via subprocess — bulk-friendly",
-        auto_batch_threshold=10,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_STANDARD,
     ),
     "hd_parse_odb": EligibilityRule(
         task_kind="hd_parse_odb",
         batch_eligible=True,
         batch_priority="P2",
         reason="ODB++ parse via Docker sidecar — bulk-friendly",
-        auto_batch_threshold=10,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_STANDARD,
     ),
     "hd_parse_eagle": EligibilityRule(
         task_kind="hd_parse_eagle",
         batch_eligible=True,
         batch_priority="P2",
         reason="Eagle XML via KiCad importer — bulk-friendly",
-        auto_batch_threshold=10,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_STANDARD,
     ),
     "hd_diff_reference": EligibilityRule(
         task_kind="hd_diff_reference",
         batch_eligible=True,
         batch_priority="P2",
         reason="Multi-component diff — long, no UI",
-        auto_batch_threshold=5,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_SMALL_WAVE,
     ),
     "hd_sensor_kb_extract": EligibilityRule(
         task_kind="hd_sensor_kb_extract",
         batch_eligible=True,
         batch_priority="P3",
         reason="Datasheet vision LLM extraction — backlog priority",
-        auto_batch_threshold=20,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_BACKLOG,
     ),
     "hd_avl_substitution": EligibilityRule(
         task_kind="hd_avl_substitution",
         batch_eligible=True,
         batch_priority="P2",
         reason="AVL workflow — moderately bulky",
-        auto_batch_threshold=5,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_SMALL_WAVE,
     ),
     "hd_fw_dts_parse": EligibilityRule(
         task_kind="hd_fw_dts_parse",
         batch_eligible=True,
         batch_priority="P2",
         reason="DTS parsing — bulk-friendly",
-        auto_batch_threshold=10,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_STANDARD,
     ),
     "hd_fw_linker_parse": EligibilityRule(
         task_kind="hd_fw_linker_parse",
         batch_eligible=True,
         batch_priority="P2",
         reason="Linker script parse — bulk-friendly",
-        auto_batch_threshold=10,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_STANDARD,
     ),
     "hd_cve_impact": EligibilityRule(
         task_kind="hd_cve_impact",
         batch_eligible=True,
         batch_priority="P3",
         reason="CVE impact backfill — non-urgent",
-        auto_batch_threshold=20,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_BACKLOG,
     ),
 
     # ── L4 cross-cutting CI batches ──
@@ -154,14 +179,14 @@ DEFAULT_ROUTING: dict[str, EligibilityRule] = {
         batch_eligible=True,
         batch_priority="P3",
         reason="Nightly determinism regression — high-volume, low-urgency",
-        auto_batch_threshold=50,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_NIGHTLY_CI,
     ),
     "l4_adversarial_ci": EligibilityRule(
         task_kind="l4_adversarial_ci",
         batch_eligible=True,
         batch_priority="P3",
         reason="PR-time adversarial robustness CI — high volume",
-        auto_batch_threshold=30,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_PR_CI,
     ),
 
     # ── TODO routine bulk tasks ──
@@ -170,7 +195,7 @@ DEFAULT_ROUTING: dict[str, EligibilityRule] = {
         batch_eligible=True,
         batch_priority="P3",
         reason="Bulk routine processing of TODO checkboxes",
-        auto_batch_threshold=10,
+        auto_batch_threshold=AUTO_BATCH_THRESHOLD_STANDARD,
     ),
 
     # ── Real-time required (cannot batch — would be 24h late) ──
@@ -373,7 +398,7 @@ class AutoBatchAccumulator:
         registry: EligibilityRegistry,
         *,
         dispatcher_enqueue: DispatcherEnqueue,
-        max_age_seconds: float = 60.0,
+        max_age_seconds: float = DEFAULT_AUTO_BATCH_MAX_AGE_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.registry = registry
