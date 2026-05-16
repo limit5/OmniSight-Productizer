@@ -76,13 +76,27 @@ AUTH_BASELINE_ALLOWLIST: Final[tuple[str, ...]] = (
     # Called by docker healthcheck + Caddy + /metrics/healthz
     # dashboards. Leaking "backend is up" is not a secret worth
     # gating.
+    #
+    # Probe policy (OP-1131, 2026-05-16):
+    #   /health         — bare alias for /livez (cheap process
+    #                     pulse). Convention used by Caddy and
+    #                     several legacy external monitors that
+    #                     probe /health by default. Same shallow
+    #                     semantics as /livez — does NOT touch
+    #                     DB / queues.
+    #   /livez          — canonical cheap process pulse.
+    #   /readyz         — DEEP readiness (DB + queues + deps).
+    #                     Slower; reserved for orchestrator gates.
+    #   /api/v1/health  — legacy alias for /livez (kept for
+    #                     pre-/v1 dashboards still in the wild).
+    "/health",
     "/livez",
     "/readyz",
     "/healthz",
     "/api/v1/livez",
     "/api/v1/readyz",
     "/api/v1/healthz",
-    "/api/v1/health",           # legacy alias
+    "/api/v1/health",           # legacy alias for /livez
 
     # ─── Prometheus exposition ────────────────────────────────
     # Secondary gate exists: M7 bearer-token check fires if
