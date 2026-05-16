@@ -2567,12 +2567,35 @@ def main() -> int:
             _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except Exception as e:
+            # Empty-tree / rebase --keep-empty failure path: the most common
+            # trigger is the CLI abstaining ("implementation already exists,
+            # nothing to push"), which leaves zero diff; ensure_change_ids
+            # then trips `git rebase --keep-empty --exec` with a non-zero
+            # exit status (not NoCommitsOnBranchError because the branch
+            # itself has commits — just no NEW commits vs base).
+            #
+            # The pre-ephemeral version of this comment told operators to
+            # "review changes in `{worktree_path}`, push manually" — that
+            # advice is dead under OP-1136/OP-1137 ephemeral workspaces
+            # (the worktree is reaped at next cycle), so without a revert
+            # the ticket is silently stuck In Progress with no claim label
+            # and no Gerrit Change (the zombie pattern documented in the
+            # 2026-05-17 health audit). Mirror the OP-827
+            # NoCommitsOnBranchError / WorktreeDirtyError recovery: comment
+            # + revert + release claim.
             print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
             jira_dispatch.add_comment(
                 client, snapshot.key,
                 f"[runner-gerrit-setup-fail] Could not prepare Gerrit push:\n{type(e).__name__}: {e}\n\n"
-                f"Operator: review changes in `{worktree_path}`, push manually, then transition Under Review.",
+                f"Ephemeral worktree will be reaped at next cycle; reverting to To Do for re-pickup.",
             )
+            try:
+                jira_dispatch.transition_back_to_todo(
+                    client, snapshot.key,
+                    f"[runner-gerrit-setup-fail] Push setup failure: {type(e).__name__}.",
+                )
+            except Exception as revert_err:
+                print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
             _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
 
