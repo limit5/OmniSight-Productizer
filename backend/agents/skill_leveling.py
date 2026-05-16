@@ -118,16 +118,17 @@ FIRST_TIME_SKILL_MULTIPLIER = 3.0
 ANTI_GRIND_MULTIPLIER = 0.2
 
 
-# ── Per-level unlock catalog (Lv 2-5) ──────────────────────────────
+# ── Per-level mastery-effect catalog (Lv 2-5) ──────────────────────
 
-LEVEL_UNLOCKS: Mapping[int, tuple[str, ...]] = MappingProxyType(
+MASTERY_EFFECTS_BY_LEVEL: Mapping[int, tuple[str, ...]] = MappingProxyType(
     {
-        2: ("extended_thinking_enabled",),
-        3: ("parallel_subtask_enabled",),
-        4: ("prompt_overhead_reduced",),
+        2: ("extended_thinking",),
+        3: ("parallel_subtask",),
+        4: ("prompt_overhead",),
         5: ("teach_other_agent",),
     }
 )
+LEVEL_UNLOCKS = MASTERY_EFFECTS_BY_LEVEL
 
 
 # ── Errors ──────────────────────────────────────────────────────────
@@ -263,7 +264,23 @@ def unlocks_for_level(level: int) -> tuple[str, ...]:
     """Return the unlock flags that fire on reaching ``level``."""
     if level < 1 or level > MAX_SKILL_LEVEL:
         raise ValueError(f"level must be 1..{MAX_SKILL_LEVEL}")
-    return LEVEL_UNLOCKS.get(level, ())
+    return MASTERY_EFFECTS_BY_LEVEL.get(level, ())
+
+
+def mastery_effects_for_skill(skill_id: str) -> Mapping[int, tuple[str, ...]]:
+    """Return the Lv 2-5 mastery-effect table for one canonical skill."""
+    _assert_skill_id_in_matrix(skill_id)
+    return MASTERY_EFFECTS_BY_LEVEL
+
+
+def mastery_effects_table() -> Mapping[str, Mapping[int, tuple[str, ...]]]:
+    """Return the mastery-effect table for every canonical RPG skill."""
+    return MappingProxyType(
+        {
+            skill_id: MASTERY_EFFECTS_BY_LEVEL
+            for skill_id in sorted(canonical_skill_ids())
+        }
+    )
 
 
 def unlocks_crossed(previous_level: int, new_level: int) -> tuple[str, ...]:
@@ -768,6 +785,7 @@ __all__ = [
     "LEVEL_THRESHOLDS",
     "LEVEL_UNLOCKS",
     "LevelComputeOverflow",
+    "MASTERY_EFFECTS_BY_LEVEL",
     "MAX_SKILL_LEVEL",
     "OUTCOME_MULTIPLIERS",
     "PostgresSkillStateStore",
@@ -790,6 +808,8 @@ __all__ = [
     "compute_xp_delta",
     "decay_idle_skills",
     "lock_branch_choice",
+    "mastery_effects_for_skill",
+    "mastery_effects_table",
     "next_level_threshold",
     "teach_other_agent",
     "unlocks_crossed",
