@@ -13,7 +13,10 @@ from __future__ import annotations
 from email.message import EmailMessage
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
+from backend.agents import operator_notifier as opn
 from backend.agents.operator_notifier import (
     EmailChannel,
     JiraChannel,
@@ -34,6 +37,25 @@ from backend.agents.operator_notifier import (
     format_text,
     is_high_severity,
     severity_tier,
+)
+
+SAFE_LINE_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs", "Cc")),
+    max_size=512,
+)
+LARGE_LINE_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs", "Cc")),
+    max_size=4096,
+)
+CONTEXTS = st.dictionaries(
+    keys=SAFE_LINE_TEXT,
+    values=st.one_of(
+        st.none(),
+        st.booleans(),
+        st.integers(min_value=-1_000_000, max_value=1_000_000),
+        SAFE_LINE_TEXT,
+    ),
+    max_size=12,
 )
 
 
@@ -515,6 +537,176 @@ def test_build_channels_from_env_wires_email_with_host_port_form():
     assert email_chan.smtp.host == "smtp.example.com"
     assert email_chan.smtp.port == 2525
     assert email_chan.recipients == ["a@b.com", "c@d.com"]
+
+
+# ── OP-1297: property-based public API contracts ──────────────────
+
+
+@settings(max_examples=75, deadline=None)
+@given(severity=st.sampled_from(list(Severity)))
+def test_op1297_routing_helpers_property_are_stable(severity: Severity):
+    """Public routing helpers are pure and preserve the documented
+    severity → channel/tier contract for every Severity member."""
+    first_channels = channels_for(severity)
+    second_channels = channels_for(severity)
+
+    assert isinstance(first_channels, frozenset)
+    assert first_channels == second_channels
+    assert first_channels.issubset({"jira", "email", "slack", "line"})
+    assert first_channels
+    assert severity_tier(severity) in {"low", "medium", "high"}
+    assert is_high_severity(severity) is (severity in {Severity.CRITICAL, Severity.P0})
+    if severity == Severity.WARN:
+        assert first_channels == frozenset({"jira"})
+    elif severity == Severity.DEGRADED:
+        assert first_channels == frozenset({"jira", "email"})
+    else:
+        assert first_channels == frozenset({"jira", "email", "slack", "line"})
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    severity=st.sampled_from(list(Severity)),
+    code=SAFE_LINE_TEXT,
+    message=LARGE_LINE_TEXT,
+    context=CONTEXTS,
+    count=st.integers(min_value=1, max_value=500),
+    ack_url=st.one_of(st.none(), SAFE_LINE_TEXT),
+    scope=SAFE_LINE_TEXT,
+    window=st.floats(min_value=0.0, max_value=86_400.0, allow_nan=False, allow_infinity=False),
+)
+def test_op1297_format_text_property_preserves_return_contract(
+    severity: Severity,
+    code: str,
+    message: str,
+    context: dict[str, object],
+    count: int,
+    ack_url: str | None,
+    scope: str,
+    window: float,
+):
+    """format_text accepts empty/large public fields and returns a
+    deterministic plain-text body carrying the required identifiers."""
+    payload = Notification(
+        notification_id="nid",
+        severity=severity,
+        code=code,
+        message=message,
+        context=context,
+        count=count,
+        ack_url=ack_url,
+        scope=scope,
+        aggregation_window_seconds=window,
+    )
+
+    body = format_text(payload)
+
+    assert isinstance(body, str)
+    assert body == format_text(payload)
+    assert f"[{severity.value}] {code}: {message}" in body
+    assert "id=nid" in body
+    if count > 1:
+        assert body.splitlines()[0].startswith(f"[{count} events in ")
+        assert f"count={count}" in body
+    else:
+        assert "events in" not in body
+    if ack_url:
+        assert f"Ack: {ack_url}" in body
+    for key, value in context.items():
+        assert f"  {key}: {value}" in body
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    severity=st.sampled_from(list(Severity)),
+    code=SAFE_LINE_TEXT,
+    first_message=LARGE_LINE_TEXT,
+    second_message=LARGE_LINE_TEXT,
+    first_context=CONTEXTS,
+    second_context=CONTEXTS,
+    ticket=st.one_of(st.none(), SAFE_LINE_TEXT),
+    scope=SAFE_LINE_TEXT,
+    root_cause_key=st.one_of(st.none(), SAFE_LINE_TEXT),
+)
+def test_op1297_notify_property_coalesces_idempotent_burst_snapshot(
+    severity: Severity,
+    code: str,
+    first_message: str,
+    second_message: str,
+    first_context: dict[str, object],
+    second_context: dict[str, object],
+    ticket: str | None,
+    scope: str,
+    root_cause_key: str | None,
+):
+    """Notifier.notify is non-dispatching inside the window and returns
+    snapshots that preserve edge-case inputs without aliasing context."""
+    n, _, ch = _make_notifier(dedup=60.0)
+
+    first = n.notify(
+        severity,
+        code,
+        first_message,
+        context=first_context,
+        ticket=ticket,
+        scope=scope,
+        root_cause_key=root_cause_key,
+    )
+    second = n.notify(
+        severity.value,
+        code,
+        second_message,
+        context=second_context,
+        ticket=ticket,
+        scope=scope,
+        root_cause_key=root_cause_key,
+    )
+
+    assert first.count == 1
+    assert second.count == 2
+    assert second.severity == severity
+    assert second.code == code
+    assert second.message == second_message
+    assert second.context == second_context
+    assert second.context is not second_context
+    assert second.ticket == (ticket or n.config.default_ticket)
+    assert second.scope == scope
+    assert second.root_cause_key == (root_cause_key if root_cause_key is not None else code)
+    assert all(channel.calls == [] for channel in ch.values())
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    message_arg=st.one_of(st.none(), LARGE_LINE_TEXT),
+    context=CONTEXTS,
+    extra_value=SAFE_LINE_TEXT,
+)
+def test_op1297_module_notify_property_merges_structured_fields(
+    message_arg: str | None,
+    context: dict[str, object],
+    extra_value: str,
+):
+    """Module-level notify keeps the watchdog-style kwargs API stable:
+    message kwarg fills the message only when positional message is None,
+    and all remaining fields merge into context."""
+    n, _, _ = _make_notifier()
+    original_get_default = opn.get_default_notifier
+    opn.get_default_notifier = lambda: n
+    try:
+        snapshot = opn.notify(
+            Severity.WARN,
+            "module-api",
+            message_arg,
+            context=context,
+            detail=extra_value,
+        )
+    finally:
+        opn.get_default_notifier = original_get_default
+
+    assert snapshot.message == (message_arg or "")
+    assert snapshot.context["detail"] == extra_value
+    for key, value in context.items():
+        assert snapshot.context[key] == value
 
 
 def test_immediate_repeat_does_not_dispatch_until_window_expires():
