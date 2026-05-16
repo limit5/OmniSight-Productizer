@@ -15,7 +15,7 @@
  * the caller page.
  */
 
-import { ClipboardList, Sparkles, Users } from "lucide-react"
+import { ClipboardList, Sparkles, UserPlus, Users } from "lucide-react"
 import type { ReactElement } from "react"
 
 import { Badge } from "@/components/ui/badge"
@@ -44,6 +44,15 @@ export interface Party {
 
 export interface PartyHallProps {
   parties: Party[]
+  /**
+   * RPG.W17.6 — when provided, the Party Hall renders a "Form party"
+   * CTA that opens the operator's party builder modal (see
+   * `<PartyBuilderModal>`). The CTA is additive so callers that only
+   * want the read-only Party Hall can omit the prop.
+   */
+  onCreatePartyClick?: () => void
+  /** Label override for the create-party CTA (defaults to "Form party"). */
+  createPartyLabel?: string
   className?: string
 }
 
@@ -142,11 +151,37 @@ function PartyCard({ party }: { party: Party }): ReactElement {
   )
 }
 
-export function PartyHall({ parties, className }: PartyHallProps): ReactElement {
+function CreatePartyButton({
+  onClick,
+  label,
+}: {
+  onClick: () => void
+  label: string
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center justify-center gap-1 rounded border border-violet-500/55 bg-violet-500/10 px-3 py-1.5 font-mono text-xs text-violet-700 hover:bg-violet-500/20 dark:text-violet-300"
+      data-testid="party-hall-create-button"
+    >
+      <UserPlus className="size-3.5" aria-hidden="true" />
+      {label}
+    </button>
+  )
+}
+
+export function PartyHall({
+  parties,
+  onCreatePartyClick,
+  createPartyLabel,
+  className,
+}: PartyHallProps): ReactElement {
   const totalMembers = parties.reduce(
     (total, party) => total + party.members.length,
     0,
   )
+  const ctaLabel = createPartyLabel ?? "Form party"
 
   if (parties.length === 0) {
     return (
@@ -167,6 +202,14 @@ export function PartyHall({ parties, className }: PartyHallProps): ReactElement 
           <p className="mt-1 text-xs text-muted-foreground">
             Form a 2-5 member party to take on a Tier L+ task.
           </p>
+          {onCreatePartyClick ? (
+            <div className="mt-3 flex justify-center">
+              <CreatePartyButton
+                onClick={onCreatePartyClick}
+                label={ctaLabel}
+              />
+            </div>
+          ) : null}
         </div>
       </section>
     )
@@ -182,10 +225,18 @@ export function PartyHall({ parties, className }: PartyHallProps): ReactElement 
             {totalMembers} member{totalMembers === 1 ? "" : "s"}
           </p>
         </div>
-        <Badge variant="outline" className="h-7 gap-1.5 px-2 text-xs">
-          <Users className="size-3.5" aria-hidden="true" />
-          {formatMemberCount(totalMembers)} total
-        </Badge>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline" className="h-7 gap-1.5 px-2 text-xs">
+            <Users className="size-3.5" aria-hidden="true" />
+            {formatMemberCount(totalMembers)} total
+          </Badge>
+          {onCreatePartyClick ? (
+            <CreatePartyButton
+              onClick={onCreatePartyClick}
+              label={ctaLabel}
+            />
+          ) : null}
+        </div>
       </div>
 
       <div
