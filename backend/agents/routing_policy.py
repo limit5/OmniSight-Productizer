@@ -23,6 +23,7 @@ eligible for routing.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import time
@@ -67,6 +68,7 @@ _ADR_0007_PATH = (
     _PROJECT_ROOT / "docs" / "adr" / "ADR-0007-multi-provider-subscription-orchestrator.md"
 )
 _ADR_VENDOR_MATRIX_HEADING = "## Vendor capability matrix (for routing policy)"
+LOG = logging.getLogger(__name__)
 
 ROUTING_POLICY_PROVIDER_AGENT_CLASS_LABELS = {
     "anthropic": frozenset({"subscription-claude", "api-anthropic"}),
@@ -98,6 +100,7 @@ _RECENTLY_CAPPED_LOCK = RLock()
 _MODEL_ROUTING_CACHE: tuple[float | None, dict[str, str], set[str]] | None = None
 
 HumanAssignmentResolver = Callable[[TaskSpec], str | None]
+TierGateDecisionResolver = Callable[[TaskSpec, str], object | None]
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,7 @@ class RoutingPolicy:
         now: Callable[[], float] = time.monotonic,
         utcnow: Callable[[], datetime] | None = None,
         human_assignment_resolver: HumanAssignmentResolver | None = None,
+        tier_gate_decision_resolver: TierGateDecisionResolver | None = None,
     ) -> None:
         self._orchestrator = orchestrator
         self._now = now
@@ -127,6 +131,7 @@ class RoutingPolicy:
         self._human_assignment_resolver = (
             human_assignment_resolver or _default_human_assignment_resolver
         )
+        self._tier_gate_decision_resolver = tier_gate_decision_resolver
 
     def choose_provider(self, task: TaskSpec) -> list[ProviderAdapter]:
         """Return ranked acceptable providers for ``task``.
@@ -144,11 +149,36 @@ class RoutingPolicy:
 
         candidates = self._healthy_candidates(task)
         if assigned_provider_id is not None:
-            candidates = [
+            assigned_candidates = [
                 candidate
                 for candidate in candidates
                 if candidate.provider_id == assigned_provider_id
             ]
+            assigned_eligible = self._tier_gate_eligible_candidates(
+                task, assigned_candidates
+            )
+            if assigned_eligible:
+                candidates = assigned_eligible
+            elif assigned_candidates:
+                decision = self._tier_gate_decision(task, assigned_candidates[0])
+                LOG.warning(
+                    "routing preferred provider %s under-leveled; "
+                    "falling back to eligible candidates (reasons=%s)",
+                    assigned_provider_id,
+                    getattr(decision, "unmet_reasons", ()),
+                )
+                candidates = self._tier_gate_eligible_candidates(
+                    task,
+                    [
+                        candidate
+                        for candidate in candidates
+                        if candidate.provider_id != assigned_provider_id
+                    ],
+                )
+            else:
+                candidates = []
+        else:
+            candidates = self._tier_gate_eligible_candidates(task, candidates)
 
         if _normalise_tier(task.tier) == "L":
             high_quota = [
@@ -222,6 +252,28 @@ class RoutingPolicy:
                 )
             )
         return candidates
+
+    def _tier_gate_eligible_candidates(
+        self,
+        task: TaskSpec,
+        candidates: list[_Candidate],
+    ) -> list[_Candidate]:
+        return [
+            candidate
+            for candidate in candidates
+            if _tier_gate_decision_is_eligible(
+                self._tier_gate_decision(task, candidate)
+            )
+        ]
+
+    def _tier_gate_decision(
+        self,
+        task: TaskSpec,
+        candidate: _Candidate,
+    ) -> object | None:
+        if self._tier_gate_decision_resolver is None:
+            return None
+        return self._tier_gate_decision_resolver(task, candidate.provider_id)
 
     def _list_provider_ids(self) -> list[str]:
         return list(self._orchestrator.list_adapters())  # type: ignore[attr-defined]
@@ -354,6 +406,12 @@ def _difficulty_estimate_for_task(task: TaskSpec) -> TaskDifficultyEstimate | No
     if not difficulty_estimator.is_enabled():
         return None
     return difficulty_estimator.estimate_difficulty(task)
+
+
+def _tier_gate_decision_is_eligible(decision: object | None) -> bool:
+    if decision is None:
+        return True
+    return bool(getattr(decision, "eligible", True))
 
 
 def _predicted_cost_usd(task: TaskSpec, adapter: ProviderAdapter) -> float:
