@@ -85,6 +85,7 @@ class FailureClass(str, Enum):
     # operator dashboard joins them on ``ticket_key``. Kept here so the
     # enum drives a single CHECK constraint in Postgres.
     MEMORY_RECALL_AUDIT = "MEMORY_RECALL_AUDIT"
+    """C6 audit-trail slot — distinct from runner failures (see comment above)."""
 
     @classmethod
     def coerce(cls, raw: "str | FailureClass | None") -> "FailureClass":
@@ -95,7 +96,23 @@ class FailureClass(str, Enum):
         path is intentionally non-raising so a misspelled class name in
         the runner does not block the incident write — the row still
         lands with ``failure_class=OTHER`` and the operator can re-classify
-        from ``raw_traceback`` later.
+        from ``raw_traceback`` later. Strict callers that want a hard
+        failure should branch on :class:`FailureClassUnregistered` instead
+        of calling this method.
+
+        The match is case-insensitive on the upper-cased, whitespace-trimmed
+        token, so ``"lint_failure"``, ``" LINT_FAILURE "`` and
+        ``FailureClass.LINT_FAILURE`` all resolve identically.
+
+        Args:
+            raw: An enum instance (returned as-is), a string holding an
+                enum member name, or ``None``. Non-string scalars are
+                stringified before matching, which means types such as
+                ``int`` or arbitrary objects route to :attr:`OTHER`.
+
+        Returns:
+            The matching :class:`FailureClass` member, or :attr:`OTHER`
+            when the input is ``None``, blank, or unrecognised.
         """
         if isinstance(raw, cls):
             return raw
@@ -193,10 +210,26 @@ _CLASSIFY_PATTERNS: tuple[tuple[re.Pattern[str], FailureClass], ...] = (
 def classify_from_traceback(raw: str) -> FailureClass:
     """Best-effort regex classification of a raw traceback / stderr.
 
-    Returns the first match; falls back to :attr:`FailureClass.OTHER`
-    when no pattern fires. The classifier is intentionally simple — we
-    want operators to be able to predict the routing decision from the
+    Returns the first match against :data:`_CLASSIFY_PATTERNS` (ordered,
+    case-insensitive). Falls back to :attr:`FailureClass.OTHER` when no
+    pattern fires, when the input is falsy, or when stripping yields an
+    empty string. The classifier is intentionally simple — we want
+    operators to be able to predict the routing decision from the
     pattern table alone, without re-running the runner.
+
+    The function is total: any input is accepted (the parameter is
+    typed ``str`` for the common path but ``None``, integers, and
+    arbitrary objects are stringified defensively so a malformed
+    traceback never crashes the incident-record write path).
+
+    Args:
+        raw: The traceback or stderr blob to classify. Typically a
+            string; any non-string is coerced via :class:`str` and a
+            blank or ``None`` value short-circuits to :attr:`OTHER`.
+
+    Returns:
+        The first :class:`FailureClass` whose regex matches, or
+        :attr:`FailureClass.OTHER` if none do.
     """
     text = str(raw or "")
     if not text.strip():
