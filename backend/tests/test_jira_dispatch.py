@@ -10,11 +10,14 @@ JIRA credentials absent, so this suite runs offline cleanly.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from hypothesis import assume, given, settings
+from hypothesis import strategies as st
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
@@ -22,6 +25,39 @@ sys.path.insert(0, str(REPO_ROOT))
 from backend.agents import jira_dispatch as jd
 
 JIRA_CREDS_PRESENT = (Path("~/.config/omnisight/jira-claude-token").expanduser()).is_file()
+
+SAFE_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",)),
+    max_size=2048,
+)
+OP_KEYS = st.from_regex(r"OP-[1-9][0-9]{0,5}", fullmatch=True)
+LABELS = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",)),
+    min_size=0,
+    max_size=80,
+)
+
+
+def _property_issue(
+    *,
+    key: str,
+    labels: list[str],
+    fix_versions: list[str],
+    summary: str,
+    created: str,
+    components: list[str],
+) -> dict:
+    return {
+        "key": key,
+        "fields": {
+            "summary": summary,
+            "labels": labels,
+            "fixVersions": [{"name": v} for v in fix_versions],
+            "created": created,
+            "components": [{"name": c} for c in components],
+            "issuetype": {"name": "Story"},
+        },
+    }
 
 
 # ── to_snapshot ────────────────────────────────────────────────────
@@ -72,6 +108,54 @@ def test_to_snapshot_handles_no_fix_version() -> None:
     snap = jd.to_snapshot(_fake_issue(fix_versions=()))
     assert snap.fix_version is None
     assert snap.days_to_fix_version is None
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    key=OP_KEYS,
+    labels=st.lists(LABELS, max_size=40),
+    fix_versions=st.lists(SAFE_TEXT, max_size=5),
+    summary=SAFE_TEXT,
+    created=SAFE_TEXT,
+    components=st.lists(SAFE_TEXT, max_size=3),
+)
+def test_to_snapshot_property_preserves_public_contract(
+    key: str,
+    labels: list[str],
+    fix_versions: list[str],
+    summary: str,
+    created: str,
+    components: list[str],
+) -> None:
+    snap = jd.to_snapshot(
+        _property_issue(
+            key=key,
+            labels=labels,
+            fix_versions=fix_versions,
+            summary=summary,
+            created=created,
+            components=components,
+        )
+    )
+
+    assert snap.key == key
+    assert snap.labels == tuple(labels)
+    assert snap.mutex_labels == tuple(
+        label for label in labels if label.startswith("mutex:")
+    )
+    assert isinstance(snap.days_since_created, float)
+    assert snap.downstream_blocked_count == 0
+    assert snap.has_mutex_in_progress_sibling is False
+    assert snap.fix_version == (fix_versions[0] if fix_versions else None)
+    if components:
+        assert snap.component == components[0]
+    else:
+        priority = next(
+            (label for label in labels if label.startswith("priority:")), None,
+        )
+        assert snap.component == (
+            priority.split(":", 1)[1].upper() if priority else "default"
+        )
 
 
 # ── parse_prerequisites ────────────────────────────────────────────
@@ -143,6 +227,64 @@ blocks_on:
     assert out == {}
 
 
+@settings(max_examples=75, deadline=None)
+@given(description=SAFE_TEXT)
+def test_parse_prerequisites_property_missing_block_has_full_empty_schema(
+    description: str,
+) -> None:
+    assume(jd.PREREQS_RE.search(description) is None)
+
+    out = jd.parse_prerequisites(description)
+
+    assert set(out) == {
+        "blocks_on", "soft_prereqs", "mutex_with",
+        "schema_locks", "live_state_requires", "external_blockers",
+    }
+    assert all(value == [] for value in out.values())
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    blocks_on=st.lists(OP_KEYS, max_size=20),
+    mutex_with=st.lists(
+        st.from_regex(r"mutex:[A-Za-z0-9_./:-]{1,80}", fullmatch=True),
+        max_size=20,
+    ),
+)
+def test_parse_prerequisites_property_yaml_lists_are_stable(
+    blocks_on: list[str],
+    mutex_with: list[str],
+) -> None:
+    blocks_yaml = (
+        "blocks_on:\n"
+        + "\n".join(f"  - {json.dumps(key)}" for key in blocks_on)
+        if blocks_on else "blocks_on: []"
+    )
+    mutex_yaml = (
+        "mutex_with:\n"
+        + "\n".join(f"  - {json.dumps(label)}" for label in mutex_with)
+        if mutex_with else "mutex_with: []"
+    )
+    desc = (
+        "## Prerequisites\n\n"
+        "```yaml\n"
+        f"{blocks_yaml}\n"
+        f"{mutex_yaml}\n"
+        "```\n"
+    )
+
+    first = jd.parse_prerequisites(desc)
+    second = jd.parse_prerequisites(desc)
+
+    assert first == second
+    assert first["blocks_on"] == blocks_on
+    assert first["mutex_with"] == mutex_with
+    assert first["soft_prereqs"] == []
+    assert first["schema_locks"] == []
+    assert first["live_state_requires"] == []
+    assert first["external_blockers"] == []
+
+
 # ── ADF helper ─────────────────────────────────────────────────────
 
 
@@ -152,6 +294,43 @@ def test_adf_paragraph_shape() -> None:
     assert adf["version"] == 1
     assert adf["content"][0]["type"] == "paragraph"
     assert adf["content"][0]["content"][0]["text"] == "hello"
+
+
+@settings(max_examples=75, deadline=None)
+@given(text=SAFE_TEXT)
+def test_adf_paragraph_property_preserves_text_and_shape(text: str) -> None:
+    adf = jd._adf_paragraph(text)
+
+    assert adf == jd._adf_paragraph(text)
+    assert adf["type"] == "doc"
+    assert adf["version"] == 1
+    assert adf["content"] == [
+        {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+    ]
+
+
+# ── Dependency waiting labels ─────────────────────────────────────
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    blockers=st.lists(OP_KEYS, max_size=30),
+    other_labels=st.lists(LABELS, max_size=30),
+)
+def test_dependency_waiting_labels_property_filters_sorted_and_idempotent(
+    blockers: list[str],
+    other_labels: list[str],
+) -> None:
+    waiting = [jd.dependency_waiting_label(key) for key in blockers]
+    labels = other_labels + waiting
+
+    out = jd.dependency_waiting_labels(labels)
+
+    assert out == jd.dependency_waiting_labels(tuple(labels))
+    assert out == sorted(
+        label for label in labels if label.startswith("runner-blocked:waiting-")
+    )
+    assert set(waiting).issubset(set(out))
 
 
 # ── Network-dependent tests ────────────────────────────────────────
