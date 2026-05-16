@@ -441,16 +441,19 @@ def party_total_xp_pool(
     *,
     synergy_xp_bonus: float = 0.0,
 ) -> int:
-    """RPG.W17 -- compute the total XP pool that the party's task completion
-    distributes across members.
+    """RPG.W17.5 (OP-196) -- compute the total XP pool that the party's
+    task completion distributes across members.
 
     Mirrors the ADR-0008 §"Party / Synergy system (W17)" rule: each
     member contributes their own base XP to the pool, and the entire
     pool is multiplied by ``(1 + synergy_xp_bonus)`` before being
-    split. The pool is what
-    :func:`backend.agents.party.compute_party_xp_distribution`
-    distributes; this helper lives in ``xp_engine`` so the W4.1 curve
-    constants stay co-located with their callers.
+    split. The pool is the *party-side* half of the W17.5 payout
+    contract — the per-member ``personal_xp`` half is accrued
+    separately and is **not** folded into this number. The pool
+    flows into :func:`backend.agents.party.compute_party_xp_distribution`,
+    which performs the even-split and adds the personal-XP additive
+    on top per W17.5. This helper lives in ``xp_engine`` so the W4.1
+    curve constants stay co-located with their callers.
 
     Returns 0 for ``party_size <= 0`` or non-positive ``base_xp_per_member``.
     """

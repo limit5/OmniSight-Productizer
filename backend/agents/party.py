@@ -53,6 +53,28 @@ this module:
 * W17.5 (shared XP + personal accrual) lives in
   :func:`compute_party_xp_distribution`.
 
+W17 sub-wave coverage in this module
+------------------------------------
+The W17 module shipped in one bundle under OP-220; this table tracks
+the attribution of each sub-wave back to its dedicated TODO row so a
+future reader of git blame can resolve a symbol to its W17.x ticket.
+
+- W17.5 (OP-196): :func:`compute_party_xp_distribution` /
+  :func:`task_complete` + the :class:`MemberXpShare` /
+  :class:`PartyXpDistribution` result dataclasses -- the
+  "shared evenly + personal accrual" payout rule from ADR-0008
+  §"Party / Synergy system (W17)". The pool ``total_xp`` divides
+  evenly across N members (integer floor; the remainder stays on the
+  table and is surfaced via ``PartyXpDistribution.total_xp_pool`` for
+  audit). Each member additionally accrues their own per-task
+  ``personal_xp`` (passed by the caller via ``personal_xp_by_member``)
+  on top of the party share, so a member is never *worse off* for
+  joining a party — personal contributions remain attributable to
+  the individual character card. The synergy bonus from W17 layers
+  on top of the party share *only*, never on the personal XP, so a
+  party with no synergy degrades cleanly to ``base_share + personal``
+  without coupling to the synergy matrix.
+
 Module-global state audit (per project SOP)
 -------------------------------------------
 The module declares no module-level mutable state. Every store
@@ -178,7 +200,25 @@ class Party:
 
 @dataclass(frozen=True)
 class MemberXpShare:
-    """Per-member XP attribution from :func:`compute_party_xp_distribution`."""
+    """Per-member XP attribution from :func:`compute_party_xp_distribution`.
+
+    W17.5 (OP-196): the four numeric fields encode the
+    "shared evenly + personal accrual" payout rule:
+
+    * ``party_share`` -- the member's slice of the evenly-split pool
+      (``total_xp // N``).
+    * ``synergy_bonus`` -- the additive bonus from the W17 synergy
+      matrix; ``round(party_share * synergy_xp_bonus)`` per member,
+      clamped to ``>= 0``. Synergy never applies to ``personal_xp``.
+    * ``personal_xp`` -- the per-member task contribution the caller
+      passed in via ``personal_xp_by_member``; clamped to ``>= 0`` so
+      a negative input cannot net out the party share.
+    * ``total = party_share + synergy_bonus + personal_xp`` -- the
+      XP delta the persistence layer should record for the member's
+      character card. The two halves (party + personal) are reported
+      separately so the operator UI can attribute each delta back to
+      its source.
+    """
 
     member_agent_id: str
     personal_xp: int
@@ -189,7 +229,21 @@ class MemberXpShare:
 
 @dataclass(frozen=True)
 class PartyXpDistribution:
-    """Result of :func:`compute_party_xp_distribution`."""
+    """Result of :func:`compute_party_xp_distribution`.
+
+    W17.5 (OP-196): ``total_xp_pool`` reports the *input* pool the
+    caller asked the helper to distribute, **not** the sum of
+    ``shares[*].total``. The two diverge by design:
+
+    * The pool may not divide evenly across N members — the floored
+      remainder ``total_xp_pool - N * party_share`` is intentionally
+      left on the table (no rounding-up that would inflate the
+      character-level XP curve). Persisting the pool lets an auditor
+      reconstruct the rounding.
+    * ``shares[*].personal_xp`` is *additive* to the pool and lives
+      outside it, so the sum of ``shares[*].total`` is always
+      ``>= total_xp_pool`` whenever any member has personal XP.
+    """
 
     party_id: str
     total_xp_pool: int
@@ -667,17 +721,28 @@ def compute_party_xp_distribution(
 ) -> PartyXpDistribution:
     """Split ``total_xp`` evenly across the party, plus per-member personal XP.
 
-    Per OP-220 AC #2 ("compute_party_xp_distribution") and the W17
+    W17.5 (OP-196) -- pins the "shared evenly + personal accrual"
+    payout rule called out by OP-220 AC #2 and the W17
     state-transition contract:
 
     * Each member gets ``total_xp // N`` (integer floor — remainder
       stays on the table; surfaced via the
       :class:`PartyXpDistribution.total_xp_pool` field for audit).
     * Each member additionally gets ``personal_xp`` from
-      ``personal_xp_by_member`` (per-member task contribution).
-    * If a synergy applies, each share is multiplied by
+      ``personal_xp_by_member`` (per-member task contribution). The
+      personal slice is **additive**, never split across the party —
+      this is the ADR-0008 promise that "party play doesn't penalise
+      individual progression" (§"Party / Synergy system (W17)").
+    * If a synergy applies, each party share is multiplied by
       ``(1 + synergy_xp_bonus)`` and ``synergy_bonus`` records the
-      delta.
+      delta. Synergy never applies to ``personal_xp``, so an absent
+      or zero ``synergy_xp_bonus`` cleanly degrades to
+      ``party_share + personal_xp``.
+    * A missing entry in ``personal_xp_by_member`` (or no map at all)
+      means "no personal contribution this round" — the member still
+      receives the full ``party_share + synergy_bonus``. Negative
+      personal-XP inputs are clamped to ``0`` so a malformed caller
+      payload cannot net out the party share.
 
     Pure function — no DB calls. Persistence happens in
     :func:`task_complete` once the operator's `XpDelta` rows are
@@ -744,9 +809,16 @@ async def task_complete(
     Composes the W17 state-transition contract:
 
         ``party.task_complete(outcome)``
-          → ``compute_party_xp_distribution``
+          → ``compute_party_xp_distribution`` (W17.5 / OP-196 payout)
           → mark members ungated for individual tasks
           → caller emits ``party:task:completed`` SSE
+
+    The W17.5 payout split — even share + per-member personal accrual
+    + synergy bonus on the share only — is delegated entirely to
+    :func:`compute_party_xp_distribution`. ``task_complete`` itself
+    owns the state-machine transition (active_task_id → None) and the
+    membership lookup, but is otherwise XP-rule-agnostic so the W17.5
+    contract has a single source of truth.
     """
     state = await store.get_state(party_id)
     if state is None:
