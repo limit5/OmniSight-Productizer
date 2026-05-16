@@ -57,10 +57,12 @@ import backend.agents.provider_adapters.xai_subscription  # noqa: F401,E402
 DEFAULT_CAP_SUPPRESSION_S = 5 * 60 * 60
 HIGH_QUOTA_RATIO = 0.50
 MP_ENABLED_ENV = "OMNISIGHT_MP_ENABLED"
-# RPG.W14 — feature flag for the talent-weight injection call site.
-# Off by default until the RPG.W14 talent rollout is enabled; the helper
-# :func:`talent_routing_weight_multiplier` short-circuits to ``1.0`` while
-# the flag is off.
+# RPG.W14.4 (OP-188) — feature flag for the talent-weight injection
+# call site. Off by default until the RPG.W14 talent rollout is enabled;
+# the helper :func:`talent_routing_weight_multiplier` short-circuits to
+# ``1.0`` while the flag is off so the call site is safe to wire today
+# and "lights up" the moment the flag flips (typically alongside
+# RPG.W7.1 ``prefer_agent_id`` landing).
 TALENT_ROUTING_ENABLED_ENV = "OMNISIGHT_MP_TALENT_ROUTING_ENABLED"
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _MODEL_MAPPING_PATH = _PROJECT_ROOT / "configs" / "model_mapping.yaml"
@@ -694,7 +696,7 @@ def is_enabled() -> bool:
 
 
 def is_talent_routing_enabled() -> bool:
-    """Return whether the RPG.W14 talent-weight injection is active.
+    """Return whether the RPG.W14.4 (OP-188) talent-weight injection is active.
 
     Feature-flagged off by default. Enabling the flag activates the
     +20%-per-matching-talent multiplier from
@@ -713,13 +715,18 @@ def talent_routing_weight_multiplier(
     task_labels: tuple[str, ...],
     guild: str | None = None,
 ) -> float:
-    """RPG.W14 -- return the routing-weight multiplier for ``talent_choices``.
+    """RPG.W14.4 (OP-188) -- routing-weight multiplier for ``talent_choices``.
 
     Returns ``1.0`` unconditionally when
     :func:`is_talent_routing_enabled` is False, so the call site is
     safe to wire today and "lights up" the moment the feature flag
     flips. ``MP routing_policy unreachable`` (RoutingWeightInjectionFailed)
     degrades silently to ``1.0`` per OP-219's error-catalog spec.
+
+    Production callers that need to look up the agent's choices first
+    should reach for :func:`build_talent_routing_weight_resolver`
+    instead of composing ``store.list_choices`` + this helper
+    themselves.
     """
     if not is_talent_routing_enabled():
         return 1.0
@@ -745,6 +752,87 @@ def talent_routing_weight_multiplier(
         return 1.0
 
 
+def build_talent_routing_weight_resolver(
+    store: Any,
+    *,
+    path: Path | str | None = None,
+) -> Callable[..., Any]:
+    """W14.4 (OP-188) -- closure that resolves the per-agent routing multiplier.
+
+    The returned closure has the shape
+    ``async (agent_id, *, task_labels, guild=None) -> float`` and is
+    the production-wiring surface for MP dispatch code that wants the
+    talent-weight bump without hand-rolling the
+    :meth:`TalentChoiceStore.list_choices` lookup:
+
+    .. code-block:: python
+
+        from backend.agents.routing_policy import (
+            build_talent_routing_weight_resolver,
+        )
+        from backend.agents.talent_tree import PostgresTalentChoiceStore
+
+        store = PostgresTalentChoiceStore(conn_factory)
+        resolve = build_talent_routing_weight_resolver(store)
+
+        bump = await resolve(
+            agent_id="agent-A",
+            task_labels=("security", "schema"),
+            guild=Guild.backend,
+        )
+        weighted_score = base_score * bump
+
+    The closure honours :func:`is_talent_routing_enabled` and degrades
+    silently to ``1.0`` on:
+
+    * the feature flag being off,
+    * an empty / missing per-agent talent set,
+    * any :class:`backend.agents.talent_tree.RoutingWeightInjectionFailed`
+      raised by the YAML loader (the W14.4 error-catalog contract),
+    * any other unexpected error inside ``store.list_choices`` -- the
+      MP dispatch path must never crash because the talent layer is
+      unreachable.
+
+    ``path`` is forwarded to
+    :func:`backend.agents.talent_tree.routing_weight_multiplier_for_talents`
+    so unit tests can pin the YAML to a fixture; production callers
+    leave it ``None`` and the talent_tree default is used.
+    """
+    from backend.agents.talent_tree import (
+        RoutingWeightInjectionFailed,
+        TALENT_TREE_PATH,
+        routing_weight_multiplier_for_talents,
+    )
+
+    resolved_path = path if path is not None else TALENT_TREE_PATH
+
+    async def _resolve(
+        agent_id: str,
+        *,
+        task_labels: tuple[str, ...],
+        guild: Any = None,
+    ) -> float:
+        if not is_talent_routing_enabled():
+            return 1.0
+        try:
+            choices = await store.list_choices(agent_id)
+        except Exception:  # noqa: BLE001 -- degrade-silently contract
+            return 1.0
+        if not choices:
+            return 1.0
+        try:
+            return routing_weight_multiplier_for_talents(
+                tuple(choices),
+                task_labels=tuple(task_labels),
+                path=resolved_path,
+                guild=guild,
+            )
+        except RoutingWeightInjectionFailed:
+            return 1.0
+
+    return _resolve
+
+
 def choose_provider(task: TaskSpec) -> list[ProviderAdapter]:
     """Return ranked provider candidates using the module-default policy."""
     return _DEFAULT_POLICY.choose_provider(task)
@@ -758,8 +846,12 @@ def on_cap_hit(provider_id: str, retry_after_s: int | None = None) -> None:
 __all__ = [
     "MP_ENABLED_ENV",
     "RoutingPolicy",
+    "TALENT_ROUTING_ENABLED_ENV",
     "_recently_capped",
+    "build_talent_routing_weight_resolver",
     "choose_provider",
     "is_enabled",
+    "is_talent_routing_enabled",
     "on_cap_hit",
+    "talent_routing_weight_multiplier",
 ]

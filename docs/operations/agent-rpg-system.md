@@ -862,6 +862,74 @@ milestones + the capstone block.
   `Talent reminders (per RPG.W14):` block to the system prompt, one
   bullet per locked milestone (ordered by ascending milestone level).
 
+#### Talent → routing + prompt wiring (W14.4 / OP-188)
+
+Both effects are implemented as a thin compute layer in
+`backend/agents/talent_tree.py` plus a dispatcher-wiring layer in the
+two consumer modules — mirroring the OP-180 (W13.3) pattern that
+introduced `build_feature_unlock_gate` + `install_feature_unlock_gate`.
+
+Helper surface:
+
+| Helper | Lives in | Purpose |
+|---|---|---|
+| `routing_weight_multiplier_for_talents(choices, *, task_labels, guild=None)` | `backend/agents/talent_tree.py` | Pure compute — scans `config/talent_tree.yaml` for every locked talent's `routing_label` and multiplies in `ROUTING_WEIGHT_TALENT_MATCH` (1.20) per match. |
+| `prompt_reminders_for_talents(choices, *, guild=None)` | `backend/agents/talent_tree.py` | Pure compute — returns the ordered tuple of `prompt_reminder` strings (Lv 10 first). |
+| `routing_policy.talent_routing_weight_multiplier(choices, *, task_labels, guild=None)` | `backend/agents/routing_policy.py` | Feature-flagged wrapper — short-circuits to `1.0` when `OMNISIGHT_MP_TALENT_ROUTING_ENABLED` is off and degrades silently on `RoutingWeightInjectionFailed`. |
+| `routing_policy.build_talent_routing_weight_resolver(store, *, path=None)` | `backend/agents/routing_policy.py` | **Dispatcher wiring** — closure `async (agent_id, *, task_labels, guild=None) -> float` that reads `store.list_choices(agent_id)` and applies the feature-flagged multiplier in one call. |
+| `prompt_builder.enrich_system_prompt_with_talents(system_prompt, choices, *, guild=None)` | `backend/agents/prompt_builder.py` | Compute helper — appends the `Talent reminders (per RPG.W14):` block to a system prompt. |
+| `prompt_builder.build_talent_prompt_enricher(store, *, path=None)` | `backend/agents/prompt_builder.py` | **Dispatcher wiring** — closure `async (agent_id, system_prompt, *, guild=None) -> str` that reads `store.list_choices(agent_id)` and applies the enrichment in one call. |
+
+Both `build_talent_*` closures read the store on every invocation
+(no in-process cache) so an operator-flip of an agent's talent picks
+is reflected on the next dispatch.
+
+Production wiring snippet:
+
+```python
+from backend.agents.prompt_builder import build_talent_prompt_enricher
+from backend.agents.routing_policy import (
+    build_talent_routing_weight_resolver,
+)
+from backend.agents.talent_tree import PostgresTalentChoiceStore
+
+talent_store = PostgresTalentChoiceStore(conn_factory)
+enrich_prompt = build_talent_prompt_enricher(talent_store)
+resolve_weight = build_talent_routing_weight_resolver(talent_store)
+
+# At task-dispatch time:
+system_prompt = await enrich_prompt(
+    agent_id, base_system_prompt, guild=Guild.backend,
+)
+weight_bump = await resolve_weight(
+    agent_id, task_labels=task.labels, guild=Guild.backend,
+)
+```
+
+Degrade-silently contract:
+
+* Routing resolver returns `1.0` when (a) the feature flag is off,
+  (b) the agent has no locked talents, (c) the YAML loader raises
+  `RoutingWeightInjectionFailed`, or (d) `store.list_choices`
+  raises any exception. The MP dispatch path must never crash
+  because the talent layer is unreachable.
+* Prompt enricher returns the *unmodified* `system_prompt` when
+  (a) the agent has no locked talents, or (b) `store.list_choices`
+  raises any exception. Task start must never block because the
+  talent layer is unreachable.
+
+Source symbols (W14.4 / OP-188):
+
+* `backend/agents/talent_tree.py` — `ROUTING_WEIGHT_TALENT_MATCH`,
+  `routing_weight_multiplier_for_talents`,
+  `prompt_reminders_for_talents`, `RoutingWeightInjectionFailed`.
+* `backend/agents/routing_policy.py` — `TALENT_ROUTING_ENABLED_ENV`,
+  `is_talent_routing_enabled`, `talent_routing_weight_multiplier`,
+  `build_talent_routing_weight_resolver`.
+* `backend/agents/prompt_builder.py` — `TALENT_REMINDER_HEADER`,
+  `enrich_system_prompt_with_talents`,
+  `build_talent_prompt_enricher`.
+
 ### Capstone
 
 Lv-80 unlocks a Guild capstone ability (e.g. backend Guild =
