@@ -200,6 +200,35 @@ async def test_pg_batch_get_run_round_trip():
 
 
 @pytest.mark.asyncio
+async def test_pg_batch_get_run_extracts_tenant_id_from_json_metadata():
+    store, conn = _make_store_with_conn(PostgresBatchPersistence)
+    now = datetime.now(timezone.utc)
+    conn.fetchrow_returns.append({
+        "batch_run_id": "br_tenant",
+        "anthropic_batch_id": "batch_tenant",
+        "status": "submitted",
+        "request_count": 1,
+        "total_size_bytes": None,
+        "submitted_at": now,
+        "ended_at": None,
+        "expires_at": None,
+        "success_count": None,
+        "error_count": None,
+        "canceled_count": None,
+        "expired_count": None,
+        "metadata": '{"tenant_id":"tenant_a","phase":"HD.5"}',
+        "created_by": "bot",
+        "created_at": now,
+    })
+    run = await store.get_batch_run("br_tenant")
+    assert run is not None
+    assert run.tenant_id == "tenant_a"
+    assert run.metadata == {"tenant_id": "tenant_a", "phase": "HD.5"}
+    assert run.total_size_bytes == 0
+    assert run.success_count == 0
+
+
+@pytest.mark.asyncio
 async def test_pg_batch_get_run_missing_returns_none():
     store, conn = _make_store_with_conn(PostgresBatchPersistence)
     conn.fetchrow_returns.append(None)
@@ -256,6 +285,14 @@ async def test_pg_batch_find_by_task_id():
     method, sql, args = conn.first_call("fetchrow")
     assert "WHERE task_id = $1" in sql
     assert args == ("lookup_me",)
+
+
+@pytest.mark.asyncio
+async def test_pg_batch_find_by_task_id_with_tenant_id_refuses_unscoped_lookup():
+    store, conn = _make_store_with_conn(PostgresBatchPersistence)
+    with pytest.raises(NotImplementedError, match="tenant-scoped batch result lookup"):
+        await store.find_result_by_task_id("lookup_me", tenant_id="tenant_a")
+    assert conn.calls == []
 
 
 @pytest.mark.asyncio
