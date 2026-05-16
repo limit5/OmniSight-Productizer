@@ -19,6 +19,16 @@
 - **Troubleshooting**（即将推出）— 出红色 banner 了怎么办
 - **Tutorials**（即将推出）— 从零开始跑一次 Invoke 的手把手教学
 
+## Agent 身份与升级系统（Priority RPG）
+
+Agent 不再只是无状态的 runner — 每个 agent 都有自己的角色卡
+（Character Card），包含 Guild、level、XP、talent，以及每个 skill /
+tool 的熟练度。日常操作 how-to（查看 roster、选 Guild、看 XP）请见
+[Agent RPG 系统操作指南](../../operations/agent-rpg-system.md)；
+设计理由与背后的 schema lock-in 请见
+[ADR-0008 — Agent RPG Class & Skill Leveling System](../../adr/0008-agent-rpg-class-skill-leveling.md)
+（权威规格 — 本指南与 ADR 不一致时以 ADR 为准）。
+
 ## 多语版本
 
 本文档同步维护英文（`en/`，权威源）、繁中（`zh-TW/`）、

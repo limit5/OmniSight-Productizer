@@ -90,3 +90,4 @@ Schema は `/api/v1/system/sse-schema`。
 - [Operation Modes](operation-modes.md)
 - [Panels Overview](panels-overview.md)
 - `backend/models.py` — 正本の enum 定義
+- [ADR-0008 — Agent RPG Class & Skill Leveling System](../../../adr/0008-agent-rpg-class-skill-leveling.md) — agent のキャラクターカード / Guild / level / skill / talent モデルの正本仕様(操作面 how-to: [`docs/operations/agent-rpg-system.md`](../../../operations/agent-rpg-system.md))
