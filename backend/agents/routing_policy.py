@@ -154,7 +154,7 @@ class RoutingPolicy:
             assigned_candidates = [
                 candidate
                 for candidate in candidates
-                if candidate.provider_id == assigned_provider_id
+                if _candidate_matches_assignment(candidate, assigned_provider_id)
             ]
             assigned_eligible = self._tier_gate_eligible_candidates(
                 task, assigned_candidates
@@ -174,7 +174,9 @@ class RoutingPolicy:
                     [
                         candidate
                         for candidate in candidates
-                        if candidate.provider_id != assigned_provider_id
+                        if not _candidate_matches_assignment(
+                            candidate, assigned_provider_id
+                        )
                     ],
                 )
             else:
@@ -619,6 +621,59 @@ def _default_human_assignment_resolver(task: TaskSpec) -> str | None:
         if isinstance(value, str) and value.strip():
             return _normalise_provider_id(value)
     return None
+
+
+def _candidate_matches_assignment(
+    candidate: _Candidate,
+    assigned_agent_id: str,
+) -> bool:
+    return (
+        _normalise_provider_id(assigned_agent_id)
+        in _candidate_assignment_ids(candidate)
+    )
+
+
+def _candidate_assignment_ids(candidate: _Candidate) -> frozenset[str]:
+    values = {candidate.provider_id}
+    values.update(_adapter_identity_values(candidate.adapter))
+    return frozenset(
+        _normalise_provider_id(value) for value in values if value.strip()
+    )
+
+
+def _adapter_identity_values(adapter: ProviderAdapter) -> set[str]:
+    values: set[str] = set()
+    for attr in (
+        "agent_id",
+        "adapter_id",
+        "instance_id",
+        "runner_instance_id",
+    ):
+        value = getattr(adapter, attr, None)
+        try:
+            candidate = value() if callable(value) else value
+        except Exception:
+            candidate = None
+        if isinstance(candidate, str) and candidate.strip():
+            values.add(candidate)
+
+    metadata = getattr(adapter, "metadata", None)
+    if callable(metadata):
+        try:
+            metadata = metadata()
+        except Exception:
+            metadata = None
+    if isinstance(metadata, dict):
+        for key in (
+            "agent_id",
+            "adapter_id",
+            "instance_id",
+            "runner_instance_id",
+        ):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(value)
+    return values
 
 
 def _adapter_last_retrained_at(adapter: ProviderAdapter) -> datetime | None:
