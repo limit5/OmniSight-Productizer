@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import tempfile
@@ -62,3 +63,33 @@ def test_persist_failure_metric_is_registered():
     # Must be callable without raising.
     m.persist_failure_total.labels(module="budget_strategy").inc()
     m.persist_failure_total.labels(module="notifications").inc()
+
+
+@pytest.mark.asyncio
+async def test_notifications_dispatch_task_failure_is_logged_and_metered(
+    caplog,
+):
+    from backend import metrics as m, notifications as n
+
+    m.reset_for_tests()
+
+    async def _boom():
+        raise RuntimeError("dispatch task exploded")
+
+    caplog.set_level(logging.WARNING, logger="backend.notifications")
+    n._create_dispatch_task(_boom(), "external dispatch")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert any(
+        "background external dispatch task failed" in rec.message
+        for rec in caplog.records
+    )
+    if m.is_available():
+        samples = list(m.persist_failure_total.collect()[0].samples)
+        total = sum(
+            s.value for s in samples
+            if s.labels.get("module") == "notifications"
+            and s.name.endswith("_total")
+        )
+        assert total == 1
