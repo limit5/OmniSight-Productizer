@@ -24,9 +24,27 @@ from typing import Mapping
 class BridgeStaleError(RuntimeError):
     """gerrit_jira_bridge cursor is older than the configured ceiling."""
 
-    def __init__(self, lag_seconds: int) -> None:
-        super().__init__(f"bridge cursor lag {lag_seconds}s exceeds ceiling")
+    def __init__(
+        self,
+        lag_seconds: int,
+        ceiling_seconds: int | None = None,
+    ) -> None:
+        # ``ceiling_seconds`` is optional for backward compatibility with the
+        # documented ``BridgeStaleError(lag_seconds: int)`` signature
+        # (sprint-abc-master-plan §2.2). When omitted, fall back to the
+        # module-level ceiling used by ``pickup_bridge_check``.
+        effective_ceiling = (
+            ceiling_seconds
+            if ceiling_seconds is not None
+            else PICKUP_BRIDGE_LAG_CEILING_SECONDS
+        )
+        super().__init__(
+            f"runner_health_checks.pickup_bridge_check: gerrit_jira_bridge "
+            f"cursor lag={lag_seconds}s exceeds ceiling={effective_ceiling}s "
+            f"— refusing pickup to avoid re-doing already-merged work (F4/F10)"
+        )
         self.lag_seconds = lag_seconds
+        self.ceiling_seconds = effective_ceiling
 
 
 @dataclass(frozen=True)
@@ -47,9 +65,20 @@ class RebaseRequired:
 class FeatureListNotStaged(RuntimeError):
     """Runner committed without the per-ticket feature-list JSON staged."""
 
-    def __init__(self, file: str) -> None:
-        super().__init__(f"feature-list file not staged: {file}")
+    def __init__(self, file: str, repo: Path | None = None) -> None:
+        # ``repo`` is optional for backward compatibility with the documented
+        # ``FeatureListNotStaged(file: str)`` signature
+        # (sprint-abc-master-plan §2.2). When provided, it is woven into the
+        # message so operators can locate the offending workspace.
+        repo_clause = f" in repo={repo!s}" if repo is not None else ""
+        super().__init__(
+            f"runner_health_checks.assert_feature_list_staged: per-ticket "
+            f"feature-list JSON not present in git index{repo_clause}: "
+            f"file={file!r} — commit would land without per-ticket payload "
+            f"(F20-analogue)"
+        )
         self.file = file
+        self.repo = repo
 
 
 @dataclass(frozen=True)
@@ -87,7 +116,7 @@ def pickup_bridge_check(
 ) -> None:
     """Raise ``BridgeStaleError`` when the bridge cursor is too far behind."""
     if lag_seconds > ceiling_seconds:
-        raise BridgeStaleError(lag_seconds)
+        raise BridgeStaleError(lag_seconds, ceiling_seconds=ceiling_seconds)
 
 
 # F6/F7/F12 -- two runner instances picking overlapping ticket scopes is
@@ -142,7 +171,7 @@ def assert_feature_list_staged(repo: Path, file: str) -> None:
     )
     staged = set(result.stdout.splitlines())
     if file not in staged:
-        raise FeatureListNotStaged(file)
+        raise FeatureListNotStaged(file, repo=repo)
 
 
 # F25 -- stream-events daemon may silently die; pickup must refuse
