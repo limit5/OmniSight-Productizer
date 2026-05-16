@@ -60,7 +60,7 @@ def _check_alembic_head(expected: Any, cwd: Path = None) -> CheckResult:
     check sees the worktree's actual state, not the runner-host main repo.
     """
     if not isinstance(expected, str):
-        return CheckResult(False, "alembic_head", f"argument must be str, got {type(expected).__name__}")
+        return CheckResult(False, "alembic_head", f"argument must be str, got {type(expected).__name__}: {expected!r:.60}")
     base = cwd if cwd is not None else REPO_ROOT
     try:
         result = subprocess.run(
@@ -71,7 +71,7 @@ def _check_alembic_head(expected: Any, cwd: Path = None) -> CheckResult:
             timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        return CheckResult(False, "alembic_head", f"alembic invocation failed: {e}")
+        return CheckResult(False, "alembic_head", f"alembic invocation failed in {base / 'backend'} (expected={expected!r}): {e}")
     head_match = re.search(r"^([0-9a-f]{4,})\s+\(head\)", result.stdout, re.MULTILINE)
     actual = head_match.group(1) if head_match else result.stdout.strip().split()[0] if result.stdout.strip() else "<empty>"
     return CheckResult(
@@ -101,20 +101,21 @@ def _check_feature_flag(expected: Any, cwd: Path = None) -> CheckResult:
 def _check_file_exists(expected: Any, cwd: Path = None) -> CheckResult:
     """Pass iff path exists relative to ``cwd`` (default REPO_ROOT)."""
     if not isinstance(expected, str):
-        return CheckResult(False, "file_exists", f"argument must be str path, got {type(expected).__name__}")
+        return CheckResult(False, "file_exists", f"argument must be str path, got {type(expected).__name__}: {expected!r:.60}")
     base = cwd if cwd is not None else REPO_ROOT
     target = base / expected
+    exists = target.exists()
     return CheckResult(
-        target.exists(),
+        exists,
         "file_exists",
-        f"{expected}: " + ("present" if target.exists() else "MISSING"),
+        f"{expected}: present (at {target})" if exists else f"{expected}: MISSING (looked at {target})",
     )
 
 
 def _check_command_succeeds(expected: Any, cwd: Path = None) -> CheckResult:
     """Pass iff shell command returns exit code 0. 30s timeout, runs in ``cwd``."""
     if not isinstance(expected, str):
-        return CheckResult(False, "command_succeeds", f"argument must be str command, got {type(expected).__name__}")
+        return CheckResult(False, "command_succeeds", f"argument must be str command, got {type(expected).__name__}: {expected!r:.60}")
     base = cwd if cwd is not None else REPO_ROOT
     try:
         result = subprocess.run(
@@ -126,14 +127,14 @@ def _check_command_succeeds(expected: Any, cwd: Path = None) -> CheckResult:
             timeout=30,
         )
     except subprocess.TimeoutExpired:
-        return CheckResult(False, "command_succeeds", f"command timed out: {expected[:60]}")
+        return CheckResult(False, "command_succeeds", f"command timed out after 30s in {base}: {expected[:60]}")
     if result.returncode == 0:
         return CheckResult(True, "command_succeeds", f"OK: {expected[:60]}")
     stderr_tail = (result.stderr or "").strip().splitlines()[-1] if result.stderr else "<no stderr>"
     return CheckResult(
         False,
         "command_succeeds",
-        f"exit {result.returncode}: {expected[:60]} — {stderr_tail[:80]}",
+        f"exit {result.returncode} (cwd={base}): {expected[:60]} — {stderr_tail[:80]}",
     )
 
 
@@ -156,7 +157,7 @@ def _check_db_row_count(expected: Any, cwd: Path = None) -> CheckResult:
         with engine.connect() as conn:
             count = conn.execute(text(f"SELECT COUNT(*) FROM {expected['table']}")).scalar()
     except Exception as e:
-        return CheckResult(False, "db_row_count", f"DB query failed: {e}")
+        return CheckResult(False, "db_row_count", f"DB query failed for table {expected['table']!r}: {type(e).__name__}: {e}")
     minv = int(expected.get("min", 0))
     maxv = expected.get("max")
     if count < minv:
@@ -168,15 +169,16 @@ def _check_db_row_count(expected: Any, cwd: Path = None) -> CheckResult:
 
 def _check_deployed_version(expected: Any, cwd: Path = None) -> CheckResult:
     """Pass iff localhost:8000/healthz reports matching version."""
+    healthz_url = "http://localhost:8000/healthz"
     if not isinstance(expected, str):
-        return CheckResult(False, "deployed_version", f"argument must be version str, got {type(expected).__name__}")
+        return CheckResult(False, "deployed_version", f"argument must be version str, got {type(expected).__name__}: {expected!r:.60}")
     try:
         import urllib.request
-        with urllib.request.urlopen("http://localhost:8000/healthz", timeout=5) as resp:
+        with urllib.request.urlopen(healthz_url, timeout=5) as resp:
             import json as _json
             data = _json.loads(resp.read().decode())
     except Exception as e:
-        return CheckResult(False, "deployed_version", f"health endpoint unreachable: {e}")
+        return CheckResult(False, "deployed_version", f"health endpoint {healthz_url} unreachable (expected version={expected!r}): {type(e).__name__}: {e}")
     actual = data.get("version") or data.get("release_tag") or "<unknown>"
     return CheckResult(
         actual == expected,
@@ -213,20 +215,20 @@ def evaluate(
     results: list[CheckResult] = []
     for req in requirements:
         if not isinstance(req, dict):
-            results.append(CheckResult(False, "<malformed>", f"requirement must be dict, got {type(req).__name__}"))
+            results.append(CheckResult(False, "<malformed>", f"requirement must be dict, got {type(req).__name__}: {req!r:.80}"))
             continue
         if len(req) != 1:
-            results.append(CheckResult(False, "<malformed>", f"requirement must have exactly 1 key, got {list(req.keys())}"))
+            results.append(CheckResult(False, "<malformed>", f"requirement must have exactly 1 key, got {len(req)}: {list(req.keys())}"))
             continue
         kind, arg = next(iter(req.items()))
         handler = CHECK_KINDS.get(kind)
         if handler is None:
-            results.append(CheckResult(False, kind, f"unknown check kind: {kind}"))
+            results.append(CheckResult(False, kind, f"unknown check kind: {kind!r} (available: {sorted(CHECK_KINDS)})"))
             continue
         try:
             results.append(handler(arg, cwd))
         except Exception as e:
-            results.append(CheckResult(False, kind, f"handler raised {type(e).__name__}: {e}"))
+            results.append(CheckResult(False, kind, f"handler raised {type(e).__name__} for arg={arg!r:.60}: {e}"))
     return results
 
 
