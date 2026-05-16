@@ -20,6 +20,18 @@
 - **Troubleshooting**(近日公開)— 赤いバナーが出た時の対処
 - **Tutorials**(近日公開)— Invoke をゼロから一度走らせるハンズオン
 
+## Agent アイデンティティと育成システム(Priority RPG)
+
+agent はもはやステートレスな runner ではなく、それぞれが Guild ・
+レベル・ XP ・タレント・スキル / ツール熟練度を持つキャラクター
+カード(Character Card)を備えています。日常運用の how-to(ロスター閲覧・
+Guild 選択・XP の読み方)は
+[Agent RPG システム運用ガイド](../../operations/agent-rpg-system.md)を、
+設計理由と背後のスキーマ固定は
+[ADR-0008 — Agent RPG Class & Skill Leveling System](../../adr/0008-agent-rpg-class-skill-leveling.md)
+を参照してください(正本仕様 — 本ガイドと ADR が食い違う場合は ADR が
+優先)。
+
 ## 多言語版
 
 本ドキュメントは英語(`en/`、正本)、繁体字中国語(`zh-TW/`)、

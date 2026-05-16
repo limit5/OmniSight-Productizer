@@ -101,3 +101,4 @@ Status: `none | active | finalized | cleaned`.
 - [Operation Modes](operation-modes.md)
 - [Panels Overview](panels-overview.md)
 - `backend/models.py` — canonical enum definitions
+- [ADR-0008 — Agent RPG Class & Skill Leveling System](../../../adr/0008-agent-rpg-class-skill-leveling.md) — authoritative spec for the agent Character Card / Guild / level / skill / talent model (operator-facing how-to: [`docs/operations/agent-rpg-system.md`](../../../operations/agent-rpg-system.md))
