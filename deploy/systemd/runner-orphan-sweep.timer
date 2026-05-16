@@ -1,0 +1,21 @@
+; OP-1139 / Sprint Boreas-C4 — 30-min cadence for runner-orphan-sweep.
+;
+; Conservative cadence — the sweeper itself only deletes workspaces
+; older than 4 hours (default), so running every 30 min is plenty.
+; Reducing frequency further is fine; increasing would mostly waste
+; cycles since orphans need to age past the threshold first.
+
+[Unit]
+Description=Sweep orphan runner workspaces every 30 minutes
+Documentation=https://soraapp.atlassian.net/browse/OP-1139
+Requires=runner-orphan-sweep.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+AccuracySec=1min
+Unit=runner-orphan-sweep.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

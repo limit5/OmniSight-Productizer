@@ -1,0 +1,20 @@
+; OP-1139 / Sprint Boreas-C4 — Orphan ephemeral-workspace sweeper.
+;
+; Oneshot service paired with runner-orphan-sweep.timer. Each fire:
+;   bash scripts/runner-cleanup/sweep-orphans.sh
+;
+; Removes /tmp/runner-workspaces/<instance>/run-* dirs older than
+; $OMNISIGHT_RUNNER_ORPHAN_MAX_AGE_MIN minutes (default 240 = 4h —
+; comfortably longer than a healthy cycle's 30-min timeout).
+
+[Unit]
+Description=Sweep orphan ephemeral runner workspaces
+Documentation=https://soraapp.atlassian.net/browse/OP-1139
+
+[Service]
+Type=oneshot
+User=USERNAME
+WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
+ExecStart=/bin/bash /home/USER_HOME/work/sora/OmniSight-Productizer/scripts/runner-cleanup/sweep-orphans.sh
+SuccessExitStatus=0
+TimeoutStartSec=60
