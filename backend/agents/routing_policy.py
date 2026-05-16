@@ -503,8 +503,9 @@ def _preferred_provider_family_for_task(task: TaskSpec) -> str | None:
     guild_specs, provider_matrix = _load_model_routing_matrix()
     model_spec = guild_specs.get(guild.value, "")
     provider = _provider_from_model_spec(model_spec)
-    if provider in provider_matrix:
-        return provider
+    provider_family = _adr_vendor_label(provider or "")
+    if provider_family in provider_matrix:
+        return provider_family
     return None
 
 
@@ -569,8 +570,11 @@ def _parse_model_routing_matrix(raw: Any) -> tuple[dict[str, str], set[str]]:
             provider = str(provider_id).strip().lower()
             if not provider or not isinstance(provider_cfg, dict):
                 continue
+            provider_family = _adr_vendor_label(provider)
+            if provider_family is None:
+                continue
             if isinstance(provider_cfg.get("default_model"), str):
-                provider_matrix.add(provider)
+                provider_matrix.add(provider_family)
 
     guild_specs: dict[str, str] = {}
     guilds = raw.get("guilds")
