@@ -1060,6 +1060,38 @@ daily Postgres backup (D15 dependency once shipped).
 | `POST` | `/agents/{id}/talents/lock` | Lock `{guild, milestone, talent_id, agent_level}` |
 | `POST` | `/agents/{id}/talents/capstone` | Lock the Lv-80 capstone for `{guild, agent_level}` |
 
+### Talent fork modal (W14.5 — frontend block on task assignment)
+
+Per ADR-0008 the talent choice is permanent — once routing weights and
+the system-prompt enrichment start applying, switching mid-task would
+desync the agent's behaviour from the operator's intent. W14.5 ships
+the **operator-side hard stop**: a modal that interrupts the task
+assignment flow when the target agent has at least one milestone with
+`choiceRequired === true` and no `chosenTalentId`.
+
+| File | Purpose |
+|---|---|
+| `components/omnisight/agents/TalentForkModal.tsx` | Pure-presentation dialog — receives `{ open, agentId, agentDisplayName, pendingTaskId, milestones, onLockTalent, onConfirm, onCancel }` and refuses to enable its confirm button until every pending milestone has a locked talent |
+
+Caller contract (e.g. `app/page.tsx` `handleAssignTask`):
+
+1. Before calling `engine.assignTask(taskId, agentId)`, read the
+   target agent's `talents` array (the same `CharacterTalentMilestone[]`
+   the Character Card renders) and check whether any entry has
+   `choiceRequired === true` AND `chosenTalentId == null`.
+2. If yes, mount `<TalentForkModal>` with that milestone list, the
+   pending `taskId`, and an `onLockTalent` handler that POSTs to
+   `/agents/{id}/talents/lock` and refetches the agent's talents.
+3. `onConfirm` re-runs the original `engine.assignTask` call.
+4. `onCancel` (Esc / overlay click / cancel button) aborts the
+   assignment — the task stays unassigned in the backlog.
+
+The modal is pure presentation, mirroring the W19.3
+`FusionPreviewModal` pattern — no engine coupling, no API calls
+from inside the modal. This keeps the SSE-driven `ui:talent_choice_required`
+event handler in one place (the page-level shell) and lets the modal
+stay in the storybook-ready / unit-testable layer.
+
 ---
 
 ## Party / Synergy system (W17 — live as of 2026-05-11 / OP-220)
