@@ -223,11 +223,28 @@ will own it).
 These numbers come from `backend/agents/xp_engine.py`; this section is
 a cheat sheet, not a re-spec. The ADR has the design rationale.
 
+### Level curve (W4.2 / OP-133)
+
 ```python
 level_threshold(N) = ceil(100 * N ** 1.4)        # cumulative XP to reach Lv N
 MAX_LEVEL = 80                                    # hard cap; Lv 80+ XP is discarded
 BASE_TASK_XP = 100                                # per task, before multipliers
 ```
+
+The "sigmoid late-game" property called out in ADR-0008 is delivered by
+two cooperating pieces:
+
+1. The `100 * N ** 1.4` curve itself -- per-level marginal cost
+   `level_threshold(N+1) - level_threshold(N)` grows monotonically with
+   `N` (later levels cost more raw XP than earlier ones).
+2. The `MAX_LEVEL = 80` hard cap in `level_for_xp()` -- past Lv 80 the
+   level computation discards extra XP, so Lv 80 -> 81 is not just
+   expensive but unreachable. This is the *flat* tail of the S-curve.
+
+There is no transcendental sigmoid in code; the polynomial curve plus
+the absolute cap together produce the operator-facing S-shape. The
+character-level field is monotonic by construction (it can rise but
+never drop -- see "Common XP-related questions" below).
 
 Outcome multipliers (stack with each other and with buff/debuff):
 
@@ -254,8 +271,12 @@ runner code only; there is no operator endpoint to award XP by hand.
 
 ### Common XP-related questions
 
-- *"Why did Lv 50 → 51 take so long?"* — `100 × 51 ** 1.4 ≈ 21,200`,
-  vs `100 × 50 ** 1.4 ≈ 20,560`. The curve is sigmoid-flat by design.
+- *"Why did Lv 50 → 51 take so long?"* — cumulative
+  `level_threshold(51) = 24,581` vs `level_threshold(50) = 23,909` — the
+  Lv 50 → 51 jump costs **672 XP** in marginal terms. Per-level marginal
+  cost rises monotonically from ~164 XP at Lv 2 to ~806 XP at Lv 80
+  (and is unreachable beyond), so late-game progression flattens by
+  design — see "Level curve (W4.2 / OP-133)" above for the derivation.
 - *"An agent's level dropped."* — Levels never drop. Skill XP (W12,
   live) decays toward but cannot cross a level threshold; the
   card-level field is monotonic. If you observe a drop, file a bug.
