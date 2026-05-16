@@ -131,7 +131,11 @@ def patch_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(file_coordinator, "jira_link_exists", fake_link_exists)
     monkeypatch.setattr(file_coordinator, "jira_create_issue_link", fake_create_issue_link)
     monkeypatch.setattr(jira_dispatch, "add_comment", fake_add_comment)
-    monkeypatch.setattr(engine.jira_dispatch, "make_client", lambda cls: _fake_client())
+    monkeypatch.setattr(
+        engine.jira_dispatch,
+        "make_client",
+        lambda cls, instance_id=None: _fake_client(),
+    )
     return state
 
 
