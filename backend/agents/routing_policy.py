@@ -731,6 +731,7 @@ def talent_routing_weight_multiplier(
         # many other modules at startup.
         from backend.agents.talent_tree import (
             RoutingWeightInjectionFailed,
+            TalentTreeError,
             routing_weight_multiplier_for_talents,
         )
     except ImportError:  # pragma: no cover — defensive
@@ -741,7 +742,7 @@ def talent_routing_weight_multiplier(
             task_labels=tuple(task_labels),
             guild=guild,
         )
-    except RoutingWeightInjectionFailed:
+    except (OSError, RoutingWeightInjectionFailed, TalentTreeError):
         return 1.0
 
 

@@ -15,6 +15,7 @@ Covers the 9 AC cases listed on OP-219 §"Test plan":
 
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 
 import pytest
@@ -71,6 +72,24 @@ def test_each_guild_declares_exactly_four_milestones_with_three_options():
         assert guild_tree.capstone.ability_id
 
 
+def test_loaded_tree_top_level_mapping_is_immutable():
+    tree = load_talent_tree()
+    with pytest.raises(TypeError):
+        tree[Guild.backend] = tree[Guild.backend]  # type: ignore[index]
+
+
+def test_loaded_tree_milestone_mapping_is_immutable():
+    tree = load_talent_tree()
+    with pytest.raises(TypeError):
+        tree[Guild.backend].options_by_milestone[10] = ()  # type: ignore[index]
+
+
+def test_loaded_talent_options_are_frozen_dataclasses():
+    option = available_talents("agent-A", Guild.backend, 10)[0]
+    with pytest.raises(FrozenInstanceError):
+        option.talent_id = "rewritten"  # type: ignore[misc]
+
+
 def test_available_talents_returns_three_options_backend_lv10():
     options = available_talents("agent-A", Guild.backend, 10)
     talent_ids = {option.talent_id for option in options}
@@ -80,6 +99,11 @@ def test_available_talents_returns_three_options_backend_lv10():
 def test_available_talents_rejects_milestone_outside_set():
     with pytest.raises(TalentTreeError):
         available_talents("agent-A", Guild.backend, 25)
+
+
+def test_available_talents_rejects_blank_agent_id():
+    with pytest.raises(ValueError):
+        available_talents(" ", Guild.backend, 10)
 
 
 # ── lock_talent: happy path at each milestone ───────────────────────
@@ -145,6 +169,21 @@ async def test_lock_talent_refuses_when_agent_below_milestone():
         )
 
 
+@pytest.mark.asyncio
+async def test_lock_talent_rejects_bool_agent_level():
+    store = InMemoryTalentChoiceStore()
+    with pytest.raises(TypeError):
+        await lock_talent(
+            store,
+            "agent-A",
+            Guild.backend,
+            10,
+            "schema-first",
+            agent_level=True,  # type: ignore[arg-type]
+            now=T0,
+        )
+
+
 # ── lock_talent: idempotent re-lock same value ──────────────────────
 
 
@@ -160,6 +199,31 @@ async def test_lock_talent_idempotent_on_same_value():
     assert first == second
     summary = await agent_talent_summary(store, "agent-A")
     assert len(summary.choices) == 1
+
+
+@pytest.mark.asyncio
+async def test_lock_talent_idempotent_relock_preserves_original_timestamp():
+    store = InMemoryTalentChoiceStore()
+    first = await lock_talent(
+        store,
+        "agent-A",
+        Guild.backend,
+        10,
+        "schema-first",
+        agent_level=10,
+        now=T0,
+    )
+    second = await lock_talent(
+        store,
+        "agent-A",
+        Guild.backend,
+        10,
+        "schema-first",
+        agent_level=10,
+        now=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    assert second == first
+    assert second.chosen_at == T0
 
 
 # ── lock_talent: refuse re-write different value ────────────────────
@@ -231,6 +295,39 @@ async def test_capstone_locks_after_lv80_and_final_pick():
     assert lock.ability_id == "code_archaeologist"
 
 
+@pytest.mark.asyncio
+async def test_capstone_relock_preserves_original_lock_timestamp():
+    talent_store = InMemoryTalentChoiceStore()
+    capstone_store = InMemoryCapstoneStore()
+    await lock_talent(
+        talent_store,
+        "agent-A",
+        Guild.backend,
+        CAPSTONE_LEVEL,
+        "legacy-archaeologist",
+        agent_level=80,
+        now=T0,
+    )
+    first = await lock_capstone_ability(
+        capstone_store,
+        talent_store,
+        "agent-A",
+        Guild.backend,
+        agent_level=80,
+        now=T0,
+    )
+    second = await lock_capstone_ability(
+        capstone_store,
+        talent_store,
+        "agent-A",
+        Guild.backend,
+        agent_level=80,
+        now=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    assert second == first
+    assert second.locked_at == T0
+
+
 # ── Routing-weight injection ────────────────────────────────────────
 
 
@@ -280,6 +377,46 @@ def test_routing_weight_multiplier_label_case_insensitive():
     )
     multiplier = routing_weight_multiplier_for_talents(
         choices, task_labels=("SECURITY",), guild=Guild.backend,
+    )
+    assert multiplier == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH)
+
+
+def test_routing_weight_multiplier_trims_task_labels():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    multiplier = routing_weight_multiplier_for_talents(
+        choices, task_labels=("  security  ",), guild=Guild.backend,
+    )
+    assert multiplier == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH)
+
+
+def test_routing_weight_multiplier_ignores_unknown_choice():
+    choices = (
+        TalentChoice("agent-A", 10, "fictional-talent", T0),
+    )
+    multiplier = routing_weight_multiplier_for_talents(
+        choices, task_labels=("security",), guild=Guild.backend,
+    )
+    assert multiplier == 1.0
+
+
+def test_routing_weight_multiplier_respects_guild_scope():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    multiplier = routing_weight_multiplier_for_talents(
+        choices, task_labels=("security",), guild=Guild.frontend,
+    )
+    assert multiplier == 1.0
+
+
+def test_routing_weight_multiplier_counts_each_locked_talent_once():
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+    multiplier = routing_weight_multiplier_for_talents(
+        choices, task_labels=("security", "SECURITY"), guild=Guild.backend,
     )
     assert multiplier == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH)
 
@@ -386,4 +523,29 @@ def test_routing_policy_call_site_applies_multiplier_when_flag_on(monkeypatch):
             choices, task_labels=("security",), guild=Guild.backend.value,
         )
         == pytest.approx(ROUTING_WEIGHT_TALENT_MATCH)
+    )
+
+
+def test_routing_policy_call_site_returns_1_when_talent_tree_lookup_fails(monkeypatch):
+    from backend.agents import routing_policy
+    from backend.agents import talent_tree
+
+    def raise_lookup_failure(*args, **kwargs):
+        raise TalentTreeError("talent_tree unavailable")
+
+    monkeypatch.setenv(routing_policy.TALENT_ROUTING_ENABLED_ENV, "true")
+    monkeypatch.setattr(
+        talent_tree,
+        "routing_weight_multiplier_for_talents",
+        raise_lookup_failure,
+    )
+    choices = (
+        TalentChoice("agent-A", 10, "security-first", T0),
+    )
+
+    assert (
+        routing_policy.talent_routing_weight_multiplier(
+            choices, task_labels=("security",), guild=Guild.backend.value,
+        )
+        == 1.0
     )
