@@ -86,7 +86,7 @@ def fuse_skills(
     skill_a: SkillLevel | Mapping[str, Any] | Any,
     skill_b: SkillLevel | Mapping[str, Any] | Any,
 ) -> HybridSkillFusion | None:
-    """Return the hybrid skill if both inputs are Lv5+ and recipe-backed.
+    """Return the hybrid skill if both inputs are Lv5 and recipe-backed.
 
     Inputs may be :class:`SkillLevel`, mappings, or objects with ``name`` and
     ``level`` attributes. Skill ordering is ignored.
@@ -96,7 +96,7 @@ def fuse_skills(
     right = _normalise_skill_level(skill_b)
     if left.name == right.name:
         return None
-    if left.level < FUSION_REQUIRED_LEVEL or right.level < FUSION_REQUIRED_LEVEL:
+    if left.level != FUSION_REQUIRED_LEVEL or right.level != FUSION_REQUIRED_LEVEL:
         return None
 
     recipe = HYBRID_SKILL_RECIPES.get(_recipe_key(left.name, right.name))
