@@ -625,6 +625,73 @@ class TestGitPatchsetPusher:
         assert res.ok is False
         assert "workspace" in res.reason.lower()
 
+    def test_push_amend_uses_reset_author(self, tmp_path):
+        """OP-1196 phase 2 regression — the amend step MUST adopt the
+        workspace's ambient git identity, not preserve the original
+        commit's author. Without --reset-author, Gerrit rejects the
+        push with `not registered in your account, and you lack
+        'forge author' permission` because merger-agent-bot lacks
+        forgeAuthor (per O10 mirror, kept active by OP-1196 phase 1α).
+
+        Simulate the scenario: workspace has a HEAD commit authored
+        by SOMEONE-ELSE; configure user.email to merger-bot; run the
+        pusher; assert the amended HEAD's author becomes merger-bot.
+        """
+        import subprocess
+        ws = tmp_path / "repo"
+        ws.mkdir()
+
+        def g(*args, env=None):
+            return subprocess.run(
+                ["git", *args], cwd=ws, capture_output=True, text=True, env=env,
+            )
+
+        g("init", "-q", "-b", "main")
+        # Set workspace's user (= merger-bot identity, the AFTER state).
+        g("config", "user.name", "merger-agent-bot")
+        g("config", "user.email", "rt3628+merger-bot@gmail.com")
+        # Seed the HEAD with a commit by SOMEONE ELSE — this is the
+        # `Author:` we expect --reset-author to overwrite.
+        original_env = {
+            **__import__("os").environ,
+            "GIT_AUTHOR_NAME": "codex-bot",
+            "GIT_AUTHOR_EMAIL": "rt3628+codex-bot@gmail.com",
+            "GIT_COMMITTER_NAME": "codex-bot",
+            "GIT_COMMITTER_EMAIL": "rt3628+codex-bot@gmail.com",
+        }
+        (ws / "hello.py").write_text("x = 1\n")
+        g("add", ".", env=original_env)
+        g("commit", "-q", "-m", "baseline by codex-bot", env=original_env)
+
+        # Confirm pre-condition: HEAD's author IS codex-bot.
+        pre = g("log", "-1", "--format=%an <%ae>").stdout.strip()
+        assert "codex-bot" in pre, f"setup broken: pre-amend author = {pre!r}"
+
+        # Now run the pusher. It will write resolved_text + add + amend.
+        # We DON'T configure a remote — the push step will fail. That's
+        # fine; we only care that the AMEND step ran correctly. Inspect
+        # HEAD's author after the run.
+        pusher = ma.GitPatchsetPusher()
+        _run(pusher.push(
+            change_id="Itest1196phase2", project="omnisight",
+            workspace=str(ws), file_path="hello.py",
+            resolved_text="x = 42  # merger resolution\n",
+            commit_message="merger resolution",
+        ))
+
+        # Post-condition: HEAD's author is now merger-agent-bot.
+        post = g("log", "-1", "--format=%an <%ae>").stdout.strip()
+        assert "merger-agent-bot" in post, (
+            f"--reset-author regression: HEAD's author after amend is "
+            f"{post!r}, expected merger-agent-bot. The push step would "
+            f"have been rejected by Gerrit's forgeAuthor block."
+        )
+        # And the file content was applied.
+        assert (ws / "hello.py").read_text() == "x = 42  # merger resolution\n"
+        # And the Merger-Change-Id trailer was added.
+        body = g("log", "-1", "--format=%B").stdout
+        assert "Merger-Change-Id: Itest1196phase2" in body
+
 
 # ──────────────────────────────────────────────────────────────
 #  Metric counters fire on expected paths

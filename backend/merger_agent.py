@@ -417,8 +417,26 @@ class GitPatchsetPusher:
             return PatchsetPushResult(
                 ok=False, reason=f"git add failed: {err or out}"
             )
+        # OP-1196 phase 2 (2026-05-17): --reset-author rewrites the
+        # commit's `Author:` header from the original PS uploader to the
+        # ambient git identity (which the caller configures as
+        # merger-agent-bot before invoking this pusher). Without this
+        # flag, `--amend` preserves the original author; Gerrit then
+        # rejects with `email <original-author>@... is not registered
+        # in your account, and you lack 'forge author' permission`,
+        # because merger-agent-bot lacks (and SHOULD NOT have — per
+        # O10's forgeAuthor block mirrored in OP-1196 phase 1α)
+        # `forgeAuthor` permission. The reset-author path is the safe
+        # alternative: declare the merger as the AUTHOR of its
+        # resolution PS, which the audit trail should record anyway.
+        # Empirical verification (2026-05-17 #689 push test) confirmed
+        # this is the failing path absent the flag — Gerrit rejected
+        # with `commit 5620b38: email rt3628+codex-bot@gmail.com is
+        # not registered in your account, and you lack 'forge author'
+        # permission`. Adding --reset-author resolves it.
         rc, out, err = _git([
             "commit", "--amend", "--no-edit",
+            "--reset-author",
             "--trailer", f"Merger-Change-Id: {change_id}",
         ])
         if rc != 0:
