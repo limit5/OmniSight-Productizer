@@ -122,6 +122,14 @@ def test_registry_get_unknown_falls_back_to_generic_dev():
     assert not rule.batch_eligible
 
 
+def test_registry_get_unknown_without_generic_default_stays_realtime():
+    reg = EligibilityRegistry(defaults={})
+    rule = reg.get("invented_kind_xyz")
+    assert rule.task_kind == "invented_kind_xyz"
+    assert not rule.batch_eligible
+    assert rule.batch_priority == "P1"
+
+
 def test_registry_override_takes_precedence():
     reg = EligibilityRegistry()
     custom = EligibilityRule(
@@ -325,6 +333,24 @@ async def test_accumulator_buckets_by_kind_model_tools():
 
 
 @pytest.mark.asyncio
+async def test_accumulator_tools_signature_order_uses_same_bucket():
+    received: list[BatchableTask] = []
+
+    async def enqueue(t: BatchableTask) -> None:
+        received.append(t)
+
+    reg = EligibilityRegistry()
+    acc = AutoBatchAccumulator(reg, dispatcher_enqueue=enqueue)
+
+    await acc.add(_task("a", task_kind="hd_parse_kicad", tools=["Read", "Write"]))
+    await acc.add(_task("b", task_kind="hd_parse_kicad", tools=["Write", "Read"]))
+
+    assert acc.bucket_keys() == [("hd_parse_kicad", "claude-sonnet-4-6", "Read|Write")]
+    assert acc.pending_count == 2
+    assert received == []
+
+
+@pytest.mark.asyncio
 async def test_accumulator_flush_due_only_flushes_expired_buckets():
     received: list[BatchableTask] = []
 
@@ -351,6 +377,40 @@ async def test_accumulator_flush_due_only_flushes_expired_buckets():
     assert [task.task_id for task in received] == ["old"]
     assert acc.pending_count == 1
     assert acc.bucket_keys() == [("hd_parse_altium", "claude-opus-4-7", "")]
+
+
+@pytest.mark.asyncio
+async def test_accumulator_age_timeout_uses_first_task_time_for_bucket():
+    received: list[BatchableTask] = []
+
+    async def enqueue(t: BatchableTask) -> None:
+        received.append(t)
+
+    fake_t = [1000.0]
+    reg = EligibilityRegistry()
+    reg.set_override(EligibilityRule(
+        task_kind="todo_routine",
+        batch_eligible=True,
+        auto_batch_threshold=100,
+        reason="test",
+    ))
+    acc = AutoBatchAccumulator(
+        reg,
+        dispatcher_enqueue=enqueue,
+        max_age_seconds=10.0,
+        clock=lambda: fake_t[0],
+    )
+
+    await acc.add(_task("first"))
+    fake_t[0] = 1005.0
+    await acc.add(_task("second"))
+
+    fake_t[0] = 1011.0
+    flushed = await acc.flush_due()
+
+    assert flushed == 2
+    assert [task.task_id for task in received] == ["first", "second"]
+    assert acc.pending_count == 0
 
 
 @pytest.mark.asyncio
