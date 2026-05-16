@@ -7,6 +7,7 @@ documents and retrieval stays filtered to reflection-summary metadata.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pytest
@@ -63,6 +64,71 @@ class FakeStore:
         offset: int = 0,
     ) -> list[rag.VectorDocument]:
         raise AssertionError("list_by_tenant is not used by reflection_rag tests")
+
+
+class KeywordReflectionEmbedder:
+    TOPICS = (
+        ("pytest", "test", "assertion", "fixture", "coverage"),
+        ("lint", "ruff", "checkpatch", "format", "style"),
+        ("gerrit", "change-id", "review", "push", "codereview"),
+        ("jira", "ticket", "transition", "comment", "todo"),
+        ("pgvector", "embedding", "rag", "retrieval", "vector"),
+        ("prompt", "injection", "context", "budget", "lesson"),
+        ("tenant", "isolation", "rls", "scope", "cross-tenant"),
+        ("ratelimit", "quota", "throttle", "backoff", "429"),
+        ("sse", "stream", "event", "websocket", "emit"),
+        ("token", "cost", "spend", "pricing", "budget"),
+    )
+
+    async def embed_texts(self, texts: list[str]) -> list[list[float]]:
+        return [self._embed(text) for text in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return self._embed(text)
+
+    def _embed(self, text: str) -> list[float]:
+        lower = text.lower()
+        return [
+            float(sum(1 for token in topic if token in lower))
+            for topic in self.TOPICS
+        ]
+
+
+class ScoringStore(FakeStore):
+    async def upsert(self, documents: list[rag.VectorDocument]) -> None:
+        self.documents.extend(documents)
+
+    async def query(self, query: rag.VectorQuery) -> list[rag.VectorHit]:
+        self.queries.append(query)
+        hits: list[rag.VectorHit] = []
+        for doc in self.documents:
+            if doc.tenant_id != query.tenant_id:
+                continue
+            if query.source_path and doc.source_path != query.source_path:
+                continue
+            if any(doc.metadata.get(k) != v for k, v in query.metadata_filter.items()):
+                continue
+            hits.append(
+                rag.VectorHit(
+                    chunk_id=doc.chunk_id,
+                    tenant_id=doc.tenant_id,
+                    source_path=doc.source_path,
+                    chunk_text=doc.chunk_text,
+                    score=_cosine(query.embedding, doc.embedding),
+                    metadata=dict(doc.metadata),
+                )
+            )
+        hits.sort(key=lambda hit: (hit.score, hit.chunk_id), reverse=True)
+        return hits[: query.limit]
+
+
+def _cosine(left: list[float], right: list[float]) -> float:
+    numerator = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(sum(a * a for a in left))
+    right_norm = math.sqrt(sum(b * b for b in right))
+    if not left_norm or not right_norm:
+        return 0.0
+    return numerator / (left_norm * right_norm)
 
 
 def _summary(**kwargs: Any) -> rr.ReflectionSummary:
@@ -290,6 +356,61 @@ async def test_retrieve_reflection_summaries_validates_query_inputs():
             store=FakeStore(),
             outcome="blocked",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.asyncio
+async def test_reflection_rag_relevance_at_five_exceeds_synthetic_eval_floor():
+    eval_rows = (
+        ("OP-EVAL-1", "pytest fixture assertion coverage failure"),
+        ("OP-EVAL-2", "ruff lint checkpatch format style failure"),
+        ("OP-EVAL-3", "gerrit change-id review push codereview failure"),
+        ("OP-EVAL-4", "jira ticket transition comment todo failure"),
+        ("OP-EVAL-5", "pgvector embedding rag retrieval vector failure"),
+        ("OP-EVAL-6", "prompt injection context budget lesson failure"),
+        ("OP-EVAL-7", "tenant isolation rls scope cross-tenant failure"),
+        ("OP-EVAL-8", "ratelimit quota throttle backoff 429 failure"),
+        ("OP-EVAL-9", "sse stream event websocket emit failure"),
+        ("OP-EVAL-10", "token cost spend pricing budget failure"),
+    )
+    summaries = [
+        _summary(
+            ticket_key=ticket_key,
+            summary=f"Resolved {topic} by mirroring the existing RPG W6 pattern.",
+            metadata={"component": "RPG", "eval_topic": ticket_key},
+        )
+        for ticket_key, topic in eval_rows
+    ]
+    summaries.extend(
+        _summary(
+            ticket_key=f"OP-DISTRACTOR-{index}",
+            summary=f"Generic unrelated runner note {index} with no eval topic match.",
+            metadata={"component": "RPG", "eval_topic": "distractor"},
+        )
+        for index in range(12)
+    )
+    embedder = KeywordReflectionEmbedder()
+    store = ScoringStore()
+
+    await rr.vectorize_reflection_summaries(
+        summaries,
+        embedder=embedder,
+        store=store,
+    )
+
+    relevant = 0
+    for expected_ticket, query_text in eval_rows:
+        hits = await rr.retrieve_reflection_summaries(
+            tenant_id="t-acme",
+            query_text=query_text,
+            embedder=embedder,
+            store=store,
+            top_k=5,
+        )
+        if expected_ticket in {hit.ticket_key for hit in hits}:
+            relevant += 1
+
+    relevance_at_five = relevant / len(eval_rows)
+    assert relevance_at_five >= 0.7
 
 
 def test_pgvector_reflection_store_reuses_existing_pgvector_adapter():
