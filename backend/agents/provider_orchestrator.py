@@ -63,6 +63,7 @@ class TaskSpec:
     tier: str
     area: list[str]
     correlation_id: str | None = None
+    prefer_agent_id: str | None = None
 
 
 @dataclass(frozen=True)
