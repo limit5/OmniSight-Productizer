@@ -419,6 +419,47 @@ def emit_rpg_level_up(
     )
 
 
+def emit_rpg_talent_fork_required(
+    agent_id: str,
+    *,
+    milestone: int,
+    agent_level: int,
+    guild: str | None = None,
+    session_id: str | None = None,
+    broadcast_scope: str | None = None,
+    tenant_id: str | None = None,
+    **extra: Any,
+) -> None:
+    """RPG.W14.1 milestone-gate trigger for the operator UI.
+
+    Fired once per (agent_id, milestone) when a level-up transition
+    crosses one of :data:`backend.agents.talent_tree.MILESTONE_LEVELS`
+    (Lv 10 / 30 / 50 / 80). The Character Card "Talents" tab subscribes
+    to ``rpg.talent_fork_required`` and renders the W14.5 picker modal
+    that blocks task assignment until the operator commits a pick via
+    ``POST /agents/{id}/talents/lock``.
+    """
+    broadcast_scope = _resolve_scope(
+        "emit_rpg_talent_fork_required", broadcast_scope, "global",
+    )
+    bus.publish("rpg.talent_fork_required", {
+        "agent_id": agent_id,
+        "milestone": milestone,
+        "agent_level": agent_level,
+        "guild": guild,
+        "toast": {
+            "title": "Talent fork unlocked",
+            "message": f"{agent_id} reached Lv {milestone} — pick a talent.",
+        },
+        **extra,
+    }, session_id=session_id, broadcast_scope=broadcast_scope,
+       tenant_id=_auto_tenant(tenant_id))
+    _log(
+        f"[RPG] {agent_id} milestone Lv{milestone} reached "
+        f"(agent_level={agent_level}); talent fork required",
+    )
+
+
 def emit_task_update(task_id: str, status: str, assigned_agent_id: str | None = None,
                      session_id: str | None = None,
                      broadcast_scope: str | None = None,

@@ -46,7 +46,7 @@ target ship).
 | W7.2   | `backend/agents/tier_gate.py` — Tier X requires Lv ≥ 50 + skill ≥ Lv 3 | **Live** (OP-147) — pure helper + async resolver; W7.1 wires the call site once `prefer_agent_id` lands |
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
 | W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
-| W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1 |
+| W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219; W14.1 OP-185) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1; W14.1 trigger fires `rpg.talent_fork_required` on level-up |
 | W17    | `backend/agents/party.py` + `backend/agents/synergy_registry.py` + `config/synergy_matrix.yaml` + alembic 0230 | **Live** (OP-220) — party CRUD + synergy lookup + pre-pickup gate live |
 
 If a runbook step below names a surface that is "Deferred" in this
@@ -831,15 +831,41 @@ backend callers is `backend/agents/talent_tree.py`:
 | `await lock_talent(store, agent_id, guild, milestone, talent_id, *, agent_level=...)` | Idempotent + refuses re-write; gates on `agent_level >= milestone` |
 | `await agent_talent_summary(store, agent_id, *, capstone_store=...)` | Full talent chain + Lv-80 capstone lock |
 | `await lock_capstone_ability(...)` | Gated by Lv 80 + Lv-80 milestone talent already locked |
+| `milestones_crossed(previous_level, new_level)` | W14.1 — pure helper: which milestones a level-up transition crossed (ascending order; `()` when `new_level <= previous_level`) |
+| `pending_milestone_forks(agent_level, choices)` | W14.1 — pure helper: milestones the agent has reached but not yet locked a talent for; drives the picker modal |
 
-### Milestone gates
+### Milestone gates (W14.1)
 
 Locks are gated at **Lv 10 / 30 / 50 / 80** (agent.level from the W4.1
-`xp_engine`, NOT W12 per-skill levels). When an agent crosses a
-milestone and has no talent locked at that level yet, the
-`level_up(N)` hook emits `ui:talent_choice_required` SSE — the
-Character Card UI displays the "Pick required" indicator and renders
-the 3 buttons returned by `GET /agents/{id}/talents/options`.
+`xp_engine`, NOT W12 per-skill levels). When `CharacterCardRegistry.update_card`
+raises an agent's level past one of these gates, the `_emit_level_up_safely`
+hook in `backend/agents/character_card.py` walks
+`talent_tree.milestones_crossed(previous, new)` and emits one
+**`rpg.talent_fork_required`** SSE per milestone crossed via
+`backend.events.emit_rpg_talent_fork_required`. Payload shape:
+
+```json
+{
+  "agent_id": "agent-codex-alpha",
+  "milestone": 30,
+  "agent_level": 31,
+  "guild": "backend",
+  "toast": {
+    "title": "Talent fork unlocked",
+    "message": "agent-codex-alpha reached Lv 30 — pick a talent."
+  }
+}
+```
+
+The Character Card "Talents" tab subscribes to this event and renders
+the W14.5 picker modal that blocks task assignment until the operator
+commits a pick via `POST /agents/{id}/talents/lock`. On cold reads
+(no SSE replay) the same gate state is reconstructed from the
+`pending_milestone_forks` array in `GET /agents/{id}/talents` —
+the endpoint joins the talent rows against the character card's
+`level` column and runs `pending_milestone_forks(agent_level,
+summary.choices)` so the UI can light up the picker even if the
+operator missed the live event.
 
 ### YAML layout
 

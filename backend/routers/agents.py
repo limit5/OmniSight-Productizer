@@ -45,6 +45,7 @@ from backend.agents.talent_tree import (
     capstone_for_guild,
     lock_capstone_ability,
     lock_talent,
+    pending_milestone_forks,
 )
 from backend.agents.party import (
     MemberAlreadyInParty,
@@ -301,15 +302,32 @@ async def get_agent_talents(
     agent_id: str,
     conn: asyncpg.Connection = Depends(get_conn),
 ):
-    """RPG.W14: full talent chain + capstone for the Character Card."""
+    """RPG.W14: full talent chain + capstone for the Character Card.
+
+    W14.1 (OP-185): the response includes ``pending_milestone_forks``
+    — the Lv-10/30/50/80 gates the agent has reached but not yet
+    committed a pick to. The Character Card "Talents" tab (W14.5)
+    uses this list to drive the picker modal that blocks task
+    assignment until the operator commits.
+    """
     talent_store = PostgresTalentChoiceStore(lambda: _borrowed_conn(conn))
     capstone_store = PostgresCapstoneStore(lambda: _borrowed_conn(conn))
     summary = await agent_talent_summary(
         talent_store, agent_id, capstone_store=capstone_store,
     )
+    card_store = PostgresCharacterCardStore(lambda: _borrowed_conn(conn))
+    card = await card_store.get_card(agent_id)
+    agent_level = card.level if card is not None else 0
+    pending = (
+        pending_milestone_forks(agent_level, summary.choices)
+        if agent_level >= 1
+        else ()
+    )
     return {
         "agent_id": summary.agent_id,
+        "agent_level": agent_level,
         "milestones": [int(level) for level in MILESTONE_LEVELS],
+        "pending_milestone_forks": [int(level) for level in pending],
         "choices": [
             {
                 "milestone_level": choice.milestone_level,
