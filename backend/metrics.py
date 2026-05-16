@@ -763,6 +763,12 @@ if _AVAILABLE:
         labelnames=("dimension",),  # tenant | project | product_line
         registry=REGISTRY,
     )
+    capability_matrix_unexpected_fallback_total = Counter(
+        "omnisight_capability_matrix_unexpected_fallback_total",
+        "Capability matrix expected rows that fell back to read-only safe-default",
+        labelnames=("area", "tier", "issuetype"),
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -867,6 +873,7 @@ else:
     billing_workflow_runs_total = _NoOp()  # type: ignore
     billing_workspace_gb_hours_total = _NoOp()  # type: ignore
     metrics_label_cap_used = _NoOp()  # type: ignore
+    capability_matrix_unexpected_fallback_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1352,7 +1359,7 @@ def reset_for_tests() -> None:
     global billing_llm_calls_total, billing_llm_input_tokens_total
     global billing_llm_output_tokens_total, billing_llm_cost_usd_total
     global billing_workflow_runs_total, billing_workspace_gb_hours_total
-    global metrics_label_cap_used
+    global metrics_label_cap_used, capability_matrix_unexpected_fallback_total
     billing_llm_calls_total = Counter(
         "omnisight_billing_llm_calls_total",
         "LLM calls fan-outed to billing, by tenant/project/product_line/provider/model",
@@ -1396,5 +1403,11 @@ def reset_for_tests() -> None:
         "omnisight_metrics_label_cap_used",
         "Fraction (0..1) of the per-worker label cap consumed by tracked values",
         labelnames=("dimension",),
+        registry=REGISTRY,
+    )
+    capability_matrix_unexpected_fallback_total = Counter(
+        "omnisight_capability_matrix_unexpected_fallback_total",
+        "Capability matrix expected rows that fell back to read-only safe-default",
+        labelnames=("area", "tier", "issuetype"),
         registry=REGISTRY,
     )

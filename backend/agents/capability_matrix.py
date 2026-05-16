@@ -26,6 +26,7 @@ config file (no DB state).
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -58,6 +59,9 @@ CAPABILITIES: frozenset[str] = frozenset({
 
 LABEL_ENABLE_PREFIX = "capability:enable="
 LABEL_DISABLE_PREFIX = "capability:disable="
+STRICT_FALLBACK_ENV = "OMNISIGHT_CAPABILITY_FALLBACK_STRICT"
+_EXPECTED_LABEL_VALUE_LIMIT = 10
+_ExpectedTriple = tuple[str, str, str]
 
 
 # ── Issuetype name localization (OP-986 / CapabilityMatrixLocaleDrift) ──
@@ -137,6 +141,10 @@ class CapabilityMatrixMissingEntry(LookupError):
         )
 
 
+class CapabilityMatrixUnexpectedMiss(CapabilityMatrixMissingEntry):
+    """An expected matrix row was absent and fell to the safe default."""
+
+
 class CapabilityNotPermitted(PermissionError):
     """Runner attempted a capability not enabled for this ticket."""
 
@@ -157,6 +165,7 @@ class CapabilityMatrix:
     capabilities: frozenset[str]
     read_only_default: frozenset[str]
     entries: Mapping[str, Mapping[str, Mapping[str, frozenset[str]]]]
+    expected_triples: frozenset[_ExpectedTriple] = frozenset()
     source_path: Path | None = None
 
     def resolve(
@@ -167,6 +176,7 @@ class CapabilityMatrix:
         *,
         labels: Iterable[str] = (),
         strict: bool = False,
+        ticket_id: str | None = None,
     ) -> frozenset[str]:
         """Return enabled capabilities for ``(ticket_type, area, tier)``.
 
@@ -182,7 +192,7 @@ class CapabilityMatrix:
         Label overrides apply in both cases so an operator can rescue a
         missing-entry ticket without first patching the YAML.
         """
-        base = self._lookup(ticket_type, area, tier)
+        base = self._lookup(ticket_type, area, tier, ticket_id=ticket_id)
         if base is None:
             adjusted = apply_label_overrides(self.read_only_default, labels)
             if strict:
@@ -205,6 +215,7 @@ class CapabilityMatrix:
         *,
         labels: Iterable[str] = (),
         strict: bool = False,
+        ticket_id: str | None = None,
     ) -> frozenset[str]:
         """Union of :meth:`resolve` across each area.
 
@@ -221,7 +232,7 @@ class CapabilityMatrix:
         union: set[str] = set()
         missing: list[str] = []
         for area in area_list:
-            base = self._lookup(ticket_type, area, tier)
+            base = self._lookup(ticket_type, area, tier, ticket_id=ticket_id)
             if base is None:
                 missing.append(area)
             else:
@@ -256,17 +267,60 @@ class CapabilityMatrix:
         return tuple(sorted(self.entries.get(ticket_type, {}).get(area, {})))
 
     def _lookup(
-        self, ticket_type: str, area: str, tier: str
+        self, ticket_type: str, area: str, tier: str, *, ticket_id: str | None = None
     ) -> frozenset[str] | None:
         # Normalize a (possibly localized) JIRA issuetype name to the English
         # key used in the YAML — see ``canonical_issuetype`` / OP-986.
-        by_area = self.entries.get(canonical_issuetype(ticket_type))
+        canonical_type = canonical_issuetype(ticket_type)
+        by_area = self.entries.get(canonical_type)
         if by_area is None:
+            self._handle_expected_fallback(
+                canonical_type, area, tier, ("ticket_type",), ticket_id=ticket_id
+            )
             return None
         by_tier = by_area.get(area)
         if by_tier is None:
+            self._handle_expected_fallback(
+                canonical_type, area, tier, ("area",), ticket_id=ticket_id
+            )
             return None
-        return by_tier.get(tier)
+        caps = by_tier.get(tier)
+        if caps is None:
+            self._handle_expected_fallback(
+                canonical_type, area, tier, ("tier",), ticket_id=ticket_id
+            )
+        return caps
+
+    def _handle_expected_fallback(
+        self,
+        ticket_type: str,
+        area: str,
+        tier: str,
+        missing_keys: tuple[str, ...],
+        *,
+        ticket_id: str | None,
+    ) -> None:
+        if (ticket_type, area, tier) not in self.expected_triples:
+            return
+        payload = {
+            "event": "capability_matrix.fallback_used",
+            "area": area,
+            "tier": tier,
+            "issuetype": ticket_type,
+            "missing_keys": list(missing_keys),
+            "ticket_id": ticket_id,
+        }
+        log.warning(
+            "capability_matrix.fallback_used area=%s tier=%s issuetype=%s "
+            "missing_keys=%s ticket_id=%s",
+            area, tier, ticket_type, ",".join(missing_keys), ticket_id,
+            extra=payload,
+        )
+        _increment_unexpected_fallback_metric(area, tier, ticket_type)
+        if _strict_fallback_enabled():
+            raise CapabilityMatrixUnexpectedMiss(
+                ticket_type, area, tier, self.read_only_default
+            )
 
 
 def load_capability_matrix(
@@ -310,6 +364,7 @@ def load_capability_matrix(
         )
 
     entries: dict[str, dict[str, dict[str, frozenset[str]]]] = {}
+    expected_triples: set[_ExpectedTriple] = set()
     for ticket_type, by_area in matrix_raw.items():
         if not isinstance(by_area, dict) or not by_area:
             raise CapabilityMatrixError(
@@ -323,7 +378,12 @@ def load_capability_matrix(
                     "must be a non-empty mapping"
                 )
             per_tier: dict[str, frozenset[str]] = {}
-            for tier, caps in by_tier.items():
+            for tier, entry in by_tier.items():
+                expected = True
+                caps = entry
+                if isinstance(entry, dict):
+                    expected = bool(entry.get("expected", True))
+                    caps = entry.get("capabilities")
                 if not isinstance(caps, list):
                     raise CapabilityMatrixError(
                         f"capability_matrix.matrix[{ticket_type!r}][{area!r}][{tier!r}] "
@@ -334,15 +394,22 @@ def load_capability_matrix(
                     clean, declared_caps,
                     f"matrix[{ticket_type!r}][{area!r}][{tier!r}]",
                 )
-                per_tier[str(tier)] = clean
+                tier_key = str(tier)
+                per_tier[tier_key] = clean
+                if expected:
+                    expected_triples.add((str(ticket_type), str(area), tier_key))
             per_area[str(area)] = MappingProxyType(per_tier)  # type: ignore[assignment]
         entries[str(ticket_type)] = MappingProxyType(per_area)  # type: ignore[assignment]
+
+    expected_triples |= _parse_expected_coverage(raw.get("expected_coverage"))
+    _assert_expected_label_cardinality(expected_triples)
 
     return CapabilityMatrix(
         schema_version=1,
         capabilities=declared_caps,
         read_only_default=read_only_default,
         entries=MappingProxyType(entries),  # type: ignore[arg-type]
+        expected_triples=frozenset(expected_triples),
         source_path=matrix_path,
     )
 
@@ -460,15 +527,70 @@ def _assert_subset(
         )
 
 
+def _parse_expected_coverage(raw: Any) -> set[_ExpectedTriple]:
+    if raw is None:
+        return set()
+    if not isinstance(raw, dict):
+        raise CapabilityMatrixError("capability_matrix.expected_coverage must be a mapping")
+    triples: set[_ExpectedTriple] = set()
+    for ticket_type, by_area in raw.items():
+        if not isinstance(by_area, dict):
+            raise CapabilityMatrixError(
+                f"capability_matrix.expected_coverage[{ticket_type!r}] must be a mapping"
+            )
+        for area, tiers in by_area.items():
+            if tiers is True:
+                raise CapabilityMatrixError(
+                    "expected_coverage area-wide true requires explicit tiers"
+                )
+            if not isinstance(tiers, list):
+                raise CapabilityMatrixError(
+                    f"capability_matrix.expected_coverage[{ticket_type!r}][{area!r}] "
+                    "must be a list of tier strings"
+                )
+            for tier in tiers:
+                triples.add((str(ticket_type), str(area), str(tier)))
+    return triples
+
+
+def _assert_expected_label_cardinality(triples: set[_ExpectedTriple]) -> None:
+    for index, label in enumerate(("issuetype", "area", "tier")):
+        values = {triple[index] for triple in triples}
+        if len(values) > _EXPECTED_LABEL_VALUE_LIMIT:
+            raise CapabilityMatrixError(
+                "capability_matrix expected coverage exceeds Prometheus label "
+                f"cardinality limit for {label}: {len(values)} > "
+                f"{_EXPECTED_LABEL_VALUE_LIMIT}"
+            )
+
+
+def _strict_fallback_enabled() -> bool:
+    return os.environ.get(STRICT_FALLBACK_ENV, "").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+
+
+def _increment_unexpected_fallback_metric(area: str, tier: str, issuetype: str) -> None:
+    try:
+        from backend import metrics as _metrics
+        _metrics.capability_matrix_unexpected_fallback_total.labels(
+            area=area, tier=tier, issuetype=issuetype
+        ).inc()
+    except Exception:  # noqa: BLE001 - observability must not block pickup
+        log.debug("capability_matrix unexpected fallback metric publish failed", exc_info=True)
+
+
 __all__ = [
     "CAPABILITIES",
     "CapabilityMatrix",
     "CapabilityMatrixError",
     "CapabilityMatrixMissingEntry",
+    "CapabilityMatrixUnexpectedMiss",
     "CapabilityNotPermitted",
     "DEFAULT_MATRIX_PATH",
     "LABEL_DISABLE_PREFIX",
     "LABEL_ENABLE_PREFIX",
+    "STRICT_FALLBACK_ENV",
     "apply_label_overrides",
     "canonical_issuetype",
     "load_capability_matrix",
