@@ -52,7 +52,7 @@ refuses to start if any is missing:
 OMNISIGHT_ENV=production                      # triggers ENV=production + strict gate
 OMNISIGHT_AUTH_MODE=strict                    # session + admin required
 OMNISIGHT_ADMIN_PASSWORD=<rotate-me>          # C1 — must be strong, ≥ 12 chars, not "omnisight-admin"
-OMNISIGHT_DECISION_BEARER=<rotate-me>         # H1 — ≥ 16 chars random secret
+OMNISIGHT_DECISION_BEARER=<rotate-me>         # H1 — ≥ 16 chars; DEPRECATED FX2.D4.4 / OP-237: sunset target = next major; migrate to Admin UI > API Keys (K6) — see docs/ops/security_baseline.md §3
 OMNISIGHT_COOKIE_SECURE=true                  # HTTPS via Cloudflare Tunnel
 
 # ── LLM provider (one of) ──

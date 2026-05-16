@@ -185,6 +185,11 @@ Check:
    `ConfigValidationError` from `validate_startup_config()`.
 2. `backend/main.py:56-61` raises on missing critical env
    (`OMNISIGHT_DECISION_BEARER`, provider API keys) in prod mode.
+   *(`OMNISIGHT_DECISION_BEARER` is on the sunset path per
+   FX2.D4.4 / OP-237 — see `docs/ops/security_baseline.md` §3; the
+   missing-bearer alarm stays for the deprecation window so deploys
+   that simply drop the env var without creating Admin UI API keys
+   still get caught.)*
 3. `/readyz` checks DB + Redis (when configured). A failed Redis means
    `/readyz` returns 503 even though the process is running. See
    `backend/routers/health.py`.

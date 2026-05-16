@@ -17,6 +17,13 @@ The backend rejected the call with 401 / 403.
 - **Fix**: open Settings → provider tab → re-enter the bearer; or
   unset `OMNISIGHT_DECISION_BEARER` in `.env` for single-user local
   deploys.
+- **Note (FX2.D4.4 / OP-237, 2026-05-16)**: `OMNISIGHT_DECISION_BEARER`
+  is DEPRECATED and scheduled for removal in the next major release.
+  Use Admin UI → API Keys to issue a per-service `omni_*` bearer
+  instead (K6). The legacy env var is auto-migrated into an
+  `api_keys` row on first boot and is still honoured for the
+  deprecation window; once you've created per-service keys you can
+  drop the env var.
 
 ### `[RATE LIMITED] ...`
 Sliding-window throttle kicked in (30 req / 10 s per client IP by

@@ -25,7 +25,12 @@ router = APIRouter(tags=["profile"])
 def _require_token(authorization: str | None = Header(default=None)) -> None:
     """Gate for decision mutations. Per-key validation happens in
     current_user(); this only ensures a bearer is present when the
-    legacy env is set (backwards compat)."""
+    legacy env is set (backwards compat).
+
+    FX2.D4.4 (OP-237, 2026-05-16): the env-var probe below is on the
+    sunset path — removal targeted at next major, per AS.0.4 Track B.
+    Once AS.6 ports this router to ``Depends(_au.require_api_key)``
+    the env check here disappears entirely."""
     expected = os.environ.get("OMNISIGHT_DECISION_BEARER", "").strip()
     if not expected:
         return

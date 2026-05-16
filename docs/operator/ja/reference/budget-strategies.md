@@ -89,6 +89,11 @@ mode と同様、PUT `/api/v1/budget-strategy` は `OMNISIGHT_DECISION_BEARER`
 設定時に bearer token 必須、レート制限はクライアント IP あたり 10 秒で
 30 リクエスト。
 
+> **非推奨 (FX2.D4.4 / OP-237, 2026-05-16)**:
+> [operation-modes.md](./operation-modes.md) の「MODE を変更できる人」を
+> 参照。`OMNISIGHT_DECISION_BEARER` はサンセット対象。Admin UI →
+> API Keys から per-service トークン (K6) を発行してください。
+
 ## 内部実装
 
 - バックエンド: `backend/budget_strategy.py` · `_TUNINGS` が上記 4 行の

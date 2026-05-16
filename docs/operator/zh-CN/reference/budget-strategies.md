@@ -83,6 +83,11 @@ DOWNGRADE 与 FREEZE 阈值对应每日 LLM token 预算
 与 mode 相同，PUT `/api/v1/budget-strategy` 若 `OMNISIGHT_DECISION_BEARER`
 有设则需 bearer token；速率限制为每客户端 IP 每 10 秒 30 次。
 
+> **弃用（FX2.D4.4 / OP-237, 2026-05-16）**：
+> 详见 [operation-modes.md](./operation-modes.md) "谁能改 MODE"。
+> `OMNISIGHT_DECISION_BEARER` 已纳入 sunset，请在 Admin UI →
+> API Keys 内签发 per-service token (K6) 替代。
+
 ## 内部实现
 
 - 后端：`backend/budget_strategy.py` · `_TUNINGS` 即上表 4 行冻结 dict。

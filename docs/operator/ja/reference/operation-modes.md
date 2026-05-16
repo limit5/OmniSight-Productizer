@@ -67,6 +67,13 @@ MODE を上げてください。
 (UI は localStorage から token を読取)。未設定なら、バックエンドに
 到達可能な全員が操作可能 — ローカル単独利用なら OK、共有環境では非推奨。
 
+> **非推奨 (FX2.D4.4 / OP-237, 2026-05-16)**:
+> `OMNISIGHT_DECISION_BEARER` は次のメジャーで削除予定。
+> **Admin UI → API Keys** から per-service の `omni_*` bearer (K6) を
+> 発行し、env var を外してください。起動時に既存値は `api_keys`
+> 行へ自動移行されるため、移行期間中の呼出元が 401 になることは
+> ありません。
+
 ## 内部実装
 
 - フロント: `components/omnisight/mode-selector.tsx` — セグメント pill +

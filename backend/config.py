@@ -1155,6 +1155,15 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
     hard_errors: list[str] = []
 
     # ── Bearer token ──
+    # FX2.D4.4 (OP-237, 2026-05-16): OMNISIGHT_DECISION_BEARER is on the
+    # sunset path. K6 ``api_keys`` table is the supported replacement —
+    # ``migrate_legacy_bearer()`` at lifespan startup moves the env value
+    # into a hashed ``api_keys`` row (id ``ak-legacy-<sha[:12]>``), and
+    # operators should create per-service keys via Admin UI > API Keys.
+    # Removal is targeted at the next major release; until then the var
+    # is honoured for backwards compat but every prod boot that still
+    # carries it emits a deprecation warning so the signal can't be
+    # silently ignored.
     bearer = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if bearer:
         if len(bearer) < _MIN_BEARER_LEN:
@@ -1164,12 +1173,27 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
                 "that size — use at least 16."
             )
             (hard_errors if strict else warnings).append(msg)
+        warnings.append(
+            "OMNISIGHT_DECISION_BEARER is DEPRECATED and scheduled for "
+            "removal in the next major release. K6 has auto-migrated it "
+            "into the api_keys table; create per-service keys via "
+            "Admin UI > API Keys, then unset the env var. See "
+            "docs/ops/security_baseline.md §3 + "
+            "docs/security/as_0_4_credential_refactor_migration_plan.md "
+            "Track B for the migration path."
+        )
     else:
         # Empty bearer leaves DE mutator endpoints open. Fine in dev,
         # foot-gun in prod. Audit H1 (2026-04-19): upgrade to hard error
         # under strict mode — mirrors C1's admin-password treatment, so
         # a production deploy that forgets the bearer env can't silently
         # ship open mutator endpoints.
+        #
+        # FX2.D4.4 (OP-237): once the legacy env is gone, operators are
+        # expected to gate mutators via api_keys entries instead; the
+        # "empty bearer = open" alarm stays for the deprecation window
+        # so deployments that simply unset the var without creating
+        # api_keys rows still get caught at startup.
         msg = (
             "OMNISIGHT_DECISION_BEARER is empty — Decision Engine "
             "mutator endpoints (approve/reject/undo/mode) are OPEN. "

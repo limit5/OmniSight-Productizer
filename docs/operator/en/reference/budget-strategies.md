@@ -96,6 +96,11 @@ Like mode, the PUT endpoint (`/api/v1/budget-strategy`) is behind
 `OMNISIGHT_DECISION_BEARER` if that env var is set, and is rate-limited
 to 30 requests / 10 s per client IP.
 
+> **Deprecation (FX2.D4.4 / OP-237, 2026-05-16)**: see
+> [operation-modes.md](./operation-modes.md) "Who can change mode" —
+> `OMNISIGHT_DECISION_BEARER` is sunset-tracked. Issue per-service
+> tokens via Admin UI → API Keys (K6) instead.
+
 ## Under the hood
 
 - Backend: `backend/budget_strategy.py` · `_TUNINGS` is the 4-row

@@ -50,6 +50,27 @@ OMNISIGHT_ADMIN_PASSWORD="$(openssl rand -base64 24)"
 
 ## 3. Bearer Token (Service-to-Service)
 
+> **DEPRECATED — FX2.D4.4 / OP-237 (2026-05-16).**
+> `OMNISIGHT_DECISION_BEARER` is on the sunset path. The supported
+> replacement is the K6 `api_keys` table — issue per-service `omni_*`
+> bearers from **Admin UI → API Keys** (each scoped, hashed, auditable,
+> revocable without a backend restart). The legacy env var is
+> auto-migrated into a hashed `ak-legacy-<sha[:12]>` row on first
+> boot (`backend.api_keys.migrate_legacy_bearer`), so existing CI
+> scripts continue to authenticate while you cut over.
+>
+> Removal of the env-var fallback is targeted at the next major
+> release. New deployments should not use `OMNISIGHT_DECISION_BEARER`
+> at all; existing deployments should plan a one-cycle migration:
+>
+> 1. Boot once with the env var present so the legacy row is written.
+> 2. Create per-service keys via Admin UI > API Keys.
+> 3. Roll callers onto the new keys.
+> 4. Unset `OMNISIGHT_DECISION_BEARER`.
+>
+> See `docs/security/as_0_4_credential_refactor_migration_plan.md`
+> Track B for the full expand-migrate-contract recipe.
+
 The `OMNISIGHT_DECISION_BEARER` token allows CI/CD pipelines and internal
 services to call Decision Engine mutator endpoints without a session cookie.
 
@@ -58,6 +79,7 @@ services to call Decision Engine mutator endpoints without a session cookie.
 | Minimum length | 16 characters (128-bit entropy) |
 | Scope | Restrict to CI runner IPs via reverse-proxy allowlist |
 | Rotation | Rotate quarterly; revoke immediately on compromise |
+| Status | **Deprecated** — prefer K6 `api_keys` per-service tokens |
 
 ```bash
 OMNISIGHT_DECISION_BEARER="$(openssl rand -base64 32)"
@@ -115,7 +137,7 @@ Ensure `runsc` is installed on the host (`runsc --version`).
 - [ ] `OMNISIGHT_ENV=production`
 - [ ] `OMNISIGHT_AUTH_MODE=strict`
 - [ ] `OMNISIGHT_ADMIN_PASSWORD` set to a strong passphrase (not `omnisight-admin`)
-- [ ] `OMNISIGHT_DECISION_BEARER` set (16+ chars), access restricted to CI allowlist IPs
+- [ ] `OMNISIGHT_DECISION_BEARER` set (16+ chars), access restricted to CI allowlist IPs *(deprecated — see §3; prefer per-service K6 keys via Admin UI → API Keys, sunset target = next major)*
 - [ ] `OMNISIGHT_COOKIE_SECURE=true`
 - [ ] `OMNISIGHT_FRONTEND_ORIGIN` set to production domain
 - [ ] Default admin password changed after first login

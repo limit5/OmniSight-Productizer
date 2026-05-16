@@ -78,7 +78,18 @@ history).
 - `budget-strategy-panel` error banner auto-clears after 10 s.
 
 ### Deprecated / Removed
-- Nothing yet.
+- **`OMNISIGHT_DECISION_BEARER` env var is DEPRECATED** (FX2.D4.4 /
+  OP-237, 2026-05-16). The K6 `api_keys` table is the supported
+  replacement — issue per-service `omni_*` bearers from Admin UI →
+  API Keys. The env var is auto-migrated into a hashed
+  `ak-legacy-<sha[:12]>` row on first boot and is still honoured for
+  the deprecation window, but every boot that still carries it now
+  emits a startup warning and every request that authenticates via
+  the legacy path logs `[AUTH][DEPRECATION] ...`. Removal of the
+  env-var fallback is targeted at the next major release. See
+  `docs/ops/security_baseline.md` §3 and
+  `docs/security/as_0_4_credential_refactor_migration_plan.md`
+  Track B for the migration path.
 
 ### Security
 - Optional bearer-token gate on decision mutators
