@@ -25,6 +25,9 @@ ENV:
   OMNISIGHT_RUNNER_TARGET      optional ticket key override (skip scheduler,
                                pickup specific ticket — for testing)
   OMNISIGHT_RUNNER_DRY_RUN     if "1", do everything except transition + invoke
+  OMNISIGHT_RUNNER_CLAIM_SHADOW
+                               if unset/"on", JIRA claim labels are shadow-written
+                               to runner_coordination (OP-1168 observation)
   OMNISIGHT_CODEX_WORKTREE     codex worktree override (defaults to
                                ../OmniSight-codex-worktree for default
                                instance; ../OmniSight-<bot>-worktree for
