@@ -72,7 +72,8 @@ class ProjectStateAxisTimeout(TimeoutError):
         self.axis = axis
         self.deadline_sec = deadline_sec
         super().__init__(
-            f"project_state axis {axis!r} exceeded {deadline_sec:.3f}s budget"
+            f"project_state_aggregator: axis {axis!r} exceeded per-axis "
+            f"budget of {deadline_sec:.3f}s"
         )
 
 
@@ -82,7 +83,10 @@ class ProjectStateAllAxesFailed(RuntimeError):
 
     def __init__(self, errors: dict[str, str]) -> None:
         self.errors = dict(errors)
-        super().__init__(f"all axes failed: {errors}")
+        super().__init__(
+            f"project_state_aggregator: all {len(errors)} axes failed; "
+            f"per-axis errors={errors}"
+        )
 
 
 class ProjectStateBudgetExceeded(TimeoutError):
@@ -96,8 +100,9 @@ class ProjectStateBudgetExceeded(TimeoutError):
         self.latencies = dict(latencies)
         self.completed = dict(completed)
         super().__init__(
-            f"project_state total budget exceeded; completed axes: "
-            f"{sorted(completed.keys())}"
+            f"project_state_aggregator: total wall-clock budget of "
+            f"{TOTAL_BUDGET_SEC:.3f}s exceeded; completed axes="
+            f"{sorted(completed.keys())} latencies_sec={latencies}"
         )
 
 
@@ -146,7 +151,10 @@ class ProjectStateBudgets:
             return self.temporal_sec
         if axis == AXIS_CAUSAL:
             return self.causal_sec
-        raise ValueError(f"unknown axis {axis!r}")
+        raise ValueError(
+            f"project_state_aggregator.ProjectStateBudgets.per_axis: "
+            f"unknown axis {axis!r}; valid axes={list(ALL_AXES)}"
+        )
 
 
 @dataclass
@@ -266,7 +274,12 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
     try:
         from backend.agents import jira_dispatch
     except ImportError as exc:
-        log.info("project_state.structural.jira_unavailable: %s", exc)
+        log.info(
+            "project_state.structural.jira_unavailable ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
         return {}
 
     def _sync_pull() -> dict[str, Any]:
@@ -282,7 +295,12 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
     try:
         return await asyncio.to_thread(_sync_pull)
     except Exception as exc:  # noqa: BLE001 — degrade-on-anything
-        log.info("project_state.structural.jira_degrade: %s", exc)
+        log.info(
+            "project_state.structural.jira_degrade ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
         return {}
 
 
@@ -300,7 +318,12 @@ async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
             top_k=5,
         )
     except Exception as exc:  # noqa: BLE001 — degrade per AC #3
-        log.info("project_state.structural.cognee_degrade: %s", exc)
+        log.info(
+            "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
         return {}
     return {
         "kg_neighbours": [
@@ -334,7 +357,12 @@ async def _temporal_graphiti(ticket_key: str) -> dict[str, Any]:
             dispatcher=dispatcher,
         )
     except Exception as exc:  # noqa: BLE001
-        log.info("project_state.temporal.graphiti_degrade: %s", exc)
+        log.info(
+            "project_state.temporal.graphiti_degrade ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
         return {}
     if not isinstance(timeline, dict):
         return {}
@@ -384,7 +412,12 @@ async def _causal_failure_neighbours(ticket_key: str) -> dict[str, Any]:
                 break
         return {"ticket": ticket_key, "neighbours": neighbours[:3]}
     except Exception as exc:  # noqa: BLE001
-        log.info("project_state.causal.failure_graph_degrade: %s", exc)
+        log.info(
+            "project_state.causal.failure_graph_degrade ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
         return {"ticket": ticket_key, "neighbours": []}
 
 
@@ -439,9 +472,13 @@ async def _run_axis(
     except Exception as exc:  # noqa: BLE001 — degrade-per-axis per AC #3
         latency = time.monotonic() - start
         log.warning(
-            "project_state.axis_failure axis=%s ticket=%s err=%s",
+            "project_state.axis_failure axis=%s ticket=%s latency_sec=%.3f "
+            "budget=%.3f err_type=%s err=%s",
             name,
             ticket_key,
+            latency,
+            deadline_sec,
+            type(exc).__name__,
             exc,
         )
         return AxisResult(
@@ -544,17 +581,32 @@ async def aggregate_project_state(
 
     if all(r.payload is None for r in results.values()):
         errors = {name: r.error or "no_payload" for name, r in results.items()}
-        log.warning("project_state.all_axes_failed ticket=%s errors=%s", ticket_key, errors)
+        log.warning(
+            "project_state.all_axes_failed ticket=%s develop_sha=%s "
+            "total_latency_sec=%.3f errors=%s",
+            ticket_key,
+            develop_sha,
+            total_latency,
+            errors,
+        )
         # The router catches this and emits 200 with all-null axes per
         # AC error catalog; raising here makes the operator log line
         # carry the typed reason for triage.
         raise ProjectStateAllAxesFailed(errors)
 
     if budget_exceeded:
+        cancelled = sorted(
+            name for name, r in results.items()
+            if r.error == "ProjectStateBudgetExceeded"
+        )
         log.warning(
-            "project_state.budget_exceeded ticket=%s total_latency_sec=%.3f",
+            "project_state.budget_exceeded ticket=%s develop_sha=%s "
+            "total_latency_sec=%.3f total_budget_sec=%.3f cancelled_axes=%s",
             ticket_key,
+            develop_sha,
             total_latency,
+            budgets.total_sec,
+            cancelled,
         )
 
     return payload
