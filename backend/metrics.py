@@ -706,6 +706,17 @@ if _AVAILABLE:
         "1 if alembic head on disk > applied revision, 0 if aligned",
         registry=REGISTRY,
     )
+    alembic_drift = Gauge(
+        "omnisight_alembic_drift",
+        "Alembic image-vs-DB drift state by direction",
+        labelnames=("direction",),
+        registry=REGISTRY,
+    )
+    alembic_drift_probe_errors_total = Counter(
+        "omnisight_alembic_drift_probe_errors_total",
+        "Alembic drift probe collection failures",
+        registry=REGISTRY,
+    )
 
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics.
     # Cardinality is bucketed via ``backend.metrics_labels.bucket_*``
@@ -878,6 +889,8 @@ else:
     replica_lag_seconds = _NoOp()  # type: ignore
     readyz_latency_seconds = _NoOp()  # type: ignore
     readyz_migrations_pending = _NoOp()  # type: ignore
+    alembic_drift = _NoOp()  # type: ignore
+    alembic_drift_probe_errors_total = _NoOp()  # type: ignore
     # Y9 #285 row 4 — billing metrics with (tenant, project, product_line)
     billing_llm_calls_total = _NoOp()  # type: ignore
     billing_llm_input_tokens_total = _NoOp()  # type: ignore
@@ -1338,6 +1351,7 @@ def reset_for_tests() -> None:
     global backend_instance_up, rolling_deploy_responses_total
     global rolling_deploy_5xx_rate, replica_lag_seconds, readyz_latency_seconds
     global readyz_migrations_pending
+    global alembic_drift, alembic_drift_probe_errors_total
     backend_instance_up = Gauge(
         "omnisight_backend_instance_up",
         "1 when this backend replica is serving traffic, 0 when draining/down",
@@ -1368,6 +1382,17 @@ def reset_for_tests() -> None:
     readyz_migrations_pending = Gauge(
         "omnisight_readyz_migrations_pending",
         "1 if alembic head on disk > applied revision, 0 if aligned",
+        registry=REGISTRY,
+    )
+    alembic_drift = Gauge(
+        "omnisight_alembic_drift",
+        "Alembic image-vs-DB drift state by direction",
+        labelnames=("direction",),
+        registry=REGISTRY,
+    )
+    alembic_drift_probe_errors_total = Counter(
+        "omnisight_alembic_drift_probe_errors_total",
+        "Alembic drift probe collection failures",
         registry=REGISTRY,
     )
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics
