@@ -480,6 +480,8 @@ These 7 subcontracts are the implementation contract for **v2-⑥-2bc** (forward
 
 ### Family ⑤ — Shipped-but-not-deployed runtime detector
 
+**Contract spec doc** (filed 2026-05-16, OP-1154): [`docs/sprint-s12/2026-05-16-v2-family5-image-surfacing-contract.md`](2026-05-16-v2-family5-image-surfacing-contract.md) — audit contract (4 truth-sources + join rule), `/version` endpoint contract, `MANIFEST.json` schema + build-time bake invariants, drift detection state machine, evidence-file contract for `docs/audit/AUDIT-deployment/YYYY-MM-DD.json`, `OmniSightStaleImage` alert routing per v2-AlertBridge-1a, cross-family handoff to ⑥/⑩/31.G/31.C, AutoRedeploy Option (a)/(b) decision. Downstream Family ⑤ tickets cite that doc's §-anchors in their AC.
+
 **Why**: today's image was 7 days stale; no system flagged it; AUDIT-23 / OP-976 promised `scripts/deployment-audit.sh` + daily cron but neither exists.
 
 **Defense dimensions covered**: D1 (detection — new) + D2 (remediation — new). D3/D4/D5 N/A (audit is observational only).
