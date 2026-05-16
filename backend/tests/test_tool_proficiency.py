@@ -24,20 +24,29 @@ from backend.agents.mp_w17_telemetry_consumer import consume_batch, consume_even
 from backend.agents.mp_w17_telemetry_consumer import consume_invocation_log_line
 from backend.agents.mp_w17_telemetry_consumer import payload_from_invocation_log
 from backend.agents.tool_proficiency import (
+    CROSS_GUILD_HANDOFF_REQUIRED_LEVEL,
     InMemoryToolProficiencyStore,
     LEVEL_REQUIREMENTS,
     MAX_TOOL_LEVEL,
+    PeerHandoffSuccessRate,
     ProficiencyGateConfigMissing,
     TOOL_LEVEL_SPECS,
     ToolLevelSpec,
+    TOOL_ID_CROSS_GUILD_HANDOFF,
+    TOOL_ID_PEER_HANDOFF,
     ToolProficiencyState,
     build_feature_unlock_gate,
     can_invoke_at_level,
+    can_perform_cross_guild_handoff,
     capability_for_level,
     compute_tool_level,
     get_required_level,
     install_feature_unlock_gate,
+    is_cross_guild_handoff,
     list_proficiencies,
+    peer_handoff_success_rate,
+    peer_handoff_tool_id,
+    record_peer_handoff_outcome,
     record_tool_invocation,
     reset_gate_config_cache_for_tests,
     tool_level_spec,
@@ -1071,6 +1080,211 @@ async def test_dispatcher_tool_invocation_telemetry_includes_agent_id(
         "success": True,
         "agent_id": AGENT,
     }]
+# ── W13.4 (OP-181) A2A peer-handoff + cross-Guild Lv-4 gate ─────────
+
+
+def test_w13_4_constants_match_adr_and_shipped_yaml():
+    """W13.4 — the helper constants must agree with the shipped YAML
+    (``mcp__a2a__cross_guild_handoff: 4``) and with the ADR-0008 Lv-4
+    row. Drift here would silently disable the Lv-4 gate (helper says
+    Lv 3, YAML stays at Lv 4) without any other test failing."""
+    reset_gate_config_cache_for_tests()
+    repo_root = Path(__file__).resolve().parents[2]
+    shipped = repo_root / "config" / "tool_proficiency_gates.yaml"
+    assert get_required_level(
+        TOOL_ID_CROSS_GUILD_HANDOFF, config_path=shipped
+    ) == CROSS_GUILD_HANDOFF_REQUIRED_LEVEL == 4
+    # Same-Guild peer-handoff stays at bootstrap Lv 1 — the success-rate
+    # accrues but the gate is permissive.
+    assert get_required_level(
+        TOOL_ID_PEER_HANDOFF, config_path=shipped
+    ) == 1
+
+
+def test_is_cross_guild_handoff_handles_case_and_whitespace():
+    """W13.4 — same Guild with different casing / whitespace is NOT a
+    cross-Guild handoff; different Guilds are. Blank slugs raise so a
+    mis-classified handoff cannot escape into the cross-Guild bucket."""
+    assert is_cross_guild_handoff("backend", "frontend") is True
+    assert is_cross_guild_handoff("backend", "backend") is False
+    # Case + whitespace tolerance: "Backend" vs "backend " must NOT be
+    # classified as cross-Guild.
+    assert is_cross_guild_handoff("Backend", "backend ") is False
+    assert is_cross_guild_handoff(" BACKEND ", "Backend") is False
+    # Blank slug refuses — better than silently picking a bucket.
+    with pytest.raises(ValueError):
+        is_cross_guild_handoff("", "backend")
+    with pytest.raises(ValueError):
+        is_cross_guild_handoff("backend", "  ")
+    with pytest.raises(TypeError):
+        is_cross_guild_handoff(None, "backend")  # type: ignore[arg-type]
+
+
+def test_peer_handoff_tool_id_routes_to_constants():
+    """W13.4 — the bucket helper must return the two stable tool_ids
+    so a typo in either constant is caught immediately."""
+    assert peer_handoff_tool_id(cross_guild=False) == TOOL_ID_PEER_HANDOFF
+    assert (
+        peer_handoff_tool_id(cross_guild=True)
+        == TOOL_ID_CROSS_GUILD_HANDOFF
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_peer_handoff_outcome_buckets_same_and_cross_guild():
+    """W13.4 — same-Guild outcomes accrue on ``mcp__a2a__peer_handoff``;
+    cross-Guild outcomes accrue on ``mcp__a2a__cross_guild_handoff``.
+    The two buckets are independent so a Lv-1 sender's cross-Guild
+    failures cannot poison the same-Guild row's success ratio."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+
+    # 3 same-Guild successes.
+    for _ in range(3):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=False, outcome="success", now=T0
+        )
+    # 2 cross-Guild fails.
+    for _ in range(2):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=True, outcome="fail", now=T0
+        )
+
+    same = await store.get_state(sender, TOOL_ID_PEER_HANDOFF)
+    cross = await store.get_state(sender, TOOL_ID_CROSS_GUILD_HANDOFF)
+    assert same is not None
+    assert same.invocation_count == 3 and same.success_count == 3
+    assert cross is not None
+    assert cross.invocation_count == 2 and cross.success_count == 0
+
+
+@pytest.mark.asyncio
+async def test_peer_handoff_success_rate_summarises_sender_row():
+    """W13.4 — the summary view returns the underlying counters + the
+    derived ratio + level so a UI card can render without re-computing.
+    No row → zeroed summary with Lv 1 (bootstrap floor)."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+
+    # No row yet → zeroed summary at Lv 1.
+    empty = await peer_handoff_success_rate(
+        store, sender, cross_guild=False
+    )
+    assert empty == PeerHandoffSuccessRate(
+        agent_id=sender,
+        cross_guild=False,
+        invocations=0,
+        successes=0,
+        success_ratio=0.0,
+        level=1,
+    )
+
+    # 10 success, 3 fail → 0.769 ratio, Lv 2 (≥ 10 success ≥ 0.70 ratio).
+    for _ in range(10):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=False, outcome="success", now=T0
+        )
+    for _ in range(3):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=False, outcome="fail", now=T0
+        )
+
+    summary = await peer_handoff_success_rate(
+        store, sender, cross_guild=False
+    )
+    assert summary.invocations == 13
+    assert summary.successes == 10
+    assert summary.success_ratio == pytest.approx(10 / 13)
+    assert summary.level == 2  # 10 successes, ratio 0.769 ≥ 0.70
+
+
+@pytest.mark.asyncio
+async def test_can_perform_cross_guild_handoff_refuses_under_lv4():
+    """W13.4 — a Lv-1 sender attempting a cross-Guild handoff is refused
+    by the in-process pre-check (mirrors the dispatcher refusal but
+    runs before the round-trip)."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+    # Lv-1 sender (single bootstrap row at TOOL_ID_CROSS_GUILD_HANDOFF).
+    await record_peer_handoff_outcome(
+        store, sender, cross_guild=True, outcome="success", now=T0
+    )
+
+    blocked: list[tuple[str, str, int, int]] = []
+
+    def _emit(agent_id: str, tool_id: str, current: int, required: int) -> None:
+        blocked.append((agent_id, tool_id, current, required))
+
+    allowed = await can_perform_cross_guild_handoff(
+        store, sender, now=T0, emit_gate_blocked=_emit
+    )
+    assert allowed is False
+    assert blocked == [(sender, TOOL_ID_CROSS_GUILD_HANDOFF, 1, 4)]
+
+
+@pytest.mark.asyncio
+async def test_can_perform_cross_guild_handoff_allows_lv4_sender():
+    """W13.4 — once the sender reaches Lv 4 on the cross-Guild handoff
+    tool, the pre-check allows. Verified against the ADR-0008 Lv-4
+    threshold (≥ 200 success / ≥ 0.85 ratio)."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=sender,
+            tool_id=TOOL_ID_CROSS_GUILD_HANDOFF,
+            level=4,
+            invocation_count=230,
+            success_count=200,  # 200/230 ≈ 0.870 ≥ 0.85
+            last_used_at=T0,
+        )
+    )
+    assert await can_perform_cross_guild_handoff(
+        store, sender, now=T0
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_w13_4_cross_guild_dispatcher_refuses_lv1_sender(tmp_path: Path):
+    """W13.4 — end-to-end through ``install_feature_unlock_gate`` against
+    the canonical YAML entry ``mcp__a2a__cross_guild_handoff: 4``. The
+    canonical W13.4 acceptance: a fresh Lv-1 sender attempting the
+    cross-Guild handoff tool surfaces a structured
+    ``tool_proficiency_insufficient`` refusal from the dispatcher
+    instead of forwarding to the handler."""
+    import json
+
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    # Use "Read" as the registered handler name (matches the schema
+    # registry) but gate it at Lv 4 to re-create the
+    # ``mcp__a2a__cross_guild_handoff: 4`` semantics without registering
+    # a new schema.
+    config.write_text("gates:\n  Read: 4\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+    # Seed the sender at Lv 1.
+    await record_tool_invocation(store, sender, "Read", "success", now=T0)
+
+    dispatcher = ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001 - test handler
+        return "ok"
+
+    dispatcher.register("Read", _read)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=sender,
+        config_path=config, now=T0,
+    )
+
+    result = await dispatcher.execute("u-x", "Read", {"file_path": "/x"})
+    assert result.is_error
+    payload = json.loads(result.content)
+    assert payload["error"] == "tool_proficiency_insufficient"
+    assert payload["agent_id"] == sender
 
 
 # ── Constants sanity ─────────────────────────────────────────────────

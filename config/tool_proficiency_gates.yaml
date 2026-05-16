@@ -51,7 +51,22 @@ gates:
   mcp__filesystem__edit_multiple_files: 3
   BatchWrite: 3
 
+  # ── Same-Guild peer-handoff (Lv 1 — bootstrap; success-rate only) ─
+  # W13.4 (OP-181): same-Guild peer-handoff invocations accrue
+  # success-rate on this tool_id but the gate stays permissive. The
+  # canonical helper :func:`record_peer_handoff_outcome` writes here
+  # when ``cross_guild=False``.
+  mcp__a2a__peer_handoff: 1
+
   # ── Advanced flags + cross-Guild A2A handoff (Lv 4) ───────────────
+  # W13.4 (OP-181): cross-Guild peer-handoff is the canonical Lv-4
+  # gate sample. A sender that has not crossed Lv 4 on
+  # ``mcp__a2a__cross_guild_handoff`` is refused by the dispatcher
+  # via :func:`install_feature_unlock_gate`, and by the in-process
+  # pre-check via :func:`can_perform_cross_guild_handoff`.
+  # ``CrossGuildHandoff`` is the legacy alias; both entries co-exist
+  # so callers using the schema-registry name and callers using the
+  # MCP tool_id resolve to the same Lv-4 requirement.
   CrossGuildHandoff: 4
   mcp__a2a__cross_guild_handoff: 4
   AgentAdvanced: 4

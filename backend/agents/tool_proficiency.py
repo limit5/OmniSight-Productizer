@@ -43,6 +43,24 @@ future reader of git blame can resolve a symbol to its W13.x ticket.
   ``set_proficiency_gate`` so the refusal surfaces as a
   ``tool_proficiency_insufficient`` ``tool_result`` to the calling
   model.
+- W13.4 (OP-181): :data:`TOOL_ID_PEER_HANDOFF` +
+  :data:`TOOL_ID_CROSS_GUILD_HANDOFF` +
+  :data:`CROSS_GUILD_HANDOFF_REQUIRED_LEVEL` +
+  :func:`is_cross_guild_handoff` + :func:`peer_handoff_tool_id` +
+  :func:`record_peer_handoff_outcome` +
+  :func:`peer_handoff_success_rate` +
+  :func:`can_perform_cross_guild_handoff` -- ADR-0008 §"MCP/A2A tool
+  proficiency (W13)" 's Lv-4 row ("advanced flags + cross-Guild A2A
+  handoff"). Peer-handoff outcomes (success / fail / timeout) flow
+  through :func:`record_tool_invocation` keyed on one of two stable
+  tool_ids: ``mcp__a2a__peer_handoff`` for same-Guild peer-handoff
+  (bootstrap Lv 1 in the YAML; success-rate accrual only) and
+  ``mcp__a2a__cross_guild_handoff`` for cross-Guild handoff (gated
+  at Lv 4 in the YAML — the canonical W13.4 sample, matching the
+  pre-existing ``CrossGuildHandoff: 4`` shipped under OP-218). The
+  W13.4 helpers are a domain-shaped facade so call sites in the A2A
+  dispatcher do not have to hard-code those tool_ids or the Lv-4
+  threshold.
 
 Module-global state audit (per project SOP)
 -------------------------------------------
@@ -147,6 +165,26 @@ TOOL_LEVEL_SPECS: Mapping[int, ToolLevelSpec] = MappingProxyType(
 
 
 TELEMETRY_LAG_THRESHOLD = timedelta(hours=24)
+
+
+# ── W13.4 (OP-181) A2A peer-handoff tool_ids + required level ─────────
+# Stable tool_id names the W13.4 facade uses on every call to
+# :func:`record_tool_invocation` / :func:`can_invoke_at_level`. Keeping
+# them as module constants means the A2A dispatcher does not have to
+# hard-code the strings (a typo there would silently bucket telemetry
+# into a third row and the Lv-4 gate would never fire).
+
+TOOL_ID_PEER_HANDOFF: str = "mcp__a2a__peer_handoff"
+TOOL_ID_CROSS_GUILD_HANDOFF: str = "mcp__a2a__cross_guild_handoff"
+
+# ADR-0008 §"MCP/A2A tool proficiency (W13)" Lv-4 row: "advanced flags
+# + cross-Guild A2A handoff". Mirrored in the shipped
+# ``config/tool_proficiency_gates.yaml`` as
+# ``mcp__a2a__cross_guild_handoff: 4`` -- the constant exists so
+# callers that want to short-circuit the YAML lookup (e.g. an in-process
+# pre-check before the dispatcher round-trip) can do so without
+# duplicating the magic ``4``.
+CROSS_GUILD_HANDOFF_REQUIRED_LEVEL: int = 4
 
 
 # Module-level cache of the YAML config; loaded on first read,
@@ -631,6 +669,155 @@ def install_feature_unlock_gate(
     return gate
 
 
+# ── W13.4 (OP-181) A2A peer-handoff success-rate + Lv-4 gate ────────
+
+
+@dataclass(frozen=True)
+class PeerHandoffSuccessRate:
+    """W13.4 success-rate summary for one sender × handoff scope.
+
+    ``cross_guild`` distinguishes same-Guild peer-handoff (which
+    accrues on :data:`TOOL_ID_PEER_HANDOFF`) from cross-Guild handoff
+    (which accrues on :data:`TOOL_ID_CROSS_GUILD_HANDOFF` and is gated
+    at Lv :data:`CROSS_GUILD_HANDOFF_REQUIRED_LEVEL`). ``invocations``
+    and ``successes`` mirror the underlying ``ToolProficiencyState``
+    columns 1:1 so a future read-model can join the two without
+    re-computing.
+    """
+
+    agent_id: str
+    cross_guild: bool
+    invocations: int
+    successes: int
+    success_ratio: float
+    level: int
+
+
+def is_cross_guild_handoff(sender_guild: str, receiver_guild: str) -> bool:
+    """Pure helper: True iff sender and receiver belong to different Guilds.
+
+    Compares the two Guild slugs after stripping whitespace and
+    lower-casing so a same-Guild handoff between e.g. ``"Backend"`` and
+    ``"backend "`` does not silently bucket into the cross-Guild
+    bucket. Blank Guild slugs raise — the W13.4 facade refuses to
+    classify a handoff with missing Guild metadata because the wrong
+    classification would either (a) over-credit a cross-Guild
+    practitioner or (b) under-gate a cross-Guild call.
+    """
+    return _required_guild_slug(sender_guild) != _required_guild_slug(
+        receiver_guild
+    )
+
+
+def peer_handoff_tool_id(*, cross_guild: bool) -> str:
+    """Return the tool_id W13.4 buckets a peer-handoff under.
+
+    Cross-Guild handoff routes to :data:`TOOL_ID_CROSS_GUILD_HANDOFF`
+    (Lv-4 gated in the YAML); same-Guild peer-handoff routes to
+    :data:`TOOL_ID_PEER_HANDOFF` (Lv-1 bootstrap in the YAML — the
+    success-rate accrues but the gate is permissive).
+    """
+    return TOOL_ID_CROSS_GUILD_HANDOFF if cross_guild else TOOL_ID_PEER_HANDOFF
+
+
+async def record_peer_handoff_outcome(
+    store: ToolProficiencyStore,
+    sender_agent_id: str,
+    *,
+    cross_guild: bool,
+    outcome: str,
+    now: datetime | None = None,
+    emit_level_up: Callable[[str, str, int, int], None] | None = None,
+) -> ToolInvocationRecorded:
+    """Record one peer-handoff outcome on the sender's proficiency row.
+
+    Same-Guild vs cross-Guild is the caller's decision (see
+    :func:`is_cross_guild_handoff` for the canonical implementation);
+    the W13.4 facade just buckets the recorded outcome under the
+    matching tool_id via :func:`peer_handoff_tool_id`. ``outcome``
+    follows the W17.7 telemetry vocabulary
+    (``"success" | "fail" | ...``) — only ``"success"`` increments
+    ``success_count``. The receiver side does not record on this row;
+    proficiency is sender-side because the sender owns the
+    "can I invoke cross-Guild handoff?" decision per ADR-0008 §"MCP/A2A
+    tool proficiency (W13)" Lv-4 row.
+    """
+    tool_id = peer_handoff_tool_id(cross_guild=cross_guild)
+    return await record_tool_invocation(
+        store,
+        sender_agent_id,
+        tool_id,
+        outcome,
+        now=now,
+        emit_level_up=emit_level_up,
+    )
+
+
+async def peer_handoff_success_rate(
+    store: ToolProficiencyStore,
+    sender_agent_id: str,
+    *,
+    cross_guild: bool,
+) -> PeerHandoffSuccessRate:
+    """Return :class:`PeerHandoffSuccessRate` for one sender × handoff scope.
+
+    If the sender has never recorded a handoff of that scope the row
+    does not exist; the helper returns a zeroed summary with ``level=1``
+    (the bootstrap floor) so callers can render a "0 / 0 — Lv 1" badge
+    without a separate "no row" branch.
+    """
+    sender_agent_id = _required("agent_id", sender_agent_id)
+    tool_id = peer_handoff_tool_id(cross_guild=cross_guild)
+    state = await store.get_state(sender_agent_id, tool_id)
+    if state is None:
+        return PeerHandoffSuccessRate(
+            agent_id=sender_agent_id,
+            cross_guild=cross_guild,
+            invocations=0,
+            successes=0,
+            success_ratio=0.0,
+            level=1,
+        )
+    return PeerHandoffSuccessRate(
+        agent_id=state.agent_id,
+        cross_guild=cross_guild,
+        invocations=state.invocation_count,
+        successes=state.success_count,
+        success_ratio=state.success_ratio,
+        level=state.level,
+    )
+
+
+async def can_perform_cross_guild_handoff(
+    store: ToolProficiencyStore,
+    sender_agent_id: str,
+    *,
+    now: datetime | None = None,
+    emit_gate_blocked: Callable[[str, str, int, int], None] | None = None,
+) -> bool:
+    """Return True iff the sender's Lv on the cross-Guild handoff tool ≥ 4.
+
+    Thin convenience wrapper over :func:`can_invoke_at_level` keyed on
+    :data:`TOOL_ID_CROSS_GUILD_HANDOFF` with required level
+    :data:`CROSS_GUILD_HANDOFF_REQUIRED_LEVEL`. Provided so call sites
+    in the A2A dispatcher do not have to repeat the tool_id + Lv-4
+    pair (a drift there would silently disable the gate). Production
+    paths that already wire :func:`install_feature_unlock_gate` get
+    the same refusal via the YAML — this helper exists for the
+    in-process pre-check path (e.g. early UI affordance like greying
+    out the cross-Guild handoff button on Character Card) and for
+    callers that don't own the dispatcher.
+    """
+    return await can_invoke_at_level(
+        store,
+        sender_agent_id,
+        TOOL_ID_CROSS_GUILD_HANDOFF,
+        required_level=CROSS_GUILD_HANDOFF_REQUIRED_LEVEL,
+        now=now,
+        emit_gate_blocked=emit_gate_blocked,
+    )
+
+
 # ── Gate config loading ─────────────────────────────────────────────
 
 
@@ -811,6 +998,15 @@ def _required(field: str, value: Any) -> str:
     return clean
 
 
+def _required_guild_slug(value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError("guild slug must be a string")
+    clean = value.strip().lower()
+    if not clean:
+        raise ValueError("guild slug is required")
+    return clean
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -818,14 +1014,18 @@ def _utc(value: datetime) -> datetime:
 
 
 __all__ = [
+    "CROSS_GUILD_HANDOFF_REQUIRED_LEVEL",
     "InMemoryToolProficiencyStore",
     "LEVEL_CAPABILITIES",
     "LEVEL_REQUIREMENTS",
     "MAX_TOOL_LEVEL",
+    "PeerHandoffSuccessRate",
     "PostgresToolProficiencyStore",
     "ProficiencyGateConfigMissing",
     "TELEMETRY_LAG_THRESHOLD",
     "TOOL_LEVEL_SPECS",
+    "TOOL_ID_CROSS_GUILD_HANDOFF",
+    "TOOL_ID_PEER_HANDOFF",
     "TelemetryConsumerLag",
     "ToolInvocationRecorded",
     "ToolLevelSpec",
@@ -836,11 +1036,16 @@ __all__ = [
     "ToolProficiencyStore",
     "build_feature_unlock_gate",
     "can_invoke_at_level",
+    "can_perform_cross_guild_handoff",
     "capability_for_level",
     "compute_tool_level",
     "get_required_level",
     "install_feature_unlock_gate",
+    "is_cross_guild_handoff",
     "list_proficiencies",
+    "peer_handoff_success_rate",
+    "peer_handoff_tool_id",
+    "record_peer_handoff_outcome",
     "record_tool_invocation",
     "reset_gate_config_cache_for_tests",
     "tool_level_spec",
