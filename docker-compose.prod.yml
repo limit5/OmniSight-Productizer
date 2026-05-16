@@ -80,6 +80,7 @@ services:
       - LOG_LEVEL=warning
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    stop_grace_period: 10s
     # H4-followup: partial hardening. The tecnativa image's entrypoint
     # writes haproxy.cfg next to a template bundled in the image at
     # /usr/local/etc/haproxy/ — tmpfs-ing that dir hides the template
@@ -213,6 +214,7 @@ services:
       docker-socket-proxy:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 40s
     # H4-followup: runtime hardening. Non-root already via Dockerfile
     # USER app (commit 2fb03dde). These knobs complete the defence-
     # in-depth: setuid paths blocked, root caps dropped, root
@@ -306,6 +308,7 @@ services:
       docker-socket-proxy:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 40s
     # H4-followup: hardening (see backend-a for rationale).
     read_only: true
     tmpfs:
@@ -350,6 +353,7 @@ services:
       backend-b:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 15s
     # H4-followup: hardening. Caddy binds :80 + :443 (privileged ports)
     # and issues/saves internal-CA certs — it needs NET_BIND_SERVICE
     # back, plus SETUID/SETGID for its own internal privilege drop,
@@ -430,6 +434,7 @@ services:
       caddy:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 15s
     # H4-followup: hardening. Non-root already via Dockerfile USER app
     # (commit 445ab13a). Next.js standalone server.js writes only to
     # stdout/stderr (docker logs) at runtime, so read_only rootfs
@@ -539,6 +544,7 @@ services:
       caddy:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 15s
     # H4-followup: hardening. cloudflared is upstream-maintained by
     # Cloudflare (digest-pinned per H3 commit 7b4afbb3). It maintains
     # internal state for QUIC connections, so we leave rootfs
@@ -662,6 +668,7 @@ services:
       docker-socket-proxy:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 10s
     # Threat model §4.2 — read-only rootfs + sized tmpfs.
     # ``/tmp`` is noexec/nosuid/nodev: vendor installers that try to
     # self-extract a binary into /tmp and exec it are blocked by
@@ -737,6 +744,7 @@ services:
       backend-b:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 10s
     # FX.7.7 — cgroup memory caps. Prometheus TSDB compaction + 15d
     # retention can grow heap several hundred MB on busy stacks. 1g
     # ceiling is generous for this scrape-target footprint (backend-a +
@@ -811,6 +819,7 @@ services:
         done
         echo "FX.7.8 OK: GRAFANA_ADMIN_PASSWORD passes startup validation."
     restart: "no"
+    stop_grace_period: 10s
     # FX.7.7 — cgroup memory caps. Trivial alpine sh validator; <8 MB
     # RSS in practice. 64m ceiling is more than enough; 16m reservation
     # is the soft floor.
@@ -842,6 +851,7 @@ services:
       grafana-env-validator:
         condition: service_completed_successfully
     restart: unless-stopped
+    stop_grace_period: 10s
     # FX.7.7 — cgroup memory caps. Grafana steady-state ~150 MB; 512m
     # ceiling absorbs heavy dashboard-render bursts, 128m reservation
     # keeps the UI responsive under host pressure.
