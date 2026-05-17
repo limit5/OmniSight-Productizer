@@ -3,7 +3,8 @@
 Directory layout::
 
     configs/models/*.md              Model-specific behavior rules
-    configs/roles/{category}/*.skill.md   Role-specific skill definitions
+    configs/guilds/{category}/*.skill.md  Guild/role-specific skill definitions
+    configs/roles                         Compatibility symlink to configs/guilds
 
 Prompt assembly order:
     1. Model rules  (how to behave with this LLM)
@@ -71,7 +72,8 @@ _CAPTURE_TASKS: set[asyncio.Task] = set()
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIGS_ROOT = _PROJECT_ROOT / "configs"
 _MODELS_DIR = _CONFIGS_ROOT / "models"
-_ROLES_DIR = _CONFIGS_ROOT / "roles"
+_GUILDS_DIR = _CONFIGS_ROOT / "guilds"
+_ROLES_DIR = _GUILDS_DIR
 _SKILLS_DIR = _CONFIGS_ROOT / "skills"
 
 # Maximum prompt section lengths (rough char counts) to avoid blowing context
@@ -332,7 +334,7 @@ _roles_cache: list[dict] | None = None
 
 
 def list_available_roles() -> list[dict]:
-    """Scan configs/roles/ and return all available role definitions. Cached after first call."""
+    """Scan configs/guilds/ and return all available role definitions. Cached after first call."""
     global _roles_cache
     if _roles_cache is not None:
         return list(_roles_cache)  # Return copy to prevent mutation
@@ -485,7 +487,7 @@ def _resolve_skill_loading_mode(requested: str | None) -> str:
 
 
 def list_all_skills_metadata() -> list[dict]:
-    """Enumerate every skill under ``configs/roles/**/*.skill.md`` and
+    """Enumerate every skill under ``configs/guilds/**/*.skill.md`` and
     ``configs/skills/*/SKILL.md`` and return its metadata card
     (name, description, trigger_condition, token_cost, path, …).
 
@@ -498,7 +500,7 @@ def list_all_skills_metadata() -> list[dict]:
     out: list[dict] = []
     seen_paths: set[str] = set()
 
-    # Role skills — configs/roles/{category}/{role}.skill.md
+    # Role skills — configs/guilds/{category}/{role}.skill.md
     if _ROLES_DIR.is_dir():
         for category_dir in sorted(_ROLES_DIR.iterdir()):
             if not category_dir.is_dir():

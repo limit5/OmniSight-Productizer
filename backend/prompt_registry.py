@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PROMPTS_ROOT = _PROJECT_ROOT / "backend" / "agents" / "prompts"
 SKILLS_ROOT = _PROJECT_ROOT / "configs" / "skills"
-ROLES_ROOT = _PROJECT_ROOT / "configs" / "roles"
+ROLES_ROOT = _PROJECT_ROOT / "configs" / "guilds"
 CANARY_RATE_PCT = 5  # design-locked: 5%
 
 # B15 #350: Anthropic rule-of-thumb for token estimation (≈4 chars / token).
