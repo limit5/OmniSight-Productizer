@@ -36,6 +36,7 @@ from typing import Callable, Iterable, Optional
 
 from backend.config import settings
 from backend.agents import (
+    feature_dup_detector,
     model_deconfliction,
     provider_orchestrator,
     runner_coordination,
@@ -2407,6 +2408,104 @@ def pickup_staleness_check(
     )
 
 
+def _open_bot_owned_patch_signals() -> list[feature_dup_detector.PatchSignal]:
+    """Return open bot-owned Gerrit PS signals for feature-dup detection."""
+
+    _, ssh_key = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
+        f"claude-bot@{GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON", "--current-patch-set", "--files",
+        "is:open",
+    ]
+    result = BREAKERS["gerrit_ssh"].call(
+        subprocess.run, cmd, capture_output=True, text=True, timeout=15
+    )
+    result.check_returncode()
+
+    signals: list[feature_dup_detector.PatchSignal] = []
+    for line in result.stdout.splitlines():
+        try:
+            change = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if change.get("type") == "stats":
+            continue
+        owner = str(((change.get("owner") or {}).get("username")) or "?")
+        if not (owner.startswith("codex-bot") or owner.startswith("claude-bot")):
+            continue
+        signal = feature_dup_detector.patch_signal_from_gerrit_change(change)
+        if signal is not None:
+            signals.append(signal)
+    return signals
+
+
+def _feature_dup_candidate_signal(
+    snapshot: TicketSnapshot,
+    description: str,
+    open_signals: list[feature_dup_detector.PatchSignal],
+) -> feature_dup_detector.PatchSignal:
+    """Prefer the ticket's open PS signal; fall back to planned file paths."""
+
+    for signal in open_signals:
+        if signal.ticket_key == snapshot.key:
+            return feature_dup_detector.PatchSignal(
+                ticket_key=signal.ticket_key,
+                change_number=signal.change_number,
+                subject=signal.subject,
+                url=signal.url,
+                files_changed=signal.files_changed,
+                added_symbols=signal.added_symbols,
+                description=description,
+                areas=feature_dup_detector.areas_from_labels(snapshot.labels),
+            )
+    return feature_dup_detector.PatchSignal(
+        ticket_key=snapshot.key,
+        files_changed=frozenset(predict_target_files(snapshot, description=description)),
+        description=description,
+        areas=feature_dup_detector.areas_from_labels(snapshot.labels),
+    )
+
+
+def _feature_dup_idem_key(left_key: str, right_key: str, reasons: Iterable[str]) -> str:
+    pair = "-".join(sorted((left_key, right_key)))
+    reason_key = "-".join(sorted(reasons))
+    return f"feature-dup-{pair}-{reason_key}"
+
+
+def post_feature_dup_warnings(
+    client: DispatchClient,
+    snapshot: TicketSnapshot,
+    *,
+    description: str,
+    open_signals: list[feature_dup_detector.PatchSignal] | None = None,
+) -> list[feature_dup_detector.FeatureDupHit]:
+    """Post non-blocking feature-dup warnings for the pickup candidate."""
+
+    if open_signals is None:
+        open_signals = _open_bot_owned_patch_signals()
+    candidate = _feature_dup_candidate_signal(snapshot, description, open_signals)
+    hits = feature_dup_detector.detect_feature_duplicates(candidate, open_signals)
+    for hit in hits:
+        current_comment = feature_dup_detector.format_feature_dup_warning(
+            candidate, hit
+        )
+        reverse_hit = feature_dup_detector.FeatureDupHit(
+            other=candidate,
+            reasons=hit.reasons,
+            shared_symbols=hit.shared_symbols,
+            file_jaccard=hit.file_jaccard,
+            jira_similarity=hit.jira_similarity,
+        )
+        other_comment = feature_dup_detector.format_feature_dup_warning(
+            hit.other, reverse_hit
+        )
+        idem = _feature_dup_idem_key(snapshot.key, hit.other.ticket_key, hit.reasons)
+        add_comment(client, snapshot.key, current_comment, idem_key=f"{idem}-current")
+        add_comment(client, hit.other.ticket_key, other_comment, idem_key=f"{idem}-other")
+    return hits
+
+
 def _paths_overlap(targets: set[str], in_flight: set[str]) -> set[str]:
     import fnmatch
 
@@ -3832,5 +3931,14 @@ def pre_pickup_ok(
                 lbl = shared[0] if shared else mutex_labels[0]
                 lines.append(f"{lbl} held by {hk} (status: {status})")
             return False, "mutex conflict:\n  " + "\n  ".join(lines)
+
+    try:
+        post_feature_dup_warnings(client, snapshot, description=desc)
+    except Exception as exc:  # noqa: BLE001 — warning-only detector must fail open
+        log.warning(
+            "feature_dup_detector.pickup_probe_failed key=%s err=%s",
+            snapshot.key,
+            exc,
+        )
 
     return True, "pre-pickup checks passed"
