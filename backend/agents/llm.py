@@ -1,12 +1,75 @@
-"""Multi-provider LLM factory.
+"""Multi-provider LLM factory + observability callback.
 
-Supports: Anthropic (default), Google, OpenAI, xAI, Groq, DeepSeek, Together, Ollama.
+Single entry point for every LangChain chat model the backend creates.
+Concentrates provider knowledge (credential resolution, model defaults,
+adapter kwargs, fallback chain) in one module so the rest of the
+codebase imports a generic ``BaseChatModel`` and stays vendor-agnostic.
 
-Usage:
-    from backend.agents.llm import get_llm
-    llm = get_llm()                    # uses configured default provider
-    llm = get_llm("openai")           # override provider
+Supported providers
+-------------------
+Anthropic (default), Google Gemini, OpenAI, xAI (Grok), Groq, DeepSeek,
+Together.ai, OpenRouter, and Ollama (keyless local runtime). Provider
+metadata + the public model whitelist are surfaced through
+:func:`list_providers` and consumed by the Settings UI.
+
+Public surface
+--------------
+- :func:`get_llm` — primary factory; honours per-cache, per-tenant
+  circuit breakers (M3), and the configured fallback chain.
+- :func:`get_cheapest_model` — cost-aware factory for utility LLM
+  calls (auto-title, future short-form classifiers) — walks
+  :data:`_CHEAPEST_MODEL_PREFERENCE` and intentionally disables the
+  cascade so a missing cheap-key does not silently land on flagship Opus.
+- :func:`list_providers` — provider registry consumed by the Settings UI.
+- :func:`validate_model_spec` — pre-flight check used by routes that
+  accept user-supplied model strings.
+- :class:`TokenTrackingCallback` — LangChain callback that feeds usage
+  + rate-limit + cache + per-turn-metric telemetry into the shared
+  pipelines (``SharedTokenUsage``, ``emit_turn_metrics``,
+  ``emit_turn_complete``, ``SharedKV("provider_ratelimit")``).
+
+Side-effect pipelines (per LLM turn)
+------------------------------------
+``TokenTrackingCallback.on_llm_end`` fans out into four downstream
+systems, each wrapped in its own try/except so a single subsystem
+failure cannot abort the user-visible turn:
+
+1. ``track_tokens`` → ``SharedTokenUsage`` + Postgres ``token_usage`` row
+   (ZZ.A1 cache normalisation, ZZ.A3 wall-clock stamps).
+2. ``emit_turn_metrics`` SSE — live ring-buffer card in the dashboard
+   (ZZ.A2 context-window progress + warning icon).
+3. ``emit_turn_complete`` SSE — rich payload for ``TurnDetailDrawer``
+   (ZZ.B1 prompt + assistant messages, backend-authoritative cost).
+4. ``SharedKV("provider_ratelimit")`` write with 60 s TTL (Z.1 #290 ck-3)
+   so cross-worker dashboards + future adaptive backoff (Z.2 / Z.4)
+   read the latest rate-limit snapshot without holding a callback ref.
+
+Failover + resilience
+---------------------
+Failed primary inits walk ``settings.llm_fallback_chain`` in order. Two
+breakers gate each candidate:
+
+- **Per-tenant per-key circuit** (``backend.circuit_breaker``) — opens
+  on repeated failure for a single ``(tenant_id, provider, key_fp)``
+  so one tenant's bad key cannot push others down-chain.
+- **Legacy global cooldown** (``_provider_failures``, 5 min) — kept in
+  sync for backward compatibility with older callers / metrics / tests
+  that read it directly.
+
+Caching
+-------
+Process-local cache keyed by ``f"{provider}:{model}:{id(bind_tools)}"``
+so tool bindings are not silently shared between callers that bind
+different tool lists. The cache is per-worker; cross-worker coordination
+is intentionally left to the rate-limit / circuit-breaker subsystems.
+
+Usage
+-----
+    from backend.agents.llm import get_llm, get_cheapest_model
+    llm = get_llm()                    # configured default provider
+    llm = get_llm("openai")            # override provider
     llm = get_llm("groq", "mixtral-8x7b-32768")  # override provider + model
+    llm = get_cheapest_model()         # utility-call tier (no Opus burn)
 """
 
 from __future__ import annotations
@@ -339,6 +402,24 @@ class TokenTrackingCallback(BaseCallbackHandler):
     """
 
     def __init__(self, model_name: str, provider: str | None = None) -> None:
+        """Initialise the per-turn telemetry buffers.
+
+        Args:
+            model_name: Concrete model id used for the LangChain call
+                (e.g. ``"claude-opus-4-7"``). Threaded into every
+                downstream emit (``track_tokens``, ``emit_turn_metrics``,
+                ``emit_turn_complete``) as the authoritative model label.
+            provider: Resolved provider id (``"anthropic"``, ``"openai"``
+                …). Optional for backward-compat with test fixtures that
+                instantiate the callback directly; when ``None``, the
+                context-window lookup degrades to "—" and the rate-limit
+                SharedKV write is skipped.
+
+        All ``last_*`` attributes are per-turn buffers populated in
+        ``on_llm_end`` and read by tests / observability code that
+        needs to inspect what the most recent turn carried — see the
+        inline comments below for the contract each one upholds.
+        """
         self.model_name = model_name
         # ZZ.A2 #303-2: ``provider`` threads the resolved provider id into
         # ``on_llm_end`` so the turn_metrics SSE event can look up the
@@ -410,6 +491,15 @@ class TokenTrackingCallback(BaseCallbackHandler):
         self._prompt_messages = [_serialize_message(m) for m in flat]
 
     def on_llm_start(self, *args, **kwargs) -> None:  # noqa: ANN002
+        """Reset per-turn timing state for non-chat completion models.
+
+        LangChain dispatches one of two start hooks: chat models hit
+        :meth:`on_chat_model_start` (which captures the prompt batch
+        for the ``turn.complete`` payload), text-completion models hit
+        this one. Both must stamp ``self._start`` /
+        ``self._start_ts_utc`` so :meth:`on_llm_end` can compute
+        ``latency_ms`` and the ZZ.A3 ``turn_started_at`` boundary.
+        """
         self._start = time.time()
         self._start_ts_utc = datetime.now(timezone.utc).isoformat()
         # Non-chat / completion models don't invoke on_chat_model_start;
@@ -530,6 +620,35 @@ class TokenTrackingCallback(BaseCallbackHandler):
         return {}
 
     def on_llm_end(self, response: LLMResult, **kwargs) -> None:  # noqa: ANN003
+        """Fan out the completed turn into every downstream telemetry pipeline.
+
+        Invoked by LangChain after the provider's HTTP response has been
+        materialised into an :class:`LLMResult`. Drives, in order:
+
+        1. **Rate-limit snapshot + normalisation + SharedKV mirror**
+           (Z.1 #290 ck-1/2/3). Each step has its own try/except so a
+           parse bug on an unfamiliar provider shape never propagates
+           into the user-visible turn.
+        2. **Token usage extraction** (with langchain-anthropic ≥ 0.3
+           ``usage_metadata`` fallback) and cache-counter normalisation
+           via :meth:`_extract_cache_tokens` (ZZ.A1).
+        3. **``track_tokens``** — feeds ``SharedTokenUsage`` + the
+           Postgres ``token_usage`` row with the input/output/cache
+           counts, latency, and ZZ.A3 wall-clock stamps.
+        4. **``emit_turn_metrics``** — SSE event powering the live
+           dashboard ring-buffer card with context-window % (ZZ.A2).
+           ``context_limit=None`` is honoured per the NULL-vs-genuine-zero
+           contract so unknown providers render "—" not "0%".
+        5. **``emit_turn_complete``** — rich SSE payload that upgrades
+           the bare turn card into a ``TurnDetailDrawer``-ready record
+           with the full prompt + assistant message chain (ZZ.B1).
+
+        Every subsystem is wrapped so a single failure (Redis drop,
+        emit-bus hiccup, malformed response) degrades to a debug log
+        rather than aborting the LLM call. The outermost ``except``
+        downgrades to a single ``logger.warning`` so observability bugs
+        cannot starve the application of LLM responses.
+        """
         try:
             from backend.routers.system import track_tokens
 
@@ -1197,6 +1316,14 @@ def _load_ollama_tool_calling_compat() -> dict[str, dict]:
 
 
 def reload_ollama_tool_calling_compat_for_tests() -> None:
+    """Drop the per-worker Ollama compat cache so the next read re-parses YAML.
+
+    Test-only escape hatch. Production code relies on the mtime-based
+    invalidation inside :func:`_load_ollama_tool_calling_compat`; tests
+    that rewrite the YAML in-place within the same process tick may
+    write through to the same mtime second and miss the cache check —
+    calling this between writes forces a fresh load.
+    """
     global _OLLAMA_TOOL_COMPAT_CACHE
     _OLLAMA_TOOL_COMPAT_CACHE = None
 
@@ -1382,13 +1509,36 @@ def list_providers() -> list[dict]:
 
 
 def validate_model_spec(model_spec: str) -> dict:
-    """Validate a model spec and check if the provider has an API key configured.
+    """Validate a model spec and check whether its provider has credentials.
+
+    Accepts either the explicit ``"<provider>:<model>"`` shape used by
+    OpenRouter-style ids (``"openrouter:qwen/qwen3-235b"``) or a bare
+    model name (``"claude-sonnet-4"``); for the bare form, walks
+    :func:`list_providers` to back-resolve the owning provider via the
+    public model whitelist.
 
     Args:
-        model_spec: Model spec like "openrouter:qwen/qwen3-235b" or "claude-sonnet-4"
+        model_spec: Model spec — either ``"<provider>:<model>"`` or a
+            bare model id appearing in any provider's ``models`` list
+            or ``default_model``. Empty string is treated as "no
+            override requested" and validates trivially.
 
     Returns:
-        {"valid": True/False, "provider": str, "model": str, "configured": bool, "warning": str}
+        Dict with the following keys (always present):
+
+        - ``valid`` (bool): ``True`` when the spec parses, the provider
+          is known, and (if ``requires_key``) a credential is
+          configured. ``False`` otherwise.
+        - ``provider`` (str): Resolved provider id, or ``""`` when the
+          spec was empty.
+        - ``model`` (str): Model id (sub-string after the ``":"`` for
+          explicit specs, or the raw input for bare names).
+        - ``configured`` (bool): Whether the provider currently has a
+          credential available (per
+          :func:`backend.llm_credential_resolver.is_provider_configured`).
+        - ``warning`` (str): Operator-facing explanation when ``valid``
+          is ``False`` or when validation passes with a caveat (e.g.
+          unknown model falls through to the global default provider).
     """
     if not model_spec:
         return {"valid": True, "provider": "", "model": "", "configured": True, "warning": ""}
