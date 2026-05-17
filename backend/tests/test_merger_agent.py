@@ -1060,7 +1060,7 @@ def test_many_ai_votes_without_human_rejected():
 # ──────────────────────────────────────────────────────────────
 
 
-def test_multi_file_abstain(tmp_path, caplog):
+def test_multi_file_whole_batch_runs_llm(tmp_path, caplog):
     _write_file(tmp_path, "backend/greetings.py", "def greet(name):\n    return name\n")
     _write_file(
         tmp_path,
@@ -1083,13 +1083,73 @@ def test_multi_file_abstain(tmp_path, caplog):
 
     outcome = _run(ma.resolve_conflict(req, deps=deps))
 
-    assert outcome.reason is ma.MergerReason.abstained_multi_file
-    assert llm.calls == []
+    assert outcome.reason is ma.MergerReason.plus_two_voted
+    assert len(llm.calls) == 1
+    assert outcome.metadata["multi_file_strategy"] == "multi_file_whole_batch"
     assert outcome.metadata["coupling_components"] == [
         ["backend/greetings.py", "backend/utils.py"],
     ]
     assert "multi-file coupling summary jira=OP-1424" in caplog.text
+    assert "multi-file strategy selected jira=OP-1424" in caplog.text
     assert "backend/utils.py" in caplog.text
+
+
+def test_multi_file_per_file_fallback_for_independent_components(tmp_path):
+    _write_file(tmp_path, "backend/greetings.py", "def greet(name):\n    return name\n")
+    _write_file(tmp_path, "backend/utils.py", "def util():\n    return 1\n")
+    llm = _FakeLLM({
+        "resolved_block": "ok\n", "confidence": 0.99,
+        "rationale": "trivial", "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm, pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+    req = _base_request(additional_files=["backend/utils.py"])
+    req.workspace = str(tmp_path)
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.multi_file_per_file_fallback
+    assert llm.calls == []
+    assert outcome.metadata["multi_file_strategy"] == (
+        "multi_file_per_file_fallback"
+    )
+    assert outcome.metadata["coupling_components"] == [
+        ["backend/greetings.py"],
+        ["backend/utils.py"],
+    ]
+
+
+def test_multi_file_split_too_large_for_oversized_coupled_component(tmp_path):
+    _write_file(
+        tmp_path,
+        "backend/greetings.py",
+        "from backend.utils import util\n\nvalue = util()\n",
+    )
+    _write_file(tmp_path, "backend/utils.py", "def util():\n    return 1\n")
+    llm = _FakeLLM({
+        "resolved_block": "ok\n", "confidence": 0.99,
+        "rationale": "trivial", "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm, pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+    req = _base_request(
+        conflict=OVERSIZED_CONFLICT,
+        additional_files=["backend/utils.py"],
+    )
+    req.workspace = str(tmp_path)
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.multi_file_split_too_large
+    assert llm.calls == []
+    assert outcome.metadata["multi_file_strategy"] == "multi_file_split_too_large"
+    assert "multi_file_split_too_large" in outcome.metadata["risk_reasons"]
 
 
 def test_oversized_conflict_abstain():

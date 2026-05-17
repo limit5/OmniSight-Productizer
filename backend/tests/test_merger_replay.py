@@ -180,7 +180,7 @@ def test_replay_case_matches_operator_resolution_or_abstains(case_name: str):
 
     if meta["expected_replay"] == "abstain_multi_file":
         deps = ma.MergerDeps(
-            llm=_FakeLLM("LLM must not run for multi-file abstain"),
+            llm=_FakeLLM("LLM must not run for split multi-file fallback"),
             pusher=_ExplodingPusher(),
             reviewer=_ExplodingReviewer(),
             test_runner=_passing_test_runner,
@@ -188,8 +188,13 @@ def test_replay_case_matches_operator_resolution_or_abstains(case_name: str):
         )
         outcome = _run(ma.resolve_conflict(req, deps=deps))
 
-        assert outcome.reason is ma.MergerReason.abstained_multi_file
+        assert outcome.reason in {
+            ma.MergerReason.multi_file_per_file_fallback,
+            ma.MergerReason.multi_file_split_too_large,
+        }
         assert outcome.metadata["additional_files"] == req.additional_files
+        assert outcome.metadata["multi_file_strategy"] == outcome.reason.value
+        assert outcome.metadata["coupling_components"]
         return
 
     if meta["expected_replay"] == "abstain_oversized":

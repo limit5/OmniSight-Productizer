@@ -67,7 +67,7 @@ import subprocess
 import textwrap
 import threading
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Protocol
@@ -175,6 +175,9 @@ class MergerReason(str, Enum):
     plus_two_voted = "plus_two_voted"
     abstained_low_confidence = "abstained_low_confidence"
     abstained_multi_file = "abstained_multi_file"
+    multi_file_whole_batch = "multi_file_whole_batch"
+    multi_file_per_file_fallback = "multi_file_per_file_fallback"
+    multi_file_split_too_large = "multi_file_split_too_large"
     abstained_oversized = "abstained_oversized"
     abstained_prompt_oversized = "abstained_prompt_oversized"
     refused_security_file = "refused_security_file"
@@ -236,6 +239,16 @@ class ConflictRisk:
 
     tier: MergerRiskTier
     reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MultiFileStrategySelection:
+    """Coupling-aware multi-file routing decision."""
+
+    reason: MergerReason
+    risk: ConflictRisk
+    coupling_components: list[set[str]]
+    prompt_evaluations: list[dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -1124,6 +1137,66 @@ def build_prompt_with_size_gate(
         sections_trimmed = _CONTEXT_PACK_TRIM_ORDER[:len(sections_trimmed) + 1]
 
 
+def _select_multi_file_strategy(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    coupling_components: list[set[str]],
+) -> MultiFileStrategySelection:
+    """Select the multi-file route after coupling and prompt-size checks."""
+    risk = classify_conflict_risk(req, blocks, coupling_components)
+    prompt_evaluations: list[dict[str, Any]] = []
+    ordered_components = [
+        set(component)
+        for component in coupling_components
+        if component
+    ]
+
+    for component in ordered_components:
+        component_files = sorted(component)
+        component_req = replace(
+            req,
+            additional_files=[
+                path for path in component_files if path != req.file_path
+            ],
+        )
+        component_risk = classify_conflict_risk(
+            component_req, blocks, [set(component_files)],
+        )
+        prompt_gate = build_prompt_with_size_gate(
+            component_req, blocks, component_risk,
+        )
+        prompt_evaluations.append({
+            "component_files": component_files,
+            "strategy": (
+                MergerReason.multi_file_whole_batch.value
+                if len(component_files) > 1
+                else MergerReason.multi_file_per_file_fallback.value
+            ),
+            "risk_tier": component_risk.tier.value,
+            "risk_reasons": list(component_risk.reasons),
+            "prompt_size_bytes": prompt_gate.prompt_size_bytes,
+            "prompt_limit_bytes": prompt_gate.limit_bytes,
+            "sections_trimmed": list(prompt_gate.sections_trimmed),
+            "oversized": prompt_gate.oversized,
+        })
+
+    if risk.tier is MergerRiskTier.high or any(
+        evaluation["oversized"] for evaluation in prompt_evaluations
+    ):
+        reason = MergerReason.multi_file_split_too_large
+    elif len(ordered_components) == 1:
+        reason = MergerReason.multi_file_whole_batch
+    else:
+        reason = MergerReason.multi_file_per_file_fallback
+
+    return MultiFileStrategySelection(
+        reason=reason,
+        risk=risk,
+        coupling_components=ordered_components,
+        prompt_evaluations=prompt_evaluations,
+    )
+
+
 def build_prompt(
     req: ConflictRequest,
     blocks: list[ConflictBlock],
@@ -1315,21 +1388,29 @@ def classify_conflict_risk(
     if multi_file:
         if len(touched_files) >= 5:
             reasons.append("multi_file_count_exceeds_batch")
+            reasons.append(MergerReason.multi_file_split_too_large.value)
         coupled = any(
             len(set(component) & set(touched_files)) > 1
             for component in (coupling_components or [])
         )
+        component_count = len(coupling_components or [])
         reasons.append(
             "multi_file_high_coupling" if coupled else "multi_file_low_coupling"
         )
+        if component_count == 1:
+            reasons.append(MergerReason.multi_file_whole_batch.value)
+        elif component_count > 1:
+            reasons.append(MergerReason.multi_file_per_file_fallback.value)
         if coupled and total_lines > MAX_CONFLICT_LINES:
             reasons.append("multi_file_coupled_oversize")
+            reasons.append(MergerReason.multi_file_split_too_large.value)
 
     deduped = tuple(dict.fromkeys(reasons))
     if multi_file:
         high_reasons = {
             "multi_file_count_exceeds_batch",
             "multi_file_coupled_oversize",
+            MergerReason.multi_file_split_too_large.value,
         }
         if any(reason in high_reasons for reason in deduped):
             return ConflictRisk(MergerRiskTier.high, deduped)
@@ -2501,7 +2582,7 @@ async def resolve_conflict(
       1. 3-strike gate — if this change has failed >= MAX_FAILURES_PER_CHANGE
          times, refuse immediately.
       2. Security-file gate — refuse unconditionally; no push, no vote.
-      3. Multi-file gate — abstain if request touches > 1 file.
+      3. Multi-file selector — use coupling + prompt size to choose route.
       4. Parse conflicts — empty list is "no conflict found".
       5. Oversized gate — abstain if combined conflict > MAX_CONFLICT_LINES.
       6. LLM call — abstain on unavailable / invalid JSON.
@@ -2547,8 +2628,10 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 3. Multi-file gate ───────────────────────────────────────
+    # ── 3. Multi-file selector preflight ─────────────────────────
     extra = [p for p in request.additional_files if p and p != request.file_path]
+    coupling_components: list[set[str]] | None = None
+    multi_file_strategy: MultiFileStrategySelection | None = None
     if extra:
         coupling_components = _classify_coupling(
             [request.file_path, *extra],
@@ -2563,19 +2646,6 @@ async def resolve_conflict(
             request.change_number or request.change_id or "(unknown)",
             coupling_summary,
         )
-        outcome = _build_abstain(
-            request, MergerReason.abstained_multi_file,
-            confidence=0.0,
-            rationale=(f"patchset touches {len(extra) + 1} files; "
-                       f"merger only auto-votes on single-file conflicts"),
-            metadata={
-                "additional_files": extra,
-                "coupling_components": coupling_summary,
-            },
-        )
-        _observe_metric(outcome)
-        await _safe_audit(deps.audit, outcome)
-        return outcome
 
     # ── 4. Parse conflicts ───────────────────────────────────────
     blocks = parse_conflict_block(request.conflict_text)
@@ -2587,6 +2657,61 @@ async def resolve_conflict(
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
+
+    if extra:
+        multi_file_strategy = _select_multi_file_strategy(
+            request,
+            blocks,
+            coupling_components or [],
+        )
+        strategy_meta = {
+            "additional_files": extra,
+            "multi_file_strategy": multi_file_strategy.reason.value,
+            "coupling_components": [
+                sorted(component)
+                for component in multi_file_strategy.coupling_components
+            ],
+            "component_prompt_evaluations": (
+                multi_file_strategy.prompt_evaluations
+            ),
+            **_risk_metadata(multi_file_strategy.risk),
+        }
+        logger.info(
+            "merger_agent: multi-file strategy selected "
+            "jira=%s change=%s strategy=%s components=%s",
+            request.jira_ticket or "(none)",
+            request.change_number or request.change_id or "(unknown)",
+            multi_file_strategy.reason.value,
+            strategy_meta["coupling_components"],
+        )
+        if multi_file_strategy.reason is MergerReason.multi_file_split_too_large:
+            outcome = _build_abstain(
+                request,
+                MergerReason.multi_file_split_too_large,
+                confidence=0.0,
+                rationale=(
+                    "multi-file conflict split is too large for automated "
+                    "resolution; human escalation required"
+                ),
+                metadata=strategy_meta,
+            )
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+        if multi_file_strategy.reason is MergerReason.multi_file_per_file_fallback:
+            outcome = _build_abstain(
+                request,
+                MergerReason.multi_file_per_file_fallback,
+                confidence=0.0,
+                rationale=(
+                    "multi-file conflict spans independent coupling "
+                    "components; per-file fallback required"
+                ),
+                metadata=strategy_meta,
+            )
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
 
     nested_blocks = [b for b in blocks if b.has_nested_markers]
     if nested_blocks:
@@ -2773,8 +2898,24 @@ async def resolve_conflict(
         return deterministic
 
     # ── 5. Structural risk gate ─────────────────────────────────
-    risk = classify_conflict_risk(request, blocks)
+    risk = (
+        multi_file_strategy.risk
+        if multi_file_strategy is not None
+        else classify_conflict_risk(request, blocks)
+    )
     risk_meta = _risk_metadata(risk)
+    if multi_file_strategy is not None:
+        risk_meta = {
+            **risk_meta,
+            "multi_file_strategy": multi_file_strategy.reason.value,
+            "coupling_components": [
+                sorted(component)
+                for component in multi_file_strategy.coupling_components
+            ],
+            "component_prompt_evaluations": (
+                multi_file_strategy.prompt_evaluations
+            ),
+        }
     if risk.tier is MergerRiskTier.high:
         outcome = _build_abstain(
             request,
@@ -3260,6 +3401,7 @@ __all__ = [
     "MERGER_PROMPT_VERSION",
     "MergerReason",
     "MergerRiskTier",
+    "MultiFileStrategySelection",
     "PatchsetPushResult",
     "PatchsetPusher",
     "ProposalReview",
