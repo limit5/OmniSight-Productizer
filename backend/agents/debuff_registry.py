@@ -18,10 +18,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
-from typing import Literal, Mapping
+from typing import Callable, Literal, Mapping
 
 DebuffKind = Literal["xp", "routing_weight"]
 DebuffOutcomeStatus = Literal["success", "partial", "fail", "failed"]
+_DebuffActiveRule = tuple[str, Callable[["DebuffContext"], bool]]
 
 BURNOUT_DEBUFF_ID = "burnout"
 STALE_MEMORY_DEBUFF_ID = "stale_memory"
@@ -105,12 +106,11 @@ def active_debuffs_for_context(context: DebuffContext) -> tuple[DebuffDefinition
     """Return debuffs active for the caller-supplied runtime ``context``."""
 
     _validate_context(context)
-    active: list[DebuffDefinition] = []
-    if _burnout_active(context):
-        active.append(DEBUFF_DEFINITIONS[BURNOUT_DEBUFF_ID])
-    if _stale_memory_active(context):
-        active.append(DEBUFF_DEFINITIONS[STALE_MEMORY_DEBUFF_ID])
-    return tuple(active)
+    return tuple(
+        DEBUFF_DEFINITIONS[debuff_id]
+        for debuff_id, predicate in _ACTIVE_DEBUFF_RULES
+        if predicate(context)
+    )
 
 
 def active_debuff_ids_for_context(context: DebuffContext) -> tuple[str, ...]:
@@ -128,22 +128,15 @@ def xp_multiplier_for_context(context: DebuffContext) -> float:
 def xp_multiplier_for_debuff_ids(debuff_ids: tuple[str, ...]) -> float:
     """Return the combined XP multiplier for explicit active debuff ids."""
 
-    multiplier = 1.0
-    for debuff_id in debuff_ids:
-        debuff = get_debuff_definition(debuff_id)
-        if debuff.kind == "xp":
-            multiplier *= debuff.multiplier
-    return multiplier
+    return _multiplier_for_debuff_ids(debuff_ids, "xp")
 
 
 def routing_weight_multiplier_for_context(context: DebuffContext) -> float:
     """Return the combined routing-weight multiplier for active debuffs."""
 
-    multiplier = 1.0
-    for debuff in active_debuffs_for_context(context):
-        if debuff.kind == "routing_weight":
-            multiplier *= debuff.multiplier
-    return multiplier
+    return _multiplier_for_debuff_ids(
+        active_debuff_ids_for_context(context), "routing_weight"
+    )
 
 
 def routing_weight_multiplier_for_last_retrained_at(
@@ -170,6 +163,23 @@ def _stale_memory_active(context: DebuffContext) -> bool:
         return False
     elapsed = (_utc(context.now) - _utc(context.last_retrained_at)).total_seconds()
     return elapsed >= STALE_MEMORY_IDLE_SECONDS
+
+
+_ACTIVE_DEBUFF_RULES: tuple[_DebuffActiveRule, ...] = (
+    (BURNOUT_DEBUFF_ID, _burnout_active),
+    (STALE_MEMORY_DEBUFF_ID, _stale_memory_active),
+)
+
+
+def _multiplier_for_debuff_ids(
+    debuff_ids: tuple[str, ...], kind: DebuffKind
+) -> float:
+    multiplier = 1.0
+    for debuff_id in debuff_ids:
+        debuff = get_debuff_definition(debuff_id)
+        if debuff.kind == kind:
+            multiplier *= debuff.multiplier
+    return multiplier
 
 
 def _validate_context(context: DebuffContext) -> None:
