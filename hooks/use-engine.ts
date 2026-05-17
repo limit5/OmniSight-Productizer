@@ -15,6 +15,7 @@ function mapAgent(a: api.ApiAgent): Agent {
     name: a.name,
     type: a.type as Agent["type"],
     subType: a.sub_type || undefined,
+    guild: a.guild || undefined,
     status: a.status as AgentStatus,
     progress: a.progress,
     thoughtChain: a.thought_chain,

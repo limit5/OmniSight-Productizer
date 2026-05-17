@@ -1096,6 +1096,7 @@ export interface ApiAgent {
   name: string
   type: string
   sub_type: string
+  guild?: string | null
   status: string
   progress: { current: number; total: number }
   thought_chain: string
@@ -1107,6 +1108,28 @@ export interface ApiAgent {
 
 export async function listAgents() {
   return request<ApiAgent[]>("/agents")
+}
+
+export interface AgentCardSummary {
+  agent_id: string
+  agent_class: string
+  instance_suffix: string | null
+  guild: string
+  level: number
+  xp: number
+  specialization_label: string
+  style_fingerprint: string
+  created_at: string
+  last_activity_at?: string | null
+  status?: string | null
+}
+
+export async function listAgentCards(filters: { guild?: string; sort_by?: "level" | "activity" | "xp" } = {}) {
+  const qs = new URLSearchParams()
+  if (filters.guild) qs.set("guild", filters.guild)
+  if (filters.sort_by) qs.set("sort_by", filters.sort_by)
+  const suffix = qs.toString() ? `?${qs.toString()}` : ""
+  return request<AgentCardSummary[]>(`/agents/cards${suffix}`)
 }
 
 export async function getAgent(id: string) {

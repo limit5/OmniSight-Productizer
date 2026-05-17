@@ -37,6 +37,7 @@ import { CommandPalette } from "@/components/omnisight/command-palette"
 import { ForecastPanel } from "@/components/omnisight/forecast-panel"
 import { InvokeCore } from "@/components/omnisight/invoke-core"
 import { IntegrationSettings, SettingsButton } from "@/components/omnisight/integration-settings"
+import { OperationsConsole } from "@/components/omnisight/operations-console"
 import { HostDevicePanel } from "@/components/omnisight/host-device-panel"
 import { SourceControlMatrix, type Repository } from "@/components/omnisight/source-control-matrix"
 import { TaskBacklog } from "@/components/omnisight/task-backlog"
@@ -676,6 +677,7 @@ export default function Home() {
           }
         />
         <IntegrationSettings open={showSettings} onClose={() => setShowSettings(false)} />
+        <OperationsConsole agents={agents} activePanel={activePanel} />
 
         {/* ===== MOBILE LAYOUT (< 768px) ===== */}
         <main className="flex-1 flex flex-col md:hidden min-h-0 pb-24">
