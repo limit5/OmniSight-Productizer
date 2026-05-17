@@ -823,10 +823,20 @@ Take-both feature-preservation rubric:
    - Duplicate the complete setup in each method so each branch keeps its
      own assertion intent.
 
-6. ABSTAIN BIAS:
+6. CALL KWARG / METADATA FIELD UNION:
+   - When both sides add new keyword arguments or metadata fields to the
+     same function call or literal, keep the union of field names.
+   - Sort disjoint keyword arguments / dict keys alphabetically by field
+     name in the resolved block unless surrounding code proves another
+     local ordering convention.
+   - Never drop an observability field such as a log key, verify result,
+     merger reason, metric label, or metadata value unless the two fields
+     are concrete duplicates.
+
+7. ABSTAIN BIAS:
    - If you cannot identify whether ADD-vs-ADD, rename detection,
-     docstring collision, signature overlap, or split-test preservation
-     applies, abstain.
+     docstring collision, signature overlap, split-test preservation, or
+     call kwarg / metadata field union applies, abstain.
    - Emit a low confidence score and name the unresolved reason class in
      the rationale instead of interleaving lines or picking one side.
 """
@@ -1897,6 +1907,7 @@ def _deterministic_block_resolution(
         lambda head, incoming: _resolve_dunder_all_union(head, incoming, prefix),
         _resolve_import_union,
         _resolve_distinct_symbol_adds,
+        _resolve_call_keyword_adds,
         _resolve_dict_literal_adds,
         _resolve_comment_docstring_adds,
     )
@@ -2099,6 +2110,46 @@ def _dict_entries(lines: list[str]) -> list[tuple[str, str]] | None:
         if not isinstance(key, (str, int, float, bool)):
             return None
         entries.append((str(key), line))
+    return entries
+
+
+def _resolve_call_keyword_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _call_keyword_entries(head_lines)
+    incoming = _call_keyword_entries(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_names = {name for name, _line in head}
+    incoming_names = {name for name, _line in incoming}
+    if not head_names or not incoming_names or head_names & incoming_names:
+        return None
+    entries = sorted([*head, *incoming], key=lambda item: _literal_sort_key(item[0]))
+    return _join_block_lines([line for _name, line in entries]), (
+        "call keyword disjoint additions"
+    )
+
+
+def _call_keyword_entries(lines: list[str]) -> list[tuple[str, str]] | None:
+    meaningful = [line for line in lines if line.strip()]
+    if not meaningful:
+        return None
+    source = "f(\n" + "\n".join(meaningful) + "\n)"
+    try:
+        tree = ast.parse(source, mode="eval")
+    except SyntaxError:
+        return None
+    if not isinstance(tree.body, ast.Call):
+        return None
+    if tree.body.args or len(tree.body.keywords) != len(meaningful):
+        return None
+
+    entries: list[tuple[str, str]] = []
+    for keyword, line in zip(tree.body.keywords, meaningful):
+        if keyword.arg is None:
+            return None
+        entries.append((keyword.arg, line))
     return entries
 
 
