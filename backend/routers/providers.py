@@ -1,4 +1,14 @@
-"""LLM provider configuration endpoints."""
+"""LLM provider configuration endpoints.
+
+Exposes the ``/providers`` HTTP surface the operator UI uses to inspect
+and tune the runtime LLM configuration. Endpoints cover listing
+configured providers, switching the active provider/model, reporting
+fallback-chain health together with per-tenant circuit-breaker state,
+reordering the fallback chain, and live-pinging or validating a model
+spec. All mutations update runtime :data:`backend.config.settings`
+only — to persist across restarts, set the matching ``OMNISIGHT_*``
+env vars in ``.env``.
+"""
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
