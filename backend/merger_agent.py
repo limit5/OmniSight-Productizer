@@ -59,6 +59,7 @@ Public entry points
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import logging
 import os
@@ -1118,6 +1119,8 @@ def build_prompt_with_size_gate(
     req: ConflictRequest,
     blocks: list[ConflictBlock],
     risk: ConflictRisk,
+    *,
+    cross_file_directive: str = "",
 ) -> PromptSizeGateResult:
     """Build a prompt, trimming lower-priority context before LLM input.
 
@@ -1132,7 +1135,13 @@ def build_prompt_with_size_gate(
         context_pack = build_context_pack(
             req, blocks, omit_sections=sections_trimmed,
         )
-        prompt = build_prompt(req, blocks, risk, context_pack=context_pack)
+        prompt = build_prompt(
+            req,
+            blocks,
+            risk,
+            context_pack=context_pack,
+            cross_file_directive=cross_file_directive,
+        )
         prompt_size = _prompt_size_bytes(prompt)
         oversized = prompt_size > limit
         if not oversized or len(sections_trimmed) == len(_CONTEXT_PACK_TRIM_ORDER):
@@ -1190,8 +1199,12 @@ def _select_multi_file_strategy(
             "oversized": prompt_gate.oversized,
         })
 
-    if risk.tier is MergerRiskTier.high or any(
+    any_component_oversized = any(
         evaluation["oversized"] for evaluation in prompt_evaluations
+    )
+    split_reasons = {"multi_file_coupled_oversize"}
+    if any_component_oversized or any(
+        reason in split_reasons for reason in risk.reasons
     ):
         reason = MergerReason.multi_file_split_too_large
     elif len(ordered_components) == 1:
@@ -1213,6 +1226,7 @@ def build_prompt(
     risk: ConflictRisk | None = None,
     *,
     context_pack: str | None = None,
+    cross_file_directive: str = "",
 ) -> str:
     """Deterministic prompt — inlines the conflict + commit messages +
     the provided file context, and repeats the no-new-logic guardrail."""
@@ -1230,6 +1244,14 @@ def build_prompt(
         f"JIRA ticket: {req.jira_ticket or '(none supplied)'}",
         f"HEAD commit message:\n{req.head_commit_message.strip()}",
         f"Incoming commit message:\n{req.incoming_commit_message.strip()}",
+    ]
+    if cross_file_directive:
+        parts.extend([
+            "",
+            "Cross-file consistency directive:",
+            cross_file_directive.strip(),
+        ])
+    parts.extend([
         "",
         "Context pack (priority-capped):",
         context_pack or "(none supplied)",
@@ -1238,7 +1260,7 @@ def build_prompt(
         req.file_context.strip() or "(none supplied)",
         "",
         "Conflict blocks:",
-    ]
+    ])
     for i, blk in enumerate(blocks, start=1):
         parts.extend([
             f"  Block {i} (lines {blk.start_line}-{blk.end_line}):",
@@ -1781,6 +1803,371 @@ def _risk_metadata(risk: ConflictRisk) -> dict[str, Any]:
         "risk_tier": risk.tier.value,
         "risk_reasons": list(risk.reasons),
     }
+
+
+def _per_file_consistency_directive(
+    file_path: str,
+    sibling_paths: Collection[str],
+) -> str:
+    siblings = sorted(path for path in sibling_paths if path and path != file_path)
+    sibling_text = ", ".join(siblings) if siblings else "(none)"
+    return (
+        f"sibling files {sibling_text} have own conflicts; assume they "
+        "resolve consistently. Your choice must keep imports/signatures aligned."
+    )
+
+
+async def _resolve_one_file_with_directive(
+    req: ConflictRequest,
+    *,
+    deps: MergerDeps,
+    sibling_paths: Collection[str],
+) -> tuple[Resolution | None, ResolutionOutcome | None, dict[str, Any]]:
+    blocks = parse_conflict_block(req.conflict_text)
+    directive = _per_file_consistency_directive(req.file_path, sibling_paths)
+    meta: dict[str, Any] = {
+        "file_path": req.file_path,
+        "cross_file_directive": directive,
+    }
+    if not blocks:
+        return None, _build_refusal(
+            req,
+            MergerReason.refused_no_conflict,
+            rationale="no <<<<<<< / ======= / >>>>>>> markers found",
+            metadata=meta,
+        ), meta
+
+    nested_blocks = [b for b in blocks if b.has_nested_markers]
+    if nested_blocks:
+        meta["nested_marker_start_lines"] = [
+            b.start_line for b in nested_blocks
+        ]
+        return None, _build_refusal(
+            req,
+            MergerReason.refused_nested_markers,
+            rationale="nested conflict markers found inside parsed conflict block",
+            metadata=meta,
+        ), meta
+
+    total_lines = sum(b.n_conflict_lines for b in blocks)
+    if total_lines > MAX_CONFLICT_LINES:
+        meta["conflict_lines"] = total_lines
+        return None, _build_abstain(
+            req,
+            MergerReason.abstained_oversized,
+            confidence=0.0,
+            rationale=(
+                f"combined conflict {total_lines} lines exceeds "
+                f"gate {MAX_CONFLICT_LINES}"
+            ),
+            metadata=meta,
+        ), meta
+
+    risk = classify_conflict_risk(req, blocks)
+    meta.update(_risk_metadata(risk))
+    if risk.tier is MergerRiskTier.high:
+        return None, _build_abstain(
+            req,
+            MergerReason.abstained_low_confidence,
+            confidence=0.0,
+            rationale=(
+                "structural risk HIGH before LLM invocation; "
+                f"signals={','.join(risk.reasons) or 'none'}"
+            ),
+            metadata={**meta, "conflict_lines": total_lines},
+        ), meta
+
+    prompt_gate = build_prompt_with_size_gate(
+        req,
+        blocks,
+        risk,
+        cross_file_directive=directive,
+    )
+    meta.update({
+        "prompt_size_bytes": prompt_gate.prompt_size_bytes,
+        "prompt_limit_bytes": prompt_gate.limit_bytes,
+        "sections_trimmed": list(prompt_gate.sections_trimmed),
+    })
+    if prompt_gate.oversized:
+        return None, _build_abstain(
+            req,
+            MergerReason.abstained_prompt_oversized,
+            confidence=0.0,
+            rationale=(
+                "LLM prompt remained over the hard input-size gate after "
+                "trimming lower-priority context-pack sections"
+            ),
+            metadata=meta,
+        ), meta
+
+    try:
+        raw, tokens = await deps.llm(prompt_gate.prompt)
+        _observe_llm_cost(_estimate_llm_cost(tokens))
+    except Exception as exc:
+        logger.warning("merger_agent: per-file llm raised: %s", exc)
+        raw = ""
+
+    meta["proposal_prompt"] = prompt_gate.prompt
+    meta["proposal_response"] = raw
+    if not raw:
+        return None, _build_abstain(
+            req,
+            MergerReason.refused_llm_unavailable,
+            confidence=0.0,
+            rationale="LLM returned empty response",
+            metadata=meta,
+        ), meta
+
+    try:
+        payload = _parse_llm_response(raw)
+        resolution = _assemble_resolution(req, blocks, payload)
+    except _LLMParseError as exc:
+        return None, _build_abstain(
+            req,
+            MergerReason.refused_llm_invalid_json,
+            confidence=0.0,
+            rationale=f"LLM returned invalid payload: {exc}",
+            metadata={**meta, "raw_head": raw[:200]},
+        ), meta
+
+    try:
+        metrics.merger_confidence.observe(resolution.confidence)
+    except Exception:
+        pass
+
+    if bool(payload.get("new_logic_detected", False)):
+        return resolution, _build_abstain(
+            req,
+            MergerReason.refused_new_logic_detected,
+            confidence=resolution.confidence,
+            rationale=(
+                f"LLM self-reported new logic invention; "
+                f"{resolution.rationale}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=meta,
+        ), meta
+
+    if resolution.confidence < MIN_CONFIDENCE_FOR_PLUS_TWO:
+        return resolution, _build_abstain(
+            req,
+            MergerReason.abstained_low_confidence,
+            confidence=resolution.confidence,
+            rationale=(
+                f"confidence {resolution.confidence:.2f} < "
+                f"{MIN_CONFIDENCE_FOR_PLUS_TWO}; {resolution.rationale}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=meta,
+        ), meta
+
+    review = await _review_proposal(req, blocks, resolution, deps=deps)
+    sandwich_decision = "confirm" if review.confirmed else "object"
+    meta.update({
+        "merger_sandwich_decision": sandwich_decision,
+        "review_model": review.model,
+        "review_cost_usd": review.cost_usd,
+        "review_tokens_used": review.tokens_used,
+        "review_prompt": review.prompt,
+        "review_response": review.raw_response,
+    })
+    if not review.confirmed:
+        return resolution, _build_abstain(
+            req,
+            MergerReason.refused_review_objected,
+            confidence=resolution.confidence,
+            rationale=(
+                "LLM-B objected to LLM-A's proposed resolution; "
+                f"{review.reason}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=meta,
+        ), meta
+
+    meta.update({
+        "resolved_text": resolution.resolved_text,
+        "changed_identifiers": list(resolution.changed_identifiers),
+        "conflict_lines": total_lines,
+        "blocks": len(blocks),
+    })
+    return resolution, None, meta
+
+
+async def _run_test_with_resolved_files(
+    request: ConflictRequest,
+    deps: MergerDeps,
+    resolved_files: dict[str, str],
+) -> TestRunResult:
+    originals: dict[Path, bytes | None] = {}
+    for path, resolved_text in resolved_files.items():
+        target = _safe_workspace_file(request.workspace, path)
+        if target is None:
+            continue
+        try:
+            originals[target] = target.read_bytes() if target.exists() else None
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(resolved_text, encoding="utf-8")
+        except OSError as exc:
+            return TestRunResult(
+                ok=False,
+                summary=f"workspace overlay failed for {path}: {exc}",
+                command="workspace overlay",
+            )
+
+    try:
+        return await deps.test_runner(request)
+    finally:
+        for target, original in originals.items():
+            try:
+                if original is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.write_bytes(original)
+            except OSError:
+                logger.warning(
+                    "merger_agent: failed to restore workspace file %s",
+                    target,
+                )
+
+
+async def _resolve_per_file_with_directive(
+    request: ConflictRequest,
+    *,
+    deps: MergerDeps,
+    strategy_meta: dict[str, Any],
+) -> ResolutionOutcome:
+    file_contents = _collect_file_contents(request)
+    paths = [
+        path for path in dict.fromkeys([request.file_path, *request.additional_files])
+        if path
+    ]
+    sibling_contents = {
+        path: content
+        for path, content in file_contents.items()
+        if path in paths
+    }
+
+    async def _run_file(
+        path: str,
+    ) -> tuple[Resolution | None, ResolutionOutcome | None, dict[str, Any]]:
+        file_req = replace(
+            request,
+            file_path=path,
+            conflict_text=sibling_contents.get(path, ""),
+            additional_files=[],
+            sibling_file_contents={
+                p: sibling_contents[p]
+                for p in paths
+                if p != path and p in sibling_contents
+            },
+        )
+        return await _resolve_one_file_with_directive(
+            file_req,
+            deps=deps,
+            sibling_paths=paths,
+        )
+
+    per_file = await asyncio.gather(*(_run_file(path) for path in paths))
+    file_resolution_meta = [meta for _resolution, _outcome, meta in per_file]
+    blocking = next(
+        (outcome for _resolution, outcome, _meta in per_file if outcome is not None),
+        None,
+    )
+    if blocking is not None:
+        blocking.metadata = {
+            **strategy_meta,
+            "file_resolutions": file_resolution_meta,
+            "per_file_blocked_at": blocking.file_path,
+            "per_file_block_reason": blocking.reason.value,
+        }
+        _observe_metric(blocking)
+        await _safe_audit(deps.audit, blocking)
+        return blocking
+
+    resolutions = {
+        paths[idx]: resolution
+        for idx, (resolution, _outcome, _meta) in enumerate(per_file)
+        if resolution is not None
+    }
+    resolved_files = {
+        path: resolution.resolved_text
+        for path, resolution in resolutions.items()
+    }
+    changed_identifiers_by_file = {
+        path: list(resolution.changed_identifiers)
+        for path, resolution in resolutions.items()
+    }
+    primary = resolutions[request.file_path]
+
+    test_result = await _run_test_with_resolved_files(
+        request,
+        deps,
+        resolved_files,
+    )
+    if not test_result.ok:
+        _bump_failure(request.change_id)
+        outcome = _build_refusal(
+            request,
+            MergerReason.refused_test_failure,
+            rationale=(
+                "per-file union verifier failed: "
+                f"{test_result.summary or test_result.command}"
+            ),
+            confidence=primary.confidence,
+            diff_preview=primary.diff,
+            metadata={
+                **strategy_meta,
+                "file_resolutions": file_resolution_meta,
+                "resolved_files": resolved_files,
+                "changed_identifiers_by_file": changed_identifiers_by_file,
+                "verify_result": "red",
+                "verify_stage": "per_file_union",
+            },
+        )
+        outcome.resolved_text = primary.resolved_text
+        outcome.changed_identifiers = list(primary.changed_identifiers)
+        outcome.test_result = {
+            "ok": False,
+            "summary": test_result.summary,
+            "command": test_result.command,
+        }
+        outcome.failure_count = get_failure_count(request.change_id)
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    confidence = min(resolution.confidence for resolution in resolutions.values())
+    combined_diff = "\n".join(
+        resolution.diff for resolution in resolutions.values() if resolution.diff
+    )
+    outcome = _build_abstain(
+        request,
+        reason=MergerReason.deferred_push_to_caller,
+        confidence=confidence,
+        rationale=(
+            "Per-file fallback resolved independent conflict components; "
+            "caller is responsible for applying all resolved_files and pushing."
+        ),
+        diff_preview=combined_diff,
+        metadata={
+            **strategy_meta,
+            "file_resolutions": file_resolution_meta,
+            "resolved_files": resolved_files,
+            "changed_identifiers_by_file": changed_identifiers_by_file,
+            "verify_result": "green",
+            "verify_stage": "per_file_union",
+        },
+    )
+    outcome.resolved_text = primary.resolved_text
+    outcome.changed_identifiers = list(primary.changed_identifiers)
+    outcome.test_result = {
+        "ok": True,
+        "summary": test_result.summary,
+        "command": test_result.command,
+    }
+    _observe_metric(outcome)
+    await _safe_audit(deps.audit, outcome)
+    return outcome
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2750,19 +3137,11 @@ async def resolve_conflict(
             await _safe_audit(deps.audit, outcome)
             return outcome
         if multi_file_strategy.reason is MergerReason.multi_file_per_file_fallback:
-            outcome = _build_abstain(
+            return await _resolve_per_file_with_directive(
                 request,
-                MergerReason.multi_file_per_file_fallback,
-                confidence=0.0,
-                rationale=(
-                    "multi-file conflict spans independent coupling "
-                    "components; per-file fallback required"
-                ),
-                metadata=strategy_meta,
+                deps=deps,
+                strategy_meta=strategy_meta,
             )
-            _observe_metric(outcome)
-            await _safe_audit(deps.audit, outcome)
-            return outcome
 
     nested_blocks = [b for b in blocks if b.has_nested_markers]
     if nested_blocks:

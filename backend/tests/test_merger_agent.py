@@ -1096,7 +1096,16 @@ def test_multi_file_whole_batch_runs_llm(tmp_path, caplog):
 
 def test_multi_file_per_file_fallback_for_independent_components(tmp_path):
     _write_file(tmp_path, "backend/greetings.py", "def greet(name):\n    return name\n")
-    _write_file(tmp_path, "backend/utils.py", "def util():\n    return 1\n")
+    _write_file(
+        tmp_path,
+        "backend/utils.py",
+        "def util():\n"
+        "<<<<<<< HEAD\n"
+        "    return 1\n"
+        "=======\n"
+        "    return 2\n"
+        ">>>>>>> feature/util\n",
+    )
     llm = _FakeLLM({
         "resolved_block": "ok\n", "confidence": 0.99,
         "rationale": "trivial", "new_logic_detected": False,
@@ -1111,8 +1120,11 @@ def test_multi_file_per_file_fallback_for_independent_components(tmp_path):
 
     outcome = _run(ma.resolve_conflict(req, deps=deps))
 
-    assert outcome.reason is ma.MergerReason.multi_file_per_file_fallback
-    assert llm.calls == []
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert len(llm.calls) == 2
+    assert all("Cross-file consistency directive:" in call for call in llm.calls)
+    assert "sibling files backend/utils.py have own conflicts" in llm.calls[0]
+    assert "sibling files backend/greetings.py have own conflicts" in llm.calls[1]
     assert outcome.metadata["multi_file_strategy"] == (
         "multi_file_per_file_fallback"
     )
@@ -1120,6 +1132,88 @@ def test_multi_file_per_file_fallback_for_independent_components(tmp_path):
         ["backend/greetings.py"],
         ["backend/utils.py"],
     ]
+    assert set(outcome.metadata["resolved_files"]) == {
+        "backend/greetings.py",
+        "backend/utils.py",
+    }
+    assert outcome.metadata["verify_result"] == "green"
+
+
+def test_per_file_fallback_abstains_when_union_verify_fails(tmp_path):
+    _write_file(tmp_path, "backend/greetings.py", "def greet(name):\n    return name\n")
+    _write_file(
+        tmp_path,
+        "backend/utils.py",
+        "def util():\n"
+        "<<<<<<< HEAD\n"
+        "    return 1\n"
+        "=======\n"
+        "    return 2\n"
+        ">>>>>>> feature/util\n",
+    )
+    llm = _FakeLLM({
+        "resolved_block": "ok\n", "confidence": 0.99,
+        "rationale": "trivial", "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm, pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(False, "py_compile failed"),
+    )
+    req = _base_request(additional_files=["backend/utils.py"])
+    req.workspace = str(tmp_path)
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.refused_test_failure
+    assert len(llm.calls) == 2
+    assert outcome.metadata["verify_result"] == "red"
+    assert outcome.metadata["verify_stage"] == "per_file_union"
+    assert outcome.test_result == {
+        "ok": False,
+        "summary": "py_compile failed",
+        "command": "pytest -x",
+    }
+
+
+def test_five_file_independent_per_file_fallback_resolves_all(tmp_path):
+    file_paths = [f"backend/independent_{idx}.py" for idx in range(5)]
+    for idx, path in enumerate(file_paths):
+        _write_file(
+            tmp_path,
+            path,
+            f"def value_{idx}():\n"
+            "<<<<<<< HEAD\n"
+            f"    return {idx}\n"
+            "=======\n"
+            f"    return {idx + 10}\n"
+            f">>>>>>> feature/value-{idx}\n",
+        )
+    llm = _FakeLLM({
+        "resolved_block": "    return 42\n",
+        "confidence": 0.99,
+        "rationale": "synthetic independent file",
+        "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm, pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True, "py_compile passed"),
+    )
+    req = _base_request(
+        file_path=file_paths[0],
+        conflict=(tmp_path / file_paths[0]).read_text(),
+        additional_files=file_paths[1:],
+    )
+    req.workspace = str(tmp_path)
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert len(llm.calls) == 5
+    assert set(outcome.metadata["resolved_files"]) == set(file_paths)
+    assert outcome.metadata["verify_result"] == "green"
+    assert outcome.test_result["summary"] == "py_compile passed"
 
 
 def test_multi_file_split_too_large_for_oversized_coupled_component(tmp_path):
