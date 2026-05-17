@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -26,6 +27,9 @@ import pytest
 from backend import merge_arbiter as arb
 from backend import merger_agent as ma
 from backend.submit_rule import human_vote, merger_vote
+
+
+MERGER_REPLAY_FIXTURES = Path(__file__).parent / "fixtures" / "merger_replay"
 
 
 def _run(coro):
@@ -709,6 +713,12 @@ def _git_workspace(tmp_path):
     return ws
 
 
+def _commit_all(ws, message: str) -> None:
+    subprocess.run(["git", "add", "."], cwd=ws, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", message], cwd=ws,
+                   check=True, capture_output=True)
+
+
 class TestDeferredPushRouting:
     """OP-1196 phase 3 — arbiter must route MergerReason.deferred_
     push_to_caller to ArbiterReason.merger_resolved_pending_caller_push,
@@ -920,8 +930,42 @@ class TestBuildThenVerify:
         assert pusher.calls == []
         assert outcome.merger_outcome is not None
         assert outcome.merger_outcome["metadata"]["verify_result"] == "green"
-        assert outcome.merger_outcome["metadata"]["verify_stage"] == "pytest"
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "replay"
         assert outcome.merger_outcome["test_result"]["ok"] is True
+
+    def test_conflict_marker_resolution_abstains_before_py_compile(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        task = _task(workspace=str(ws))
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text=(
+                    "def greet(name):\n"
+                    "<<<<<<< HEAD\n"
+                    "    return f'Hello {name}!'\n"
+                    "=======\n"
+                    "    return f'Hi {name}!'\n"
+                    ">>>>>>> feature/greeting\n"
+                ),
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "red"
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "conflict_marker"
+        assert "conflict markers found" in outcome.merger_outcome["test_result"]["summary"]
 
     def test_broken_resolution_abstains_without_pushing(self, tmp_path):
         ws = _git_workspace(tmp_path)
@@ -948,6 +992,41 @@ class TestBuildThenVerify:
         assert outcome.merger_outcome is not None
         assert outcome.merger_outcome["metadata"]["verify_result"] == "red"
         assert outcome.merger_outcome["metadata"]["verify_stage"] == "py_compile"
+
+    def test_additional_python_file_syntax_abstains_without_pushing(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        (ws / "backend" / "extra.py").write_text(
+            "def helper(:\n    return 1\n",
+            encoding="utf-8",
+        )
+        _commit_all(ws, "add broken extra")
+        task = _task(
+            workspace=str(ws),
+            additional_files=["backend/extra.py"],
+        )
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text="def greet(name):\n    return f'Hello {name}!'\n",
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "red"
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "py_compile"
+        assert "backend/extra.py" in outcome.merger_outcome["test_result"]["command"]
 
     def test_semantically_wrong_resolution_abstains_with_pytest_output(self, tmp_path):
         ws = _git_workspace(tmp_path)
@@ -976,3 +1055,85 @@ class TestBuildThenVerify:
         assert test_result["ok"] is False
         assert "test_greet" in test_result["last_30_lines"]
         assert outcome.merger_outcome["metadata"]["verify_stage"] == "pytest"
+
+    def test_replay_fixture_suite_runs_after_targeted_pytest(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        (ws / "backend" / "tests").mkdir(parents=True)
+        (ws / "backend" / "tests" / "test_merger_replay.py").write_text(
+            "def test_replay_fixture_sweep():\n"
+            "    assert True\n",
+            encoding="utf-8",
+        )
+        _commit_all(ws, "add replay suite")
+        task = _task(workspace=str(ws), push_locally=False)
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text="def greet(name):\n    return f'Hello {name}!'\n",
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_resolved_pending_caller_push
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "green"
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "replay"
+        assert "backend/tests/test_merger_replay.py" in (
+            outcome.merger_outcome["test_result"]["command"]
+        )
+
+    def test_change_930_before_fixture_marker_scan_abstains_without_pushing(
+        self,
+        tmp_path,
+    ):
+        ws = _git_workspace(tmp_path)
+        fixture_text = (
+            MERGER_REPLAY_FIXTURES
+            / "change_930"
+            / "before"
+            / "backend"
+            / "merge_arbiter.py"
+        ).read_text(encoding="utf-8")
+        (ws / "backend" / "merge_arbiter.py").write_text(
+            fixture_text,
+            encoding="utf-8",
+        )
+        _commit_all(ws, "add change 930 fixture")
+        task = _task(
+            workspace=str(ws),
+            file_path="backend/merge_arbiter.py",
+            conflict_text=fixture_text,
+        )
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text=fixture_text,
+                changed_identifiers=[],
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "conflict_marker"
+        assert "conflict markers found" in outcome.merger_outcome["test_result"]["summary"]

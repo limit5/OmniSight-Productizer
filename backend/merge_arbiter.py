@@ -539,9 +539,10 @@ class _DefaultResolutionVerifier:
     """Build-then-verify gate for LLM conflict resolutions.
 
     The merger agent is invoked in deferred-push mode so this verifier can
-    apply the resolved file to a scratch git worktree, run py_compile and
-    a targeted pytest subset, then push from the scratch worktree only if
-    both checks are green.
+    apply the resolved file to a scratch git worktree, scan changed files
+    for conflict markers, run py_compile over changed Python files, run a
+    targeted pytest subset plus replay fixtures, then push from the scratch
+    worktree only if every check is green.
     """
 
     def __init__(
@@ -614,7 +615,15 @@ class _DefaultResolutionVerifier:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(outcome.resolved_text, encoding="utf-8")
 
-            touched_files = [task.file_path, *task.additional_files]
+            touched_files = self._touched_files(task)
+            result = self._run_conflict_marker_scan(
+                touched_files,
+                cwd=scratch,
+                timeout=_remaining_seconds(deadline),
+            )
+            if not result.ok:
+                return self._failed_outcome(task, outcome, result)
+
             py_files = [p for p in touched_files if p.endswith(".py")]
             for file_path in py_files:
                 result = self._run(
@@ -650,11 +659,84 @@ class _DefaultResolutionVerifier:
                     scratch_path=scratch,
                 )
 
+            result = self._run_replay_fixture_sweep(
+                cwd=scratch,
+                timeout=_remaining_seconds(deadline),
+            )
+            if not result.ok:
+                return self._failed_outcome(task, outcome, result)
+
             if task.push_locally:
                 return self._push_verified(task, outcome, scratch, result)
             return self._verified_deferred(task, outcome, result)
         finally:
             self._cleanup_scratch(task.workspace, scratch)
+
+    @staticmethod
+    def _touched_files(task: MergeConflictTask) -> list[str]:
+        touched: list[str] = []
+        for file_path in [task.file_path, *task.additional_files]:
+            if file_path and file_path not in touched:
+                touched.append(file_path)
+        return touched
+
+    def _run_conflict_marker_scan(
+        self,
+        file_paths: list[str],
+        *,
+        cwd: str,
+        timeout: float,
+    ) -> VerifyRunResult:
+        if not file_paths:
+            return VerifyRunResult(
+                ok=True,
+                stage="conflict_marker",
+                summary="conflict_marker skipped: no changed files",
+                verify_outcome="green",
+                scratch_path=cwd,
+            )
+
+        result = self._run(
+            ["grep", "-E", r"^(<<<<<<<|=======|>>>>>>>)", "--", *file_paths],
+            cwd=cwd,
+            stage="conflict_marker",
+            timeout=timeout,
+        )
+        if result.ok:
+            result.ok = False
+            result.summary = "conflict_marker failed: conflict markers found"
+            result.verify_outcome = "red"
+            return result
+        if "exit 1" in result.summary:
+            result.ok = True
+            result.summary = "conflict_marker passed"
+            result.verify_outcome = "green"
+        return result
+
+    def _run_replay_fixture_sweep(
+        self,
+        *,
+        cwd: str,
+        timeout: float,
+    ) -> VerifyRunResult:
+        replay_suite = Path(cwd) / "backend/tests/test_merger_replay.py"
+        if not replay_suite.exists():
+            return VerifyRunResult(
+                ok=True,
+                stage="replay",
+                summary="replay skipped: backend/tests/test_merger_replay.py missing",
+                verify_outcome="green",
+                scratch_path=cwd,
+            )
+        return self._run(
+            [
+                "python3", "-m", "pytest", "backend/tests/test_merger_replay.py",
+                f"--timeout={PYTEST_TIMEOUT_SECONDS}", "--durations=0", "-x",
+            ],
+            cwd=cwd,
+            stage="replay",
+            timeout=timeout,
+        )
 
     def _create_scratch_worktree(self, workspace: str) -> str:
         parent = tempfile.mkdtemp(prefix="merger-verify-")
