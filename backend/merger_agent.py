@@ -1253,6 +1253,7 @@ def is_security_sensitive(file_path: str) -> bool:
 def classify_conflict_risk(
     req: ConflictRequest,
     blocks: list[ConflictBlock],
+    coupling_components: list[set[str]] | None = None,
 ) -> ConflictRisk:
     """Classify structural merge risk before spending an LLM call.
 
@@ -1262,10 +1263,17 @@ def classify_conflict_risk(
     contract cannot safely verify before push.
     """
     reasons: list[str] = []
+    touched_files = [
+        path for path in dict.fromkeys(
+            [req.file_path, *req.additional_files]
+        )
+        if path
+    ]
+    multi_file = len(touched_files) > 1
 
     if len(blocks) > 1:
         reasons.append("multiple_conflict_blocks")
-    if len(req.additional_files) > 0:
+    if multi_file:
         reasons.append("additional_files_present")
 
     total_lines = sum(block.n_conflict_lines for block in blocks)
@@ -1280,7 +1288,29 @@ def classify_conflict_risk(
         if _has_take_both_feature_shape(block):
             reasons.append("take_both_feature_shape")
 
+    if multi_file:
+        if len(touched_files) >= 5:
+            reasons.append("multi_file_count_exceeds_batch")
+        coupled = any(
+            len(set(component) & set(touched_files)) > 1
+            for component in (coupling_components or [])
+        )
+        reasons.append(
+            "multi_file_high_coupling" if coupled else "multi_file_low_coupling"
+        )
+        if coupled and total_lines > MAX_CONFLICT_LINES:
+            reasons.append("multi_file_coupled_oversize")
+
     deduped = tuple(dict.fromkeys(reasons))
+    if multi_file:
+        high_reasons = {
+            "multi_file_count_exceeds_batch",
+            "multi_file_coupled_oversize",
+        }
+        if any(reason in high_reasons for reason in deduped):
+            return ConflictRisk(MergerRiskTier.high, deduped)
+        return ConflictRisk(MergerRiskTier.medium, deduped)
+
     high_reasons = {
         "multiple_conflict_blocks",
         "additional_files_present",

@@ -297,6 +297,144 @@ class TestParseConflict:
         assert blocks[0].has_nested_markers is True
 
 
+class TestClassifyConflictRisk:
+
+    def test_single_file_narrow_conflict_is_low(self):
+        conflict = (
+            "<<<<<<< HEAD\n"
+            "count = 1\n"
+            "=======\n"
+            "count = 2\n"
+            ">>>>>>> feature/greeting\n"
+        )
+        req = _base_request(conflict=conflict)
+        blocks = ma.parse_conflict_block(req.conflict_text)
+
+        risk = ma.classify_conflict_risk(req, blocks)
+
+        assert risk.tier is ma.MergerRiskTier.low
+        assert risk.reasons == ()
+
+    def test_single_file_signature_overlap_is_medium(self):
+        conflict = (
+            "<<<<<<< HEAD\n"
+            "def greet(name):\n"
+            "    return f'Hello {name}!'\n"
+            "=======\n"
+            "def greet(person):\n"
+            "    return f'Hi {person}!'\n"
+            ">>>>>>> feature/greeting\n"
+        )
+        req = _base_request(conflict=conflict)
+        blocks = ma.parse_conflict_block(req.conflict_text)
+
+        risk = ma.classify_conflict_risk(req, blocks)
+
+        assert risk.tier is ma.MergerRiskTier.medium
+        assert "signature_overlap" in risk.reasons
+
+    def test_multi_file_low_coupling_is_medium(self):
+        req = _base_request(additional_files=["backend/alpha.py"])
+        blocks = ma.parse_conflict_block(req.conflict_text)
+
+        risk = ma.classify_conflict_risk(
+            req,
+            blocks,
+            coupling_components=[
+                {"backend/greetings.py"},
+                {"backend/alpha.py"},
+            ],
+        )
+
+        assert risk.tier is ma.MergerRiskTier.medium
+        assert "multi_file_low_coupling" in risk.reasons
+
+    def test_multi_file_high_coupling_that_fits_batch_is_medium(self):
+        req = _base_request(additional_files=["backend/alpha.py"])
+        blocks = ma.parse_conflict_block(req.conflict_text)
+
+        risk = ma.classify_conflict_risk(
+            req,
+            blocks,
+            coupling_components=[
+                {"backend/greetings.py", "backend/alpha.py"},
+            ],
+        )
+
+        assert risk.tier is ma.MergerRiskTier.medium
+        assert "multi_file_high_coupling" in risk.reasons
+
+    def test_real_multi_file_conflict_tier_matches_manual_classification(
+        self,
+        tmp_path,
+    ):
+        _write_file(
+            tmp_path,
+            "backend/greetings.py",
+            "from backend.alpha import Alpha\n\nvalue = Alpha()\n",
+        )
+        _write_file(tmp_path, "backend/alpha.py", "class Alpha:\n    pass\n")
+        req = _base_request(additional_files=["backend/alpha.py"])
+        req.workspace = str(tmp_path)
+        blocks = ma.parse_conflict_block(req.conflict_text)
+        coupling_components = ma._classify_coupling(
+            [req.file_path, *req.additional_files],
+            req.workspace,
+        )
+
+        risk = ma.classify_conflict_risk(req, blocks, coupling_components)
+
+        assert _sorted_components(coupling_components) == [
+            ["backend/alpha.py", "backend/greetings.py"],
+        ]
+        assert risk.tier is ma.MergerRiskTier.medium
+        assert "multi_file_high_coupling" in risk.reasons
+
+    def test_multi_file_high_coupling_oversize_is_high(self):
+        req = _base_request(
+            conflict=OVERSIZED_CONFLICT,
+            additional_files=["backend/alpha.py"],
+        )
+        blocks = ma.parse_conflict_block(req.conflict_text)
+
+        risk = ma.classify_conflict_risk(
+            req,
+            blocks,
+            coupling_components=[
+                {"backend/greetings.py", "backend/alpha.py"},
+            ],
+        )
+
+        assert risk.tier is ma.MergerRiskTier.high
+        assert "multi_file_coupled_oversize" in risk.reasons
+
+    def test_multi_file_count_exceeding_batch_is_high(self):
+        req = _base_request(
+            additional_files=[
+                "backend/alpha.py",
+                "backend/beta.py",
+                "backend/gamma.py",
+                "backend/delta.py",
+            ],
+        )
+        blocks = ma.parse_conflict_block(req.conflict_text)
+
+        risk = ma.classify_conflict_risk(
+            req,
+            blocks,
+            coupling_components=[
+                {"backend/greetings.py"},
+                {"backend/alpha.py"},
+                {"backend/beta.py"},
+                {"backend/gamma.py"},
+                {"backend/delta.py"},
+            ],
+        )
+
+        assert risk.tier is ma.MergerRiskTier.high
+        assert "multi_file_count_exceeds_batch" in risk.reasons
+
+
 class TestClassifyCoupling:
 
     def test_independent_files_stay_separate(self, tmp_path):
