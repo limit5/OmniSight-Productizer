@@ -39,6 +39,8 @@ as operator-overridable constants rather than adding BP.N.3 env knobs here.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import os
 import threading
@@ -282,6 +284,59 @@ def estimate_tavily_cost_usd(
     """Estimate Tavily Search USD cost from documented API credit costs."""
 
     return _credits_for_depth(search_depth) * max(0.0, float(credit_usd))
+
+
+async def _audit_web_search_query_async(
+    *,
+    query: str,
+    provider: str,
+    status: str,
+    tenant_id: str,
+    result_count: int | None = None,
+    cost_usd_estimated: float | None = None,
+    error: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Best-effort BP.N.5 audit row for direct web-search client calls."""
+    from backend import audit as _audit
+
+    after: dict[str, Any] = {
+        "query": query,
+        "provider": provider,
+        "status": status,
+        "tenant_id": tenant_id or "t-default",
+    }
+    if result_count is not None:
+        after["result_count"] = int(result_count)
+    if cost_usd_estimated is not None:
+        after["cost_usd_estimated"] = float(cost_usd_estimated)
+    if request_id:
+        after["request_id"] = request_id
+    if error:
+        after["error"] = error
+
+    await _audit.log(
+        action="web_search.query",
+        entity_kind="web_search_query",
+        entity_id=hashlib.sha256(query.encode("utf-8")).hexdigest()[:16],
+        before=None,
+        after=after,
+        actor="system",
+    )
+
+
+def _audit_web_search_query(**kwargs: Any) -> None:
+    """Run or schedule the async audit writer from the sync Tavily client."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            asyncio.run(_audit_web_search_query_async(**kwargs))
+        except Exception as exc:  # noqa: BLE001 -- audit is best-effort
+            logger.debug("web_search audit log failed: %s", exc)
+        return
+
+    loop.create_task(_audit_web_search_query_async(**kwargs))
 
 
 class WebSearchRateGate:
@@ -569,6 +624,7 @@ class TavilyWebSearchClient:
         include_answer: bool = False,
         include_raw_content: bool = False,
         now: datetime | None = None,
+        audit: bool = True,
     ) -> WebSearchResponse:
         """Execute a Tavily search after tenant rate and cost gates."""
 
@@ -576,7 +632,7 @@ class TavilyWebSearchClient:
         tid = tenant_id or "t-default"
         cleaned_query = query.strip()
         if not cleaned_query:
-            return self._error_response(
+            response = self._error_response(
                 query=query,
                 tenant_id=tid,
                 search_depth=search_depth,
@@ -584,17 +640,60 @@ class TavilyWebSearchClient:
                 error="query is empty",
                 now=current,
             )
+            if audit:
+                _audit_web_search_query(
+                    query=query,
+                    provider="tavily",
+                    status="invalid",
+                    tenant_id=tid,
+                    cost_usd_estimated=0.0,
+                    error=response.error,
+                )
+            return response
         if not self.api_key:
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider="tavily",
+                    status="credential_missing",
+                    tenant_id=tid,
+                    error=(
+                        "OMNISIGHT_TAVILY_API_KEY or TAVILY_API_KEY is required"
+                    ),
+                )
             raise WebSearchCredentialMissing(
                 "OMNISIGHT_TAVILY_API_KEY or TAVILY_API_KEY is required"
             )
 
-        self.rate_gate.check(tid)
         cost_usd = estimate_tavily_cost_usd(
             search_depth=search_depth,
             credit_usd=self.credit_usd,
         )
-        reservation = self.cost_tracker.reserve(tid, cost_usd, now=current)
+        try:
+            self.rate_gate.check(tid)
+            reservation = self.cost_tracker.reserve(tid, cost_usd, now=current)
+        except WebSearchRateLimited as exc:
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider="tavily",
+                    status="rate_limited",
+                    tenant_id=tid,
+                    cost_usd_estimated=cost_usd,
+                    error=str(exc),
+                )
+            raise
+        except WebSearchBudgetExceeded as exc:
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider="tavily",
+                    status="budget_exceeded",
+                    tenant_id=tid,
+                    cost_usd_estimated=cost_usd,
+                    error=str(exc),
+                )
+            raise
 
         payload = {
             "query": cleaned_query,
@@ -616,7 +715,7 @@ class TavilyWebSearchClient:
         except (httpx.HTTPError, ValueError) as exc:
             self.cost_tracker.refund(reservation, now=current)
             logger.info("tavily search failed tenant=%s error=%s", tid, exc)
-            return self._error_response(
+            response = self._error_response(
                 query=cleaned_query,
                 tenant_id=tid,
                 search_depth=search_depth,
@@ -624,8 +723,19 @@ class TavilyWebSearchClient:
                 error=f"{type(exc).__name__}: {exc}",
                 now=current,
             )
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider=response.provider,
+                    status="provider_error",
+                    tenant_id=tid,
+                    cost_usd_estimated=response.cost_usd_estimated,
+                    error=response.error,
+                    request_id=response.request_id,
+                )
+            return response
 
-        return WebSearchResponse(
+        response = WebSearchResponse(
             provider="tavily",
             query=cleaned_query,
             tenant_id=tid,
@@ -637,6 +747,17 @@ class TavilyWebSearchClient:
             answer=str(data.get("answer") or ""),
             request_id=str(data.get("request_id") or ""),
         )
+        if audit:
+            _audit_web_search_query(
+                query=cleaned_query,
+                provider=response.provider,
+                status="ok",
+                tenant_id=tid,
+                result_count=response.total_results,
+                cost_usd_estimated=response.cost_usd_estimated,
+                request_id=response.request_id,
+            )
+        return response
 
     def _error_response(
         self,
