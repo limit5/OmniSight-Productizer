@@ -9,6 +9,7 @@ pg_test_pool fixture to ensure the module-global pool is installed.
 """
 
 import pytest
+from fastapi import HTTPException
 
 from backend.models import Artifact, ArtifactType
 
@@ -56,6 +57,98 @@ class TestArtifactModel:
         for t in ArtifactType:
             a = Artifact(id="a1", name="file", type=t)
             assert a.type == t
+
+
+class TestArtifactRouterEdgeCases:
+
+    def test_path_validation_allows_nested_tenant_artifact_file(self, tmp_path, monkeypatch):
+        from backend.routers import artifacts as art_mod
+
+        tenants_root = tmp_path / "data" / "tenants"
+        artifact_file = tenants_root / "t-a" / "artifacts" / "task" / "report.md"
+        artifact_file.parent.mkdir(parents=True)
+        artifact_file.write_text("ok")
+
+        monkeypatch.setattr(art_mod, "tenants_root", lambda: tenants_root)
+        monkeypatch.setattr(art_mod, "_LEGACY_ARTIFACTS_ROOT", tmp_path / ".artifacts")
+
+        assert art_mod._is_valid_artifact_path(artifact_file)
+
+    def test_path_validation_rejects_prefix_sibling_outside_tenants_root(self, tmp_path, monkeypatch):
+        from backend.routers import artifacts as art_mod
+
+        tenants_root = tmp_path / "data" / "tenants"
+        sibling_file = tmp_path / "data" / "tenants_evil" / "t-a" / "artifacts" / "report.md"
+        sibling_file.parent.mkdir(parents=True)
+        sibling_file.write_text("no")
+
+        monkeypatch.setattr(art_mod, "tenants_root", lambda: tenants_root)
+        monkeypatch.setattr(art_mod, "_LEGACY_ARTIFACTS_ROOT", tmp_path / ".artifacts")
+
+        assert not art_mod._is_valid_artifact_path(sibling_file)
+
+    @pytest.mark.asyncio
+    async def test_download_missing_file_inside_artifact_storage_returns_404(self, tmp_path, monkeypatch):
+        from backend.routers import artifacts as art_mod
+
+        tenants_root = tmp_path / "data" / "tenants"
+        missing_file = tenants_root / "t-a" / "artifacts" / "missing.md"
+
+        async def fake_get_artifact(_conn, artifact_id):
+            assert artifact_id == "art-missing-file"
+            return {
+                "id": artifact_id,
+                "name": "missing.md",
+                "type": "markdown",
+                "file_path": str(missing_file),
+            }
+
+        monkeypatch.setattr(art_mod, "tenants_root", lambda: tenants_root)
+        monkeypatch.setattr(art_mod, "_LEGACY_ARTIFACTS_ROOT", tmp_path / ".artifacts")
+        monkeypatch.setattr(art_mod.db, "get_artifact", fake_get_artifact)
+
+        with pytest.raises(HTTPException) as excinfo:
+            await art_mod.download_artifact("art-missing-file", conn=object())
+
+        assert excinfo.value.status_code == 404
+        assert excinfo.value.detail == "Artifact file missing from disk"
+
+    @pytest.mark.asyncio
+    async def test_delete_outside_artifact_storage_skips_unlink_but_deletes_metadata(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from backend.routers import artifacts as art_mod
+
+        tenants_root = tmp_path / "data" / "tenants"
+        outside_file = tmp_path / "outside" / "keep.bin"
+        outside_file.parent.mkdir()
+        outside_file.write_bytes(b"do not delete")
+        deleted_ids = []
+
+        async def fake_get_artifact(_conn, artifact_id):
+            assert artifact_id == "art-outside"
+            return {
+                "id": artifact_id,
+                "name": "keep.bin",
+                "type": "binary",
+                "file_path": str(outside_file),
+            }
+
+        async def fake_delete_artifact(_conn, artifact_id):
+            deleted_ids.append(artifact_id)
+            return True
+
+        monkeypatch.setattr(art_mod, "tenants_root", lambda: tenants_root)
+        monkeypatch.setattr(art_mod, "_LEGACY_ARTIFACTS_ROOT", tmp_path / ".artifacts")
+        monkeypatch.setattr(art_mod.db, "get_artifact", fake_get_artifact)
+        monkeypatch.setattr(art_mod.db, "delete_artifact", fake_delete_artifact)
+
+        await art_mod.delete_artifact("art-outside", conn=object())
+
+        assert outside_file.exists()
+        assert deleted_ids == ["art-outside"]
 
 
 class TestReportGenerator:
