@@ -1336,6 +1336,53 @@ def test_develop_merge_drift_sweep_re_evaluates_newly_unmergeable_ps(
     assert len(spawned) == 1
 
 
+def test_develop_drift_cooldown_survives_bridge_restart(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """OP-1418: persisted cooldown state blocks immediate restart replay."""
+    now = 1_900_000_000.0
+    monkeypatch.setattr(bridge.time, "time", lambda: now)
+    config = bridge.BridgeConfig(
+        cursor_file=tmp_path / "event-cursor.json",
+        merger_drift_cooldown_seconds=30.0 * 60.0,
+    )
+    logs: list[tuple[str, str, dict[str, Any]]] = []
+    first = bridge.GerritJiraBridge(
+        _client(),
+        config,
+        sleep=lambda _: None,
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+
+    assert first._should_re_evaluate_drift("900", True) is False
+    assert first._should_re_evaluate_drift("900", False) is True
+
+    state_file = tmp_path / "drift-cooldown.json"
+    assert json.loads(state_file.read_text()) == {
+        "changes": {
+            "900": {
+                "last_re_eval_ts": now,
+                "last_seen_mergeable": False,
+            },
+        },
+    }
+    assert oct(state_file.stat().st_mode & 0o777) == "0o600"
+
+    restarted = bridge.GerritJiraBridge(
+        _client(),
+        config,
+        sleep=lambda _: None,
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+
+    assert restarted._should_re_evaluate_drift("900", False) is False
+    assert any(
+        ev == "merger_drift_re_eval_skipped_cooldown"
+        and kw["change"] == "900"
+        for _level, ev, kw in logs
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  OP-1196 phase 3b — startup conflict backfill
 # ──────────────────────────────────────────────────────────────────────
