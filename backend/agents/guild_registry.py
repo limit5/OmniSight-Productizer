@@ -181,8 +181,10 @@ class SecondaryGuildChoiceError(ValueError):
     """Raised when a secondary Guild selection is invalid for the agent."""
 
 
-def get_guild_definition(guild: Guild) -> GuildDefinition:
+def get_guild_definition(guild: Guild | str) -> GuildDefinition:
     """Return RPG-facing metadata for ``guild``.
+
+    ``guild`` accepts the BP.B enum member or its slug string.
 
     Raises:
         KeyError: ``guild`` is missing from :data:`GUILD_DEFINITIONS`.
@@ -191,6 +193,11 @@ def get_guild_definition(guild: Guild) -> GuildDefinition:
             added without a matching :class:`GuildDefinition`.
     """
 
+    if isinstance(guild, str):
+        try:
+            guild = Guild(guild.strip())
+        except ValueError as exc:
+            raise KeyError(guild) from exc
     return GUILD_DEFINITIONS[guild]
 
 
@@ -224,14 +231,28 @@ def eligible_guilds_for_agent_class(agent_class: str) -> FrozenSet[Guild]:
         ) from exc
 
 
-def agent_class_supports_guild(agent_class: str, guild: Guild) -> bool:
+def agent_class_supports_guild(agent_class: str, guild: Guild | str | None) -> bool:
     """Whether ``agent_class`` may specialize into ``guild``.
+
+    ``guild`` accepts the BP.B enum member or its slug string. Unknown
+    scalar values are treated as unsupported.
 
     Raises:
         UnknownAgentClassError: ``agent_class`` is not a key in
             :data:`AGENT_CLASS_GUILD_MATRIX` (propagated from
             :func:`eligible_guilds_for_agent_class`).
+        TypeError: ``guild`` is a non-scalar value.
     """
+
+    if isinstance(guild, str):
+        try:
+            guild = Guild(guild.strip())
+        except ValueError:
+            return False
+    elif guild is None:
+        return False
+    elif not isinstance(guild, Guild):
+        raise TypeError("guild must be a Guild, string, or None")
 
     return guild in eligible_guilds_for_agent_class(agent_class)
 
