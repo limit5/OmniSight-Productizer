@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -215,6 +216,12 @@ class BridgeConfig:
     # debounce coalesces them into a single sweep on the most recent
     # merged SHA.
     auto_rebase_debounce_seconds: float = 30.0
+    # OP-1409 — debounce window for merger drift re-evaluation sweeps.
+    # Develop can advance several times in a burst; re-check all open
+    # develop PSes once after the burst settles.
+    merger_drift_debounce_seconds: float = 60.0
+    merger_drift_cooldown_seconds: float = 30.0 * 60.0
+    gerrit_rest_base_url: str | None = None
     archive_age_days: int | None = None
 
 
@@ -445,6 +452,7 @@ class GerritJiraBridge:
         sleep: Callable[[float], None] = time.sleep,
         popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen,
         run_command: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+        urlopen: Callable[..., Any] = urllib.request.urlopen,
         logger: Callable[..., None] = structured_log,
     ) -> None:
         self.client = client
@@ -452,6 +460,7 @@ class GerritJiraBridge:
         self.sleep = sleep
         self.popen_factory = popen_factory
         self.run_command = run_command
+        self.urlopen = urlopen
         self.log = logger
         self.counters = BridgeCounters()
         self._ticket_locks: dict[str, Lock] = {}
@@ -470,6 +479,10 @@ class GerritJiraBridge:
         # the rebase path don't import the module at all.
         self._auto_rebase_sweeper: Any = None
         self._auto_rebase_scheduler: Any = None
+        self._develop_drift_scheduler: Any = None
+        self._develop_drift_lock = Lock()
+        self._develop_drift_last_seen_mergeable: dict[str, bool] = {}
+        self._develop_drift_last_re_eval: dict[str, float] = {}
         # SP-B-X-019 / OP-1077 — independent heartbeat-thread state.
         # The maintenance-tick loop runs *inside* ``stream_forever``'s
         # blocking SSH read, so it stalls during quiet Gerrit periods.
@@ -810,6 +823,7 @@ class GerritJiraBridge:
             self._emit_ps_merged_metrics(event)
             self._handle_change_merged(event)
             self._schedule_auto_rebase_sweep(event)
+            self._on_develop_merge_advance(event)
             return
         if event_type == "patchset-created":
             self._handle_patchset_created(event)
@@ -1361,6 +1375,227 @@ class GerritJiraBridge:
             change_id=str(change_number) if change_number else "",
             ps=str(ps_number) if ps_number else "",
         )
+
+    # ─── change-merged → merger drift re-evaluation (OP-1409) ───────
+
+    def _on_develop_merge_advance(self, event: dict[str, Any]) -> None:
+        """Schedule a debounced sweep when ``develop`` advances.
+
+        Type β conflicts arrive after upload: a PS was mergeable when
+        ``patchset-created`` fired, then a later develop merge makes it
+        unmergeable. This schedules one sweep per develop-merge burst
+        and feeds newly-unmergeable changes back into the proactive
+        merger path using the existing synthetic patchset-created shape.
+        """
+        try:
+            change = event.get("change") or {}
+            branch = str(
+                change.get("branch")
+                or change.get("ref")
+                or event.get("refName")
+                or ""
+            )
+            if branch.startswith("refs/heads/"):
+                branch = branch.removeprefix("refs/heads/")
+            if branch and branch != "develop":
+                return
+            project = str(change.get("project") or "")
+            merged_sha = (
+                str(event.get("newRev") or "")
+                or str((event.get("patchSet") or {}).get("revision") or "")
+            )
+            scheduler = self._ensure_develop_drift_scheduler()
+            scheduler.schedule(project=project, merged_sha=merged_sha)
+            self.log(
+                "INFO", "merger_drift_sweep_scheduled",
+                project=project, merged_sha=merged_sha,
+                delay_s=self.config.merger_drift_debounce_seconds,
+            )
+        except Exception as exc:  # pragma: no cover — defensive
+            self.log(
+                "ERROR", "merger_drift_schedule_error",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _ensure_develop_drift_scheduler(self) -> Any:
+        if self._develop_drift_scheduler is not None:
+            return self._develop_drift_scheduler
+        from backend.agents.auto_rebase import DebouncedSweepScheduler
+
+        def _runner(project: str, merged_sha: str) -> None:
+            try:
+                self._run_develop_drift_sweep(
+                    project=project, merged_sha=merged_sha,
+                )
+            except Exception as exc:  # pragma: no cover — defensive
+                self.log(
+                    "ERROR", "merger_drift_sweep_runner_error",
+                    err=f"{type(exc).__name__}: {exc}",
+                )
+
+        self._develop_drift_scheduler = DebouncedSweepScheduler(
+            runner=_runner,
+            delay_seconds=self.config.merger_drift_debounce_seconds,
+            log=lambda *args, **kwargs: None,
+        )
+        return self._develop_drift_scheduler
+
+    def _run_develop_drift_sweep(
+        self, *, project: str = "", merged_sha: str = "",
+    ) -> int:
+        """Re-check open develop PSes and re-evaluate new conflicts."""
+        self.log(
+            "INFO", "merger_drift_sweep_start",
+            project=project, merged_sha=merged_sha,
+        )
+        changes = self._query_open_develop_changes()
+        triggered = 0
+        for change_obj in changes:
+            change_key = str(
+                change_obj.get("number")
+                or change_obj.get("_number")
+                or change_obj.get("id")
+                or ""
+            )
+            if not change_key:
+                continue
+            mergeable = self._fetch_current_mergeable(change_key)
+            if mergeable is None:
+                continue
+            if not self._should_re_evaluate_drift(change_key, mergeable):
+                continue
+            event = self._synthesize_patchset_created_event(change_obj)
+            self.log(
+                "INFO", "merger_drift_re_eval_triggered",
+                reason="merger_drift_detected_re_evaluation",
+                change=str(change_obj.get("number") or ""),
+                ps=str(
+                    (change_obj.get("currentPatchSet") or {}).get("number")
+                    or ""
+                ),
+                project=str(change_obj.get("project") or ""),
+            )
+            self._spawn_proactive_merger_thread(event)
+            triggered += 1
+        self.log(
+            "INFO", "merger_drift_sweep_complete",
+            project=project, merged_sha=merged_sha,
+            scanned=len(changes), triggered=triggered,
+        )
+        return triggered
+
+    def _query_open_develop_changes(self) -> list[dict[str, Any]]:
+        cmd = self._ssh_cmd(
+            "gerrit", "query", "--current-patch-set", "--format=JSON",
+            "status:open", "branch:develop",
+        )
+        try:
+            result = self.run_command(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=self._ssh_env(),
+            )
+        except subprocess.TimeoutExpired:
+            self.log("WARN", "merger_drift_gerrit_query_timeout")
+            return []
+        except Exception as exc:  # pragma: no cover — defensive
+            self.log(
+                "ERROR", "merger_drift_gerrit_query_raised",
+                err=f"{type(exc).__name__}: {exc}",
+            )
+            return []
+        if result.returncode != 0:
+            self.log(
+                "WARN", "merger_drift_gerrit_query_failed",
+                rc=result.returncode,
+                err=((result.stderr or "") + "\n" + (result.stdout or ""))[-500:],
+            )
+            return []
+
+        changes: list[dict[str, Any]] = []
+        for raw in (result.stdout or "").splitlines():
+            if not raw.strip():
+                continue
+            try:
+                obj = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") == "stats" or "rowCount" in obj:
+                continue
+            if obj.get("id") or obj.get("number") or obj.get("_number"):
+                changes.append(obj)
+        return changes
+
+    def _fetch_current_mergeable(self, change_key: str) -> bool | None:
+        rest_base = self._gerrit_rest_base_url()
+        path_key = urllib.parse.quote(change_key, safe="")
+        url = f"{rest_base}/changes/{path_key}/revisions/current/mergeable"
+        req = urllib.request.Request(
+            url,
+            method="GET",
+            headers={"Accept": "application/json"},
+        )
+        try:
+            with self.urlopen(req, timeout=30) as resp:
+                payload = resp.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace") if exc.fp else ""
+            self.log(
+                "WARN", "merger_drift_mergeable_fetch_failed",
+                change=change_key, status=exc.code, err=detail[:300],
+            )
+            return None
+        except Exception as exc:
+            self.log(
+                "WARN", "merger_drift_mergeable_fetch_error",
+                change=change_key, err=f"{type(exc).__name__}: {exc}",
+            )
+            return None
+        body = payload.lstrip(")]}'\n").strip()
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self.log("WARN", "merger_drift_mergeable_parse_error",
+                     change=change_key)
+            return None
+        value = data.get("mergeable")
+        return value if isinstance(value, bool) else None
+
+    def _gerrit_rest_base_url(self) -> str:
+        if self.config.gerrit_rest_base_url:
+            return self.config.gerrit_rest_base_url.rstrip("/")
+        host = self.config.gerrit_host
+        if "@" in host:
+            host = host.rsplit("@", 1)[1]
+        return f"https://{host}:29420"
+
+    def _should_re_evaluate_drift(
+        self, change_key: str, mergeable: bool,
+    ) -> bool:
+        now = time.monotonic()
+        with self._develop_drift_lock:
+            previous = self._develop_drift_last_seen_mergeable.get(change_key)
+            if mergeable:
+                self._develop_drift_last_seen_mergeable[change_key] = True
+                return False
+            if previous is False:
+                return False
+            last_eval = self._develop_drift_last_re_eval.get(change_key)
+            if (
+                last_eval is not None
+                and now - last_eval < self.config.merger_drift_cooldown_seconds
+            ):
+                self.log(
+                    "INFO", "merger_drift_re_eval_skipped_cooldown",
+                    change=change_key,
+                    age_s=round(now - last_eval, 3),
+                )
+                return False
+            self._develop_drift_last_seen_mergeable[change_key] = False
+            self._develop_drift_last_re_eval[change_key] = now
+            return True
 
     # ─── change-merged → auto-rebase sweep (OP-733) ──────────────────
 
