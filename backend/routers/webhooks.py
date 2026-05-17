@@ -1094,6 +1094,24 @@ async def _post_merge_conflict_to_backend(
     return body
 
 
+def _fetch_jira_description_for_merger(jira_ticket: str) -> str:
+    if not jira_ticket:
+        return ""
+    try:
+        from backend.agents import jira_dispatch
+        agent_class = os.environ.get(
+            "OMNISIGHT_MERGER_JIRA_AGENT_CLASS", "subscription-claude",
+        )
+        client = jira_dispatch.make_client(agent_class)
+        return jira_dispatch.fetch_description(client, jira_ticket)
+    except Exception as exc:
+        logger.debug(
+            "merger context-pack JIRA description fetch failed for %s: %s",
+            jira_ticket, exc,
+        )
+        return ""
+
+
 def _is_merger_uploader(uploader: dict) -> bool:
     """Loop prevention — recognise merger-agent-bot's own patchset uploads."""
     name = (uploader.get("name") or "").lower()
@@ -1257,6 +1275,7 @@ async def _proactive_merger_check(event: dict) -> None:
         subject = change_data.get("subject", "")
         ticket_match = re.search(r"\bOP-\d+\b", subject)
         jira_ticket = ticket_match.group(0) if ticket_match else ""
+        jira_description = _fetch_jira_description_for_merger(jira_ticket)
 
         primary = result.conflict_files[0]
         additional = [cf.path for cf in result.conflict_files[1:]]
@@ -1267,11 +1286,16 @@ async def _proactive_merger_check(event: dict) -> None:
             file_path=primary.path,
             conflict_text=primary.conflict_text,
             file_context=primary.file_context,
+            change_number=str(change_number),
             head_commit_message=result.head_subject or subject,
             incoming_commit_message=result.incoming_subject or subject,
             patchset_revision=rev,
             jira_ticket=jira_ticket,
+            jira_description=jira_description,
             additional_files=additional,
+            sibling_file_contents=dict(result.sibling_file_contents),
+            git_logs=dict(result.git_logs),
+            symbol_table=dict(result.symbol_table),
             # OP-1196 phase 3 — daemon does the push using its host
             # workspace + merger-bot SSH key. Backend has neither.
             push_locally=False,

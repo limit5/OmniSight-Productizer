@@ -122,8 +122,13 @@ class MergeConflictTask:
     file_context: str = ""
     patchset_revision: str = ""
     workspace: str | None = None
+    change_number: str = ""
     additional_files: list[str] = field(default_factory=list)
+    sibling_file_contents: dict[str, str] = field(default_factory=dict)
+    git_logs: dict[str, str] = field(default_factory=dict)
+    symbol_table: dict[str, str] = field(default_factory=dict)
     jira_ticket: str = ""                # parent story (for abstain ticket)
+    jira_description: str = ""
     catc_owner: str = ""                 # original CATC assignee
     guild_id: str = ""
     size: str = ""
@@ -148,8 +153,13 @@ class MergeConflictTask:
             file_context=str(d.get("file_context") or d.get("fileContext") or ""),
             patchset_revision=str(d.get("patchset_revision") or d.get("revision") or ""),
             workspace=d.get("workspace"),
+            change_number=str(d.get("change_number") or ""),
             additional_files=list(d.get("additional_files") or []),
+            sibling_file_contents=dict(d.get("sibling_file_contents") or {}),
+            git_logs=dict(d.get("git_logs") or {}),
+            symbol_table=dict(d.get("symbol_table") or {}),
             jira_ticket=str(d.get("jira_ticket") or ""),
+            jira_description=str(d.get("jira_description") or ""),
             catc_owner=str(d.get("catc_owner") or ""),
             guild_id=str(d.get("guild_id") or d.get("guild") or ""),
             size=str(
@@ -405,7 +415,13 @@ async def on_merge_conflict_webhook(
         file_context=task.file_context,
         patchset_revision=task.patchset_revision,
         workspace=task.workspace,
+        change_number=task.change_number,
+        jira_ticket=task.jira_ticket,
+        jira_description=task.jira_description,
         additional_files=list(task.additional_files),
+        sibling_file_contents=dict(task.sibling_file_contents),
+        git_logs=dict(task.git_logs),
+        symbol_table=dict(task.symbol_table),
         # OP-1196 phase 3 — pass through the deferred-push flag.
         push_locally=task.push_locally,
     )

@@ -293,8 +293,13 @@ class MergeConflictRequest(BaseModel):
     file_context: str = ""
     patchset_revision: str = ""
     workspace: str | None = None
+    change_number: str = ""
     additional_files: list[str] = Field(default_factory=list)
+    sibling_file_contents: dict[str, str] = Field(default_factory=dict)
+    git_logs: dict[str, str] = Field(default_factory=dict)
+    symbol_table: dict[str, str] = Field(default_factory=dict)
     jira_ticket: str = ""
+    jira_description: str = ""
     catc_owner: str = ""
     guild_id: str = ""
     size: str = ""
@@ -362,8 +367,13 @@ async def merge_conflict_endpoint(
         file_context=model.file_context,
         patchset_revision=model.patchset_revision,
         workspace=model.workspace,
+        change_number=model.change_number,
         additional_files=list(model.additional_files),
+        sibling_file_contents=dict(model.sibling_file_contents),
+        git_logs=dict(model.git_logs),
+        symbol_table=dict(model.symbol_table),
         jira_ticket=model.jira_ticket,
+        jira_description=model.jira_description,
         catc_owner=model.catc_owner,
         guild_id=model.guild_id,
         size=model.size or model.t_shirt_size or model.tshirt_size,

@@ -62,6 +62,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import threading
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -91,6 +92,16 @@ MAX_CONFLICT_LINES = int(os.environ.get("OMNISIGHT_MERGER_MAX_LINES", "20"))
 # Conflict block we emit the LLM *must* produce — we refuse to trust
 # anything longer than the incoming block × safety factor.
 MAX_RESOLUTION_EXPANSION_FACTOR = 3.0
+
+# Approximate combined LLM-input cap for the pre-resolution context pack.
+# The merger prompt does not depend on a provider tokenizer, so this uses
+# the conventional 4 chars/token guardrail and prioritises sections before
+# truncating.
+CONTEXT_PACK_TOKEN_LIMIT = int(
+    os.environ.get("OMNISIGHT_MERGER_CONTEXT_PACK_TOKENS", "32000")
+)
+_CONTEXT_PACK_CHARS_PER_TOKEN = 4
+_CONTEXT_PACK_GIT_LOG_LINES = 50
 
 # 3-strike rule (mirrors CLAUDE.md L1 Agent Behavior).
 MAX_FAILURES_PER_CHANGE = 3
@@ -212,6 +223,12 @@ class ConflictRequest:
     file_context: str = ""          # 20-line surrounding context (caller-trimmed)
     patchset_revision: str = ""     # Gerrit revision sha (for vote target)
     workspace: str | None = None    # where the pusher runs git commands
+    change_number: str = ""         # Gerrit numeric change id, for logs/audit
+    jira_ticket: str = ""           # OP-NNNN key for context-pack provenance
+    jira_description: str = ""      # caller-supplied ticket description
+    sibling_file_contents: dict[str, str] = field(default_factory=dict)
+    git_logs: dict[str, str] = field(default_factory=dict)
+    symbol_table: dict[str, str] = field(default_factory=dict)
     # Extra files touched by *this* patchset — single-file gate.  Caller
     # normally only sends a single entry (the conflicting file) but the
     # field exists so a multi-file resolution can be explicitly opted
@@ -731,14 +748,148 @@ def parse_conflict_block(text: str) -> list[ConflictBlock]:
     return blocks
 
 
+def _context_pack_limit_chars() -> int:
+    return max(0, CONTEXT_PACK_TOKEN_LIMIT * _CONTEXT_PACK_CHARS_PER_TOKEN)
+
+
+def _safe_workspace_file(workspace: str | None, rel_path: str) -> Path | None:
+    if not workspace or not rel_path:
+        return None
+    root = Path(workspace).expanduser().resolve()
+    target = (root / rel_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target
+
+
+def _read_workspace_text(workspace: str | None, rel_path: str) -> str:
+    target = _safe_workspace_file(workspace, rel_path)
+    if target is None:
+        return ""
+    try:
+        raw = target.read_bytes()
+    except OSError:
+        return ""
+    if b"\x00" in raw[:8192]:
+        return "<binary file>"
+    return raw.decode("utf-8", errors="replace")
+
+
+def _git_region_log(
+    workspace: str | None,
+    file_path: str,
+    blocks: list[ConflictBlock],
+) -> str:
+    root_path = Path(workspace).expanduser().resolve() if workspace else None
+    if root_path is None or not (root_path / ".git").exists() or not blocks:
+        return ""
+    first = blocks[0]
+    start = max(1, first.start_line - _CONTEXT_PACK_GIT_LOG_LINES)
+    end = first.end_line + _CONTEXT_PACK_GIT_LOG_LINES
+    commands = [
+        ["git", "log", "--follow", "-n", "5", f"-L{start},{end}:{file_path}"],
+        ["git", "log", "-p", "--follow", "-n", "5", "--", file_path],
+    ]
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=root_path,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    return ""
+
+
+def _collect_file_contents(req: ConflictRequest) -> dict[str, str]:
+    paths = [req.file_path, *req.additional_files]
+    out: dict[str, str] = {}
+    for path in paths:
+        if not path or path in out:
+            continue
+        if path == req.file_path:
+            out[path] = req.conflict_text
+            continue
+        supplied = req.sibling_file_contents.get(path, "")
+        out[path] = supplied or _read_workspace_text(req.workspace, path)
+    for path, content in req.sibling_file_contents.items():
+        if path and path not in out:
+            out[path] = content
+    return out
+
+
+def _truncate_section(title: str, content: str, remaining: int) -> str:
+    if remaining <= 0:
+        return ""
+    body = content.strip() or "(none supplied)"
+    section = f"## {title}\n{body}\n"
+    if len(section) <= remaining:
+        return section
+    suffix = "\n[context-pack truncated]\n"
+    keep = max(0, remaining - len(suffix))
+    if keep <= 0:
+        return ""
+    return section[:keep].rstrip() + suffix
+
+
+def build_context_pack(req: ConflictRequest, blocks: list[ConflictBlock]) -> str:
+    """Build the pre-resolution context pack with deterministic priority.
+
+    Priority order follows OP-1403: conflict file, recent git log, JIRA
+    description, sibling files, then symbol table. All collectors are
+    best-effort so a missing daemon workspace never blocks the merger.
+    """
+    limit = _context_pack_limit_chars()
+    if limit <= 0:
+        return ""
+
+    file_contents = _collect_file_contents(req)
+    conflict_file = file_contents.pop(req.file_path, req.conflict_text)
+    git_log = req.git_logs.get(req.file_path) or _git_region_log(
+        req.workspace, req.file_path, blocks,
+    )
+
+    sections: list[tuple[str, str]] = [
+        (f"Conflict file: {req.file_path}", conflict_file),
+        (f"Recent git log for {req.file_path}", git_log),
+        (f"JIRA ticket {req.jira_ticket or '(unknown)'}", req.jira_description),
+    ]
+    for path in sorted(file_contents):
+        sections.append((f"Sibling file: {path}", file_contents[path]))
+    for path in sorted(req.symbol_table):
+        sections.append((f"Develop symbol table: {path}", req.symbol_table[path]))
+
+    out = ""
+    for title, content in sections:
+        sep = "\n\n" if out else ""
+        chunk = _truncate_section(title, content, limit - len(out) - len(sep))
+        if not chunk:
+            break
+        out = f"{out}{sep}{chunk}"
+        if len(out) >= limit:
+            break
+    return out[:limit].strip()
+
+
 def build_prompt(
     req: ConflictRequest,
     blocks: list[ConflictBlock],
     risk: ConflictRisk | None = None,
+    *,
+    context_pack: str | None = None,
 ) -> str:
     """Deterministic prompt — inlines the conflict + commit messages +
     the provided file context, and repeats the no-new-logic guardrail."""
     risk = risk or classify_conflict_risk(req, blocks)
+    if context_pack is None:
+        context_pack = build_context_pack(req, blocks)
     parts: list[str] = [
         "SYSTEM: " + SYSTEM_PROMPT,
         "",
@@ -746,8 +897,13 @@ def build_prompt(
         f"Structural risk tier: {risk.tier.value}",
         "Structural risk signals: "
         + (", ".join(risk.reasons) if risk.reasons else "(none)"),
+        f"Gerrit change number: {req.change_number or '(unknown)'}",
+        f"JIRA ticket: {req.jira_ticket or '(none supplied)'}",
         f"HEAD commit message:\n{req.head_commit_message.strip()}",
         f"Incoming commit message:\n{req.incoming_commit_message.strip()}",
+        "",
+        "Context pack (priority-capped):",
+        context_pack or "(none supplied)",
         "",
         "File context (20 lines surrounding the conflict):",
         req.file_context.strip() or "(none supplied)",
@@ -1116,7 +1272,14 @@ async def resolve_conflict(
         return outcome
 
     # ── 5. LLM call ──────────────────────────────────────────────
-    prompt = build_prompt(request, blocks, risk)
+    context_pack = build_context_pack(request, blocks)
+    logger.info(
+        "merger_agent: context_pack_bytes=%d change=%s file=%s",
+        len(context_pack.encode("utf-8")),
+        request.change_number or change_id,
+        request.file_path,
+    )
+    prompt = build_prompt(request, blocks, risk, context_pack=context_pack)
     try:
         raw, _tokens = await deps.llm(prompt)
     except Exception as exc:
@@ -1512,6 +1675,7 @@ __all__ = [
     "SYSTEM_PROMPT",
     "TestRunResult",
     "TestRunner",
+    "build_context_pack",
     "build_prompt",
     "classify_conflict_risk",
     "get_failure_count",

@@ -547,6 +547,128 @@ def test_build_prompt_contains_system_and_blocks():
     assert "backend/greetings.py" in prompt
 
 
+def test_context_pack_contains_full_conflict_file_git_log_and_jira_desc():
+    conflict = (
+        "class GuildRunner:\n"
+        "    def resolve(self, guild):\n"
+        "        guild_id = guild.id\n"
+        "<<<<<<< HEAD\n"
+        "        return self.lookup(guild)\n"
+        "=======\n"
+        "        return self.lookup_by_id(guild_id)\n"
+        ">>>>>>> feature/guild-id\n"
+        "\n"
+        "    def audit(self, guild_id):\n"
+        "        return guild_id\n"
+    )
+    req = _base_request(file_path="backend/agents/llm.py", conflict=conflict)
+    req.jira_ticket = "OP-1403"
+    req.jira_description = "Teach merger bot to preserve guild and guild_id semantics."
+    req.sibling_file_contents = {
+        "backend/agents/nodes.py": "def node(guild_id):\n    return guild_id\n",
+        "backend/metrics.py": "guild_id_metric = 'guild_id'\n",
+    }
+    req.git_logs = {
+        "backend/agents/llm.py": (
+            "commit abc123\n"
+            "Author: test\n\n"
+            "    Preserve guild object while adding guild_id callsites\n"
+        )
+    }
+    req.symbol_table = {
+        "backend/agents/llm.py": (
+            "class GuildRunner line 1 calls: lookup, lookup_by_id"
+        )
+    }
+
+    blocks = ma.parse_conflict_block(conflict)
+    pack = ma.build_context_pack(req, blocks)
+
+    assert "class GuildRunner" in pack
+    assert "def audit(self, guild_id)" in pack
+    assert "Preserve guild object while adding guild_id callsites" in pack
+    assert "Teach merger bot to preserve guild and guild_id semantics" in pack
+    assert "def node(guild_id)" in pack
+    assert "class GuildRunner line 1 calls" in pack
+
+
+def test_context_pack_size_cap_prioritises_conflict_then_git_log(monkeypatch):
+    monkeypatch.setattr(ma, "CONTEXT_PACK_TOKEN_LIMIT", 40)
+    conflict = "important_conflict_line\n" * 20
+    req = _base_request(conflict=conflict)
+    req.jira_description = "jira text that should lose to earlier sections"
+    req.sibling_file_contents = {
+        "backend/other.py": "sibling text that should be truncated"
+    }
+    req.git_logs = {req.file_path: "recent git intent\n"}
+
+    pack = ma.build_context_pack(req, [])
+
+    assert "important_conflict_line" in pack
+    assert "recent git intent" in pack or "[context-pack truncated]" in pack
+    assert len(pack) <= ma.CONTEXT_PACK_TOKEN_LIMIT * 4
+    assert "sibling text that should be truncated" not in pack
+
+
+def test_op1403_synthetic_guild_shape_prompt_mentions_guild_and_guild_id():
+    conflict = (
+        "class GuildService:\n"
+        "    def merge(self, guild):\n"
+        "        guild_id = guild.id\n"
+        "<<<<<<< HEAD\n"
+        "        return self.by_guild(guild)\n"
+        "=======\n"
+        "        return self.by_id(guild_id)\n"
+        ">>>>>>> feature/guild-id\n"
+        "\n"
+        "    def by_guild(self, guild):\n"
+        "        return guild.name\n"
+        "\n"
+        "    def by_id(self, guild_id):\n"
+        "        return guild_id\n"
+    )
+    llm = _FakeLLM({
+        "resolved_block": (
+            "        self.by_guild(guild)\n"
+            "        return self.by_id(guild_id)\n"
+        ),
+        "confidence": 0.96,
+        "rationale": "preserves guild object and guild_id lookup semantics",
+        "new_logic_detected": False,
+    })
+
+    class _ExplodingPusher:
+        async def push(self, **kwargs):
+            raise AssertionError("pusher should be skipped")
+
+    class _ExplodingReviewer:
+        async def post_review(self, **kwargs):
+            raise AssertionError("reviewer should be skipped")
+
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_ExplodingPusher(),
+        reviewer=_ExplodingReviewer(),
+        test_runner=_test_runner(True),
+    )
+    req = _base_request(file_path="backend/agents/llm.py", conflict=conflict)
+    req.push_locally = False
+    req.jira_ticket = "OP-883"
+    req.jira_description = "Resolve guild versus guild_id naming collision."
+    req.git_logs = {
+        req.file_path: "commit cafe123\n    Introduce guild_id alongside guild\n"
+    }
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    prompt = llm.calls[0]
+    assert "def by_guild(self, guild)" in prompt
+    assert "def by_id(self, guild_id)" in prompt
+    assert "Resolve guild versus guild_id naming collision" in prompt
+    assert "Introduce guild_id alongside guild" in prompt
+
+
 # ──────────────────────────────────────────────────────────────
 #  Submit-rule simulator (emulates O7 Gerrit rule for tests)
 # ──────────────────────────────────────────────────────────────

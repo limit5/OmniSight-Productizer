@@ -182,6 +182,43 @@ def test_invalid_payload_returns_invalid_payload_outcome():
     assert outcome.reason is arb.ArbiterReason.invalid_payload
 
 
+def test_merge_conflict_passes_context_pack_fields_to_merger():
+    seen: list[ma.ConflictRequest] = []
+
+    async def merger(req: ma.ConflictRequest) -> ma.ResolutionOutcome:
+        seen.append(req)
+        return _plus_two_outcome(_task())
+
+    task = _task(
+        change_number="883",
+        jira_ticket="OP-883",
+        jira_description="JIRA context for guild_id change",
+        sibling_file_contents={"backend/agents/nodes.py": "guild_id = 1\n"},
+        git_logs={"backend/greetings.py": "commit abc\n"},
+        symbol_table={"backend/greetings.py": "function greet line 1 calls: str"},
+    )
+    deps = arb.ArbiterDeps(
+        merger=merger,
+        jira=_StubJira(),
+        notifier=_StubNotifier(),
+    )
+
+    outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+    assert outcome.reason is arb.ArbiterReason.merger_plus_two_awaiting_human
+    assert seen[0].change_number == "883"
+    assert seen[0].jira_ticket == "OP-883"
+    assert seen[0].jira_description == "JIRA context for guild_id change"
+    assert (
+        seen[0].sibling_file_contents["backend/agents/nodes.py"]
+        == "guild_id = 1\n"
+    )
+    assert seen[0].git_logs["backend/greetings.py"] == "commit abc\n"
+    assert seen[0].symbol_table["backend/greetings.py"].startswith(
+        "function greet"
+    )
+
+
 def test_merger_plus_two_emits_awaiting_human_sse():
     task = _task()
     notifier = _StubNotifier()

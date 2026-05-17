@@ -60,6 +60,7 @@ purely SSH-protocol auth.
 from __future__ import annotations
 
 import asyncio
+import ast
 import contextlib
 import logging
 import os
@@ -111,6 +112,9 @@ class EnrichmentResult:
     error: str = ""                       # non-empty if enrichment itself blew up
     head_subject: str = ""                # develop tip commit subject
     incoming_subject: str = ""            # incoming patchset commit subject
+    sibling_file_contents: dict[str, str] = field(default_factory=dict)
+    git_logs: dict[str, str] = field(default_factory=dict)
+    symbol_table: dict[str, str] = field(default_factory=dict)
 
 
 # Per-project locks so two concurrent calls on the same project
@@ -332,12 +336,34 @@ async def _run(
                 ],
             )
 
+        changed = await _capture_lines(
+            repo_dir,
+            ["git", "diff", "--name-only", "origin/develop", attempt_ref],
+        )
+        changed = sorted(set(p for p in changed if p))
+
         # Step 6: read each conflict file's content + extract context
         files: list[ConflictFile] = []
         for rel in conflicted:
             cf = await _read_conflict_file(repo_dir, rel)
             if cf is not None:
                 files.append(cf)
+        sibling_file_contents: dict[str, str] = {}
+        for rel in changed:
+            if rel in conflicted:
+                continue
+            text = await _read_text_file(repo_dir, rel)
+            if text:
+                sibling_file_contents[rel] = text
+        git_logs = {
+            rel: await _git_log_for_conflict_region(repo_dir, rel, cf.conflict_text)
+            for rel, cf in ((f.path, f) for f in files)
+        }
+        symbol_table = {
+            rel: await _symbol_table_for_develop(repo_dir, rel)
+            for rel in sorted(set([*conflicted, *changed]))
+        }
+        symbol_table = {k: v for k, v in symbol_table.items() if v}
 
         # Step 7: cleanup
         await _run_git(repo_dir, ["git", "merge", "--abort"])
@@ -347,6 +373,9 @@ async def _run(
             conflict_files=files,
             head_subject=head_subject,
             incoming_subject=incoming_subject,
+            sibling_file_contents=sibling_file_contents,
+            git_logs=git_logs,
+            symbol_table=symbol_table,
         )
 
 
@@ -465,6 +494,77 @@ async def _read_conflict_file(
         conflict_text=text,
         file_context=context,
     )
+
+
+async def _read_text_file(repo_dir: Path, rel_path: str) -> str:
+    abs_path = repo_dir / rel_path
+    try:
+        raw = abs_path.read_bytes()
+    except OSError:
+        return ""
+    if len(raw) > _FILE_CONTENT_CAP:
+        return "<file too large to inline>"
+    if _BINARY_HINT.search(raw[:8192]):
+        return "<binary file>"
+    return raw.decode("utf-8", errors="replace")
+
+
+async def _git_log_for_conflict_region(
+    repo_dir: Path, rel_path: str, conflict_text: str,
+) -> str:
+    lines = conflict_text.splitlines()
+    marker_idx = next(
+        (
+            idx for idx, line in enumerate(lines, start=1)
+            if line.startswith("<<<<<<<")
+        ),
+        1,
+    )
+    start = max(1, marker_idx - 50)
+    end = min(len(lines) or start, marker_idx + 50)
+    commands = [
+        ["git", "log", "--follow", "-n", "5", f"-L{start},{end}:{rel_path}"],
+        ["git", "log", "-p", "--follow", "-n", "5", "--", rel_path],
+    ]
+    for cmd in commands:
+        out = await _capture(repo_dir, cmd)
+        if out.strip():
+            return out.strip()
+    return ""
+
+
+async def _symbol_table_for_develop(repo_dir: Path, rel_path: str) -> str:
+    if not rel_path.endswith(".py"):
+        return ""
+    content = await _capture(
+        repo_dir, ["git", "show", f"origin/develop:{rel_path}"],
+    )
+    if not content.strip():
+        return ""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return ""
+    lines: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+        ):
+            continue
+        calls: set[str] = set()
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                fn = child.func
+                if isinstance(fn, ast.Name):
+                    calls.add(fn.id)
+                elif isinstance(fn, ast.Attribute):
+                    calls.add(fn.attr)
+        kind = "class" if isinstance(node, ast.ClassDef) else "function"
+        lines.append(
+            f"{kind} {node.name} line {node.lineno} calls: "
+            f"{', '.join(sorted(calls)) if calls else '(none)'}"
+        )
+    return "\n".join(lines)
 
 
 def _slice_context(text: str, n_lines: int) -> str:
