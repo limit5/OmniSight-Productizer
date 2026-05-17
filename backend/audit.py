@@ -36,6 +36,7 @@ import time
 import weakref
 from typing import Any, Optional
 
+from backend.agent_guild_dual_write import guild_id_from_values, sync_agent_type_guild_id
 from backend.db_context import tenant_insert_value, tenant_where_pg
 
 logger = logging.getLogger(__name__)
@@ -106,6 +107,8 @@ async def _log_impl(
     """
     before_d = before or {}
     after_d = after or {}
+    before_d = sync_agent_type_guild_id(before_d)
+    after_d = sync_agent_type_guild_id(after_d)
     payload = {
         "action": action,
         "entity_kind": entity_kind,
@@ -141,13 +144,13 @@ async def _log_impl(
     row = await conn.fetchrow(
         "INSERT INTO audit_log "
         "(ts, actor, action, entity_kind, entity_id, before_json, "
-        " after_json, prev_hash, curr_hash, session_id, tenant_id) "
-        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) "
+        " after_json, prev_hash, curr_hash, session_id, tenant_id, guild_id) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) "
         "RETURNING id",
         ts, actor, action, entity_kind, entity_id or "",
         json.dumps(before_d, ensure_ascii=False),
         json.dumps(after_d, ensure_ascii=False),
-        prev, curr, session_id, tid,
+        prev, curr, session_id, tid, guild_id_from_values(after_d, before_d),
     )
     return row["id"] if row else None
 

@@ -3237,22 +3237,31 @@ async def insert_debug_finding(conn, data: dict) -> None:
     # tenant_id ALWAYS comes from context (tenant_insert_value), never
     # from the caller's data dict — anti-forge guarantee (same rule as
     # insert_artifact, SP-3.6a).
+    from backend.agent_guild_dual_write import (
+        guild_id_from_values,
+        sync_agent_type_guild_id,
+        sync_json_mapping,
+    )
+
+    synced_data = sync_agent_type_guild_id(data)
+    synced_context = sync_json_mapping(synced_data.get("context", "{}"))
     await conn.execute(
         """INSERT INTO debug_findings
            (id, task_id, agent_id, finding_type, severity, content,
-            context, status, created_at, tenant_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            context, status, created_at, tenant_id, guild_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT (id) DO NOTHING""",
-        data["id"],
-        data["task_id"],
-        data["agent_id"],
-        data["finding_type"],
-        data.get("severity", "info"),
-        data["content"],
-        data.get("context", "{}"),
-        data.get("status", "open"),
-        data.get("created_at", ""),
+        synced_data["id"],
+        synced_data["task_id"],
+        synced_data["agent_id"],
+        synced_data["finding_type"],
+        synced_data.get("severity", "info"),
+        synced_data["content"],
+        synced_context,
+        synced_data.get("status", "open"),
+        synced_data.get("created_at", ""),
         tenant_insert_value(),
+        guild_id_from_values(synced_data),
     )
 
 
