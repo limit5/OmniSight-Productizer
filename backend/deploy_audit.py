@@ -78,7 +78,19 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 ALLOWED_STATUSES = frozenset({STATUS_STARTED, STATUS_SUCCEEDED, STATUS_FAILED})
 
-GENESIS_HASH = "0" * 64
+# SHA-256 produces a 32-byte digest -> 64 hex chars.
+SHA256_HEX_LEN = 64
+
+# Default ``query`` window: matches the 1-year compliance retention
+# claim in this module's docstring.
+DEFAULT_QUERY_WINDOW_DAYS = 365
+
+# ``query`` filters ``ts < :until`` (exclusive). Without a small buffer
+# a row inserted at the same wall-clock instant as ``until=now()`` would
+# be excluded; one second is well below the audit cadence.
+QUERY_UNTIL_CLOCK_SKEW_SECONDS = 1
+
+GENESIS_HASH = "0" * SHA256_HEX_LEN
 
 # Operator-initiated kinds: a non-empty reason is required so the
 # compliance trail explains why a human triggered the change.
@@ -285,9 +297,11 @@ def query(
     ``since=datetime.min`` for an unbounded scan.
     """
     if since is None:
-        since = datetime.now(timezone.utc) - timedelta(days=365)
+        since = datetime.now(timezone.utc) - timedelta(days=DEFAULT_QUERY_WINDOW_DAYS)
     if until is None:
-        until = datetime.now(timezone.utc) + timedelta(seconds=1)
+        until = datetime.now(timezone.utc) + timedelta(
+            seconds=QUERY_UNTIL_CLOCK_SKEW_SECONDS
+        )
     if kind is not None:
         _validate_kind(kind)
 
