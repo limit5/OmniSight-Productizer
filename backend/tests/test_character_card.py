@@ -124,6 +124,18 @@ async def test_list_cards_rejects_unknown_sort():
         await store.list_cards(sort_by="created")  # type: ignore[arg-type]
 
 
+async def test_list_cards_filters_by_guild():
+    store = InMemoryCharacterCardStore()
+    await store.create_card(_create("agent-be", guild="backend"))
+    await store.create_card(_create("agent-fe", guild="frontend"))
+    await store.create_card(_create("agent-be2", guild="backend"))
+
+    entries = await store.list_cards(guild="backend")
+
+    assert sorted(entry.card.agent_id for entry in entries) == ["agent-be", "agent-be2"]
+    assert all(entry.card.guild == "backend" for entry in entries)
+
+
 async def test_update_card_changes_only_supplied_fields_and_strips_text():
     store = InMemoryCharacterCardStore()
     await store.create_card(_create(level=2, xp=10, specialization_label="old"))
@@ -158,6 +170,15 @@ async def test_update_card_rejects_invalid_level_and_xp():
         await store.update_card("api-anthropic-alpha", CharacterCardUpdate(level=0))
     with pytest.raises(ValueError, match="xp must be >= 0"):
         await store.update_card("api-anthropic-alpha", CharacterCardUpdate(xp=-1))
+
+
+async def test_update_card_with_empty_patch_returns_card_unchanged():
+    store = InMemoryCharacterCardStore()
+    original = await store.create_card(_create(level=4, xp=180, specialization_label="foo"))
+
+    updated = await store.update_card("api-anthropic-alpha", CharacterCardUpdate())
+
+    assert updated == original
 
 
 async def test_delete_card_reports_whether_card_existed():
@@ -256,6 +277,25 @@ async def test_fetch_skill_entries_marks_branch_choice_required_at_level_three()
     assert entries[0].branch_choice_required is True
 
 
+async def test_fetch_skill_entries_does_not_flag_branch_choice_below_threshold():
+    store = _SkillStore(
+        (
+            _SkillState(
+                skill_id="enterprise_web",
+                level=2,
+                xp=30,
+                branch_choice=None,
+                last_active_at=T0,
+            ),
+        )
+    )
+
+    entries = await fetch_skill_entries(store, "api-anthropic-alpha")
+
+    assert len(entries) == 1
+    assert entries[0].branch_choice_required is False
+
+
 def test_character_card_validates_required_fields_and_numeric_bounds():
     with pytest.raises(ValueError, match="agent_id is required"):
         CharacterCard(
@@ -282,3 +322,8 @@ def test_character_card_guild_drift_helpers_report_unknown_guilds():
 
     with pytest.raises(CharacterCardGuildDriftError):
         assert_character_card_guilds_within_registry(("backend", "unknown"))
+
+
+def test_character_card_rejects_unknown_guild():
+    with pytest.raises(ValueError, match="unknown guild"):
+        _create(guild="not_a_real_guild").to_card()
