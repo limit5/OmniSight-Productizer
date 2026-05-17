@@ -60,10 +60,13 @@ purely SSH-protocol auth.
 from __future__ import annotations
 
 import asyncio
+import ast
+import contextlib
 import logging
 import os
 import re
 import shutil
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -109,20 +112,68 @@ class EnrichmentResult:
     error: str = ""                       # non-empty if enrichment itself blew up
     head_subject: str = ""                # develop tip commit subject
     incoming_subject: str = ""            # incoming patchset commit subject
+    sibling_file_contents: dict[str, str] = field(default_factory=dict)
+    git_logs: dict[str, str] = field(default_factory=dict)
+    symbol_table: dict[str, str] = field(default_factory=dict)
 
 
 # Per-project locks so two concurrent calls on the same project
 # don't fight over the same git checkout. Process-local; daemon is
 # single-process.
-_LOCKS: dict[str, asyncio.Lock] = {}
-_LOCKS_GUARD = asyncio.Lock()
+#
+# OP-1197 (2026-05-17 ~04:30) — switched from `asyncio.Lock` to
+# `threading.Lock`. The bridge daemon's per-event handler threads
+# each call ``asyncio.run(...)`` which creates a fresh event loop.
+# ``asyncio.Lock`` objects retain a binding to whichever event loop
+# they were FIRST acquired in; subsequent acquire from a different
+# loop raises ``RuntimeError: <asyncio.locks.Lock ...> is bound to
+# a different event loop``. The OP-1196 phase 3b backfill scanner
+# triggered this on every backfilled candidate because it spawns N
+# threads in rapid succession at startup — empirically observed on
+# 2026-05-17 ~03:23 across all 10 backfilled candidates (685/686/
+# 694/695/696/697/698/699/700/702). Live patchset-created events
+# hit the same bug less often (only when two events arrive close
+# enough that the first event's loop is still active) — the bug was
+# always latent.
+#
+# ``threading.Lock`` is loop-agnostic. The critical section the lock
+# protects is subprocess calls (git clone/fetch/merge/abort) which
+# already block the calling thread anyway — the async-ness of
+# ``asyncio.Lock`` added no concurrency benefit. We acquire the
+# threading.Lock via ``asyncio.to_thread`` so the surrounding code
+# stays async-friendly and the event loop isn't blocked while
+# waiting for the lock (to_thread offloads the blocking acquire to
+# the default executor).
+_LOCKS: dict[str, "threading.Lock"] = {}
+_LOCKS_GUARD = threading.Lock()
 
 
-async def _lock_for(project: str) -> asyncio.Lock:
-    async with _LOCKS_GUARD:
+async def _lock_for(project: str) -> "threading.Lock":
+    # threading.Lock acquire is microseconds-fast with no contention;
+    # the GUARD just serialises the dict mutation. We acquire via
+    # to_thread so the call is non-blocking from the loop's pov.
+    await asyncio.to_thread(_LOCKS_GUARD.acquire)
+    try:
         if project not in _LOCKS:
-            _LOCKS[project] = asyncio.Lock()
+            _LOCKS[project] = threading.Lock()
         return _LOCKS[project]
+    finally:
+        _LOCKS_GUARD.release()
+
+
+@contextlib.asynccontextmanager
+async def _project_lock(project: str):
+    """``async with _project_lock(project):`` — serialises enrich
+    callers per-project across threads + event loops. Built atop
+    ``threading.Lock`` so it works correctly when callers use
+    ``asyncio.run`` per-thread (each thread has its own loop, but
+    threading.Lock is shared)."""
+    lock = await _lock_for(project)
+    await asyncio.to_thread(lock.acquire)
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -174,8 +225,7 @@ async def enrich_via_local_merge(
 async def _run(
     change_id: str, revision: str, project: str, ps_number: str,
 ) -> EnrichmentResult:
-    lock = await _lock_for(project)
-    async with lock:
+    async with _project_lock(project):
         repo_dir = _repo_dir_for(project)
         ssh_url = _ssh_url_for(project)
         ssh_command = _ssh_cmd_string()
@@ -286,12 +336,34 @@ async def _run(
                 ],
             )
 
+        changed = await _capture_lines(
+            repo_dir,
+            ["git", "diff", "--name-only", "origin/develop", attempt_ref],
+        )
+        changed = sorted(set(p for p in changed if p))
+
         # Step 6: read each conflict file's content + extract context
         files: list[ConflictFile] = []
         for rel in conflicted:
             cf = await _read_conflict_file(repo_dir, rel)
             if cf is not None:
                 files.append(cf)
+        sibling_file_contents: dict[str, str] = {}
+        for rel in changed:
+            if rel in conflicted:
+                continue
+            text = await _read_text_file(repo_dir, rel)
+            if text:
+                sibling_file_contents[rel] = text
+        git_logs = {
+            rel: await _git_log_for_conflict_region(repo_dir, rel, cf.conflict_text)
+            for rel, cf in ((f.path, f) for f in files)
+        }
+        symbol_table = {
+            rel: await _symbol_table_for_develop(repo_dir, rel)
+            for rel in sorted(set([*conflicted, *changed]))
+        }
+        symbol_table = {k: v for k, v in symbol_table.items() if v}
 
         # Step 7: cleanup
         await _run_git(repo_dir, ["git", "merge", "--abort"])
@@ -301,6 +373,9 @@ async def _run(
             conflict_files=files,
             head_subject=head_subject,
             incoming_subject=incoming_subject,
+            sibling_file_contents=sibling_file_contents,
+            git_logs=git_logs,
+            symbol_table=symbol_table,
         )
 
 
@@ -419,6 +494,77 @@ async def _read_conflict_file(
         conflict_text=text,
         file_context=context,
     )
+
+
+async def _read_text_file(repo_dir: Path, rel_path: str) -> str:
+    abs_path = repo_dir / rel_path
+    try:
+        raw = abs_path.read_bytes()
+    except OSError:
+        return ""
+    if len(raw) > _FILE_CONTENT_CAP:
+        return "<file too large to inline>"
+    if _BINARY_HINT.search(raw[:8192]):
+        return "<binary file>"
+    return raw.decode("utf-8", errors="replace")
+
+
+async def _git_log_for_conflict_region(
+    repo_dir: Path, rel_path: str, conflict_text: str,
+) -> str:
+    lines = conflict_text.splitlines()
+    marker_idx = next(
+        (
+            idx for idx, line in enumerate(lines, start=1)
+            if line.startswith("<<<<<<<")
+        ),
+        1,
+    )
+    start = max(1, marker_idx - 50)
+    end = min(len(lines) or start, marker_idx + 50)
+    commands = [
+        ["git", "log", "--follow", "-n", "5", f"-L{start},{end}:{rel_path}"],
+        ["git", "log", "-p", "--follow", "-n", "5", "--", rel_path],
+    ]
+    for cmd in commands:
+        out = await _capture(repo_dir, cmd)
+        if out.strip():
+            return out.strip()
+    return ""
+
+
+async def _symbol_table_for_develop(repo_dir: Path, rel_path: str) -> str:
+    if not rel_path.endswith(".py"):
+        return ""
+    content = await _capture(
+        repo_dir, ["git", "show", f"origin/develop:{rel_path}"],
+    )
+    if not content.strip():
+        return ""
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return ""
+    lines: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+        ):
+            continue
+        calls: set[str] = set()
+        for child in ast.walk(node):
+            if isinstance(child, ast.Call):
+                fn = child.func
+                if isinstance(fn, ast.Name):
+                    calls.add(fn.id)
+                elif isinstance(fn, ast.Attribute):
+                    calls.add(fn.attr)
+        kind = "class" if isinstance(node, ast.ClassDef) else "function"
+        lines.append(
+            f"{kind} {node.name} line {node.lineno} calls: "
+            f"{', '.join(sorted(calls)) if calls else '(none)'}"
+        )
+    return "\n".join(lines)
 
 
 def _slice_context(text: str, n_lines: int) -> str:

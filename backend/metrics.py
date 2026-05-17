@@ -84,6 +84,12 @@ if _AVAILABLE:
         buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
         registry=REGISTRY,
     )
+    model_mapping_violation_total = Counter(
+        "omnisight_model_mapping_violation_total",
+        "LLM provider/model mapping guardrail violations by Guild and mode",
+        labelnames=("guild_id", "mode"),
+        registry=REGISTRY,
+    )
 
     # SSE ───────────────────────────────────────────────────────
     sse_subscribers = Gauge(
@@ -292,7 +298,7 @@ if _AVAILABLE:
     )
     # `skill_load_latency_ms` — wall-clock time each skill-loading
     # call took. Buckets go up to 1s because the most expensive
-    # phase (scanning configs/roles/** for the catalog + reading
+    # phase (scanning configs/guilds/** for the catalog + reading
     # skill bodies) should normally finish in <50ms; a 1s+ bucket
     # is a red flag that filesystem I/O or YAML parsing has stalled.
     skill_load_latency_ms = Histogram(
@@ -553,6 +559,11 @@ if _AVAILABLE:
         buckets=(0.0, 0.1, 0.25, 0.5, 0.75, 0.85, 0.9, 0.95, 0.99, 1.0),
         registry=REGISTRY,
     )
+    merger_llm_cost_usd_total = Counter(
+        "omnisight_merger_llm_cost_usd_total",
+        "Estimated merger LLM spend per conflict, including proposal and review",
+        registry=REGISTRY,
+    )
 
     # Phase 63-E: episodic memory quality decay ────────────────
     memory_decay_total = Counter(
@@ -591,13 +602,13 @@ if _AVAILABLE:
     semantic_entropy_score = Gauge(
         "omnisight_semantic_entropy_score",
         "Rolling-window pairwise cosine-similarity mean for an agent's outputs",
-        labelnames=("agent_id",),
+        labelnames=("agent_id", "guild_id"),
         registry=REGISTRY,
     )
     cognitive_deadlock_total = Counter(
         "omnisight_cognitive_deadlock_total",
         "Times an agent's entropy crossed the deadlock threshold",
-        labelnames=("agent_id",),
+        labelnames=("agent_id", "guild_id"),
         registry=REGISTRY,
     )
 
@@ -605,19 +616,19 @@ if _AVAILABLE:
     scratchpad_saves_total = Counter(
         "omnisight_scratchpad_saves_total",
         "Times an agent's scratchpad was flushed to disk",
-        labelnames=("agent_id", "trigger"),  # trigger: turn_interval|tool_done|subtask_switch|manual
+        labelnames=("agent_id", "guild_id", "trigger"),  # trigger: turn_interval|tool_done|subtask_switch|manual
         registry=REGISTRY,
     )
     scratchpad_size_bytes = Gauge(
         "omnisight_scratchpad_size_bytes",
         "Size (bytes, on-disk ciphertext) of the most recent scratchpad write",
-        labelnames=("agent_id",),
+        labelnames=("agent_id", "guild_id"),
         registry=REGISTRY,
     )
     token_continuation_total = Counter(
         "omnisight_token_continuation_total",
         "Auto-continuation rounds issued after stop_reason=max_tokens",
-        labelnames=("agent_id", "provider"),
+        labelnames=("agent_id", "guild_id", "provider"),
         registry=REGISTRY,
     )
 
@@ -625,20 +636,36 @@ if _AVAILABLE:
     pep_decisions_total = Counter(
         "omnisight_pep_decisions_total",
         "PEP Gateway decisions partitioned by outcome / tier / rule",
-        labelnames=("decision", "tier", "rule"),  # decision: auto_allow|hold|deny
+        labelnames=("decision", "tier", "rule", "guild_id"),  # decision: auto_allow|hold|deny
         registry=REGISTRY,
     )
     pep_deny_total = Counter(
         "omnisight_pep_deny_total",
         "PEP Gateway hard-deny events (destructive pattern matches)",
-        labelnames=("rule",),
+        labelnames=("rule", "guild_id"),
         registry=REGISTRY,
     )
     pep_hold_duration_seconds = Histogram(
         "omnisight_pep_hold_duration_seconds",
         "Wall-clock seconds a HELD tool call spent waiting for operator",
-        labelnames=("outcome",),  # approved | rejected | timeout
+        labelnames=("outcome", "guild_id"),  # approved | rejected | timeout
         buckets=(1, 5, 15, 60, 300, 900, 1800, 3600),
+        registry=REGISTRY,
+    )
+
+    # R1 (#307): ChatOps Interactive ───────────────────────────
+    chatops_messages_total = Counter(
+        "omnisight_chatops_messages_total",
+        "ChatOps bridge messages by direction / channel / kind",
+        labelnames=("direction", "channel", "kind", "guild_id"),
+        registry=REGISTRY,
+    )
+
+    # R4 (#310): Checkpoint resume / watchdog recovery ─────────
+    watchdog_events_total = Counter(
+        "omnisight_watchdog_events_total",
+        "Watchdog events partitioned by event / severity / source",
+        labelnames=("event", "severity", "source", "guild_id"),
         registry=REGISTRY,
     )
 
@@ -812,6 +839,7 @@ else:
     decision_total = decision_resolve_seconds = _NoOp()  # type: ignore
     pipeline_step_seconds = _NoOp()  # type: ignore
     provider_failure_total = provider_latency_seconds = _NoOp()  # type: ignore
+    model_mapping_violation_total = _NoOp()  # type: ignore
     sse_subscribers = sse_dropped_total = _NoOp()  # type: ignore
     workflow_step_total = _NoOp()  # type: ignore
     auth_login_total = _NoOp()  # type: ignore
@@ -877,6 +905,7 @@ else:
     merger_abstain_total = _NoOp()  # type: ignore
     merger_security_refusal_total = _NoOp()  # type: ignore
     merger_confidence = _NoOp()  # type: ignore
+    merger_llm_cost_usd_total = _NoOp()  # type: ignore
     awaiting_human_pending = _NoOp()  # type: ignore
     awaiting_human_age_seconds = _NoOp()  # type: ignore
     worker_pool_capacity = _NoOp()  # type: ignore
@@ -884,11 +913,13 @@ else:
     pep_decisions_total = _NoOp()  # type: ignore
     pep_deny_total = _NoOp()  # type: ignore
     pep_hold_duration_seconds = _NoOp()  # type: ignore
+    chatops_messages_total = _NoOp()  # type: ignore
     semantic_entropy_score = _NoOp()  # type: ignore
     cognitive_deadlock_total = _NoOp()  # type: ignore
     scratchpad_saves_total = _NoOp()  # type: ignore
     scratchpad_size_bytes = _NoOp()  # type: ignore
     token_continuation_total = _NoOp()  # type: ignore
+    watchdog_events_total = _NoOp()  # type: ignore
     backend_instance_up = _NoOp()  # type: ignore
     rolling_deploy_responses_total = _NoOp()  # type: ignore
     rolling_deploy_5xx_rate = _NoOp()  # type: ignore
@@ -925,6 +956,7 @@ def reset_for_tests() -> None:
         return
     global REGISTRY, decision_total, decision_resolve_seconds
     global pipeline_step_seconds, provider_failure_total, provider_latency_seconds
+    global model_mapping_violation_total
     global sse_subscribers, sse_dropped_total, workflow_step_total
     global auth_login_total, subprocess_orphan_total, persist_failure_total
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
@@ -956,6 +988,7 @@ def reset_for_tests() -> None:
     global worker_lifecycle_total, worker_task_total, worker_task_seconds
     global merger_plus_two_total, merger_abstain_total
     global merger_security_refusal_total, merger_confidence
+    global merger_llm_cost_usd_total
     global awaiting_human_pending, awaiting_human_age_seconds
     global worker_pool_capacity
     global process_start_time
@@ -987,6 +1020,11 @@ def reset_for_tests() -> None:
         labelnames=("provider", "model"),
         buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
         registry=REGISTRY,
+    )
+    model_mapping_violation_total = Counter(
+        "omnisight_model_mapping_violation_total",
+        "LLM provider/model mapping guardrail violations by Guild and mode",
+        labelnames=("guild_id", "mode"), registry=REGISTRY,
     )
     sse_subscribers = Gauge(
         "omnisight_sse_subscribers", "SSE subscribers", registry=REGISTRY,
@@ -1292,6 +1330,11 @@ def reset_for_tests() -> None:
         buckets=(0.0, 0.1, 0.25, 0.5, 0.75, 0.85, 0.9, 0.95, 0.99, 1.0),
         registry=REGISTRY,
     )
+    merger_llm_cost_usd_total = Counter(
+        "omnisight_merger_llm_cost_usd_total",
+        "Estimated merger LLM spend per conflict",
+        registry=REGISTRY,
+    )
     awaiting_human_pending = Gauge(
         "omnisight_awaiting_human_plus_two_pending",
         "Number of changes waiting for the human +2 hard gate",
@@ -1315,15 +1358,15 @@ def reset_for_tests() -> None:
     global pep_decisions_total, pep_deny_total, pep_hold_duration_seconds
     pep_decisions_total = Counter(
         "omnisight_pep_decisions_total", "PEP decisions",
-        labelnames=("decision", "tier", "rule"), registry=REGISTRY,
+        labelnames=("decision", "tier", "rule", "guild_id"), registry=REGISTRY,
     )
     pep_deny_total = Counter(
         "omnisight_pep_deny_total", "PEP hard-deny events",
-        labelnames=("rule",), registry=REGISTRY,
+        labelnames=("rule", "guild_id"), registry=REGISTRY,
     )
     pep_hold_duration_seconds = Histogram(
         "omnisight_pep_hold_duration_seconds", "PEP hold duration",
-        labelnames=("outcome",),
+        labelnames=("outcome", "guild_id"),
         buckets=(1, 5, 15, 60, 300, 900, 1800, 3600),
         registry=REGISTRY,
     )
@@ -1331,28 +1374,41 @@ def reset_for_tests() -> None:
     semantic_entropy_score = Gauge(
         "omnisight_semantic_entropy_score",
         "Rolling-window pairwise cosine-similarity mean for an agent's outputs",
-        labelnames=("agent_id",), registry=REGISTRY,
+        labelnames=("agent_id", "guild_id"), registry=REGISTRY,
     )
     cognitive_deadlock_total = Counter(
         "omnisight_cognitive_deadlock_total",
         "Times an agent's entropy crossed the deadlock threshold",
-        labelnames=("agent_id",), registry=REGISTRY,
+        labelnames=("agent_id", "guild_id"), registry=REGISTRY,
     )
     global scratchpad_saves_total, scratchpad_size_bytes, token_continuation_total
     scratchpad_saves_total = Counter(
         "omnisight_scratchpad_saves_total",
         "Times an agent's scratchpad was flushed to disk",
-        labelnames=("agent_id", "trigger"), registry=REGISTRY,
+        labelnames=("agent_id", "guild_id", "trigger"), registry=REGISTRY,
     )
     scratchpad_size_bytes = Gauge(
         "omnisight_scratchpad_size_bytes",
         "Size (bytes, on-disk ciphertext) of the most recent scratchpad write",
-        labelnames=("agent_id",), registry=REGISTRY,
+        labelnames=("agent_id", "guild_id"), registry=REGISTRY,
     )
     token_continuation_total = Counter(
         "omnisight_token_continuation_total",
         "Auto-continuation rounds issued after stop_reason=max_tokens",
-        labelnames=("agent_id", "provider"), registry=REGISTRY,
+        labelnames=("agent_id", "guild_id", "provider"), registry=REGISTRY,
+    )
+    global chatops_messages_total, watchdog_events_total
+    chatops_messages_total = Counter(
+        "omnisight_chatops_messages_total",
+        "ChatOps bridge messages by direction / channel / kind",
+        labelnames=("direction", "channel", "kind", "guild_id"),
+        registry=REGISTRY,
+    )
+    watchdog_events_total = Counter(
+        "omnisight_watchdog_events_total",
+        "Watchdog events partitioned by event / severity / source",
+        labelnames=("event", "severity", "source", "guild_id"),
+        registry=REGISTRY,
     )
     # G7 (HA-07): observability for HA signals ─────────────────
     global backend_instance_up, rolling_deploy_responses_total

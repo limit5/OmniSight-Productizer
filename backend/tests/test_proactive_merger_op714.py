@@ -334,6 +334,9 @@ class TestProactiveMergerInvokes:
         assert payload["patchset_revision"] == "d386745be2"
         assert payload["jira_ticket"] == "OP-92"
         assert payload["file_path"] == "src/preferences.py"
+        assert payload["workspace"].endswith(
+            "/tmp/op717-merger-work/omnisight_OmniSight-Productizer/repo"
+        )
         assert "<<<<<<< HEAD" in payload["conflict_text"]
         assert ">>>>>>> branch" in payload["conflict_text"]
         assert payload["head_commit_message"] == "head subj"
@@ -385,6 +388,111 @@ class TestProactiveMergerInvokes:
                    for r in caplog.records)
         assert any(
             "merger_outcome reason=abstained_low_confidence" in r.message
+            for r in caplog.records
+        )
+
+    async def test_logs_arbiter_and_underlying_merger_reason(
+        self, caplog, merger_http_env,
+    ):
+        """OP-1421 — bridge log must preserve the specific MergerReason
+        even when the arbiter maps it to a generic refusal bucket."""
+        mock_client = MagicMock()
+        mock_client.query_change = AsyncMock(return_value={
+            "hashtags": [], "subject": "[OP-1421] refused other",
+        })
+        mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
+
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        enrichment = EnrichmentResult(
+            mergeable=False,
+            conflict_files=[ConflictFile(
+                path="x.py",
+                conflict_text="<<<<<<< x\na\n=======\nb\n>>>>>>> y\n",
+                file_context="",
+            )],
+        )
+
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={
+                "ok": True,
+                "reason": "merger_refused_other",
+                "merger_outcome": {"reason": "refused_no_conflict"},
+            },
+        ))
+
+        with patch("backend.gerrit.gerrit_client", mock_client), \
+             http_patch, \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
+             caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            await _proactive_merger_check(_event(change_number=1421, ps_number=3))
+
+        http_client.post.assert_awaited_once()
+        assert any(
+            "merger_outcome reason=merger_refused_other "
+            "merger_reason=refused_no_conflict" in r.message
+            for r in caplog.records
+        )
+
+    async def test_drift_verify_red_does_not_call_caller_push(
+        self, caplog, merger_http_env,
+    ):
+        mock_client = MagicMock()
+        mock_client.query_change = AsyncMock(return_value={
+            "hashtags": [], "subject": "[OP-92] verify red",
+        })
+        mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
+
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        enrichment = EnrichmentResult(
+            mergeable=False,
+            conflict_files=[ConflictFile(
+                path="src/preferences.py",
+                conflict_text=(
+                    "<<<<<<< HEAD\nreturn 1\n=======\nreturn 2\n"
+                    ">>>>>>> branch\n"
+                ),
+                file_context="",
+            )],
+        )
+
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={
+                "ok": True,
+                "reason": "merger_refused_test_failure",
+                "merger_outcome": {
+                    "metadata": {
+                        "verify_result": "red",
+                        "verify_stage": "py_compile",
+                    },
+                },
+            },
+        ))
+        caller_push = AsyncMock()
+
+        with patch("backend.gerrit.gerrit_client", mock_client), \
+             http_patch, \
+             patch("backend.routers.webhooks._daemon_apply_resolution_push",
+                   caller_push), \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
+             caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            await _proactive_merger_check(_event())
+
+        http_client.post.assert_awaited_once()
+        payload = http_client.post.await_args.kwargs["json"]
+        assert payload["push_locally"] is False
+        assert payload["workspace"].endswith(
+            "/tmp/op717-merger-work/omnisight_OmniSight-Productizer/repo"
+        )
+        caller_push.assert_not_awaited()
+        assert any(
+            "merger_outcome reason=merger_refused_test_failure "
+            "verify_result=red" in r.message
             for r in caplog.records
         )
 

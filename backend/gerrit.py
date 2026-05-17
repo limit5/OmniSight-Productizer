@@ -53,9 +53,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from backend.config import settings
+from backend.submit_rule import evaluate_submit_rule
 
 logger = logging.getLogger(__name__)
 
@@ -69,11 +71,164 @@ class GerritClient:
     the SSH argv. See module docstring for the resolution strategy.
     """
 
+    # OP-1190 prewarm cache. Populated by ``prewarm_for_daemon`` from
+    # the gerrit-jira-bridge daemon's main event loop AFTER
+    # ``db_pool.init_pool`` has succeeded. Once set, ``_resolve_account``
+    # serves from this cache instead of touching the asyncpg pool — which
+    # is required because the daemon's per-event handler threads call
+    # ``asyncio.run(...)`` and therefore run in a different event loop
+    # than the one the pool was created in.
+    #
+    # Class-level state (not instance) so the module-global
+    # ``gerrit_client`` singleton and any test instances share the same
+    # warm cache. None means "no cache; fall back to async DB read".
+    _cached_registry: list[dict] | None = None
+    _cached_default: dict | None = None
+
+    @classmethod
+    async def prewarm_for_daemon(cls) -> None:
+        """OP-1190 + OP-1193 — populate the daemon's gerrit-account cache.
+
+        Background — the layered fix
+        ----------------------------
+        OP-1190 introduced this method to sidestep the asyncpg
+        "different loop" RuntimeError raised when a per-event worker
+        thread (spawned by ``_handle_patchset_created``) calls
+        ``asyncio.run(_proactive_merger_check(event))`` and the inner
+        ``_resolve_account`` tries to acquire from the pool bound to
+        the daemon's main loop. The fix populates a class-level cache
+        in the main loop, then ``_resolve_account`` serves the cache
+        synchronously without ever calling ``pool.acquire()``.
+
+        OP-1193 rewrites the cache SOURCE (this method) — the
+        OP-1190-era implementation read from the DB via
+        ``pick_default("gerrit")`` and stashed whatever first-default
+        row it found. But the only gerrit row in ``git_accounts`` is
+        ``merger-agent-bot``'s (ga-23a020393575, from OP-693), and
+        loading it into the daemon's account slot conflated identities:
+        the daemon (claude-bot, with its own SSH key + ``user@host``
+        in env) ended up authenticating reads against Gerrit AS the
+        merger-bot — and crashed in practice because the row's
+        ``ssh_host`` lacks the ``user@`` prefix and ``ssh_key`` is the
+        decrypted PEM content rather than a filesystem path. The
+        2026-05-17 OP-1185 re-run (Gerrit Change #716, abandoned)
+        observed ``Gerrit query failed: user@sora.services: Permission
+        denied (publickey)`` — local-OS-user fallback because no
+        ``user@`` prefix was present.
+
+        New design — env-sourced identity
+        ---------------------------------
+        Build the cached default account from THE DAEMON'S OWN env
+        (``OMNISIGHT_GERRIT_SSH_HOST`` carries ``claude-bot@host``,
+        ``OMNISIGHT_GIT_SSH_KEY_PATH`` is a real filesystem path,
+        ``OMNISIGHT_GERRIT_PROJECT`` is the project root). This mirrors
+        the legacy ``default-gerrit (legacy scalar)`` row that
+        ``backend.git_credentials`` synthesises when no real DB row
+        exists — see ``git_credentials.py`` around the
+        ``entry_id="default-gerrit"`` shim block. The DB rows remain
+        reachable for OTHER consumers (e.g., merger-bot's own resolution
+        push) via explicit ``pick_account_for_url`` / ``pick_by_id``
+        calls; only this daemon-identity cache changes.
+
+        Pool init is no longer a prerequisite — kept the call site
+        after ``db_pool.init_pool`` only because other daemon
+        subsystems (audit log, JIRA write) still need the pool.
+
+        Idempotent: safe to call multiple times. The cache is reset
+        only by an explicit ``invalidate_prewarm_cache`` call — daemon
+        restart re-runs this method.
+        """
+        ssh_host = (
+            (settings.gerrit_ssh_host or "").strip()
+            or os.environ.get("OMNISIGHT_GERRIT_SSH_HOST", "").strip()
+        )
+        ssh_port_str = (
+            str(settings.gerrit_ssh_port).strip()
+            if settings.gerrit_ssh_port
+            else os.environ.get("OMNISIGHT_GERRIT_SSH_PORT", "29418").strip()
+        )
+        try:
+            ssh_port = int(ssh_port_str or "29418")
+        except ValueError:
+            ssh_port = 29418
+        ssh_key = (
+            (settings.git_ssh_key_path or "").strip()
+            or os.environ.get("OMNISIGHT_GIT_SSH_KEY_PATH", "").strip()
+        )
+        project = (
+            (settings.gerrit_project or "").strip()
+            or os.environ.get("OMNISIGHT_GERRIT_PROJECT", "").strip()
+        )
+
+        if not ssh_host:
+            logger.warning(
+                "GerritClient.prewarm_for_daemon: no SSH host configured "
+                "(settings.gerrit_ssh_host empty AND OMNISIGHT_GERRIT_SSH_HOST "
+                "env unset) — cache stays empty; daemon worker threads will "
+                "fall back to the async DB path and likely hit OP-1190 or "
+                "the merger-bot-identity mismatch."
+            )
+            return
+
+        account: dict = {
+            "id": "daemon-env",
+            "platform": "gerrit",
+            "ssh_host": ssh_host,        # contract: 'user@host' or bare 'host'
+            "ssh_port": ssh_port,
+            "ssh_key": ssh_key,          # contract: filesystem PATH (not PEM)
+            "project": project,
+            "is_default": True,
+        }
+        cls._cached_default = account
+        cls._cached_registry = [account]
+        logger.info(
+            "GerritClient.prewarm_for_daemon: cache populated from env "
+            "(ssh_host=%s ssh_port=%d project=%s ssh_key=%s)",
+            ssh_host, ssh_port, project,
+            "set" if ssh_key else "MISSING",
+        )
+
+    @classmethod
+    def invalidate_prewarm_cache(cls) -> None:
+        """OP-1190 — clear the prewarm cache.
+
+        Tests use this between cases to force a fresh resolution. Prod
+        code shouldn't need it: the daemon re-prewarms on each restart,
+        and credential rotation requires a daemon restart anyway.
+        """
+        cls._cached_registry = None
+        cls._cached_default = None
+
+    def _resolve_account_from_cache(self, project: str = "") -> dict | None:
+        """OP-1190 — synchronous account resolution using the prewarm cache.
+
+        Returns ``None`` if the cache is not populated (caller must fall
+        back to the async DB-read path). Returns the resolved account
+        dict otherwise, applying the same project-aware → default
+        precedence as :meth:`_resolve_account`.
+        """
+        registry = type(self)._cached_registry
+        if registry is None:
+            return None
+        if project:
+            needle = project.strip().lower()
+            for entry in registry:
+                if entry.get("platform") != "gerrit":
+                    continue
+                if (entry.get("project") or "").strip().lower() == needle:
+                    return entry
+        return type(self)._cached_default
+
     async def _resolve_account(self, project: str = "") -> dict | None:
         """Pick the right ``git_accounts(platform='gerrit')`` row.
 
         Resolution order:
 
+        0. **OP-1190** — if :meth:`prewarm_for_daemon` has populated the
+           class-level cache, serve from it synchronously. This is the
+           daemon-worker-thread path: the asyncpg pool is bound to the
+           daemon's main loop and cannot be acquired from per-event
+           ``asyncio.run`` worker loops.
         1. If *project* is non-empty, scan the tenant-scoped registry
            for a gerrit row whose ``project`` field matches
            case-insensitive — direct hit for multi-project tenants.
@@ -85,6 +240,13 @@ class GerritClient:
         either source. Callers should surface ``"Gerrit not
         configured"`` to the user in that case.
         """
+        cached = self._resolve_account_from_cache(project)
+        if cached is not None or type(self)._cached_registry is not None:
+            # Cache populated → trust it. cached==None means "registry was
+            # cached but no gerrit row matches", which is the same answer
+            # the async path would give without burning a pool acquire.
+            return cached
+
         from backend.git_credentials import (
             get_credential_registry_async, pick_default,
         )
@@ -157,7 +319,13 @@ class GerritClient:
 
     # ─── Query ───
 
-    async def query_change(self, change_id: str, project: str = "") -> dict | None:
+    async def query_change(
+        self,
+        change_id: str,
+        project: str = "",
+        *,
+        include_dependencies: bool = False,
+    ) -> dict | None:
         """Query a Gerrit change by Change-Id or change number.
 
         Returns parsed JSON dict or None if not found.
@@ -166,9 +334,10 @@ class GerritClient:
         if account is None:
             logger.warning("Gerrit query: no account configured")
             return None
+        dep_flag = " --dependencies" if include_dependencies else ""
         rc, out, err = await self._ssh_with(
             account,
-            f'gerrit query --format=JSON --current-patch-set "change:{change_id}"',
+            f'gerrit query --format=JSON --current-patch-set{dep_flag} "change:{change_id}"',
         )
         if rc != 0:
             logger.warning("Gerrit query failed: %s", err)
@@ -306,6 +475,20 @@ class GerritClient:
         if account is None:
             return {"error": "Gerrit not configured"}
         proj = self._project_for(account, project)
+        change = await self.query_change(
+            commit,
+            project=proj,
+            include_dependencies=True,
+        )
+        blockers = _depends_on_blockers(change or {})
+        if blockers:
+            decision = evaluate_submit_rule([], depends_on_blockers=blockers)
+            return {
+                "error": decision.detail,
+                "reason": decision.reason.value,
+                "missing": list(decision.missing),
+                "depends_on_blockers": list(decision.depends_on_blockers),
+            }
         rc, out, err = await self._ssh_with(
             account,
             f'gerrit review --project "{proj}" --submit {commit}',
@@ -397,6 +580,19 @@ class GerritClient:
         if rc != 0:
             return {"status": "error", "message": err}
         return {"status": "ok", "version": out}
+
+
+def _depends_on_blockers(change: dict) -> list[dict]:
+    """Return Gerrit dependency entries that are not already merged."""
+    blockers: list[dict] = []
+    for dep in change.get("dependsOn") or ():
+        if not isinstance(dep, dict):
+            continue
+        status = str(dep.get("status") or "").strip().upper()
+        if status in {"MERGED", "SUBMITTED"}:
+            continue
+        blockers.append(dep)
+    return blockers
 
 
 # Singleton

@@ -406,6 +406,4 @@ async def test_stop_container_cancels_oom_watchdog(db_for_audit, monkeypatch):
     assert oom_task is not None and not oom_task.cancelled()
 
     await ct.stop_container("a-stop")
-    # Give the loop one tick to process the cancellation.
-    await asyncio.sleep(0.02)
-    assert oom_task.cancelled() or oom_task.done()
+    assert oom_task.done()

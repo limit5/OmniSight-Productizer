@@ -12,12 +12,18 @@ import pytest
 from backend.agents.anthropic_native_client import TokenUsage
 from backend.agents.loop_detector import OutcomesGraderUnavailable
 from backend.agents.outcomes_consumer import (
+    MAX_COMPLETION_TEXT_CHARS,
+    MAX_DIFF_TEXT_CHARS,
+    MAX_GRADER_REASONING_CHARS,
+    MAX_TRANSITION_REASON_CHARS,
     OUTCOMES_FAIL_LABEL,
     OUTCOMES_PARTIAL_LABEL,
     OutcomesBudgetTracker,
+    OutcomesGraderRefused,
     RunnerOutcomesVerdict,
     consume_outcomes_verdict,
     grade_outcomes,
+    parse_outcomes_grader_response,
 )
 
 
@@ -122,6 +128,28 @@ def test_fail_verdict_reverts_patchsets_reopens_and_labels(
     assert calls["todo"] == [("OP-860", "[outcomes:fail] AC 3 contradicted by diff")]
 
 
+def test_fail_transition_reason_is_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch_jira_writes(monkeypatch)
+    long_reasoning = "x" * (MAX_TRANSITION_REASON_CHARS + 25)
+
+    consume_outcomes_verdict(
+        client=_StubClient(),
+        key="OP-860",
+        verdict=RunnerOutcomesVerdict(
+            verdict="fail",
+            grader_reasoning=long_reasoning,
+        ),
+    )
+
+    assert calls["todo"] == [
+        (
+            "OP-860",
+            f"[outcomes:fail] {long_reasoning[:MAX_TRANSITION_REASON_CHARS]}",
+        )
+    ]
+    assert long_reasoning in calls["comments"][0][1]
+
+
 def test_budget_cap_disables_runner_grader_for_rest_of_day(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -208,6 +236,63 @@ def test_grade_outcomes_sends_ac_completion_and_diff(monkeypatch: pytest.MonkeyP
     assert "diff --git" in captured["prompt"]
     assert captured["model"] == "claude-haiku-4-20250506"
     assert captured["temperature"] == "0.0"
+
+
+def test_parse_outcomes_grader_response_accepts_wrapped_json() -> None:
+    verdict, reasoning = parse_outcomes_grader_response(
+        'Here is the assessment:\n{"verdict": "PARTIAL", '
+        '"grader_reasoning": "AC 2 lacks evidence"}\nDone.'
+    )
+
+    assert verdict == "partial"
+    assert reasoning == "AC 2 lacks evidence"
+
+
+def test_parse_outcomes_grader_response_truncates_reasoning() -> None:
+    long_reasoning = "r" * (MAX_GRADER_REASONING_CHARS + 25)
+
+    verdict, reasoning = parse_outcomes_grader_response(
+        json.dumps({"verdict": "fail", "grader_reasoning": long_reasoning})
+    )
+
+    assert verdict == "fail"
+    assert reasoning == long_reasoning[:MAX_GRADER_REASONING_CHARS]
+
+
+def test_parse_outcomes_grader_response_rejects_empty_reasoning() -> None:
+    with pytest.raises(OutcomesGraderRefused, match="omitted grader_reasoning"):
+        parse_outcomes_grader_response(
+            json.dumps({"verdict": "pass", "grader_reasoning": "   "})
+        )
+
+
+def test_grade_outcomes_truncates_completion_and_diff() -> None:
+    captured: dict[str, str] = {}
+
+    class Client:
+        def simple(self, *, prompt: str, model: str, temperature: float):
+            captured["prompt"] = prompt
+            return (
+                '{"verdict": "pass", "grader_reasoning": "all AC covered"}',
+                TokenUsage(input_tokens=10, output_tokens=10),
+            )
+
+    completion_text = "c" * (MAX_COMPLETION_TEXT_CHARS + 1)
+    diff_text = "d" * (MAX_DIFF_TEXT_CHARS + 1)
+
+    grade_outcomes(
+        client=Client(),  # type: ignore[arg-type]
+        ticket_key="OP-860",
+        ac_text="1. Verify truncation",
+        completion_text=completion_text,
+        diff_text=diff_text,
+        grader_model="claude-haiku-4-20250506",
+    )
+
+    assert completion_text[:MAX_COMPLETION_TEXT_CHARS] in captured["prompt"]
+    assert completion_text not in captured["prompt"]
+    assert diff_text[:MAX_DIFF_TEXT_CHARS] in captured["prompt"]
+    assert diff_text not in captured["prompt"]
 
 
 def test_budget_tracker_records_spend(tmp_path: Path) -> None:

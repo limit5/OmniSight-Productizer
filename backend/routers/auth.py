@@ -421,10 +421,12 @@ async def login(req: LoginRequest, request: Request, response: Response) -> dict
 
         raise HTTPException(status_code=401, detail="invalid email or password")
 
-    # K5: Check if user has MFA enrolled — if so, defer session creation
+    # K5: Check if user has MFA enrolled or policy-enforced — if so,
+    # defer session creation until the MFA challenge flow completes.
     from backend import mfa as _mfa
     has_mfa = await _mfa.has_verified_mfa(user.id)
-    if has_mfa:
+    require_mfa = await _mfa.require_mfa_for_user(user.id)
+    if has_mfa or require_mfa:
         mfa_token = await _mfa.create_mfa_challenge(
             user.id, ip=client_ip,
             user_agent=request.headers.get("user-agent", ""),

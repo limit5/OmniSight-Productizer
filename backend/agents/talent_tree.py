@@ -11,7 +11,8 @@ task start).
 This module owns:
 
 * The YAML loader + drift guard (mirroring the W11.2 ``skill_matrix``
-  pattern but for talents).
+  pattern but for talents), with deterministic defaults for Guilds not
+  explicitly curated in YAML.
 * The :class:`TalentChoiceStore` Protocol with an in-memory store for
   dev / tests and a Postgres store wired to alembic 0228.
 * The capstone ability store (alembic 0229) and the Lv-80 gate that
@@ -86,7 +87,9 @@ future reader of git blame can resolve a symbol to its W14.x ticket.
 Module-global state audit (per project SOP)
 -------------------------------------------
 The module reads ``config/talent_tree.yaml`` lazily on each
-``available_talents`` / drift call; the YAML is the source of truth.
+``available_talents`` / drift call; the YAML is the source of truth
+for curated Guilds and the compiled defaults cover the remaining Guild
+enum members.
 There is no in-process cache because the talent tree is small (Guilds
 × 4 milestones × 3 options ≈ kilobytes) and we want operators editing
 the YAML to see effects on the next call without a restart. Mutable
@@ -122,6 +125,138 @@ task label matches a locked talent's ``routing_label``. ``+20%`` per
 ADR-0008 §"Routing integration"; feature-flagged on
 ``OMNISIGHT_MP_TALENT_ROUTING_ENABLED`` so RPG.W7.1
 (``prefer_agent_id``) can drop in cleanly."""
+
+_DEFAULT_TALENT_SUFFIXES: Mapping[int, tuple[str, str, str]] = MappingProxyType(
+    {
+        10: ("first", "guard", "path"),
+        30: ("model", "planner", "connector"),
+        50: ("stabilizer", "optimizer", "observer"),
+        80: ("master", "architect", "synthesizer"),
+    }
+)
+
+_DEFAULT_GUILD_TALENT_FOCI: Mapping[Guild, tuple[str, ...]] = MappingProxyType(
+    {
+        Guild.architect: (
+            "system", "adr", "tradeoff", "boundary", "roadmap", "integration",
+            "migration", "resilience", "platform", "portfolio", "governance",
+            "evolution",
+        ),
+        Guild.sa_sd: (
+            "interface", "sequence", "modularity", "contract", "state",
+            "dependency", "reuse", "failure", "maintainability", "domain",
+            "review", "integration",
+        ),
+        Guild.ux: (
+            "research", "accessibility", "flow", "information", "prototype",
+            "content", "usability", "mobile", "handoff", "delight", "journey",
+            "system",
+        ),
+        Guild.pm: (
+            "outcome", "scope", "risk", "stakeholder", "priority",
+            "acceptance", "dependency", "release", "metrics", "strategy",
+            "roadmap", "feedback",
+        ),
+        Guild.gateway: (
+            "protocol", "throttle", "routing", "a2a", "mcp", "backpressure",
+            "compatibility", "observability", "failover", "traffic", "policy",
+            "control",
+        ),
+        Guild.bsp: (
+            "boot", "devicetree", "kernel", "board", "crosscompile",
+            "peripheral", "bringup", "power", "storage", "secureboot",
+            "factory", "recovery",
+        ),
+        Guild.hal: (
+            "abstraction", "driver", "register", "vendor", "timing", "dma",
+            "interrupt", "portability", "testbench", "lowpower",
+            "compatibility", "diagnostic",
+        ),
+        Guild.algo_cv: (
+            "dataset", "accuracy", "latency", "robustness", "calibration",
+            "tracking", "benchmark", "edgecase", "pipeline", "fusion",
+            "optimization", "explainability",
+        ),
+        Guild.optical: (
+            "lens", "focus", "illumination", "calibration", "distortion",
+            "thermal", "mtf", "alignment", "ircut", "tolerance", "lab",
+            "field",
+        ),
+        Guild.isp: (
+            "exposure", "color", "noise", "sharpness", "hdr", "awb", "ae",
+            "af", "tuning", "artifact", "sensor", "pipeline",
+        ),
+        Guild.audio: (
+            "aec", "noise", "latency", "codec", "beamforming", "gain",
+            "wakeword", "jitter", "room", "dsp", "quality", "diagnostic",
+        ),
+        Guild.frontend: (
+            "accessibility", "motion", "typescript", "design-system", "ssr",
+            "state", "web-perf", "visual-regression", "i18n",
+            "ui-architecture", "dx", "design-engineering",
+        ),
+        Guild.backend: (
+            "schema", "performance", "security", "distributed", "data-model",
+            "api-contract", "incident", "refactor", "observability", "legacy",
+            "platform", "cost",
+        ),
+        Guild.sre: (
+            "slo", "incident", "capacity", "deployment", "alert", "runbook",
+            "rollback", "observability", "errorbudget", "resilience", "cost",
+            "oncall",
+        ),
+        Guild.qa: (
+            "contract", "regression", "fixture", "coverage", "e2e",
+            "exploratory", "matrix", "flake", "performance", "release",
+            "risk", "traceability",
+        ),
+        Guild.auditor: (
+            "evidence", "chain", "policy", "readmodel", "control", "finding",
+            "retention", "sampling", "attestation", "compliance", "exception",
+            "signoff",
+        ),
+        Guild.red_team: (
+            "injection", "authz", "exfiltration", "sandbox", "fuzzing",
+            "supplychain", "bypass", "privacy", "abusecase", "persistence",
+            "detection", "reporting",
+        ),
+        Guild.forensics: (
+            "timeline", "log", "artifact", "rootcause", "containment",
+            "correlation", "snapshot", "replay", "blast", "recovery",
+            "lesson", "chain",
+        ),
+        Guild.intel: (
+            "cve", "vendor", "feed", "exploit", "dependency", "threatmodel",
+            "freshness", "triage", "advisory", "signal", "watchlist",
+            "briefing",
+        ),
+        Guild.reporter: (
+            "summary", "release", "changelog", "audience", "evidence",
+            "timeline", "translation", "runbook", "narrative", "executive",
+            "operator", "archive",
+        ),
+        Guild.custom: (
+            "charter", "constraint", "routing", "template", "boundary",
+            "handoff", "validation", "metric", "integration", "operator",
+            "extension", "review",
+        ),
+    }
+)
+ROUTING_WEIGHT_CAPSTONE_MATCH = 1.50
+"""Multiplier applied by MP routing_policy when a task label matches a
+Lv-80 capstone's ``signature_label``. ``+50%`` — strictly larger than
+the per-talent +20% from :data:`ROUTING_WEIGHT_TALENT_MATCH` so the
+single-signature ability outweighs any single talent fork. Shares the
+same RPG.W14 feature flag as talent routing weight; see
+:func:`backend.agents.routing_policy.is_talent_routing_enabled`."""
+
+CAPSTONE_SIGNATURE_HEADER = "Signature ability (per RPG.W14 capstone):"
+"""Header line prepended to the capstone signature-ability block when
+:func:`prompt_builder.enrich_system_prompt_with_capstone` injects it
+into the system prompt at task start. Distinct from the per-talent
+``Talent reminders`` header so operators reading the prompt log can
+tell at a glance whether the agent is executing a Lv-80 signature
+move."""
 
 
 # ── YAML path resolution ───────────────────────────────────────────
@@ -173,11 +308,27 @@ class TalentOption:
 
 @dataclass(frozen=True)
 class CapstoneAbility:
-    """The single Lv-80 capstone unlock per Guild."""
+    """The single Lv-80 capstone unlock per Guild.
+
+    ``signature_label`` is the routing keyword the MP routing policy
+    matches against task labels (mirrors the per-talent
+    ``routing_label`` but applied at the Guild-capstone scope).
+    ``signature_prompt`` is the multi-line block that
+    :mod:`backend.agents.prompt_builder` injects under
+    :data:`CAPSTONE_SIGNATURE_HEADER` at task start when the agent
+    holds this capstone lock. ``commit_budget`` is the operator-facing
+    advisory commit ceiling (``≤ N commit``) — per ADR-0008
+    §"Talent tree (W14)" the canonical capstone shape is "single
+    signature ability surgical-refactor in ≤ 3 commit"; ``None`` means
+    no advisory budget is asserted for this capstone.
+    """
 
     ability_id: str
     display_name: str
     summary: str
+    signature_label: str
+    signature_prompt: str
+    commit_budget: int | None = None
 
 
 @dataclass(frozen=True)
@@ -254,6 +405,10 @@ def load_talent_tree(
             options_by_milestone=MappingProxyType(milestones),
             capstone=capstone,
         )
+    for guild in Guild:
+        out.setdefault(guild, _default_guild_talent_tree(guild))
+    _assert_talent_tree_complete(out)
+    _assert_global_talent_ids_unique(out)
     return MappingProxyType(out)
 
 
@@ -708,7 +863,7 @@ def routing_weight_multiplier_for_talents(
     behind the :func:`backend.agents.routing_policy.is_talent_routing_enabled`
     feature flag and degrade silently
     (:class:`RoutingWeightInjectionFailed`) on import/IO errors. ``guild``
-    is optional: when omitted we scan every Guild's tree (cheap, ≤ 2
+    is optional: when omitted we scan every Guild's tree (cheap, 21
     guilds × 4 milestones × 3 options today).
 
     See :func:`backend.agents.routing_policy.build_talent_routing_weight_resolver`
@@ -740,6 +895,89 @@ def routing_weight_multiplier_for_talents(
                 if option.routing_label.strip().lower() in label_set:
                     multiplier *= ROUTING_WEIGHT_TALENT_MATCH
     return multiplier
+
+
+def capstone_signature_block(ability: CapstoneAbility) -> str:
+    """Return the prompt block that anchors the Lv-80 signature ability.
+
+    Composed of ``display_name`` (one line), ``signature_prompt`` body,
+    and the operator-facing ``≤ N commit`` advisory when
+    ``commit_budget`` is set. Pure function — :mod:`prompt_builder`
+    prepends :data:`CAPSTONE_SIGNATURE_HEADER` when it injects this
+    into the system prompt.
+    """
+    body = ability.signature_prompt.strip()
+    lines = [f"{ability.display_name} — {ability.summary.strip()}", body]
+    if ability.commit_budget is not None:
+        lines.append(
+            f"Commit budget: ≤ {ability.commit_budget} commit "
+            f"(surgical refactor discipline; bundle related edits into the "
+            f"same change rather than splitting into many small commits)."
+        )
+    return "\n\n".join(line for line in lines if line)
+
+
+def capstone_matches_task_labels(
+    ability: CapstoneAbility,
+    task_labels: tuple[str, ...],
+) -> bool:
+    """Return whether ``ability.signature_label`` appears in ``task_labels``.
+
+    Case-insensitive (mirrors the per-talent routing match in
+    :func:`routing_weight_multiplier_for_talents`). Pure / cheap: the
+    MP routing policy can call this for every locked capstone in the
+    candidate set without YAML I/O.
+    """
+    if not task_labels:
+        return False
+    label = ability.signature_label.strip().lower()
+    if not label:
+        return False
+    return any(
+        isinstance(item, str) and item.strip().lower() == label
+        for item in task_labels
+    )
+
+
+def capstone_routing_weight_multiplier(
+    capstone: CapstoneLock | None,
+    *,
+    task_labels: tuple[str, ...],
+    guild: Guild | str | None = None,
+    path: Path | str = TALENT_TREE_PATH,
+) -> float:
+    """Return the routing-weight multiplier contributed by ``capstone``.
+
+    ``None`` (no capstone locked) or empty ``task_labels`` → ``1.0``.
+    The lock's ``ability_id`` is resolved against
+    ``config/talent_tree.yaml``: when ``guild`` is given we scan only
+    that Guild's capstone (the common case — routing already knows
+    the candidate's Guild); when ``guild`` is omitted we scan all
+    Guild capstones (cheap, ≤ 2 today).
+
+    Pure — feature-gate at the routing_policy call site, not here.
+    YAML/IO errors raise :class:`RoutingWeightInjectionFailed` so the
+    caller can degrade silently per ADR-0008 §"Error catalog".
+    """
+    if capstone is None or not task_labels:
+        return 1.0
+    try:
+        tree = load_talent_tree(path)
+    except TalentTreeError as exc:  # pragma: no cover — defensive
+        raise RoutingWeightInjectionFailed(str(exc)) from exc
+    guilds_to_scan: tuple[Guild, ...]
+    if guild is None:
+        guilds_to_scan = tuple(tree.keys())
+    else:
+        guild_enum = guild if isinstance(guild, Guild) else _coerce_guild(guild)
+        guilds_to_scan = (guild_enum,) if guild_enum in tree else ()
+    for g in guilds_to_scan:
+        ability = tree[g].capstone
+        if ability.ability_id != capstone.ability_id:
+            continue
+        if capstone_matches_task_labels(ability, task_labels):
+            return ROUTING_WEIGHT_CAPSTONE_MATCH
+    return 1.0
 
 
 def prompt_reminders_for_talents(
@@ -938,11 +1176,152 @@ def _parse_capstone(raw: Any, guild: Guild) -> CapstoneAbility:
         raise TalentTreeError(
             f"talent_tree {guild.value!r} must declare a capstone block"
         )
+    ability_id = _required_text(raw.get("ability_id"), "ability_id")
+    display_name = _required_text(raw.get("display_name"), "display_name")
+    summary = _required_text(raw.get("summary"), "summary")
+    # RPG.W14.6 — the signature-ability runtime surface is required on
+    # every capstone so prompt enrichment + routing weight have a
+    # deterministic input. Default fallbacks live here (not in the
+    # dataclass) so the YAML drift guard catches missing fields at
+    # boot rather than silently shipping a no-op capstone.
+    signature_label = raw.get("signature_label")
+    if signature_label is None:
+        # Backwards-compat fallback: derive from ability_id so older
+        # capstone blocks keep loading. Operators get a deterministic
+        # routing label without having to touch the YAML, but the
+        # ADR-0008 W14.6 contract still expects explicit declarations
+        # going forward.
+        signature_label = ability_id.replace("_", "-")
+    else:
+        signature_label = _required_text(signature_label, "signature_label")
+    signature_prompt = raw.get("signature_prompt")
+    if signature_prompt is None:
+        # Backwards-compat fallback: reuse summary so the prompt
+        # injector still has something to write under the header.
+        signature_prompt = summary
+    else:
+        signature_prompt = _required_text(signature_prompt, "signature_prompt")
+    commit_budget_raw = raw.get("commit_budget")
+    commit_budget: int | None
+    if commit_budget_raw is None:
+        commit_budget = None
+    elif isinstance(commit_budget_raw, int) and not isinstance(commit_budget_raw, bool):
+        if commit_budget_raw <= 0:
+            raise TalentTreeError(
+                f"talent_tree {guild.value!r} capstone commit_budget must be positive"
+            )
+        commit_budget = commit_budget_raw
+    else:
+        raise TalentTreeError(
+            f"talent_tree {guild.value!r} capstone commit_budget must be a "
+            f"positive integer or omitted"
+        )
     return CapstoneAbility(
-        ability_id=_required_text(raw.get("ability_id"), "ability_id"),
-        display_name=_required_text(raw.get("display_name"), "display_name"),
-        summary=_required_text(raw.get("summary"), "summary"),
+        ability_id=ability_id,
+        display_name=display_name,
+        summary=summary,
+        signature_label=signature_label,
+        signature_prompt=signature_prompt,
+        commit_budget=commit_budget,
     )
+
+
+def _default_guild_talent_tree(guild: Guild) -> GuildTalentTree:
+    """Build deterministic default talent options for Guilds not in YAML."""
+    foci = _DEFAULT_GUILD_TALENT_FOCI[guild]
+    options_by_milestone: dict[int, tuple[TalentOption, ...]] = {}
+    focus_offset = 0
+    for milestone in MILESTONE_LEVELS:
+        suffixes = _DEFAULT_TALENT_SUFFIXES[milestone]
+        options: list[TalentOption] = []
+        for suffix in suffixes:
+            focus = foci[focus_offset]
+            focus_offset += 1
+            option_slug = f"{_slug(guild.value)}-{_slug(focus)}-{suffix}"
+            options.append(
+                TalentOption(
+                    talent_id=option_slug,
+                    display_name=_title(f"{focus} {suffix}"),
+                    summary=(
+                        f"Bias toward {_words(focus)} decisions for the "
+                        f"{_title(guild.value)} Guild."
+                    ),
+                    routing_label=_slug(focus),
+                    prompt_reminder=(
+                        f"For {_words(guild.value)} work, foreground "
+                        f"{_words(focus)} tradeoffs before choosing an "
+                        "implementation path."
+                    ),
+                )
+            )
+        options_by_milestone[milestone] = tuple(options)
+    return GuildTalentTree(
+        guild=guild,
+        options_by_milestone=MappingProxyType(options_by_milestone),
+        capstone=CapstoneAbility(
+            ability_id=f"{_slug(guild.value)}-capstone",
+            display_name=f"{_title(guild.value)} Capstone",
+            summary=(
+                f"Dedicated Lv-80 capstone for the {_words(guild.value)} "
+                "Guild, reserved for high-context specialist execution."
+            ),
+        ),
+    )
+
+
+def _assert_talent_tree_complete(tree: Mapping[Guild, GuildTalentTree]) -> None:
+    missing = sorted(guild.value for guild in set(Guild) - set(tree))
+    if missing:
+        raise TalentTreeError(f"talent_tree missing Guild defaults: {missing}")
+
+
+def _assert_global_talent_ids_unique(
+    tree: Mapping[Guild, GuildTalentTree],
+) -> None:
+    seen: dict[str, Guild] = {}
+    for guild, guild_tree in tree.items():
+        for options in guild_tree.options_by_milestone.values():
+            for option in options:
+                owner = seen.setdefault(option.talent_id, guild)
+                if owner != guild:
+                    raise TalentTreeError(
+                        f"talent_tree talent_id {option.talent_id!r} is reused "
+                        f"by both {owner.value!r} and {guild.value!r}"
+                    )
+
+
+def _slug(value: str) -> str:
+    return value.replace("_", "-").lower()
+
+
+def _words(value: str) -> str:
+    return value.replace("_", " ").replace("-", " ")
+
+
+def _title(value: str) -> str:
+    acronyms = {
+        "a2a",
+        "adr",
+        "ae",
+        "aec",
+        "af",
+        "awb",
+        "cve",
+        "dma",
+        "dsp",
+        "e2e",
+        "hdr",
+        "i18n",
+        "ircut",
+        "mcp",
+        "mtf",
+        "slo",
+        "ssr",
+    }
+    words: list[str] = []
+    for word in _words(value).split():
+        words.append(word.upper() if word.lower() in acronyms else word.title())
+    return " ".join(words)
 
 
 def _required_text(value: Any, field_name: str) -> str:
@@ -956,6 +1335,7 @@ def _required_text(value: Any, field_name: str) -> str:
 
 __all__ = [
     "CAPSTONE_LEVEL",
+    "CAPSTONE_SIGNATURE_HEADER",
     "CapstoneAbility",
     "CapstoneLock",
     "CapstoneRequiresLv80",
@@ -968,6 +1348,7 @@ __all__ = [
     "OPTIONS_PER_MILESTONE",
     "PostgresCapstoneStore",
     "PostgresTalentChoiceStore",
+    "ROUTING_WEIGHT_CAPSTONE_MATCH",
     "ROUTING_WEIGHT_TALENT_MATCH",
     "RoutingWeightInjectionFailed",
     "TALENT_TREE_PATH",
@@ -981,6 +1362,9 @@ __all__ = [
     "agent_talent_summary",
     "available_talents",
     "capstone_for_guild",
+    "capstone_matches_task_labels",
+    "capstone_routing_weight_multiplier",
+    "capstone_signature_block",
     "load_talent_tree",
     "lock_capstone_ability",
     "lock_talent",

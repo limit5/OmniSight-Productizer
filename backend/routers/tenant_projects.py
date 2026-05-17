@@ -122,7 +122,8 @@ from __future__ import annotations
 import logging
 import re
 import secrets
-from typing import Literal
+from datetime import datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
@@ -365,7 +366,7 @@ WHERE tenant_id = $1 AND product_line = $2 AND slug = $3
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _row_to_project_dict(row) -> dict:
+def _row_to_project_dict(row: Any) -> dict[str, Any]:
     """Project the RETURNING row to a JSON-serialisable response body."""
     return {
         "project_id": row["id"],
@@ -1956,8 +1957,8 @@ async def restore_project(
 async def gc_archived_projects(
     *,
     retention_days: int | None = None,
-    now_utc=None,
-) -> list[dict]:
+    now_utc: datetime | None = None,
+) -> list[dict[str, Any]]:
     """Hard-delete projects whose archive has aged past the retention
     window. Emits a ``tenant_project_billing_gc`` audit row per
     deletion (the audit chain doubles as the billing event surface
@@ -2389,7 +2390,7 @@ RETURNING user_id, project_id, role, created_at
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def _row_to_project_member_dict(row) -> dict:
+def _row_to_project_member_dict(row: Any) -> dict[str, Any]:
     """Project a project_members row to the JSON response body."""
     return {
         "user_id": row["user_id"],
@@ -3114,7 +3115,7 @@ WHERE project_id = $1 AND guest_tenant_id = $2
 """
 
 
-def _row_to_project_share_dict(row) -> dict:
+def _row_to_project_share_dict(row: Any) -> dict[str, Any]:
     """Project a project_shares row to the JSON response body."""
     return {
         "share_id": row["id"],

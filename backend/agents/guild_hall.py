@@ -11,7 +11,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from backend.agents.character_card import CharacterCard
+from backend.agents.character_card import (
+    CharacterCard,
+    CharacterCardRosterEntry,
+    CharacterCardSort,
+)
 from backend.agents.guild_registry import GuildDefinition, list_guild_definitions
 from backend.sandbox_tier import Guild
 
@@ -39,6 +43,7 @@ class GuildHallMember:
     instance_suffix: str
     level: int
     xp: int
+    spec: str
     specialization_label: str
 
 
@@ -80,9 +85,10 @@ class GuildHallView:
 
 
 def build_guild_hall_view(
-    cards: Iterable[CharacterCard],
+    cards: Iterable[CharacterCard | CharacterCardRosterEntry],
     *,
     definitions: Iterable[GuildDefinition] | None = None,
+    sort_by: CharacterCardSort = "level",
 ) -> GuildHallView:
     """Build a stable Guild Hall payload from character cards.
 
@@ -91,18 +97,24 @@ def build_guild_hall_view(
     """
 
     ordered_definitions = _definitions(definitions)
-    buckets: dict[Guild, list[CharacterCard]] = {
+    buckets: dict[Guild, list[CharacterCardRosterEntry]] = {
         definition.guild: [] for definition in ordered_definitions
     }
 
-    for card in cards:
+    for listing in cards:
+        entry = _roster_entry(listing)
+        card = entry.card
         guild = _coerce_guild(card.guild)
         if guild is None or guild not in buckets:
             continue
-        buckets[guild].append(card)
+        buckets[guild].append(entry)
 
     guild_rows = tuple(
-        _build_guild_row(definition, buckets[definition.guild])
+        _build_guild_row(
+            definition,
+            buckets[definition.guild],
+            sort_by=sort_by,
+        )
         for definition in ordered_definitions
     )
     return GuildHallView(guilds=guild_rows)
@@ -118,9 +130,13 @@ def _definitions(
 
 def _build_guild_row(
     definition: GuildDefinition,
-    cards: list[CharacterCard],
+    entries: list[CharacterCardRosterEntry],
+    *,
+    sort_by: CharacterCardSort,
 ) -> GuildHallGuild:
-    members = tuple(_member_from_card(card) for card in _sort_cards(cards))
+    members = tuple(
+        _member_from_card(entry.card) for entry in _sort_entries(entries, sort_by)
+    )
     return GuildHallGuild(
         guild=definition.guild.value,
         display_name=definition.display_name,
@@ -138,23 +154,52 @@ def _member_from_card(card: CharacterCard) -> GuildHallMember:
         instance_suffix=card.instance_suffix,
         level=card.level,
         xp=card.xp,
+        spec=card.specialization_label,
         specialization_label=card.specialization_label,
     )
 
 
-def _sort_cards(cards: Iterable[CharacterCard]) -> tuple[CharacterCard, ...]:
-    return tuple(
-        sorted(
-            cards,
-            key=lambda card: (
-                -card.level,
-                -card.xp,
-                card.agent_class,
-                card.instance_suffix,
-                card.agent_id,
-            ),
-        )
-    )
+def _roster_entry(
+    listing: CharacterCard | CharacterCardRosterEntry,
+) -> CharacterCardRosterEntry:
+    if isinstance(listing, CharacterCardRosterEntry):
+        return listing
+    return CharacterCardRosterEntry(card=listing, last_activity_at=listing.created_at)
+
+
+def _sort_entries(
+    entries: Iterable[CharacterCardRosterEntry],
+    sort_by: CharacterCardSort,
+) -> tuple[CharacterCardRosterEntry, ...]:
+    if sort_by == "level":
+        def key(entry: CharacterCardRosterEntry) -> tuple[int, int, str, str, str]:
+            return (
+                -entry.card.level,
+                -entry.card.xp,
+                entry.card.agent_class,
+                entry.card.instance_suffix,
+                entry.card.agent_id,
+            )
+    elif sort_by == "xp":
+        def key(entry: CharacterCardRosterEntry) -> tuple[int, int, str, str, str]:
+            return (
+                -entry.card.xp,
+                -entry.card.level,
+                entry.card.agent_class,
+                entry.card.instance_suffix,
+                entry.card.agent_id,
+            )
+    elif sort_by == "activity":
+        def key(entry: CharacterCardRosterEntry) -> tuple[float, str, str, str]:
+            return (
+                -entry.last_activity_at.timestamp(),
+                entry.card.agent_class,
+                entry.card.instance_suffix,
+                entry.card.agent_id,
+            )
+    else:
+        raise ValueError("sort_by must be one of: level, xp, activity")
+    return tuple(sorted(entries, key=key))
 
 
 def _recruit_cta(guild: Guild) -> GuildHallRecruitCta:

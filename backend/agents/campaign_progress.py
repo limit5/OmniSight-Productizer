@@ -20,6 +20,11 @@ from typing import Literal, Sequence
 ChapterStatus = Literal["locked", "active", "complete"]
 
 DEFAULT_CHAPTER_COUNT = 4
+DEFAULT_PROGRESS_BAR_WIDTH = 20
+
+# Percent scale: both the decimal→percent multiplier and the upper cap
+# returned by `_percent` (results above 100% are clamped).
+PERCENT_SCALE = 100
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,7 @@ class CampaignChapter:
     completed_tasks: int
     total_tasks: int
     percent: int
+    progress_bar: str
     status: ChapterStatus
 
 
@@ -43,6 +49,7 @@ class CampaignProgress:
     completed_tasks: int
     total_tasks: int
     percent: int
+    progress_bar: str
     current_chapter_index: int
     chapters: tuple[CampaignChapter, ...]
 
@@ -53,6 +60,7 @@ def campaign_progress(
     *,
     chapter_count: int = DEFAULT_CHAPTER_COUNT,
     chapter_titles: Sequence[str] | None = None,
+    progress_bar_width: int = DEFAULT_PROGRESS_BAR_WIDTH,
 ) -> CampaignProgress:
     """Return campaign progress and evenly sliced chapter state.
 
@@ -63,13 +71,14 @@ def campaign_progress(
     completed = _clean_task_count("completed_tasks", completed_tasks)
     total = _clean_task_count("total_tasks", total_tasks)
     chapters = _clean_chapter_count(chapter_count, total)
+    bar_width = _clean_progress_bar_width(progress_bar_width)
     if completed > total:
         raise ValueError("completed_tasks must be <= total_tasks")
 
     titles = _chapter_titles(chapter_titles, chapters)
     slices = _chapter_slices(total, chapters)
     chapter_progress = tuple(
-        _chapter_progress(index, title, start, end, completed)
+        _chapter_progress(index, title, start, end, completed, bar_width)
         for index, (title, (start, end)) in enumerate(zip(titles, slices), start=1)
     )
     current_chapter = _current_chapter_index(chapter_progress)
@@ -77,6 +86,7 @@ def campaign_progress(
         completed_tasks=completed,
         total_tasks=total,
         percent=_percent(completed, total),
+        progress_bar=_progress_bar(completed, total, bar_width),
         current_chapter_index=current_chapter,
         chapters=chapter_progress,
     )
@@ -88,6 +98,7 @@ def _chapter_progress(
     start: int,
     end: int,
     completed_tasks: int,
+    progress_bar_width: int,
 ) -> CampaignChapter:
     total = end - start
     completed = min(max(completed_tasks - start, 0), total)
@@ -105,6 +116,7 @@ def _chapter_progress(
         completed_tasks=completed,
         total_tasks=total,
         percent=_percent(completed, total),
+        progress_bar=_progress_bar(completed, total, progress_bar_width),
         status=status,
     )
 
@@ -159,6 +171,13 @@ def _clean_chapter_count(chapter_count: int, total_tasks: int) -> int:
     return count
 
 
+def _clean_progress_bar_width(progress_bar_width: int) -> int:
+    width = _clean_task_count("progress_bar_width", progress_bar_width)
+    if width < 1:
+        raise ValueError("progress_bar_width must be >= 1")
+    return width
+
+
 def _required(field: str, value: str) -> str:
     if not isinstance(value, str):
         raise TypeError(f"{field} must be a string")
@@ -169,11 +188,17 @@ def _required(field: str, value: str) -> str:
 
 
 def _percent(completed: int, total: int) -> int:
-    return min(100, math.floor((completed / total) * 100))
+    return min(PERCENT_SCALE, math.floor((completed / total) * PERCENT_SCALE))
+
+
+def _progress_bar(completed: int, total: int, width: int) -> str:
+    filled = min(width, math.floor((completed / total) * width))
+    return ("#" * filled) + ("-" * (width - filled))
 
 
 __all__ = [
     "DEFAULT_CHAPTER_COUNT",
+    "DEFAULT_PROGRESS_BAR_WIDTH",
     "CampaignChapter",
     "CampaignProgress",
     "ChapterStatus",

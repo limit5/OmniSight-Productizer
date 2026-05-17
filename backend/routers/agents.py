@@ -53,6 +53,7 @@ from backend.agents.party import (
     PartyActiveTaskExists,
     PartyError,
     PartySizeInvalid,
+    PartyTaskTierTooLow,
     PostgresPartyStore,
     assign_task as assign_party_task,
     create_party,
@@ -202,6 +203,7 @@ async def list_agent_cards(
 @router.get("/guild-hall/{guild}/roster")
 async def get_guild_hall_roster(
     guild: str,
+    sort_by: CharacterCardSort = "level",
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     try:
@@ -215,12 +217,12 @@ async def get_guild_hall_roster(
     try:
         entries = await registry.list_cards(
             guild=selected_guild.value,
-            sort_by="level",
+            sort_by=sort_by,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    view = build_guild_hall_view(entry.card for entry in entries)
+    view = build_guild_hall_view(entries, sort_by=sort_by)
     for guild_row in view.guilds:
         if guild_row.guild == selected_guild.value:
             return _guild_hall_guild_to_dict(guild_row)
@@ -572,17 +574,25 @@ async def assign_party_task_endpoint(
 ):
     """RPG.W17: assign a Tier L+ task to the party.
 
-    Refuses with 409 (``PartyActiveTaskExists``) if the party already
-    holds another active task.
+    Body shape: ``{"task_id": str, "tier": "L"|"X"}`` — ``tier`` is
+    required per W17.4 (OP-195). Refuses with 422
+    (``PartyTaskTierTooLow``) when ``tier`` is below L, with 409
+    (``PartyActiveTaskExists``) if the party already holds another
+    active task, and with 404 for an unknown / disbanded party.
     """
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="body must be a JSON object")
     task_id = body.get("task_id")
     if not isinstance(task_id, str) or not task_id.strip():
         raise HTTPException(status_code=400, detail="task_id is required")
+    tier = body.get("tier")
+    if not isinstance(tier, str) or not tier.strip():
+        raise HTTPException(status_code=400, detail="tier is required")
     store = PostgresPartyStore(lambda: _borrowed_conn(conn))
     try:
-        state = await assign_party_task(store, party_id, task_id)
+        state = await assign_party_task(store, party_id, task_id, tier=tier)
+    except PartyTaskTierTooLow as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except PartyActiveTaskExists as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PartyError as exc:
@@ -808,6 +818,7 @@ def _guild_hall_guild_to_dict(guild: GuildHallGuild) -> dict:
                 "instance_suffix": member.instance_suffix,
                 "level": member.level,
                 "xp": member.xp,
+                "spec": member.spec,
                 "specialization_label": member.specialization_label,
             }
             for member in guild.members
@@ -859,4 +870,3 @@ def _party_to_dict(party: Party) -> dict:
             else None
         ),
     }
-

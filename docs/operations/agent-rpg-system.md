@@ -2,9 +2,11 @@
 
 > **Status**: v0.5.0 partial ship (RPG.W1-W14 core + W15-W17 + W19-W20
 > shipped; W18 + W21 deferred). Last reviewed
-> 2026-05-11 (W12 promoted to **Live** via OP-217; W13 promoted to
-> **Live** via OP-218; W14 promoted to **Live** via OP-219;
-> W17 promoted to **Live** via OP-220).
+> 2026-05-17 (W11.3 periodic verification pass via OP-1377; W12
+> promoted to **Live** via OP-217; W13 promoted to **Live** via OP-218;
+> W14 promoted to **Live** via OP-219; W17 promoted to **Live** via OP-220;
+> W3.3 promoted to **Live** via OP-130 on 2026-05-16; W19 fusion
+> hardening landed via OP-1391 + OP-1392 on 2026-05-17).
 > **Authoritative spec**: [ADR-0008 — Agent RPG Class & Skill Leveling
 > System](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/). This doc covers
 > *operation*, not design — when the two diverge, ADR-0008 wins and this
@@ -22,8 +24,8 @@ having to re-derive the curve from the ADR every time.
 The RPG system ships in waves. Some of the surfaces ADR-0008 describes
 are **structural slots** (module + helper present, no live data path
 yet); some are fully live. Treat the table below as the source of
-truth on what an operator can act on **today** (2026-05-08 — v0.5.0
-target ship).
+truth on what an operator can act on **today** (2026-05-17 — v0.5.0
+target ship; W11.3 periodic verification pass per OP-1377).
 
 | Wave   | Module / surface                                              | Status today               |
 | ------ | ------------------------------------------------------------- | -------------------------- |
@@ -36,17 +38,18 @@ target ship).
 | W11.3  | This document                                                 | **Live**                   |
 | W15.1  | `backend/agents/buff_registry.py` — Fresh Tokens / Streak / Well-Rested  | **Live** (XP multiplier inputs) |
 | W15.2  | `backend/agents/debuff_registry.py` — Burnout / Stale Memory             | **Live**                  |
-| W16.1  | `backend/agents/achievement_registry.py` + unlock daemon                 | **Live**                  |
-| W19.1  | `backend/agents/skill_fusion.py` — Lv5 fusion preview                    | **Live**                  |
-| W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title` |
+| W16.1  | `backend/agents/achievement_registry.py` + unlock daemon (alembic 0240 milestone table per OP-1385; in-memory unlock store per OP-1386) | **Live**                  |
+| W19.1  | `backend/agents/skill_fusion.py` — Lv5 fusion preview (OP-1391 exact-Lv5 gate + OP-1392 level deltas) | **Live**                  |
+| W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title`; W20.3 completion status string exported as `campaign_completion.CAMPAIGN_COMPLETION_STATUS` (OP-1396) |
 | W3.2   | `backend/agents/style_fingerprint.py` — pure SHA-256 generator over last-N `(commit_style / test_pattern / refactor_tendency)` | **Live** (OP-129) |
-| W3.3   | `backend/agents/style_fingerprint_cron.py` — daily recompute sweep + drift logging | **Live** (OP-130) — helper + drift threshold live; systemd timer wiring still owned by devops |
+| W3.3   | `backend/agents/style_fingerprint_cron.py` — daily recompute sweep + drift logging | **Live** as of 2026-05-16 (OP-130) — helper + drift threshold live; systemd timer wiring still owned by devops |
 | W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred** (W5.1 BP.M dim-memory scoping + W7.2 tier gate landed standalone — see "BP.M dim memory scoping (W5.1)" and "Tier gating (W7.2)" below) |
 | W5.1   | `backend/agents/skill_memory.py` — `(agent_id, skill_id)`-tagged BP.M dim memory adapter over pgvector | **Live** (OP-137) — `vectorize_distilled_skills` + `retrieve_distilled_skills` ship; W5.2 auto-distil hook + W5.3 latency tests follow |
 | W7.2   | `backend/agents/tier_gate.py` — Tier X requires Lv ≥ 50 + skill ≥ Lv 3 | **Live** (OP-147) — pure helper + async resolver; W7.1 wires the call site once `prefer_agent_id` lands |
 | W12    | `backend/agents/skill_leveling.py` + alembic 0226 `agent_skill_state` | **Live** (OP-217) — branch lock + decay cron live |
 | W13    | `backend/agents/tool_proficiency.py` + alembic 0227 `agent_tool_proficiency` + `config/tool_proficiency_gates.yaml` | **Live** (OP-218) — MP.W17.7 telemetry consumer + dispatcher gate live |
 | W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219; W14.1 OP-185) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1; W14.1 trigger fires `rpg.talent_fork_required` on level-up |
+| W14    | `backend/agents/talent_tree.py` + `config/talent_tree.yaml` + alembic 0228/0229 | **Live** (OP-219) — milestone lock + capstone gate live; routing weight injection feature-flagged off until W7.1; Lv-80 signature-ability surface live via OP-190 (W14.6 — `signature_label` / `signature_prompt` / `commit_budget` per Guild capstone) |
 | W17    | `backend/agents/party.py` + `backend/agents/synergy_registry.py` + `config/synergy_matrix.yaml` + alembic 0230 | **Live** (OP-220) — party CRUD + synergy lookup + pre-pickup gate live |
 
 If a runbook step below names a surface that is "Deferred" in this
@@ -443,6 +446,17 @@ the operator believes was earned, the unlock criteria may have a bug —
 file a ticket against RPG.W16 with the `(agent_id, achievement_id,
 date)` triple.
 
+Storage layout: alembic 0240 (OP-1385) creates the
+`agent_achievement_milestone` table and seeds the five registry-backed
+milestone definitions (delivery, quality, mentorship, challenge,
+learning). The auto-unlock scanner consumes an
+`AchievementUnlockStore` (Protocol) — the in-memory implementation
+`InMemoryAchievementUnlockStore` in
+`backend/agents/achievement_unlock_daemon.py` (OP-1386) provides
+metric snapshots + idempotent unlock persistence + inspection helpers
+for non-DB contexts (CI, local dev); production wires the same
+Protocol against the alembic 0240 table.
+
 ---
 
 ## Campaign progress (W20)
@@ -459,6 +473,19 @@ The `campaign_progress.py` module computes per-campaign chapter state
 (open / in-progress / closed). There is no UI for campaign management
 today; create campaigns by setting `rpg_campaign_id` on the task row
 directly when dispatching.
+
+Campaign **completion** rewards an XP delta whose `status` field is
+pinned to the `CAMPAIGN_COMPLETION_STATUS` constant in
+`backend/agents/campaign_completion.py` (W20.3 — OP-1396; sibling
+constants: `CAMPAIGN_COMPLETION_BONUS_MULTIPLIER` for the XP multiplier
+on `BASE_TASK_XP` and `CAMPAIGN_COMPLETION_BADGE_PREFIX` for the
+per-campaign badge id). Operator dashboards and downstream reward
+consumers should import these constants rather than hard-coding the
+strings / multiplier, so a future tuning lands in one place. The
+helper itself (`campaign_completion_reward(...)`) is pure — no DB
+writes — and returns `None` until `completed_tasks == total_tasks`,
+so callers can evaluate it after every task completion without
+double-applying a reward.
 
 ---
 
@@ -878,6 +905,76 @@ Source symbols (per W13.6 attribution):
 | `data-testid="character-card-tool-gate-blocked"` (banner anchor) | `components/omnisight/agents/CharacterCard.tsx` |
 | `getLevelProgressPercent` (shared 0-100 clamp) | `components/omnisight/agents/CharacterCard.tsx` |
 | Contract tests (lock the row shape + gate banner) | `test/components/character-card-tools.test.tsx` |
+### Peer-handoff + cross-Guild gating (W13.4 / OP-181)
+
+The Lv-4 row of the W13 ladder — *"advanced flags + cross-Guild A2A
+handoff"* in ADR-0008 §"MCP/A2A tool proficiency (W13)" — is the
+A2A-specific sub-wave. W13.4 ships the domain-shaped facade so the
+A2A dispatcher and the Character Card UI don't have to hard-code the
+tool_id strings or the magic Lv-4 threshold. Peer-handoff success
+rate accrues on two stable tool_ids; cross-Guild handoff is gated at
+Lv 4 by the shipped YAML (canonical sample: `mcp__a2a__cross_guild_handoff: 4`).
+
+| Helper | Purpose |
+|---|---|
+| `is_cross_guild_handoff(sender_guild, receiver_guild)` | Pure helper: case/whitespace-tolerant Guild-slug comparison; raises on blank slugs |
+| `peer_handoff_tool_id(*, cross_guild)` | Returns the tool_id the W13.4 facade buckets the outcome under |
+| `await record_peer_handoff_outcome(store, sender_agent_id, *, cross_guild, outcome, now=None)` | Wrapper over `record_tool_invocation` that picks the right tool_id; sender-side accrual only |
+| `await peer_handoff_success_rate(store, sender_agent_id, *, cross_guild)` | Returns `PeerHandoffSuccessRate(agent_id, cross_guild, invocations, successes, success_ratio, level)` |
+| `await can_perform_cross_guild_handoff(store, sender_agent_id, *, now=None)` | In-process pre-check; thin wrapper over `can_invoke_at_level` keyed on `mcp__a2a__cross_guild_handoff` with required Lv 4 |
+
+Constants (importable for callers that want to avoid the YAML
+round-trip):
+
+| Constant | Value |
+|---|---|
+| `TOOL_ID_PEER_HANDOFF` | `"mcp__a2a__peer_handoff"` |
+| `TOOL_ID_CROSS_GUILD_HANDOFF` | `"mcp__a2a__cross_guild_handoff"` |
+| `CROSS_GUILD_HANDOFF_REQUIRED_LEVEL` | `4` |
+
+Production wiring per A2A handoff dispatch:
+
+```python
+from backend.agents.tool_proficiency import (
+    is_cross_guild_handoff,
+    record_peer_handoff_outcome,
+    can_perform_cross_guild_handoff,
+)
+
+cross_guild = is_cross_guild_handoff(
+    sender_card.guild, receiver_card.guild
+)
+if cross_guild and not await can_perform_cross_guild_handoff(
+    store, sender_card.agent_id
+):
+    raise CrossGuildHandoffRefused(sender_card.agent_id)
+
+outcome = await dispatch_a2a_handoff(envelope)  # "success" | "fail"
+await record_peer_handoff_outcome(
+    store,
+    sender_card.agent_id,
+    cross_guild=cross_guild,
+    outcome=outcome,
+)
+```
+
+The dispatcher path (via `install_feature_unlock_gate`) gives the
+same refusal end-to-end — the in-process pre-check exists so the UI
+can grey out the cross-Guild handoff affordance on Character Card
+before the agent attempts the call. Both paths read the same YAML.
+
+Source symbols (per W13.4 attribution):
+
+| Symbol | File |
+|---|---|
+| `TOOL_ID_PEER_HANDOFF` / `TOOL_ID_CROSS_GUILD_HANDOFF` / `CROSS_GUILD_HANDOFF_REQUIRED_LEVEL` | `backend/agents/tool_proficiency.py` |
+| `PeerHandoffSuccessRate` (dataclass) | `backend/agents/tool_proficiency.py` |
+| `is_cross_guild_handoff` / `peer_handoff_tool_id` | `backend/agents/tool_proficiency.py` |
+| `record_peer_handoff_outcome` | `backend/agents/tool_proficiency.py` |
+| `peer_handoff_success_rate` | `backend/agents/tool_proficiency.py` |
+| `can_perform_cross_guild_handoff` | `backend/agents/tool_proficiency.py` |
+| `mcp__a2a__peer_handoff: 1` (same-Guild bootstrap entry) | `config/tool_proficiency_gates.yaml` |
+| `mcp__a2a__cross_guild_handoff: 4` (canonical Lv-4 sample) | `config/tool_proficiency_gates.yaml` |
 
 ### Telemetry consumer
 
@@ -950,12 +1047,13 @@ operator missed the live event.
 
 ### YAML layout
 
-`config/talent_tree.yaml` is the source of truth for the 3 options per
-Guild × milestone. The drift guard in `talent_tree.py` validates the
-shape at module import — a malformed YAML raises `TalentTreeError` at
-boot. Today the file populates **backend** and **frontend** Guilds at
-all four milestones; adding a new Guild only requires populating four
-milestones + the capstone block.
+`config/talent_tree.yaml` is the source of truth for curated Guild
+wording. The loader in `talent_tree.py` overlays that YAML on
+deterministic defaults for the full 21-Guild enum, so
+`available_talents(agent_id, guild, milestone)` returns exactly 3
+options for every Guild at Lv 10 / 30 / 50 / 80. The drift guard
+validates the effective tree at load time — a malformed YAML override
+raises `TalentTreeError` at boot.
 
 ### Effects of a locked talent
 
@@ -1045,6 +1143,41 @@ proposal). The capstone lock is gated by **both** Lv 80 AND the Lv-80
 milestone talent being already locked — attempting `POST /agents/{id}/talents/capstone`
 before either gate is met returns `409 CapstoneRequiresLv80`.
 
+#### Signature-ability runtime surface (W14.6 — OP-190)
+
+The capstone is more than a trophy — once locked it carries a
+runtime "single signature ability" that materialises on every
+dispatch:
+
+* **`signature_label`** — routing keyword consumed by
+  `routing_policy.capstone_routing_weight_multiplier()`. A task whose
+  labels include the signature_label (case-insensitive) earns a +50%
+  weight bump for any capstone-locked candidate — strictly larger
+  than the per-talent +20% so the single Lv-80 ability outweighs any
+  single fork. Shares the `OMNISIGHT_MP_TALENT_ROUTING_ENABLED`
+  feature flag with the per-talent multiplier (one flag, both
+  effects).
+* **`signature_prompt`** — multi-line prompt block injected at task
+  start by `prompt_builder.enrich_system_prompt_with_capstone()` under
+  the dedicated header `Signature ability (per RPG.W14 capstone):`.
+  Distinct from the `Talent reminders` header so operators reading
+  the prompt log can tell at a glance whether the agent is executing
+  a Lv-80 signature move; the talent reminders + signature block
+  compose (talent ladder first, capstone payload below).
+* **`commit_budget`** — operator-facing advisory commit ceiling
+  appended to the signature block. The canonical backend example
+  (`code_archaeologist`) carries `commit_budget: 3` per ADR-0008
+  §"Talent tree (W14)" — "single signature ability surgical refactor
+  in ≤ 3 commit". Optional: omit the field to leave the budget
+  unasserted.
+
+Shipped today: `backend` Guild `code_archaeologist` (`legacy-audit`
+label, 3-commit budget) and `frontend` Guild
+`pixel_perfect_synthesizer` (`design-synthesis` label, 3-commit
+budget). New Guild capstones populate the same three fields in
+`config/talent_tree.yaml`; the drift guard rejects a capstone block
+that omits `signature_label` / `signature_prompt` at boot.
+
 ### Recovery
 
 Talent choices are operator decisions — no auto-rebuild possible.
@@ -1108,9 +1241,12 @@ The backend helper surface is `backend/agents/party.py`:
 | Helper | Purpose |
 |---|---|
 | `await create_party(store, name, member_agent_ids, member_guilds=...)` | Validate 2-5 members, compute synergy, persist |
-| `await assign_task(store, party_id, task_id)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists` |
+| `await assign_task(store, party_id, task_id, tier=...)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists`. W17.4 (OP-195): refuses sub-L tiers with `PartyTaskTierTooLow` when `tier` is supplied |
 | `compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)` | Even split + per-member personal XP + synergy bonus |
 | `await task_complete(store, party_id, total_xp, ...)` | Composes the W17 state transition: distribute XP + release task |
+| `await assign_task(store, party_id, task_id)` | Per-task exclusivity — refuses 2nd active task with `PartyActiveTaskExists` |
+| `compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)` | Even split + per-member personal XP + synergy bonus (W17.5 — see below) |
+| `await task_complete(store, party_id, total_xp, ...)` | Composes the W17 state transition: distribute XP (W17.5) + release task |
 | `await member_is_gated(store, agent_id)` | Pre-pickup probe consumed by `jira_dispatch.pre_pickup_ok` |
 
 ### Synergy matrix
@@ -1128,6 +1264,122 @@ duplicates / malformed rows with `SynergyComputeFailed`. Per AC #3,
 `create_party` catches that exception and degrades to a no-bonus base
 XP path so a YAML edit accident does not break party creation.
 
+### Party formation rules (W17.2 / OP-193)
+
+ADR-0008 §"Party / Synergy system (W17)" pins the *formation
+contract* for a valid party — the slice of the W17 ship that decides
+"can this set of agents form a party?" before `create_party`
+persists anything. The contract:
+
+- **Size bound**: `2 ≤ |members| ≤ 5` (`MIN_PARTY_SIZE` /
+  `MAX_PARTY_SIZE` in `backend/agents/party.py`; mirrored by the
+  `agent_party_state` CHECK constraint in alembic 0230 so a manual
+  DB write also cannot violate it).
+- **Per-member Guild slug required**: the caller resolves every
+  member's Guild from their Character Card and passes a
+  `member_agent_id → guild_slug` mapping. Missing or empty slugs
+  refuse the formation rather than fall back to a default Guild.
+- **Cross-Guild synergy lookup**: the party's Guild bag feeds
+  `synergy_for_members`, which returns the strongest matrix entry
+  whose pair is fully covered. Same-Guild parties get
+  `synergy_label=None` (no bonus — synergy is by definition
+  cross-Guild). Parties whose Guild bag is not covered by any matrix
+  entry also get no synergy.
+- **Degradation on YAML failure (AC #3)**: if
+  `config/synergy_matrix.yaml` cannot be loaded the formation still
+  succeeds with no synergy (a warning is logged) — never block party
+  creation on a YAML edit accident.
+- **No member in another active party**: enforced at persistence
+  time inside `create_party` via the store's
+  `active_party_for_member` probe (raises `MemberAlreadyInParty`).
+  This is the one check the pure pre-flight helper cannot perform
+  because it needs the store handle.
+
+The W17.2 helper surface, exposed by `backend/agents/party.py`:
+
+| Helper | Purpose |
+|---|---|
+| `party_formation_rules(*, synergy_path=...)` | Returns the pinned `PartyFormationRules` catalog (`min_size`, `max_size`, `synergy_matrix_path`) — no I/O, no YAML read, so the Party Builder UI can render the bounds without out-of-band constants |
+| `preview_party_formation(member_agent_ids, member_guilds, *, synergy_path=...)` | Pure pre-flight — runs the size + per-member Guild + cross-Guild synergy lookup that `create_party` does, but reports refusals through `PartyFormationPreview.issues` instead of raising, and degrades to `synergy=None` on YAML failure. Used by the W17.6 Party Builder UI for live validation |
+| `PartyFormationRules` | Frozen dataclass: `min_size`, `max_size`, `synergy_matrix_path` |
+| `PartyFormationPreview` | Frozen dataclass: `member_agent_ids`, `synergy`, `issues`, plus the `is_valid` predicate (true iff `issues` is empty) |
+
+The W17.6 Party Builder consumes `preview_party_formation` on every
+form keystroke; the W17.2 contract is the single authoritative
+spec for what constitutes a valid formation, and the authoritative
+refusal still happens server-side in `create_party` (only that path
+can probe the store for "is this member already in another active
+party?").
+
+Operator-facing invariant: `preview_party_formation(...).is_valid`
+is *necessary* for `create_party` to succeed but **not sufficient**
+— the active-party check is store-bound and cannot be previewed
+client-side. Treat the preview as live validation, not a contract
+on the eventual `POST /agents/parties` response.
+
+Source symbols (per W17.2 attribution):
+
+| Symbol | File |
+|---|---|
+| `MIN_PARTY_SIZE` / `MAX_PARTY_SIZE` (pinned size bounds) | `backend/agents/party.py` |
+| `PartyFormationRules` / `party_formation_rules` (catalog accessor) | `backend/agents/party.py` |
+| `PartyFormationPreview` / `preview_party_formation` (pre-flight) | `backend/agents/party.py` |
+| `_validate_members` (size + duplicate check) | `backend/agents/party.py` |
+| `_validate_member_guilds` (per-member Guild requirement) | `backend/agents/party.py` |
+| `_resolve_synergy` (cross-Guild lookup + AC #3 degradation) | `backend/agents/party.py` |
+| `PartySizeInvalid` / `MemberAlreadyInParty` (refusal classes) | `backend/agents/party.py` |
+| `agent_party_state` CHECK constraint (storage-layer bound) | `backend/alembic/versions/0230_agent_party.py` |
+| Lock-in tests (size happy / below / above / cross-Guild / same-Guild / degraded YAML) | `backend/tests/test_party.py` |
+### Party XP distribution (W17.5 / OP-196)
+
+When a party's Tier L+ task completes, the
+`compute_party_xp_distribution(party, total_xp, personal_xp_by_member=...)`
+helper in `backend/agents/party.py` produces one `MemberXpShare`
+per member with four numeric fields. The ADR-0008 promise is that
+"party play doesn't penalise individual progression" — so the pool
+splits evenly *and* each member also accrues their own personal XP
+on top:
+
+| Field | Source | Notes |
+|---|---|---|
+| `party_share` | `total_xp // N` | Integer floor over the N party members; the remainder is left on the table (audit-trail visible via `PartyXpDistribution.total_xp_pool`) |
+| `synergy_bonus` | `round(party_share * synergy_xp_bonus)` | Applied to the party share only; clamped to `>= 0`. Sourced from `agent_party_state.synergy_xp_bonus` (resolved via the W17 matrix in `create_party`). |
+| `personal_xp` | `personal_xp_by_member[agent_id]` | Per-member task contribution from the caller; clamped to `>= 0`; never split. A missing key means "no personal accrual this round". |
+| `total` | `party_share + synergy_bonus + personal_xp` | The XP delta the persistence layer should write to the member's character card. |
+
+Worked example (3-member party, fullstack synergy +15%, pool 300):
+
+| Member | party_share | synergy_bonus | personal_xp | total |
+|---|---|---|---|---|
+| `agent-A` (backend) | 100 | 15 | 50 | 165 |
+| `agent-B` (frontend) | 100 | 15 | 0 | 115 |
+| `agent-C` (devops) | 100 | 15 | 25 | 140 |
+
+Key invariants the helper enforces (covered by the contract tests in
+`backend/tests/test_party.py`):
+
+- Pool divides evenly across members; remainder stays on the table
+  (`total_xp_pool` reports the input pool, not the sum of shares).
+- A missing or zero `synergy_xp_bonus` cleanly degrades to
+  `party_share + personal_xp` — synergy never applies to personal XP.
+- Negative `synergy_xp_bonus` (from a malformed state row) and
+  negative `personal_xp` inputs are both clamped to `0` so a bad
+  payload cannot net out the party share.
+- Empty party returns `()` shares + `total_xp_pool=0`, never raises.
+
+The pool itself is constructed in
+`backend/agents/xp_engine.party_total_xp_pool(base_xp_per_member,
+party_size, synergy_xp_bonus=...)` — that helper is the *party-side*
+half of the W17.5 payout contract, while `compute_party_xp_distribution`
+is the *distribution* half. The per-member `personal_xp` half is
+accrued separately by the caller (per-task contribution) and is never
+folded into the pool.
+
+The HTTP surface at `POST /agents/parties/{party_id}/task/complete`
+accepts `{"total_xp": int, "personal_xp_by_member": {agent_id: int}}`
+and returns the full breakdown verbatim, so the operator UI can
+attribute each delta back to its source.
+
 ### Per-task exclusivity (pre-pickup gate)
 
 When a party holds an active task, its members cannot accept
@@ -1140,6 +1392,20 @@ string as `MemberInActiveParty:<agent_id> gated by party <party_id>
 …`. Runners parse this prefix the same way they parse `mutex conflict:`
 (OP-687) and fall through to the next pickup candidate.
 
+### Tier-L+ eligibility gate (W17.4 / OP-195)
+
+ADR-0008 §"Routing integration" pins party-eligible tasks to **Tier L+**
+(see `PARTY_ELIGIBLE_TIERS = {"L", "X"}`). `assign_task` enforces this
+when the caller supplies a `tier`: a Tier S/M task raises
+`PartyTaskTierTooLow` *before* the exclusivity check, so an accidental
+sub-L assignment cannot block an otherwise-idle party. The router
+endpoint `POST /agents/parties/{party_id}/task` requires `tier` in the
+body and surfaces the refusal as HTTP 422 with the offending tier in
+the error message. Callers that pre-date W17.4 (and the in-process
+helper itself when `tier=None`) skip the gate for backward
+compatibility — the runner wires the live `tier:` Jira label through,
+so production traffic never hits the legacy `None` path.
+
 ### Operator-facing surface
 
 `components/omnisight/agents/PartyHall.tsx` renders the active-party
@@ -1147,7 +1413,13 @@ grid for the operator. Each card shows member portraits, the
 currently-assigned Tier L+ task (or "Idle — no active task"), and the
 synergy badge from `PartyBadge.tsx`. The fetch is `GET
 /agents/parties`; synergy metadata is exposed independently at `GET
-/agents/parties/synergies` for the legend.
+/agents/parties/synergies` and is rendered by
+`components/omnisight/agents/SynergyMatrixLegend.tsx` (OP-194 / W17.3)
+as a reference table — one row per cross-Guild combination with the
+Guild pair, label, headline XP/skill bonus, and one-line summary. Both
+components are presentational and share the `PartySynergy` shape from
+`PartyBadge.tsx`, so the Party Hall page composes them side-by-side
+without remapping the payload.
 
 ### Endpoints
 
@@ -1157,7 +1429,7 @@ synergy badge from `PartyBadge.tsx`. The fetch is `GET
 | `GET`  | `/agents/parties/synergies` | Full synergy matrix legend |
 | `POST` | `/agents/parties` | Create a party `{name, member_agent_ids, member_guilds}` |
 | `GET`  | `/agents/parties/{party_id}` | Single party + members + synergy |
-| `POST` | `/agents/parties/{party_id}/task` | Assign a Tier L+ `{task_id}` (idempotent on same id) |
+| `POST` | `/agents/parties/{party_id}/task` | Assign a Tier L+ `{task_id, tier}` (idempotent on same id; 422 when `tier` < L per W17.4) |
 | `POST` | `/agents/parties/{party_id}/task/complete` | Distribute XP + release task |
 
 ### Recovery
@@ -1182,6 +1454,26 @@ helper is exposed to the frontend via:
 Now that W12 is live (OP-217), the confirm button writes to
 `agent_skill_state`; before W12 shipped, this was a preview-only
 surface.
+
+### Fusion gate + level deltas (W19.1 hardening — OP-1391 / OP-1392)
+
+The W19.1 hybrid-recipe path in `skill_fusion.py` requires **both
+observed component skills at exactly Lv 5** before resolving an
+explicit recipe (OP-1391). A near-miss — e.g. one Lv 5 + one Lv 4 —
+does not partially resolve; the preview returns no recipe so the UI
+never shows a confirmable card the backend would refuse.
+
+On a successful fusion, the helper surfaces the post-fusion ledger
+explicitly (OP-1392):
+
+| Output field | Value |
+|---|---|
+| Each component skill | Lv 4 (one level lower than the consumed Lv 5) |
+| Newly created hybrid skill | Lv 3 |
+
+Operators reading the preview payload should treat these deltas as
+the **contract** — the same numbers are written to `agent_skill_state`
+when the operator confirms.
 
 ---
 

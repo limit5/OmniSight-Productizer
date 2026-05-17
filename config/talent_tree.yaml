@@ -18,6 +18,10 @@
 #         ability_id: <slug>
 #         display_name: <Title Case>
 #         summary: <one-line capability summary>
+#         signature_label: <routing keyword>           # RPG.W14.6
+#         signature_prompt: |                          # RPG.W14.6
+#           <multi-line signature-ability prompt block>
+#         commit_budget: <positive int or omitted>     # RPG.W14.6
 #
 # Invariants enforced by backend/agents/talent_tree.py:
 #   * milestone keys are exactly {10, 30, 50, 80} (no extras, no holes)
@@ -25,12 +29,21 @@
 #   * talent_id values are globally unique within a Guild
 #   * routing_label is a free-form task-keyword used by MP routing_policy
 #   * Lv 80 row has a 4th-tier talent_id plus a capstone block
+#   * capstone.signature_label is the routing keyword consumed by
+#     ``capstone_routing_weight_multiplier`` (RPG.W14.6 — +50% match)
+#   * capstone.signature_prompt is the block prompt_builder injects
+#     under ``Signature ability (per RPG.W14 capstone):`` at task
+#     start when the agent holds this capstone lock
+#   * capstone.commit_budget is the operator-facing advisory
+#     surgical-refactor commit ceiling; optional
 #
 # Operator notes
 # --------------
-# Adding a new Guild only requires populating four milestones + the
-# capstone block. The drift guard in talent_tree.py validates the shape
-# at module import — a malformed YAML raises TalentTreeError at boot.
+# This file carries curated overrides for Guilds whose choices need
+# hand-written wording. backend/agents/talent_tree.py fills any missing
+# Guild enum member with deterministic defaults, then validates that the
+# effective tree covers all 21 Guilds. A malformed YAML override raises
+# TalentTreeError at boot.
 
 schema_version: 1
 guilds:
@@ -142,6 +155,19 @@ guilds:
         1M-context legacy-code read + surgical refactor proposal. The
         Lv-80 backend Guild capstone reserves a dedicated long-context
         slot for whole-repo audits with a single-PR surgical diff.
+      # RPG.W14.6 signature-ability runtime surface
+      signature_label: legacy-audit
+      signature_prompt: |
+        You hold the backend Guild Lv-80 capstone — the legacy
+        archaeologist signature. Read the full call graph and
+        history before touching code: git log + blame on the affected
+        modules, the last 3 incident reports that mention them, and
+        the existing tests that pin behaviour. Then propose a single
+        surgical change set that preserves observable behaviour and
+        retires accidental complexity in the same patch. Cite the
+        evidence (commit hash, blame line, incident id) for every
+        non-trivial decision in the change description.
+      commit_budget: 3
 
   frontend:
     milestones:
@@ -254,3 +280,16 @@ guilds:
         Whole-route design-to-code synthesis at production fidelity. The
         Lv-80 frontend Guild capstone unlocks pixel-grade visual diff
         loops with the design system as the constraint surface.
+      # RPG.W14.6 signature-ability runtime surface
+      signature_label: design-synthesis
+      signature_prompt: |
+        You hold the frontend Guild Lv-80 capstone — the pixel-perfect
+        synthesizer signature. When synthesising a whole route from a
+        design spec: anchor on the design system tokens first (no
+        one-off colours, fonts, or spacings), wire the route tree and
+        data-fetch boundaries before any component code, and run a
+        production-fidelity visual diff against the design before
+        opening review. Ship the interaction, not the wireframe — if
+        the prototype shows a motion or hover state, the merged code
+        must include it under ``prefers-reduced-motion`` discipline.
+      commit_budget: 3

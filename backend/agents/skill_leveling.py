@@ -16,7 +16,7 @@ The W12 module shipped in one bundle under OP-217; this table tracks
 the attribution of each sub-wave back to its dedicated TODO row so a
 future reader of git blame can resolve a symbol to its W12.x ticket.
 
-- W12.2 (OP-171): :data:`LEVEL_THRESHOLDS` / :data:`LEVEL_5_CAP_THRESHOLD`
+- W12.2 (OP-171 / OP-1381): :data:`LEVEL_THRESHOLDS` / :data:`LEVEL_5_CAP_THRESHOLD`
   + :func:`compute_level` / :func:`next_level_threshold` -- the
   ``25 / 100 / 250 / 600 / 1500`` task-success-token curve from
   ADR-0008 §"Skill leveling (W12)". Lv 1 starts at 0 XP; Lv 2-5 are
@@ -52,6 +52,7 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+import json
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
@@ -84,7 +85,7 @@ LEVEL_OVERFLOW_GUARD_XP = 10 ** 9
 
 OutcomeStatus = str  # ``success`` | ``partial`` | ``fail``
 
-# W12.2 (OP-171): cumulative XP thresholds to *reach* a given level
+# W12.2 (OP-171 / OP-1381): cumulative XP thresholds to *reach* a given level
 # per ADR-0008 §"Skill leveling (W12)". ``LEVEL_THRESHOLDS[L]`` is the
 # task-success-token count at which the agent transitions into Lv ``L``;
 # Lv 1 starts at 0. The five curve points are ``25 / 100 / 250 / 600 /
@@ -172,6 +173,7 @@ class SkillState:
     branch_choice: str | None
     last_active_at: datetime
     last_taught_at: datetime | None = None
+    mastery_effects: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "agent_id", _required("agent_id", self.agent_id))
@@ -189,6 +191,15 @@ class SkillState:
         object.__setattr__(self, "last_active_at", _utc(self.last_active_at))
         if self.last_taught_at is not None:
             object.__setattr__(self, "last_taught_at", _utc(self.last_taught_at))
+        object.__setattr__(
+            self,
+            "mastery_effects",
+            tuple(
+                str(effect).strip()
+                for effect in self.mastery_effects
+                if str(effect).strip()
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -219,7 +230,7 @@ class SkillXpAward:
 def compute_level(xp: int) -> int:
     """Return the W12 skill level (1-5) for ``xp``.
 
-    Implements the W12.2 (OP-171) curve: walks :data:`LEVEL_THRESHOLDS`
+    Implements the W12.2 (OP-171 / OP-1381) curve: walks :data:`LEVEL_THRESHOLDS`
     in ascending order and returns the highest level whose threshold
     has been met. With the canonical ``25 / 100 / 250 / 600`` entry
     points this maps 0-24 → Lv 1, 25-99 → Lv 2, 100-249 → Lv 3,
@@ -247,7 +258,7 @@ def compute_level(xp: int) -> int:
 def next_level_threshold(level: int) -> int:
     """Return the XP threshold for the next level above ``level``.
 
-    Reads the W12.2 (OP-171) curve in :data:`LEVEL_THRESHOLDS`. For
+    Reads the W12.2 (OP-171 / OP-1381) curve in :data:`LEVEL_THRESHOLDS`. For
     Lv 5 (the cap) returns the configurable
     :data:`LEVEL_5_CAP_THRESHOLD` value; this is what
     :func:`_decay_xp_floor` uses to clamp decay against demotion at
@@ -396,11 +407,12 @@ class InMemorySkillStateStore:
 class PostgresSkillStateStore:
     """``agent_skill_state``-backed store (alembic 0226).
 
-    The store expects the columns introduced in the 0226 migration:
-    ``agent_id / skill_id / level / xp / branch_choice / last_active_at /
-    last_taught_at``. Writes are full-row UPSERTs keyed by
-    ``(agent_id, skill_id)`` so the caller does not have to know whether
-    a row already exists.
+    The store writes the OP-1378 columns added after the original 0226
+    migration: ``skill_xp / last_used_at / mastery_effects``. The earlier
+    ``xp / last_active_at`` columns are still populated during rollout so
+    older readers observe the same row values. Writes are full-row UPSERTs
+    keyed by ``(agent_id, skill_id)`` so the caller does not have to know
+    whether a row already exists.
     """
 
     def __init__(self, conn_factory: ConnFactory) -> None:
@@ -412,8 +424,9 @@ class PostgresSkillStateStore:
         async with _acquire(self._factory) as conn:
             row = await conn.fetchrow(
                 """
-                SELECT agent_id, skill_id, level, xp, branch_choice,
-                       last_active_at, last_taught_at
+                SELECT agent_id, skill_id, level, skill_xp AS xp, branch_choice,
+                       last_used_at AS last_active_at, last_taught_at,
+                       mastery_effects
                 FROM agent_skill_state
                 WHERE agent_id = $1 AND skill_id = $2
                 """,
@@ -426,8 +439,9 @@ class PostgresSkillStateStore:
         async with _acquire(self._factory) as conn:
             rows = await conn.fetch(
                 """
-                SELECT agent_id, skill_id, level, xp, branch_choice,
-                       last_active_at, last_taught_at
+                SELECT agent_id, skill_id, level, skill_xp AS xp, branch_choice,
+                       last_used_at AS last_active_at, last_taught_at,
+                       mastery_effects
                 FROM agent_skill_state
                 WHERE agent_id = $1
                 ORDER BY skill_id ASC
@@ -441,19 +455,24 @@ class PostgresSkillStateStore:
             row = await conn.fetchrow(
                 """
                 INSERT INTO agent_skill_state (
-                    agent_id, skill_id, level, xp, branch_choice,
-                    last_active_at, last_taught_at, created_at, updated_at
+                    agent_id, skill_id, level, xp, skill_xp, branch_choice,
+                    last_active_at, last_used_at, last_taught_at, mastery_effects,
+                    created_at, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+                VALUES ($1, $2, $3, $4, $4, $5, $6, $6, $7, $8, NOW(), NOW())
                 ON CONFLICT (agent_id, skill_id) DO UPDATE
                     SET level = EXCLUDED.level,
                         xp = EXCLUDED.xp,
+                        skill_xp = EXCLUDED.skill_xp,
                         branch_choice = EXCLUDED.branch_choice,
                         last_active_at = EXCLUDED.last_active_at,
+                        last_used_at = EXCLUDED.last_used_at,
                         last_taught_at = EXCLUDED.last_taught_at,
+                        mastery_effects = EXCLUDED.mastery_effects,
                         updated_at = NOW()
-                RETURNING agent_id, skill_id, level, xp, branch_choice,
-                          last_active_at, last_taught_at
+                RETURNING agent_id, skill_id, level, skill_xp AS xp, branch_choice,
+                          last_used_at AS last_active_at, last_taught_at,
+                          mastery_effects
                 """,
                 state.agent_id,
                 state.skill_id,
@@ -462,6 +481,7 @@ class PostgresSkillStateStore:
                 state.branch_choice,
                 state.last_active_at,
                 state.last_taught_at,
+                _mastery_effects_for_level(state.level),
             )
         return _row_to_state(row)
 
@@ -471,10 +491,11 @@ class PostgresSkillStateStore:
         async with _acquire(self._factory) as conn:
             rows = await conn.fetch(
                 """
-                SELECT agent_id, skill_id, level, xp, branch_choice,
-                       last_active_at, last_taught_at
+                SELECT agent_id, skill_id, level, skill_xp AS xp, branch_choice,
+                       last_used_at AS last_active_at, last_taught_at,
+                       mastery_effects
                 FROM agent_skill_state
-                WHERE last_active_at <= $1
+                WHERE last_used_at <= $1
                 """,
                 _utc(idle_since),
             )
@@ -548,6 +569,7 @@ async def award_skill_xp(
         branch_choice=branch_choice,
         last_active_at=when,
         last_taught_at=last_taught_at,
+        mastery_effects=_mastery_effects_for_level(new_level),
     )
     await store.upsert_state(state)
 
@@ -732,7 +754,29 @@ def _row_to_state(row: Any) -> SkillState:
         branch_choice=row["branch_choice"],
         last_active_at=row["last_active_at"],
         last_taught_at=row["last_taught_at"],
+        mastery_effects=_coerce_mastery_effects(row["mastery_effects"]),
     )
+
+
+def _mastery_effects_for_level(level: int) -> tuple[str, ...]:
+    effects: list[str] = []
+    for current_level in range(2, level + 1):
+        effects.extend(unlocks_for_level(current_level))
+    return tuple(effects)
+
+
+def _coerce_mastery_effects(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return (value,) if value else ()
+        if isinstance(decoded, list):
+            return tuple(str(item) for item in decoded)
+        return ()
+    return tuple(str(item) for item in value)
 
 
 def _assert_skill_id_in_matrix(skill_id: str) -> None:

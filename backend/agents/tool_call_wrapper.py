@@ -92,15 +92,35 @@ async def invoke_tool(
         return open_result
 
     attempts = policy.transient_retries + 1
+    arg_keys = sorted(args.keys()) if args else []
     result: ToolResult | None = None
     for attempt in range(attempts):
         try:
             call = effective_dispatcher.execute(effective_tool_use_id, name, args)
             result = await asyncio.wait_for(call, timeout=timeout) if timeout else await call
         except TimeoutError:
+            log.warning(
+                "tool_call_wrapper.invoke_tool: tool=%s timed out "
+                "tool_use_id=%s attempt=%d/%d timeout_s=%s arg_keys=%s",
+                name,
+                effective_tool_use_id,
+                attempt + 1,
+                attempts,
+                timeout,
+                arg_keys,
+            )
             result = _error_result(effective_tool_use_id, "timeout", name, "TimeoutError", "")
         except Exception as exc:  # noqa: BLE001 - wrapper boundary
-            log.exception("Wrapped tool %s raised outside dispatcher", name)
+            log.exception(
+                "tool_call_wrapper.invoke_tool: tool=%s raised before returning a ToolResult "
+                "tool_use_id=%s attempt=%d/%d exc_type=%s arg_keys=%s",
+                name,
+                effective_tool_use_id,
+                attempt + 1,
+                attempts,
+                type(exc).__name__,
+                arg_keys,
+            )
             result = _error_result(
                 effective_tool_use_id,
                 "tool_raised",
@@ -120,7 +140,11 @@ async def invoke_tool(
         await asyncio.sleep(policy.backoff_seconds)
 
     # Defensive fallback; loop always returns.
-    assert result is not None
+    assert result is not None, (
+        f"tool_call_wrapper.invoke_tool: retry loop for tool={name!r} "
+        f"tool_use_id={effective_tool_use_id!r} exited without setting result "
+        f"(attempts={attempts})"
+    )
     _record_failure(name)
     return result
 
@@ -193,8 +217,27 @@ def _circuit_open_result(name: str, tool_use_id: str) -> ToolResult | None:
     circuit = _CIRCUITS.get(name)
     if circuit is None or circuit.opened_at is None:
         return None
-    if now - circuit.opened_at < _CIRCUIT_OPEN_SECONDS:
+    elapsed = now - circuit.opened_at
+    if elapsed < _CIRCUIT_OPEN_SECONDS:
+        log.warning(
+            "tool_call_wrapper._circuit_open_result: short-circuiting call to tool=%s "
+            "tool_use_id=%s open_for_s=%.2f remaining_s=%.2f (threshold=%d failures in %.0fs)",
+            name,
+            tool_use_id,
+            elapsed,
+            _CIRCUIT_OPEN_SECONDS - elapsed,
+            _CIRCUIT_THRESHOLD,
+            _FAILURE_WINDOW_SECONDS,
+        )
         return _error_result(tool_use_id, "circuit_open", name)
+    log.info(
+        "tool_call_wrapper._circuit_open_result: circuit cool-down elapsed for tool=%s "
+        "tool_use_id=%s open_for_s=%.2f (open window=%.0fs); allowing probe call",
+        name,
+        tool_use_id,
+        elapsed,
+        _CIRCUIT_OPEN_SECONDS,
+    )
     circuit.opened_at = None
     circuit.failures.clear()
     return None
@@ -211,4 +254,14 @@ def _record_failure(name: str) -> None:
     circuit.failures = [ts for ts in circuit.failures if ts >= cutoff]
     circuit.failures.append(now)
     if len(circuit.failures) >= _CIRCUIT_THRESHOLD:
+        if circuit.opened_at is None:
+            log.warning(
+                "tool_call_wrapper._record_failure: opening circuit for tool=%s "
+                "failures=%d threshold=%d window_s=%.0f open_for_s=%.0f",
+                name,
+                len(circuit.failures),
+                _CIRCUIT_THRESHOLD,
+                _FAILURE_WINDOW_SECONDS,
+                _CIRCUIT_OPEN_SECONDS,
+            )
         circuit.opened_at = now

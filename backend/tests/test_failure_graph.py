@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from backend.agents import failure_graph as fg
 
@@ -46,6 +48,72 @@ def _make(
         occurred_at=occurred_at or _at(12),
         summary=summary,
     )
+
+
+_SAFE_ID = st.text(
+    alphabet=st.characters(
+        whitelist_categories=("Ll", "Lu", "Nd"),
+        whitelist_characters="-_",
+    ),
+    min_size=1,
+    max_size=24,
+)
+_SUMMARY_TEXT = st.text(max_size=512)
+_UTC_DATETIMES = st.datetimes(
+    min_value=datetime(2026, 1, 1),
+    max_value=datetime(2026, 12, 31, 23, 59, 59),
+    timezones=st.just(timezone.utc),
+)
+
+
+@st.composite
+def _incident_lists(draw, *, max_size: int = 25):
+    incident_ids = draw(st.lists(_SAFE_ID, min_size=0, max_size=max_size, unique=True))
+    tickets = draw(
+        st.lists(_SAFE_ID, min_size=len(incident_ids), max_size=len(incident_ids))
+    )
+    failure_classes = draw(
+        st.lists(_SAFE_ID, min_size=len(incident_ids), max_size=len(incident_ids))
+    )
+    mutex_labels = draw(
+        st.lists(
+            st.one_of(st.none(), _SAFE_ID),
+            min_size=len(incident_ids),
+            max_size=len(incident_ids),
+        )
+    )
+    occurred_at = draw(
+        st.lists(
+            _UTC_DATETIMES,
+            min_size=len(incident_ids),
+            max_size=len(incident_ids),
+        )
+    )
+    summaries = draw(
+        st.lists(
+            _SUMMARY_TEXT,
+            min_size=len(incident_ids),
+            max_size=len(incident_ids),
+        )
+    )
+    return [
+        fg.RunnerIncident(
+            incident_id=incident_id,
+            ticket_key=ticket,
+            failure_class=failure_class,
+            mutex_label=mutex_label,
+            occurred_at=occurred,
+            summary=summary,
+        )
+        for incident_id, ticket, failure_class, mutex_label, occurred, summary in zip(
+            incident_ids,
+            tickets,
+            failure_classes,
+            mutex_labels,
+            occurred_at,
+            summaries,
+        )
+    ]
 
 
 # ── Causality kind 1: same_mutex_window ──────────────────────────────
@@ -461,3 +529,154 @@ def test_rebuild_cron_degrades_quietly_when_cognee_missing(
     )
     assert rc == 0
     assert (tmp_path / "out.json").exists()
+
+
+# ── OP-1319: property-based public API contracts ───────────────────
+
+
+@settings(max_examples=75, deadline=None)
+@given(incidents=_incident_lists(max_size=35))
+def test_op1319_infer_edges_property_preserves_edge_contracts(
+    incidents: list[fg.RunnerIncident],
+) -> None:
+    """infer_edges is deterministic and only returns well-formed public
+    GraphEdge values, including empty and nullable-mutex incident lists."""
+    first = fg.infer_edges(incidents)
+    second = fg.infer_edges(list(reversed(incidents)))
+    by_id = {inc.incident_id: inc for inc in incidents}
+
+    assert first == second
+    assert len(first) == len({(e.src_id, e.dst_id, e.causality_type) for e in first})
+    for edge in first:
+        assert isinstance(edge, fg.GraphEdge)
+        assert edge.src_id in by_id
+        assert edge.dst_id in by_id
+        assert edge.src_id != edge.dst_id
+        assert edge.causality_type in fg.CAUSALITY_TYPES
+        assert edge.weight == 1.0
+        assert (
+            by_id[edge.src_id].occurred_at,
+            by_id[edge.src_id].incident_id,
+        ) <= (
+            by_id[edge.dst_id].occurred_at,
+            by_id[edge.dst_id].incident_id,
+        )
+
+
+@settings(max_examples=75, deadline=None)
+@given(incidents=_incident_lists(max_size=35))
+def test_op1319_failure_graph_property_build_and_adjacency_are_stable(
+    incidents: list[fg.RunnerIncident],
+) -> None:
+    """FailureGraph.build and adjacency keep return shapes stable and do
+    not alias generated incident lists."""
+    graph = fg.FailureGraph.build(incidents)
+    rebuilt = fg.FailureGraph.build(tuple(incidents))
+    adjacency = graph.adjacency()
+
+    assert graph == rebuilt
+    assert set(graph.nodes) == {inc.incident_id for inc in incidents}
+    assert graph.edges == fg.infer_edges(incidents)
+    assert isinstance(adjacency, dict)
+    for node_id, edges in adjacency.items():
+        assert node_id in graph.nodes
+        assert isinstance(edges, list)
+        for edge in edges:
+            assert edge in graph.edges
+            assert node_id in {edge.src_id, edge.dst_id}
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    incidents=_incident_lists(max_size=35),
+    depth=st.integers(min_value=-5, max_value=10),
+    missing_id=_SAFE_ID,
+)
+def test_op1319_neighbors_property_are_deterministic_and_depth_bounded(
+    incidents: list[fg.RunnerIncident],
+    depth: int,
+    missing_id: str,
+) -> None:
+    """get_failure_graph_neighbors handles empty graphs, unknown ids,
+    non-positive depths, and larger bounded traversals deterministically."""
+    graph = fg.FailureGraph.build(incidents)
+    query_id = incidents[0].incident_id if incidents else missing_id
+
+    first = fg.get_failure_graph_neighbors(graph, query_id, depth=depth)
+    second = fg.get_failure_graph_neighbors(graph, query_id, depth=depth)
+
+    assert first == second
+    assert isinstance(first, list)
+    assert fg.get_failure_graph_neighbors(graph, missing_id + "-missing") == []
+    if not incidents or depth <= 0:
+        assert first == []
+    for edge in first:
+        assert isinstance(edge, fg.GraphEdge)
+        assert edge in graph.edges
+
+
+@settings(max_examples=75, deadline=None)
+@given(incidents=_incident_lists(max_size=35), since=_UTC_DATETIMES, missing_id=_SAFE_ID)
+def test_op1319_incident_source_property_filters_and_gets_by_public_contract(
+    incidents: list[fg.RunnerIncident],
+    since: datetime,
+    missing_id: str,
+) -> None:
+    """InMemoryIncidentSource accepts empty/large lists, normalizes naive
+    since values, and keeps get/list_since return-type contracts."""
+    source = fg.InMemoryIncidentSource(incidents)
+    naive_since = since.replace(tzinfo=None)
+
+    aware_rows = list(source.list_since(since))
+    naive_rows = list(source.list_since(naive_since))
+
+    assert aware_rows == naive_rows
+    assert all(isinstance(row, fg.RunnerIncident) for row in aware_rows)
+    assert all(row.occurred_at >= since for row in aware_rows)
+    assert source.get(missing_id + "-missing") is None
+    for inc in incidents:
+        assert source.get(inc.incident_id) is inc
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    incidents=_incident_lists(max_size=35),
+    ticket_key=st.one_of(st.just(""), _SAFE_ID),
+    max_neighbors=st.integers(min_value=0, max_value=20),
+    depth=st.integers(min_value=0, max_value=5),
+)
+def test_op1319_pickup_context_property_preserves_string_contract(
+    incidents: list[fg.RunnerIncident],
+    ticket_key: str,
+    max_neighbors: int,
+    depth: int,
+) -> None:
+    """render_pickup_context returns deterministic text, emits empty text
+    for tickets with no prior incidents, and preserves large summaries."""
+    graph = fg.FailureGraph.build(incidents)
+    first = fg.render_pickup_context(
+        graph,
+        ticket_key,
+        max_neighbors=max_neighbors,
+        depth=depth,
+    )
+    second = fg.render_pickup_context(
+        graph,
+        ticket_key,
+        max_neighbors=max_neighbors,
+        depth=depth,
+    )
+    own = [inc for inc in incidents if inc.ticket_key == ticket_key]
+
+    assert isinstance(first, str)
+    assert first == second
+    if not own:
+        assert first == ""
+    else:
+        assert "Failure-Graph context" in first
+        assert ticket_key in first
+        for inc in own:
+            assert inc.incident_id in first
+            assert inc.failure_class in first
+            if inc.summary:
+                assert inc.summary in first

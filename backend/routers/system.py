@@ -2885,7 +2885,7 @@ async def mark_read(
 
 @router.get("/roles")
 async def get_available_roles():
-    """List all available agent roles from configs/roles/."""
+    """List all available agent roles from configs/guilds/."""
     from backend.prompt_loader import list_available_roles
     return list_available_roles()
 

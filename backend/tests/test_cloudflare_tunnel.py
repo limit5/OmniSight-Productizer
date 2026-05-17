@@ -14,6 +14,7 @@ Uses respx to mock all Cloudflare API v4 calls. Covers:
 from __future__ import annotations
 
 import base64
+from typing import Any
 
 import httpx
 import pytest
@@ -186,6 +187,27 @@ class TestCloudflareClient:
 
 class TestRouterEndpoints:
 
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            {},
+            [],
+            {"api_token": None},
+            {"api_token": ""},
+            {"api_token": []},
+            {"api_token": {"value": "tok"}},
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_validate_token_rejects_invalid_payload_shapes(
+        self,
+        client,
+        payload: Any,
+    ):
+        resp = await client.post("/api/v1/cloudflare/validate-token", json=payload)
+        assert resp.status_code == 422
+
     @respx.mock
     @pytest.mark.asyncio
     async def test_validate_token_endpoint(self, client):
@@ -198,6 +220,20 @@ class TestRouterEndpoints:
         data = resp.json()
         assert data["valid"] is True
         assert len(data["accounts"]) == 1
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_validate_token_accepts_very_large_token(self, client):
+        respx.get(f"{CF}/user/tokens/verify").mock(return_value=_cf_ok({"status": "active"}))
+        respx.get(f"{CF}/accounts").mock(return_value=_cf_ok([]))
+
+        resp = await client.post(
+            "/api/v1/cloudflare/validate-token",
+            json={"api_token": "cf-" + ("x" * 8192)},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["valid"] is True
 
     @respx.mock
     @pytest.mark.asyncio
@@ -229,6 +265,50 @@ class TestRouterEndpoints:
         zones = resp.json()
         assert len(zones) == 1
         assert zones[0]["name"] == "example.com"
+
+    @pytest.mark.asyncio
+    async def test_zones_missing_account_id_returns_422(self, client):
+        resp = await client.get("/api/v1/cloudflare/zones")
+        assert resp.status_code == 422
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_zones_accepts_very_large_account_id(self, client):
+        respx.get(f"{CF}/user/tokens/verify").mock(return_value=_cf_ok({"status": "active"}))
+        respx.get(f"{CF}/accounts").mock(return_value=_cf_ok([{"id": "acc-1", "name": "Test"}]))
+        await client.post("/api/v1/cloudflare/validate-token", json={"api_token": "cf-test-token-12345678"})
+
+        respx.get(f"{CF}/zones").mock(return_value=_cf_ok([]))
+        resp = await client.get("/api/v1/cloudflare/zones", params={"account_id": "acc-" + ("x" * 4096)})
+
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            {},
+            [],
+            {"account_id": None, "zone_id": "zone-1", "zone_name": "example.com"},
+            {"account_id": "", "zone_id": "zone-1", "zone_name": "example.com"},
+            {"account_id": [], "zone_id": "zone-1", "zone_name": "example.com"},
+            {"account_id": "acc-1", "zone_id": None, "zone_name": "example.com"},
+            {"account_id": "acc-1", "zone_id": "", "zone_name": "example.com"},
+            {"account_id": "acc-1", "zone_id": "zone-1", "zone_name": None},
+            {"account_id": "acc-1", "zone_id": "zone-1", "zone_name": ""},
+            {"account_id": "acc-1", "zone_id": "zone-1", "zone_name": []},
+            {"account_id": "acc-1", "zone_id": "zone-1", "zone_name": "example.com", "hostnames": {}},
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_provision_rejects_invalid_payload_shapes(
+        self,
+        client,
+        payload: Any,
+    ):
+        resp = await client.post("/api/v1/cloudflare/provision", json=payload)
+        assert resp.status_code == 422
 
     @respx.mock
     @pytest.mark.asyncio
@@ -282,6 +362,62 @@ class TestRouterEndpoints:
         assert resp.status_code == 200
         data = resp.json()
         assert data["tunnel_deleted"] is True
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_provision_empty_hostnames_defaults(self, client):
+        respx.get(f"{CF}/user/tokens/verify").mock(return_value=_cf_ok({"status": "active"}))
+        respx.get(f"{CF}/accounts").mock(return_value=_cf_ok([{"id": "acc-1", "name": "Test"}]))
+        await client.post("/api/v1/cloudflare/validate-token", json={"api_token": "cf-test-token-12345678"})
+
+        respx.get(f"{CF}/accounts/acc-1/cfd_tunnel").mock(return_value=_cf_ok([]))
+        respx.post(f"{CF}/accounts/acc-1/cfd_tunnel").mock(return_value=_cf_ok({
+            "id": "tun-1", "name": "omnisight", "status": "inactive", "created_at": "2026-01-01T00:00:00Z",
+        }))
+        respx.put(f"{CF}/accounts/acc-1/cfd_tunnel/tun-1/configurations").mock(return_value=_cf_ok({}))
+        respx.get(f"{CF}/accounts/acc-1/cfd_tunnel/tun-1/token").mock(return_value=_cf_ok("connector-tok"))
+        respx.post(f"{CF}/zones/zone-1/dns_records").mock(return_value=_cf_ok({
+            "id": "rec-1", "name": "omnisight.example.com", "type": "CNAME", "content": "tun-1.cfargotunnel.com",
+        }))
+
+        resp = await client.post("/api/v1/cloudflare/provision", json={
+            "account_id": "acc-1",
+            "zone_id": "zone-1",
+            "zone_name": "example.com",
+            "hostnames": [],
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["hostnames"] == ["omnisight.example.com", "api.omnisight.example.com"]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_provision_accepts_many_hostnames(self, client):
+        respx.get(f"{CF}/user/tokens/verify").mock(return_value=_cf_ok({"status": "active"}))
+        respx.get(f"{CF}/accounts").mock(return_value=_cf_ok([{"id": "acc-1", "name": "Test"}]))
+        await client.post("/api/v1/cloudflare/validate-token", json={"api_token": "cf-test-token-12345678"})
+
+        hostnames = [f"host-{idx}.example.com" for idx in range(100)]
+        respx.get(f"{CF}/accounts/acc-1/cfd_tunnel").mock(return_value=_cf_ok([]))
+        respx.post(f"{CF}/accounts/acc-1/cfd_tunnel").mock(return_value=_cf_ok({
+            "id": "tun-1", "name": "omnisight", "status": "inactive", "created_at": "2026-01-01T00:00:00Z",
+        }))
+        respx.put(f"{CF}/accounts/acc-1/cfd_tunnel/tun-1/configurations").mock(return_value=_cf_ok({}))
+        respx.get(f"{CF}/accounts/acc-1/cfd_tunnel/tun-1/token").mock(return_value=_cf_ok("connector-tok"))
+        respx.post(f"{CF}/zones/zone-1/dns_records").mock(return_value=_cf_ok({
+            "id": "rec-1", "name": "host.example.com", "type": "CNAME", "content": "tun-1.cfargotunnel.com",
+        }))
+
+        resp = await client.post("/api/v1/cloudflare/provision", json={
+            "account_id": "acc-1",
+            "zone_id": "zone-1",
+            "zone_name": "example.com",
+            "hostnames": hostnames,
+        })
+
+        assert resp.status_code == 200
+        assert resp.json()["hostnames"] == hostnames
+        assert resp.json()["dns_records_created"] == len(hostnames)
 
     @respx.mock
     @pytest.mark.asyncio
@@ -380,6 +516,40 @@ class TestRouterEndpoints:
 
         # Rotate
         resp = await client.post("/api/v1/cloudflare/rotate-token", json={"new_api_token": "cf-new-token-87654321"})
+        assert resp.status_code == 200
+        assert resp.json()["rotated"] is True
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            None,
+            {},
+            [],
+            {"new_api_token": None},
+            {"new_api_token": ""},
+            {"new_api_token": []},
+            {"new_api_token": {"value": "tok"}},
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_rotate_token_rejects_invalid_payload_shapes(
+        self,
+        client,
+        payload: Any,
+    ):
+        resp = await client.post("/api/v1/cloudflare/rotate-token", json=payload)
+        assert resp.status_code == 422
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_rotate_token_accepts_very_large_token(self, client):
+        respx.get(f"{CF}/user/tokens/verify").mock(return_value=_cf_ok({"status": "active"}))
+
+        resp = await client.post(
+            "/api/v1/cloudflare/rotate-token",
+            json={"new_api_token": "cf-" + ("x" * 8192)},
+        )
+
         assert resp.status_code == 200
         assert resp.json()["rotated"] is True
 

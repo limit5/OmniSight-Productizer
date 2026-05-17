@@ -1,0 +1,31 @@
+{
+  "after_commit_message": "[OP-186] Complete RPG talent options per Guild\n\nAdd deterministic default talent trees for every Guild enum member so available_talents returns three Lv 10/30/50/80 options for all 21 Guilds while preserving curated YAML overrides for backend/frontend.\n\nDocument the effective tree as curated YAML over compiled defaults and keep the config comments aligned with that loader behavior.\n\n[Tier-B]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\n\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\n\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I48be1f9f233a13ed106edceb4231be227e3cfc19\nTest-Phase-1a-Marker: 1778955910",
+  "after_patchset": "82645bf15d4fcffb4da684edabdada34ca96d92b",
+  "before_commit_message": "[OP-186] Complete RPG talent options per Guild\n\nAdd deterministic default talent trees for every Guild enum member so available_talents returns three Lv 10/30/50/80 options for all 21 Guilds while preserving curated YAML overrides for backend/frontend.\n\nDocument the effective tree as curated YAML over compiled defaults and keep the config comments aligned with that loader behavior.\n\n[Tier-B]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\n\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\n\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I48be1f9f233a13ed106edceb4231be227e3cfc19\nTest-Phase-1a-Marker: 1778955910",
+  "before_patchset": "7a4281cf759de302c175263af3c7c8fbde98f893",
+  "case": "change_689",
+  "change_number": "689",
+  "changed_files": [
+    "backend/agents/talent_tree.py",
+    "config/talent_tree.yaml",
+    "docs/operations/agent-rpg-system.md"
+  ],
+  "common_ancestor": "4ea35935adb2b9f9f2f7433f867072f07fb1a0a0",
+  "conflict_files": [
+    "backend/agents/talent_tree.py"
+  ],
+  "expected_replay": "matches_operator_resolution",
+  "fixture_contents": {
+    "after": "Operator-resolved file content from the post-resolution patch set.",
+    "ancestor": "Old parent file content used as the three-way merge base.",
+    "before": "Git merge-file reconstruction from rebase target parent, old parent, and pre-resolution patch set."
+  },
+  "jira_description": "#689 multi-file, borderline coupling: a=borderline b=yes",
+  "operator_audit": {
+    "per_file": "yes",
+    "whole_batch": "borderline"
+  },
+  "project": "omnisight/OmniSight-Productizer",
+  "rebase_target_parent": "17bd4b400e51c10c9aa9f7a256004cc5b9672075",
+  "subject": "[OP-186] Complete RPG talent options per Guild"
+}

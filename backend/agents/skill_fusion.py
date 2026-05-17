@@ -18,6 +18,8 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 FUSION_REQUIRED_LEVEL = 5
+FUSION_COMPONENT_LEVEL_DECREMENT = 1
+HYBRID_INITIAL_LEVEL = 3
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,9 @@ class HybridSkillFusion:
     hybrid_skill: str
     component_skills: tuple[str, str]
     required_level: int = FUSION_REQUIRED_LEVEL
+    component_skill_levels: tuple[SkillLevel, ...] = ()
+    hybrid_skill_level: int = HYBRID_INITIAL_LEVEL
+    component_level_decrement: int = FUSION_COMPONENT_LEVEL_DECREMENT
 
 
 def list_hybrid_skill_recipes() -> tuple[HybridSkillRecipe, ...]:
@@ -86,7 +91,7 @@ def fuse_skills(
     skill_a: SkillLevel | Mapping[str, Any] | Any,
     skill_b: SkillLevel | Mapping[str, Any] | Any,
 ) -> HybridSkillFusion | None:
-    """Return the hybrid skill if both inputs are Lv5+ and recipe-backed.
+    """Return the hybrid skill if both inputs are Lv5 and recipe-backed.
 
     Inputs may be :class:`SkillLevel`, mappings, or objects with ``name`` and
     ``level`` attributes. Skill ordering is ignored.
@@ -96,7 +101,7 @@ def fuse_skills(
     right = _normalise_skill_level(skill_b)
     if left.name == right.name:
         return None
-    if left.level < FUSION_REQUIRED_LEVEL or right.level < FUSION_REQUIRED_LEVEL:
+    if left.level != FUSION_REQUIRED_LEVEL or right.level != FUSION_REQUIRED_LEVEL:
         return None
 
     recipe = HYBRID_SKILL_RECIPES.get(_recipe_key(left.name, right.name))
@@ -105,6 +110,7 @@ def fuse_skills(
     return HybridSkillFusion(
         hybrid_skill=recipe.hybrid_skill,
         component_skills=recipe.key,
+        component_skill_levels=_post_fusion_component_levels(left, right),
     )
 
 
@@ -130,6 +136,20 @@ def _normalise_skill_level(skill: SkillLevel | Mapping[str, Any] | Any) -> Skill
 
 def _recipe_key(skill_a: str, skill_b: str) -> tuple[str, str]:
     return tuple(sorted((_clean_skill_name(skill_a), _clean_skill_name(skill_b))))
+
+
+def _post_fusion_component_levels(
+    skill_a: SkillLevel,
+    skill_b: SkillLevel,
+) -> tuple[SkillLevel, SkillLevel]:
+    levels = {
+        skill_a.name: skill_a.level - FUSION_COMPONENT_LEVEL_DECREMENT,
+        skill_b.name: skill_b.level - FUSION_COMPONENT_LEVEL_DECREMENT,
+    }
+    return tuple(
+        SkillLevel(name=name, level=levels[name])
+        for name in sorted(levels)
+    )
 
 
 def _clean_skill_name(name: Any) -> str:
@@ -163,8 +183,10 @@ HYBRID_SKILL_RECIPES: Mapping[tuple[str, str], HybridSkillRecipe] = MappingProxy
 
 
 __all__ = [
+    "FUSION_COMPONENT_LEVEL_DECREMENT",
     "FUSION_REQUIRED_LEVEL",
     "HYBRID_SKILL_RECIPES",
+    "HYBRID_INITIAL_LEVEL",
     "HybridSkillFusion",
     "HybridSkillRecipe",
     "SkillLevel",

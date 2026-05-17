@@ -13,6 +13,10 @@ panel 的 log 串（REPORTER VORTEX）與後端 stderr。
 - **原因**：後端設了 `OMNISIGHT_DECISION_BEARER` 但前端 token 錯誤或缺失。
 - **處理**：開 Settings → provider 分頁重新輸入 bearer；或單機部署時
   於 `.env` 取消 `OMNISIGHT_DECISION_BEARER`。
+- **註（FX2.D4.4 / OP-237, 2026-05-16）**：`OMNISIGHT_DECISION_BEARER`
+  **已棄用**，下一個主版本將移除。請在 Admin UI → API Keys 簽發
+  per-service 的 `omni_*` bearer（K6 方案）。env var 啟動時會自動
+  遷移到 `api_keys` 列，遷移完成後即可移除環境變數。
 
 ### `[RATE LIMITED] ...`
 滑動視窗節流觸發（預設每客戶端 IP 每 10 秒 30 次）。

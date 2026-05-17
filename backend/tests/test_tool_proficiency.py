@@ -24,20 +24,29 @@ from backend.agents.mp_w17_telemetry_consumer import consume_batch, consume_even
 from backend.agents.mp_w17_telemetry_consumer import consume_invocation_log_line
 from backend.agents.mp_w17_telemetry_consumer import payload_from_invocation_log
 from backend.agents.tool_proficiency import (
+    CROSS_GUILD_HANDOFF_REQUIRED_LEVEL,
     InMemoryToolProficiencyStore,
     LEVEL_REQUIREMENTS,
     MAX_TOOL_LEVEL,
+    PeerHandoffSuccessRate,
     ProficiencyGateConfigMissing,
     TOOL_LEVEL_SPECS,
     ToolLevelSpec,
+    TOOL_ID_CROSS_GUILD_HANDOFF,
+    TOOL_ID_PEER_HANDOFF,
     ToolProficiencyState,
     build_feature_unlock_gate,
     can_invoke_at_level,
+    can_perform_cross_guild_handoff,
     capability_for_level,
     compute_tool_level,
     get_required_level,
     install_feature_unlock_gate,
+    is_cross_guild_handoff,
     list_proficiencies,
+    peer_handoff_success_rate,
+    peer_handoff_tool_id,
+    record_peer_handoff_outcome,
     record_tool_invocation,
     reset_gate_config_cache_for_tests,
     tool_level_spec,
@@ -94,6 +103,23 @@ def test_compute_tool_level_lv5_threshold_transition():
     # AC #5 — Lv 4→5: ≥ 500 success and ≥ 0.90 ratio.
     invocation_count, success_count = _seed_invocations(success=500, fail=50)
     # 500 / 550 ≈ 0.909 ≥ 0.90 → Lv 5.
+    assert compute_tool_level(invocation_count, success_count) == 5
+
+
+def test_compute_tool_level_lv3_requires_ratio_and_success_count():
+    # W13.7 — both sides of the Lv 3 gate are required.
+    invocation_count, success_count = _seed_invocations(success=50, fail=13)
+    assert compute_tool_level(invocation_count, success_count) == 2
+
+
+def test_compute_tool_level_returns_highest_satisfied_level():
+    invocation_count, success_count = _seed_invocations(success=500, fail=40)
+    assert compute_tool_level(invocation_count, success_count) == 5
+
+
+def test_compute_tool_level_lv5_ratio_boundary_is_inclusive():
+    invocation_count, success_count = _seed_invocations(success=500, fail=55)
+    assert success_count / invocation_count >= 0.90
     assert compute_tool_level(invocation_count, success_count) == 5
 
 
@@ -208,6 +234,133 @@ async def test_record_tool_invocation_crosses_lv1_to_lv2_emits_level_up():
     assert state.level == 2
 
 
+@pytest.mark.asyncio
+async def test_record_tool_invocation_emits_direct_lv1_to_lv3_level_up():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=1,
+            invocation_count=49,
+            success_count=49,
+            last_used_at=T0,
+        )
+    )
+
+    recorded = await record_tool_invocation(
+        store,
+        AGENT,
+        TOOL,
+        "success",
+        now=T0,
+        emit_level_up=lambda *args: level_ups.append(args),
+    )
+
+    assert recorded.previous_level == 1
+    assert recorded.new_level == 3
+    assert level_ups == [(AGENT, TOOL, 1, 3)]
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_emits_each_threshold_once():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    seeds = (
+        (1, 9, 9, 2),
+        (2, 49, 49, 3),
+        (3, 199, 199, 4),
+        (4, 499, 499, 5),
+    )
+    for previous_level, invocations, successes, expected_level in seeds:
+        tool_id = f"{TOOL}-{expected_level}"
+        await store.upsert_state(
+            ToolProficiencyState(
+                agent_id=AGENT,
+                tool_id=tool_id,
+                level=previous_level,
+                invocation_count=invocations,
+                success_count=successes,
+                last_used_at=T0,
+            )
+        )
+        recorded = await record_tool_invocation(
+            store,
+            AGENT,
+            tool_id,
+            "success",
+            now=T0,
+            emit_level_up=lambda *args: level_ups.append(args),
+        )
+        assert recorded.new_level == expected_level
+
+    assert level_ups == [
+        (AGENT, "Read-2", 1, 2),
+        (AGENT, "Read-3", 2, 3),
+        (AGENT, "Read-4", 3, 4),
+        (AGENT, "Read-5", 4, 5),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_does_not_emit_on_same_level_success():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+
+    recorded = await record_tool_invocation(
+        store,
+        AGENT,
+        TOOL,
+        "success",
+        now=T0,
+        emit_level_up=lambda *args: level_ups.append(args),
+    )
+
+    assert recorded.previous_level == recorded.new_level == 3
+    assert level_ups == []
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_does_not_emit_when_failure_holds_level():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=1,
+            invocation_count=9,
+            success_count=9,
+            last_used_at=T0,
+        )
+    )
+
+    recorded = await record_tool_invocation(
+        store,
+        AGENT,
+        TOOL,
+        "fail",
+        now=T0,
+        emit_level_up=lambda *args: level_ups.append(args),
+    )
+
+    assert recorded.new_level == 1
+    assert recorded.invocation_count == 10
+    assert recorded.success_count == 9
+    assert level_ups == []
+
+
 # ── can_invoke_at_level ─────────────────────────────────────────────
 
 
@@ -264,6 +417,55 @@ async def test_can_invoke_first_time_bootstrap_allows_lv1():
     assert not await can_invoke_at_level(
         store, AGENT, TOOL, required_level=2, now=T0
     )
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_first_time_lv2_refusal_emits_blocked_event():
+    store = InMemoryToolProficiencyStore()
+    blocked: list[tuple[str, str, int, int]] = []
+
+    allowed = await can_invoke_at_level(
+        store,
+        AGENT,
+        TOOL,
+        required_level=2,
+        now=T0,
+        emit_gate_blocked=lambda *args: blocked.append(args),
+    )
+
+    assert allowed is False
+    assert blocked == [(AGENT, TOOL, 1, 2)]
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_rejects_required_level_outside_ladder():
+    store = InMemoryToolProficiencyStore()
+    with pytest.raises(ValueError):
+        await can_invoke_at_level(store, AGENT, TOOL, required_level=0, now=T0)
+    with pytest.raises(ValueError):
+        await can_invoke_at_level(store, AGENT, TOOL, required_level=6, now=T0)
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_stale_low_level_still_refuses_after_warning(caplog):
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=2,
+            invocation_count=20,
+            success_count=15,
+            last_used_at=T0 - timedelta(days=2),
+        )
+    )
+    with caplog.at_level("WARNING"):
+        allowed = await can_invoke_at_level(
+            store, AGENT, TOOL, required_level=3, now=T0
+        )
+
+    assert allowed is False
+    assert any("TelemetryConsumerLag" in record.message for record in caplog.records)
 
 
 @pytest.mark.asyncio
@@ -361,6 +563,7 @@ async def test_telemetry_consumer_consumes_w17_event_shape():
 @pytest.mark.asyncio
 async def test_telemetry_consumer_detects_nested_invocation_and_outcome():
     """OP-182 — W13 can derive proficiency from invocation + outcome payloads."""
+async def test_telemetry_consumer_accepts_tool_id_alias():
     store = InMemoryToolProficiencyStore()
     recorded = await consume_event(
         store,
@@ -371,6 +574,42 @@ async def test_telemetry_consumer_detects_nested_invocation_and_outcome():
                 "timestamp": T0.isoformat(),
             },
             "outcome": {"is_error": False},
+            "tool_id": TOOL,
+            "agent_id": AGENT,
+            "success": True,
+            "timestamp": T0.isoformat(),
+        },
+    )
+    assert recorded is not None
+    assert recorded.tool_id == TOOL
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_status_ok_counts_as_success():
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "status": "ok",
+            "timestamp": T0.isoformat(),
+        },
+    )
+    assert recorded is not None
+    assert recorded.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_unknown_status_counts_as_failure():
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "status": "timeout",
+            "timestamp": T0.isoformat(),
         },
     )
     assert recorded is not None
@@ -412,6 +651,25 @@ async def test_telemetry_consumer_detects_invocation_log_line():
     assert recorded.agent_id == AGENT
     assert recorded.tool_id == TOOL
     assert recorded.success_count == 1
+    assert recorded.success_count == 0
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_preserves_event_timestamp():
+    store = InMemoryToolProficiencyStore()
+    await consume_event(
+        store,
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "success": True,
+            "timestamp": T0.isoformat(),
+        },
+    )
+
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.last_used_at == T0
 
 
 @pytest.mark.asyncio
@@ -427,6 +685,50 @@ async def test_telemetry_consumer_drops_events_missing_agent_or_tool():
     assert stats.applied == 1
     assert stats.dropped_missing_agent == 1
     assert stats.dropped_missing_tool == 1
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_batch_scores_level_up_handoff():
+    store = InMemoryToolProficiencyStore()
+    payloads = [
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "success": True,
+            "timestamp": T0.isoformat(),
+        }
+        for _ in range(10)
+    ]
+
+    stats = await consume_batch(store, payloads)
+
+    assert stats.received == 10
+    assert stats.applied == 10
+    assert stats.level_ups == 1
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.level == 2
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_batch_scores_mixed_success_and_failure():
+    store = InMemoryToolProficiencyStore()
+    payloads = [
+        {"tool_name": TOOL, "agent_id": AGENT, "success": True},
+        {"tool_name": TOOL, "agent_id": AGENT, "success": False},
+        {"tool_name": TOOL, "agent_id": AGENT, "status": "passed"},
+        {"tool_name": TOOL, "agent_id": AGENT, "status": "errored"},
+    ]
+
+    stats = await consume_batch(store, payloads)
+
+    assert stats.received == 4
+    assert stats.applied == 4
+    assert stats.level_ups == 0
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.invocation_count == 4
+    assert state.success_count == 2
 
 
 @pytest.mark.asyncio
@@ -778,6 +1080,211 @@ async def test_dispatcher_tool_invocation_telemetry_includes_agent_id(
         "success": True,
         "agent_id": AGENT,
     }]
+# ── W13.4 (OP-181) A2A peer-handoff + cross-Guild Lv-4 gate ─────────
+
+
+def test_w13_4_constants_match_adr_and_shipped_yaml():
+    """W13.4 — the helper constants must agree with the shipped YAML
+    (``mcp__a2a__cross_guild_handoff: 4``) and with the ADR-0008 Lv-4
+    row. Drift here would silently disable the Lv-4 gate (helper says
+    Lv 3, YAML stays at Lv 4) without any other test failing."""
+    reset_gate_config_cache_for_tests()
+    repo_root = Path(__file__).resolve().parents[2]
+    shipped = repo_root / "config" / "tool_proficiency_gates.yaml"
+    assert get_required_level(
+        TOOL_ID_CROSS_GUILD_HANDOFF, config_path=shipped
+    ) == CROSS_GUILD_HANDOFF_REQUIRED_LEVEL == 4
+    # Same-Guild peer-handoff stays at bootstrap Lv 1 — the success-rate
+    # accrues but the gate is permissive.
+    assert get_required_level(
+        TOOL_ID_PEER_HANDOFF, config_path=shipped
+    ) == 1
+
+
+def test_is_cross_guild_handoff_handles_case_and_whitespace():
+    """W13.4 — same Guild with different casing / whitespace is NOT a
+    cross-Guild handoff; different Guilds are. Blank slugs raise so a
+    mis-classified handoff cannot escape into the cross-Guild bucket."""
+    assert is_cross_guild_handoff("backend", "frontend") is True
+    assert is_cross_guild_handoff("backend", "backend") is False
+    # Case + whitespace tolerance: "Backend" vs "backend " must NOT be
+    # classified as cross-Guild.
+    assert is_cross_guild_handoff("Backend", "backend ") is False
+    assert is_cross_guild_handoff(" BACKEND ", "Backend") is False
+    # Blank slug refuses — better than silently picking a bucket.
+    with pytest.raises(ValueError):
+        is_cross_guild_handoff("", "backend")
+    with pytest.raises(ValueError):
+        is_cross_guild_handoff("backend", "  ")
+    with pytest.raises(TypeError):
+        is_cross_guild_handoff(None, "backend")  # type: ignore[arg-type]
+
+
+def test_peer_handoff_tool_id_routes_to_constants():
+    """W13.4 — the bucket helper must return the two stable tool_ids
+    so a typo in either constant is caught immediately."""
+    assert peer_handoff_tool_id(cross_guild=False) == TOOL_ID_PEER_HANDOFF
+    assert (
+        peer_handoff_tool_id(cross_guild=True)
+        == TOOL_ID_CROSS_GUILD_HANDOFF
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_peer_handoff_outcome_buckets_same_and_cross_guild():
+    """W13.4 — same-Guild outcomes accrue on ``mcp__a2a__peer_handoff``;
+    cross-Guild outcomes accrue on ``mcp__a2a__cross_guild_handoff``.
+    The two buckets are independent so a Lv-1 sender's cross-Guild
+    failures cannot poison the same-Guild row's success ratio."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+
+    # 3 same-Guild successes.
+    for _ in range(3):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=False, outcome="success", now=T0
+        )
+    # 2 cross-Guild fails.
+    for _ in range(2):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=True, outcome="fail", now=T0
+        )
+
+    same = await store.get_state(sender, TOOL_ID_PEER_HANDOFF)
+    cross = await store.get_state(sender, TOOL_ID_CROSS_GUILD_HANDOFF)
+    assert same is not None
+    assert same.invocation_count == 3 and same.success_count == 3
+    assert cross is not None
+    assert cross.invocation_count == 2 and cross.success_count == 0
+
+
+@pytest.mark.asyncio
+async def test_peer_handoff_success_rate_summarises_sender_row():
+    """W13.4 — the summary view returns the underlying counters + the
+    derived ratio + level so a UI card can render without re-computing.
+    No row → zeroed summary with Lv 1 (bootstrap floor)."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+
+    # No row yet → zeroed summary at Lv 1.
+    empty = await peer_handoff_success_rate(
+        store, sender, cross_guild=False
+    )
+    assert empty == PeerHandoffSuccessRate(
+        agent_id=sender,
+        cross_guild=False,
+        invocations=0,
+        successes=0,
+        success_ratio=0.0,
+        level=1,
+    )
+
+    # 10 success, 3 fail → 0.769 ratio, Lv 2 (≥ 10 success ≥ 0.70 ratio).
+    for _ in range(10):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=False, outcome="success", now=T0
+        )
+    for _ in range(3):
+        await record_peer_handoff_outcome(
+            store, sender, cross_guild=False, outcome="fail", now=T0
+        )
+
+    summary = await peer_handoff_success_rate(
+        store, sender, cross_guild=False
+    )
+    assert summary.invocations == 13
+    assert summary.successes == 10
+    assert summary.success_ratio == pytest.approx(10 / 13)
+    assert summary.level == 2  # 10 successes, ratio 0.769 ≥ 0.70
+
+
+@pytest.mark.asyncio
+async def test_can_perform_cross_guild_handoff_refuses_under_lv4():
+    """W13.4 — a Lv-1 sender attempting a cross-Guild handoff is refused
+    by the in-process pre-check (mirrors the dispatcher refusal but
+    runs before the round-trip)."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+    # Lv-1 sender (single bootstrap row at TOOL_ID_CROSS_GUILD_HANDOFF).
+    await record_peer_handoff_outcome(
+        store, sender, cross_guild=True, outcome="success", now=T0
+    )
+
+    blocked: list[tuple[str, str, int, int]] = []
+
+    def _emit(agent_id: str, tool_id: str, current: int, required: int) -> None:
+        blocked.append((agent_id, tool_id, current, required))
+
+    allowed = await can_perform_cross_guild_handoff(
+        store, sender, now=T0, emit_gate_blocked=_emit
+    )
+    assert allowed is False
+    assert blocked == [(sender, TOOL_ID_CROSS_GUILD_HANDOFF, 1, 4)]
+
+
+@pytest.mark.asyncio
+async def test_can_perform_cross_guild_handoff_allows_lv4_sender():
+    """W13.4 — once the sender reaches Lv 4 on the cross-Guild handoff
+    tool, the pre-check allows. Verified against the ADR-0008 Lv-4
+    threshold (≥ 200 success / ≥ 0.85 ratio)."""
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=sender,
+            tool_id=TOOL_ID_CROSS_GUILD_HANDOFF,
+            level=4,
+            invocation_count=230,
+            success_count=200,  # 200/230 ≈ 0.870 ≥ 0.85
+            last_used_at=T0,
+        )
+    )
+    assert await can_perform_cross_guild_handoff(
+        store, sender, now=T0
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_w13_4_cross_guild_dispatcher_refuses_lv1_sender(tmp_path: Path):
+    """W13.4 — end-to-end through ``install_feature_unlock_gate`` against
+    the canonical YAML entry ``mcp__a2a__cross_guild_handoff: 4``. The
+    canonical W13.4 acceptance: a fresh Lv-1 sender attempting the
+    cross-Guild handoff tool surfaces a structured
+    ``tool_proficiency_insufficient`` refusal from the dispatcher
+    instead of forwarding to the handler."""
+    import json
+
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    # Use "Read" as the registered handler name (matches the schema
+    # registry) but gate it at Lv 4 to re-create the
+    # ``mcp__a2a__cross_guild_handoff: 4`` semantics without registering
+    # a new schema.
+    config.write_text("gates:\n  Read: 4\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    sender = "agent-sender"
+    # Seed the sender at Lv 1.
+    await record_tool_invocation(store, sender, "Read", "success", now=T0)
+
+    dispatcher = ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001 - test handler
+        return "ok"
+
+    dispatcher.register("Read", _read)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=sender,
+        config_path=config, now=T0,
+    )
+
+    result = await dispatcher.execute("u-x", "Read", {"file_path": "/x"})
+    assert result.is_error
+    payload = json.loads(result.content)
+    assert payload["error"] == "tool_proficiency_insufficient"
+    assert payload["agent_id"] == sender
 
 
 # ── Constants sanity ─────────────────────────────────────────────────

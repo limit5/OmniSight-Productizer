@@ -7,6 +7,8 @@ the Ops Summary panel.
 
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, HTTPException
 
 from backend import semantic_entropy as se
@@ -15,7 +17,7 @@ router = APIRouter(prefix="/entropy", tags=["entropy"])
 
 
 @router.get("/agents")
-async def list_entropy() -> dict:
+async def list_entropy() -> dict[str, Any]:
     """Return semantic-entropy snapshots for every tracked agent.
 
     Also exposes the current highest-entropy agent so the ops summary
@@ -30,7 +32,7 @@ async def list_entropy() -> dict:
 
 
 @router.get("/agents/{agent_id}")
-async def get_entropy(agent_id: str) -> dict:
+async def get_entropy(agent_id: str) -> dict[str, Any]:
     snap = se.snapshot_agent(agent_id)
     if snap is None:
         raise HTTPException(status_code=404, detail="Agent has no entropy snapshot yet")

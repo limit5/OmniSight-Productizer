@@ -45,7 +45,37 @@ logger = logging.getLogger(__name__)
 SERVER_NAME = "mcp_gerrit"
 """Tool-name prefix exposed to the agent (``mcp_gerrit__<method>``)."""
 
+# ─── Tunable constants ───────────────────────────────────────────
+# Per-subprocess SSH-CLI ceiling. Sized to comfortably absorb a slow
+# Gerrit query without indefinitely blocking the circuit breaker.
 DEFAULT_TIMEOUT_SECS = 30
+
+# Maximum stderr bytes embedded in a ``RuntimeError`` when the
+# gerrit-ssh-cli call fails. Keeps a single broken call from flooding
+# the agent's tool-result transcript with multi-KB SSH banners.
+STDERR_TRUNCATE_LIMIT = 500
+
+# HTTPS port that fronts Gerrit's web UI / REST surface. Distinct from
+# ``GERRIT_SSH_PORT`` (the gerrit-ssh-cli port) — used only to synthesize
+# fallback change URLs when ``gerrit query`` does not return one.
+GERRIT_WEB_PORT = 29420
+
+# Default cap on rows returned by ``query_changes``. Prevents a runaway
+# model query from pulling a multi-MB JSON payload through the audit
+# log; the caller can override per-call up to ``MAX_QUERY_CHANGES_LIMIT``.
+DEFAULT_QUERY_CHANGES_LIMIT = 25
+
+# Validation bounds advertised in the MCP tool schema for the
+# ``queryChanges.limit`` argument. Upper bound matches Gerrit's own
+# server-side default page size, lower bound rejects ``0`` / negative
+# limits that would silently return an empty list.
+MIN_QUERY_CHANGES_LIMIT = 1
+MAX_QUERY_CHANGES_LIMIT = 100
+
+# Row cap for the idempotency check in ``has_open_ps_for_ticket``. The
+# subject-match filter is already narrow, so a small window is enough
+# to spot a sibling open PS without scanning the full open-PS backlog.
+OPEN_PS_LOOKUP_LIMIT = 5
 
 
 @dataclass(frozen=True)
@@ -135,7 +165,7 @@ def _run_gerrit_query(
     if result.returncode != 0:
         raise RuntimeError(
             f"gerrit-ssh-cli failed (rc={result.returncode}): "
-            f"{(result.stderr or '').strip()[:500]}"
+            f"{(result.stderr or '').strip()[:STDERR_TRUNCATE_LIMIT]}"
         )
     return result.stdout
 
@@ -160,7 +190,7 @@ def _build_change_url(change: dict[str, Any]) -> str:
     if url:
         return url
     number = change.get("number") or change.get("_number") or "?"
-    return f"https://{GERRIT_SSH_HOST}:29420/c/{GERRIT_PROJECT_PATH}/+/{number}"
+    return f"https://{GERRIT_SSH_HOST}:{GERRIT_WEB_PORT}/c/{GERRIT_PROJECT_PATH}/+/{number}"
 
 
 def _parse_change_summary(change: dict[str, Any]) -> GerritChangeSummary | None:
@@ -192,7 +222,7 @@ def query_changes(
     *,
     agent_class: str = "subscription-claude",
     instance_id: str | None = None,
-    limit: int = 25,
+    limit: int = DEFAULT_QUERY_CHANGES_LIMIT,
 ) -> list[GerritChangeSummary]:
     """Run ``gerrit query --format=JSON <filter>`` and return parsed rows.
 
@@ -309,7 +339,7 @@ def has_open_ps_for_ticket(
         filter,
         agent_class=agent_class,
         instance_id=instance_id,
-        limit=5,
+        limit=OPEN_PS_LOOKUP_LIMIT,
     )
     return any(ticket_key in r.subject for r in rows)
 
@@ -322,7 +352,7 @@ def _tool_query_changes(input: dict[str, Any]) -> list[dict[str, Any]]:
         filter=input["filter"],
         agent_class=input.get("agent_class", "subscription-claude"),
         instance_id=input.get("instance_id"),
-        limit=int(input.get("limit", 25)),
+        limit=int(input.get("limit", DEFAULT_QUERY_CHANGES_LIMIT)),
     )
     return [r.to_json() for r in rows]
 
@@ -376,9 +406,9 @@ MCP_GERRIT_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
                 "limit": {
                     "type": "integer",
-                    "minimum": 1,
-                    "maximum": 100,
-                    "default": 25,
+                    "minimum": MIN_QUERY_CHANGES_LIMIT,
+                    "maximum": MAX_QUERY_CHANGES_LIMIT,
+                    "default": DEFAULT_QUERY_CHANGES_LIMIT,
                 },
             },
             "required": ["filter"],

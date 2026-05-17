@@ -154,7 +154,7 @@ class RoutingPolicy:
             assigned_candidates = [
                 candidate
                 for candidate in candidates
-                if candidate.provider_id == assigned_provider_id
+                if _candidate_matches_assignment(candidate, assigned_provider_id)
             ]
             assigned_eligible = self._tier_gate_eligible_candidates(
                 task, assigned_candidates
@@ -174,7 +174,9 @@ class RoutingPolicy:
                     [
                         candidate
                         for candidate in candidates
-                        if candidate.provider_id != assigned_provider_id
+                        if not _candidate_matches_assignment(
+                            candidate, assigned_provider_id
+                        )
                     ],
                 )
             else:
@@ -503,8 +505,9 @@ def _preferred_provider_family_for_task(task: TaskSpec) -> str | None:
     guild_specs, provider_matrix = _load_model_routing_matrix()
     model_spec = guild_specs.get(guild.value, "")
     provider = _provider_from_model_spec(model_spec)
-    if provider in provider_matrix:
-        return provider
+    provider_family = _adr_vendor_label(provider or "")
+    if provider_family in provider_matrix:
+        return provider_family
     return None
 
 
@@ -569,8 +572,11 @@ def _parse_model_routing_matrix(raw: Any) -> tuple[dict[str, str], set[str]]:
             provider = str(provider_id).strip().lower()
             if not provider or not isinstance(provider_cfg, dict):
                 continue
+            provider_family = _adr_vendor_label(provider)
+            if provider_family is None:
+                continue
             if isinstance(provider_cfg.get("default_model"), str):
-                provider_matrix.add(provider)
+                provider_matrix.add(provider_family)
 
     guild_specs: dict[str, str] = {}
     guilds = raw.get("guilds")
@@ -615,6 +621,59 @@ def _default_human_assignment_resolver(task: TaskSpec) -> str | None:
         if isinstance(value, str) and value.strip():
             return _normalise_provider_id(value)
     return None
+
+
+def _candidate_matches_assignment(
+    candidate: _Candidate,
+    assigned_agent_id: str,
+) -> bool:
+    return (
+        _normalise_provider_id(assigned_agent_id)
+        in _candidate_assignment_ids(candidate)
+    )
+
+
+def _candidate_assignment_ids(candidate: _Candidate) -> frozenset[str]:
+    values = {candidate.provider_id}
+    values.update(_adapter_identity_values(candidate.adapter))
+    return frozenset(
+        _normalise_provider_id(value) for value in values if value.strip()
+    )
+
+
+def _adapter_identity_values(adapter: ProviderAdapter) -> set[str]:
+    values: set[str] = set()
+    for attr in (
+        "agent_id",
+        "adapter_id",
+        "instance_id",
+        "runner_instance_id",
+    ):
+        value = getattr(adapter, attr, None)
+        try:
+            candidate = value() if callable(value) else value
+        except Exception:
+            candidate = None
+        if isinstance(candidate, str) and candidate.strip():
+            values.add(candidate)
+
+    metadata = getattr(adapter, "metadata", None)
+    if callable(metadata):
+        try:
+            metadata = metadata()
+        except Exception:
+            metadata = None
+    if isinstance(metadata, dict):
+        for key in (
+            "agent_id",
+            "adapter_id",
+            "instance_id",
+            "runner_instance_id",
+        ):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                values.add(value)
+    return values
 
 
 def _adapter_last_retrained_at(adapter: ProviderAdapter) -> datetime | None:
@@ -832,6 +891,45 @@ def build_talent_routing_weight_resolver(
             return 1.0
 
     return _resolve
+def capstone_routing_weight_multiplier(
+    capstone_lock,
+    *,
+    task_labels: tuple[str, ...],
+    guild: str | None = None,
+) -> float:
+    """RPG.W14.6 -- routing weight multiplier for a Lv-80 capstone lock.
+
+    Returns ``1.0`` when :func:`is_talent_routing_enabled` is False
+    (shares the W14 feature flag — capstone routing rides the same
+    rollout switch as per-talent routing so operators flip one env
+    var, not two). ``capstone_lock`` may be ``None`` (agent below
+    Lv 80) — also returns ``1.0``. The actual multiplier
+    (:data:`~backend.agents.talent_tree.ROUTING_WEIGHT_CAPSTONE_MATCH`,
+    ``+50%``) is applied only when the capstone's ``signature_label``
+    matches one of ``task_labels``.
+
+    YAML / IO failures degrade silently to ``1.0`` (mirrors
+    :func:`talent_routing_weight_multiplier`).
+    """
+    if not is_talent_routing_enabled():
+        return 1.0
+    if capstone_lock is None:
+        return 1.0
+    try:
+        from backend.agents.talent_tree import (
+            RoutingWeightInjectionFailed,
+            capstone_routing_weight_multiplier as _impl,
+        )
+    except ImportError:  # pragma: no cover — defensive
+        return 1.0
+    try:
+        return _impl(
+            capstone_lock,
+            task_labels=tuple(task_labels),
+            guild=guild,
+        )
+    except RoutingWeightInjectionFailed:
+        return 1.0
 
 
 def choose_provider(task: TaskSpec) -> list[ProviderAdapter]:

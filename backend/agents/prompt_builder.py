@@ -36,12 +36,18 @@ either directly (compute helper) or via the closure built by
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
 
 from backend.agents.talent_tree import (
+    CAPSTONE_SIGNATURE_HEADER,
+    TALENT_TREE_PATH,
+    CapstoneLock,
     TalentChoice,
     TalentChoiceStore,
+    TalentTreeError,
+    capstone_signature_block,
+    load_talent_tree,
     prompt_reminders_for_talents,
 )
 from backend.sandbox_tier import Guild
@@ -90,7 +96,7 @@ def build_talent_prompt_enricher(
     store: TalentChoiceStore,
     *,
     path: Path | str | None = None,
-) -> Any:
+) -> Callable[..., Awaitable[str]]:
     """W14.4 (OP-188) -- closure that fetches + enriches in one call.
 
     The returned closure has the shape
@@ -148,10 +154,61 @@ def build_talent_prompt_enricher(
         )
 
     return _enrich
+def enrich_system_prompt_with_capstone(
+    system_prompt: str,
+    capstone_lock: CapstoneLock | None,
+    *,
+    guild: Guild | str | None = None,
+    path: Path | str = TALENT_TREE_PATH,
+) -> str:
+    """Append a Lv-80 signature-ability block to ``system_prompt``.
+
+    RPG.W14.6: when ``capstone_lock`` is present the agent has unlocked
+    the single signature ability for its Guild — the prompt gets a
+    dedicated block (under :data:`CAPSTONE_SIGNATURE_HEADER`) so the
+    capstone behaviour is the first thing the model sees alongside the
+    per-milestone talent reminders.
+
+    Ordering vs :func:`enrich_system_prompt_with_talents`: callers
+    typically run talent enrichment first, then capstone enrichment —
+    the signature block lives below the talent reminders so the model
+    reads the full ladder (Lv 10 → 80) before the capstone payload.
+    No-op when ``capstone_lock`` is ``None`` (agent below Lv 80).
+    """
+    if capstone_lock is None:
+        return system_prompt
+    try:
+        tree = load_talent_tree(path)
+    except TalentTreeError:
+        # YAML drift / missing file: degrade silently rather than block
+        # the dispatch path. The RPG.W11.1 drift guard catches this at
+        # CI time so we only hit it during local hot-edits.
+        return system_prompt
+    ability = None
+    if guild is not None:
+        guild_enum = guild if isinstance(guild, Guild) else Guild(guild)
+        if guild_enum in tree and tree[guild_enum].capstone.ability_id == capstone_lock.ability_id:
+            ability = tree[guild_enum].capstone
+    if ability is None:
+        # Caller didn't pin the Guild (or pinned the wrong one) — fall
+        # back to a scan. Cheap: there are ≤ 21 Guilds even at the
+        # eventual BP.B steady state.
+        for guild_tree in tree.values():
+            if guild_tree.capstone.ability_id == capstone_lock.ability_id:
+                ability = guild_tree.capstone
+                break
+    if ability is None:
+        return system_prompt
+    block = f"{CAPSTONE_SIGNATURE_HEADER}\n{capstone_signature_block(ability)}"
+    if not system_prompt:
+        return block
+    return f"{system_prompt.rstrip()}\n\n{block}"
 
 
 __all__ = [
+    "CAPSTONE_SIGNATURE_HEADER",
     "TALENT_REMINDER_HEADER",
     "build_talent_prompt_enricher",
+    "enrich_system_prompt_with_capstone",
     "enrich_system_prompt_with_talents",
 ]

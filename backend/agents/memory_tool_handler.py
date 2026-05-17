@@ -194,6 +194,13 @@ class MemoryToolError(Exception):
     error_code: str = ERR_UNAVAILABLE
 
     def to_tool_result(self) -> dict[str, Any]:
+        """Render this error as an Anthropic ``tool_result`` payload.
+
+        Output shape: ``{"error": <catalog code>, "message": <str(self)>}``.
+        The catalog code (not the exception class name) is what the
+        orchestrator dispatches on when choosing the B10 fallback path,
+        so subclasses must keep ``error_code`` stable.
+        """
         return {"error": self.error_code, "message": str(self)}
 
 
@@ -272,6 +279,12 @@ class AuditRow:
     extra: dict[str, Any] | None = None
 
     def to_jsonl(self) -> str:
+        """Serialise this row to a single-line JSON string (no trailing newline).
+
+        Caller is responsible for appending ``\\n`` before writing to the
+        JSONL stream. Uses ``ensure_ascii=False`` so non-ASCII keys (e.g.
+        lesson titles) round-trip cleanly when B9 reingests.
+        """
         payload: dict[str, Any] = {
             "type": AUDIT_TYPE,
             "tool": MEMORY_TOOL_NAME,
@@ -286,6 +299,7 @@ class AuditRow:
 
 
 def _utcnow_iso() -> str:
+    """Return the current UTC time as a second-precision ISO 8601 string."""
     return _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
 
@@ -390,6 +404,15 @@ class MemoryToolConfig:
         progress_path: Path | None = None,
         ticket_key: str | None = None,
     ) -> "MemoryToolConfig":
+        """Construct a config from process env, scoped to ``fleet_id``.
+
+        Reads :data:`STORAGE_ROOT_ENV`, :data:`CAP_MB_ENV`, and
+        :data:`TIER_L_OPTIN_ENV`. The fleet id is appended to the
+        storage root so per-fleet directories stay isolated even when
+        operators override the root globally. An invalid ``CAP_MB_ENV``
+        value is logged and silently falls back to :data:`DEFAULT_CAP_MB`
+        — the runner should not crash on a typo in a single env var.
+        """
         root_env = os.environ.get(STORAGE_ROOT_ENV)
         root = Path(root_env) if root_env else DEFAULT_STORAGE_ROOT
         cap_env = os.environ.get(CAP_MB_ENV)
@@ -421,6 +444,14 @@ class MemoryToolHandler:
     """
 
     def __init__(self, config: MemoryToolConfig) -> None:
+        """Validate the storage root eagerly so misconfig surfaces at boot.
+
+        Creates the per-fleet directory if missing and verifies it is
+        writable+executable by the current process. Raises
+        :class:`MemoryDirNotWritable` on either failure — the runner
+        treats that as a provisioning bug and bails out before
+        registering the tool with Anthropic.
+        """
         self.config = config
         try:
             self.config.storage_root.mkdir(parents=True, exist_ok=True)
@@ -436,6 +467,12 @@ class MemoryToolHandler:
     # — Public surface —
 
     async def __call__(self, tool_input: dict[str, Any]) -> dict[str, Any]:
+        """Coroutine adapter for the dispatcher's ``await handler(...)`` contract.
+
+        The underlying :meth:`handle` is sync (filesystem IO only); this
+        wrapper exists solely so the handler plugs into the same
+        dispatcher surface as async tool handlers.
+        """
         return self.handle(tool_input)
 
     def handle(self, tool_input: dict[str, Any]) -> dict[str, Any]:
@@ -504,6 +541,7 @@ class MemoryToolHandler:
 
     @staticmethod
     def beta_header() -> str:
+        """Return the ``anthropic-beta`` header value pinning the tool version."""
         return MEMORY_TOOL_BETA_HEADER
 
     # — Commands —
@@ -511,6 +549,18 @@ class MemoryToolHandler:
     def _cmd_view(
         self, path: str, _tool_input: dict[str, Any]
     ) -> dict[str, Any]:
+        """Handle the Anthropic ``view`` op (list a dir OR read a file).
+
+        Return shapes:
+        * directory: ``{"entries": [{"name", "is_dir", "size", "tier"}, ...]}``
+          — tier-restricted children are silently filtered and emit one
+          ``tier_refuse`` audit row each, so the model never sees their
+          existence.
+        * file: ``{"content": <str>, "tier": <label>}`` when permitted;
+          raises :class:`TierViolationUnauthorizedRecall` for tier:L
+          (without opt-in) or tier:X.
+        * missing target: ``{"error": "not_found", "path": ...}``.
+        """
         target = _resolve_model_path(self.config.storage_root, path)
         if not target.exists():
             self._audit(op="read", key=path, extra={"missing": True})
@@ -556,6 +606,15 @@ class MemoryToolHandler:
     def _cmd_create(
         self, path: str, tool_input: dict[str, Any]
     ) -> dict[str, Any]:
+        """Handle the Anthropic ``create`` op (write or overwrite a file).
+
+        Accepts the body under either ``file_text`` (Anthropic's
+        documented field) or ``content`` (alias kept for the seeded
+        lessons path). Runs the cap check via :meth:`_ensure_capacity`,
+        so a write that would push the fleet directory over the cap
+        triggers eviction first; if the write itself exceeds the cap
+        in isolation, :class:`MemoryStorageFull` is raised.
+        """
         body = tool_input.get("file_text") or tool_input.get("content") or ""
         if not isinstance(body, str):
             err = MemoryToolError("file_text must be a string")
@@ -575,6 +634,15 @@ class MemoryToolHandler:
     def _cmd_str_replace(
         self, path: str, tool_input: dict[str, Any]
     ) -> dict[str, Any]:
+        """Handle the Anthropic ``str_replace`` op (single substring swap).
+
+        Replaces only the *first* match of ``old_str`` with ``new_str``
+        — matches Anthropic's documented semantics; the model is
+        expected to re-issue the op for additional matches. Returns
+        ``{"error": "old_str_not_found", ...}`` when the needle is
+        absent, so the model can self-correct without consuming an
+        error-tool_result iteration.
+        """
         old = tool_input.get("old_str", "")
         new = tool_input.get("new_str", "")
         if not isinstance(old, str) or not isinstance(new, str):
@@ -598,6 +666,13 @@ class MemoryToolHandler:
     def _cmd_insert(
         self, path: str, tool_input: dict[str, Any]
     ) -> dict[str, Any]:
+        """Handle the Anthropic ``insert`` op (insert text at a line index).
+
+        ``insert_line`` is the 0-based index *before* which the new
+        line is inserted; values past the end clamp to append. The
+        target file is created implicitly if it doesn't exist, matching
+        Anthropic's model-friendly "just write" semantics.
+        """
         line = tool_input.get("insert_line")
         text = tool_input.get("text") or tool_input.get("insert_text") or ""
         if not isinstance(line, int) or line < 0:
@@ -625,6 +700,14 @@ class MemoryToolHandler:
     def _cmd_delete(
         self, path: str, _tool_input: dict[str, Any]
     ) -> dict[str, Any]:
+        """Handle the Anthropic ``delete`` op (remove a file or directory).
+
+        Directory deletes are recursive (``shutil.rmtree``) — Anthropic
+        does not require the model to drain a directory first, and the
+        per-fleet storage root protects us from cross-fleet damage.
+        Missing targets return ``{"error": "not_found", ...}`` rather
+        than raising, so the model can ignore double-delete races.
+        """
         target = _resolve_model_path(self.config.storage_root, path)
         if not target.exists():
             return {"error": "not_found", "path": path}
@@ -638,6 +721,13 @@ class MemoryToolHandler:
     def _cmd_rename(
         self, path: str, tool_input: dict[str, Any]
     ) -> dict[str, Any]:
+        """Handle the Anthropic ``rename`` op (move a file to a new path).
+
+        Both ``path`` and ``new_path`` are validated through
+        :func:`_resolve_model_path`, so neither side can escape the
+        per-fleet storage root. Parent directories of the destination
+        are created on demand.
+        """
         new_path = tool_input.get("new_path", "")
         if not isinstance(new_path, str) or not new_path:
             err = MemoryToolError("new_path must be a non-empty string")
@@ -655,6 +745,12 @@ class MemoryToolHandler:
     # — Eviction (AC #4) —
 
     def _current_bytes(self) -> int:
+        """Return the total on-disk size of all files under the fleet root.
+
+        Walks the tree on every call (no cached index) — the directory
+        is bounded by the 100MB cap, so a full scan is cheap and avoids
+        cache-invalidation bugs across concurrent writes.
+        """
         total = 0
         for child in self.config.storage_root.rglob("*"):
             if child.is_file():
@@ -665,6 +761,20 @@ class MemoryToolHandler:
         return total
 
     def _ensure_capacity(self, incoming_bytes: int, exclude: Path) -> None:
+        """Free space for ``incoming_bytes`` via oldest-first eviction (AC #4).
+
+        Behaviour:
+        * If the inbound write alone exceeds the cap, raises
+          :class:`MemoryStorageFull` immediately (no eviction can help).
+        * Otherwise evicts files oldest-mtime-first until headroom is
+          restored, skipping ``exclude`` (the file currently being
+          written/replaced) and the two newest existing files
+          (preserves a "newest-3" safety floor with the inbound file).
+        * Emits a ``MemoryCapExceeded`` audit row when the cap is first
+          breached, then one ``evict`` row per victim.
+        * If, after evicting every eligible victim, headroom still
+          isn't enough, raises :class:`MemoryStorageFull`.
+        """
         cap_bytes = self.config.cap_mb * 1024 * 1024
         if incoming_bytes > cap_bytes:
             raise MemoryStorageFull(
@@ -735,6 +845,14 @@ class MemoryToolHandler:
         key: str,
         extra: dict[str, Any] | None = None,
     ) -> None:
+        """Append one audit row to ``progress.txt`` (AC #5).
+
+        Best-effort: a missing ``progress_path`` logs at DEBUG and
+        returns; a filesystem error logs at WARNING and returns. Audit
+        emission MUST NOT raise — the memory operation has already
+        succeeded by the time we get here, and the orchestrator must
+        not see a write-then-fail-on-audit ghost error.
+        """
         row = AuditRow(
             op=op,
             key=key,
@@ -758,6 +876,13 @@ class MemoryToolHandler:
 
 
 def _safe_read_text(path: Path) -> str | None:
+    """Read ``path`` as UTF-8 text, returning ``None`` on any I/O or decode error.
+
+    Used by directory listing where one corrupt file should not abort
+    the whole ``view``. Callers that *do* require the body (e.g.
+    single-file ``view``) check for ``None`` and raise
+    :class:`MemoryCorrupted`.
+    """
     try:
         return path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -876,6 +1001,14 @@ class MemoryTier(str, Enum):
 
     @classmethod
     def parse(cls, raw: str | "MemoryTier") -> "MemoryTier":
+        """Coerce a label into a :class:`MemoryTier`.
+
+        Accepts a bare letter (``"S"``, ``"m"``) or the prefixed form
+        commonly seen in JIRA / audit rows (``"tier:L"``). Whitespace
+        and case are normalised. Raises :class:`UnknownMemoryTier` for
+        any label outside S/M/L/X — the caller is expected to translate
+        that into a structured refusal rather than crash.
+        """
         if isinstance(raw, cls):
             return raw
         token = (raw or "").strip().upper().removeprefix("TIER:")
@@ -926,6 +1059,13 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
 def _is_truthy(env_value: str | None) -> bool:
+    """Return True for the operator-friendly truthy spellings in :data:`_TRUTHY`.
+
+    Accepts ``1``, ``true``, ``yes``, ``on`` (case-insensitive). Any
+    other value — including ``"0"``, ``"false"``, or a blank string —
+    is treated as false. This is the canonical opt-in check used by
+    the tier:L gate and any future env-driven knobs.
+    """
     if env_value is None:
         return False
     return env_value.strip().lower() in _TRUTHY
@@ -963,6 +1103,7 @@ class RecallRequest:
 
     @property
     def is_cross_fleet(self) -> bool:
+        """True iff this recall crosses fleet boundaries (federation gate)."""
         return self.query_fleet != self.target_fleet
 
 
@@ -996,6 +1137,12 @@ AuditEmitter = Callable[[RecallRequest, PolicyDecision], None]
 
 
 def _default_audit_emitter(request: RecallRequest, decision: PolicyDecision) -> None:
+    """Forward a recall outcome to :mod:`backend.agents.incident_recorder`.
+
+    Default seam used by :func:`enforce_recall` when no
+    ``audit_emitter`` override is passed. Tests inject an in-memory
+    recorder to avoid the import side-effect.
+    """
     # Local import keeps the policy module importable even if the
     # incident_recorder shim is unavailable (e.g. early-boot or a
     # narrowly-scoped unit test).
@@ -1158,6 +1305,7 @@ def tier_filter(
 
 
 def _allow(request: RecallRequest, *, escalate: bool, note: str) -> PolicyDecision:
+    """Build a permitted :class:`PolicyDecision` with a stock audit summary."""
     return PolicyDecision(
         permitted=True,
         tier=request.tier,
@@ -1168,6 +1316,7 @@ def _allow(request: RecallRequest, *, escalate: bool, note: str) -> PolicyDecisi
 
 
 def _refuse(request: RecallRequest, *, escalate: bool, reason: str) -> PolicyDecision:
+    """Build a refused :class:`PolicyDecision`; ``reason`` is surfaced to the caller."""
     return PolicyDecision(
         permitted=False,
         tier=request.tier,
@@ -1178,6 +1327,7 @@ def _refuse(request: RecallRequest, *, escalate: bool, reason: str) -> PolicyDec
 
 
 def _format_audit_summary(request: RecallRequest, outcome: str, note: str) -> str:
+    """Render the one-line summary stored on ``runner_incidents.summary``."""
     return (
         f"recall query={request.query!r} tier={request.tier.value} "
         f"fleet={request.query_fleet}->{request.target_fleet} "

@@ -19,6 +19,7 @@ router = APIRouter(prefix="/api-keys", tags=["api-keys"])
 class CreateKeyRequest(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
     scopes: list[str] = Field(default_factory=lambda: ["*"])
+    ttl_seconds: float | None = Field(default=None, gt=0)
 
 
 class UpdateScopesRequest(BaseModel):
@@ -41,6 +42,7 @@ async def create_key(
 ) -> dict:
     key, raw_secret = await _ak.create_key(
         name=req.name, scopes=req.scopes, created_by=user.email,
+        ttl_seconds=req.ttl_seconds,
     )
     await audit.write_audit(
         request, action="api_key_create", entity_kind="api_key",

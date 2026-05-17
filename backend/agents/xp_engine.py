@@ -6,13 +6,18 @@ that should be applied to the agent's character card by a later storage layer.
 
 W4 sub-wave coverage in this module
 -----------------------------------
-- W4.1 (OP-132): ``award_xp`` -- the deterministic XpDelta entry point.
-- W4.2 (OP-133): ``level_threshold`` / ``level_for_xp`` -- the
+- W4.1 (OP-132 / OP-1349): ``award_xp`` -- the deterministic XpDelta
+  entry point.
+- W4.2 (OP-133 / OP-1350): ``level_threshold`` / ``level_for_xp`` -- the
   ``100 * N**1.4`` cumulative-XP curve plus the ``MAX_LEVEL = 80`` hard cap
   that delivers the ADR-0008 "sigmoid late-game" property.
-- W4.3 (OP-134): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
+- W4.3 (OP-1351): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
   ``FIRST_TIME_SKILL_MULTIPLIER``.
-- W4.4 (OP-135): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
+- W4.4 (OP-1352): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
+- W18.2 (OP-1389): secondary-class XP earns 0.5× before Lv 30 and
+  returns to 1.0× from Lv 30 onward.
+- W18.3 (OP-1390): dual-class agents in party tasks earn the hybrid
+  synergy XP bonus.
 
 Module-global state audit (per project SOP)
 -------------------------------------------
@@ -30,6 +35,7 @@ from typing import Any, Literal, Mapping
 
 from backend.agents.buff_registry import xp_multiplier_for_buff_ids
 from backend.agents.debuff_registry import (
+    BURNOUT_DEBUFF_ID,
     DebuffContext,
     active_debuff_ids_for_context,
     xp_multiplier_for_debuff_ids,
@@ -39,17 +45,18 @@ OutcomeStatus = Literal["success", "partial", "fail", "failed"]
 ClassXpTarget = Literal["primary", "secondary"]
 
 BASE_TASK_XP = 100
+LEVEL_CURVE_BASE_XP = 100
 MAX_LEVEL = 80
 LEVEL_CURVE_EXPONENT = 1.4
-# W4.3 (OP-134): Tier-L+ tasks earn a flat 2.0× XP bump on top of the
+# W4.3 (OP-1351): Tier-L+ tasks earn a flat 2.0× XP bump on top of the
 # outcome multiplier per ADR-0008 §"Outcome multipliers" -- stacks
 # multiplicatively with success/partial/fail and with first-time-skill.
 TIER_L_PLUS_MULTIPLIER = 2.0
-# W4.3 (OP-134): The first task that exercises a new (agent, skill) pair
+# W4.3 (OP-1351): The first task that exercises a new (agent, skill) pair
 # earns a 3.0× XP bump per ADR-0008 -- discovery reward, stacks with
 # outcome and Tier-L+ multipliers.
 FIRST_TIME_SKILL_MULTIPLIER = 3.0
-# W4.4 (OP-135): Anti-grinding clamp per ADR-0008 §"XP curve" -- when the
+# W4.4 (OP-1352): Anti-grinding clamp per ADR-0008 §"XP curve" -- when the
 # runner detects that the same canonical task hash has already been
 # awarded to this agent within the last 24h, the XP delta for the repeat
 # is multiplied by 0.2 (i.e. ×0.2, an 80% haircut). Stacks multiplicatively
@@ -65,7 +72,7 @@ SECONDARY_CLASS_FULL_XP_LEVEL = 30
 SECONDARY_CLASS_RAMP_MULTIPLIER = 0.5
 HYBRID_SYNERGY_PARTY_XP_MULTIPLIER = 1.15
 
-# W4.3 (OP-134): outcome → XP multiplier per ADR-0008 §"Outcome
+# W4.3 (OP-1351): outcome → XP multiplier per ADR-0008 §"Outcome
 # multipliers". ``failed`` is an alias for ``fail`` (runner emits either
 # spelling); they MUST stay in lock-step. Tier-L+ and first-time-skill
 # bumps stack multiplicatively on top of this base multiplier inside
@@ -137,8 +144,8 @@ def award_xp(
 def level_threshold(level: int) -> int:
     """RPG.W4.2 -- cumulative XP required to reach ``level`` per ADR-0008.
 
-    Returns ``ceil(BASE_TASK_XP * level ** LEVEL_CURVE_EXPONENT)``, i.e. the
-    ``100 * N**1.4`` curve from the ADR. The per-level marginal cost
+    Returns ``ceil(LEVEL_CURVE_BASE_XP * level ** LEVEL_CURVE_EXPONENT)``,
+    i.e. the ``100 * N**1.4`` curve from the ADR. The per-level marginal cost
     ``level_threshold(N+1) - level_threshold(N)`` grows monotonically with
     ``N`` (per-level grind gets heavier), and the absolute cap from
     :func:`level_for_xp` flattens the curve past :data:`MAX_LEVEL` -- the
@@ -149,7 +156,7 @@ def level_threshold(level: int) -> int:
         raise TypeError("level must be an int")
     if level < 1:
         raise ValueError("level must be >= 1")
-    return math.ceil(BASE_TASK_XP * (level ** LEVEL_CURVE_EXPONENT))
+    return math.ceil(LEVEL_CURVE_BASE_XP * (level ** LEVEL_CURVE_EXPONENT))
 
 
 def level_for_xp(total_xp: int) -> int:
@@ -176,6 +183,8 @@ def level_for_xp(total_xp: int) -> int:
 def secondary_class_xp_multiplier(secondary_class_level: int) -> float:
     """Return W18.2's XP multiplier for a secondary class at ``level``."""
     _clean_level(secondary_class_level, field="secondary_class_level")
+    # RPG.W18.2 (OP-1389): secondary-class ramp is half-speed until
+    # Lv 30, then returns to the normal class XP rate.
     if secondary_class_level >= SECONDARY_CLASS_FULL_XP_LEVEL:
         return 1.0
     return SECONDARY_CLASS_RAMP_MULTIPLIER
@@ -317,11 +326,11 @@ def _validate_outcome(outcome: TaskOutcome) -> None:
 
 
 def _outcome_multiplier(outcome: TaskOutcome) -> float:
-    """RPG.W4.3 (OP-134) -- compose the per-task XP multiplier.
+    """RPG.W4.3 (OP-1351) -- compose the per-task XP multiplier.
 
     Stacking order is multiplicative and stable: outcome → Tier-L+ →
     first-time-skill → W15 buffs → W15 debuffs → W4.4 anti-grind →
-    W18.2 secondary-class ramp → W17 hybrid synergy. The W4.3 contract
+    W18.2 secondary-class ramp → W18.3 hybrid synergy. The W4.3 contract
     only constrains the *first three* terms (success/partial/fail/
     Tier-L+/first-time-skill); later terms are layered by W4.4 / W15 /
     W17 / W18 and documented in their own waves.
@@ -335,7 +344,7 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
         _clean_active_buff_ids(outcome.active_buff_ids)
     )
     multiplier *= xp_multiplier_for_debuff_ids(_effective_debuff_ids(outcome))
-    # W4.4 (OP-135): anti-grinding clamp -- same canonical task hash
+    # W4.4 (OP-1352): anti-grinding clamp -- same canonical task hash
     # repeated within 24h takes a flat 0.2× haircut on top of every
     # earlier multiplier. The flag is computed runner-side and passed
     # in; see :data:`DUPLICATE_TASK_MULTIPLIER` for the contract.
@@ -344,6 +353,8 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
     if outcome.class_xp_target == "secondary":
         multiplier *= secondary_class_xp_multiplier(outcome.secondary_class_level)
     if outcome.dual_class_agent and outcome.party_task:
+        # RPG.W18.3 (OP-1390): dual-class agents receive the hybrid
+        # synergy bump only while participating in a party task.
         multiplier *= HYBRID_SYNERGY_PARTY_XP_MULTIPLIER
     return multiplier
 
@@ -430,8 +441,15 @@ def _clean_active_debuff_ids(value: Any) -> tuple[str, ...]:
 def _effective_debuff_ids(outcome: TaskOutcome) -> tuple[str, ...]:
     explicit = _clean_active_debuff_ids(outcome.active_debuff_ids)
     inferred = active_debuff_ids_for_context(
-        DebuffContext(consecutive_failures=outcome.consecutive_failures)
+        DebuffContext(
+            consecutive_failures=outcome.consecutive_failures,
+            outcome_status=outcome.status,
+        )
     )
+    if outcome.status == "success":
+        explicit = tuple(
+            debuff_id for debuff_id in explicit if debuff_id != BURNOUT_DEBUFF_ID
+        )
     return tuple(dict.fromkeys(explicit + inferred))
 
 
@@ -441,16 +459,19 @@ def party_total_xp_pool(
     *,
     synergy_xp_bonus: float = 0.0,
 ) -> int:
-    """RPG.W17 -- compute the total XP pool that the party's task completion
-    distributes across members.
+    """RPG.W17.5 (OP-196) -- compute the total XP pool that the party's
+    task completion distributes across members.
 
     Mirrors the ADR-0008 §"Party / Synergy system (W17)" rule: each
     member contributes their own base XP to the pool, and the entire
     pool is multiplied by ``(1 + synergy_xp_bonus)`` before being
-    split. The pool is what
-    :func:`backend.agents.party.compute_party_xp_distribution`
-    distributes; this helper lives in ``xp_engine`` so the W4.1 curve
-    constants stay co-located with their callers.
+    split. The pool is the *party-side* half of the W17.5 payout
+    contract — the per-member ``personal_xp`` half is accrued
+    separately and is **not** folded into this number. The pool
+    flows into :func:`backend.agents.party.compute_party_xp_distribution`,
+    which performs the even-split and adds the personal-XP additive
+    on top per W17.5. This helper lives in ``xp_engine`` so the W4.1
+    curve constants stay co-located with their callers.
 
     Returns 0 for ``party_size <= 0`` or non-positive ``base_xp_per_member``.
     """
@@ -497,6 +518,7 @@ __all__ = [
     "DUPLICATE_TASK_MULTIPLIER",
     "FIRST_TIME_SKILL_MULTIPLIER",
     "HYBRID_SYNERGY_PARTY_XP_MULTIPLIER",
+    "LEVEL_CURVE_BASE_XP",
     "LEVEL_CURVE_EXPONENT",
     "MAX_LEVEL",
     "OUTCOME_MULTIPLIERS",

@@ -47,14 +47,20 @@ def _event(
     from_status: str = "承認済み",
     to_status: str = "公開済み",
     meta_key: str = "OP-1000",
+    meta_summary: str | None = None,
+    meta_labels: list[str] | None = None,
 ) -> dict:
     labels = [f"RELEASE-{version}", f"release-child:{child}", "tier:S"]
     status_item = {"field": "status", "fromString": from_status, "toString": to_status}
     meta_issue = {
         "key": meta_key,
         "fields": {
-            "summary": f"RELEASE-{version} META",
-            "labels": ["meta:release", f"RELEASE-{version}"],
+            "summary": meta_summary or f"RELEASE-{version} META",
+            "labels": (
+                meta_labels
+                if meta_labels is not None
+                else ["meta:release", f"RELEASE-{version}"]
+            ),
         },
     }
     return {
@@ -116,6 +122,47 @@ def test_routing_per_tier_uses_rc_and_prod_channels(tmp_path: Path) -> None:
     assert rc_route.slack_channel == "#releases-rc"
     assert prod_route.slack_channel == "#releases-prod"
     assert rc_route.email_recipient == "releases@sora.services"
+
+
+def test_meta_summary_detection_tolerates_action_tag_prefix() -> None:
+    """AC: tagged release META summary is treated as the linked release parent."""
+    transition = rn.transition_from_jira_event(
+        _event(
+            version="v0.5.0-rc1",
+            meta_summary="[GATE] RELEASE-v0.5.0-rc1 META",
+            meta_labels=[],
+        )
+    )
+
+    assert transition is not None
+    assert transition.meta_key == "OP-1000"
+
+
+def test_meta_summary_detection_accepts_raw_release_prefix() -> None:
+    """AC: untagged release META summary is still treated as the linked release parent."""
+    transition = rn.transition_from_jira_event(
+        _event(
+            version="v0.5.0-rc1",
+            meta_summary="RELEASE-v0.5.0-rc1 META",
+            meta_labels=[],
+        )
+    )
+
+    assert transition is not None
+    assert transition.meta_key == "OP-1000"
+
+
+def test_meta_summary_detection_rejects_mid_string_release_word() -> None:
+    """AC: non-release summaries containing RELEASE- mid-string are ignored."""
+    transition = rn.transition_from_jira_event(
+        _event(
+            version="v0.5.0-rc1",
+            meta_summary="not a release parent RELEASE-v0.5.0-rc1",
+            meta_labels=[],
+        )
+    )
+
+    assert transition is None
 
 
 def test_missing_config_falls_back_to_default_channel(tmp_path: Path) -> None:

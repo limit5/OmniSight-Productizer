@@ -19,15 +19,22 @@ import pytest
 
 from backend.agents import ai_reviewer
 from backend.agents.ai_reviewer import (
+    AIReviewVerdict,
+    Change,
+    ChangeFile,
     DEFAULT_REVIEW_DIFF_LIMIT_LOC,
     MODEL_HAIKU,
     MODEL_OPUS,
     MODEL_SONNET,
     ReviewResult,
+    ReviewerAction,
+    Severity,
+    can_auto_plus_one,
     diff_loc,
     is_too_large,
     mark_reviewed,
     reset_throttle,
+    resolve_reviewer_action,
     review_patchset,
     route_model,
     should_skip_recent,
@@ -396,3 +403,142 @@ def test_model_constants_match_spec():
     assert MODEL_OPUS == "claude-opus-4-7"
     assert DEFAULT_REVIEW_DIFF_LIMIT_LOC == 1500
     assert ai_reviewer.DEFAULT_THROTTLE_TTL_S == 24 * 3600
+
+
+# ── OP-1331 input validation / boundary coverage ─────────────────────
+
+
+def test_route_model_input_boundaries():
+    many_files = ["docs/x.md"] * 5000 + ["backend/routers/x.py"]
+
+    assert route_model(None, files=[]) == MODEL_HAIKU
+    assert route_model("", files=[None, "", "/COMMIT_MSG"]) == MODEL_HAIKU
+    assert route_model("", files=many_files) == MODEL_SONNET
+    with pytest.raises(TypeError):
+        route_model("", files=None)
+    with pytest.raises(TypeError):
+        route_model("", files=object())
+
+
+def test_diff_loc_input_boundaries():
+    huge_diff = "\n".join("+x" for _ in range(5000))
+
+    assert diff_loc(None) == 0
+    assert diff_loc("") == 0
+    assert diff_loc(huge_diff) == 5000
+    with pytest.raises(AttributeError):
+        diff_loc(object())
+
+
+def test_is_too_large_input_boundaries():
+    assert is_too_large(diff=None) is False
+    assert is_too_large(diff="") is False
+    assert is_too_large(insertions=DEFAULT_REVIEW_DIFF_LIMIT_LOC + 1) is True
+    assert is_too_large(deletions=DEFAULT_REVIEW_DIFF_LIMIT_LOC + 1) is True
+    with pytest.raises(TypeError):
+        is_too_large(insertions="many", deletions=1)
+
+
+def test_too_large_message_input_boundaries():
+    empty_msg = too_large_message(diff="", model_id=MODEL_HAIKU)
+    none_msg = too_large_message(diff=None, model_id=MODEL_HAIKU)
+    large_msg = too_large_message(
+        insertions=DEFAULT_REVIEW_DIFF_LIMIT_LOC + 10,
+        deletions=DEFAULT_REVIEW_DIFF_LIMIT_LOC + 20,
+        model_id=MODEL_HAIKU,
+    )
+
+    assert "diff size 0" in empty_msg
+    assert "diff size 0" in none_msg
+    assert "diff size 3030" in large_msg
+    with pytest.raises(TypeError):
+        too_large_message(insertions="many", deletions=1)
+
+
+def test_can_auto_plus_one_input_boundaries():
+    verdict = AIReviewVerdict(Severity.APPROVE)
+    empty_change = Change(id="Iempty", mergeable=True, files=())
+    huge_change = Change(
+        id="Ihuge",
+        mergeable=True,
+        size_insertions=5000,
+        files=(ChangeFile(file="backend/routers/x.py"),),
+    )
+    safety_change = Change(
+        id="Isafety",
+        mergeable=True,
+        files=(ChangeFile(file="backend/security/secrets.py"),),
+    )
+
+    assert can_auto_plus_one(empty_change, verdict) == (True, "all-green")
+    assert can_auto_plus_one(huge_change, verdict)[0] is False
+    assert can_auto_plus_one(safety_change, verdict)[0] is False
+    with pytest.raises(AttributeError):
+        can_auto_plus_one(None, verdict)
+    with pytest.raises(AttributeError):
+        can_auto_plus_one(empty_change, None)
+
+
+def test_resolve_reviewer_action_input_boundaries():
+    verdict = AIReviewVerdict(Severity.APPROVE)
+    change = Change(id="Iok", mergeable=True, files=())
+
+    assert (
+        resolve_reviewer_action(change, verdict, "disabled").action
+        == ReviewerAction.SKIP
+    )
+    assert (
+        resolve_reviewer_action(change, verdict, "").action
+        == ReviewerAction.AUTO_PLUS_ONE
+    )
+    assert (
+        resolve_reviewer_action(change, verdict, None).action
+        == ReviewerAction.AUTO_PLUS_ONE
+    )
+    with pytest.raises(AttributeError):
+        resolve_reviewer_action(None, verdict, "auto")
+    with pytest.raises(AttributeError):
+        resolve_reviewer_action(change, None, "auto")
+
+
+def test_throttle_input_boundaries():
+    mark_reviewed(None, "sha1", now=1000.0)
+    mark_reviewed("Iabc", None, now=1000.0)
+    mark_reviewed("Iabc", "sha1", now=1000.0)
+
+    assert should_skip_recent(None, "sha1", now=1001.0) is False
+    assert should_skip_recent("Iabc", None, now=1001.0) is False
+    assert should_skip_recent("Iabc", "sha1", now=1001.0, ttl_s=0) is False
+    assert should_skip_recent("Iabc", "sha1", now=1001.0, ttl_s=5000) is True
+
+
+def test_review_patchset_input_boundaries():
+    captured: dict = {}
+
+    def fake_invoke(prompt, *, model: str) -> str:
+        captured["prompt"] = prompt
+        captured["model"] = model
+        return "LGTM"
+
+    empty_result = review_patchset(
+        "",
+        files=[],
+        subject=None,
+        invoke=fake_invoke,
+        pricing=_stub_pricing,
+    )
+    assert empty_result.score == 1
+    assert captured["model"] == MODEL_HAIKU
+    assert "automated AI code reviewer" in captured["prompt"]
+
+    huge_result = review_patchset(
+        "+x\n" * (DEFAULT_REVIEW_DIFF_LIMIT_LOC + 1),
+        files=["docs/x.md"],
+        invoke=fake_invoke,
+        pricing=_stub_pricing,
+    )
+    assert huge_result.score == 0
+    assert huge_result.skipped_reason == "too_large"
+
+    with pytest.raises(TypeError):
+        review_patchset(None, files=None, invoke=fake_invoke, pricing=_stub_pricing)

@@ -58,7 +58,13 @@ def get_agent_class_cost_baseline(agent_class: str) -> AgentClassCostBaseline:
     try:
         return AGENT_CLASS_COST_BASELINES[key]
     except KeyError as exc:
-        raise KeyError(f"No MP.W2.2 cost baseline for agent_class {key!r}") from exc
+        known = sorted(AGENT_CLASS_COST_BASELINES)
+        raise KeyError(
+            "cost_estimator_baseline.get_agent_class_cost_baseline: no MP.W2.2 cost "
+            f"baseline registered for agent_class={key!r} "
+            f"(raw input={agent_class!r}); known agent_class keys are {known}. "
+            f"Seed source: {BASELINE_SOURCE} (extend AGENT_CLASS_COST_BASELINES to add)."
+        ) from exc
 
 
 def list_agent_class_cost_baselines() -> tuple[AgentClassCostBaseline, ...]:

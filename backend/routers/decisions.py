@@ -55,6 +55,13 @@ def _rate_limit(client_ip: str) -> None:
 # (e.g. approving a destructive-severity decision). Gate them behind an
 # optional bearer token — if OMNISIGHT_DECISION_BEARER is unset we keep
 # the current open-posture of the codebase; if set, mutators require it.
+#
+# FX2.D4.4 (OP-237, 2026-05-16): this inline env-check is on the sunset
+# path. K6 ``api_keys`` is the supported replacement; AS.0.4 Track B
+# documents the expand-migrate-contract removal in
+# ``docs/security/as_0_4_credential_refactor_migration_plan.md``.
+# Removal target: next major. Once the AS.6 expand step (Depends on
+# ``_au.require_api_key``) lands the env-var check can be deleted.
 def _require_decision_token(
     request: Request,
     authorization: str | None = Header(default=None),

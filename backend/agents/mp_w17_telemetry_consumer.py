@@ -67,7 +67,13 @@ def _parse_timestamp(raw: Any) -> datetime:
             dt = datetime.fromisoformat(cleaned)
             return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
-            LOG.debug("mp_w17 telemetry timestamp %r unparseable; using now()", raw)
+            LOG.debug(
+                "mp_w17_telemetry_consumer._parse_timestamp: timestamp %r "
+                "unparseable as ISO-8601 (cleaned=%r); falling back to "
+                "datetime.now(timezone.utc)",
+                raw,
+                cleaned,
+            )
     return datetime.now(timezone.utc)
 
 
@@ -111,9 +117,24 @@ def payload_from_invocation_log(line: str) -> dict[str, Any] | None:
         return None
     try:
         payload = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        LOG.debug(
+            "mp_w17_telemetry_consumer.payload_from_invocation_log: could not "
+            "decode JSON after %r prefix (err=%s, body[:120]=%r)",
+            INVOCATION_LOG_PREFIX,
+            exc,
+            raw[:120],
+        )
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        LOG.debug(
+            "mp_w17_telemetry_consumer.payload_from_invocation_log: decoded "
+            "JSON is not a mapping (got_type=%s, body[:120]=%r); dropping",
+            type(payload).__name__,
+            raw[:120],
+        )
+        return None
+    return payload
 
 
 async def consume_event(
@@ -137,10 +158,26 @@ async def consume_event(
     )
     agent_id = payload.get("agent_id") or invocation_payload.get("agent_id")
     if not isinstance(tool_id, str) or not tool_id.strip():
-        LOG.debug("mp_w17 telemetry event missing tool_name; dropping")
+        LOG.debug(
+            "mp_w17_telemetry_consumer.consume_event: dropping event with "
+            "missing/empty tool_name (tool_id=%r, agent_id=%r, "
+            "payload_keys=%s, invocation_keys=%s)",
+            tool_id,
+            agent_id,
+            sorted(payload.keys()),
+            sorted(invocation_payload.keys()) if invocation_payload else [],
+        )
         return None
     if not isinstance(agent_id, str) or not agent_id.strip():
-        LOG.debug("mp_w17 telemetry event missing agent_id; dropping")
+        LOG.debug(
+            "mp_w17_telemetry_consumer.consume_event: dropping event with "
+            "missing/empty agent_id (agent_id=%r, tool_id=%r, "
+            "payload_keys=%s, invocation_keys=%s)",
+            agent_id,
+            tool_id,
+            sorted(payload.keys()),
+            sorted(invocation_payload.keys()) if invocation_payload else [],
+        )
         return None
 
     when = _parse_timestamp(

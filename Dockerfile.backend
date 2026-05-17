@@ -28,12 +28,15 @@ COPY backend/requirements.txt ./requirements.txt
 # runner's `--require-hashes` install fails on any package lacking a
 # prebuilt wheel (zxcvbn-python et al).
 #
-# FX.6.7 (2026-05-04): the prod lockfile no longer carries pytest /
-# pytest-asyncio / pytest-cov / respx / pip-audit / ruff / mypy — those
-# moved to backend/requirements-dev.txt and are NOT copied into the
-# runtime image. The previous defensive ``pip uninstall -y pytest …``
-# step right after this install is gone (it was a no-op once the
-# packages stopped being resolved into the lockfile).
+# FX.6.7 (2026-05-04): the prod lockfile no longer carries pytest-asyncio /
+# pytest-cov / respx / pip-audit / ruff / mypy — those moved to
+# backend/requirements-dev.txt and are NOT copied into the runtime image.
+# OP-1405 restored runtime pytest + pytest-timeout only because
+# merge_arbiter shells out to `python3 -m pytest --timeout=60` in a
+# scratch worktree before merger-agent-bot pushes conflict resolutions.
+# The previous defensive ``pip uninstall -y pytest …`` step right after
+# this install is gone (it was a no-op once the packages stopped being
+# resolved into the lockfile).
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # OP-899: Cognee's current resolver graph pulls LiteLLM with an OpenAI
@@ -104,11 +107,24 @@ WORKDIR /app
 # import time — without these, `from backend.reports import ...` crashes
 # in production. `fonts-dejavu-core` provides a default font face so
 # PDF rendering doesn't fall back to blank glyph boxes.
-# No compilers, no git, no ssh — ~300 MB smaller than the prior image.
+# OP-1195 (2026-05-17): added `git openssh-client` after discovering
+# the merger pipeline silently abstains on every real conflict because
+# (a) conflict_enrichment.enrich_via_local_merge subprocess-execs git
+# clone/fetch/merge against the Gerrit project, (b) the resolution-push
+# step in merge_arbiter needs git+ssh to push the merger-agent-bot PS
+# back to refs/for/<branch>, and (c) the OP-713 ai-reviewer-webhook
+# path's gerrit_client.query_change shells out to `ssh ... gerrit query`
+# (separate from the daemon path that runs on the host and has both).
+# Without ssh+git the backend container silently logs
+# `skip_reason=gerrit_query_error err=[Errno 2] No such file or directory`
+# on every patchset-created webhook AND on every LLM-resolved conflict.
+# Trade-off: image gains ~25 MB. Compiler toolchain (gcc/g++) stays in
+# the builder stage only — runtime is still ~300 MB lighter than the
+# original single-stage image, just not as light as the no-git variant.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpango-1.0-0 libpangoft2-1.0-0 libcairo2 libgdk-pixbuf-2.0-0 \
         libffi8 shared-mime-info fonts-dejavu-core \
-        curl \
+        curl git openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Transport the pruned Python site-packages from builder. This is the

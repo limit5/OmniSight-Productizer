@@ -285,7 +285,11 @@ def build_default_server_config(
     catalog = default_catalog_by_name()
     if name not in catalog:
         raise KeyError(
-            f"Unknown remote MCP server {name!r}. Known: {sorted(catalog)}"
+            f"backend.agents.mcp_integration.build_default_server_config: "
+            f"Unknown remote MCP server {name!r} "
+            f"(url_override={url_override!r}, "
+            f"authorization_token={'<set>' if authorization_token else None}). "
+            f"Known DEFAULT_REMOTE_MCP_CATALOG entries: {sorted(catalog)}"
         )
     entry = catalog[name]
     return MCPServerConfig(
@@ -383,10 +387,14 @@ def build_registry_from_env(
       ``AnthropicClient.run_with_tools(mcp_servers=...)``.
     """
     src = env if env is not None else os.environ
-    if src.get("OMNISIGHT_MCP_DISABLE_ALL", "").strip().lower() in {
-        "1", "true", "yes", "on"
-    }:
-        logger.info("MCP integration disabled via OMNISIGHT_MCP_DISABLE_ALL")
+    disable_raw = src.get("OMNISIGHT_MCP_DISABLE_ALL", "")
+    if disable_raw.strip().lower() in {"1", "true", "yes", "on"}:
+        logger.info(
+            "backend.agents.mcp_integration.build_registry_from_env: "
+            "MCP integration disabled via OMNISIGHT_MCP_DISABLE_ALL=%r "
+            "(returning empty registry)",
+            disable_raw,
+        )
         return RemoteMCPRegistry()
 
     aliases = env_var_by_name or ENV_TOKEN_VAR_BY_NAME
@@ -421,9 +429,21 @@ def build_registry_from_env(
         )
     if configs:
         logger.info(
-            "MCP registry: %d server(s) configured via env (%s)",
+            "backend.agents.mcp_integration.build_registry_from_env: "
+            "MCP registry built — %d of %d catalog entries configured "
+            "via env (%s); skipped %d without an env token",
             len(configs),
+            len(catalog),
             ", ".join(c.name for c in configs),
+            len(catalog) - len(configs),
+        )
+    else:
+        logger.info(
+            "backend.agents.mcp_integration.build_registry_from_env: "
+            "MCP registry built — 0 of %d catalog entries had a token in env "
+            "(checked env vars: %s); returning empty registry",
+            len(catalog),
+            sorted(aliases.values()),
         )
     return RemoteMCPRegistry(configs)
 
@@ -485,7 +505,11 @@ def query_mcp_tool_list(
         raise
     except OSError as exc:
         raise ConnectionError(
-            f"MCP tools/list probe failed for {config.name} at {config.url}"
+            f"backend.agents.mcp_integration.query_mcp_tool_list: "
+            f"MCP tools/list probe failed for server {config.name!r} "
+            f"at {config.url!r} (timeout={timeout}s, "
+            f"authorization_token={'<set>' if config.authorization_token else None}): "
+            f"{type(exc).__name__}: {exc}"
         ) from exc
     parsed = json.loads(body) if body else {}
     tools = parsed.get("result", {}).get("tools", [])
@@ -571,17 +595,21 @@ def register_local_mcp_server(
     Re-registration replaces the prior entry so a hot-reload during
     tests is safe.
     """
+    required_prefix = f"{server_name}__"
     for name in tool_handlers:
-        if not name.startswith(f"{server_name}__"):
+        if not name.startswith(required_prefix):
             raise ValueError(
-                f"Local MCP {server_name!r}: tool name {name!r} must "
-                f"start with {server_name!r} prefix"
+                f"backend.agents.mcp_integration.register_local_mcp_server: "
+                f"local MCP server {server_name!r} tool name {name!r} must "
+                f"start with required prefix {required_prefix!r} "
+                f"(got tool_handlers keys: {sorted(tool_handlers)})"
             )
     _LOCAL_MCP_HANDLERS.update(tool_handlers)
     _LOCAL_MCP_TOOL_SCHEMAS[server_name] = list(tool_schemas)
     logger.info(
-        "Local MCP server registered: %s (%d tools)",
-        server_name, len(tool_handlers),
+        "backend.agents.mcp_integration.register_local_mcp_server: "
+        "local MCP server %r registered with %d tool(s): %s",
+        server_name, len(tool_handlers), sorted(tool_handlers),
     )
 
 
@@ -594,9 +622,17 @@ def dispatch_local_mcp_tool(tool_name: str, input: dict[str, Any]) -> Any:
     """Execute a registered local MCP tool call."""
     handler = _LOCAL_MCP_HANDLERS.get(tool_name)
     if handler is None:
+        if not _LOCAL_MCP_HANDLERS:
+            raise KeyError(
+                f"backend.agents.mcp_integration.dispatch_local_mcp_tool: "
+                f"Unknown local MCP tool {tool_name!r}; no local MCP servers "
+                f"are registered (call register_local_mcp_server first)"
+            )
         raise KeyError(
-            f"Unknown local MCP tool {tool_name!r}; known: "
-            f"{sorted(_LOCAL_MCP_HANDLERS)}"
+            f"backend.agents.mcp_integration.dispatch_local_mcp_tool: "
+            f"Unknown local MCP tool {tool_name!r}; "
+            f"registered servers: {registered_local_mcp_servers()}; "
+            f"known tool names: {sorted(_LOCAL_MCP_HANDLERS)}"
         )
     return handler(input)
 

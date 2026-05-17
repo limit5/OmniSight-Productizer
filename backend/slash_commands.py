@@ -200,6 +200,8 @@ async def _platform(conn: asyncpg.Connection, args: str) -> str:
 
 async def _spawn(conn: asyncpg.Connection, args: str) -> str:
     agent_type = args.strip().lower() or "general"
+    if agent_type == "firmware":
+        return "Firmware 已拆為 `bsp` / `hal`，請改用 `/spawn bsp` 或 `/spawn hal`。"
     from backend.routers.agents import _agents, _persist
     from backend.models import Agent, AgentType, AgentStatus
     import uuid

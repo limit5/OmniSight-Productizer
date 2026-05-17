@@ -265,3 +265,15 @@ def test_invalid_guild_or_tier_is_rejected(case: MatrixCase) -> None:
 
     with pytest.raises(ValueError):
         _claims_func(case)(tier="T9")
+
+
+@pytest.mark.parametrize("case", MATRIX_CASES, ids=lambda case: case.name)
+def test_scoped_check_rejects_invalid_guild(case: MatrixCase) -> None:
+    with pytest.raises(ValueError):
+        _check_func(case)("not-a-guild", case.supported_tier)
+
+
+@pytest.mark.parametrize("case", MATRIX_CASES, ids=lambda case: case.name)
+def test_scoped_check_rejects_invalid_tier(case: MatrixCase) -> None:
+    with pytest.raises(ValueError):
+        _check_func(case)(case.supported_guild, "T9")

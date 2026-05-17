@@ -40,6 +40,12 @@ Why this combo:
 3. Python 3.12, Node 20+, `npm ci && npm run build` runs cleanly.
 4. `.env` populated — see `.env.example`; at minimum set a
    `OMNISIGHT_DECISION_BEARER` and an LLM provider key.
+   *(Note: `OMNISIGHT_DECISION_BEARER` is deprecated as of
+   FX2.D4.4 / OP-237 (2026-05-16) and scheduled for removal in the
+   next major release. New deployments should still set it for the
+   first boot so K6 can auto-migrate it into the `api_keys` table —
+   then drop the env var once per-service Admin UI keys are in
+   place. See `docs/ops/security_baseline.md` §3.)*
 
 ## 1. Delegate DNS to Cloudflare
 
@@ -160,7 +166,7 @@ OMNISIGHT_AUTH_MODE=strict
 OMNISIGHT_COOKIE_SECURE=true
 OMNISIGHT_ADMIN_EMAIL=you@example.com
 OMNISIGHT_ADMIN_PASSWORD='at-least-12-chars-prefer-a-passphrase'
-OMNISIGHT_DECISION_BEARER='another-long-random-string'
+OMNISIGHT_DECISION_BEARER='another-long-random-string'  # DEPRECATED (FX2.D4.4 / OP-237); migrate to Admin UI > API Keys, removed in next major
 ```
 
 `validate_startup_config` (L1-03) refuses to boot under

@@ -70,7 +70,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Iterable
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +97,7 @@ class SubmitReason(str, Enum):
     reject_missing_merger_plus_two = "reject_missing_merger_plus_two"
     reject_missing_both = "reject_missing_human_and_merger_plus_two"
     reject_negative_vote = "reject_negative_vote"
+    reject_depends_on_unresolved = "reject_depends_on_unresolved"
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,7 @@ class SubmitDecision:
     ai_plus_twos: int = 0               # includes merger
     negative_votes: int = 0
     negative_voters: list[str] = field(default_factory=list)
+    depends_on_blockers: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -156,6 +158,7 @@ class SubmitDecision:
             "ai_plus_twos": self.ai_plus_twos,
             "negative_votes": self.negative_votes,
             "negative_voters": list(self.negative_voters),
+            "depends_on_blockers": list(self.depends_on_blockers),
         }
 
 
@@ -168,6 +171,7 @@ def evaluate_submit_rule(
     votes: Iterable[ReviewerVote | dict],
     *,
     had_conflict: bool = True,
+    depends_on_blockers: Iterable[str | dict[str, Any]] | None = None,
 ) -> SubmitDecision:
     """Evaluate the dual-+2 rule over ``votes`` and return a
     :class:`SubmitDecision`.
@@ -177,6 +181,11 @@ def evaluate_submit_rule(
     so existing callers that don't opt in keep their pre-OP-694
     behaviour — only the new arbiter / status-check sites should
     pass ``False`` after confirming the change had no conflict.
+
+    ``depends_on_blockers`` is the unresolved Gerrit ``Depends-On`` /
+    dependency list.  Any entry present here blocks submit before
+    positive votes can allow the change; callers should pass only
+    dependencies that have not already merged.
 
     Accepts either :class:`ReviewerVote` instances or plain dicts (for
     JSON callers).  Never raises.
@@ -206,6 +215,7 @@ def evaluate_submit_rule(
     negative = [v for v in normalized if v.is_negative()]
     negative_votes = len(negative)
     negative_voters = [v.voter for v in negative]
+    depends_on_blocker_ids = _normalize_depends_on_blockers(depends_on_blockers)
 
     # ── (3) Negative vote kill-switch ────────────────────────────
     if negative_votes > 0:
@@ -223,6 +233,26 @@ def evaluate_submit_rule(
             ai_plus_twos=ai_plus_twos,
             negative_votes=negative_votes,
             negative_voters=negative_voters,
+            depends_on_blockers=depends_on_blocker_ids,
+        )
+
+    # ── (4) Depends-On kill-switch ────────────────────────────────
+    if depends_on_blocker_ids:
+        return SubmitDecision(
+            allow=False,
+            reason=SubmitReason.reject_depends_on_unresolved,
+            detail=(
+                "Submission blocked: Gerrit Depends-On dependencies have "
+                "not passed yet. Blockers: "
+                f"{', '.join(depends_on_blocker_ids)}"
+            ),
+            missing=["depends_on_clear"],
+            human_plus_twos=human_plus_twos,
+            merger_plus_twos=merger_plus_twos,
+            ai_plus_twos=ai_plus_twos,
+            negative_votes=negative_votes,
+            negative_voters=negative_voters,
+            depends_on_blockers=depends_on_blocker_ids,
         )
 
     # ── (1) HUMAN +2 hard gate ───────────────────────────────────
@@ -268,6 +298,7 @@ def evaluate_submit_rule(
             ai_plus_twos=ai_plus_twos,
             negative_votes=negative_votes,
             negative_voters=negative_voters,
+            depends_on_blockers=depends_on_blocker_ids,
         )
 
     # ── All gates satisfied ──────────────────────────────────────
@@ -282,7 +313,33 @@ def evaluate_submit_rule(
         human_plus_twos=human_plus_twos,
         merger_plus_twos=merger_plus_twos,
         ai_plus_twos=ai_plus_twos,
+        depends_on_blockers=depends_on_blocker_ids,
     )
+
+
+def _normalize_depends_on_blockers(
+    blockers: Iterable[str | dict[str, Any]] | None,
+) -> list[str]:
+    """Return stable display ids for unresolved Gerrit dependencies."""
+    normalized: list[str] = []
+    for dep in blockers or ():
+        if isinstance(dep, str):
+            value = dep.strip()
+        elif isinstance(dep, dict):
+            value = str(
+                dep.get("id")
+                or dep.get("change_id")
+                or dep.get("changeId")
+                or dep.get("number")
+                or dep.get("_number")
+                or dep.get("revision")
+                or ""
+            ).strip()
+        else:
+            value = ""
+        if value:
+            normalized.append(value)
+    return normalized
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

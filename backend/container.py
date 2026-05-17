@@ -382,6 +382,23 @@ async def _oom_watchdog(agent_id: str, container_name: str,
         logger.debug("oom watchdog for %s aborted: %s", container_name, exc)
 
 
+async def _cancel_watchdog_task(task) -> None:
+    """Cancel and drain a per-container watchdog task."""
+    if task is asyncio.current_task():
+        return
+    try:
+        task.cancel()
+    except Exception as exc:
+        logger.debug("watchdog task cancel failed: %s", exc)
+        return
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        logger.debug("watchdog task exited during cancellation: %s", exc)
+
+
 async def _read_cgroup_oom_count(container_name: str) -> int:
     """Best-effort read of the kernel oom counter from the container's
     cgroup. Returns 0 on any failure (cgroup gone, permission denied,
@@ -1024,20 +1041,14 @@ async def stop_container(agent_id: str) -> bool:
     # against an already-removed name.
     task = getattr(info, "lifetime_task", None)
     if task is not None:
-        try:
-            task.cancel()
-        except Exception:
-            pass
+        await _cancel_watchdog_task(task)
 
     # M1: cancel the OOM watchdog. We're tearing the container down
     # explicitly, so any poll-after-this would just hit "no such
     # container" and noisy-log.
     oom = getattr(info, "oom_task", None)
     if oom is not None:
-        try:
-            oom.cancel()
-        except Exception:
-            pass
+        await _cancel_watchdog_task(oom)
 
     emit_pipeline_phase("container_stop", f"Stopping container for {agent_id}")
 

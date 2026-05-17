@@ -177,6 +177,6 @@ async def test_stop_container_cancels_lifetime_task(monkeypatch):
     info.lifetime_task = asyncio.create_task(long_sleep())
     await asyncio.sleep(0.01)
     await ct.stop_container("a-stop")
-    await asyncio.sleep(0.01)
     assert cancelled["flag"] is True
+    assert info.lifetime_task.done()
     assert "a-stop" not in ct._containers

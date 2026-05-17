@@ -27,8 +27,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+import urllib.error
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from backend import circuit_breaker as cb
 from backend.agents import circuit_breaker as runner_cb
@@ -51,6 +54,194 @@ def _reset_circuit_state():
 
 
 class TestRunnerCircuitBreaker:
+
+    @settings(
+        max_examples=75,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        name=st.text(max_size=256),
+        threshold=st.integers(min_value=1, max_value=20),
+        failures=st.integers(min_value=0, max_value=100),
+        state=st.sampled_from(["closed", "half-open"]),
+        result=st.one_of(
+            st.none(),
+            st.booleans(),
+            st.integers(),
+            st.text(max_size=4096),
+            st.lists(st.integers(), max_size=128),
+            st.dictionaries(st.text(max_size=32), st.integers(), max_size=32),
+        ),
+    )
+    def test_successful_call_property_returns_value_and_closes_probe(
+        self,
+        name,
+        threshold,
+        failures,
+        state,
+        result,
+        monkeypatch,
+    ):
+        now = {"value": 1000.0}
+        breaker = runner_cb.CircuitBreaker(
+            name,
+            failure_threshold=threshold,
+            state=state,
+            consecutive_failures=failures,
+        )
+        monkeypatch.setattr(runner_cb.time, "time", lambda: now["value"])
+
+        assert breaker.call(lambda: result) == result
+        assert breaker.consecutive_failures == 0
+        assert breaker.state == "closed"
+
+    @settings(
+        max_examples=75,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        name=st.text(max_size=256),
+        threshold=st.integers(min_value=1, max_value=20),
+        attempts=st.integers(min_value=0, max_value=40),
+        exc_kind=st.sampled_from(["url", "connection", "timeout", "http_500"]),
+    )
+    def test_transport_failures_property_open_at_threshold(
+        self,
+        name,
+        threshold,
+        attempts,
+        exc_kind,
+        monkeypatch,
+    ):
+        now = {"value": 1000.0}
+        alerts: list[str] = []
+        breaker = runner_cb.CircuitBreaker(name, failure_threshold=threshold)
+        monkeypatch.setattr(runner_cb.time, "time", lambda: now["value"])
+        monkeypatch.setattr(runner_cb, "_notify_operator", alerts.append)
+
+        def fail():
+            if exc_kind == "url":
+                raise urllib.error.URLError("down")
+            if exc_kind == "connection":
+                raise ConnectionError("down")
+            if exc_kind == "timeout":
+                raise TimeoutError("down")
+            raise urllib.error.HTTPError(
+                url="https://example.invalid",
+                code=500,
+                msg="server error",
+                hdrs=None,
+                fp=None,
+            )
+
+        for _ in range(attempts):
+            try:
+                breaker.call(fail)
+            except (
+                runner_cb.CircuitBreakerOpen,
+                urllib.error.HTTPError,
+                urllib.error.URLError,
+                ConnectionError,
+                TimeoutError,
+            ):
+                pass
+
+        recorded_failures = min(attempts, threshold)
+        assert breaker.consecutive_failures == recorded_failures
+        assert breaker.is_open() is (attempts >= threshold)
+        assert breaker.state == ("open" if attempts >= threshold else "closed")
+        assert len(alerts) == (1 if attempts >= threshold else 0)
+
+    @settings(
+        max_examples=75,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        name=st.text(max_size=256),
+        threshold=st.integers(min_value=1, max_value=20),
+        recovery_timeout=st.integers(min_value=0, max_value=1_000),
+        failures=st.integers(min_value=0, max_value=100),
+        opened_at=st.floats(
+            min_value=-1_000_000,
+            max_value=1_000_000,
+            allow_nan=False,
+            allow_infinity=False,
+        ),
+    )
+    def test_reset_property_is_idempotent(
+        self,
+        name,
+        threshold,
+        recovery_timeout,
+        failures,
+        opened_at,
+        monkeypatch,
+    ):
+        now = {"value": 1000.0}
+        breaker = runner_cb.CircuitBreaker(
+            name,
+            failure_threshold=threshold,
+            recovery_timeout=recovery_timeout,
+            state="open",
+            consecutive_failures=failures,
+            opened_at=opened_at,
+        )
+        monkeypatch.setattr(runner_cb.time, "time", lambda: now["value"])
+
+        breaker.reset()
+        first = (
+            breaker.state,
+            breaker.consecutive_failures,
+            breaker.opened_at,
+            breaker.is_open(),
+        )
+        breaker.reset()
+        second = (
+            breaker.state,
+            breaker.consecutive_failures,
+            breaker.opened_at,
+            breaker.is_open(),
+        )
+
+        assert first == ("closed", 0, 0, False)
+        assert second == first
+
+    @settings(
+        max_examples=75,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    @given(
+        open_names=st.lists(
+            st.sampled_from(list(runner_cb.BREAKERS)),
+            unique=True,
+            max_size=len(runner_cb.BREAKERS),
+        ),
+        elapsed=st.integers(min_value=0, max_value=60),
+    )
+    def test_open_services_property_reports_open_breakers_and_reset_clears(
+        self,
+        open_names,
+        elapsed,
+        monkeypatch,
+    ):
+        now = {"value": 1000.0}
+        monkeypatch.setattr(runner_cb.time, "time", lambda: now["value"])
+        runner_cb.reset_for_tests()
+        for name in open_names:
+            breaker = runner_cb.BREAKERS[name]
+            breaker.state = "open"
+            breaker.opened_at = now["value"] - elapsed
+
+        expected = [name for name in runner_cb.BREAKERS if name in open_names]
+        assert runner_cb.open_services() == expected
+        assert isinstance(runner_cb.open_services(), list)
+
+        runner_cb.reset_for_tests()
+        assert runner_cb.open_services() == []
 
     def test_jira_503_five_times_opens_then_half_open_success_closes(self, monkeypatch):
         now = {"value": 1000.0}

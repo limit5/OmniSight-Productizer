@@ -117,6 +117,8 @@ export type SSEEvent =
         push_sha: string
         awaiting_since: number
         jira_ticket: string
+        guild_id?: string
+        size?: string
         timestamp: string
       }
     }
@@ -1096,6 +1098,7 @@ export interface ApiAgent {
   name: string
   type: string
   sub_type: string
+  guild?: string | null
   status: string
   progress: { current: number; total: number }
   thought_chain: string
@@ -1107,6 +1110,28 @@ export interface ApiAgent {
 
 export async function listAgents() {
   return request<ApiAgent[]>("/agents")
+}
+
+export interface AgentCardSummary {
+  agent_id: string
+  agent_class: string
+  instance_suffix: string | null
+  guild: string
+  level: number
+  xp: number
+  specialization_label: string
+  style_fingerprint: string
+  created_at: string
+  last_activity_at?: string | null
+  status?: string | null
+}
+
+export async function listAgentCards(filters: { guild?: string; sort_by?: "level" | "activity" | "xp" } = {}) {
+  const qs = new URLSearchParams()
+  if (filters.guild) qs.set("guild", filters.guild)
+  if (filters.sort_by) qs.set("sort_by", filters.sort_by)
+  const suffix = qs.toString() ? `?${qs.toString()}` : ""
+  return request<AgentCardSummary[]>(`/agents/cards${suffix}`)
 }
 
 export async function getAgent(id: string) {
@@ -4476,6 +4501,13 @@ export interface OpsSummary {
   /** Phase 64-C-LOCAL UX-6: T3 runner dispatch breakdown. local + bundle
    * always present; ssh / qemu populated once those runners land. */
   t3_runners?: { local: number; ssh: number; qemu: number; bundle: number }
+  /** BP.K.5: per-Guild operational split for the compact ops panel.
+   * Currently sourced from pending decisions carrying ``guild_id`` (or
+   * transition-period ``agent_type``) metadata. */
+  guild_metrics?: Array<{
+    guild: string
+    decisions_pending: number
+  }>
   /** R2 (#308): the single agent with the highest current semantic-entropy
    * score, or null if the monitor hasn't produced a measurement yet. */
   highest_entropy_agent?: {
@@ -4648,6 +4680,8 @@ export interface AwaitingHumanEntry {
   awaiting_since: number
   jira_ticket: string
   age_seconds: number
+  guild_id?: string
+  size?: string
 }
 
 export interface OrchestrationSnapshot {

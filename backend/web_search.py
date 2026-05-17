@@ -39,6 +39,8 @@ as operator-overridable constants rather than adding BP.N.3 env knobs here.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import os
 import threading
@@ -49,6 +51,7 @@ from typing import Any, Callable, Literal, Protocol
 
 import httpx
 
+from backend.db_context import current_tenant_id
 from backend.rate_limit import get_limiter
 
 logger = logging.getLogger(__name__)
@@ -62,6 +65,8 @@ DEFAULT_TENANT_RATE_WINDOW_SECONDS = 60.0
 DEFAULT_DAILY_BUDGET_USD = 5.00
 DEFAULT_TAVILY_CREDIT_USD = 0.008
 KNOWN_WEB_SEARCH_PROVIDERS = frozenset({"none", "tavily", "exa", "perplexity"})
+WEB_SEARCH_PROVIDER_ENV = "OMNISIGHT_WEB_SEARCH_PROVIDER"
+WEB_SEARCH_DAILY_BUDGET_USD_ENV = "OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD"
 
 SearchDepth = Literal["basic", "advanced"]
 SearchTopic = Literal["general", "news", "finance"]
@@ -92,8 +97,8 @@ class WebSearchRuntimeConfig:
     @classmethod
     def from_settings(cls, settings: Any | None = None) -> "WebSearchRuntimeConfig":
         if settings is None:
-            provider_raw = os.environ.get("OMNISIGHT_WEB_SEARCH_PROVIDER", "")
-            budget_raw: Any = os.environ.get("OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD", "")
+            provider_raw = os.environ.get(WEB_SEARCH_PROVIDER_ENV, "")
+            budget_raw: Any = os.environ.get(WEB_SEARCH_DAILY_BUDGET_USD_ENV, "")
         else:
             provider_raw = getattr(settings, "web_search_provider", "")
             budget_raw = getattr(settings, "web_search_daily_budget_usd", "")
@@ -244,6 +249,17 @@ def _day_key(now: datetime | None = None) -> str:
     return (now or _utcnow()).astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _resolve_tenant(tenant_id: str | None) -> str:
+    """Resolve effective tenant id: explicit -> contextvar -> ``t-default``."""
+
+    if tenant_id:
+        return tenant_id
+    ctx = current_tenant_id()
+    if ctx:
+        return ctx
+    return "t-default"
+
+
 def _credits_for_depth(search_depth: SearchDepth) -> int:
     return 2 if search_depth == "advanced" else 1
 
@@ -284,6 +300,59 @@ def estimate_tavily_cost_usd(
     return _credits_for_depth(search_depth) * max(0.0, float(credit_usd))
 
 
+async def _audit_web_search_query_async(
+    *,
+    query: str,
+    provider: str,
+    status: str,
+    tenant_id: str,
+    result_count: int | None = None,
+    cost_usd_estimated: float | None = None,
+    error: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    """Best-effort BP.N.5 audit row for direct web-search client calls."""
+    from backend import audit as _audit
+
+    after: dict[str, Any] = {
+        "query": query,
+        "provider": provider,
+        "status": status,
+        "tenant_id": tenant_id or "t-default",
+    }
+    if result_count is not None:
+        after["result_count"] = int(result_count)
+    if cost_usd_estimated is not None:
+        after["cost_usd_estimated"] = float(cost_usd_estimated)
+    if request_id:
+        after["request_id"] = request_id
+    if error:
+        after["error"] = error
+
+    await _audit.log(
+        action="web_search.query",
+        entity_kind="web_search_query",
+        entity_id=hashlib.sha256(query.encode("utf-8")).hexdigest()[:16],
+        before=None,
+        after=after,
+        actor="system",
+    )
+
+
+def _audit_web_search_query(**kwargs: Any) -> None:
+    """Run or schedule the async audit writer from the sync Tavily client."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        try:
+            asyncio.run(_audit_web_search_query_async(**kwargs))
+        except Exception as exc:  # noqa: BLE001 -- audit is best-effort
+            logger.debug("web_search audit log failed: %s", exc)
+        return
+
+    loop.create_task(_audit_web_search_query_async(**kwargs))
+
+
 class WebSearchRateGate:
     """Per-tenant web-search rate gate.
 
@@ -301,7 +370,7 @@ class WebSearchRateGate:
         self.key_prefix = key_prefix
 
     def check(self, tenant_id: str) -> None:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         allowed, retry_after = get_limiter().allow(
             f"{self.key_prefix}:{tid}",
             self.config.capacity,
@@ -340,7 +409,7 @@ class RedisWebSearchCostStore:
         self._prefix = key_prefix
 
     def _key(self, tenant_id: str, now: datetime | None = None) -> str:
-        return f"{self._prefix}:{_day_key(now)}:{tenant_id or 't-default'}"
+        return f"{self._prefix}:{_day_key(now)}:{_resolve_tenant(tenant_id)}"
 
     def _ttl_seconds(self, now: datetime | None = None) -> int:
         # Add a fixed 25h TTL rather than calendar math; a stale daily
@@ -356,7 +425,7 @@ class RedisWebSearchCostStore:
         *,
         now: datetime | None = None,
     ) -> WebSearchBudgetCheck:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         amount = max(0.0, float(amount_usd))
         budget = max(0.0, float(daily_budget_usd))
         result = self._reserve_script(
@@ -390,14 +459,14 @@ class RedisWebSearchCostStore:
         amount = max(0.0, float(amount_usd))
         if amount <= 0:
             return
-        key = self._key(tenant_id or "t-default", now)
+        key = self._key(tenant_id, now)
         pipe = self._client.pipeline()
         pipe.decrbyfloat(key, amount)
         pipe.expire(key, self._ttl_seconds(now))
         pipe.execute()
 
     def spend_today(self, tenant_id: str, *, now: datetime | None = None) -> float:
-        raw = self._client.get(self._key(tenant_id or "t-default", now))
+        raw = self._client.get(self._key(tenant_id, now))
         try:
             return max(0.0, float(raw or 0.0))
         except (TypeError, ValueError):
@@ -419,7 +488,7 @@ class InMemoryWebSearchCostStore:
         *,
         now: datetime | None = None,
     ) -> WebSearchBudgetCheck:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         key = (_day_key(now), tid)
         amount = max(0.0, float(amount_usd))
         budget = max(0.0, float(daily_budget_usd))
@@ -454,7 +523,7 @@ class InMemoryWebSearchCostStore:
         *,
         now: datetime | None = None,
     ) -> None:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         key = (_day_key(now), tid)
         amount = max(0.0, float(amount_usd))
         with self._lock:
@@ -462,7 +531,7 @@ class InMemoryWebSearchCostStore:
 
     def spend_today(self, tenant_id: str, *, now: datetime | None = None) -> float:
         with self._lock:
-            return self._daily.get((_day_key(now), tenant_id or "t-default"), 0.0)
+            return self._daily.get((_day_key(now), _resolve_tenant(tenant_id)), 0.0)
 
     def clear(self) -> None:
         with self._lock:
@@ -489,7 +558,7 @@ class WebSearchCostTracker:
         now: datetime | None = None,
     ) -> WebSearchCostReservation:
         check = self.store.reserve_daily(
-            tenant_id or "t-default",
+            _resolve_tenant(tenant_id),
             amount_usd,
             self.daily_budget_usd,
             now=now,
@@ -512,7 +581,7 @@ class WebSearchCostTracker:
         self.store.refund(reservation.tenant_id, reservation.amount_usd, now=now)
 
     def spend_today(self, tenant_id: str, *, now: datetime | None = None) -> float:
-        return self.store.spend_today(tenant_id or "t-default", now=now)
+        return self.store.spend_today(_resolve_tenant(tenant_id), now=now)
 
 
 def _default_cost_store() -> WebSearchCostStore:
@@ -562,21 +631,22 @@ class TavilyWebSearchClient:
         self,
         query: str,
         *,
-        tenant_id: str = "t-default",
+        tenant_id: str | None = None,
         max_results: int = DEFAULT_MAX_RESULTS,
         search_depth: SearchDepth = "basic",
         topic: SearchTopic = "general",
         include_answer: bool = False,
         include_raw_content: bool = False,
         now: datetime | None = None,
+        audit: bool = True,
     ) -> WebSearchResponse:
         """Execute a Tavily search after tenant rate and cost gates."""
 
         current = now or _utcnow()
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         cleaned_query = query.strip()
         if not cleaned_query:
-            return self._error_response(
+            response = self._error_response(
                 query=query,
                 tenant_id=tid,
                 search_depth=search_depth,
@@ -584,17 +654,60 @@ class TavilyWebSearchClient:
                 error="query is empty",
                 now=current,
             )
+            if audit:
+                _audit_web_search_query(
+                    query=query,
+                    provider="tavily",
+                    status="invalid",
+                    tenant_id=tid,
+                    cost_usd_estimated=0.0,
+                    error=response.error,
+                )
+            return response
         if not self.api_key:
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider="tavily",
+                    status="credential_missing",
+                    tenant_id=tid,
+                    error=(
+                        "OMNISIGHT_TAVILY_API_KEY or TAVILY_API_KEY is required"
+                    ),
+                )
             raise WebSearchCredentialMissing(
                 "OMNISIGHT_TAVILY_API_KEY or TAVILY_API_KEY is required"
             )
 
-        self.rate_gate.check(tid)
         cost_usd = estimate_tavily_cost_usd(
             search_depth=search_depth,
             credit_usd=self.credit_usd,
         )
-        reservation = self.cost_tracker.reserve(tid, cost_usd, now=current)
+        try:
+            self.rate_gate.check(tid)
+            reservation = self.cost_tracker.reserve(tid, cost_usd, now=current)
+        except WebSearchRateLimited as exc:
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider="tavily",
+                    status="rate_limited",
+                    tenant_id=tid,
+                    cost_usd_estimated=cost_usd,
+                    error=str(exc),
+                )
+            raise
+        except WebSearchBudgetExceeded as exc:
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider="tavily",
+                    status="budget_exceeded",
+                    tenant_id=tid,
+                    cost_usd_estimated=cost_usd,
+                    error=str(exc),
+                )
+            raise
 
         payload = {
             "query": cleaned_query,
@@ -616,7 +729,7 @@ class TavilyWebSearchClient:
         except (httpx.HTTPError, ValueError) as exc:
             self.cost_tracker.refund(reservation, now=current)
             logger.info("tavily search failed tenant=%s error=%s", tid, exc)
-            return self._error_response(
+            response = self._error_response(
                 query=cleaned_query,
                 tenant_id=tid,
                 search_depth=search_depth,
@@ -624,8 +737,19 @@ class TavilyWebSearchClient:
                 error=f"{type(exc).__name__}: {exc}",
                 now=current,
             )
+            if audit:
+                _audit_web_search_query(
+                    query=cleaned_query,
+                    provider=response.provider,
+                    status="provider_error",
+                    tenant_id=tid,
+                    cost_usd_estimated=response.cost_usd_estimated,
+                    error=response.error,
+                    request_id=response.request_id,
+                )
+            return response
 
-        return WebSearchResponse(
+        response = WebSearchResponse(
             provider="tavily",
             query=cleaned_query,
             tenant_id=tid,
@@ -637,6 +761,17 @@ class TavilyWebSearchClient:
             answer=str(data.get("answer") or ""),
             request_id=str(data.get("request_id") or ""),
         )
+        if audit:
+            _audit_web_search_query(
+                query=cleaned_query,
+                provider=response.provider,
+                status="ok",
+                tenant_id=tid,
+                result_count=response.total_results,
+                cost_usd_estimated=response.cost_usd_estimated,
+                request_id=response.request_id,
+            )
+        return response
 
     def _error_response(
         self,
@@ -754,6 +889,8 @@ __all__ = [
     "WebSearchResponse",
     "WebSearchResult",
     "WebSearchRuntimeConfig",
+    "WEB_SEARCH_DAILY_BUDGET_USD_ENV",
+    "WEB_SEARCH_PROVIDER_ENV",
     "UnsupportedWebSearchProviderError",
     "estimate_tavily_cost_usd",
     "make_web_search_client",

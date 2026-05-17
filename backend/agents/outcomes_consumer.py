@@ -27,6 +27,19 @@ DEFAULT_OUTCOMES_BUDGET_USD_PER_DAY = 5.00
 OUTCOMES_PARTIAL_LABEL = "outcomes:partial"
 OUTCOMES_FAIL_LABEL = "outcomes:fail"
 
+# `pricing.get_pricing` returns USD-per-million-tokens; divide by this to
+# convert (tokens * USD/Mtok) into total USD.
+PRICING_TOKENS_PER_UNIT = 1_000_000
+
+# Truncation limits for grader I/O and downstream JIRA fields. Kept tight
+# so a runaway grader response or huge diff can't blow out a JIRA comment
+# or transition payload.
+MAX_GRADER_REASONING_CHARS = 1000
+MAX_COMPLETION_TEXT_CHARS = 8000
+MAX_DIFF_TEXT_CHARS = 120000
+MAX_TRANSITION_REASON_CHARS = 500
+GRADER_RESPONSE_ERROR_PREVIEW_CHARS = 200
+
 OUTCOMES_GRADER_PROMPT_TEMPLATE = """You are the OmniSight Outcomes grader.
 
 Return exactly one JSON object with:
@@ -145,7 +158,7 @@ def estimate_grader_cost_usd(
     return (
         (usage.input_tokens * input_per_mtok)
         + (usage.output_tokens * output_per_mtok)
-    ) / 1_000_000
+    ) / PRICING_TOKENS_PER_UNIT
 
 
 def parse_outcomes_grader_response(text: str) -> tuple[str, str]:
@@ -163,14 +176,15 @@ def parse_outcomes_grader_response(text: str) -> tuple[str, str]:
                 payload = None
     if not isinstance(payload, dict):
         raise OutcomesGraderRefused(
-            f"grader response did not contain JSON: {candidate[:200]!r}"
+            "grader response did not contain JSON: "
+            f"{candidate[:GRADER_RESPONSE_ERROR_PREVIEW_CHARS]!r}"
         )
     verdict = str(payload.get("verdict", "")).strip().lower()
     if verdict not in {"pass", "partial", "fail"}:
         raise OutcomesGraderRefused(
             f"grader verdict not in pass/partial/fail: {verdict!r}"
         )
-    reasoning = str(payload.get("grader_reasoning", "")).strip()[:1000]
+    reasoning = str(payload.get("grader_reasoning", "")).strip()[:MAX_GRADER_REASONING_CHARS]
     if not reasoning:
         raise OutcomesGraderRefused("grader response omitted grader_reasoning")
     return verdict, reasoning
@@ -187,8 +201,8 @@ def grade_outcomes(
 ) -> RunnerOutcomesVerdict:
     prompt = OUTCOMES_GRADER_PROMPT_TEMPLATE.format(
         ac_text=(ac_text or "").strip() or "(no acceptance criteria found)",
-        completion_text=(completion_text or "").strip()[:8000],
-        diff_text=(diff_text or "").strip()[:120000],
+        completion_text=(completion_text or "").strip()[:MAX_COMPLETION_TEXT_CHARS],
+        diff_text=(diff_text or "").strip()[:MAX_DIFF_TEXT_CHARS],
     )
     try:
         text, usage = client.simple(
@@ -253,7 +267,7 @@ def consume_outcomes_verdict(
         jira_dispatch.transition_back_to_todo(
             client,
             key,
-            f"[outcomes:fail] {verdict.grader_reasoning[:500]}",
+            f"[outcomes:fail] {verdict.grader_reasoning[:MAX_TRANSITION_REASON_CHARS]}",
         )
         return
 

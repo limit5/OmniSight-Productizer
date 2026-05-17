@@ -86,3 +86,4 @@ finalized | cleaned`。
 - [Operation Modes](operation-modes.md)
 - [Panels Overview](panels-overview.md)
 - `backend/models.py` — 權威 enum 定義
+- [ADR-0008 — Agent RPG Class & Skill Leveling System](../../../adr/0008-agent-rpg-class-skill-leveling.md) — agent 角色卡 / Guild / level / skill / talent 模型的權威規格（操作面 how-to：[`docs/operations/agent-rpg-system.md`](../../../operations/agent-rpg-system.md)）

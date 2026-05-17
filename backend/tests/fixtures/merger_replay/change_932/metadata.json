@@ -1,0 +1,29 @@
+{
+  "after_commit_message": "[OP-1435] Replay shared-setup divergent-assertion test conflict\n\nOperator resolution keeps both proactive merger tests as separate methods because their setup shape is shared but their event arguments and assertions verify different outcomes.\n\n[Tier-S]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I0000000000000000000000000000000000000932",
+  "after_patchset": "f4a49a7e5666c54e6512af923f97682eb61556d4",
+  "before_commit_message": "[OP-1421] Log underlying merger reason in bridge outcome\n\nBridge proactive merger logging now includes the arbiter outcome and the underlying merger_outcome.reason from the backend response, so generic merger_refused_other rows retain the specific MergerReason for operators.\n\n[Tier-S]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I903773e6bf9c08322bfe1a1ed09c9a4cca5b5e77",
+  "before_patchset": "2759eb6769048a769cea717a9e279900382d10c0",
+  "case": "change_932",
+  "change_number": "932",
+  "changed_files": [
+    "backend/tests/test_proactive_merger_op714.py"
+  ],
+  "common_ancestor": "5d6cdca47aa74dfab7b81e356f08a0921a50e392",
+  "conflict_files": [
+    "backend/tests/test_proactive_merger_op714.py"
+  ],
+  "expected_replay": "matches_operator_resolution",
+  "fixture_contents": {
+    "after": "Operator-resolved extract from backend/tests/test_proactive_merger_op714.py:394-497 with two separate tests.",
+    "ancestor": "Minimal preamble before either shared-setup test was added.",
+    "before": "Single conflict block representing the shared-setup divergent-assertion additions."
+  },
+  "jira_description": "#932 single-file test conflict: shared setup, divergent assertions; split into two tests.",
+  "operator_audit": {
+    "per_file": "yes",
+    "whole_batch": "yes"
+  },
+  "project": "omnisight/OmniSight-Productizer",
+  "rebase_target_parent": "5d6cdca47aa74dfab7b81e356f08a0921a50e392",
+  "subject": "[OP-1435] Replay shared-setup divergent-assertion test conflict"
+}

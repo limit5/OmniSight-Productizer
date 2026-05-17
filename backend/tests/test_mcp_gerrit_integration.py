@@ -117,6 +117,20 @@ def test_query_changes_parses_rows_and_skips_stats(monkeypatch: pytest.MonkeyPat
     assert "is:open owner:claude-bot" in cmd
 
 
+def test_query_changes_accepts_underscore_number_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gerrit JSON can expose the numeric id as ``_number`` instead of ``number``."""
+    blob = _gerrit_change_blob(number=606, subject="[OP-1295] underscore number")
+    blob["_number"] = blob.pop("number")
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(blob))
+
+    rows = mcp_gerrit.query_changes("change:606")
+
+    assert [r.change_number for r in rows] == [606]
+    assert rows[0].subject == "[OP-1295] underscore number"
+
+
 def test_query_changes_respects_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     blobs = [_gerrit_change_blob(number=200 + i, subject=f"#{i}") for i in range(10)]
     stdout = _gerrit_stdout(*blobs)
@@ -213,6 +227,25 @@ def test_get_review_extracts_current_patchset_and_approvals(
     assert "--current-patch-set" in cmd
     assert "--all-approvals" in cmd
     assert "--comments" in cmd
+
+
+def test_get_review_accepts_underscore_number_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirror query parsing for Gerrit rows that only carry ``_number``."""
+    blob = _gerrit_change_blob(
+        number=607,
+        change_id="Iunderscore",
+        current_revision="bb" * 20,
+    )
+    blob["_number"] = blob.pop("number")
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(blob))
+
+    review = mcp_gerrit.get_review("Iunderscore")
+
+    assert review is not None
+    assert review.change_number == 607
+    assert review.current_revision == "bb" * 20
 
 
 def test_get_review_returns_none_when_no_rows(monkeypatch: pytest.MonkeyPatch) -> None:

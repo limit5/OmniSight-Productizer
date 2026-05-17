@@ -87,7 +87,14 @@ async def get_sensor_type(
 ) -> dict:
     s = ip.get_sensor_type(sensor_id)
     if s is None:
-        raise HTTPException(404, f"Sensor type not found: {sensor_id}")
+        logger.warning(
+            "imaging/sensors: unknown sensor_id=%r (known=%s)",
+            sensor_id, [t.sensor_id for t in ip.list_sensor_types()],
+        )
+        raise HTTPException(
+            404,
+            f"imaging/sensors: sensor type {sensor_id!r} not found",
+        )
     return asdict(s)
 
 
@@ -142,7 +149,14 @@ async def get_ocr_engine(
 ) -> dict:
     e = ip.get_ocr_engine(engine_id)
     if e is None:
-        raise HTTPException(404, f"OCR engine not found: {engine_id}")
+        logger.warning(
+            "imaging/ocr/engines: unknown engine_id=%r (known=%s)",
+            engine_id, [x.engine_id for x in ip.list_ocr_engines()],
+        )
+        raise HTTPException(
+            404,
+            f"imaging/ocr/engines: OCR engine {engine_id!r} not found",
+        )
     return asdict(e)
 
 
@@ -163,8 +177,18 @@ async def run_ocr(
         import base64
         try:
             image_data = base64.b64decode(req.image_base64)
-        except Exception:
-            raise HTTPException(400, "Invalid base64 image data")
+        except Exception as exc:
+            logger.warning(
+                "imaging/ocr/run: base64 decode failed for "
+                "engine_id=%r language=%r (input_len=%d): %s",
+                req.engine_id, req.language, len(req.image_base64), exc,
+            )
+            raise HTTPException(
+                400,
+                f"imaging/ocr/run: invalid base64 image data for "
+                f"engine_id={req.engine_id!r} "
+                f"(input_len={len(req.image_base64)}): {exc}",
+            ) from exc
 
     result = ip.run_ocr(
         engine_id=req.engine_id,
@@ -256,7 +280,14 @@ async def get_icc_profile(
 ) -> dict:
     p = ip.get_icc_profile(profile_id)
     if p is None:
-        raise HTTPException(404, f"ICC profile not found: {profile_id}")
+        logger.warning(
+            "imaging/icc/profiles: unknown profile_id=%r (known=%s)",
+            profile_id, [x.profile_id for x in ip.list_icc_profiles()],
+        )
+        raise HTTPException(
+            404,
+            f"imaging/icc/profiles: ICC profile {profile_id!r} not found",
+        )
     return asdict(p)
 
 
@@ -288,7 +319,17 @@ async def generate_icc_profile(
 ) -> dict:
     result = ip.generate_icc_profile_binary(req.profile_id)
     if not result.data:
-        raise HTTPException(404, f"ICC profile not found: {req.profile_id}")
+        logger.warning(
+            "imaging/icc/generate: empty binary for profile_id=%r "
+            "(known=%s)",
+            req.profile_id,
+            [x.profile_id for x in ip.list_icc_profiles()],
+        )
+        raise HTTPException(
+            404,
+            f"imaging/icc/generate: ICC profile {req.profile_id!r} "
+            f"not found (no binary produced)",
+        )
     return {
         "profile_id": result.profile_id,
         "profile_class": result.profile_class,
@@ -304,7 +345,18 @@ async def embed_icc_profile(
 ) -> dict:
     profile_bin = ip.generate_icc_profile_binary(req.profile_id)
     if not profile_bin.data:
-        raise HTTPException(404, f"ICC profile not found: {req.profile_id}")
+        logger.warning(
+            "imaging/icc/embed: empty binary for profile_id=%r "
+            "(output_format=%r, image_size=%d, known=%s)",
+            req.profile_id, req.output_format, req.image_size,
+            [x.profile_id for x in ip.list_icc_profiles()],
+        )
+        raise HTTPException(
+            404,
+            f"imaging/icc/embed: ICC profile {req.profile_id!r} not found "
+            f"(output_format={req.output_format!r}, "
+            f"image_size={req.image_size})",
+        )
 
     image_data = bytes(req.image_size)
     result = ip.embed_icc_profile(image_data, req.output_format, profile_bin.data)
@@ -327,7 +379,17 @@ async def run_test_recipe(
 ) -> dict:
     result = ip.run_test_recipe(recipe_id)
     if result.status == "error":
-        raise HTTPException(404, f"Test recipe not found: {recipe_id}")
+        logger.warning(
+            "imaging/test-recipes/run: status=error for recipe_id=%r "
+            "(details=%s, known=%s)",
+            recipe_id, result.details,
+            [r.recipe_id for r in ip.list_test_recipes()],
+        )
+        raise HTTPException(
+            404,
+            f"imaging/test-recipes/run: test recipe {recipe_id!r} not found "
+            f"(details={result.details})",
+        )
     return asdict(result)
 
 

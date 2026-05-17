@@ -162,7 +162,9 @@ def assert_worktree_cwd(
     actual = Path.cwd().resolve() if cwd is None else Path(cwd).resolve()
     if actual != expected:
         raise RuntimeError(
-            f"worktree_cwd_mismatch: cwd={actual} worktree={expected}"
+            "worktree_cwd_mismatch in blast_radius_gate.assert_worktree_cwd: "
+            f"cwd={actual} worktree={expected} "
+            f"(cwd_arg={cwd!r}, worktree_root_arg={worktree_root!r})"
         )
 
     result = subprocess.run(
@@ -174,7 +176,9 @@ def assert_worktree_cwd(
     git_root = Path(result.stdout.strip()).resolve()
     if git_root != expected:
         raise RuntimeError(
-            f"worktree_cwd_mismatch: git_root={git_root} worktree={expected}"
+            "worktree_cwd_mismatch in blast_radius_gate.assert_worktree_cwd: "
+            f"git_root={git_root} worktree={expected} cwd={actual} "
+            f"(worktree_root_arg={worktree_root!r})"
         )
 
 
@@ -182,17 +186,30 @@ def load_thresholds(path: Path) -> tuple[dict[str, dict[str, int]], str | None]:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
-            raise ValueError("threshold YAML must be a mapping")
+            raise ValueError(
+                "blast_radius_gate.load_thresholds: threshold YAML must be a "
+                f"top-level mapping (path={path}, got_type={type(raw).__name__})"
+            )
         parsed: dict[str, dict[str, int]] = {}
         for key, value in raw.items():
             if not isinstance(key, str) or not isinstance(value, dict):
-                raise ValueError("threshold YAML entries must be mappings")
+                raise ValueError(
+                    "blast_radius_gate.load_thresholds: threshold YAML entries "
+                    "must map str -> dict "
+                    f"(path={path}, key={key!r}, key_type={type(key).__name__}, "
+                    f"value_type={type(value).__name__})"
+                )
             parsed[key] = _coerce_threshold(value)
         if "default" not in parsed:
             parsed["default"] = dict(DEFAULT_THRESHOLD)
         return parsed, None
     except Exception as exc:
-        log.warning("threshold_yaml_malformed: %s", exc)
+        log.warning(
+            "threshold_yaml_malformed in blast_radius_gate.load_thresholds: "
+            "path=%s: %s",
+            path,
+            exc,
+        )
         return {"default": dict(DEFAULT_THRESHOLD)}, "threshold_yaml_malformed"
 
 
@@ -238,16 +255,26 @@ def candidate_loc(
     parser_factory: TreeSitterParserFactory | None = None,
 ) -> tuple[int, bool]:
     text = path.read_text(encoding="utf-8")
-    parser = (parser_factory or default_tree_sitter_parser)(_language_for_path(path))
+    language = _language_for_path(path)
+    parser = (parser_factory or default_tree_sitter_parser)(language)
     if parser is None:
         return len(text.splitlines()), False
     try:
         tree = parser.parse(text.encode("utf-8"))
         root = tree.root_node
         if bool(getattr(root, "has_error", False)):
-            raise ValueError("tree-sitter root has parse errors")
+            raise ValueError(
+                "blast_radius_gate.candidate_loc: tree-sitter root has parse "
+                f"errors (path={path}, language={language!r})"
+            )
     except Exception as exc:
-        log.warning("tree_sitter_parse_fail: %s: %s", path, exc)
+        log.warning(
+            "tree_sitter_parse_fail in blast_radius_gate.candidate_loc: "
+            "path=%s language=%s: %s",
+            path,
+            language or "<unknown>",
+            exc,
+        )
         return PARSE_FAIL_LOC, True
     return len(text.splitlines()), False
 
@@ -271,7 +298,12 @@ def default_peer_lookup(path: str) -> Iterable[PeerPatchSet]:
     try:
         owners = jira_dispatch._open_bot_owned_file_owners()
     except Exception as exc:
-        log.warning("gerrit peer lookup failed: %s", exc)
+        log.warning(
+            "gerrit peer lookup failed in blast_radius_gate.default_peer_lookup "
+            "for path=%s: %s",
+            path,
+            exc,
+        )
         return []
     return [
         PeerPatchSet(file=path, change_number=owner.change_number, owner=owner.owner)

@@ -39,6 +39,26 @@ DEFAULT_TENANT_ID = "t-default"
 DEFAULT_BATCH_SIZE = 32
 DEFAULT_MAX_CHUNK_LINES = 120
 
+# Length (in hex chars) of the body fingerprint embedded in a chunk id.
+# 16 hex chars == 64 bits, which keeps accidental same-path collisions
+# negligible without bloating the composite id.
+CHUNK_BODY_HASH_HEX_LEN = 16
+
+# Page size used when scanning persisted tenant docs to find sources that
+# no longer exist in the workspace; balances round-trips vs. memory.
+PRUNE_SCAN_PAGE_SIZE = 500
+
+# Seconds to wait for `git ls-files` before falling back to a filesystem walk.
+GIT_LS_FILES_TIMEOUT_SECONDS = 30
+
+# Seconds to wait for `git diff ORIG_HEAD..HEAD` before treating the
+# post-merge delta as unknown.
+GIT_DIFF_TIMEOUT_SECONDS = 10
+
+# Leading bytes sniffed from a file to decide whether it is binary
+# (any NUL byte in this window => binary, skip).
+BINARY_SNIFF_BYTES = 4096
+
 CODE_EXTENSIONS = frozenset(
     {
         ".c",
@@ -109,7 +129,9 @@ class SourceChunk:
 
     @property
     def chunk_id(self) -> str:
-        body_hash = hashlib.sha256(self.chunk_text.encode("utf-8")).hexdigest()[:16]
+        body_hash = hashlib.sha256(self.chunk_text.encode("utf-8")).hexdigest()[
+            :CHUNK_BODY_HASH_HEX_LEN
+        ]
         raw = f"{self.source_path}:{self.line_start}:{self.line_end}:{body_hash}"
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -243,7 +265,7 @@ class WorkspaceRagIndexer:
     async def _prune_missing_sources(self, live_paths: set[str]) -> int:
         deleted = 0
         offset = 0
-        limit = 500
+        limit = PRUNE_SCAN_PAGE_SIZE
         while True:
             docs = await self.store.list_by_tenant(
                 self.tenant_id, limit=limit, offset=offset
@@ -468,7 +490,7 @@ def git_tracked_files(repo_root: Path) -> list[str]:
             cwd=str(repo_root),
             capture_output=True,
             check=False,
-            timeout=30,
+            timeout=GIT_LS_FILES_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return _walk_files(repo_root)
@@ -490,7 +512,7 @@ def changed_files_in_merge(repo_root: Path) -> list[str] | None:
             cwd=str(repo_root),
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=GIT_DIFF_TIMEOUT_SECONDS,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
@@ -534,7 +556,15 @@ def _first_markdown_header(lines: list[str]) -> str:
 
 
 def _normalise_rel_path(path: str) -> str:
-    return path.replace("\\", "/").strip().lstrip("./")
+    rel = path.replace("\\", "/").strip()
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if rel.startswith("/"):
+        return ""
+    parts = [part for part in rel.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
 
 
 def _path_has_skip_dir(rel_path: str) -> bool:
@@ -543,7 +573,7 @@ def _path_has_skip_dir(rel_path: str) -> bool:
 
 def _looks_binary(path: Path) -> bool:
     try:
-        return b"\0" in path.read_bytes()[:4096]
+        return b"\0" in path.read_bytes()[:BINARY_SNIFF_BYTES]
     except OSError:
         return True
 
@@ -580,7 +610,9 @@ async def build_indexer_from_env(repo_root: Path) -> tuple[WorkspaceRagIndexer, 
             tenant_id=tenant_id,
             embedder=embedder,
             store=store,
-            batch_size=int(os.environ.get("OMNISIGHT_RAG_INDEX_BATCH_SIZE", "32")),
+            batch_size=int(
+                os.environ.get("OMNISIGHT_RAG_INDEX_BATCH_SIZE", str(DEFAULT_BATCH_SIZE))
+            ),
         ),
         closeable,
     )

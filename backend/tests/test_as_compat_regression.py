@@ -285,6 +285,41 @@ async def test_existing_password_mfa_unchanged(pg_test_pool, client, monkeypatch
         client.cookies.clear()
 
 
+@pytest.mark.asyncio
+async def test_require_mfa_policy_blocks_operator_without_verified_mfa(
+    pg_test_pool, client, monkeypatch,
+):
+    """FX2.D4.1 — strict MFA policy must share the login short-circuit.
+
+    An operator without a verified MFA method must not receive a
+    password-only session when ``OMNISIGHT_REQUIRE_MFA=true``.
+    """
+    from backend import auth
+
+    monkeypatch.setenv("OMNISIGHT_REQUIRE_MFA", "true")
+
+    user = await auth.create_user(
+        email="strict-mfa-operator@compat.test",
+        name="Strict MFA Operator",
+        role="operator",
+        password="correct-horse-battery-staple",
+    )
+
+    r = await client.post(
+        "/api/v1/auth/login",
+        json={"email": user.email, "password": "correct-horse-battery-staple"},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body.get("mfa_required") is True
+    assert isinstance(body.get("mfa_token"), str) and body["mfa_token"]
+    assert body.get("mfa_methods") == []
+    assert body.get("user", {}).get("email") == user.email
+    assert auth.SESSION_COOKIE not in {c.name for c in client.cookies.jar}
+    assert auth.CSRF_COOKIE not in {c.name for c in client.cookies.jar}
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Critical #3 — Existing API key bearer auth unchanged
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

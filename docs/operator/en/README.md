@@ -20,6 +20,18 @@ the source only when you need to go deeper.
 - **Troubleshooting** (coming) — the app shows a red banner, now what?
 - **Tutorials** (coming) — follow-along first-invoke walkthroughs
 
+## Agent identity & leveling (Priority RPG)
+
+Agents are no longer just stateless runners — each has a Character Card
+with a Guild, level, XP, talents, and per-skill / per-tool proficiency.
+For day-to-day operator how-to (viewing the roster, picking a Guild,
+reading XP), see the
+[Agent RPG system operator guide](../../operations/agent-rpg-system.md).
+For the design rationale and the schema lock-ins behind it, see
+[ADR-0008 — Agent RPG Class & Skill Leveling System](../../adr/0008-agent-rpg-class-skill-leveling.md)
+(the authoritative spec — when this guide and the ADR diverge, the
+ADR wins).
+
 ## Language versions
 
 This doc is mirrored in English (`en/`), Traditional Chinese

@@ -218,6 +218,20 @@ def _emit_sse(direction: str, payload: dict) -> None:
         logger.debug("chatops.message SSE publish skipped: %s", exc)
 
 
+def _bump_message_metric(direction: str, payload: dict, *, kind: str) -> None:
+    try:
+        from backend import metrics as _m
+        guild_id = str((payload.get("meta") or {}).get("guild_id") or "unknown")
+        _m.chatops_messages_total.labels(
+            direction=direction,
+            channel=str(payload.get("channel") or "unknown"),
+            kind=kind,
+            guild_id=guild_id,
+        ).inc()
+    except Exception as exc:
+        logger.debug("chatops message metric skipped: %s", exc)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Outbound
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -272,6 +286,7 @@ async def send_interactive(
         payload["errors"] = errors
     _mirror_record("outbound", payload)
     _emit_sse("outbound", payload)
+    _bump_message_metric("outbound", payload, kind="interactive")
     return out
 
 
@@ -310,6 +325,7 @@ async def dispatch_inbound(inbound: Inbound) -> dict[str, Any]:
     }
     _mirror_record("inbound", mirror_payload)
     _emit_sse("inbound", mirror_payload)
+    _bump_message_metric("inbound", mirror_payload, kind=inbound.kind)
 
     # Audit — inbound button / command is operator-intent so it must land
     # on the hash chain regardless of handler outcome.

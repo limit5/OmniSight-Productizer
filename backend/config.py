@@ -231,6 +231,10 @@ class Settings(BaseSettings):
     gerrit_instances: str = ""
 
     # ── Webhook Secrets (External → Internal) ──
+    # Empty default is intentional: the gate below in
+    # ``validate_startup_config()`` (FX2.D4.5 / OP-238) only requires
+    # each secret when its integration is explicitly opted into, so
+    # dev boxes keep booting on zero config.
     gerrit_webhook_secret: str = ""     # Default Gerrit webhook secret (fallback)
     github_webhook_secret: str = ""     # HMAC-SHA256 signature verification
     gitlab_webhook_secret: str = ""     # X-Gitlab-Token header verification
@@ -1151,6 +1155,15 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
     hard_errors: list[str] = []
 
     # ── Bearer token ──
+    # FX2.D4.4 (OP-237, 2026-05-16): OMNISIGHT_DECISION_BEARER is on the
+    # sunset path. K6 ``api_keys`` table is the supported replacement —
+    # ``migrate_legacy_bearer()`` at lifespan startup moves the env value
+    # into a hashed ``api_keys`` row (id ``ak-legacy-<sha[:12]>``), and
+    # operators should create per-service keys via Admin UI > API Keys.
+    # Removal is targeted at the next major release; until then the var
+    # is honoured for backwards compat but every prod boot that still
+    # carries it emits a deprecation warning so the signal can't be
+    # silently ignored.
     bearer = (os.environ.get("OMNISIGHT_DECISION_BEARER") or "").strip()
     if bearer:
         if len(bearer) < _MIN_BEARER_LEN:
@@ -1160,12 +1173,27 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
                 "that size — use at least 16."
             )
             (hard_errors if strict else warnings).append(msg)
+        warnings.append(
+            "OMNISIGHT_DECISION_BEARER is DEPRECATED and scheduled for "
+            "removal in the next major release. K6 has auto-migrated it "
+            "into the api_keys table; create per-service keys via "
+            "Admin UI > API Keys, then unset the env var. See "
+            "docs/ops/security_baseline.md §3 + "
+            "docs/security/as_0_4_credential_refactor_migration_plan.md "
+            "Track B for the migration path."
+        )
     else:
         # Empty bearer leaves DE mutator endpoints open. Fine in dev,
         # foot-gun in prod. Audit H1 (2026-04-19): upgrade to hard error
         # under strict mode — mirrors C1's admin-password treatment, so
         # a production deploy that forgets the bearer env can't silently
         # ship open mutator endpoints.
+        #
+        # FX2.D4.4 (OP-237): once the legacy env is gone, operators are
+        # expected to gate mutators via api_keys entries instead; the
+        # "empty bearer = open" alarm stays for the deprecation window
+        # so deployments that simply unset the var without creating
+        # api_keys rows still get caught at startup.
         msg = (
             "OMNISIGHT_DECISION_BEARER is empty — Decision Engine "
             "mutator endpoints (approve/reject/undo/mode) are OPEN. "
@@ -1325,6 +1353,67 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
             "have HTTPS (Cloudflare Tunnel terminates TLS, so this is "
             "the right value behind it)."
         )
+
+    # ── FX2.D4.5 (#238): webhook secret fail-fast at app startup ──
+    # The webhook handlers in backend/routers/webhooks.py historically
+    # returned 503 at request time when the env-side secret was empty;
+    # operators only discovered a missing secret *after* an external
+    # event reached the endpoint (Stripe retries, GitHub redelivery
+    # queues, etc.). Hoist that check to boot: when an integration is
+    # explicitly enabled, the matching webhook secret MUST be set, or
+    # we refuse to start under strict mode.
+    #
+    # Gating choice: opt-in only — empty defaults stay benign on dev
+    # boxes that never enabled the integration. The per-instance
+    # ``git_accounts.webhook_secret`` overlay (Phase 5-7/5-8) is a
+    # runtime resolver; we validate only the env-side scalar fallback
+    # here because that's what the operator controls at deploy time.
+    _webhook_secret_gates: list[tuple[str, str, str, bool]] = [
+        (
+            "gerrit_webhook_secret",
+            "OMNISIGHT_GERRIT_WEBHOOK_SECRET",
+            "gerrit_enabled=true",
+            bool(settings.gerrit_enabled),
+        ),
+        (
+            "github_webhook_secret",
+            "OMNISIGHT_GITHUB_WEBHOOK_SECRET",
+            "ci_github_actions_enabled=true or github_repo set",
+            bool(settings.ci_github_actions_enabled)
+            or bool((settings.github_repo or "").strip()),
+        ),
+        (
+            "gitlab_webhook_secret",
+            "OMNISIGHT_GITLAB_WEBHOOK_SECRET",
+            "ci_gitlab_enabled=true or gitlab_project_id set",
+            bool(settings.ci_gitlab_enabled)
+            or bool((settings.gitlab_project_id or "").strip()),
+        ),
+        (
+            "jira_webhook_secret",
+            "OMNISIGHT_JIRA_WEBHOOK_SECRET",
+            "notification_jira_url set",
+            bool((settings.notification_jira_url or "").strip()),
+        ),
+        (
+            "stripe_webhook_secret",
+            "OMNISIGHT_STRIPE_WEBHOOK_SECRET",
+            "stripe_secret_key set",
+            bool((settings.stripe_secret_key or "").strip()),
+        ),
+    ]
+    for field, env_name, gate_desc, enabled in _webhook_secret_gates:
+        if not enabled:
+            continue
+        if (getattr(settings, field, "") or "").strip():
+            continue
+        msg = (
+            f"{env_name} is empty but {gate_desc} — the matching "
+            "webhook endpoint would return 503 to every external "
+            "delivery. Set the secret at deploy time so the failure "
+            "surfaces at boot rather than on the first inbound event."
+        )
+        (hard_errors if strict else warnings).append(msg)
 
     # ── Masked summary at startup ──
     _startup_logger.info(

@@ -11,21 +11,27 @@ from backend import release_dashboard as dashboard
 
 router = APIRouter(prefix="/admin/releases", tags=["release-dashboard"])
 
+# Minimum length for free-text request fields — pydantic shorthand for "non-empty after parsing".
+MIN_NONEMPTY_LENGTH = 1
+# Progress percent bounds for synthetic deploy progress events (inclusive).
+MIN_PROGRESS_PERCENT = 0
+MAX_PROGRESS_PERCENT = 100
+
 
 class RollbackRequest(BaseModel):
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=MIN_NONEMPTY_LENGTH)
     tag: str | None = None
 
 
 class CanaryControlRequest(BaseModel):
     command: str = Field(pattern="^(pause|resume|advance|abort)$")
-    reason: str = Field(default="operator", min_length=1)
+    reason: str = Field(default="operator", min_length=MIN_NONEMPTY_LENGTH)
 
 
 class SyntheticProgressRequest(BaseModel):
-    tag: str = Field(min_length=1)
-    progress_percent: int = Field(ge=0, le=100)
-    status: str = Field(default="deploying", min_length=1)
+    tag: str = Field(min_length=MIN_NONEMPTY_LENGTH)
+    progress_percent: int = Field(ge=MIN_PROGRESS_PERCENT, le=MAX_PROGRESS_PERCENT)
+    status: str = Field(default="deploying", min_length=MIN_NONEMPTY_LENGTH)
 
 
 @router.get("")

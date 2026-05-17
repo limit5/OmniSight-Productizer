@@ -294,6 +294,7 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("api_keys", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
         # OP-228: deterministic lookup for KS-enveloped api_keys.key_hash.
         ("api_keys", sa.Column("key_lookup_index", _t())),
+        ("api_keys", sa.Column("expires_at", sa.Float(), nullable=True)),
         ("provisioned_storage", sa.Column("bucket_lookup_index", _t())),
         # Q.7 #301 — optimistic-lock version column expansion (mirrors
         # alembic 0023_optimistic_lock_expansion for SQLite bootstrap).
@@ -316,6 +317,11 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("event_log", sa.Column("project_id", _t(), _fk_proj())),
         ("artifacts", sa.Column("project_id", _t(), _fk_proj())),
         ("user_preferences", sa.Column("project_id", _t(), _fk_proj())),
+        # BP.B.1 (OP-249, alembic 0241): nullable guild dimension on
+        # durable execution / debugging / audit trace tables.
+        ("workflow_runs", sa.Column("guild_id", _t())),
+        ("debug_findings", sa.Column("guild_id", _t())),
+        ("audit_log", sa.Column("guild_id", _t())),
         # AS.0.2 (alembic 0056): per-tenant auth feature gating. TEXT-of-JSON
         # on SQLite, JSONB on PG. Default '{}' = no AS opinion.
         ("tenants", sa.Column("auth_features", _t(), nullable=False, server_default="{}")),
@@ -881,7 +887,10 @@ CREATE TABLE IF NOT EXISTS debug_findings (
     tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
     -- Y1 row 7 (#277): project_id (alembic 0038). See artifacts above
     -- for the forward-reference rationale.
-    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    -- BP.B.1 (OP-249, alembic 0241): nullable until guild-aware
+    -- writers are updated.
+    guild_id        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS decision_rules (
@@ -917,7 +926,10 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
     -- Y1 row 7 (#277): project_id (alembic 0038). See artifacts above
     -- for the forward-reference rationale.
-    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    -- BP.B.1 (OP-249, alembic 0241): nullable until guild-aware
+    -- writers are updated.
+    guild_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
@@ -948,7 +960,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
     prev_hash       TEXT NOT NULL DEFAULT '',
     curr_hash       TEXT NOT NULL,
     session_id      TEXT,
-    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- BP.B.1 (OP-249, alembic 0241): nullable until guild-aware
+    -- writers are updated.
+    guild_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
@@ -1332,6 +1347,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_by      TEXT NOT NULL DEFAULT '',
     last_used_ip    TEXT,
     last_used_at    REAL,
+    expires_at      REAL,
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -3221,22 +3237,31 @@ async def insert_debug_finding(conn, data: dict) -> None:
     # tenant_id ALWAYS comes from context (tenant_insert_value), never
     # from the caller's data dict — anti-forge guarantee (same rule as
     # insert_artifact, SP-3.6a).
+    from backend.agent_guild_dual_write import (
+        guild_id_from_values,
+        sync_agent_type_guild_id,
+        sync_json_mapping,
+    )
+
+    synced_data = sync_agent_type_guild_id(data)
+    synced_context = sync_json_mapping(synced_data.get("context", "{}"))
     await conn.execute(
         """INSERT INTO debug_findings
            (id, task_id, agent_id, finding_type, severity, content,
-            context, status, created_at, tenant_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            context, status, created_at, tenant_id, guild_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
            ON CONFLICT (id) DO NOTHING""",
-        data["id"],
-        data["task_id"],
-        data["agent_id"],
-        data["finding_type"],
-        data.get("severity", "info"),
-        data["content"],
-        data.get("context", "{}"),
-        data.get("status", "open"),
-        data.get("created_at", ""),
+        synced_data["id"],
+        synced_data["task_id"],
+        synced_data["agent_id"],
+        synced_data["finding_type"],
+        synced_data.get("severity", "info"),
+        synced_data["content"],
+        synced_context,
+        synced_data.get("status", "open"),
+        synced_data.get("created_at", ""),
         tenant_insert_value(),
+        guild_id_from_values(synced_data),
     )
 
 
@@ -3418,7 +3443,7 @@ async def insert_episodic_memory(conn, data: dict) -> None:
         q,  # decayed_score seeded from quality_score
     )
 
-    # RPG.W5.2 [OP-138]: auto-distil a <=200 token summary for the L2
+    # RPG.W5.2 [OP-1354]: auto-distil a <=200 token summary for the L2
     # dim-memory layer (ADR-0008 *Memory hierarchy*).  Best-effort:
     # distillation failure must never poison the lesson write above.
     try:

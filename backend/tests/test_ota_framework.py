@@ -617,6 +617,18 @@ class TestManifestValidation:
         assert result.status == ManifestValidationStatus.valid
         assert len(result.warnings) > 0
 
+    def test_image_id_without_url_is_valid(self):
+        data = {
+            "manifest_id": "test-123",
+            "firmware_version": "2.0.0",
+            "images": [{"image_id": "rootfs", "sha256": "abc123"}],
+            "signature": "sig-data",
+            "signature_scheme": "ed25519_direct",
+        }
+        result = validate_manifest(data)
+        assert result.status == ManifestValidationStatus.valid
+        assert result.warnings == []
+
     def test_validation_to_dict(self):
         data = {
             "manifest_id": "test-123",
@@ -674,6 +686,16 @@ class TestRolloutEvaluation:
         metrics = {"crash_rate_pct": 0.05, "rollback_rate_pct": 1.0, "success_rate_pct": 99.0}
         result = evaluate_rollout_phase("staged", "internal", metrics)
         assert result.status == RolloutPhaseStatus.failed
+
+    def test_health_gate_thresholds_are_inclusive(self):
+        metrics = {
+            "crash_rate_pct": 0.5,
+            "rollback_rate_pct": 0.5,
+            "success_rate_pct": 99.0,
+        }
+        result = evaluate_rollout_phase("canary", "canary", metrics)
+        assert result.status == RolloutPhaseStatus.passed
+        assert result.gate_passed is True
 
     def test_rollout_eval_to_dict(self):
         metrics = {"crash_rate_pct": 0.1, "rollback_rate_pct": 0.2, "success_rate_pct": 99.8}

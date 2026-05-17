@@ -38,8 +38,8 @@ VALID_REFLECTION_OUTCOMES = frozenset(
     {REFLECTION_OUTCOME_SUCCESS, REFLECTION_OUTCOME_FAILURE}
 )
 DEFAULT_REFLECTION_TOP_K = 5
-DEFAULT_REFLECTION_INJECTION_MAX_BYTES = 2048   # OP-143: byte-budget for render_reflection_context()
-DEFAULT_REFLECTION_PROMPT_BUDGET = 2048         # OP-142: char-budget for render_reflection_lesson_block()
+DEFAULT_REFLECTION_INJECTION_MAX_BYTES = 2048   # OP-1358 task context byte cap.
+DEFAULT_REFLECTION_PROMPT_BUDGET = DEFAULT_REFLECTION_INJECTION_MAX_BYTES
 REFLECTION_SOURCE_PREFIX = "reflection://"
 REFLECTION_LESSON_PROMPT_HEADER = "Reflection RAG lessons (RPG.W6)"
 
@@ -60,9 +60,10 @@ class ReflectionSummary:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _required("tenant_id", self.tenant_id)
-        _required("ticket_key", self.ticket_key)
-        _required("summary", self.summary)
+        object.__setattr__(self, "tenant_id", _required("tenant_id", self.tenant_id))
+        object.__setattr__(self, "ticket_key", _required("ticket_key", self.ticket_key))
+        object.__setattr__(self, "summary", _required("summary", self.summary))
+        object.__setattr__(self, "failure_type", self.failure_type.strip())
         if self.outcome not in VALID_REFLECTION_OUTCOMES:
             raise ValueError(
                 f"outcome must be one of {sorted(VALID_REFLECTION_OUTCOMES)}"
@@ -70,17 +71,16 @@ class ReflectionSummary:
 
     @property
     def source_path(self) -> str:
-        return f"{REFLECTION_SOURCE_PREFIX}{self.ticket_key.strip()}/{self.outcome}"
+        return f"{REFLECTION_SOURCE_PREFIX}{self.ticket_key}/{self.outcome}"
 
     def text_for_embedding(self) -> str:
         bits = [
-            f"ticket: {self.ticket_key.strip()}",
+            f"ticket: {self.ticket_key}",
             f"outcome: {self.outcome}",
         ]
-        failure_type = self.failure_type.strip()
-        if failure_type:
-            bits.append(f"failure_type: {failure_type}")
-        bits.append(f"summary: {self.summary.strip()}")
+        if self.failure_type:
+            bits.append(f"failure_type: {self.failure_type}")
+        bits.append(f"summary: {self.summary}")
         return "\n".join(bits)
 
     def to_metadata(self) -> dict[str, Any]:
@@ -88,13 +88,12 @@ class ReflectionSummary:
         metadata.update(
             {
                 "kind": REFLECTION_RAG_KIND,
-                "ticket_key": self.ticket_key.strip(),
+                "ticket_key": self.ticket_key,
                 "outcome": self.outcome,
             }
         )
-        failure_type = self.failure_type.strip()
-        if failure_type:
-            metadata["failure_type"] = failure_type
+        if self.failure_type:
+            metadata["failure_type"] = self.failure_type
         return metadata
 
 
@@ -213,7 +212,7 @@ def render_reflection_context(
     *,
     max_bytes: int = DEFAULT_REFLECTION_INJECTION_MAX_BYTES,
 ) -> str:
-    """Render retrieved reflections as a bounded task prompt block (OP-143 / W6.3).
+    """Render retrieved reflections as a bounded task prompt block (OP-1358 / W6.3).
 
     Returns an empty string when no hits are supplied.  The final UTF-8 encoded
     block is capped to ``max_bytes`` so reflection RAG cannot bloat each task's
@@ -310,7 +309,11 @@ def render_reflection_lesson_block(
     *,
     max_chars: int = DEFAULT_REFLECTION_PROMPT_BUDGET,
 ) -> str:
-    """Render retrieved reflection hits as a bounded pre-task lesson block."""
+    """Render retrieved reflection hits as a bounded pre-task lesson block.
+
+    ``max_chars`` is the legacy public parameter name; enforcement is against
+    UTF-8 bytes so non-ASCII summaries cannot exceed the injection budget.
+    """
 
     if max_chars < 1:
         raise ValueError("max_chars must be positive")
@@ -335,7 +338,7 @@ def render_reflection_lesson_block(
         summary = " ".join(hit.summary.split())
         parts.append(f"{' | '.join(bits)}\n   Lesson: {summary}")
 
-    return _truncate_prompt_block("\n".join(parts).rstrip(), max_chars=max_chars)
+    return _truncate_prompt_block("\n".join(parts).rstrip(), max_bytes=max_chars)
 
 
 def _chunk_id(summary: ReflectionSummary) -> str:
@@ -377,13 +380,15 @@ def _reflection_query_text(
     return "\n".join(bits)
 
 
-def _truncate_prompt_block(text: str, *, max_chars: int) -> str:
-    if len(text) <= max_chars:
+def _truncate_prompt_block(text: str, *, max_bytes: int) -> str:
+    if len(text.encode("utf-8")) <= max_bytes:
         return text
     marker = "\n...[truncated]"
-    if max_chars <= len(marker):
-        return text[:max_chars]
-    return text[: max_chars - len(marker)].rstrip() + marker
+    marker_bytes = marker.encode("utf-8")
+    if max_bytes <= len(marker_bytes):
+        return _truncate_utf8(text, max_bytes)
+    body = _truncate_utf8(text, max_bytes - len(marker_bytes)).rstrip()
+    return f"{body}{marker}"
 
 
 def _required(name: str, value: str) -> str:

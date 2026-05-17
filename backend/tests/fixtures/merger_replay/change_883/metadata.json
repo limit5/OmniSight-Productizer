@@ -1,0 +1,32 @@
+{
+  "after_commit_message": "[OP-263] Add model mapping violation metric\n\nRegister and increment the BP.F model mapping guardrail counter with guild_id and mode labels.\n\n[Tier-B]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\n\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\n\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I5629707d7c84f238fbe2aadf1e9f5bcee7eacd48",
+  "after_patchset": "f89170995922990d7674c7d96c8f2adf5bdc19ad",
+  "before_commit_message": "[OP-263] Add model mapping violation metric\n\nRegister and increment the BP.F model mapping guardrail counter with guild_id and mode labels.\n\n[Tier-B]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\n\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\n\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I5629707d7c84f238fbe2aadf1e9f5bcee7eacd48",
+  "before_patchset": "bb74c1b8e41e8944189f6b15437f5069279bf668",
+  "case": "change_883",
+  "change_number": "883",
+  "changed_files": [
+    "backend/agents/llm.py",
+    "backend/agents/nodes.py",
+    "backend/metrics.py"
+  ],
+  "common_ancestor": "22f56800225a219e2133323deeffbb1e82c7b005",
+  "conflict_files": [
+    "backend/agents/llm.py",
+    "backend/agents/nodes.py"
+  ],
+  "expected_replay": "abstain_multi_file",
+  "fixture_contents": {
+    "after": "Operator-resolved file content from the post-resolution patch set.",
+    "ancestor": "Old parent file content used as the three-way merge base.",
+    "before": "Git merge-file reconstruction from rebase target parent, old parent, and pre-resolution patch set."
+  },
+  "jira_description": "#883 (llm.py + nodes.py, guild vs guild_id): a=no b=yes",
+  "operator_audit": {
+    "per_file": "yes",
+    "whole_batch": "no"
+  },
+  "project": "omnisight/OmniSight-Productizer",
+  "rebase_target_parent": "e01f1a5a4c929e8c3060ab5914988603a32f8664",
+  "subject": "[OP-263] Add model mapping violation metric"
+}

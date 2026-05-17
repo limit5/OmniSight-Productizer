@@ -12,13 +12,14 @@ import {
   type ApiKeyItem,
 } from "@/lib/api"
 
+const TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  month: "short", day: "numeric",
+  hour: "2-digit", minute: "2-digit",
+})
+
 function formatTime(epoch: number | null): string {
   if (!epoch) return "—"
-  const d = new Date(epoch * 1000)
-  return d.toLocaleString(undefined, {
-    month: "short", day: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  })
+  return TIME_FORMATTER.format(new Date(epoch * 1000))
 }
 
 export function ApiKeyManagementPanel() {

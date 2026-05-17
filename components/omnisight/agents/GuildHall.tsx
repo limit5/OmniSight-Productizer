@@ -28,7 +28,11 @@ import { cn } from "@/lib/utils"
 
 export interface GuildHallGuild {
   guild: AgentGuild
-  memberCount: number
+  memberCount?: number
+  member_count?: number
+  displayName?: string | null
+  display_name?: string | null
+  summary?: string | null
 }
 
 export interface GuildHallProps {
@@ -131,13 +135,24 @@ function memberLabel(count: number): string {
   return normalized === 1 ? "member" : "members"
 }
 
+function normalizedMemberCount(guild: GuildHallGuild): number {
+  const count = guild.memberCount ?? guild.member_count ?? 0
+  return Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0
+}
+
+function displayNameFor(guild: GuildHallGuild, fallback: string): string {
+  return guild.displayName?.trim() || guild.display_name?.trim() || fallback
+}
+
+function summaryFor(guild: GuildHallGuild, fallback: string): string {
+  return guild.summary?.trim() || fallback
+}
+
 export function GuildHall({ guilds, className }: GuildHallProps): ReactElement {
   const countsByGuild = new Map(
-    guilds.map((item) => [
-      item.guild,
-      Number.isFinite(item.memberCount) ? Math.max(0, Math.trunc(item.memberCount)) : 0,
-    ]),
+    guilds.map((item) => [item.guild, normalizedMemberCount(item)]),
   )
+  const guildsByKey = new Map(guilds.map((item) => [item.guild, item]))
 
   return (
     <section aria-label="Guild Hall" className={cn("space-y-4", className)}>
@@ -164,6 +179,13 @@ export function GuildHall({ guilds, className }: GuildHallProps): ReactElement {
         {GUILD_ORDER.map((guild) => {
           const visual = GUILD_VISUALS[guild]
           const GuildIcon = visual.Icon
+          const guildPayload = guildsByKey.get(guild)
+          const label = guildPayload
+            ? displayNameFor(guildPayload, visual.label)
+            : visual.label
+          const summary = guildPayload
+            ? summaryFor(guildPayload, visual.description)
+            : visual.description
           const memberCount = countsByGuild.get(guild) ?? 0
 
           return (
@@ -174,15 +196,16 @@ export function GuildHall({ guilds, className }: GuildHallProps): ReactElement {
                 visual.panelClass,
               )}
               data-agent-guild={guild}
+              data-member-count={memberCount}
             >
               <div className="flex items-start justify-between gap-3">
                 <div
-                  aria-label={visual.label}
+                  aria-label={label}
                   className={cn(
                     "flex size-10 shrink-0 items-center justify-center rounded-md border",
                     visual.toneClass,
                   )}
-                  title={visual.label}
+                  title={label}
                 >
                   <GuildIcon className="size-5" aria-hidden="true" />
                 </div>
@@ -198,10 +221,10 @@ export function GuildHall({ guilds, className }: GuildHallProps): ReactElement {
 
               <div className="mt-4 min-w-0">
                 <h3 className="truncate text-sm font-semibold leading-tight">
-                  {visual.label}
+                  {label}
                 </h3>
                 <p className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                  {visual.description}
+                  {summary}
                 </p>
               </div>
             </article>

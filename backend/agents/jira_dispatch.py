@@ -36,6 +36,7 @@ from typing import Callable, Iterable, Optional
 
 from backend.config import settings
 from backend.agents import (
+    feature_dup_detector,
     model_deconfliction,
     provider_orchestrator,
     runner_coordination,
@@ -55,6 +56,11 @@ from backend.agents.scope_to_paths import (
 )
 
 log = logging.getLogger(__name__)
+
+PS_STALENESS_WARN_DAYS = 7.0
+PS_STALENESS_WARN_COMMITS = 25
+PS_STALENESS_ABSTAIN_DAYS = 14.0
+PS_STALENESS_ABSTAIN_COMMITS = 100
 
 MIGRATION_IN_FLIGHT_LABEL = "migration:in-flight"
 MIGRATION_OVERRIDE_LABEL = "migration:override"
@@ -750,6 +756,25 @@ class WorktreeSyncResult:
     develop_sha: str           # SHA of fetched develop tip
     detail: str                # short status string
     worktree_path: Path | None = None  # OP-817: ephemeral dir when ephemeral=True
+
+
+@dataclass(frozen=True)
+class PatchSetStaleness:
+    """Pickup/merger staleness assessment for an existing Gerrit patchset."""
+
+    age_days: float
+    commits_behind: int
+    ps_parent: str
+    level: str
+    reason: str
+
+    @property
+    def should_warn(self) -> bool:
+        return self.level == "warn"
+
+    @property
+    def should_abstain(self) -> bool:
+        return self.level == "abstain"
 
 
 # OP-817: per-ticket ephemeral worktree base directory. Concurrent ticks of
@@ -2179,6 +2204,308 @@ def open_bot_owned_files() -> set[str]:
     return set(_open_bot_owned_file_owners())
 
 
+def _patchset_parent_revision(patchset: dict) -> str | None:
+    parents = patchset.get("parents") or []
+    if not parents:
+        return None
+    first = parents[0]
+    if isinstance(first, str):
+        return first
+    if isinstance(first, dict):
+        return str(first.get("revision") or first.get("commit") or "") or None
+    return None
+
+
+def _patchset_upload_ts(patchset: dict) -> float | None:
+    for key in ("createdOn", "created_on", "uploadedOn", "uploaded_on"):
+        raw = patchset.get(key)
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        if isinstance(raw, str) and raw.isdigit():
+            return float(raw)
+
+    raw_dt = patchset.get("created") or patchset.get("uploaded")
+    if not isinstance(raw_dt, str) or not raw_dt.strip():
+        return None
+    normalized = raw_dt.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    if re.search(r"[+-]\d{4}$", normalized):
+        normalized = normalized[:-2] + ":" + normalized[-2:]
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def assess_patchset_staleness(
+    patchset: dict,
+    *,
+    now_ts: float | None = None,
+    run_command: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    cwd: Path | None = None,
+    develop_ref: str = "origin/develop",
+) -> PatchSetStaleness | None:
+    """Return PS age/commit-distance staleness, or ``None`` when unavailable."""
+    ps_parent = _patchset_parent_revision(patchset)
+    upload_ts = _patchset_upload_ts(patchset)
+    if not ps_parent or upload_ts is None:
+        return None
+
+    current = now_ts if now_ts is not None else time.time()
+    age_days = max(0.0, (current - upload_ts) / 86400.0)
+    runner = run_command if run_command is not None else subprocess.run
+    try:
+        result = runner(
+            ["git", "rev-list", "--count", f"{ps_parent}..{develop_ref}"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        commits_behind = int((result.stdout or "0").strip() or "0")
+    except ValueError:
+        return None
+
+    reasons: list[str] = []
+    level = "fresh"
+    if age_days > PS_STALENESS_ABSTAIN_DAYS:
+        reasons.append(f"age_days>{PS_STALENESS_ABSTAIN_DAYS:g}")
+        level = "abstain"
+    if commits_behind > PS_STALENESS_ABSTAIN_COMMITS:
+        reasons.append(f"commits_behind>{PS_STALENESS_ABSTAIN_COMMITS}")
+        level = "abstain"
+    if level != "abstain":
+        if age_days > PS_STALENESS_WARN_DAYS:
+            reasons.append(f"age_days>{PS_STALENESS_WARN_DAYS:g}")
+            level = "warn"
+        if commits_behind > PS_STALENESS_WARN_COMMITS:
+            reasons.append(f"commits_behind>{PS_STALENESS_WARN_COMMITS}")
+            level = "warn"
+
+    return PatchSetStaleness(
+        age_days=age_days,
+        commits_behind=commits_behind,
+        ps_parent=ps_parent,
+        level=level,
+        reason=", ".join(reasons) if reasons else "fresh",
+    )
+
+
+def _format_ps_staleness_comment(
+    *,
+    marker: str,
+    assessment: PatchSetStaleness,
+    change_number: str | int | None = None,
+) -> str:
+    change = f" change={change_number}" if change_number else ""
+    action = (
+        "Abstaining until the patchset is manually rebased."
+        if assessment.should_abstain
+        else "Warning only; runner pickup may proceed."
+    )
+    return (
+        f"[{marker}] {action}\n"
+        f"- age_days={assessment.age_days:.1f}\n"
+        f"- commits_behind={assessment.commits_behind}\n"
+        f"- ps_parent={assessment.ps_parent[:12]}\n"
+        f"- reason={assessment.reason}{change}\n"
+        "Suggested action: rebase the Gerrit patchset manually onto "
+        "`origin/develop`, then retry runner pickup."
+    )
+
+
+def _query_open_change_for_ticket_staleness(
+    key: str,
+    agent_class: str,
+    instance_id: str | None = None,
+) -> dict | None:
+    try:
+        gerrit_user, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    except ValueError:
+        return None
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
+        f"{gerrit_user}@{GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON", "--current-patch-set",
+        "status:open", "branch:develop",
+    ]
+    try:
+        result = BREAKERS["gerrit_ssh"].call(
+            subprocess.run, cmd, capture_output=True, text=True, timeout=15
+        )
+        result.check_returncode()
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+    for line in result.stdout.splitlines():
+        try:
+            change = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if change.get("type") == "stats":
+            continue
+        subject = str(change.get("subject") or "")
+        if key in subject:
+            return change
+    return None
+
+
+def pickup_staleness_check(
+    client: DispatchClient,
+    key: str,
+    *,
+    now_ts: float | None = None,
+    worktree_path: Path | None = None,
+) -> tuple[bool, str]:
+    """Warn/abstain if an existing open PS for ``key`` is stale."""
+    change = _query_open_change_for_ticket_staleness(key, client.agent_class)
+    if change is None:
+        return True, "ps staleness check skipped: no open Gerrit PS found"
+    assessment = assess_patchset_staleness(
+        change.get("currentPatchSet") or {},
+        now_ts=now_ts,
+        cwd=worktree_path,
+    )
+    if assessment is None or assessment.level == "fresh":
+        return True, "ps staleness check passed"
+
+    marker = (
+        "runner-ps-staleness-abstain"
+        if assessment.should_abstain
+        else "runner-ps-staleness-warn"
+    )
+    add_comment(
+        client,
+        key,
+        _format_ps_staleness_comment(
+            marker=marker,
+            assessment=assessment,
+            change_number=change.get("number") or change.get("_number"),
+        ),
+        idem_key=f"{marker}-{key}",
+    )
+    if assessment.should_abstain:
+        return (
+            False,
+            "ps staleness exceeded: "
+            f"age_days={assessment.age_days:.1f} "
+            f"commits_behind={assessment.commits_behind}",
+        )
+    return (
+        True,
+        "ps staleness warning: "
+        f"age_days={assessment.age_days:.1f} "
+        f"commits_behind={assessment.commits_behind}",
+    )
+
+
+def _open_bot_owned_patch_signals() -> list[feature_dup_detector.PatchSignal]:
+    """Return open bot-owned Gerrit PS signals for feature-dup detection."""
+
+    _, ssh_key = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
+    cmd = [
+        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
+        f"claude-bot@{GERRIT_SSH_HOST}",
+        "gerrit", "query", "--format=JSON", "--current-patch-set", "--files",
+        "is:open",
+    ]
+    result = BREAKERS["gerrit_ssh"].call(
+        subprocess.run, cmd, capture_output=True, text=True, timeout=15
+    )
+    result.check_returncode()
+
+    signals: list[feature_dup_detector.PatchSignal] = []
+    for line in result.stdout.splitlines():
+        try:
+            change = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if change.get("type") == "stats":
+            continue
+        owner = str(((change.get("owner") or {}).get("username")) or "?")
+        if not (owner.startswith("codex-bot") or owner.startswith("claude-bot")):
+            continue
+        signal = feature_dup_detector.patch_signal_from_gerrit_change(change)
+        if signal is not None:
+            signals.append(signal)
+    return signals
+
+
+def _feature_dup_candidate_signal(
+    snapshot: TicketSnapshot,
+    description: str,
+    open_signals: list[feature_dup_detector.PatchSignal],
+) -> feature_dup_detector.PatchSignal:
+    """Prefer the ticket's open PS signal; fall back to planned file paths."""
+
+    for signal in open_signals:
+        if signal.ticket_key == snapshot.key:
+            return feature_dup_detector.PatchSignal(
+                ticket_key=signal.ticket_key,
+                change_number=signal.change_number,
+                subject=signal.subject,
+                url=signal.url,
+                files_changed=signal.files_changed,
+                added_symbols=signal.added_symbols,
+                description=description,
+                areas=feature_dup_detector.areas_from_labels(snapshot.labels),
+            )
+    return feature_dup_detector.PatchSignal(
+        ticket_key=snapshot.key,
+        files_changed=frozenset(predict_target_files(snapshot, description=description)),
+        description=description,
+        areas=feature_dup_detector.areas_from_labels(snapshot.labels),
+    )
+
+
+def _feature_dup_idem_key(left_key: str, right_key: str, reasons: Iterable[str]) -> str:
+    pair = "-".join(sorted((left_key, right_key)))
+    reason_key = "-".join(sorted(reasons))
+    return f"feature-dup-{pair}-{reason_key}"
+
+
+def post_feature_dup_warnings(
+    client: DispatchClient,
+    snapshot: TicketSnapshot,
+    *,
+    description: str,
+    open_signals: list[feature_dup_detector.PatchSignal] | None = None,
+) -> list[feature_dup_detector.FeatureDupHit]:
+    """Post non-blocking feature-dup warnings for the pickup candidate."""
+
+    if open_signals is None:
+        open_signals = _open_bot_owned_patch_signals()
+    candidate = _feature_dup_candidate_signal(snapshot, description, open_signals)
+    hits = feature_dup_detector.detect_feature_duplicates(candidate, open_signals)
+    for hit in hits:
+        current_comment = feature_dup_detector.format_feature_dup_warning(
+            candidate, hit
+        )
+        reverse_hit = feature_dup_detector.FeatureDupHit(
+            other=candidate,
+            reasons=hit.reasons,
+            shared_symbols=hit.shared_symbols,
+            file_jaccard=hit.file_jaccard,
+            jira_similarity=hit.jira_similarity,
+        )
+        other_comment = feature_dup_detector.format_feature_dup_warning(
+            hit.other, reverse_hit
+        )
+        idem = _feature_dup_idem_key(snapshot.key, hit.other.ticket_key, hit.reasons)
+        add_comment(client, snapshot.key, current_comment, idem_key=f"{idem}-current")
+        add_comment(client, hit.other.ticket_key, other_comment, idem_key=f"{idem}-other")
+    return hits
+
+
 def _paths_overlap(targets: set[str], in_flight: set[str]) -> set[str]:
     import fnmatch
 
@@ -3552,6 +3879,14 @@ def pre_pickup_ok(
     if not provider_decision.ok:
         return False, provider_decision.reason
 
+    caps = set(enabled_capabilities or ())
+    if "gerrit_push" in caps:
+        staleness_ok, staleness_reason = pickup_staleness_check(
+            client, snapshot.key, worktree_path=worktree_path
+        )
+        if not staleness_ok:
+            return False, staleness_reason
+
     desc = fetch_description(client, snapshot.key)
     prereqs = parse_prerequisites(desc)
 
@@ -3596,5 +3931,14 @@ def pre_pickup_ok(
                 lbl = shared[0] if shared else mutex_labels[0]
                 lines.append(f"{lbl} held by {hk} (status: {status})")
             return False, "mutex conflict:\n  " + "\n  ".join(lines)
+
+    try:
+        post_feature_dup_warnings(client, snapshot, description=desc)
+    except Exception as exc:  # noqa: BLE001 — warning-only detector must fail open
+        log.warning(
+            "feature_dup_detector.pickup_probe_failed key=%s err=%s",
+            snapshot.key,
+            exc,
+        )
 
     return True, "pre-pickup checks passed"

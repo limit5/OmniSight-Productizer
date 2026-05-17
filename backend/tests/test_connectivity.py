@@ -996,3 +996,118 @@ class TestRESTEndpoints:
             })
             assert resp.status_code == 200
             assert resp.json()["status"] == "pending"
+
+    @pytest.mark.parametrize(("path", "payload", "field"), [
+        ("/connectivity/artifacts/generate", {"protocol_id": None}, "protocol_id"),
+        ("/connectivity/composition/resolve", {"product_type": None}, "product_type"),
+        ("/connectivity/checklist", {"target_protocols": None}, "target_protocols"),
+        ("/connectivity/soc-compat", {"soc_id": None}, "soc_id"),
+        ("/connectivity/test", {
+            "protocol_id": None,
+            "recipe_id": "BLE-GATT-SERVICE",
+            "target_device": "nrf52840-dk",
+        }, "protocol_id"),
+        ("/connectivity/test", {
+            "protocol_id": "ble",
+            "recipe_id": None,
+            "target_device": "nrf52840-dk",
+        }, "recipe_id"),
+        ("/connectivity/test", {
+            "protocol_id": "ble",
+            "recipe_id": "BLE-GATT-SERVICE",
+            "target_device": None,
+        }, "target_device"),
+    ])
+    def test_post_endpoints_reject_none_inputs(self, client, path, payload, field):
+        resp = client.post(path, json=payload)
+
+        assert resp.status_code == 422
+        assert any(
+            error["loc"][-1] == field
+            for error in resp.json()["detail"]
+        )
+
+    @pytest.mark.parametrize(("path", "payload", "field"), [
+        ("/connectivity/artifacts/generate", {"protocol_id": ["ble"]}, "protocol_id"),
+        ("/connectivity/composition/resolve", {"product_type": {"name": "IoT gateway"}}, "product_type"),
+        ("/connectivity/checklist", {"target_protocols": "ble"}, "target_protocols"),
+        ("/connectivity/checklist", {"target_protocols": ["ble"], "provided_artifacts": "ble_gatt_table"}, "provided_artifacts"),
+        ("/connectivity/soc-compat", {"soc_id": ["esp32"]}, "soc_id"),
+        ("/connectivity/soc-compat", {"soc_id": "esp32", "protocol_ids": "ble"}, "protocol_ids"),
+        ("/connectivity/test", {
+            "protocol_id": "ble",
+            "recipe_id": "BLE-GATT-SERVICE",
+            "target_device": "nrf52840-dk",
+            "timeout_s": "long",
+        }, "timeout_s"),
+    ])
+    def test_post_endpoints_reject_wrong_type_inputs(self, client, path, payload, field):
+        resp = client.post(path, json=payload)
+
+        assert resp.status_code == 422
+        assert any(
+            error["loc"][-1] == field
+            for error in resp.json()["detail"]
+        )
+
+    def test_empty_collection_inputs_are_handled(self, client):
+        checklist_resp = client.post("/connectivity/checklist", json={
+            "target_protocols": [],
+            "provided_artifacts": [],
+        })
+        assert checklist_resp.status_code == 200
+        assert checklist_resp.json() == {
+            "checklists": [],
+            "count": 0,
+            "all_complete": True,
+        }
+
+        compat_resp = client.post("/connectivity/soc-compat", json={
+            "soc_id": "esp32",
+            "protocol_ids": [],
+        })
+        assert compat_resp.status_code == 200
+        assert compat_resp.json()["total_checked"] == 7
+
+        artifact_resp = client.post("/connectivity/artifacts/generate", json={
+            "protocol_id": "ble",
+            "provided_artifacts": [],
+        })
+        assert artifact_resp.status_code == 200
+        assert artifact_resp.json()["count"] == 3
+
+    def test_very_large_inputs_do_not_crash_router(self, client):
+        large_value = "x" * 10000
+
+        assert client.get(f"/connectivity/protocols/{large_value}").status_code == 404
+        assert client.get(f"/connectivity/protocols/{large_value}/recipes").status_code == 404
+        assert client.get(f"/connectivity/protocols/{large_value}/features").status_code == 404
+        assert client.get(f"/connectivity/sub-skills/{large_value}").status_code == 404
+
+        composition_resp = client.post("/connectivity/composition/resolve", json={
+            "product_type": large_value,
+        })
+        assert composition_resp.status_code == 200
+        assert composition_resp.json()["matched_rule"] is None
+
+        artifact_resp = client.post("/connectivity/artifacts/generate", json={
+            "protocol_id": large_value,
+        })
+        assert artifact_resp.status_code == 404
+
+        compat_resp = client.post("/connectivity/soc-compat", json={
+            "soc_id": large_value,
+            "protocol_ids": ["ble"],
+        })
+        assert compat_resp.status_code == 200
+        assert compat_resp.json()["compatibility"] == {"ble": False}
+
+        import backend.connectivity as conn
+        with patch.object(conn, "log_connectivity_test_result", new_callable=AsyncMock):
+            run_resp = client.post("/connectivity/test", json={
+                "protocol_id": "ble",
+                "recipe_id": "BLE-GATT-SERVICE",
+                "target_device": large_value,
+            })
+        assert run_resp.status_code == 200
+        assert run_resp.json()["target_device"] == large_value

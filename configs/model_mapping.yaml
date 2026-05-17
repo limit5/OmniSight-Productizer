@@ -1,8 +1,10 @@
-# BP.A2A.10 sample model mapping for AgentCard generation.
+# BP.F.3 operator-editable model mapping.
 #
-# BP.F will enforce/warn/advisory-check this mapping in the LLM factory.
-# A2A reads it as runtime metadata only, so operator edits update discovery
-# cards without requiring a code change.
+# Operators may change provider default_model values, per-Guild model_spec
+# values, and specialist model_spec values in this file without a code change.
+# Backend readers load it from configs/model_mapping.yaml at runtime and
+# invalidate their mtime caches after the file changes; keep the existing
+# provider:model syntax so the BP.F guardrails and A2A AgentCards agree.
 
 version: 1
 mode: advisory

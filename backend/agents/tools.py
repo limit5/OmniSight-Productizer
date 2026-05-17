@@ -22,12 +22,14 @@ import logging
 import os
 import re
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import yaml
 
 from backend.llm_adapter import tool
 from backend.db_pool import get_pool
+from backend.sandbox_tier import Guild
 
 logger = logging.getLogger(__name__)
 __path__ = [str(Path(__file__).with_suffix(""))]
@@ -1449,7 +1451,7 @@ async def list_uvc_devices() -> str:
     return "[OK] UVC Cameras:\n" + "\n".join(results)
 
 
-async def _get_deploy_info(platform: str = "") -> dict | None:
+async def _get_deploy_info(platform: str = "") -> dict[str, Any] | None:
     """Read deploy configuration from platform YAML."""
     if not platform:
         # Auto-detect from workspace hint
@@ -1930,7 +1932,7 @@ _MCP_CALL_TIMEOUT = int(os.environ.get("OMNISIGHT_MCP_CALL_TIMEOUT", "60"))
 _MCP_PROTOCOL_VERSION = "2024-11-05"
 
 
-def _load_mcp_server_spec(name: str) -> dict | None:
+def _load_mcp_server_spec(name: str) -> dict[str, Any] | None:
     """Read the MCP registry JSON and return the named server spec, or None."""
     import json as _json
     if not _MCP_REGISTRY_PATH.is_file():
@@ -1949,7 +1951,7 @@ def _load_mcp_server_spec(name: str) -> dict | None:
 async def _call_mcp_tool(
     server_name: str,
     tool_name: str,
-    arguments: dict,
+    arguments: dict[str, Any],
     *,
     timeout: int = _MCP_CALL_TIMEOUT,
 ) -> tuple[bool, str]:
@@ -2000,12 +2002,12 @@ async def _call_mcp_tool(
     except Exception as exc:
         return False, f"Failed to spawn MCP server {server_name!r}: {exc}"
 
-    async def _send(payload: dict) -> None:
+    async def _send(payload: dict[str, Any]) -> None:
         line = (_json.dumps(payload) + "\n").encode("utf-8")
         proc.stdin.write(line)
         await proc.stdin.drain()
 
-    async def _recv_response(req_id: int) -> dict:
+    async def _recv_response(req_id: int) -> dict[str, Any]:
         while True:
             raw = await proc.stdout.readline()
             if not raw:
@@ -2018,7 +2020,7 @@ async def _call_mcp_tool(
                 return msg
 
     try:
-        async def _do_call() -> dict:
+        async def _do_call() -> dict[str, Any]:
             await _send({
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -2275,6 +2277,7 @@ async def web_search(
             tenant_id=tenant_id,
             max_results=5,
             include_answer=True,
+            audit=False,
         )
     except WebSearchRateLimited as exc:
         await _audit_web_search_query(
@@ -2661,17 +2664,86 @@ ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
 TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS}
 
-AGENT_TOOLS: dict[str, list] = {
-    "architect":      ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS,
-    "firmware":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
-    "intel":          ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS,
-    "software":       ALL_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS,
-    "validator":      FILE_TOOLS + GIT_TOOLS + [run_bash] + TASK_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
-    "reporter":       FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
-    "reviewer":       [read_file, list_directory, read_yaml, search_in_files] + [git_status, git_log, git_diff, git_diff_staged, git_branch] + REVIEW_TOOLS + [get_next_task, add_task_comment] + MEMORY_TOOLS,
-    "general":        ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS,
-    "custom":         ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS,
-    "devops":         ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS,
-    "mechanical":     FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
-    "manufacturing":  FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS,
+_ARCHITECT_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS
+_DESIGN_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS
+_FIRMWARE_TOOLS = (
+    ALL_TOOLS
+    + SIMULATION_TOOLS
+    + PLATFORM_TOOLS
+    + MEMORY_TOOLS
+    + EPISODIC_TOOLS
+    + DEPLOY_TOOLS
+    + ARTIFACT_TOOLS
+)
+_SOFTWARE_TOOLS = (
+    ALL_TOOLS
+    + SIMULATION_TOOLS
+    + PLATFORM_TOOLS
+    + MEMORY_TOOLS
+    + EPISODIC_TOOLS
+    + ARTIFACT_TOOLS
+    + MCP_TOOLS
+    + IMAGE_TOOLS
+)
+_VALIDATOR_TOOLS = (
+    FILE_TOOLS
+    + GIT_TOOLS
+    + [run_bash]
+    + TASK_TOOLS
+    + SIMULATION_TOOLS
+    + PLATFORM_TOOLS
+    + MEMORY_TOOLS
+    + EPISODIC_TOOLS
+    + DEPLOY_TOOLS
+    + ARTIFACT_TOOLS
+)
+_REPORTER_TOOLS = FILE_TOOLS + GIT_TOOLS + TASK_TOOLS + REPORT_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS
+_REVIEWER_TOOLS = (
+    [read_file, list_directory, read_yaml, search_in_files]
+    + [git_status, git_log, git_diff, git_diff_staged, git_branch]
+    + REVIEW_TOOLS
+    + [get_next_task, add_task_comment]
+    + MEMORY_TOOLS
+)
+_GENERAL_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS
+_DEVOPS_TOOLS = ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS
+_MECHANICAL_TOOLS = FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS
+# BP.N.4: WebSearch is opt-in for latest-knowledge guilds only.
+_INTEL_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS
+
+GUILD_TOOLS: dict[str, list] = {
+    Guild.architect.value: _ARCHITECT_TOOLS,
+    Guild.sa_sd.value: _DESIGN_TOOLS,
+    Guild.ux.value: _GENERAL_TOOLS,
+    Guild.pm.value: _GENERAL_TOOLS,
+    Guild.gateway.value: _SOFTWARE_TOOLS,
+    Guild.bsp.value: _FIRMWARE_TOOLS,
+    Guild.hal.value: _FIRMWARE_TOOLS,
+    Guild.algo_cv.value: _SOFTWARE_TOOLS,
+    Guild.optical.value: _MECHANICAL_TOOLS,
+    Guild.isp.value: _FIRMWARE_TOOLS,
+    Guild.audio.value: _FIRMWARE_TOOLS,
+    Guild.frontend.value: _SOFTWARE_TOOLS,
+    Guild.backend.value: _SOFTWARE_TOOLS,
+    Guild.sre.value: _DEVOPS_TOOLS,
+    Guild.qa.value: _VALIDATOR_TOOLS,
+    Guild.auditor.value: _REVIEWER_TOOLS,
+    Guild.red_team.value: _REVIEWER_TOOLS,
+    Guild.forensics.value: _REVIEWER_TOOLS,
+    Guild.intel.value: _INTEL_TOOLS,
+    Guild.reporter.value: _REPORTER_TOOLS,
+    Guild.custom.value: _GENERAL_TOOLS,
 }
+
+_AGENT_TOOL_ALIASES: dict[str, list] = {
+    "firmware": GUILD_TOOLS[Guild.bsp.value],
+    "software": GUILD_TOOLS[Guild.backend.value],
+    "validator": GUILD_TOOLS[Guild.qa.value],
+    "reviewer": GUILD_TOOLS[Guild.auditor.value],
+    "general": GUILD_TOOLS[Guild.custom.value],
+    "devops": GUILD_TOOLS[Guild.sre.value],
+    "mechanical": GUILD_TOOLS[Guild.optical.value],
+    "manufacturing": GUILD_TOOLS[Guild.optical.value],
+}
+
+AGENT_TOOLS: dict[str, list] = {**GUILD_TOOLS, **_AGENT_TOOL_ALIASES}

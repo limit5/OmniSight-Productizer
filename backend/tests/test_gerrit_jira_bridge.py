@@ -5,18 +5,43 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from backend.agents import gerrit_jira_bridge as bridge
 from backend.agents import jira_dispatch
+
+SAFE_TEXT = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",)),
+    max_size=2048,
+)
+JSON_VALUES = st.recursive(
+    st.none()
+    | st.booleans()
+    | st.integers(min_value=-(10**9), max_value=10**9)
+    | st.floats(allow_nan=False, allow_infinity=False, width=32)
+    | SAFE_TEXT,
+    lambda children: st.lists(children, max_size=8)
+    | st.dictionaries(SAFE_TEXT, children, max_size=8),
+    max_leaves=32,
+)
+OP_KEYS = st.from_regex(r"OP-[1-9][0-9]{0,5}", fullmatch=True)
+CHANGE_NUMBERS = st.from_regex(r"[1-9][0-9]{0,8}", fullmatch=True)
+UTC_DATETIMES = st.datetimes(
+    min_value=datetime(1970, 1, 1),
+    max_value=datetime(2100, 12, 31),
+    timezones=st.just(timezone.utc),
+)
 
 
 def _client() -> jira_dispatch.DispatchClient:
@@ -85,6 +110,169 @@ def _merged_event(subject: str = "[OP-19] implement bridge", change_id: str = "I
             "number": 19,
         },
     })
+
+
+@settings(max_examples=75, deadline=None)
+@given(payload=JSON_VALUES)
+def test_parse_stream_line_property_json_objects_round_trip(payload: Any) -> None:
+    line = json.dumps(payload)
+    parsed = bridge.parse_stream_line(line)
+
+    assert parsed == bridge.parse_stream_line(line)
+    if isinstance(payload, dict):
+        assert parsed == payload
+        assert isinstance(parsed, dict)
+    else:
+        assert parsed is None
+
+
+@settings(max_examples=75, deadline=None)
+@given(line=SAFE_TEXT)
+def test_parse_stream_line_property_never_returns_non_dict(line: str) -> None:
+    parsed = bridge.parse_stream_line(line)
+
+    assert parsed is None or isinstance(parsed, dict)
+
+
+@settings(max_examples=75, deadline=None)
+@given(keys=st.lists(OP_KEYS, max_size=25))
+def test_extract_ticket_keys_property_bracketed_subject_dedupes_in_order(
+    keys: list[str],
+) -> None:
+    subject = " ".join(
+        f"[{key}/backend] title" if idx % 2 else f"[{key}] title"
+        for idx, key in enumerate(keys)
+    )
+
+    assert bridge.extract_ticket_keys_from_subject(subject) == list(dict.fromkeys(keys))
+
+
+@settings(max_examples=75, deadline=None)
+@given(keys=st.lists(OP_KEYS, max_size=25))
+def test_extract_ticket_keys_property_plain_subject_dedupes_in_order(
+    keys: list[str],
+) -> None:
+    subject = " ".join(f"fix {key}" for key in keys)
+
+    assert bridge.extract_ticket_keys_from_subject(subject) == list(dict.fromkeys(keys))
+
+
+@settings(max_examples=75, deadline=None)
+@given(numbers=st.lists(CHANGE_NUMBERS, max_size=25))
+def test_extract_change_numbers_property_runner_comments_only_dedupe(
+    numbers: list[str],
+) -> None:
+    comments = []
+    for number in numbers:
+        url = f"https://sora.services:29420/c/omnisight/OmniSight-Productizer/+/{number}"
+        comments.append(_comment(f"ordinary comment {url}"))
+        comments.append(_comment(f"[runner-pushed-to-gerrit] Patchset on Gerrit: {url}"))
+
+    assert bridge.extract_change_numbers_from_comments(comments) == list(
+        dict.fromkeys(numbers)
+    )
+
+
+@settings(max_examples=75, deadline=None)
+@given(dt=UTC_DATETIMES)
+def test_parse_jira_datetime_property_returns_utc_datetime(dt: datetime) -> None:
+    parsed = bridge.parse_jira_datetime(dt.isoformat())
+
+    assert parsed == dt
+    assert parsed is not None
+    assert parsed.tzinfo == timezone.utc
+    assert bridge.parse_jira_datetime(dt.isoformat().replace("+00:00", "Z")) == dt
+
+
+@settings(max_examples=75, deadline=None)
+@given(value=st.integers(min_value=-10_000, max_value=10_000))
+def test_heartbeat_stale_after_seconds_property_clamps_integer_env(value: int) -> None:
+    assert bridge.heartbeat_stale_after_seconds(
+        {"OMNISIGHT_BRIDGE_STALE_AFTER_SEC": str(value)}
+    ) == max(1, value)
+
+
+@settings(max_examples=75, deadline=None)
+@given(value=st.integers(min_value=0, max_value=10_000))
+def test_archive_age_days_from_env_property_accepts_non_negative_integer(
+    value: int,
+) -> None:
+    assert bridge.archive_age_days_from_env(
+        {"OMNISIGHT_ARCHIVE_AGE_DAYS": str(value)}
+    ) == value
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    key=OP_KEYS,
+    insertions=st.integers(min_value=-1_000_000, max_value=1_000_000),
+    deletions=st.integers(min_value=-1_000_000, max_value=1_000_000),
+    patchset_number=st.integers(min_value=-1_000, max_value=1_000),
+    approvals=st.lists(st.integers(min_value=-3, max_value=3), max_size=12),
+)
+def test_compute_ps_merged_metrics_property_preserves_schema_and_counts(
+    key: str,
+    insertions: int,
+    deletions: int,
+    patchset_number: int,
+    approvals: list[int],
+) -> None:
+    event = {
+        "change": {
+            "id": "Iproperty",
+            "number": 123,
+            "subject": f"[{key}] property test",
+            "createdOn": 100,
+            "lastUpdated": 250,
+            "currentPatchSet": {
+                "number": patchset_number,
+                "sizeInsertions": insertions,
+                "sizeDeletions": deletions,
+                "approvals": [
+                    {"type": "Verified", "value": value}
+                    for value in approvals
+                ],
+            },
+        },
+    }
+
+    metrics = bridge.compute_ps_merged_metrics(event)
+
+    assert set(metrics) == {
+        "change_id",
+        "change_number",
+        "ticket",
+        "lifetime_min",
+        "patchset_count",
+        "rebase_count",
+        "rework_count",
+        "changed_files",
+        "final_diff_size",
+        "verified_minus_one_count",
+    }
+    assert metrics == bridge.compute_ps_merged_metrics(event)
+    assert metrics["ticket"] == key
+    assert metrics["lifetime_min"] == 2.5
+    assert metrics["patchset_count"] == patchset_number
+    assert metrics["final_diff_size"] == abs(insertions) + abs(deletions)
+    assert metrics["verified_minus_one_count"] == len(
+        [value for value in approvals if value <= -1]
+    )
+
+
+def test_public_helpers_handle_empty_none_and_large_edges() -> None:
+    large_text = "x" * 10_000
+
+    assert bridge.parse_stream_line("") is None
+    assert bridge.parse_stream_line(large_text) is None
+    assert bridge.parse_jira_datetime("") is None
+    assert bridge.parse_jira_datetime(None) is None  # type: ignore[arg-type]
+    assert bridge.extract_ticket_keys_from_subject("") == []
+    assert bridge.extract_ticket_keys_from_subject(large_text) == []
+    assert bridge.flatten_adf_text(None) == ""
+    assert bridge.extract_change_numbers_from_comments([]) == []
+    assert bridge.heartbeat_stale_after_seconds({}) == bridge.DEFAULT_BRIDGE_STALE_AFTER_SEC
+    assert bridge.archive_age_days_from_env({}) == bridge.DEFAULT_ARCHIVE_AGE_DAYS
 
 
 def test_parse_stream_line_handles_malformed_and_non_object() -> None:
@@ -471,6 +659,49 @@ def test_malformed_line_increments_parse_errors_and_continues() -> None:
     b.run_once_from_lines(["{bad", _merged_event()])
     assert b.counters.parse_errors == 1
     assert b.counters.transitions_made == 1
+
+
+def test_stream_startup_reaps_stale_merger_verify_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    scratch_root = tmp_path / "tmp"
+    scratch_root.mkdir()
+    stale = scratch_root / "merger-verify-stale"
+    fresh = scratch_root / "merger-verify-fresh"
+    stale.mkdir()
+    fresh.mkdir()
+    (stale / "worktree").mkdir()
+    (fresh / "worktree").mkdir()
+    now = time.time()
+    old = now - bridge.MERGER_VERIFY_REAP_AGE_SECONDS - 60
+    os.utime(stale, (old, old))
+    os.utime(fresh, (now, now))
+
+    b = FakeBridge()
+    b.config.heartbeat_file_path = tmp_path / "heartbeat"
+    monkeypatch.setattr(bridge, "MERGER_VERIFY_SCRATCH_ROOT", scratch_root)
+
+    class FakeProc:
+        stdout = iter([])
+        stderr = None
+
+        def wait(self) -> int:
+            b.stop()
+            return 0
+
+    b.popen_factory = lambda *args, **kwargs: FakeProc()
+
+    b.stream_forever()
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert any(
+        level == "WARN"
+        and event == "merger_verify_scratch_reaped"
+        and extra["path"] == str(stale)
+        for level, event, extra in b.logs
+    )
 
 
 def test_heartbeat_warns_when_stream_silent_before_first_event() -> None:
@@ -1038,3 +1269,548 @@ def test_patchset_created_ai_reviewer_independent_of_merger_failure(
 
     assert len(ai_calls) == 1
     assert ai_calls[0]["change"]["number"] == 42
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  OP-1409 — develop-tip drift re-evaluation
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_develop_merge_drift_sweep_re_evaluates_newly_unmergeable_ps(
+    tmp_path,
+) -> None:
+    """A develop ``change-merged`` event should sweep open develop PSes
+    and synthesize a proactive-merger event for a newly-unmergeable
+    change."""
+    import subprocess as _sub
+
+    open_change = (
+        '{"id":"Iop1409","number":900,"project":"omnisight/x",'
+        '"branch":"develop","subject":"[OP-1409] drift target",'
+        '"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abc900",'
+        '"uploader":{"username":"alice"},"parents":[{"revision":"base1"}],'
+        '"ref":"refs/changes/00/900/1"}}\n'
+        '{"type":"stats","rowCount":1,"runTimeMilliseconds":12}'
+    )
+    run_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        run_calls.append(args)
+        return _sub.CompletedProcess(
+            args=args, returncode=0, stdout=open_change, stderr="",
+        )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b")]}\'\n{\"mergeable\":false}"
+
+    requested_urls: list[str] = []
+
+    def fake_urlopen(req, timeout=30):
+        requested_urls.append(req.full_url)
+        return FakeResponse()
+
+    logs: list[tuple[str, str, dict[str, Any]]] = []
+    spawned: list[dict[str, Any]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        bridge.BridgeConfig(
+            cursor_file=tmp_path / "event-cursor.json",
+            gerrit_rest_base_url="https://gerrit.example",
+        ),
+        sleep=lambda _: None,
+        run_command=fake_run,
+        urlopen=fake_urlopen,
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+    b._handle_change_merged = lambda _event: None  # type: ignore[method-assign]
+    b._schedule_auto_rebase_sweep = lambda _event: None  # type: ignore[method-assign]
+    b._spawn_proactive_merger_thread = (  # type: ignore[method-assign]
+        lambda event: spawned.append(event)
+    )
+
+    class ImmediateScheduler:
+        def schedule(self, *, project: str, merged_sha: str) -> None:
+            b._run_develop_drift_sweep(project=project, merged_sha=merged_sha)
+
+    b._develop_drift_scheduler = ImmediateScheduler()
+
+    b.process_stream_event({
+        "type": "change-merged",
+        "newRev": "develop-tip-2",
+        "change": {
+            "id": "Imerged",
+            "number": 899,
+            "project": "omnisight/x",
+            "branch": "develop",
+            "subject": "[OP-1409] advance develop",
+        },
+    })
+
+    assert len(run_calls) == 1
+    assert run_calls[0][-2:] == ["status:open", "branch:develop"]
+    assert requested_urls == [
+        "https://gerrit.example/changes/900/revisions/current/mergeable"
+    ]
+    assert len(spawned) == 1
+    assert spawned[0]["type"] == "patchset-created"
+    assert spawned[0]["change"]["number"] == 900
+    assert spawned[0]["patchSet"]["number"] == 1
+    assert any(ev == "merger_drift_re_eval_triggered" for _level, ev, _kw in logs)
+
+    b.process_stream_event({
+        "type": "change-merged",
+        "newRev": "develop-tip-3",
+        "change": {
+            "id": "Imerged2",
+            "number": 901,
+            "project": "omnisight/x",
+            "branch": "develop",
+            "subject": "[OP-1409] advance develop again",
+        },
+    })
+
+    assert len(spawned) == 1
+
+
+def test_develop_drift_cooldown_survives_bridge_restart(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    """OP-1418: persisted cooldown state blocks immediate restart replay."""
+    now = 1_900_000_000.0
+    monkeypatch.setattr(bridge.time, "time", lambda: now)
+    config = bridge.BridgeConfig(
+        cursor_file=tmp_path / "event-cursor.json",
+        merger_drift_cooldown_seconds=30.0 * 60.0,
+    )
+    logs: list[tuple[str, str, dict[str, Any]]] = []
+    first = bridge.GerritJiraBridge(
+        _client(),
+        config,
+        sleep=lambda _: None,
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+
+    assert first._should_re_evaluate_drift("900", True) is False
+    assert first._should_re_evaluate_drift("900", False) is True
+
+    state_file = tmp_path / "drift-cooldown.json"
+    assert json.loads(state_file.read_text()) == {
+        "changes": {
+            "900": {
+                "last_re_eval_ts": now,
+                "last_seen_mergeable": False,
+            },
+        },
+    }
+    assert oct(state_file.stat().st_mode & 0o777) == "0o600"
+
+    restarted = bridge.GerritJiraBridge(
+        _client(),
+        config,
+        sleep=lambda _: None,
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+
+    assert restarted._should_re_evaluate_drift("900", False) is False
+    assert any(
+        ev == "merger_drift_re_eval_skipped_cooldown"
+        and kw["change"] == "900"
+        for _level, ev, kw in logs
+    )
+
+
+def test_develop_drift_sweep_abstains_on_stale_patchset(
+    tmp_path, monkeypatch,
+) -> None:
+    """OP-1440: merger-time drift re-check skips stale PSes before spawn."""
+    import subprocess as _sub
+
+    now = 1_800_000_000.0
+    open_change = (
+        '{"id":"Iop1440","number":901,"project":"omnisight/x",'
+        '"branch":"develop","subject":"[OP-1440] stale drift target",'
+        '"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abc901",'
+        f'"createdOn":{now - 15 * 86400},'
+        '"uploader":{"username":"alice"},"parents":[{"revision":"base15"}],'
+        '"ref":"refs/changes/01/901/1"}}\n'
+        '{"type":"stats","rowCount":1,"runTimeMilliseconds":12}'
+    )
+    run_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        run_calls.append(args)
+        if args[:3] == ["git", "rev-list", "--count"]:
+            return _sub.CompletedProcess(
+                args=args, returncode=0, stdout="101\n", stderr="",
+            )
+        return _sub.CompletedProcess(
+            args=args, returncode=0, stdout=open_change, stderr="",
+        )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b")]}\'\n{\"mergeable\":false}"
+
+    comments: list[tuple[str, str]] = []
+    monkeypatch.setattr(bridge.time, "time", lambda: now)
+    monkeypatch.setattr(jira_dispatch.time, "time", lambda: now)
+    monkeypatch.setattr(
+        jira_dispatch,
+        "add_comment",
+        lambda client, key, text, idem_key=None: comments.append((key, text)),
+    )
+
+    logs: list[tuple[str, str, dict[str, Any]]] = []
+    spawned: list[dict[str, Any]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        bridge.BridgeConfig(
+            cursor_file=tmp_path / "event-cursor.json",
+            gerrit_rest_base_url="https://gerrit.example",
+        ),
+        sleep=lambda _: None,
+        run_command=fake_run,
+        urlopen=lambda req, timeout=30: FakeResponse(),
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+    b._spawn_proactive_merger_thread = (  # type: ignore[method-assign]
+        lambda event: spawned.append(event)
+    )
+
+    triggered = b._run_develop_drift_sweep(
+        project="omnisight/x", merged_sha="develop-tip-2",
+    )
+
+    assert triggered == 0
+    assert spawned == []
+    assert any(call[:3] == ["git", "rev-list", "--count"] for call in run_calls)
+    assert comments and comments[0][0] == "OP-1440"
+    assert "[merger-ps-staleness-abstain]" in comments[0][1]
+    assert "age_days=15.0" in comments[0][1]
+    assert "commits_behind=101" in comments[0][1]
+    assert any(
+        ev == "merger_drift_re_eval_skipped_stale_ps"
+        and kw["reason"] == "staleness_exceeded"
+        for _level, ev, kw in logs
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  OP-1196 phase 3b — startup conflict backfill
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestBackfillExistingConflicts:
+    """The daemon's stream_forever only sees LIVE patchset-created
+    events. Conflicts that pre-date a daemon restart (or were created
+    during a daemon downtime window) never reach the merger pipeline
+    via the normal path. ``backfill_existing_conflicts`` is the
+    one-shot scan invoked from ``_run_with_db_pool`` to close that gap.
+
+    Tests below cover the pure-function filter logic + the orchestrator
+    end-to-end with a fake ``run_command``.
+    """
+
+    # Sample `gerrit query --current-patch-set --format=JSON` output —
+    # 5 changes spanning every filter branch + 1 stats trailer line.
+    _SAMPLE_GERRIT_QUERY = "\n".join([
+        # Change A — mergeable=False, no hashtag, not merger-bot uploader → CANDIDATE
+        '{"id":"Ia111","number":689,"project":"omnisight/x","branch":"develop",'
+        '"subject":"OP-186 talent_tree","mergeable":false,"status":"NEW",'
+        '"hashtags":[],"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abcdef1","uploader":{"username":"alice"}}}',
+        # Change B — mergeable=True → skip
+        '{"id":"Ib222","number":700,"project":"omnisight/x","branch":"develop",'
+        '"subject":"clean change","mergeable":true,"status":"NEW",'
+        '"hashtags":[],"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abcdef2","uploader":{"username":"alice"}}}',
+        # Change C — already-attempted (Merger-Proactive-PS1) → skip
+        '{"id":"Ic333","number":701,"project":"omnisight/x","branch":"develop",'
+        '"subject":"already tried","mergeable":false,"status":"NEW",'
+        '"hashtags":["Merger-Proactive-PS1"],"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abcdef3","uploader":{"username":"alice"}}}',
+        # Change D — resolved-awaiting-human → skip
+        '{"id":"Id444","number":702,"project":"omnisight/x","branch":"develop",'
+        '"subject":"merger already won","mergeable":false,"status":"NEW",'
+        '"hashtags":["Merge-Conflict-Resolved"],"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":2,"revision":"abcdef4","uploader":{"username":"merger-agent-bot"}}}',
+        # Change E — uploader is merger-agent-bot → skip (loop prevention)
+        '{"id":"Ie555","number":703,"project":"omnisight/x","branch":"develop",'
+        '"subject":"merger uploaded","mergeable":false,"status":"NEW",'
+        '"hashtags":[],"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abcdef5","uploader":{"username":"merger-agent-bot"}}}',
+        # Stats trailer that gerrit appends
+        '{"type":"stats","rowCount":5,"runTimeMilliseconds":12,"moreChanges":false}',
+    ])
+
+    def test_select_candidates_filters_correctly(self):
+        candidates, counters = bridge.GerritJiraBridge._select_backfill_candidates(
+            self._SAMPLE_GERRIT_QUERY
+        )
+        # Only Change A passes the filter.
+        assert len(candidates) == 1
+        assert candidates[0]["number"] == 689
+        # Counters reflect each skip reason.
+        assert counters == {
+            "scanned": 5,
+            "skipped_mergeable": 1,
+            "skipped_already_attempted": 1,
+            "skipped_resolved_awaiting_human": 1,
+            "skipped_uploader_is_merger": 1,
+            "skipped_no_current_patchset": 0,
+            "skipped_unparseable": 0,
+            "candidates": 1,
+        }
+
+    def test_select_candidates_skips_unparseable(self):
+        garbage = "this is not json\n{also not json\n"
+        candidates, counters = bridge.GerritJiraBridge._select_backfill_candidates(garbage)
+        assert candidates == []
+        assert counters["skipped_unparseable"] == 2
+        assert counters["scanned"] == 0
+
+    def test_select_candidates_skips_missing_currentPatchSet(self):
+        partial = (
+            '{"id":"If666","number":704,"project":"omnisight/x",'
+            '"branch":"develop","subject":"missing cps","mergeable":false,'
+            '"hashtags":[]}\n'
+        )
+        candidates, counters = bridge.GerritJiraBridge._select_backfill_candidates(partial)
+        assert candidates == []
+        assert counters["skipped_no_current_patchset"] == 1
+
+    def test_synthesize_event_shape_matches_live_event(self):
+        change_obj = {
+            "id": "Itest", "number": 689, "project": "omnisight/x",
+            "branch": "develop", "subject": "test", "url": "http://...",
+            "owner": {"username": "alice"},
+            "hashtags": ["tag1"],
+            "currentPatchSet": {
+                "number": 2, "revision": "deadbeef",
+                "uploader": {"username": "alice"},
+                "parents": ["aaa"], "ref": "refs/changes/89/689/2",
+            },
+        }
+        event = bridge.GerritJiraBridge._synthesize_patchset_created_event(change_obj)
+        assert event["type"] == "patchset-created"
+        # Same keys merger code paths read from a live event.
+        assert event["change"]["id"] == "Itest"
+        assert event["change"]["number"] == 689
+        assert event["change"]["project"] == "omnisight/x"
+        assert event["change"]["branch"] == "develop"
+        assert event["patchSet"]["number"] == 2
+        assert event["patchSet"]["revision"] == "deadbeef"
+        assert event["patchSet"]["uploader"]["username"] == "alice"
+        # Carries hashtags for prefilter visibility in logs.
+        assert event["change"]["hashtags"] == ["tag1"]
+
+    def test_backfill_end_to_end_spawns_one_thread_for_candidate(
+        self, tmp_path, monkeypatch,
+    ):
+        """End-to-end (synchronous): subprocess returns the 5-change
+        sample, filter picks 1, bridge spawns 1 proactive-merger thread."""
+        import subprocess as _sub
+        sample = self._SAMPLE_GERRIT_QUERY
+
+        # Env knobs the backfill needs.
+        monkeypatch.setenv("OMNISIGHT_GERRIT_PROJECT", "omnisight/x")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_HOST", "claude-bot@host")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_PORT", "29418")
+        monkeypatch.setenv("OMNISIGHT_GIT_SSH_KEY_PATH", "/dev/null")
+
+        # Fake run_command — returns the sample on the gerrit-query
+        # invocation, raises on anything else (defensive).
+        run_calls: list[list[str]] = []
+        def fake_run(args, **kwargs):
+            run_calls.append(args)
+            return _sub.CompletedProcess(
+                args=args, returncode=0,
+                stdout=sample, stderr="",
+            )
+
+        # Capture log lines.
+        logs: list[tuple[str, str, dict]] = []
+        def fake_logger(level, event, **kwargs):
+            logs.append((level, event, kwargs))
+
+        # Stub out _spawn_proactive_merger_thread so we don't actually
+        # spin up a thread (the live function imports the merger
+        # webhook code which has heavy backend deps; that's covered by
+        # other tests).
+        spawned: list[dict] = []
+
+        b = bridge.GerritJiraBridge(
+            _client(),
+            bridge.BridgeConfig(cursor_file=tmp_path / "event-cursor.json"),
+            sleep=lambda _: None,
+            run_command=fake_run,
+            logger=fake_logger,
+        )
+        b._spawn_proactive_merger_thread = (  # type: ignore[method-assign]
+            lambda event: spawned.append(event)
+        )
+
+        synthesized = b.backfill_existing_conflicts()
+
+        # The function returned the same number of candidates and the
+        # spawn list reflects exactly one event for change 689.
+        assert synthesized == 1
+        assert len(spawned) == 1
+        assert spawned[0]["change"]["number"] == 689
+        assert spawned[0]["patchSet"]["revision"] == "abcdef1"
+        # run_command was called exactly once (the gerrit query).
+        assert len(run_calls) == 1
+        assert "gerrit" in run_calls[0]
+        # backfill_complete log line was emitted with the counter dict.
+        complete_logs = [
+            kwargs for level, ev, kwargs in logs if ev == "backfill_complete"
+        ]
+        assert len(complete_logs) == 1
+        assert complete_logs[0]["candidates"] == 1
+        assert complete_logs[0]["skipped_mergeable"] == 1
+        # backfill_synthesize_event was logged for the one candidate.
+        synth_logs = [
+            kwargs for level, ev, kwargs in logs
+            if ev == "backfill_synthesize_event"
+        ]
+        assert len(synth_logs) == 1
+        assert synth_logs[0]["change_id"] == "689"
+
+    def test_backfill_skipped_when_project_unset(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("OMNISIGHT_GERRIT_PROJECT", raising=False)
+        # Override settings.gerrit_project too — otherwise tests inheriting
+        # a configured prod-like settings object would fall through.
+        from backend.config import settings as _settings
+        monkeypatch.setattr(_settings, "gerrit_project", "", raising=False)
+        monkeypatch.delenv("OMNISIGHT_GERRIT_SSH_HOST", raising=False)
+        monkeypatch.setattr(_settings, "gerrit_ssh_host", "", raising=False)
+
+        logs: list[tuple[str, str, dict]] = []
+        def fake_logger(level, event, **kwargs):
+            logs.append((level, event, kwargs))
+
+        # run_command should NEVER be called when project is unset.
+        def exploding_run(*args, **kwargs):
+            raise AssertionError(
+                "OP-1196 phase 3b regression: subprocess invoked despite "
+                "missing OMNISIGHT_GERRIT_PROJECT"
+            )
+
+        b = bridge.GerritJiraBridge(
+            _client(),
+            bridge.BridgeConfig(cursor_file=tmp_path / "event-cursor.json"),
+            sleep=lambda _: None,
+            run_command=exploding_run,
+            logger=fake_logger,
+        )
+
+        assert b.backfill_existing_conflicts() == 0
+        # backfill_skipped warning emitted.
+        skipped_logs = [
+            (level, ev, kwargs) for level, ev, kwargs in logs
+            if ev == "backfill_skipped"
+        ]
+        assert len(skipped_logs) >= 1
+        assert skipped_logs[0][0] == "WARN"
+
+    def test_backfill_search_expression_is_shell_quoted(
+        self, tmp_path, monkeypatch,
+    ):
+        """OP-1196 phase 3b hotfix regression — the search expression
+        handed to ``gerrit query`` MUST be shell-quoted BEFORE SSH
+        concatenates argv into the remote command string. Without
+        quoting, ``-is:wip`` is parsed as a stray CLI option by
+        gerrit's argparser and the query aborts with
+        ``fatal: "-is:wip" is not a valid option``. Observed in
+        prod-like deploy 2026-05-17 ~03:07 BEFORE this fix landed.
+        """
+        import subprocess as _sub
+        monkeypatch.setenv("OMNISIGHT_GERRIT_PROJECT", "omnisight/x")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_HOST", "claude-bot@host")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_PORT", "29418")
+        monkeypatch.setenv("OMNISIGHT_GIT_SSH_KEY_PATH", "/dev/null")
+
+        captured_args: list[str] = []
+        def fake_run(args, **kwargs):
+            captured_args.extend(args)
+            return _sub.CompletedProcess(
+                args=args, returncode=0, stdout="", stderr="",
+            )
+
+        b = bridge.GerritJiraBridge(
+            _client(),
+            bridge.BridgeConfig(cursor_file=tmp_path / "event-cursor.json"),
+            sleep=lambda _: None,
+            run_command=fake_run,
+            logger=lambda *a, **kw: None,
+        )
+        b._spawn_proactive_merger_thread = (  # type: ignore[method-assign]
+            lambda event: None
+        )
+
+        b.backfill_existing_conflicts()
+
+        # The shlex-quoted search expression must appear as a SINGLE
+        # argv element, NOT as separate `project:...`, `status:open`,
+        # `-is:wip` tokens. (SSH concatenates argv with spaces; the
+        # remote shell re-tokenises; the quote chars preserve the
+        # expression as one token.)
+        assert "'project:omnisight/x status:open -is:wip'" in captured_args, (
+            f"argv lacks the shell-quoted search expression — "
+            f"captured: {captured_args!r}"
+        )
+        # No bare `-is:wip` token (would be interpreted as a CLI
+        # option by gerrit's argparser, aborting the query).
+        assert "-is:wip" not in captured_args, captured_args
+        # And `project:...` / `status:open` must NOT be standalone
+        # argv elements either — they're embedded in the quoted expr.
+        assert "project:omnisight/x" not in captured_args, captured_args
+        assert "status:open" not in captured_args, captured_args
+
+    def test_backfill_handles_gerrit_query_failure_gracefully(
+        self, tmp_path, monkeypatch,
+    ):
+        """Backfill MUST NOT raise — gerrit query failure logs + returns 0
+        so the main stream loop still gets to start."""
+        import subprocess as _sub
+        monkeypatch.setenv("OMNISIGHT_GERRIT_PROJECT", "omnisight/x")
+        monkeypatch.setenv("OMNISIGHT_GERRIT_SSH_HOST", "claude-bot@host")
+
+        def fake_run(args, **kwargs):
+            return _sub.CompletedProcess(
+                args=args, returncode=255,
+                stdout="", stderr="ssh: connection refused",
+            )
+
+        logs: list[tuple[str, str, dict]] = []
+        b = bridge.GerritJiraBridge(
+            _client(),
+            bridge.BridgeConfig(cursor_file=tmp_path / "event-cursor.json"),
+            sleep=lambda _: None,
+            run_command=fake_run,
+            logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+        )
+
+        result = b.backfill_existing_conflicts()
+        assert result == 0
+        fail_logs = [
+            (level, ev) for level, ev, _ in logs
+            if ev == "backfill_gerrit_query_failed"
+        ]
+        assert len(fail_logs) == 1
+        assert fail_logs[0][0] == "WARN"

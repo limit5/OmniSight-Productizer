@@ -107,6 +107,49 @@ class AchievementUnlockStore(Protocol):
     async def unlock_achievement(self, unlock: AchievementUnlock) -> bool: ...
 
 
+class InMemoryAchievementUnlockStore:
+    """Dev/test achievement store for the daily unlock scanner."""
+
+    def __init__(
+        self,
+        snapshots: tuple[AchievementMetricSnapshot, ...] = (),
+    ) -> None:
+        self._snapshots: dict[str, AchievementMetricSnapshot] = {
+            snapshot.agent_id: snapshot for snapshot in snapshots
+        }
+        self._unlocks: dict[tuple[str, str], AchievementUnlock] = {}
+
+    async def list_metric_snapshots(self) -> tuple[AchievementMetricSnapshot, ...]:
+        return tuple(self._snapshots.values())
+
+    async def has_achievement(
+        self,
+        agent_id: str,
+        achievement_id: str,
+    ) -> bool:
+        key = (
+            _required("agent_id", agent_id),
+            _required("achievement_id", achievement_id),
+        )
+        return key in self._unlocks
+
+    async def unlock_achievement(self, unlock: AchievementUnlock) -> bool:
+        key = (unlock.agent_id, unlock.achievement_id)
+        if key in self._unlocks:
+            return False
+        self._unlocks[key] = unlock
+        return True
+
+    async def replace_metric_snapshots(
+        self,
+        snapshots: tuple[AchievementMetricSnapshot, ...],
+    ) -> None:
+        self._snapshots = {snapshot.agent_id: snapshot for snapshot in snapshots}
+
+    async def list_unlocked_achievements(self) -> tuple[AchievementUnlock, ...]:
+        return tuple(self._unlocks.values())
+
+
 async def scan_achievement_unlocks(
     store: AchievementUnlockStore,
     *,
@@ -234,6 +277,7 @@ __all__ = [
     "AchievementUnlock",
     "AchievementUnlockScanResult",
     "AchievementUnlockStore",
+    "InMemoryAchievementUnlockStore",
     "scan_achievement_unlocks",
     "run_daily_unlock_loop",
 ]

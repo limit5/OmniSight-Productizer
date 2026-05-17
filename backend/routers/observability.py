@@ -204,8 +204,10 @@ async def ops_summary() -> dict:
     from backend.routers import system as _sys
     from backend import decision_engine as _de
 
+    pending_decisions = []
     try:
-        pending = len(_de.list_pending())
+        pending_decisions = _de.list_pending()
+        pending = len(pending_decisions)
     except Exception as exc:
         logger.debug("ops_summary: decision engine lookup failed: %s", exc)
         pending = 0
@@ -300,6 +302,7 @@ async def ops_summary() -> dict:
         "checked_at": time.time(),
         "uptime_s": uptime,
         "t3_runners": t3_runners,
+        "guild_metrics": _ops_summary_guild_metrics(pending_decisions),
         "highest_entropy_agent": highest_entropy,
         "coordinator": coordinator_snap,
         "aimd": aimd_snap,
@@ -316,3 +319,37 @@ async def ops_summary() -> dict:
         # Watchdog liveness
         "watchdog_age_s": _watchdog_age_s(),
     }
+
+
+def _ops_summary_guild_metrics(pending_decisions: list[Any]) -> list[dict[str, Any]]:
+    """Best-effort per-Guild split for the compact ops panel.
+
+    BP.B trace writers dual-write either ``guild_id`` or legacy
+    ``agent_type`` into decision source metadata. The ops summary should
+    surface that split without making the polling endpoint depend on
+    durable stores.
+    """
+
+    try:
+        from backend.agent_guild_dual_write import guild_id_from_values
+    except Exception as exc:
+        logger.debug("ops_summary: guild metric helper unavailable: %s", exc)
+        return []
+
+    buckets: dict[str, int] = {}
+    for decision in pending_decisions:
+        source = getattr(decision, "source", None)
+        if not isinstance(source, dict):
+            continue
+        guild_id = guild_id_from_values(source)
+        if not guild_id:
+            continue
+        buckets[guild_id] = buckets.get(guild_id, 0) + 1
+
+    return [
+        {"guild": guild_id, "decisions_pending": count}
+        for guild_id, count in sorted(
+            buckets.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    ]

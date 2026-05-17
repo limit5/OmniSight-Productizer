@@ -23,6 +23,57 @@ This module owns:
   fifth error, :class:`SynergyComputeFailed`, is re-exported from
   :mod:`backend.agents.synergy_registry` because that's where it's
   raised — see AC #3.)
+* The W17.4 (OP-195) tier-eligibility gate on :func:`assign_task` —
+  ADR-0008 §"Routing integration" pins party-eligible tasks to Tier L+
+  (see :data:`PARTY_ELIGIBLE_TIERS`). Sub-L tasks raise
+  :class:`PartyTaskTierTooLow` so they fall back to the individual
+  pickup loop instead of consuming a whole party's exclusivity slot.
+
+W17 sub-wave coverage
+---------------------
+The W17 ship is split across TODO.md sub-waves; the rows live in
+this module:
+
+* **W17.2 (OP-193) — Party formation rules**: the size bound (2-5
+  members), the per-member Guild requirement, and the cross-Guild
+  synergy lookup that gates the "synergy bonus" attached to the
+  party. The contract is pinned by :data:`MIN_PARTY_SIZE`,
+  :data:`MAX_PARTY_SIZE`, :class:`PartyFormationRules`,
+  :func:`party_formation_rules`, and the pure pre-flight
+  :func:`preview_party_formation` (mirrors OP-179's ``ToolLevelSpec``
+  / OP-180's ``build_feature_unlock_gate`` attribution pattern — no
+  new persistence, no new YAML; just exposes the existing
+  ``_validate_members`` / ``_validate_member_guilds`` /
+  ``_resolve_synergy`` contract as a structured, raising-free surface
+  for the W17.6 Party Builder UI). Tests live in
+  :mod:`backend.tests.test_party` (size happy + below/above bounds +
+  fullstack matrix lookup + uniform-Guild → no synergy + missing
+  YAML degrades).
+* W17.4 (per-task exclusivity) lives in :func:`assign_task`.
+* W17.5 (shared XP + personal accrual) lives in
+  :func:`compute_party_xp_distribution`.
+
+W17 sub-wave coverage in this module
+------------------------------------
+The W17 module shipped in one bundle under OP-220; this table tracks
+the attribution of each sub-wave back to its dedicated TODO row so a
+future reader of git blame can resolve a symbol to its W17.x ticket.
+
+- W17.5 (OP-196): :func:`compute_party_xp_distribution` /
+  :func:`task_complete` + the :class:`MemberXpShare` /
+  :class:`PartyXpDistribution` result dataclasses -- the
+  "shared evenly + personal accrual" payout rule from ADR-0008
+  §"Party / Synergy system (W17)". The pool ``total_xp`` divides
+  evenly across N members (integer floor; the remainder stays on the
+  table and is surfaced via ``PartyXpDistribution.total_xp_pool`` for
+  audit). Each member additionally accrues their own per-task
+  ``personal_xp`` (passed by the caller via ``personal_xp_by_member``)
+  on top of the party share, so a member is never *worse off* for
+  joining a party — personal contributions remain attributable to
+  the individual character card. The synergy bonus from W17 layers
+  on top of the party share *only*, never on the personal XP, so a
+  party with no synergy degrades cleanly to ``base_share + personal``
+  without coupling to the synergy matrix.
 
 Module-global state audit (per project SOP)
 -------------------------------------------
@@ -58,8 +109,17 @@ ConnFactory = Callable[[], Any]
 
 # ── Constants from ADR-0008 §"Party / Synergy system (W17)" ────────
 
+# W17.2 (OP-193) party formation bounds. Mirrored by the
+# ``agent_party_state`` CHECK constraint in alembic 0230, so a manual
+# DB write also cannot violate the bound.
 MIN_PARTY_SIZE = 2
 MAX_PARTY_SIZE = 5
+
+#: ADR-0008 §"Routing integration": "Tier L+ tasks can target a party".
+#: Maps to ADR-0005 review-authority letters (the `tier:` Jira label).
+#: W17.4 (OP-195) wires this gate into :func:`assign_task` so a party
+#: cannot be saddled with Tier S/M chores — those are pickup-loop work.
+PARTY_ELIGIBLE_TIERS = frozenset({"L", "X"})
 
 
 # ── Errors (OP-220 §"Error catalog") ───────────────────────────────
@@ -79,6 +139,18 @@ class MemberAlreadyInParty(PartyError):
 
 class PartyActiveTaskExists(PartyError):
     """Refuse assigning a second concurrent task to one party."""
+
+
+class PartyTaskTierTooLow(PartyError):
+    """Refuse assigning a sub-L tier task to a party. W17.4 (OP-195)
+    enforces ADR-0008 §"Routing integration": party-eligible tasks are
+    Tier L+ (i.e., :data:`PARTY_ELIGIBLE_TIERS`). Carries the offending
+    tier label as :attr:`tier` so the router can echo it back in the
+    HTTP 422 detail."""
+
+    def __init__(self, message: str, *, tier: str):
+        super().__init__(message)
+        self.tier = tier
 
 
 class MemberInActiveParty(PartyError):
@@ -128,7 +200,25 @@ class Party:
 
 @dataclass(frozen=True)
 class MemberXpShare:
-    """Per-member XP attribution from :func:`compute_party_xp_distribution`."""
+    """Per-member XP attribution from :func:`compute_party_xp_distribution`.
+
+    W17.5 (OP-196): the four numeric fields encode the
+    "shared evenly + personal accrual" payout rule:
+
+    * ``party_share`` -- the member's slice of the evenly-split pool
+      (``total_xp // N``).
+    * ``synergy_bonus`` -- the additive bonus from the W17 synergy
+      matrix; ``round(party_share * synergy_xp_bonus)`` per member,
+      clamped to ``>= 0``. Synergy never applies to ``personal_xp``.
+    * ``personal_xp`` -- the per-member task contribution the caller
+      passed in via ``personal_xp_by_member``; clamped to ``>= 0`` so
+      a negative input cannot net out the party share.
+    * ``total = party_share + synergy_bonus + personal_xp`` -- the
+      XP delta the persistence layer should record for the member's
+      character card. The two halves (party + personal) are reported
+      separately so the operator UI can attribute each delta back to
+      its source.
+    """
 
     member_agent_id: str
     personal_xp: int
@@ -139,13 +229,67 @@ class MemberXpShare:
 
 @dataclass(frozen=True)
 class PartyXpDistribution:
-    """Result of :func:`compute_party_xp_distribution`."""
+    """Result of :func:`compute_party_xp_distribution`.
+
+    W17.5 (OP-196): ``total_xp_pool`` reports the *input* pool the
+    caller asked the helper to distribute, **not** the sum of
+    ``shares[*].total``. The two diverge by design:
+
+    * The pool may not divide evenly across N members — the floored
+      remainder ``total_xp_pool - N * party_share`` is intentionally
+      left on the table (no rounding-up that would inflate the
+      character-level XP curve). Persisting the pool lets an auditor
+      reconstruct the rounding.
+    * ``shares[*].personal_xp`` is *additive* to the pool and lives
+      outside it, so the sum of ``shares[*].total`` is always
+      ``>= total_xp_pool`` whenever any member has personal XP.
+    """
 
     party_id: str
     total_xp_pool: int
     synergy_label: str | None
     synergy_xp_bonus: float
     shares: tuple[MemberXpShare, ...]
+
+
+@dataclass(frozen=True)
+class PartyFormationRules:
+    """Pinned W17.2 (OP-193) formation contract.
+
+    Returned by :func:`party_formation_rules`. Mirrors the
+    ``ToolLevelSpec`` pattern from OP-179 — a frozen, read-only
+    catalog of the static contract so the Party Builder UI (W17.6)
+    and the API legend can render the bounds without hard-coding
+    them out of band.
+    """
+
+    min_size: int
+    max_size: int
+    synergy_matrix_path: Path
+
+
+@dataclass(frozen=True)
+class PartyFormationPreview:
+    """Pre-flight result of :func:`preview_party_formation`.
+
+    ``issues`` is a tuple of human-readable refusal strings — empty
+    iff the formation is acceptable to :func:`create_party` modulo
+    the runtime "is anyone already in an active party" check, which
+    only :func:`create_party` can perform because it needs the store
+    handle. ``synergy`` is the entry that *would* apply at the time
+    of preview; it is ``None`` for same-Guild parties, for parties
+    whose Guild list is not covered by any matrix entry, and when
+    the synergy YAML cannot be loaded (degraded per AC #3).
+    """
+
+    member_agent_ids: tuple[str, ...]
+    synergy: SynergyEntry | None
+    issues: tuple[str, ...]
+
+    @property
+    def is_valid(self) -> bool:
+        """True iff no formation rule is violated."""
+        return not self.issues
 
 
 # ── Store Protocols ────────────────────────────────────────────────
@@ -339,6 +483,74 @@ class PostgresPartyStore:
 # ── Public helpers ─────────────────────────────────────────────────
 
 
+def party_formation_rules(
+    *,
+    synergy_path: Path | str = SYNERGY_MATRIX_PATH,
+) -> PartyFormationRules:
+    """Return the pinned W17.2 (OP-193) formation contract.
+
+    Pure accessor — no I/O, no synergy YAML read. Consumers (the
+    Party Builder UI legend, the ``/agents/parties/formation-rules``
+    legend, pre-flight admission gates) use this to surface the
+    contract bounds without hard-coding the integers out of band.
+    """
+    return PartyFormationRules(
+        min_size=MIN_PARTY_SIZE,
+        max_size=MAX_PARTY_SIZE,
+        synergy_matrix_path=Path(synergy_path),
+    )
+
+
+def preview_party_formation(
+    member_agent_ids: Sequence[str],
+    member_guilds: Mapping[str, str],
+    *,
+    synergy_path: Path | str = SYNERGY_MATRIX_PATH,
+) -> PartyFormationPreview:
+    """Pre-flight check for the W17.2 (OP-193) formation contract.
+
+    Runs the size + per-member Guild + cross-Guild synergy lookup
+    that :func:`create_party` performs, *without* touching a store or
+    raising — every refusal is reported through
+    :attr:`PartyFormationPreview.issues` instead. The W17.6 Party
+    Builder UI calls this on each form keystroke to render live
+    validation; the authoritative refusal still happens server-side
+    in :func:`create_party`, because only that path can probe the
+    store for "is this member already in an active party?".
+
+    Synergy lookup degrades to ``None`` if the YAML cannot be loaded,
+    matching the AC #3 degradation contract — a YAML edit accident
+    must not block formation previews.
+    """
+    members: tuple[str, ...]
+    issues: list[str] = []
+    try:
+        members = _validate_members(member_agent_ids)
+    except (PartySizeInvalid, MemberAlreadyInParty, ValueError, TypeError) as exc:
+        normalised = (
+            tuple(m for m in member_agent_ids if isinstance(m, str))
+            if isinstance(member_agent_ids, (list, tuple))
+            else ()
+        )
+        return PartyFormationPreview(
+            member_agent_ids=normalised,
+            synergy=None,
+            issues=(str(exc),),
+        )
+    try:
+        _validate_member_guilds(members, member_guilds)
+    except (PartyError, TypeError) as exc:
+        issues.append(str(exc))
+    synergy: SynergyEntry | None = None
+    if not issues:
+        synergy = _resolve_synergy(member_guilds.values(), path=synergy_path)
+    return PartyFormationPreview(
+        member_agent_ids=members,
+        synergy=synergy,
+        issues=tuple(issues),
+    )
+
+
 async def create_party(
     store: PartyStore,
     name: str,
@@ -351,10 +563,17 @@ async def create_party(
 ) -> Party:
     """Create a new party.
 
-    Validates size, refuses duplicate members or members already in
-    another active party, and computes the synergy bonus from
-    ``config/synergy_matrix.yaml`` via
-    :func:`backend.agents.synergy_registry.synergy_for_members`.
+    Orchestrates the W17.2 (OP-193) formation contract:
+
+    * :func:`_validate_members` enforces the 2-5 size bound and
+      refuses duplicates,
+    * :func:`_validate_member_guilds` requires a per-member Guild
+      slug,
+    * the store's ``active_party_for_member`` probe refuses members
+      already in another active party,
+    * :func:`_resolve_synergy` consults the cross-Guild matrix and
+      attaches the synergy bonus (or ``None`` for same-Guild parties
+      / parties not covered by any matrix entry).
 
     Per AC #3 ``SynergyComputeFailed`` from the registry is **caught
     here** and degraded to "no synergy + log warning"; the party is
@@ -364,7 +583,9 @@ async def create_party(
     ``member_guilds`` is a per-member Guild lookup keyed by
     ``member_agent_id`` — supplied by the caller so this helper stays
     storage-agnostic (the router resolves it from the agent's
-    character_card.guild before calling).
+    character_card.guild before calling). For client-side live
+    validation without a store round-trip, see
+    :func:`preview_party_formation` (W17.2 pre-flight helper).
     """
     clean_name = _required("name", name)
     members = _validate_members(member_agent_ids)
@@ -377,8 +598,9 @@ async def create_party(
         active = await store.active_party_for_member(member_id)
         if active is not None:
             raise MemberAlreadyInParty(
-                f"agent {member_id!r} is already in active party "
-                f"{active.party_id!r}"
+                f"create_party: agent {member_id!r} is already in active party "
+                f"{active.party_id!r} (active_task_id={active.active_task_id!r}); "
+                f"cannot add to new party {clean_name!r}"
             )
 
     # Synergy lookup — degrade on failure per AC #3.
@@ -418,6 +640,7 @@ async def assign_task(
     party_id: str,
     task_id: str,
     *,
+    tier: str | None = None,
     now: datetime | None = None,
 ) -> PartyState:
     """Assign a single Tier L+ task to ``party_id``.
@@ -426,14 +649,33 @@ async def assign_task(
     :class:`PartyActiveTaskExists` if the party already holds another
     active task. Idempotent on the *same* task — re-assigning the
     same ``task_id`` returns the existing state row unchanged.
+
+    W17.4 (OP-195): when ``tier`` is supplied, enforce ADR-0008
+    §"Routing integration" — only Tier L+ (see
+    :data:`PARTY_ELIGIBLE_TIERS`) are party-eligible. Sub-L tiers raise
+    :class:`PartyTaskTierTooLow` *before* the exclusivity check so an
+    accidental Tier S/M assignment cannot block a party that is still
+    idle. ``tier=None`` skips the gate for backward compatibility with
+    callers that have not yet been wired through the new label
+    pipeline; the FastAPI router (which sees the ``tier:`` Jira label)
+    always passes a value.
     """
     clean_party_id = _required("party_id", party_id)
     clean_task_id = _required("task_id", task_id)
+    if tier is not None:
+        _assert_party_eligible_tier(tier, task_id=clean_task_id)
     state = await store.get_state(clean_party_id)
     if state is None:
-        raise PartyError(f"party {clean_party_id!r} does not exist")
+        raise PartyError(
+            f"assign_task: party {clean_party_id!r} does not exist "
+            f"(task_id={clean_task_id!r})"
+        )
     if state.disbanded_at is not None:
-        raise PartyError(f"party {clean_party_id!r} is disbanded")
+        raise PartyError(
+            f"assign_task: party {clean_party_id!r} is disbanded "
+            f"(disbanded_at={state.disbanded_at.isoformat()}; "
+            f"cannot assign task_id={clean_task_id!r})"
+        )
     if state.active_task_id is not None and state.active_task_id != clean_task_id:
         raise PartyActiveTaskExists(
             f"party {clean_party_id!r} already holds active task "
@@ -466,7 +708,9 @@ async def release_task(
     clean_party_id = _required("party_id", party_id)
     state = await store.get_state(clean_party_id)
     if state is None:
-        raise PartyError(f"party {clean_party_id!r} does not exist")
+        raise PartyError(
+            f"release_task: party {clean_party_id!r} does not exist"
+        )
     if state.active_task_id is None:
         return state
     moment = _utc(now or datetime.now(timezone.utc))
@@ -487,26 +731,43 @@ def compute_party_xp_distribution(
 ) -> PartyXpDistribution:
     """Split ``total_xp`` evenly across the party, plus per-member personal XP.
 
-    Per OP-220 AC #2 ("compute_party_xp_distribution") and the W17
+    W17.5 (OP-196) -- pins the "shared evenly + personal accrual"
+    payout rule called out by OP-220 AC #2 and the W17
     state-transition contract:
 
     * Each member gets ``total_xp // N`` (integer floor — remainder
       stays on the table; surfaced via the
       :class:`PartyXpDistribution.total_xp_pool` field for audit).
     * Each member additionally gets ``personal_xp`` from
-      ``personal_xp_by_member`` (per-member task contribution).
-    * If a synergy applies, each share is multiplied by
+      ``personal_xp_by_member`` (per-member task contribution). The
+      personal slice is **additive**, never split across the party —
+      this is the ADR-0008 promise that "party play doesn't penalise
+      individual progression" (§"Party / Synergy system (W17)").
+    * If a synergy applies, each party share is multiplied by
       ``(1 + synergy_xp_bonus)`` and ``synergy_bonus`` records the
-      delta.
+      delta. Synergy never applies to ``personal_xp``, so an absent
+      or zero ``synergy_xp_bonus`` cleanly degrades to
+      ``party_share + personal_xp``.
+    * A missing entry in ``personal_xp_by_member`` (or no map at all)
+      means "no personal contribution this round" — the member still
+      receives the full ``party_share + synergy_bonus``. Negative
+      personal-XP inputs are clamped to ``0`` so a malformed caller
+      payload cannot net out the party share.
 
     Pure function — no DB calls. Persistence happens in
     :func:`task_complete` once the operator's `XpDelta` rows are
     written through :mod:`backend.agents.character_card`.
     """
     if not isinstance(total_xp, int) or isinstance(total_xp, bool):
-        raise TypeError("total_xp must be an int")
+        raise TypeError(
+            f"total_xp must be an int; got {type(total_xp).__name__} "
+            f"(party_id={party.state.party_id!r})"
+        )
     if total_xp < 0:
-        raise ValueError("total_xp must be >= 0")
+        raise ValueError(
+            f"total_xp must be >= 0; got {total_xp} "
+            f"(party_id={party.state.party_id!r})"
+        )
 
     members = party.members
     if not members:
@@ -564,13 +825,23 @@ async def task_complete(
     Composes the W17 state-transition contract:
 
         ``party.task_complete(outcome)``
-          → ``compute_party_xp_distribution``
+          → ``compute_party_xp_distribution`` (W17.5 / OP-196 payout)
           → mark members ungated for individual tasks
           → caller emits ``party:task:completed`` SSE
+
+    The W17.5 payout split — even share + per-member personal accrual
+    + synergy bonus on the share only — is delegated entirely to
+    :func:`compute_party_xp_distribution`. ``task_complete`` itself
+    owns the state-machine transition (active_task_id → None) and the
+    membership lookup, but is otherwise XP-rule-agnostic so the W17.5
+    contract has a single source of truth.
     """
     state = await store.get_state(party_id)
     if state is None:
-        raise PartyError(f"party {party_id!r} does not exist")
+        raise PartyError(
+            f"task_complete: party {party_id!r} does not exist "
+            f"(total_xp={total_xp})"
+        )
     members = await store.list_members(party_id)
     party = Party(state=state, members=members, synergy=None)
     distribution = compute_party_xp_distribution(
@@ -642,8 +913,17 @@ async def list_active_parties(store: PartyStore) -> tuple[Party, ...]:
 
 
 def _validate_members(member_agent_ids: Sequence[str]) -> tuple[str, ...]:
+    """Enforce the W17.2 (OP-193) size bound + duplicate-member check.
+
+    Raises :class:`PartySizeInvalid` outside ``[MIN_PARTY_SIZE,
+    MAX_PARTY_SIZE]`` and :class:`MemberAlreadyInParty` on duplicates
+    within the proposed list.
+    """
     if not isinstance(member_agent_ids, (list, tuple)):
-        raise TypeError("member_agent_ids must be a sequence of strings")
+        raise TypeError(
+            f"member_agent_ids must be a sequence of strings; "
+            f"got {type(member_agent_ids).__name__}"
+        )
     cleaned: list[str] = []
     seen: set[str] = set()
     for index, raw in enumerate(member_agent_ids):
@@ -653,7 +933,10 @@ def _validate_members(member_agent_ids: Sequence[str]) -> tuple[str, ...]:
             )
         clean = raw.strip()
         if not clean:
-            raise ValueError(f"member_agent_ids[{index}] is empty")
+            raise ValueError(
+                f"member_agent_ids[{index}] is empty "
+                f"(raw value={raw!r})"
+            )
         if clean in seen:
             raise MemberAlreadyInParty(
                 f"member {clean!r} appears twice in member_agent_ids"
@@ -675,18 +958,57 @@ def _validate_member_guilds(
     members: tuple[str, ...],
     member_guilds: Mapping[str, str],
 ) -> None:
+    """Enforce the W17.2 (OP-193) per-member Guild requirement.
+
+    Every member must have a non-empty Guild slug in
+    ``member_guilds`` so the cross-Guild synergy lookup has a
+    well-defined Guild bag. The caller resolves slugs from the
+    member's ``character_card.guild`` before invoking.
+    """
     if not isinstance(member_guilds, Mapping):
-        raise TypeError("member_guilds must be a mapping member_agent_id -> guild_slug")
+        raise TypeError(
+            f"member_guilds must be a mapping member_agent_id -> guild_slug; "
+            f"got {type(member_guilds).__name__}"
+        )
     for member_id in members:
         guild = member_guilds.get(member_id)
         if guild is None:
             raise PartyError(
-                f"member_guilds is missing a guild slug for member {member_id!r}"
+                f"member_guilds is missing a guild slug for member {member_id!r} "
+                f"(known keys={sorted(member_guilds.keys())!r})"
             )
         if not isinstance(guild, str) or not guild.strip():
             raise PartyError(
-                f"member_guilds[{member_id!r}] must be a non-empty guild slug"
+                f"member_guilds[{member_id!r}] must be a non-empty guild slug; "
+                f"got {guild!r} (type {type(guild).__name__})"
             )
+
+
+def _assert_party_eligible_tier(tier: str, *, task_id: str) -> None:
+    """W17.4 gate (OP-195): refuse anything below Tier L for a party.
+
+    Normalises the label the same way :mod:`backend.agents.jira_dispatch`
+    does (``label.split(":", 1)[1].strip().upper()``) so a router
+    passing the raw ``tier:l`` suffix and a programmatic caller passing
+    ``"L"`` both clear the gate.
+    """
+    if not isinstance(tier, str):
+        raise TypeError(
+            f"tier must be a string; got {type(tier).__name__} "
+            f"(task_id={task_id!r})"
+        )
+    clean = tier.strip().upper()
+    if not clean:
+        raise ValueError(
+            f"tier is required (task_id={task_id!r}); got {tier!r}"
+        )
+    if clean not in PARTY_ELIGIBLE_TIERS:
+        eligible = ", ".join(sorted(PARTY_ELIGIBLE_TIERS))
+        raise PartyTaskTierTooLow(
+            f"task {task_id!r} tier {clean!r} is not party-eligible; "
+            f"expected one of {{{eligible}}} (ADR-0008 §Routing integration)",
+            tier=clean,
+        )
 
 
 def _resolve_synergy(
@@ -694,12 +1016,21 @@ def _resolve_synergy(
     *,
     path: Path | str,
 ) -> SynergyEntry | None:
-    """Wrap :func:`synergy_for_members` so AC #3 ("degrade to no-bonus
-    base XP + log warning") fires uniformly across call sites."""
+    """W17.2 (OP-193) cross-Guild synergy lookup.
+
+    Wrap :func:`synergy_for_members` so AC #3 ("degrade to no-bonus
+    base XP + log warning") fires uniformly across call sites
+    (``create_party`` and :func:`preview_party_formation`).
+    """
     try:
         return synergy_for_members(guilds, path=path)
     except SynergyComputeFailed as exc:
-        LOG.warning("synergy_compute_failed; degrading to no-bonus base XP: %s", exc)
+        LOG.warning(
+            "synergy_compute_failed; degrading to no-bonus base XP "
+            "(matrix_path=%r): %s",
+            str(path),
+            exc,
+        )
         return None
 
 
@@ -735,10 +1066,14 @@ def _row_to_member(row: Any) -> PartyMember:
 
 def _required(field_name: str, value: Any) -> str:
     if not isinstance(value, str):
-        raise TypeError(f"{field_name} must be a string")
+        raise TypeError(
+            f"{field_name} must be a string; got {type(value).__name__}"
+        )
     clean = value.strip()
     if not clean:
-        raise ValueError(f"{field_name} is required")
+        raise ValueError(
+            f"{field_name} is required (got empty/whitespace value {value!r})"
+        )
     return clean
 
 
@@ -759,13 +1094,17 @@ __all__ = [
     "MemberAlreadyInParty",
     "MemberInActiveParty",
     "MemberXpShare",
+    "PARTY_ELIGIBLE_TIERS",
     "Party",
     "PartyActiveTaskExists",
     "PartyError",
+    "PartyFormationPreview",
+    "PartyFormationRules",
     "PartyMember",
     "PartySizeInvalid",
     "PartyState",
     "PartyStore",
+    "PartyTaskTierTooLow",
     "PartyXpDistribution",
     "PostgresPartyStore",
     "SynergyComputeFailed",
@@ -775,6 +1114,8 @@ __all__ = [
     "get_party",
     "list_active_parties",
     "member_is_gated",
+    "party_formation_rules",
+    "preview_party_formation",
     "release_task",
     "task_complete",
 ]

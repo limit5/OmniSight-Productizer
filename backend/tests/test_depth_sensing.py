@@ -8,6 +8,8 @@ and gate validation.
 from __future__ import annotations
 
 
+import math
+
 import pytest
 
 from backend import depth_sensing as ds
@@ -326,6 +328,16 @@ class TestStructuredLight:
         assert frame.width == 640
         assert frame.height == 480
 
+    def test_phase_shift_short_frames_use_missing_pixel_default(self):
+        codec = ds.create_structured_light_codec("phase_shift", resolution=(4, 3))
+        frame = codec.decode([b"", b"", b"", b""])
+        depths = ds._unpack_depth(frame.depth_data, frame.width * frame.height)
+
+        assert isinstance(frame, DepthFrame)
+        assert frame.min_depth == 10.0
+        assert frame.max_depth == 10.0
+        assert set(depths) == {10.0}
+
 
 # ===================================================================
 # 6. Stereo pipeline
@@ -416,6 +428,16 @@ class TestStereoPipeline:
         assert pipe.config.block_size == 11
         assert pipe.config.baseline == 0.12
         assert pipe.config.focal_length == 500.0
+
+    def test_disparity_to_depth_thresholds_zero_and_clip(self):
+        pipe = ds.create_stereo_pipeline("sgbm", baseline=0.1, focal_length=500.0)
+        disparity = ds._pack_depth([0.0, 0.5, 1.0, 10000.0])
+        frame = pipe.disparity_to_depth(disparity, width=2, height=2)
+        depths = ds._unpack_depth(frame.depth_data, 4)
+
+        assert depths == pytest.approx([0.0, 0.0, 50.0, 0.01])
+        assert frame.min_depth == 0.01
+        assert frame.max_depth == 50.0
 
 
 # ===================================================================
@@ -515,6 +537,21 @@ class TestPointCloud:
         assert isinstance(data, bytes)
         assert len(data) > 0
 
+    def test_compute_normals_collinear_points_use_default_normal(self):
+        proc = ds.create_point_cloud_processor("pcl")
+        cloud = PointCloudData(
+            points=[(0.0, 0.0, 1.0), (1.0, 0.0, 1.0), (2.0, 0.0, 1.0)],
+            colors=[],
+            normals=[],
+            point_count=3,
+            bounds_min=(0.0, 0.0, 1.0),
+            bounds_max=(2.0, 0.0, 1.0),
+        )
+
+        result = proc.compute_normals(cloud, radius=3.0, max_nn=2)
+
+        assert result.normals == [(0.0, 0.0, 1.0)] * 3
+
 
 # ===================================================================
 # 8. Registration
@@ -589,6 +626,24 @@ class TestRegistration:
         assert hasattr(result, "inlier_rmse")
         assert hasattr(result, "transformation")
         assert hasattr(result, "converged")
+
+    def test_registration_empty_clouds_return_non_converged_inf_rmse(self):
+        empty = PointCloudData(
+            points=[],
+            colors=[],
+            normals=[],
+            point_count=0,
+            bounds_min=(0.0, 0.0, 0.0),
+            bounds_max=(0.0, 0.0, 0.0),
+        )
+
+        result = ds.register_point_clouds(empty, empty, "icp_point_to_point")
+
+        assert result.fitness == 0.0
+        assert math.isinf(result.inlier_rmse)
+        assert result.num_inliers == 0
+        assert result.converged is False
+        assert result.iterations == 0
 
 
 # ===================================================================

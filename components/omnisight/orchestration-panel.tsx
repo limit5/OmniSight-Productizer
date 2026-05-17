@@ -88,6 +88,8 @@ export function OrchestrationPanel() {
           awaiting_since: ev.data.awaiting_since,
           jira_ticket: ev.data.jira_ticket,
           age_seconds: 0,
+          guild_id: ev.data.guild_id,
+          size: ev.data.size,
         }
         setSnap((prev) => {
           if (!prev) return prev
@@ -537,10 +539,12 @@ function AwaitingHumanBlock({ snap }: { snap: OrchestrationSnapshot }) {
             const cellProps = link
               ? { href: link, target: "_blank", rel: "noreferrer" }
               : {}
+            const guild = formatGuild(item.guild_id)
+            const size = formatTShirtSize(item.size)
             return (
               <li
                 key={item.change_id}
-                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 px-2 py-1 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.2))] bg-white/5"
+                className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] items-center gap-2 px-2 py-1 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.2))] bg-white/5"
               >
                 <Cell
                   {...cellProps}
@@ -552,6 +556,18 @@ function AwaitingHumanBlock({ snap }: { snap: OrchestrationSnapshot }) {
                     · {item.file_path}
                   </span>
                 </Cell>
+                <span
+                  className="max-w-[7rem] truncate rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.25))] bg-white/[0.04] px-1 py-0.5 text-[9px] tracking-[0.12em] text-[var(--muted-foreground,#94a3b8)] uppercase"
+                  title={item.guild_id || "Guild unknown"}
+                >
+                  {guild}
+                </span>
+                <span
+                  className={`rounded-sm border px-1 py-0.5 text-[9px] font-semibold tracking-[0.12em] ${size.tone}`}
+                  title={item.size ? `T-shirt size ${size.label}` : "T-shirt size unknown"}
+                >
+                  {size.label}
+                </span>
                 <span className="font-mono text-[10px] text-[var(--neural-cyan,#67e8f9)] tabular-nums">
                   c={item.merger_confidence.toFixed(2)}
                 </span>
@@ -634,4 +650,36 @@ function fmtAge(seconds: number): string {
   if (seconds < 3600) return `${Math.round(seconds / 60)}m`
   if (seconds < 86_400) return `${(seconds / 3600).toFixed(1)}h`
   return `${(seconds / 86_400).toFixed(1)}d`
+}
+
+function formatGuild(guildId?: string): string {
+  const guild = guildId?.trim()
+  if (!guild) return "GUILD --"
+  return guild.replace(/[_-]+/g, " ")
+}
+
+function formatTShirtSize(size?: string): { label: string; tone: string } {
+  const label = size?.trim().toUpperCase()
+  if (label === "S") {
+    return {
+      label,
+      tone: "border-[var(--validation-emerald,#10b981)]/30 text-[var(--validation-emerald,#10b981)]",
+    }
+  }
+  if (label === "M") {
+    return {
+      label,
+      tone: "border-[var(--neural-cyan,#67e8f9)]/30 text-[var(--neural-cyan,#67e8f9)]",
+    }
+  }
+  if (label === "XL") {
+    return {
+      label,
+      tone: "border-[var(--fui-orange,#f59e0b)]/30 text-[var(--fui-orange,#f59e0b)]",
+    }
+  }
+  return {
+    label: "SIZE --",
+    tone: "border-[var(--neural-border,rgba(148,163,184,0.25))] text-[var(--muted-foreground,#94a3b8)]",
+  }
 }

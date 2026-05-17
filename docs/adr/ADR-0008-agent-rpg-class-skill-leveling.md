@@ -173,6 +173,8 @@ Milestone gates at **Lv 10 / 30 / 50 / 80**. At each gate, operator picks a tale
 
 Lv 80 capstone is a single signature ability per Guild — the deliberate end-state of long-running agents (e.g. `code-archaeologist` reads 1M-context legacy code and proposes surgical refactor in ≤ 3 commit).
 
+**Signature-ability runtime surface (W14.6 — OP-190).** The capstone is not a passive trophy: each Guild capstone in `config/talent_tree.yaml` carries three runtime fields beyond the descriptive `ability_id` / `display_name` / `summary` triple — `signature_label` (routing keyword consumed by `routing_policy.capstone_routing_weight_multiplier`, **+50%** on match, strictly larger than the per-talent +20% so the single Lv-80 ability outweighs any single fork; shares the W14 talent-routing feature flag so one env var rolls out both effects), `signature_prompt` (multi-line block injected at task start by `prompt_builder.enrich_system_prompt_with_capstone` under a dedicated `Signature ability (per RPG.W14 capstone):` header — distinct from the per-talent `Talent reminders` header so operators reading the prompt log can tell at a glance whether the agent is executing a Lv-80 signature move), and an optional `commit_budget` (operator-facing advisory commit ceiling — the canonical backend `code_archaeologist` carries `commit_budget: 3` to encode the "≤ 3 commit" surgical-refactor discipline this paragraph names). The drift guard rejects a capstone block missing the required signature fields at boot.
+
 ### Party / Synergy system (W17)
 
 `agent_party` table holds 2-5 member rows per party. Cross-Guild composition triggers a synergy bonus from a fixed matrix:
@@ -190,6 +192,9 @@ Party tasks are exclusive: one active task per party. Party XP is shared evenly 
 
 - **Character Card** (`components/omnisight/agents/CharacterCard.tsx`) — RPG-style: portrait / Guild crest / level bar / skill radar / talent tree / tool proficiency bars. Three tabs: Stats / Skills / Tools.
 - **Guild Hall** (`components/omnisight/agents/GuildHall.tsx`) — grid of Guilds with member counts; click → roster.
+- **Party Hall** (`components/omnisight/agents/PartyHall.tsx`) — grid of active multi-agent parties; one card per party with member portraits, the assigned Tier L+ task, and the synergy badge. Renders the "Form party" CTA when the caller wires an `onCreatePartyClick` handler.
+- **Party Builder modal** (`components/omnisight/agents/PartyBuilderModal.tsx`, W17.6) — operator-facing composer for new parties: name input, 2-5 agent picker keyed off the eligible roster, and a live synergy preview that mirrors `synergy_registry.synergy_for_members` (strongest applicable entry by `xp_bonus` desc → `skill_bonus` desc → `label` asc). Agents already in an active party are surfaced as locked-out rows so the operator does not race the server-side `MemberAlreadyInParty` 409. On confirm, the caller POSTs to `POST /api/v1/agents/parties`.
+- **Active-party indicator** (`components/omnisight/agents/ActivePartyIndicator.tsx`, W17.6) — inline pill rendered next to an agent display name in rosters and Character Card headers, showing which active party an agent belongs to (and which Tier L+ task that party currently holds, when present). Returns `null` for solo agents so it adds no layout weight outside party context; amber-locked styling when the party is mid-task signals "cannot solo-assign".
 - **Instance Carousel** — `α / β / γ` switcher on Character Card.
 - **Level-up animation** — flare effect + toast (respects `prefers-reduced-motion`).
 - **Onboarding** — 3-step tooltip tour first time card opens; `seen_rpg_tour` persists.

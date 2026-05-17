@@ -58,15 +58,21 @@ Public entry points
 
 from __future__ import annotations
 
+import ast
+import asyncio
+import difflib
 import json
 import logging
 import os
 import re
+import subprocess
+import textwrap
 import threading
-from dataclasses import asdict, dataclass, field
+import time
+from dataclasses import asdict, dataclass, field, replace
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Collection, Protocol
 
 from backend import metrics
 from backend.gerrit import gerrit_client as _default_gerrit_client
@@ -81,6 +87,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = os.environ.get(
     "OMNISIGHT_MERGER_MODEL", "anthropic/claude-opus-4-7"
 )
+REVIEW_MODEL = os.environ.get(
+    "OMNISIGHT_MERGER_REVIEW_MODEL", "anthropic/claude-3-5-haiku"
+)
 
 # Gate thresholds.  Tweak via env for A/B'ing in production.
 MIN_CONFIDENCE_FOR_PLUS_TWO = float(
@@ -91,6 +100,33 @@ MAX_CONFLICT_LINES = int(os.environ.get("OMNISIGHT_MERGER_MAX_LINES", "20"))
 # Conflict block we emit the LLM *must* produce — we refuse to trust
 # anything longer than the incoming block × safety factor.
 MAX_RESOLUTION_EXPANSION_FACTOR = 3.0
+
+# Approximate combined LLM-input cap for the pre-resolution context pack.
+# The merger prompt does not depend on a provider tokenizer, so this uses
+# the conventional 4 chars/token guardrail and prioritises sections before
+# truncating.
+CONTEXT_PACK_TOKEN_LIMIT = int(
+    os.environ.get("OMNISIGHT_MERGER_CONTEXT_PACK_TOKENS", "32000")
+)
+_CONTEXT_PACK_CHARS_PER_TOKEN = 4
+_CONTEXT_PACK_GIT_LOG_LINES = 50
+PROMPT_INPUT_HARD_LIMIT_BYTES = int(
+    os.environ.get("OMNISIGHT_MERGER_PROMPT_LIMIT_BYTES", "150000")
+)
+_CONTEXT_PACK_TRIM_ORDER = ("git_log", "sibling_files", "symbol_table")
+_GIT_REGION_LOG_TIMEOUT_SECONDS = 20
+_GIT_REGION_LOG_TIMEOUT_MARKER = (
+    "[git log timed out after 20s - partial history may exist]"
+)
+REVIEW_COST_CAP_USD = float(
+    os.environ.get("OMNISIGHT_MERGER_REVIEW_COST_CAP_USD", "0.02")
+)
+_DEFAULT_TOKEN_COST_USD = float(
+    os.environ.get("OMNISIGHT_MERGER_TOKEN_COST_USD", "0.000003")
+)
+
+# Bumped for OP-1426: whole-batch multi-file resolution schema.
+MERGER_PROMPT_VERSION = "merger-prompt-v4-op1426"
 
 # 3-strike rule (mirrors CLAUDE.md L1 Agent Behavior).
 MAX_FAILURES_PER_CHANGE = 3
@@ -120,13 +156,13 @@ _SECURITY_PATH_PATTERNS: tuple[str, ...] = (
 
 # Conflict block regex (captures HEAD + incoming halves).
 _CONFLICT_RE = re.compile(
-    r"<<<<<<<\s+(?P<head_label>.+?)\n"
+    r"^<<<<<<<[ \t]*(?P<head_label>[^\r\n]*)\r?\n"
     r"(?P<head>.*?)"
-    r"(?:\|{7}.+?\n.*?)?"      # optional diff3 ancestor section
-    r"=======\n"
+    r"(?:^\|{7}[^\r\n]*\r?\n.*?)?"      # optional diff3 ancestor section
+    r"^=======[^\r\n]*(?:\r?\n|$)"
     r"(?P<incoming>.*?)"
-    r">>>>>>>\s+(?P<incoming_label>.+?)(?:\n|$)",
-    re.DOTALL,
+    r"^>>>>>>>[ \t]*(?P<incoming_label>[^\r\n]*)(?:\r?\n|$)",
+    re.DOTALL | re.MULTILINE,
 )
 
 
@@ -141,20 +177,45 @@ class MergerReason(str, Enum):
     plus_two_voted = "plus_two_voted"
     abstained_low_confidence = "abstained_low_confidence"
     abstained_multi_file = "abstained_multi_file"
+    multi_file_whole_batch = "multi_file_whole_batch"
+    multi_file_per_file_fallback = "multi_file_per_file_fallback"
+    multi_file_split_too_large = "multi_file_split_too_large"
     abstained_oversized = "abstained_oversized"
+    abstained_prompt_oversized = "abstained_prompt_oversized"
     refused_security_file = "refused_security_file"
     refused_test_failure = "refused_test_failure"
     refused_no_conflict = "refused_no_conflict"
+    refused_nested_markers = "refused_nested_markers"
     refused_llm_unavailable = "refused_llm_unavailable"
     refused_llm_invalid_json = "refused_llm_invalid_json"
     refused_escalated = "refused_escalated"
     refused_push_failed = "refused_push_failed"
     refused_new_logic_detected = "refused_new_logic_detected"
+    refused_review_objected = "refused_review_objected"
+    resolved_deterministic_merge = "resolved_deterministic_merge"
+    # OP-1196 phase 3 — daemon-side push wiring (Option C). When the
+    # caller (e.g., the gerrit-jira-bridge daemon) sets
+    # ``request.push_locally=False``, the merger runs through all the
+    # decision gates + LLM call but SKIPS the in-process pusher step
+    # and returns this reason. The outcome carries ``resolved_text``
+    # so the caller can perform the push + +2 itself using its own
+    # workspace + credentials (the daemon has both — backend
+    # container has neither). This is the "secrets stay on host"
+    # design choice from the OP-1196 α-vs-β-vs-C analysis.
+    deferred_push_to_caller = "deferred_push_to_caller"
 
 
 class LabelVote(int, Enum):
     abstain = 0
     plus_two = 2
+
+
+class MergerRiskTier(str, Enum):
+    """Structural risk tier computed before the merger LLM is invoked."""
+
+    low = "LOW"
+    medium = "MEDIUM"
+    high = "HIGH"
 
 
 @dataclass
@@ -167,10 +228,49 @@ class ConflictBlock:
     incoming_lines: list[str]
     start_line: int
     end_line: int
+    has_nested_markers: bool = False
 
     @property
     def n_conflict_lines(self) -> int:
         return len(self.head_lines) + len(self.incoming_lines)
+
+
+@dataclass(frozen=True)
+class ConflictRisk:
+    """Pre-LLM structural risk signal for merge-conflict routing."""
+
+    tier: MergerRiskTier
+    reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MultiFileStrategySelection:
+    """Coupling-aware multi-file routing decision."""
+
+    reason: MergerReason
+    risk: ConflictRisk
+    coupling_components: list[set[str]]
+    prompt_evaluations: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class WorkspaceReadFailure:
+    """Sentinel for sibling-file workspace reads that could not supply text."""
+
+    reason: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class PromptSizeGateResult:
+    """Prompt + context pack after applying the oversized-input trim cascade."""
+
+    prompt: str
+    context_pack: str
+    prompt_size_bytes: int
+    limit_bytes: int
+    sections_trimmed: tuple[str, ...]
+    oversized: bool
 
 
 @dataclass
@@ -186,11 +286,31 @@ class ConflictRequest:
     file_context: str = ""          # 20-line surrounding context (caller-trimmed)
     patchset_revision: str = ""     # Gerrit revision sha (for vote target)
     workspace: str | None = None    # where the pusher runs git commands
+    change_number: str = ""         # Gerrit numeric change id, for logs/audit
+    jira_ticket: str = ""           # OP-NNNN key for context-pack provenance
+    jira_description: str = ""      # caller-supplied ticket description
+    sibling_file_contents: dict[str, str] = field(default_factory=dict)
+    git_logs: dict[str, str] = field(default_factory=dict)
+    symbol_table: dict[str, str] = field(default_factory=dict)
     # Extra files touched by *this* patchset — single-file gate.  Caller
     # normally only sends a single entry (the conflicting file) but the
     # field exists so a multi-file resolution can be explicitly opted
     # into and routed through the abstain-for-human path.
     additional_files: list[str] = field(default_factory=list)
+    # OP-1196 phase 3 — daemon-side push wiring (Option C). When True
+    # (default — backwards-compatible), the merger does its own push
+    # and +2 vote via the in-process GitPatchsetPusher + reviewer.
+    # When False, the merger runs everything up to + including the
+    # LLM call, populates ResolutionOutcome.resolved_text, but skips
+    # the push step entirely and returns MergerReason.
+    # deferred_push_to_caller. The caller (typically the
+    # gerrit-jira-bridge daemon) inspects the response, applies the
+    # resolved_text to its own workspace, amends as merger-agent-bot,
+    # pushes, and posts the +2 vote. This is the "secrets stay on
+    # host" architecture decided in the OP-1196 α-vs-C analysis —
+    # the backend container has the LLM + asyncpg pool but NEITHER
+    # the merger-bot SSH key NOR a workspace; the daemon has both.
+    push_locally: bool = True
 
 
 @dataclass
@@ -202,6 +322,22 @@ class Resolution:
     rationale: str
     diff: str                       # unified diff scoped to conflict region
     changed_blocks: int             # should equal # conflict blocks in input
+    changed_identifiers: list[str] = field(default_factory=list)
+    file_resolutions: list[dict[str, Any]] = field(default_factory=list)
+    changed_identifiers_by_file: dict[str, list[str]] = field(default_factory=dict)
+
+
+@dataclass
+class ProposalReview:
+    """Second-LLM review of a proposed conflict resolution."""
+
+    confirmed: bool
+    reason: str
+    raw_response: str
+    prompt: str
+    model: str
+    tokens_used: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -220,6 +356,15 @@ class ResolutionOutcome:
     failure_count: int = 0
     test_result: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    changed_identifiers: list[str] = field(default_factory=list)
+    # OP-1196 phase 3 — full resolved file content (NOT just diff preview),
+    # populated whenever the LLM produces a confident-enough resolution.
+    # Used by callers that opted into deferred-push mode
+    # (``ConflictRequest.push_locally=False``) to apply the resolution
+    # to their own workspace before amending + pushing as
+    # merger-agent-bot. Empty when the merger short-circuited before
+    # the LLM step (abstain gates) or when the LLM refused.
+    resolved_text: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -347,6 +492,20 @@ async def _default_llm(prompt: str) -> tuple[str, int]:
         return ("", 0)
 
 
+async def _default_review_llm(prompt: str) -> tuple[str, int]:
+    """Cost-efficient reviewer LLM for the second half of the sandwich."""
+    try:
+        from backend.iq_runner import live_ask_fn
+    except Exception as exc:                           # pragma: no cover
+        logger.warning("merger_agent: live_ask_fn unavailable: %s", exc)
+        return ("", 0)
+    try:
+        return await live_ask_fn(REVIEW_MODEL, prompt)
+    except Exception as exc:
+        logger.warning("merger_agent: review live_ask_fn raised: %s", exc)
+        return ("", 0)
+
+
 class GitPatchsetPusher:
     """Pushes the resolved file as a new patchset on an existing
     Gerrit change via the local ``git`` CLI.
@@ -417,8 +576,26 @@ class GitPatchsetPusher:
             return PatchsetPushResult(
                 ok=False, reason=f"git add failed: {err or out}"
             )
+        # OP-1196 phase 2 (2026-05-17): --reset-author rewrites the
+        # commit's `Author:` header from the original PS uploader to the
+        # ambient git identity (which the caller configures as
+        # merger-agent-bot before invoking this pusher). Without this
+        # flag, `--amend` preserves the original author; Gerrit then
+        # rejects with `email <original-author>@... is not registered
+        # in your account, and you lack 'forge author' permission`,
+        # because merger-agent-bot lacks (and SHOULD NOT have — per
+        # O10's forgeAuthor block mirrored in OP-1196 phase 1α)
+        # `forgeAuthor` permission. The reset-author path is the safe
+        # alternative: declare the merger as the AUTHOR of its
+        # resolution PS, which the audit trail should record anyway.
+        # Empirical verification (2026-05-17 #689 push test) confirmed
+        # this is the failing path absent the flag — Gerrit rejected
+        # with `commit 5620b38: email rt3628+codex-bot@gmail.com is
+        # not registered in your account, and you lack 'forge author'
+        # permission`. Adding --reset-author resolves it.
         rc, out, err = _git([
             "commit", "--amend", "--no-edit",
+            "--reset-author",
             "--trailer", f"Merger-Change-Id: {change_id}",
         ])
         if rc != 0:
@@ -575,6 +752,7 @@ class MergerDeps:
     """Inject-at-call-time bundle so tests don't need to monkey-patch."""
 
     llm: MergerLLM = _default_llm
+    review_llm: MergerLLM = _default_review_llm
     pusher: PatchsetPusher = field(default_factory=GitPatchsetPusher)
     reviewer: GerritReviewer = field(default_factory=GerritClientReviewer)
     hashtag_setter: HashtagSetter = field(default_factory=GerritClientHashtagSetter)
@@ -618,17 +796,85 @@ def reset_failure_counts_for_tests() -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+TAKE_BOTH_FEATURE_PRESERVATION_RUBRIC = """\
+Take-both feature-preservation rubric:
+
+1. ADD-vs-ADD distinct symbols:
+   - When both sides add distinct symbols, prefer a take-both resolution.
+   - Symbols include functions, classes, parameters, exports, constants,
+     routing branches, metrics fields, validation guards, and side-effect
+     calls.
+   - Keep both additions unless there is concrete rename evidence or the
+     two behaviors are mutually exclusive.
+
+2. RENAME DETECTION:
+   - Treat two new symbols as a possible rename only when they differ
+     mainly by name and share the same shape, similar docstring, or
+     identical body.
+   - Before unifying, check the conflict context, sibling files, symbol
+     table, and call sites supplied in the context pack.
+   - If unifying, prefer the older or more conventional name and preserve
+     all call-site-observable behavior from both sides.
+
+3. DOCSTRING COLLISION:
+   - When both sides add docstring entries for the same parameter, merge
+     by concatenating the descriptions.
+   - Keep both descriptions unless one is a strict duplicate of the other.
+   - Do not let docstring collisions justify dropping either parameter or
+     its implementation.
+
+4. SIGNATURE OVERLAP:
+   - When both sides add new parameters to the same function signature,
+     keep both parameters in the resolved signature.
+   - In the function body, propagate both values to downstream callers
+     using names already present in the conflict or context.
+   - Preserve defaults, keyword-only markers, type annotations, and call
+     ordering unless the context proves a rename.
+
+5. SPLIT TESTS WITH SHARED SETUP:
+   - When a conflict spans two test methods that share the same setup
+     pattern, do not collapse them into one merged test method.
+   - Shared setup includes the same mock names, fixture imports, helper
+     calls, patch decorators, or context-manager patches.
+   - If the methods diverge in assert lines, patched return payloads, or
+     `_event(...)` arguments, emit two separate test methods.
+   - Duplicate the complete setup in each method so each branch keeps its
+     own assertion intent.
+
+6. CALL KWARG / METADATA FIELD UNION:
+   - When both sides add new keyword arguments or metadata fields to the
+     same function call or literal, keep the union of field names.
+   - Sort disjoint keyword arguments / dict keys alphabetically by field
+     name in the resolved block unless surrounding code proves another
+     local ordering convention.
+   - Never drop an observability field such as a log key, verify result,
+     merger reason, metric label, or metadata value unless the two fields
+     are concrete duplicates.
+
+7. ABSTAIN BIAS:
+   - If you cannot identify whether ADD-vs-ADD, rename detection,
+     docstring collision, signature overlap, split-test preservation, or
+     call kwarg / metadata field union applies, abstain.
+   - Emit a low confidence score and name the unresolved reason class in
+     the rationale instead of interleaving lines or picking one side.
+"""
+
+
 SYSTEM_PROMPT = (
-    "You are a merge conflict resolution expert.  You receive one Git "
-    "conflict block (HEAD side + incoming side) and must produce a "
-    "single unified resolution that PRESERVES THE LOGICAL INTENT OF BOTH "
+    f"Prompt version: {MERGER_PROMPT_VERSION}\n\n"
+    "You are a merge conflict resolution expert.  You receive one or more "
+    "Git conflict files (HEAD side + incoming side) and must produce "
+    "unified resolutions that PRESERVE THE LOGICAL INTENT OF BOTH "
     "commits.  You MUST NOT introduce any logic, function, call, "
     "variable, or statement that does not appear in either half of the "
     "conflict or in the provided file context.  If you cannot preserve "
     "both intents without introducing new logic, output a low confidence "
     "score and explain the ambiguity in the rationale — do NOT fabricate "
-    "a compromise.  Output STRICTLY a JSON object matching this schema:\n"
-    '{"resolved_block": "<text that replaces the conflict block>",'
+    "a compromise.\n\n"
+    + TAKE_BOTH_FEATURE_PRESERVATION_RUBRIC
+    + "\nOutput STRICTLY a JSON object matching this schema:\n"
+    '{"resolved_blocks": [{"file_path": "<repo-relative path>",'
+    ' "resolved_text": "<complete resolved file text>"}],'
     ' "confidence": <float 0..1>,'
     ' "rationale": "<one-paragraph explanation>",'
     ' "new_logic_detected": <bool; true if you had to invent anything>}'
@@ -642,6 +888,7 @@ def parse_conflict_block(text: str) -> list[ConflictBlock]:
     for m in _CONFLICT_RE.finditer(text):
         head = m.group("head") or ""
         incoming = m.group("incoming") or ""
+        has_nested_markers = "<<<<<<<" in head or "<<<<<<<" in incoming
         head_lines = head.splitlines()
         incoming_lines = incoming.splitlines()
         start = text[: m.start()].count("\n") + 1
@@ -653,39 +900,525 @@ def parse_conflict_block(text: str) -> list[ConflictBlock]:
             incoming_lines=incoming_lines,
             start_line=start,
             end_line=end,
+            has_nested_markers=has_nested_markers,
         ))
     return blocks
 
 
-def build_prompt(req: ConflictRequest, blocks: list[ConflictBlock]) -> str:
+def _context_pack_limit_chars() -> int:
+    return max(0, CONTEXT_PACK_TOKEN_LIMIT * _CONTEXT_PACK_CHARS_PER_TOKEN)
+
+
+def _safe_workspace_file(workspace: str | None, rel_path: str) -> Path | None:
+    if not workspace or not rel_path:
+        return None
+    root = Path(workspace).expanduser().resolve()
+    target = (root / rel_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    return target
+
+
+def _read_workspace_text(
+    workspace: str | None,
+    rel_path: str,
+) -> str | WorkspaceReadFailure:
+    target = _safe_workspace_file(workspace, rel_path)
+    if target is None:
+        return WorkspaceReadFailure(
+            reason="unsafe_path",
+            detail="path is outside workspace or workspace is unavailable",
+        )
+    try:
+        raw = target.read_bytes()
+    except FileNotFoundError:
+        return WorkspaceReadFailure(reason="missing_file", detail="file not found")
+    except OSError:
+        return WorkspaceReadFailure(reason="read_error", detail="OSError")
+    if b"\x00" in raw[:8192]:
+        return "<binary file>"
+    return raw.decode("utf-8", errors="replace")
+
+
+def _render_workspace_read_failure(
+    path: str,
+    failure: WorkspaceReadFailure,
+) -> str:
+    detail = f": {failure.detail}" if failure.detail else ""
+    return f"[workspace read failed: {failure.reason} for {path}{detail}]"
+
+
+def _git_region_log(
+    workspace: str | None,
+    file_path: str,
+    blocks: list[ConflictBlock],
+) -> str:
+    root_path = Path(workspace).expanduser().resolve() if workspace else None
+    if root_path is None or not (root_path / ".git").exists() or not blocks:
+        return ""
+    first = blocks[0]
+    start = max(1, first.start_line - _CONTEXT_PACK_GIT_LOG_LINES)
+    end = first.end_line + _CONTEXT_PACK_GIT_LOG_LINES
+    commands = [
+        ["git", "log", "--follow", "-n", "5", f"-L{start},{end}:{file_path}"],
+        ["git", "log", "-p", "--follow", "-n", "5", "--", file_path],
+    ]
+    for cmd in commands:
+        try:
+            proc = subprocess.run(
+                cmd,
+                cwd=root_path,
+                capture_output=True,
+                text=True,
+                timeout=_GIT_REGION_LOG_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "merger_agent: git region log timed out after %ss for %s",
+                _GIT_REGION_LOG_TIMEOUT_SECONDS,
+                file_path,
+            )
+            return _GIT_REGION_LOG_TIMEOUT_MARKER
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    return ""
+
+
+def _collect_file_contents(req: ConflictRequest) -> dict[str, str]:
+    paths = [req.file_path, *req.additional_files]
+    out: dict[str, str] = {}
+    for path in paths:
+        if not path or path in out:
+            continue
+        if path == req.file_path:
+            out[path] = req.conflict_text
+            continue
+        if path in req.sibling_file_contents:
+            out[path] = req.sibling_file_contents[path]
+            continue
+        content = _read_workspace_text(req.workspace, path)
+        if isinstance(content, WorkspaceReadFailure):
+            logger.warning(
+                "merger_agent: sibling workspace read failed "
+                "jira=%s change=%s path=%s reason=%s detail=%s",
+                req.jira_ticket or "(none)",
+                req.change_number or req.change_id or "(unknown)",
+                path,
+                content.reason,
+                content.detail,
+            )
+            out[path] = _render_workspace_read_failure(path, content)
+            continue
+        out[path] = content
+    for path, content in req.sibling_file_contents.items():
+        if path and path not in out:
+            out[path] = content
+    return out
+
+
+def _truncate_section(
+    title: str,
+    content: str,
+    remaining: int,
+    *,
+    empty_label: str = "(none supplied)",
+) -> str:
+    if remaining <= 0:
+        return ""
+    body = content.strip() or empty_label
+    section = f"## {title}\n{body}\n"
+    if len(section) <= remaining:
+        return section
+    suffix = "\n[context-pack truncated]\n"
+    keep = max(0, remaining - len(suffix))
+    if keep <= 0:
+        return ""
+    return section[:keep].rstrip() + suffix
+
+
+def build_context_pack(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    *,
+    omit_sections: Collection[str] | None = None,
+) -> str:
+    """Build the pre-resolution context pack with deterministic priority.
+
+    Priority order follows OP-1403: conflict file, recent git log, JIRA
+    description, sibling files, then symbol table. All collectors are
+    best-effort so a missing daemon workspace never blocks the merger.
+    """
+    limit = _context_pack_limit_chars()
+    if limit <= 0:
+        return ""
+
+    omitted = set(omit_sections or ())
+    file_contents = _collect_file_contents(req)
+    conflict_file = file_contents.pop(req.file_path, req.conflict_text)
+    git_log = ""
+    if "git_log" not in omitted:
+        git_log = req.git_logs.get(req.file_path) or _git_region_log(
+            req.workspace, req.file_path, blocks,
+        )
+
+    sections: list[tuple[str, str, str]] = [
+        (f"Conflict file: {req.file_path}", conflict_file, "(none supplied)"),
+        (
+            f"JIRA ticket {req.jira_ticket or '(unknown)'}",
+            req.jira_description,
+            "(none supplied)",
+        ),
+    ]
+    if "git_log" not in omitted:
+        sections.insert(1, (
+            f"Recent git log for {req.file_path}",
+            git_log,
+            "(none supplied)",
+        ))
+    if "sibling_files" not in omitted:
+        for path in sorted(file_contents):
+            sections.append((
+                f"Sibling file: {path}",
+                file_contents[path],
+                "(file is empty)",
+            ))
+    if "symbol_table" not in omitted:
+        for path in sorted(req.symbol_table):
+            sections.append((
+                f"Develop symbol table: {path}",
+                req.symbol_table[path],
+                "(none supplied)",
+            ))
+
+    out = ""
+    for title, content, empty_label in sections:
+        sep = "\n\n" if out else ""
+        chunk = _truncate_section(
+            title,
+            content,
+            limit - len(out) - len(sep),
+            empty_label=empty_label,
+        )
+        if not chunk:
+            break
+        out = f"{out}{sep}{chunk}"
+        if len(out) >= limit:
+            break
+    return out[:limit].strip()
+
+
+def _prompt_size_bytes(prompt: str) -> int:
+    return len(prompt.encode("utf-8"))
+
+
+def _format_sections_trimmed(sections: Collection[str]) -> str:
+    return "[" + ",".join(sections) + "]"
+
+
+def build_prompt_with_size_gate(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
+    risk: ConflictRisk,
+    *,
+    cross_file_directive: str = "",
+) -> PromptSizeGateResult:
+    """Build a prompt, trimming lower-priority context before LLM input.
+
+    The context-pack budget is token-ish and local to the context block.
+    This gate measures the final UTF-8 prompt bytes after the system
+    prompt, rubric, commit messages, and conflict blocks are present.
+    """
+    limit = max(0, PROMPT_INPUT_HARD_LIMIT_BYTES)
+    sections_trimmed: tuple[str, ...] = ()
+
+    while True:
+        context_pack = build_context_pack(
+            req, blocks, omit_sections=sections_trimmed,
+        )
+        prompt = build_prompt(
+            req,
+            blocks,
+            risk,
+            context_pack=context_pack,
+            cross_file_directive=cross_file_directive,
+        )
+        prompt_size = _prompt_size_bytes(prompt)
+        oversized = prompt_size > limit
+        if not oversized or len(sections_trimmed) == len(_CONTEXT_PACK_TRIM_ORDER):
+            return PromptSizeGateResult(
+                prompt=prompt,
+                context_pack=context_pack,
+                prompt_size_bytes=prompt_size,
+                limit_bytes=limit,
+                sections_trimmed=sections_trimmed,
+                oversized=oversized,
+            )
+        sections_trimmed = _CONTEXT_PACK_TRIM_ORDER[:len(sections_trimmed) + 1]
+
+
+def _select_multi_file_strategy(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    coupling_components: list[set[str]],
+    blocks_by_file: dict[str, list[ConflictBlock]] | None = None,
+) -> MultiFileStrategySelection:
+    """Select the multi-file route after coupling and prompt-size checks."""
+    risk = classify_conflict_risk(req, blocks, coupling_components)
+    prompt_evaluations: list[dict[str, Any]] = []
+    ordered_components = [
+        set(component)
+        for component in coupling_components
+        if component
+    ]
+
+    for component in ordered_components:
+        component_files = sorted(component)
+        component_req = replace(
+            req,
+            additional_files=[
+                path for path in component_files if path != req.file_path
+            ],
+        )
+        component_risk = classify_conflict_risk(
+            component_req, blocks, [set(component_files)],
+        )
+        prompt_blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]] = blocks
+        if blocks_by_file is not None:
+            prompt_blocks = {
+                path: file_blocks
+                for path, file_blocks in blocks_by_file.items()
+                if path in component_files
+            }
+        prompt_gate = build_prompt_with_size_gate(
+            component_req, prompt_blocks, component_risk,
+        )
+        prompt_evaluations.append({
+            "component_files": component_files,
+            "strategy": (
+                MergerReason.multi_file_whole_batch.value
+                if len(component_files) > 1
+                else MergerReason.multi_file_per_file_fallback.value
+            ),
+            "risk_tier": component_risk.tier.value,
+            "risk_reasons": list(component_risk.reasons),
+            "prompt_size_bytes": prompt_gate.prompt_size_bytes,
+            "prompt_limit_bytes": prompt_gate.limit_bytes,
+            "sections_trimmed": list(prompt_gate.sections_trimmed),
+            "oversized": prompt_gate.oversized,
+        })
+
+    any_component_oversized = any(
+        evaluation["oversized"] for evaluation in prompt_evaluations
+    )
+    split_reasons = {"multi_file_coupled_oversize"}
+    if any_component_oversized or any(
+        reason in split_reasons for reason in risk.reasons
+    ):
+        reason = MergerReason.multi_file_split_too_large
+    elif len(ordered_components) == 1:
+        reason = MergerReason.multi_file_whole_batch
+    else:
+        reason = MergerReason.multi_file_per_file_fallback
+
+    return MultiFileStrategySelection(
+        reason=reason,
+        risk=risk,
+        coupling_components=ordered_components,
+        prompt_evaluations=prompt_evaluations,
+    )
+
+
+def _collect_conflict_blocks_by_file(
+    req: ConflictRequest,
+    primary_blocks: list[ConflictBlock],
+) -> dict[str, list[ConflictBlock]]:
+    blocks_by_file = {req.file_path: primary_blocks}
+    if not req.additional_files:
+        return blocks_by_file
+
+    texts = _conflict_texts_by_file(req, [req.file_path, *req.additional_files])
+    for path in req.additional_files:
+        text = texts.get(path, "")
+        if not text or "<<<<<<<" not in text:
+            continue
+        blocks = parse_conflict_block(text)
+        if blocks:
+            blocks_by_file[path] = blocks
+    return blocks_by_file
+
+
+def _normalize_blocks_by_file(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
+) -> dict[str, list[ConflictBlock]]:
+    if isinstance(blocks, dict):
+        return {path: list(file_blocks) for path, file_blocks in blocks.items()}
+    return {req.file_path: list(blocks)}
+
+
+def build_prompt(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
+    risk: ConflictRisk | None = None,
+    *,
+    context_pack: str | None = None,
+    cross_file_directive: str = "",
+) -> str:
     """Deterministic prompt — inlines the conflict + commit messages +
     the provided file context, and repeats the no-new-logic guardrail."""
+    blocks_by_file = _normalize_blocks_by_file(req, blocks)
+    primary_blocks = blocks_by_file.get(req.file_path, [])
+    risk = risk or classify_conflict_risk(req, primary_blocks)
+    if context_pack is None:
+        context_pack = build_context_pack(req, primary_blocks)
     parts: list[str] = [
         "SYSTEM: " + SYSTEM_PROMPT,
         "",
-        f"FILE: {req.file_path}",
+        f"PRIMARY FILE: {req.file_path}",
+        "FILES TO RESOLVE:",
+        *[f"  - {path}" for path in blocks_by_file],
+        f"Structural risk tier: {risk.tier.value}",
+        "Structural risk signals: "
+        + (", ".join(risk.reasons) if risk.reasons else "(none)"),
+        f"Gerrit change number: {req.change_number or '(unknown)'}",
+        f"JIRA ticket: {req.jira_ticket or '(none supplied)'}",
         f"HEAD commit message:\n{req.head_commit_message.strip()}",
         f"Incoming commit message:\n{req.incoming_commit_message.strip()}",
+    ]
+    if cross_file_directive:
+        parts.extend([
+            "",
+            "Cross-file consistency directive:",
+            cross_file_directive.strip(),
+        ])
+    parts.extend([
+        "",
+        "Context pack (priority-capped):",
+        context_pack or "(none supplied)",
         "",
         "File context (20 lines surrounding the conflict):",
         req.file_context.strip() or "(none supplied)",
         "",
         "Conflict blocks:",
+    ])
+    for path, file_blocks in blocks_by_file.items():
+        parts.append(f"  File: {path}")
+        for i, blk in enumerate(file_blocks, start=1):
+            parts.extend([
+                f"    Block {i} (lines {blk.start_line}-{blk.end_line}):",
+                f"      HEAD [{blk.head_label}]:",
+                *[f"        {line}" for line in blk.head_lines],
+                f"      INCOMING [{blk.incoming_label}]:",
+                *[f"        {line}" for line in blk.incoming_lines],
+            ])
+    parts.append("")
+    parts.append(
+        "Return ONE JSON object (no prose, no fences): "
+        '{"resolved_blocks": [{"file_path": "<repo-relative path>", '
+        '"resolved_text": "<complete resolved file text>"}], '
+        '"confidence": <float 0..1>, '
+        '"rationale": "<one-paragraph explanation>", '
+        '"new_logic_detected": <bool; true if you had to invent anything>}. '
+        "Include one resolved_blocks entry for every file listed above."
+    )
+    return "\n".join(parts)
+
+
+def build_review_prompt(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    resolution: Resolution,
+) -> str:
+    """Prompt for LLM-B: independently review LLM-A's resolution."""
+    parts: list[str] = [
+        "SYSTEM: You are an independent merge-resolution reviewer. "
+        "You do not propose edits. You only decide whether the proposed "
+        "resolution preserves both sides' intent.",
+        "",
+        f"FILE: {req.file_path}",
+        f"Gerrit change number: {req.change_number or '(unknown)'}",
+        f"JIRA ticket: {req.jira_ticket or '(none supplied)'}",
+        "",
+        "Original conflict:",
+        req.conflict_text,
+        "",
+        "LLM-A proposed resolved file:",
+        resolution.resolved_text,
+        "",
+        "LLM-A diff explanation:",
+        resolution.diff,
+        "",
+        f"LLM-A rationale: {resolution.rationale}",
+        f"LLM-A confidence: {resolution.confidence:.2f}",
+        "",
+        "Review rubric:",
+        TAKE_BOTH_FEATURE_PRESERVATION_RUBRIC,
+        "",
+        "Does this resolution preserve both sides' intent?",
+        "Does it handle all five rubric cases above?",
+        "Reply on the first line with exactly CONFIRM or OBJECT, then "
+        "give one short reason.",
     ]
     for i, blk in enumerate(blocks, start=1):
         parts.extend([
-            f"  Block {i} (lines {blk.start_line}-{blk.end_line}):",
-            f"    HEAD [{blk.head_label}]:",
-            *[f"      {line}" for line in blk.head_lines],
-            f"    INCOMING [{blk.incoming_label}]:",
-            *[f"      {line}" for line in blk.incoming_lines],
+            "",
+            f"Conflict block {i} HEAD:",
+            "\n".join(blk.head_lines),
+            f"Conflict block {i} INCOMING:",
+            "\n".join(blk.incoming_lines),
         ])
-    parts.append("")
-    parts.append(
-        "Return ONE JSON object (no prose, no fences) with the schema "
-        "described above."
-    )
     return "\n".join(parts)
+
+
+def _estimate_llm_cost(tokens_used: int) -> float:
+    return max(0.0, float(tokens_used) * _DEFAULT_TOKEN_COST_USD)
+
+
+def _observe_llm_cost(cost_usd: float) -> None:
+    try:
+        metrics.merger_llm_cost_usd_total.inc(cost_usd)
+    except Exception:
+        pass
+
+
+async def _review_proposal(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    resolution: Resolution,
+    *,
+    deps: MergerDeps,
+) -> ProposalReview:
+    """Ask LLM-B to confirm or object to LLM-A's resolution."""
+    prompt = build_review_prompt(req, blocks, resolution)
+    try:
+        raw, tokens = await deps.review_llm(prompt)
+    except Exception as exc:
+        logger.warning("merger_agent: review llm raised: %s", exc)
+        raw, tokens = "", 0
+
+    cost_usd = _estimate_llm_cost(tokens)
+    _observe_llm_cost(cost_usd)
+    first = (raw.strip().splitlines() or [""])[0].strip().upper()
+    confirmed = first == "CONFIRM" and cost_usd <= REVIEW_COST_CAP_USD
+    reason = raw.strip() or "review LLM returned empty response"
+    if cost_usd > REVIEW_COST_CAP_USD:
+        reason = (
+            f"review cost ${cost_usd:.6f} exceeded cap "
+            f"${REVIEW_COST_CAP_USD:.6f}; raw={reason[:500]}"
+        )
+    return ProposalReview(
+        confirmed=confirmed,
+        reason=reason,
+        raw_response=raw,
+        prompt=prompt,
+        model=REVIEW_MODEL,
+        tokens_used=tokens,
+        cost_usd=cost_usd,
+    )
 
 
 def is_security_sensitive(file_path: str) -> bool:
@@ -695,6 +1428,797 @@ def is_security_sensitive(file_path: str) -> bool:
     ``backend/auth/session.py``, and ``configs/prod/app.yaml`` all trip."""
     norm = file_path.strip().replace("\\", "/").lower()
     return any(pat in norm for pat in _SECURITY_PATH_PATTERNS)
+
+
+def classify_conflict_risk(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    coupling_components: list[set[str]] | None = None,
+) -> ConflictRisk:
+    """Classify structural merge risk before spending an LLM call.
+
+    LOW means the conflict is a narrow line edit. MEDIUM is the intended
+    LLM-resolution lane for edit/edit overlaps that still fit the hard
+    gates. HIGH is reserved for shapes the current one-block JSON
+    contract cannot safely verify before push.
+    """
+    reasons: list[str] = []
+    touched_files = [
+        path for path in dict.fromkeys(
+            [req.file_path, *req.additional_files]
+        )
+        if path
+    ]
+    multi_file = len(touched_files) > 1
+
+    if len(blocks) > 1:
+        reasons.append("multiple_conflict_blocks")
+    if multi_file:
+        reasons.append("additional_files_present")
+
+    total_lines = sum(block.n_conflict_lines for block in blocks)
+    if total_lines > max(1, int(MAX_CONFLICT_LINES * 0.75)):
+        reasons.append("near_line_limit")
+
+    for block in blocks:
+        if _has_signature_overlap(block):
+            reasons.append("signature_overlap")
+        if _has_param_name_collision(block):
+            reasons.append("param_name_collision")
+        if _has_take_both_feature_shape(block):
+            reasons.append("take_both_feature_shape")
+
+    if multi_file:
+        if len(touched_files) >= 5:
+            reasons.append("multi_file_count_exceeds_batch")
+            reasons.append(MergerReason.multi_file_split_too_large.value)
+        coupled = any(
+            len(set(component) & set(touched_files)) > 1
+            for component in (coupling_components or [])
+        )
+        component_count = len(coupling_components or [])
+        reasons.append(
+            "multi_file_high_coupling" if coupled else "multi_file_low_coupling"
+        )
+        if component_count == 1:
+            reasons.append(MergerReason.multi_file_whole_batch.value)
+        elif component_count > 1:
+            reasons.append(MergerReason.multi_file_per_file_fallback.value)
+        if coupled and total_lines > MAX_CONFLICT_LINES:
+            reasons.append("multi_file_coupled_oversize")
+            reasons.append(MergerReason.multi_file_split_too_large.value)
+
+    deduped = tuple(dict.fromkeys(reasons))
+    if multi_file:
+        high_reasons = {
+            "multi_file_count_exceeds_batch",
+            "multi_file_coupled_oversize",
+            MergerReason.multi_file_split_too_large.value,
+        }
+        if any(reason in high_reasons for reason in deduped):
+            return ConflictRisk(MergerRiskTier.high, deduped)
+        return ConflictRisk(MergerRiskTier.medium, deduped)
+
+    high_reasons = {
+        "multiple_conflict_blocks",
+        "additional_files_present",
+        "near_line_limit",
+    }
+    if any(reason in high_reasons for reason in deduped):
+        return ConflictRisk(MergerRiskTier.high, deduped)
+    if deduped:
+        return ConflictRisk(MergerRiskTier.medium, deduped)
+    return ConflictRisk(MergerRiskTier.low, ())
+
+
+def _classify_coupling(
+    file_paths: list[str],
+    workspace: str,
+    conflict_text: str = "",
+) -> list[set[str]]:
+    """Return connected components for files that should be resolved together."""
+    deadline = time.monotonic() + 20.0
+    root = Path(workspace).expanduser().resolve()
+    targets = [_normalise_rel_path(path) for path in file_paths]
+    targets = [path for path in dict.fromkeys(targets) if path]
+    if not targets:
+        return []
+
+    parent = {path: path for path in targets}
+
+    def find(path: str) -> str:
+        while parent[path] != path:
+            parent[path] = parent[parent[path]]
+            path = parent[path]
+        return path
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    module_to_path: dict[str, str] = {}
+    definitions: dict[str, set[str]] = {}
+    references: dict[str, set[str]] = {}
+    imports: dict[str, set[str]] = {}
+    field_references: dict[str, set[str]] = {}
+
+    if root.is_dir():
+        try:
+            for path in root.rglob("*.py"):
+                if time.monotonic() > deadline:
+                    break
+                rel_path = _normalise_rel_path(path.relative_to(root).as_posix())
+                module_to_path[_module_name_for_path(rel_path)] = rel_path
+                if rel_path.endswith("/__init__.py"):
+                    module_to_path[_module_name_for_path(rel_path[:-12])] = rel_path
+        except OSError:
+            module_to_path = {}
+
+    for path in targets:
+        if time.monotonic() > deadline:
+            continue
+        tree = _parse_workspace_python(root, path)
+        if tree is None:
+            definitions[path] = set()
+            references[path] = set()
+            imports[path] = set()
+            field_references[path] = set()
+            continue
+        definitions[path] = _top_level_symbols(tree)
+        references[path] = _referenced_symbols(tree)
+        imports[path] = _imported_modules(tree)
+        field_references[path] = _field_like_symbols(tree)
+
+    target_set = set(targets)
+    for path in targets:
+        for imported in imports.get(path, set()):
+            imported_path = _resolve_imported_path(imported, module_to_path)
+            if imported_path in target_set and imported_path != path:
+                union(path, imported_path)
+
+    for left in targets:
+        for right in targets:
+            if left == right:
+                continue
+            if definitions.get(left, set()) & references.get(right, set()):
+                union(left, right)
+
+    for left in targets:
+        for right in targets:
+            if left != right and _is_test_source_pair(left, right):
+                union(left, right)
+
+    data_flow_fields = _data_flow_fields_for_targets(
+        root,
+        targets,
+        field_references,
+        conflict_text,
+        deadline,
+    )
+    for files in data_flow_fields.values():
+        ordered = [path for path in targets if path in files]
+        for path in ordered[1:]:
+            union(ordered[0], path)
+
+    components: dict[str, set[str]] = {}
+    for path in targets:
+        components.setdefault(find(path), set()).add(path)
+    return list(components.values())
+
+
+def _normalise_rel_path(path: str) -> str:
+    return path.strip().replace("\\", "/").lstrip("./")
+
+
+def _module_name_for_path(path: str) -> str:
+    path = _normalise_rel_path(path)
+    if path.endswith(".py"):
+        path = path[:-3]
+    if path.endswith("/__init__"):
+        path = path[:-9]
+    return path.replace("/", ".")
+
+
+def _parse_workspace_python(root: Path, rel_path: str) -> ast.AST | None:
+    target = (root / rel_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    try:
+        source = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        return ast.parse(source, filename=rel_path)
+    except SyntaxError:
+        return None
+
+
+def _top_level_symbols(tree: ast.AST) -> set[str]:
+    symbols: set[str] = set()
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(node.name)
+    return symbols
+
+
+def _referenced_symbols(tree: ast.AST) -> set[str]:
+    refs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            refs.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            refs.add(node.attr)
+    return refs
+
+
+def _imported_modules(tree: ast.AST) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+            modules.update(
+                f"{node.module}.{alias.name}" for alias in node.names
+                if alias.name != "*"
+            )
+    return modules
+
+
+def _field_like_symbols(tree: ast.AST) -> set[str]:
+    fields: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            fields.add(node.attr)
+        elif isinstance(node, ast.keyword) and node.arg:
+            fields.add(node.arg)
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            fields.add(node.slice.value)
+        elif isinstance(node, ast.Dict):
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    fields.add(key.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            fields.add(node.target.id)
+    return {field for field in fields if _is_data_flow_field_name(field)}
+
+
+def _data_flow_fields_for_targets(
+    root: Path,
+    targets: list[str],
+    field_references: dict[str, set[str]],
+    conflict_text: str,
+    deadline: float,
+) -> dict[str, set[str]]:
+    target_set = set(targets)
+    candidates = set().union(*(field_references.get(path, set()) for path in targets))
+    conflict_fields = _field_names_from_text(conflict_text)
+    if conflict_fields:
+        candidates &= conflict_fields
+    if not candidates:
+        return {}
+
+    codebase_references: dict[str, set[str]] = {field: set() for field in candidates}
+    if root.is_dir():
+        try:
+            paths = root.rglob("*.py")
+            for path in paths:
+                if time.monotonic() > deadline:
+                    break
+                rel_path = _normalise_rel_path(path.relative_to(root).as_posix())
+                tree = _parse_workspace_python(root, rel_path)
+                if tree is None:
+                    continue
+                fields = _field_like_symbols(tree) & candidates
+                for field in fields:
+                    codebase_references[field].add(rel_path)
+        except OSError:
+            return {}
+
+    return {
+        field: files
+        for field, files in codebase_references.items()
+        if len(files) >= 3 and files <= target_set
+    }
+
+
+def _field_names_from_text(text: str) -> set[str]:
+    if not text:
+        return set()
+    fields: set[str] = set()
+    for block in parse_conflict_block(text):
+        fields.update(_field_names_from_lines(block.head_lines))
+        fields.update(_field_names_from_lines(block.incoming_lines))
+    if not fields:
+        fields.update(_field_names_from_lines(text.splitlines()))
+    return fields
+
+
+def _field_names_from_lines(lines: list[str]) -> set[str]:
+    fields: set[str] = set()
+    for line in lines:
+        fields.update(
+            match.group("field")
+            for match in re.finditer(r"[.\[]['\"]?(?P<field>[A-Za-z_][A-Za-z0-9_]*)", line)
+        )
+        fields.update(
+            match.group("field")
+            for match in re.finditer(r"\b(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        )
+        fields.update(
+            match.group("field")
+            for match in re.finditer(r"['\"](?P<field>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*:", line)
+        )
+    return {field for field in fields if _is_data_flow_field_name(field)}
+
+
+def _is_data_flow_field_name(name: str) -> bool:
+    return (
+        len(name) >= 3
+        and not name.startswith("_")
+        and name not in {"self", "cls", "args", "kwargs", "return"}
+    )
+
+
+def _resolve_imported_path(
+    imported: str,
+    module_to_path: dict[str, str],
+) -> str | None:
+    module = imported
+    while module:
+        if module in module_to_path:
+            return module_to_path[module]
+        module = module.rpartition(".")[0]
+    return None
+
+
+def _is_test_source_pair(left: str, right: str) -> bool:
+    return (
+        _source_for_test_path(left) == right
+        or _source_for_test_path(right) == left
+        or _test_targets_package(left, right)
+        or _test_targets_package(right, left)
+    )
+
+
+def _source_for_test_path(path: str) -> str | None:
+    if not path.startswith("backend/tests/test_") or not path.endswith(".py"):
+        return None
+    name = path.removeprefix("backend/tests/test_")
+    return f"backend/{name}"
+
+
+def _test_targets_package(test_path: str, source_path: str) -> bool:
+    source = _source_for_test_path(test_path)
+    if source is None or not source_path.endswith(".py"):
+        return False
+    package = source.removesuffix(".py")
+    return source_path.startswith(f"{package}/")
+
+
+_PY_SIGNATURE_RE = re.compile(r"^\s*(?:async\s+def|def)\s+\w+\s*\((?P<params>[^)]*)\)")
+_IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _has_signature_overlap(block: ConflictBlock) -> bool:
+    return bool(_signature_params(block.head_lines)) and bool(
+        _signature_params(block.incoming_lines)
+    )
+
+
+def _signature_params(lines: list[str]) -> set[str]:
+    params: set[str] = set()
+    for line in lines:
+        match = _PY_SIGNATURE_RE.match(line)
+        if not match:
+            continue
+        for raw in match.group("params").split(","):
+            name = raw.strip().split("=", 1)[0].split(":", 1)[0].strip()
+            if name and name not in {"self", "cls", "*", "/"}:
+                params.add(name.lstrip("*"))
+    return params
+
+
+def _has_param_name_collision(block: ConflictBlock) -> bool:
+    head_params = _signature_params(block.head_lines)
+    incoming_params = _signature_params(block.incoming_lines)
+    if not head_params or not incoming_params:
+        return False
+    if head_params & incoming_params:
+        return True
+    for left in head_params:
+        for right in incoming_params:
+            if left.startswith(f"{right}_") or right.startswith(f"{left}_"):
+                return True
+    return False
+
+
+def _has_take_both_feature_shape(block: ConflictBlock) -> bool:
+    head_names = set(_IDENT_RE.findall("\n".join(block.head_lines)))
+    incoming_names = set(_IDENT_RE.findall("\n".join(block.incoming_lines)))
+    head_unique = head_names - incoming_names
+    incoming_unique = incoming_names - head_names
+    return bool(head_unique and incoming_unique)
+
+
+def _risk_metadata(risk: ConflictRisk) -> dict[str, Any]:
+    return {
+        "risk_tier": risk.tier.value,
+        "risk_reasons": list(risk.reasons),
+    }
+
+
+def _per_file_consistency_directive(
+    file_path: str,
+    sibling_paths: Collection[str],
+) -> str:
+    siblings = sorted(path for path in sibling_paths if path and path != file_path)
+    sibling_text = ", ".join(siblings) if siblings else "(none)"
+    return (
+        f"sibling files {sibling_text} have own conflicts; assume they "
+        "resolve consistently. Your choice must keep imports/signatures aligned."
+    )
+
+
+async def _resolve_one_file_with_directive(
+    req: ConflictRequest,
+    *,
+    deps: MergerDeps,
+    sibling_paths: Collection[str],
+) -> tuple[Resolution | None, ResolutionOutcome | None, dict[str, Any]]:
+    blocks = parse_conflict_block(req.conflict_text)
+    directive = _per_file_consistency_directive(req.file_path, sibling_paths)
+    meta: dict[str, Any] = {
+        "file_path": req.file_path,
+        "cross_file_directive": directive,
+    }
+    if not blocks:
+        return None, _build_refusal(
+            req,
+            MergerReason.refused_no_conflict,
+            rationale="no <<<<<<< / ======= / >>>>>>> markers found",
+            metadata=meta,
+        ), meta
+
+    nested_blocks = [b for b in blocks if b.has_nested_markers]
+    if nested_blocks:
+        meta["nested_marker_start_lines"] = [
+            b.start_line for b in nested_blocks
+        ]
+        return None, _build_refusal(
+            req,
+            MergerReason.refused_nested_markers,
+            rationale="nested conflict markers found inside parsed conflict block",
+            metadata=meta,
+        ), meta
+
+    total_lines = sum(b.n_conflict_lines for b in blocks)
+    if total_lines > MAX_CONFLICT_LINES:
+        meta["conflict_lines"] = total_lines
+        return None, _build_abstain(
+            req,
+            MergerReason.abstained_oversized,
+            confidence=0.0,
+            rationale=(
+                f"combined conflict {total_lines} lines exceeds "
+                f"gate {MAX_CONFLICT_LINES}"
+            ),
+            metadata=meta,
+        ), meta
+
+    risk = classify_conflict_risk(req, blocks)
+    meta.update(_risk_metadata(risk))
+    if risk.tier is MergerRiskTier.high:
+        return None, _build_abstain(
+            req,
+            MergerReason.abstained_low_confidence,
+            confidence=0.0,
+            rationale=(
+                "structural risk HIGH before LLM invocation; "
+                f"signals={','.join(risk.reasons) or 'none'}"
+            ),
+            metadata={**meta, "conflict_lines": total_lines},
+        ), meta
+
+    prompt_gate = build_prompt_with_size_gate(
+        req,
+        blocks,
+        risk,
+        cross_file_directive=directive,
+    )
+    meta.update({
+        "prompt_size_bytes": prompt_gate.prompt_size_bytes,
+        "prompt_limit_bytes": prompt_gate.limit_bytes,
+        "sections_trimmed": list(prompt_gate.sections_trimmed),
+    })
+    if prompt_gate.oversized:
+        return None, _build_abstain(
+            req,
+            MergerReason.abstained_prompt_oversized,
+            confidence=0.0,
+            rationale=(
+                "LLM prompt remained over the hard input-size gate after "
+                "trimming lower-priority context-pack sections"
+            ),
+            metadata=meta,
+        ), meta
+
+    try:
+        raw, tokens = await deps.llm(prompt_gate.prompt)
+        _observe_llm_cost(_estimate_llm_cost(tokens))
+    except Exception as exc:
+        logger.warning("merger_agent: per-file llm raised: %s", exc)
+        raw = ""
+
+    meta["proposal_prompt"] = prompt_gate.prompt
+    meta["proposal_response"] = raw
+    if not raw:
+        return None, _build_abstain(
+            req,
+            MergerReason.refused_llm_unavailable,
+            confidence=0.0,
+            rationale="LLM returned empty response",
+            metadata=meta,
+        ), meta
+
+    try:
+        payload = _parse_llm_response(raw)
+        resolution = _assemble_resolution(req, blocks, payload)
+    except _LLMParseError as exc:
+        return None, _build_abstain(
+            req,
+            MergerReason.refused_llm_invalid_json,
+            confidence=0.0,
+            rationale=f"LLM returned invalid payload: {exc}",
+            metadata={**meta, "raw_head": raw[:200]},
+        ), meta
+
+    try:
+        metrics.merger_confidence.observe(resolution.confidence)
+    except Exception:
+        pass
+
+    if bool(payload.get("new_logic_detected", False)):
+        return resolution, _build_abstain(
+            req,
+            MergerReason.refused_new_logic_detected,
+            confidence=resolution.confidence,
+            rationale=(
+                f"LLM self-reported new logic invention; "
+                f"{resolution.rationale}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=meta,
+        ), meta
+
+    if resolution.confidence < MIN_CONFIDENCE_FOR_PLUS_TWO:
+        return resolution, _build_abstain(
+            req,
+            MergerReason.abstained_low_confidence,
+            confidence=resolution.confidence,
+            rationale=(
+                f"confidence {resolution.confidence:.2f} < "
+                f"{MIN_CONFIDENCE_FOR_PLUS_TWO}; {resolution.rationale}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=meta,
+        ), meta
+
+    review = await _review_proposal(req, blocks, resolution, deps=deps)
+    sandwich_decision = "confirm" if review.confirmed else "object"
+    meta.update({
+        "merger_sandwich_decision": sandwich_decision,
+        "review_model": review.model,
+        "review_cost_usd": review.cost_usd,
+        "review_tokens_used": review.tokens_used,
+        "review_prompt": review.prompt,
+        "review_response": review.raw_response,
+    })
+    if not review.confirmed:
+        return resolution, _build_abstain(
+            req,
+            MergerReason.refused_review_objected,
+            confidence=resolution.confidence,
+            rationale=(
+                "LLM-B objected to LLM-A's proposed resolution; "
+                f"{review.reason}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=meta,
+        ), meta
+
+    meta.update({
+        "resolved_text": resolution.resolved_text,
+        "changed_identifiers": list(resolution.changed_identifiers),
+        "conflict_lines": total_lines,
+        "blocks": len(blocks),
+    })
+    return resolution, None, meta
+
+
+async def _run_test_with_resolved_files(
+    request: ConflictRequest,
+    deps: MergerDeps,
+    resolved_files: dict[str, str],
+) -> TestRunResult:
+    originals: dict[Path, bytes | None] = {}
+    for path, resolved_text in resolved_files.items():
+        target = _safe_workspace_file(request.workspace, path)
+        if target is None:
+            continue
+        try:
+            originals[target] = target.read_bytes() if target.exists() else None
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(resolved_text, encoding="utf-8")
+        except OSError as exc:
+            return TestRunResult(
+                ok=False,
+                summary=f"workspace overlay failed for {path}: {exc}",
+                command="workspace overlay",
+            )
+
+    try:
+        return await deps.test_runner(request)
+    finally:
+        for target, original in originals.items():
+            try:
+                if original is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.write_bytes(original)
+            except OSError:
+                logger.warning(
+                    "merger_agent: failed to restore workspace file %s",
+                    target,
+                )
+
+
+async def _resolve_per_file_with_directive(
+    request: ConflictRequest,
+    *,
+    deps: MergerDeps,
+    strategy_meta: dict[str, Any],
+) -> ResolutionOutcome:
+    file_contents = _collect_file_contents(request)
+    paths = [
+        path for path in dict.fromkeys([request.file_path, *request.additional_files])
+        if path
+    ]
+    sibling_contents = {
+        path: content
+        for path, content in file_contents.items()
+        if path in paths
+    }
+
+    async def _run_file(
+        path: str,
+    ) -> tuple[Resolution | None, ResolutionOutcome | None, dict[str, Any]]:
+        file_req = replace(
+            request,
+            file_path=path,
+            conflict_text=sibling_contents.get(path, ""),
+            additional_files=[],
+            sibling_file_contents={
+                p: sibling_contents[p]
+                for p in paths
+                if p != path and p in sibling_contents
+            },
+        )
+        return await _resolve_one_file_with_directive(
+            file_req,
+            deps=deps,
+            sibling_paths=paths,
+        )
+
+    per_file = await asyncio.gather(*(_run_file(path) for path in paths))
+    file_resolution_meta = [meta for _resolution, _outcome, meta in per_file]
+    blocking = next(
+        (outcome for _resolution, outcome, _meta in per_file if outcome is not None),
+        None,
+    )
+    if blocking is not None:
+        blocking.metadata = {
+            **strategy_meta,
+            "file_resolutions": file_resolution_meta,
+            "per_file_blocked_at": blocking.file_path,
+            "per_file_block_reason": blocking.reason.value,
+        }
+        _observe_metric(blocking)
+        await _safe_audit(deps.audit, blocking)
+        return blocking
+
+    resolutions = {
+        paths[idx]: resolution
+        for idx, (resolution, _outcome, _meta) in enumerate(per_file)
+        if resolution is not None
+    }
+    resolved_files = {
+        path: resolution.resolved_text
+        for path, resolution in resolutions.items()
+    }
+    changed_identifiers_by_file = {
+        path: list(resolution.changed_identifiers)
+        for path, resolution in resolutions.items()
+    }
+    primary = resolutions[request.file_path]
+
+    test_result = await _run_test_with_resolved_files(
+        request,
+        deps,
+        resolved_files,
+    )
+    if not test_result.ok:
+        _bump_failure(request.change_id)
+        outcome = _build_refusal(
+            request,
+            MergerReason.refused_test_failure,
+            rationale=(
+                "per-file union verifier failed: "
+                f"{test_result.summary or test_result.command}"
+            ),
+            confidence=primary.confidence,
+            diff_preview=primary.diff,
+            metadata={
+                **strategy_meta,
+                "file_resolutions": file_resolution_meta,
+                "resolved_files": resolved_files,
+                "changed_identifiers_by_file": changed_identifiers_by_file,
+                "verify_result": "red",
+                "verify_stage": "per_file_union",
+            },
+        )
+        outcome.resolved_text = primary.resolved_text
+        outcome.changed_identifiers = list(primary.changed_identifiers)
+        outcome.test_result = {
+            "ok": False,
+            "summary": test_result.summary,
+            "command": test_result.command,
+        }
+        outcome.failure_count = get_failure_count(request.change_id)
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    confidence = min(resolution.confidence for resolution in resolutions.values())
+    combined_diff = "\n".join(
+        resolution.diff for resolution in resolutions.values() if resolution.diff
+    )
+    outcome = _build_abstain(
+        request,
+        reason=MergerReason.deferred_push_to_caller,
+        confidence=confidence,
+        rationale=(
+            "Per-file fallback resolved independent conflict components; "
+            "caller is responsible for applying all resolved_files and pushing."
+        ),
+        diff_preview=combined_diff,
+        metadata={
+            **strategy_meta,
+            "file_resolutions": file_resolution_meta,
+            "resolved_files": resolved_files,
+            "changed_identifiers_by_file": changed_identifiers_by_file,
+            "verify_result": "green",
+            "verify_stage": "per_file_union",
+        },
+    )
+    outcome.resolved_text = primary.resolved_text
+    outcome.changed_identifiers = list(primary.changed_identifiers)
+    outcome.test_result = {
+        "ok": True,
+        "summary": test_result.summary,
+        "command": test_result.command,
+    }
+    _observe_metric(outcome)
+    await _safe_audit(deps.audit, outcome)
+    return outcome
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -733,13 +2257,73 @@ def _parse_llm_response(raw: str) -> dict[str, Any]:
 
 def _assemble_resolution(
     req: ConflictRequest,
-    blocks: list[ConflictBlock],
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
     llm_payload: dict[str, Any],
 ) -> Resolution:
-    """Splice the LLM's ``resolved_block`` back into the original file,
-    preserving every line outside the conflict region."""
+    """Assemble the LLM resolution, preserving legacy single-file payloads."""
+    blocks_by_file = _normalize_blocks_by_file(req, blocks)
+    source_by_file = _conflict_texts_by_file(req, blocks_by_file.keys())
+    all_blocks = [
+        block
+        for file_blocks in blocks_by_file.values()
+        for block in file_blocks
+    ]
+    all_empty_hunk = all(b.n_conflict_lines == 0 for b in all_blocks)
+
+    file_payloads = _resolved_file_payloads(llm_payload)
+    if file_payloads:
+        resolved_by_file: dict[str, str] = {}
+        for item in file_payloads:
+            file_path = item.get("file_path") or item.get("path")
+            resolved_text = item.get("resolved_text") or item.get("text")
+            if not isinstance(file_path, str) or not isinstance(resolved_text, str):
+                raise _LLMParseError(
+                    "resolved_blocks entries must include file_path and "
+                    "resolved_text strings"
+                )
+            if file_path not in blocks_by_file:
+                raise _LLMParseError(f"unexpected resolved file {file_path!r}")
+            if not resolved_text and not all_empty_hunk:
+                raise _LLMParseError(f"resolved_text missing for {file_path!r}")
+            resolved_by_file[file_path] = resolved_text
+
+        missing = [path for path in blocks_by_file if path not in resolved_by_file]
+        if missing:
+            raise _LLMParseError(
+                "resolved_blocks missing file(s): " + ", ".join(missing)
+            )
+
+        confidence, rationale = _resolution_confidence_and_rationale(llm_payload)
+        changed_by_file = {
+            path: _extract_changed_identifiers(path, text)
+            for path, text in resolved_by_file.items()
+        }
+        file_resolutions = [
+            {
+                "file_path": path,
+                "resolved_text": resolved_by_file[path],
+                "changed_identifiers": changed_by_file[path],
+            }
+            for path in blocks_by_file
+        ]
+        return Resolution(
+            resolved_text=resolved_by_file[req.file_path],
+            confidence=confidence,
+            rationale=rationale,
+            diff=_make_file_diff(source_by_file, resolved_by_file),
+            changed_blocks=sum(
+                len(file_blocks) for file_blocks in blocks_by_file.values()
+            ),
+            changed_identifiers=changed_by_file.get(req.file_path, []),
+            file_resolutions=file_resolutions,
+            changed_identifiers_by_file=changed_by_file,
+        )
+
+    primary_blocks = blocks_by_file.get(req.file_path, [])
     resolved_block = str(llm_payload.get("resolved_block", ""))
-    if not resolved_block:
+    if "resolved_block" not in llm_payload:
+        raise _LLMParseError("resolved_block missing")
+    if not resolved_block and not all_empty_hunk:
         raise _LLMParseError("resolved_block missing or empty")
 
     # We only support the single-block path for auto-vote; a multi-
@@ -752,13 +2336,13 @@ def _assemble_resolution(
         llm_payload["resolved_blocks"], list
     ):
         blocks_out = [str(b) for b in llm_payload["resolved_blocks"]]
-        if len(blocks_out) != len(blocks):
+        if len(blocks_out) != len(primary_blocks):
             raise _LLMParseError(
                 f"resolved_blocks length {len(blocks_out)} != "
-                f"conflict blocks {len(blocks)}"
+                f"conflict blocks {len(primary_blocks)}"
             )
     else:
-        blocks_out = [resolved_block] * len(blocks)
+        blocks_out = [resolved_block] * len(primary_blocks)
 
     # Do the splices right-to-left so earlier offsets stay valid.
     matches = list(_CONFLICT_RE.finditer(text))
@@ -766,26 +2350,128 @@ def _assemble_resolution(
         m = matches[idx]
         text = text[: m.start()] + blocks_out[idx] + text[m.end() :]
 
-    confidence = float(llm_payload.get("confidence", 0.0))
-    if confidence < 0:
-        confidence = 0.0
-    if confidence > 1:
-        confidence = 1.0
-    rationale = str(llm_payload.get("rationale", ""))
+    confidence, rationale = _resolution_confidence_and_rationale(llm_payload)
     new_logic = bool(llm_payload.get("new_logic_detected", False))
 
     if new_logic:
         # Clamp confidence hard — the prompt asked for exactly this.
         confidence = min(confidence, 0.3)
 
-    diff = _make_block_diff(req.file_path, blocks, blocks_out)
+    diff = _make_block_diff(req.file_path, primary_blocks, blocks_out)
+    changed_identifiers = _extract_changed_identifiers(req.file_path, text)
     return Resolution(
         resolved_text=text,
         confidence=confidence,
         rationale=rationale or "(no rationale supplied)",
         diff=diff,
-        changed_blocks=len(blocks),
+        changed_blocks=len(primary_blocks),
+        changed_identifiers=changed_identifiers,
+        file_resolutions=[{
+            "file_path": req.file_path,
+            "resolved_text": text,
+            "changed_identifiers": changed_identifiers,
+        }],
+        changed_identifiers_by_file={req.file_path: changed_identifiers},
     )
+
+
+def _resolved_file_payloads(llm_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = llm_payload.get("resolved_blocks")
+    if not isinstance(raw, list) or not raw:
+        return []
+    if all(isinstance(item, dict) for item in raw):
+        return raw
+    return []
+
+
+def _resolution_confidence_and_rationale(
+    llm_payload: dict[str, Any],
+) -> tuple[float, str]:
+    confidence = float(llm_payload.get("confidence", 0.0))
+    if confidence < 0:
+        confidence = 0.0
+    if confidence > 1:
+        confidence = 1.0
+    rationale = str(llm_payload.get("rationale", ""))
+    if bool(llm_payload.get("new_logic_detected", False)):
+        confidence = min(confidence, 0.3)
+    return confidence, rationale or "(no rationale supplied)"
+
+
+def _conflict_texts_by_file(
+    req: ConflictRequest,
+    file_paths: Collection[str],
+) -> dict[str, str]:
+    texts: dict[str, str] = {req.file_path: req.conflict_text}
+    for path in file_paths:
+        if path == req.file_path:
+            continue
+        if path in req.sibling_file_contents:
+            texts[path] = req.sibling_file_contents[path]
+            continue
+        if not req.workspace:
+            texts[path] = ""
+            continue
+        rel = Path(path)
+        if rel.is_absolute() or ".." in rel.parts:
+            texts[path] = ""
+            continue
+        try:
+            texts[path] = (Path(req.workspace) / rel).read_text(encoding="utf-8")
+        except OSError:
+            texts[path] = ""
+    return texts
+
+
+def _make_file_diff(
+    before_by_file: dict[str, str],
+    after_by_file: dict[str, str],
+) -> str:
+    chunks: list[str] = []
+    for path, after in after_by_file.items():
+        before = before_by_file.get(path, "")
+        chunks.extend(difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        ))
+    return "\n".join(chunks)
+
+
+def _extract_changed_identifiers(file_path: str, resolved_text: str) -> list[str]:
+    """Best-effort pytest ``-k`` terms from resolved Python content."""
+    if not file_path.endswith(".py"):
+        return []
+    try:
+        tree = ast.parse(resolved_text)
+    except SyntaxError:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            names.append(value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _add(node.name)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in [
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ]:
+                _add(arg.arg)
+            if node.args.vararg:
+                _add(node.args.vararg.arg)
+            if node.args.kwarg:
+                _add(node.args.kwarg.arg)
+    return names
 
 
 def _make_block_diff(
@@ -806,6 +2492,1009 @@ def _make_block_diff(
         for line in resolved.splitlines():
             out.append(f"+{line}")
     return "\n".join(out)
+
+
+def try_deterministic_merge(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+) -> ResolutionOutcome | None:
+    """Resolve narrow AST-safe conflicts without calling an LLM.
+
+    Signature-compat shims are candidate resolutions only: they return a
+    deferred-push outcome so the arbiter's verifier must validate before
+    any push.
+    """
+    if not blocks:
+        return None
+
+    resolved_blocks: list[str] = []
+    patterns: list[str] = []
+    matches = list(_CONFLICT_RE.finditer(req.conflict_text))
+    if len(matches) != len(blocks):
+        return None
+    coordinated = _resolve_constructor_behavior_signature_candidate(
+        req.conflict_text, blocks, matches,
+    )
+    if coordinated is not None:
+        resolved_blocks, patterns = coordinated
+    else:
+        for block, match in zip(blocks, matches):
+            prefix = req.conflict_text[:match.start()]
+            suffix = req.conflict_text[match.end():]
+            resolved = _deterministic_block_resolution(block, prefix, suffix)
+            if resolved is None:
+                return None
+            resolved_block, pattern = resolved
+            resolved_blocks.append(resolved_block)
+            patterns.append(pattern)
+
+    text = req.conflict_text
+    for idx in range(len(matches) - 1, -1, -1):
+        match = matches[idx]
+        text = text[: match.start()] + resolved_blocks[idx] + text[match.end():]
+
+    diff = _make_block_diff(req.file_path, blocks, resolved_blocks)
+    is_signature_candidate = "signature compatibility candidate" in patterns
+    reason = (
+        MergerReason.deferred_push_to_caller
+        if is_signature_candidate
+        else MergerReason.resolved_deterministic_merge
+    )
+    outcome = _build_abstain(
+        req,
+        reason,
+        confidence=1.0,
+        rationale=(
+            "candidate AST merge: " if is_signature_candidate
+            else "deterministic AST trivial merge: "
+        ) + (
+            f"{', '.join(dict.fromkeys(patterns))}"
+        ),
+        diff_preview=diff,
+        metadata={
+            "merger_path": (
+                "signature_compat_candidate"
+                if is_signature_candidate
+                else "deterministic"
+            ),
+            "deterministic_patterns": list(dict.fromkeys(patterns)),
+            "conflict_lines": sum(block.n_conflict_lines for block in blocks),
+            "blocks": len(blocks),
+            "signature_compat_candidate": is_signature_candidate,
+        },
+    )
+    outcome.resolved_text = text
+    outcome.changed_identifiers = _extract_changed_identifiers(req.file_path, text)
+    return outcome
+
+
+def _deterministic_block_resolution(
+    block: ConflictBlock,
+    prefix: str,
+    suffix: str = "",
+) -> tuple[str, str] | None:
+    resolvers = (
+        _resolve_signature_compat_candidate,
+        lambda head, incoming: _resolve_dunder_all_union(head, incoming, prefix),
+        lambda head, incoming: _resolve_add_method_to_class(
+            block, prefix, suffix,
+        ),
+        _resolve_import_union,
+        _resolve_distinct_symbol_adds,
+        _resolve_call_keyword_adds,
+        _resolve_dict_literal_adds,
+        _resolve_comment_docstring_adds,
+    )
+    for resolver in resolvers:
+        resolved = resolver(block.head_lines, block.incoming_lines)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _join_block_lines(lines: list[str]) -> str:
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _resolve_constructor_behavior_signature_candidate(
+    conflict_text: str,
+    blocks: list[ConflictBlock],
+    matches: list[re.Match[str]],
+) -> tuple[list[str], list[str]] | None:
+    if len(blocks) < 2:
+        return None
+
+    init_idx = -1
+    init_resolved = ""
+    state_attr = ""
+    for idx, block in enumerate(blocks):
+        resolved = _resolve_constructor_state_signature_block(
+            block.head_lines, block.incoming_lines,
+        )
+        if resolved is not None:
+            init_idx = idx
+            init_resolved, state_attr = resolved
+            break
+    if init_idx < 0:
+        return None
+
+    body_idx = -1
+    body_resolved = ""
+    for idx, block in enumerate(blocks):
+        if idx == init_idx:
+            continue
+        resolved = _resolve_state_conditional_body_block(
+            block.head_lines, block.incoming_lines, state_attr,
+        )
+        if resolved is not None:
+            body_idx = idx
+            body_resolved = resolved
+            break
+    if body_idx < 0:
+        return None
+
+    resolved_blocks: list[str] = []
+    patterns: list[str] = []
+    for idx, block in enumerate(blocks):
+        if idx == init_idx:
+            resolved_blocks.append(init_resolved)
+            patterns.append("signature compatibility candidate")
+            continue
+        if idx == body_idx:
+            resolved_blocks.append(body_resolved)
+            patterns.append("signature compatibility candidate")
+            continue
+        match = matches[idx]
+        prefix = conflict_text[:match.start()]
+        suffix = conflict_text[match.end():]
+        resolved = _deterministic_block_resolution(block, prefix, suffix)
+        if resolved is None:
+            return None
+        resolved_block, pattern = resolved
+        resolved_blocks.append(resolved_block)
+        patterns.append(pattern)
+
+    text = conflict_text
+    for idx in range(len(matches) - 1, -1, -1):
+        match = matches[idx]
+        text = text[: match.start()] + resolved_blocks[idx] + text[match.end():]
+    try:
+        compile(text, "<signature-body-candidate>", "exec")
+    except SyntaxError:
+        return None
+    return resolved_blocks, patterns
+
+
+def is_constructor_behavior_signature_candidate(
+    blocks: list[ConflictBlock],
+) -> bool:
+    state_attr = ""
+    init_seen = False
+    for block in blocks:
+        resolved = _resolve_constructor_state_signature_block(
+            block.head_lines, block.incoming_lines,
+        )
+        if resolved is not None:
+            _init_text, state_attr = resolved
+            init_seen = True
+            break
+    if not init_seen or not state_attr:
+        return False
+    return any(
+        _resolve_state_conditional_body_block(
+            block.head_lines, block.incoming_lines, state_attr,
+        )
+        is not None
+        for block in blocks
+    )
+
+
+def _resolve_constructor_state_signature_block(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _single_simple_function(head_lines)
+    incoming = _single_simple_function(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_node, head_source, head_indent = head
+    incoming_node, incoming_source, incoming_indent = incoming
+    if type(head_node) is not type(incoming_node):
+        return None
+    if head_node.name != "__init__" or incoming_node.name != "__init__":
+        return None
+    if head_node.decorator_list or incoming_node.decorator_list:
+        return None
+
+    head_params = _simple_params(head_node)
+    incoming_params = _simple_params(incoming_node)
+    if head_params is None or incoming_params is None:
+        return None
+    signature_parts = _signature_union_parts(head_params, incoming_params)
+    if signature_parts is None:
+        return None
+
+    common_names = {name for name, _default in head_params} & {
+        name for name, _default in incoming_params
+    }
+    added_names = [
+        name
+        for name, _default in [*head_params, *incoming_params]
+        if name not in common_names and name != "self"
+    ]
+    if len(added_names) != 1:
+        return None
+    state_param = added_names[0]
+
+    head_body = _function_body_lines(head_source, head_node)
+    incoming_body = _function_body_lines(incoming_source, incoming_node)
+    state_attr = (
+        _assigned_self_attr_from_param(incoming_node, state_param)
+        or _assigned_self_attr_from_param(head_node, state_param)
+    )
+    if not state_attr:
+        return None
+
+    merged_body = _unique_body_lines([*head_body, *incoming_body])
+    if not merged_body:
+        return None
+
+    indent = head_indent or incoming_indent
+    child = indent + "    "
+    lines = [
+        f"{indent}def __init__({', '.join(signature_parts)}):",
+        *_indent_function_body(merged_body, child),
+    ]
+    return _join_block_lines(lines), state_attr
+
+
+def _resolve_state_conditional_body_block(
+    head_lines: list[str],
+    incoming_lines: list[str],
+    state_attr: str,
+) -> str | None:
+    head = _single_simple_function(head_lines)
+    incoming = _single_simple_function(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_node, head_source, head_indent = head
+    incoming_node, incoming_source, incoming_indent = incoming
+    if type(head_node) is not type(incoming_node):
+        return None
+    if head_node.name != incoming_node.name or head_node.name == "__init__":
+        return None
+    if head_node.decorator_list or incoming_node.decorator_list:
+        return None
+    if ast.dump(head_node.args) != ast.dump(incoming_node.args):
+        return None
+
+    head_body = _function_body_lines(head_source, head_node)
+    incoming_body = _function_body_lines(incoming_source, incoming_node)
+    head_return = _returns_self_attr(head_node, state_attr)
+    incoming_return = _returns_self_attr(incoming_node, state_attr)
+    if head_return == incoming_return:
+        return None
+    if incoming_return:
+        injected_body = incoming_body
+        fallback_body = head_body
+    else:
+        injected_body = head_body
+        fallback_body = incoming_body
+
+    prefix_len = _common_prefix_len(injected_body, fallback_body)
+    prefix = injected_body[:prefix_len]
+    fallback_tail = fallback_body[prefix_len:]
+    if not fallback_tail:
+        return None
+
+    indent = head_indent or incoming_indent
+    child = indent + "    "
+    grandchild = child + "    "
+    async_prefix = "async " if isinstance(head_node, ast.AsyncFunctionDef) else ""
+    signature = _function_signature_text(head_source, head_node)
+    if signature is None:
+        return None
+    lines = [
+        f"{indent}{async_prefix}def {head_node.name}({signature}):",
+        *_indent_function_body(prefix, child),
+        f"{child}if self.{state_attr} is not None:",
+        f"{grandchild}return self.{state_attr}",
+        *_indent_function_body(fallback_tail, child),
+    ]
+    return _join_block_lines(lines)
+
+
+def _resolve_add_method_to_class(
+    block: ConflictBlock,
+    prefix: str,
+    suffix: str,
+) -> tuple[str, str] | None:
+    head_source = prefix + _join_block_lines(block.head_lines) + suffix
+    incoming_source = prefix + _join_block_lines(block.incoming_lines) + suffix
+    try:
+        head_tree = ast.parse(head_source)
+        incoming_tree = ast.parse(incoming_source)
+    except SyntaxError:
+        return None
+
+    head_class = _class_containing_line(head_tree, block.start_line)
+    incoming_class = _class_containing_line(incoming_tree, block.start_line)
+    if head_class is None or incoming_class is None:
+        return None
+    if head_class.name != incoming_class.name:
+        return None
+    if _class_header_text(head_source, head_class) != _class_header_text(
+        incoming_source, incoming_class,
+    ):
+        return None
+    if _class_non_method_fingerprint(head_class) != _class_non_method_fingerprint(
+        incoming_class,
+    ):
+        return None
+
+    head_methods = _class_methods(head_class)
+    incoming_methods = _class_methods(incoming_class)
+    shared_names = set(head_methods) & set(incoming_methods)
+    for name in shared_names:
+        if ast.dump(head_methods[name]) != ast.dump(incoming_methods[name]):
+            return None
+
+    head_added = _methods_within_range(
+        head_class, block.start_line, len(block.head_lines),
+    )
+    incoming_added = _methods_within_range(
+        incoming_class, block.start_line, len(block.incoming_lines),
+    )
+    if not head_added or not incoming_added:
+        return None
+    head_added_names = {method.name for method in head_added}
+    incoming_added_names = {method.name for method in incoming_added}
+    if head_added_names & incoming_added_names:
+        return None
+    if not _conflict_range_is_method_only(
+        head_class, block.start_line, len(block.head_lines),
+    ):
+        return None
+    if not _conflict_range_is_method_only(
+        incoming_class, block.start_line, len(block.incoming_lines),
+    ):
+        return None
+
+    resolved = _add_method_to_class_resolution(
+        _class_header_text(head_source, head_class),
+        [_node_text(head_source, method) for method in head_added],
+        [_node_text(incoming_source, method) for method in incoming_added],
+    )
+    if not resolved:
+        return None
+    try:
+        compile(prefix + resolved + suffix, "<deterministic-merge>", "exec")
+    except SyntaxError:
+        return None
+    return resolved, "add_method_to_class"
+
+
+def _class_containing_line(tree: ast.Module, line: int) -> ast.ClassDef | None:
+    classes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.lineno <= line
+        and getattr(node, "end_lineno", node.lineno) >= line
+    ]
+    if not classes:
+        return None
+    return max(classes, key=lambda node: node.lineno)
+
+
+def _class_header_text(source: str, node: ast.ClassDef) -> str:
+    lines = source.splitlines()
+    start = min(
+        [decorator.lineno for decorator in node.decorator_list] or [node.lineno],
+    )
+    body_start = min(
+        [child.lineno for child in node.body] or [node.lineno + 1],
+    )
+    return "\n".join(lines[start - 1:body_start - 1])
+
+
+def _class_methods(
+    node: ast.ClassDef,
+) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for child in node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            methods[child.name] = child
+    return methods
+
+
+def _class_non_method_fingerprint(node: ast.ClassDef) -> list[str]:
+    return [
+        ast.dump(child)
+        for child in node.body
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _methods_within_range(
+    class_node: ast.ClassDef,
+    start_line: int,
+    line_count: int,
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    if line_count <= 0:
+        return []
+    end_line = start_line + line_count - 1
+    return [
+        child for child in class_node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and child.lineno >= start_line
+        and getattr(child, "end_lineno", child.lineno) <= end_line
+    ]
+
+
+def _conflict_range_is_method_only(
+    class_node: ast.ClassDef,
+    start_line: int,
+    line_count: int,
+) -> bool:
+    if line_count <= 0:
+        return False
+    end_line = start_line + line_count - 1
+    for child in class_node.body:
+        child_end = getattr(child, "end_lineno", child.lineno)
+        overlaps = child.lineno <= end_line and child_end >= start_line
+        if overlaps and not isinstance(
+            child, (ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            return False
+    return True
+
+
+def _node_text(
+    source: str,
+    node: ast.AST,
+) -> str:
+    lines = source.splitlines()
+    return "\n".join(lines[node.lineno - 1:getattr(node, "end_lineno")])
+
+
+def _add_method_to_class_resolution(
+    class_def_head: str,
+    head_methods: list[str],
+    incoming_methods: list[str],
+) -> str:
+    del class_def_head
+    method_blocks = [
+        text.rstrip("\n")
+        for text in [*head_methods, *incoming_methods]
+        if text.strip()
+    ]
+    if not method_blocks:
+        return ""
+    return "\n\n".join(method_blocks) + "\n"
+
+
+def _literal_sort_key(value: str) -> tuple[str, str]:
+    return (value.lower(), value)
+
+
+def _resolve_signature_compat_candidate(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _single_simple_function(head_lines)
+    incoming = _single_simple_function(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_node, head_source, head_indent = head
+    incoming_node, incoming_source, incoming_indent = incoming
+    if type(head_node) is not type(incoming_node):
+        return None
+    if head_node.name != incoming_node.name:
+        return None
+    if head_node.decorator_list or incoming_node.decorator_list:
+        return None
+    if _simple_param_names(head_node) == _simple_param_names(incoming_node):
+        return None
+    head_params = _simple_params(head_node)
+    incoming_params = _simple_params(incoming_node)
+    if head_params is None or incoming_params is None:
+        return None
+
+    union_names = [name for name, _default in head_params]
+    union_names.extend(
+        name for name, _default in incoming_params if name not in union_names
+    )
+    common_names = {name for name, _default in head_params} & {
+        name for name, _default in incoming_params
+    }
+    defaults = {
+        **{name: default for name, default in head_params if default is not None},
+        **{
+            name: default
+            for name, default in incoming_params
+            if default is not None
+        },
+    }
+    signature_parts: list[str] = []
+    seen_default = False
+    for name in union_names:
+        default = defaults.get(name)
+        if name not in common_names and default is None:
+            default = "None"
+        if default is None and seen_default:
+            default = "None"
+        if default is not None:
+            seen_default = True
+        signature_parts.append(f"{name}={default}" if default is not None else name)
+
+    incoming_only = [
+        name for name, _default in incoming_params if name not in common_names
+    ]
+    head_only = [name for name, _default in head_params if name not in common_names]
+    guard_names = incoming_only or head_only
+    if not guard_names:
+        return None
+
+    guard = " or ".join(f"{name} is not None" for name in guard_names)
+    if incoming_only:
+        guarded_source = incoming_source
+        guarded_node = incoming_node
+        fallback_source = head_source
+        fallback_node = head_node
+    else:
+        guarded_source = head_source
+        guarded_node = head_node
+        fallback_source = incoming_source
+        fallback_node = incoming_node
+    guarded_body = _function_body_lines(guarded_source, guarded_node)
+    fallback_body = _function_body_lines(fallback_source, fallback_node)
+    if not guarded_body or not fallback_body:
+        return None
+
+    indent = head_indent or incoming_indent
+    child = indent + "    "
+    grandchild = child + "    "
+    async_prefix = "async " if isinstance(head_node, ast.AsyncFunctionDef) else ""
+    lines = [
+        f"{indent}{async_prefix}def {head_node.name}({', '.join(signature_parts)}):",
+        f"{child}if {guard}:",
+        *_indent_function_body(guarded_body, grandchild),
+        f"{child}else:",
+        *_indent_function_body(fallback_body, grandchild),
+    ]
+    return _join_block_lines(lines), "signature compatibility candidate"
+
+
+def _signature_union_parts(
+    head_params: list[tuple[str, str | None]],
+    incoming_params: list[tuple[str, str | None]],
+) -> list[str] | None:
+    if not head_params or not incoming_params:
+        return None
+    union_names = [name for name, _default in head_params]
+    union_names.extend(
+        name for name, _default in incoming_params if name not in union_names
+    )
+    common_names = {name for name, _default in head_params} & {
+        name for name, _default in incoming_params
+    }
+    if {name for name in union_names if name != "self"} == (
+        common_names - {"self"}
+    ):
+        return None
+    defaults = {
+        **{name: default for name, default in head_params if default is not None},
+        **{
+            name: default
+            for name, default in incoming_params
+            if default is not None
+        },
+    }
+    signature_parts: list[str] = []
+    seen_default = False
+    for name in union_names:
+        default = defaults.get(name)
+        if name not in common_names and default is None:
+            default = "None"
+        if default is None and seen_default:
+            default = "None"
+        if default is not None:
+            seen_default = True
+        signature_parts.append(f"{name}={default}" if default is not None else name)
+    return signature_parts
+
+
+def _assigned_self_attr_from_param(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    param_name: str,
+) -> str:
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = child.value
+        if not isinstance(value, ast.Name) or value.id != param_name:
+            continue
+        targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ):
+                return target.attr
+    return ""
+
+
+def _unique_body_lines(lines: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        key = line.strip()
+        if not key:
+            if merged and merged[-1].strip():
+                merged.append(line)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(line)
+    while merged and not merged[-1].strip():
+        merged.pop()
+    return merged
+
+
+def _returns_self_attr(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    attr_name: str,
+) -> bool:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Return):
+            continue
+        value = child.value
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "self"
+            and value.attr == attr_name
+        ):
+            return True
+    return False
+
+
+def _common_prefix_len(left: list[str], right: list[str]) -> int:
+    count = 0
+    for left_line, right_line in zip(left, right):
+        if left_line.strip() != right_line.strip():
+            break
+        count += 1
+    return count
+
+
+def _function_signature_text(
+    source: str,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str | None:
+    del source
+    try:
+        return ast.unparse(node.args)
+    except Exception:
+        return None
+
+
+def _single_simple_function(
+    lines: list[str],
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, str, str] | None:
+    source = _join_block_lines(lines)
+    indent = _first_indent(lines)
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return None
+    if len(tree.body) != 1 or not isinstance(
+        tree.body[0],
+        (ast.FunctionDef, ast.AsyncFunctionDef),
+    ):
+        return None
+    return tree.body[0], textwrap.dedent(source), indent
+
+
+def _simple_param_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    return [arg.arg for arg in node.args.args]
+
+
+def _simple_params(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[tuple[str, str | None]] | None:
+    args = node.args
+    if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
+        return None
+    defaults = [None] * (len(args.args) - len(args.defaults))
+    defaults.extend(ast.unparse(default) for default in args.defaults)
+    return [(arg.arg, default) for arg, default in zip(args.args, defaults)]
+
+
+def _function_body_lines(
+    source: str,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[str]:
+    end_lineno = getattr(node, "end_lineno", None)
+    if end_lineno is None:
+        return []
+    return source.splitlines()[node.body[0].lineno - 1:end_lineno]
+
+
+def _indent_function_body(lines: list[str], indent: str) -> list[str]:
+    return [
+        indent + line[4:] if line.startswith("    ") else indent + line
+        for line in lines
+    ]
+
+
+def _parse_single_assign(lines: list[str]) -> ast.Assign | None:
+    try:
+        tree = ast.parse(_join_block_lines(lines))
+    except SyntaxError:
+        return None
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Assign):
+        return None
+    return tree.body[0]
+
+
+def _string_list_assignment(
+    lines: list[str],
+    target_name: str,
+) -> tuple[str, list[str]] | None:
+    assign = _parse_single_assign(lines)
+    if assign is None or len(assign.targets) != 1:
+        return None
+    target = assign.targets[0]
+    if not isinstance(target, ast.Name) or target.id != target_name:
+        return None
+    if not isinstance(assign.value, (ast.List, ast.Tuple)):
+        return None
+    values: list[str] = []
+    for elt in assign.value.elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, str):
+            return None
+        values.append(elt.value)
+    return target.id, values
+
+
+def _resolve_dunder_all_union(
+    head_lines: list[str],
+    incoming_lines: list[str],
+    prefix: str = "",
+) -> tuple[str, str] | None:
+    head = _string_list_assignment(head_lines, "__all__")
+    incoming = _string_list_assignment(incoming_lines, "__all__")
+    if head is not None and incoming is not None:
+        values = sorted(set(head[1]) | set(incoming[1]), key=_literal_sort_key)
+        lines = ["__all__ = ["]
+        lines.extend(f'    "{value}",' for value in values)
+        lines.append("]")
+        return _join_block_lines(lines), "__all__ list union"
+
+    if "__all__" not in prefix[-500:]:
+        return None
+    head_entries = _string_list_entries(head_lines)
+    incoming_entries = _string_list_entries(incoming_lines)
+    if head_entries is None or incoming_entries is None:
+        return None
+    indent = _first_indent([*head_lines, *incoming_lines])
+    values = sorted(
+        set(head_entries) | set(incoming_entries),
+        key=_literal_sort_key,
+    )
+    lines = [f'{indent}"{value}",' for value in values]
+    return _join_block_lines(lines), "__all__ list union"
+
+
+def _string_list_entries(lines: list[str]) -> list[str] | None:
+    meaningful = [line.strip() for line in lines if line.strip()]
+    if not meaningful:
+        return None
+    try:
+        expr = ast.parse("[" + "\n".join(meaningful) + "\n]", mode="eval")
+    except SyntaxError:
+        return None
+    if not isinstance(expr.body, ast.List):
+        return None
+    values: list[str] = []
+    for elt in expr.body.elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, str):
+            return None
+        values.append(elt.value)
+    return values
+
+
+def _resolve_import_union(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _import_statements(head_lines)
+    incoming = _import_statements(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    imports = sorted(set(head) | set(incoming), key=str.lower)
+    return _join_block_lines(imports), "import statement union"
+
+
+def _import_statements(lines: list[str]) -> list[str] | None:
+    if not lines or any(line[:1].isspace() for line in lines if line.strip()):
+        return None
+    try:
+        tree = ast.parse(_join_block_lines(lines))
+    except SyntaxError:
+        return None
+    if not tree.body:
+        return None
+    imports: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            return None
+        imports.append(ast.unparse(node))
+    return imports
+
+
+def _resolve_distinct_symbol_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _top_level_symbol_blocks(head_lines)
+    incoming = _top_level_symbol_blocks(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_names = {name for name, _text in head}
+    incoming_names = {name for name, _text in incoming}
+    if not head_names or not incoming_names or head_names & incoming_names:
+        return None
+    ordered = sorted([*head, *incoming], key=lambda item: _literal_sort_key(item[0]))
+    return "\n\n".join(text.rstrip("\n") for _name, text in ordered) + "\n", (
+        "add/add distinct symbol"
+    )
+
+
+def _top_level_symbol_blocks(lines: list[str]) -> list[tuple[str, str]] | None:
+    source = _join_block_lines(lines)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    if not tree.body:
+        return None
+    symbols: list[tuple[str, str]] = []
+    source_lines = source.splitlines()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return None
+        end_lineno = getattr(node, "end_lineno", None)
+        if end_lineno is None:
+            return None
+        block_text = "\n".join(source_lines[node.lineno - 1:end_lineno]) + "\n"
+        symbols.append((node.name, block_text))
+    return symbols
+
+
+def _resolve_dict_literal_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _dict_entries(head_lines)
+    incoming = _dict_entries(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_keys = {key for key, _line in head}
+    incoming_keys = {key for key, _line in incoming}
+    if not head_keys or not incoming_keys or head_keys & incoming_keys:
+        return None
+    entries = sorted([*head, *incoming], key=lambda item: _literal_sort_key(item[0]))
+    return _join_block_lines([line for _key, line in entries]), (
+        "dict literal disjoint additions"
+    )
+
+
+def _dict_entries(lines: list[str]) -> list[tuple[str, str]] | None:
+    meaningful = [line for line in lines if line.strip()]
+    if not meaningful:
+        return None
+    source = "{\n" + "\n".join(meaningful) + "\n}"
+    try:
+        expr = ast.parse(source, mode="eval")
+    except SyntaxError:
+        return None
+    if not isinstance(expr.body, ast.Dict):
+        return None
+    if len(expr.body.keys) != len(meaningful):
+        return None
+    entries: list[tuple[str, str]] = []
+    for key_node, line in zip(expr.body.keys, meaningful):
+        if not isinstance(key_node, ast.Constant):
+            return None
+        key = key_node.value
+        if not isinstance(key, (str, int, float, bool)):
+            return None
+        entries.append((str(key), line))
+    return entries
+
+
+def _resolve_call_keyword_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _call_keyword_entries(head_lines)
+    incoming = _call_keyword_entries(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_names = {name for name, _line in head}
+    incoming_names = {name for name, _line in incoming}
+    if not head_names or not incoming_names or head_names & incoming_names:
+        return None
+    entries = sorted([*head, *incoming], key=lambda item: _literal_sort_key(item[0]))
+    return _join_block_lines([line for _name, line in entries]), (
+        "call keyword disjoint additions"
+    )
+
+
+def _call_keyword_entries(lines: list[str]) -> list[tuple[str, str]] | None:
+    meaningful = [line for line in lines if line.strip()]
+    if not meaningful:
+        return None
+    source = "f(\n" + "\n".join(meaningful) + "\n)"
+    try:
+        tree = ast.parse(source, mode="eval")
+    except SyntaxError:
+        return None
+    if not isinstance(tree.body, ast.Call):
+        return None
+    if tree.body.args or len(tree.body.keywords) != len(meaningful):
+        return None
+
+    entries: list[tuple[str, str]] = []
+    for keyword, line in zip(tree.body.keywords, meaningful):
+        if keyword.arg is None:
+            return None
+        entries.append((keyword.arg, line))
+    return entries
+
+
+def _resolve_comment_docstring_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    if not _comment_or_docstring_lines(head_lines):
+        return None
+    if not _comment_or_docstring_lines(incoming_lines):
+        return None
+    indent = _first_indent([*head_lines, *incoming_lines])
+    separator = f"{indent}# ---"
+    return _join_block_lines([*head_lines, separator, *incoming_lines]), (
+        "add-only docstring/comment"
+    )
+
+
+def _comment_or_docstring_lines(lines: list[str]) -> bool:
+    meaningful = [line for line in lines if line.strip()]
+    if not meaningful:
+        return False
+    if all(line.lstrip().startswith("#") for line in meaningful):
+        return True
+    try:
+        tree = ast.parse(_join_block_lines(meaningful))
+    except SyntaxError:
+        return False
+    return all(
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for node in tree.body
+    )
+
+
+def _first_indent(lines: list[str]) -> str:
+    for line in lines:
+        if line.strip():
+            return line[: len(line) - len(line.lstrip())]
+    return ""
 
 
 def _is_oversized(blocks: list[ConflictBlock], resolution: Resolution) -> bool:
@@ -836,7 +3525,7 @@ async def resolve_conflict(
       1. 3-strike gate — if this change has failed >= MAX_FAILURES_PER_CHANGE
          times, refuse immediately.
       2. Security-file gate — refuse unconditionally; no push, no vote.
-      3. Multi-file gate — abstain if request touches > 1 file.
+      3. Multi-file selector — use coupling + prompt size to choose route.
       4. Parse conflicts — empty list is "no conflict found".
       5. Oversized gate — abstain if combined conflict > MAX_CONFLICT_LINES.
       6. LLM call — abstain on unavailable / invalid JSON.
@@ -882,19 +3571,24 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 3. Multi-file gate ───────────────────────────────────────
+    # ── 3. Multi-file selector preflight ─────────────────────────
     extra = [p for p in request.additional_files if p and p != request.file_path]
+    coupling_components: list[set[str]] | None = None
+    multi_file_strategy: MultiFileStrategySelection | None = None
     if extra:
-        outcome = _build_abstain(
-            request, MergerReason.abstained_multi_file,
-            confidence=0.0,
-            rationale=(f"patchset touches {len(extra) + 1} files; "
-                       f"merger only auto-votes on single-file conflicts"),
-            metadata={"additional_files": extra},
+        coupling_components = _classify_coupling(
+            [request.file_path, *extra],
+            request.workspace or os.getcwd(),
+            request.conflict_text,
         )
-        _observe_metric(outcome)
-        await _safe_audit(deps.audit, outcome)
-        return outcome
+        coupling_summary = [sorted(component) for component in coupling_components]
+        logger.info(
+            "merger_agent: multi-file coupling summary "
+            "jira=%s change=%s components=%s",
+            request.jira_ticket or "(none)",
+            request.change_number or request.change_id or "(unknown)",
+            coupling_summary,
+        )
 
     # ── 4. Parse conflicts ───────────────────────────────────────
     blocks = parse_conflict_block(request.conflict_text)
@@ -907,7 +3601,105 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    total_lines = sum(b.n_conflict_lines for b in blocks)
+    blocks_by_file = _collect_conflict_blocks_by_file(request, blocks)
+
+    if extra:
+        multi_file_strategy = _select_multi_file_strategy(
+            request,
+            blocks,
+            coupling_components or [],
+            blocks_by_file,
+        )
+        strategy_meta = {
+            "additional_files": extra,
+            "multi_file_strategy": multi_file_strategy.reason.value,
+            "coupling_components": [
+                sorted(component)
+                for component in multi_file_strategy.coupling_components
+            ],
+            "component_prompt_evaluations": (
+                multi_file_strategy.prompt_evaluations
+            ),
+            **_risk_metadata(multi_file_strategy.risk),
+        }
+        logger.info(
+            "merger_agent: multi-file strategy selected "
+            "jira=%s change=%s strategy=%s components=%s",
+            request.jira_ticket or "(none)",
+            request.change_number or request.change_id or "(unknown)",
+            multi_file_strategy.reason.value,
+            strategy_meta["coupling_components"],
+        )
+        if multi_file_strategy.reason is MergerReason.multi_file_split_too_large:
+            outcome = _build_abstain(
+                request,
+                MergerReason.multi_file_split_too_large,
+                confidence=0.0,
+                rationale=(
+                    "multi-file conflict split is too large for automated "
+                    "resolution; human escalation required"
+                ),
+                metadata=strategy_meta,
+            )
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+        if multi_file_strategy.reason is MergerReason.multi_file_per_file_fallback:
+            return await _resolve_per_file_with_directive(
+                request,
+                deps=deps,
+                strategy_meta=strategy_meta,
+            )
+
+    nested_blocks = [
+        b
+        for file_blocks in blocks_by_file.values()
+        for b in file_blocks
+        if b.has_nested_markers
+    ]
+    if nested_blocks:
+        logger.warning(
+            "nested_marker_warning change_id=%s file=%s blocks=%s",
+            request.change_id,
+            request.file_path,
+            [b.start_line for b in nested_blocks],
+        )
+        outcome = _build_refusal(
+            request, MergerReason.refused_nested_markers,
+            rationale="nested conflict markers found inside parsed conflict block",
+            metadata={"nested_marker_start_lines": [
+                b.start_line for b in nested_blocks
+            ]},
+        )
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    total_lines = sum(
+        b.n_conflict_lines
+        for file_blocks in blocks_by_file.values()
+        for b in file_blocks
+    )
+    deterministic: ResolutionOutcome | None = None
+    if (
+        total_lines > MAX_CONFLICT_LINES
+        and len(blocks_by_file) == 1
+        and is_constructor_behavior_signature_candidate(blocks)
+    ):
+        deterministic = try_deterministic_merge(request, blocks)
+        if (
+            deterministic is not None
+            and deterministic.metadata.get("signature_compat_candidate") is True
+        ):
+            logger.info(
+                "merger_path=deterministic change=%s file=%s patterns=%s",
+                request.change_number or change_id,
+                request.file_path,
+                deterministic.metadata.get("deterministic_patterns", []),
+            )
+            _observe_metric(deterministic)
+            await _safe_audit(deps.audit, deterministic)
+            return deterministic
     if total_lines > MAX_CONFLICT_LINES:
         outcome = _build_abstain(
             request, MergerReason.abstained_oversized,
@@ -920,10 +3712,227 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 5. LLM call ──────────────────────────────────────────────
-    prompt = build_prompt(request, blocks)
+    if len(blocks_by_file) == 1:
+        deterministic = deterministic or try_deterministic_merge(request, blocks)
+    if deterministic is not None:
+        logger.info(
+            "merger_path=deterministic change=%s file=%s patterns=%s",
+            request.change_number or change_id,
+            request.file_path,
+            deterministic.metadata.get("deterministic_patterns", []),
+        )
+        if (
+            deterministic.reason is MergerReason.deferred_push_to_caller
+            and not request.push_locally
+        ):
+            _observe_metric(deterministic)
+            await _safe_audit(deps.audit, deterministic)
+            return deterministic
+
+        test_result = await deps.test_runner(request)
+        if not test_result.ok:
+            _bump_failure(change_id)
+            outcome = _build_refusal(
+                request,
+                MergerReason.refused_test_failure,
+                rationale=(
+                    "deterministic merge verifier failed: "
+                    f"{test_result.summary or test_result.command}"
+                ),
+                confidence=deterministic.confidence,
+                diff_preview=deterministic.diff_preview,
+                metadata=deterministic.metadata,
+            )
+            outcome.changed_identifiers = list(deterministic.changed_identifiers)
+            outcome.test_result = {
+                "ok": False,
+                "summary": test_result.summary,
+                "command": test_result.command,
+            }
+            outcome.failure_count = get_failure_count(change_id)
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+
+        deterministic.test_result = {
+            "ok": True,
+            "summary": test_result.summary,
+            "command": test_result.command,
+        }
+        if not request.push_locally:
+            _observe_metric(deterministic)
+            await _safe_audit(deps.audit, deterministic)
+            return deterministic
+
+        resolution = Resolution(
+            resolved_text=deterministic.resolved_text,
+            confidence=deterministic.confidence,
+            rationale=deterministic.rationale,
+            diff=deterministic.diff_preview,
+            changed_blocks=len(blocks),
+            changed_identifiers=list(deterministic.changed_identifiers),
+        )
+        commit_message = _build_patchset_message(request, resolution)
+        push = await deps.pusher.push(
+            change_id=change_id,
+            project=request.project,
+            workspace=request.workspace,
+            file_path=request.file_path,
+            resolved_text=resolution.resolved_text,
+            commit_message=commit_message,
+        )
+        if not push.ok:
+            _bump_failure(change_id)
+            outcome = _build_refusal(
+                request,
+                MergerReason.refused_push_failed,
+                rationale=f"Gerrit push failed: {push.reason}",
+                confidence=resolution.confidence,
+                diff_preview=resolution.diff,
+                metadata=deterministic.metadata,
+            )
+            outcome.changed_identifiers = list(resolution.changed_identifiers)
+            outcome.failure_count = get_failure_count(change_id)
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+
+        review_sha = push.sha or request.patchset_revision
+        review = await deps.reviewer.post_review(
+            commit_sha=review_sha,
+            project=request.project,
+            message=_build_review_message(request, resolution, push),
+            score=int(LabelVote.plus_two),
+        )
+        if not review.ok:
+            outcome = _build_abstain(
+                request,
+                MergerReason.abstained_low_confidence,
+                confidence=resolution.confidence,
+                rationale=(
+                    f"deterministic patchset pushed but +2 vote call failed: "
+                    f"{review.reason}; human to take over"
+                ),
+                diff_preview=resolution.diff,
+                metadata={
+                    **deterministic.metadata,
+                    "push_sha": push.sha,
+                    "review_url": push.review_url,
+                },
+            )
+            outcome.push_sha = push.sha
+            outcome.review_url = push.review_url
+            outcome.changed_identifiers = list(resolution.changed_identifiers)
+            outcome.test_result = deterministic.test_result
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+
+        hashtag_set_ok = True
+        hashtag_set_reason = ""
+        try:
+            ht_res = await deps.hashtag_setter.add_hashtag(
+                change_id=change_id,
+                project=request.project,
+                hashtag=CONFLICT_RESOLVED_HASHTAG,
+            )
+            hashtag_set_ok = ht_res.ok
+            hashtag_set_reason = ht_res.reason
+        except Exception as exc:                           # pragma: no cover
+            hashtag_set_ok = False
+            hashtag_set_reason = f"hashtag_setter raised: {exc!r}"
+
+        _reset_failure(change_id)
+        deterministic.voted_score = LabelVote.plus_two
+        deterministic.push_sha = push.sha
+        deterministic.review_url = push.review_url
+        deterministic.failure_count = 0
+        deterministic.metadata = {
+            **deterministic.metadata,
+            "push_sha": push.sha,
+            "review_url": push.review_url,
+            "hashtag_set_ok": hashtag_set_ok,
+            "hashtag_set_reason": hashtag_set_reason,
+        }
+        _observe_metric(deterministic)
+        await _safe_audit(deps.audit, deterministic)
+        _emit_sse_voted(deterministic)
+        return deterministic
+
+    # ── 5. Structural risk gate ─────────────────────────────────
+    risk = (
+        multi_file_strategy.risk
+        if multi_file_strategy is not None
+        else classify_conflict_risk(request, blocks)
+    )
+    risk_meta = _risk_metadata(risk)
+    if multi_file_strategy is not None:
+        risk_meta = {
+            **risk_meta,
+            "multi_file_strategy": multi_file_strategy.reason.value,
+            "coupling_components": [
+                sorted(component)
+                for component in multi_file_strategy.coupling_components
+            ],
+            "component_prompt_evaluations": (
+                multi_file_strategy.prompt_evaluations
+            ),
+        }
+    if risk.tier is MergerRiskTier.high:
+        outcome = _build_abstain(
+            request,
+            MergerReason.abstained_low_confidence,
+            confidence=0.0,
+            rationale=(
+                "structural risk HIGH before LLM invocation; "
+                f"signals={','.join(risk.reasons) or 'none'}"
+            ),
+            metadata={**risk_meta, "conflict_lines": total_lines},
+        )
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    # ── 6. LLM call ──────────────────────────────────────────────
+    prompt_blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]]
+    prompt_blocks = blocks_by_file if len(blocks_by_file) > 1 else blocks
+    prompt_gate = build_prompt_with_size_gate(request, prompt_blocks, risk)
+    logger.info(
+        "merger_agent: context_pack_bytes=%d merger_prompt_version=%s "
+        "merger_prompt_size_bytes=%d sections_trimmed=%s "
+        "prompt_limit_bytes=%d change=%s file=%s",
+        len(prompt_gate.context_pack.encode("utf-8")),
+        MERGER_PROMPT_VERSION,
+        prompt_gate.prompt_size_bytes,
+        _format_sections_trimmed(prompt_gate.sections_trimmed),
+        prompt_gate.limit_bytes,
+        request.change_number or change_id,
+        request.file_path,
+    )
+    if prompt_gate.oversized:
+        outcome = _build_abstain(
+            request,
+            MergerReason.abstained_prompt_oversized,
+            confidence=0.0,
+            rationale=(
+                "LLM prompt remained over the hard input-size gate after "
+                "trimming lower-priority context-pack sections"
+            ),
+            metadata={
+                **risk_meta,
+                "prompt_size_bytes": prompt_gate.prompt_size_bytes,
+                "prompt_limit_bytes": prompt_gate.limit_bytes,
+                "sections_trimmed": list(prompt_gate.sections_trimmed),
+            },
+        )
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    prompt = prompt_gate.prompt
     try:
         raw, _tokens = await deps.llm(prompt)
+        _observe_llm_cost(_estimate_llm_cost(_tokens))
     except Exception as exc:
         logger.warning("merger_agent: llm raised: %s", exc)
         raw = ""
@@ -934,6 +3943,7 @@ async def resolve_conflict(
             request, MergerReason.refused_llm_unavailable,
             confidence=0.0,
             rationale="LLM returned empty response",
+            metadata=risk_meta,
         )
         outcome.failure_count = get_failure_count(change_id)
         _observe_metric(outcome)
@@ -942,14 +3952,14 @@ async def resolve_conflict(
 
     try:
         payload = _parse_llm_response(raw)
-        resolution = _assemble_resolution(request, blocks, payload)
+        resolution = _assemble_resolution(request, prompt_blocks, payload)
     except _LLMParseError as exc:
         _bump_failure(change_id)
         outcome = _build_abstain(
             request, MergerReason.refused_llm_invalid_json,
             confidence=0.0,
             rationale=f"LLM returned invalid payload: {exc}",
-            metadata={"raw_head": raw[:200]},
+            metadata={**risk_meta, "raw_head": raw[:200]},
         )
         outcome.failure_count = get_failure_count(change_id)
         _observe_metric(outcome)
@@ -961,6 +3971,22 @@ async def resolve_conflict(
     except Exception:
         pass
 
+    resolution_meta = {
+        "file_resolutions": list(resolution.file_resolutions),
+        "changed_identifiers_by_file": dict(
+            resolution.changed_identifiers_by_file
+        ),
+    }
+    if resolution.file_resolutions:
+        resolution_meta["resolved_files"] = {
+            item["file_path"]: item["resolved_text"]
+            for item in resolution.file_resolutions
+            if (
+                isinstance(item.get("file_path"), str)
+                and isinstance(item.get("resolved_text"), str)
+            )
+        }
+
     # ── 6. New-logic gate ────────────────────────────────────────
     if bool(payload.get("new_logic_detected", False)):
         outcome = _build_abstain(
@@ -969,7 +3995,9 @@ async def resolve_conflict(
             rationale=(f"LLM self-reported new logic invention; "
                        f"{resolution.rationale}"),
             diff_preview=resolution.diff,
+            metadata={**risk_meta, **resolution_meta},
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
@@ -982,12 +4010,54 @@ async def resolve_conflict(
             rationale=(f"confidence {resolution.confidence:.2f} < "
                        f"{MIN_CONFIDENCE_FOR_PLUS_TWO}; {resolution.rationale}"),
             diff_preview=resolution.diff,
+            metadata={**risk_meta, **resolution_meta},
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 8. Test gate (before push — spec: "fail => don't push") ──
+    # ── 8. Independent LLM-B review gate ────────────────────────
+    review = await _review_proposal(request, blocks, resolution, deps=deps)
+    sandwich_decision = "confirm" if review.confirmed else "object"
+    logger.info(
+        "merger_sandwich_decision=%s change=%s file=%s model=%s cost_usd=%.6f",
+        sandwich_decision,
+        request.change_number or change_id,
+        request.file_path,
+        review.model,
+        review.cost_usd,
+    )
+    review_meta = {
+        **risk_meta,
+        **resolution_meta,
+        "merger_sandwich_decision": sandwich_decision,
+        "review_model": review.model,
+        "review_cost_usd": review.cost_usd,
+        "review_tokens_used": review.tokens_used,
+        "review_prompt": review.prompt,
+        "review_response": review.raw_response,
+        "proposal_prompt": prompt,
+        "proposal_response": raw,
+    }
+    if not review.confirmed:
+        outcome = _build_abstain(
+            request,
+            MergerReason.refused_review_objected,
+            confidence=resolution.confidence,
+            rationale=(
+                "LLM-B objected to LLM-A's proposed resolution; "
+                f"{review.reason}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=review_meta,
+        )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    # ── 9. Test gate (before push — spec: "fail => don't push") ──
     test_result = await deps.test_runner(request)
     if not test_result.ok:
         _bump_failure(change_id)
@@ -997,7 +4067,9 @@ async def resolve_conflict(
                        f"{test_result.summary or test_result.command}"),
             confidence=resolution.confidence,
             diff_preview=resolution.diff,
+            metadata=review_meta,
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.test_result = {
             "ok": False,
             "summary": test_result.summary,
@@ -1008,8 +4080,36 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 9. Push patchset ────────────────────────────────────────
+    # ── 10. Push patchset ───────────────────────────────────────
     commit_message = _build_patchset_message(request, resolution)
+
+    # OP-1196 phase 3 — caller-side push handoff (Option C). The
+    # gerrit-jira-bridge daemon sets ``push_locally=False`` because the
+    # backend container has neither a workspace nor the merger-bot SSH
+    # key, and the daemon (running on host) has both. Return the
+    # fully-LLM-resolved file content so the caller can apply +
+    # amend + push using its own credentials.
+    if not request.push_locally:
+        outcome = _build_abstain(
+            request,
+            reason=MergerReason.deferred_push_to_caller,
+            confidence=resolution.confidence,
+            rationale=(
+                f"LLM produced a resolution at confidence "
+                f"{resolution.confidence:.2f}; backend deferring push "
+                f"to caller per push_locally=False (caller is "
+                f"responsible for applying, amending as merger-agent-bot, "
+                f"pushing, and posting the +2 vote)."
+            ),
+            diff_preview=resolution.diff,
+            metadata=review_meta,
+        )
+        outcome.resolved_text = resolution.resolved_text
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
     push = await deps.pusher.push(
         change_id=change_id,
         project=request.project,
@@ -1025,13 +4125,15 @@ async def resolve_conflict(
             rationale=f"Gerrit push failed: {push.reason}",
             confidence=resolution.confidence,
             diff_preview=resolution.diff,
+            metadata={**risk_meta, **resolution_meta},
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.failure_count = get_failure_count(change_id)
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 10. Post +2 vote ────────────────────────────────────────
+    # ── 11. Post +2 vote ────────────────────────────────────────
     review_sha = push.sha or request.patchset_revision
     review_message = _build_review_message(request, resolution, push)
     review = await deps.reviewer.post_review(
@@ -1050,17 +4152,22 @@ async def resolve_conflict(
             rationale=(f"patchset pushed but +2 vote call failed: "
                        f"{review.reason}; human to take over"),
             diff_preview=resolution.diff,
-            metadata={"push_sha": push.sha, "review_url": push.review_url},
+            metadata={
+                **review_meta,
+                "push_sha": push.sha,
+                "review_url": push.review_url,
+            },
         )
         outcome.push_sha = push.sha
         outcome.review_url = push.review_url
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.test_result = {"ok": True, "summary": test_result.summary,
                                "command": test_result.command}
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 10b. Mark change with Merge-Conflict-Resolved hashtag ────
+    # ── 11b. Mark change with Merge-Conflict-Resolved hashtag ────
     # OP-694: the Gerrit Merger-Plus-2 submit-requirement is gated on
     # this hashtag (`applicableIf = hashtag:Merge-Conflict-Resolved`).
     # Setting it here is what makes the +2 we just cast actually count
@@ -1090,7 +4197,7 @@ async def resolve_conflict(
             change_id, hashtag_set_reason,
         )
 
-    # ── 11. Success — +2 voted ───────────────────────────────────
+    # ── 12. Success — +2 voted ───────────────────────────────────
     _reset_failure(change_id)
     outcome = ResolutionOutcome(
         change_id=change_id,
@@ -1106,11 +4213,13 @@ async def resolve_conflict(
         test_result={"ok": True, "summary": test_result.summary,
                      "command": test_result.command},
         metadata={
+            **review_meta,
             "conflict_lines": total_lines,
             "blocks": len(blocks),
             "hashtag_set_ok": hashtag_set_ok,
             "hashtag_set_reason": hashtag_set_reason,
         },
+        changed_identifiers=list(resolution.changed_identifiers),
     )
     _observe_metric(outcome)
     await _safe_audit(deps.audit, outcome)
@@ -1259,6 +4368,7 @@ __all__ = [
     "AUDIT_ENTITY_KIND",
     "ConflictBlock",
     "ConflictRequest",
+    "ConflictRisk",
     "DEFAULT_MODEL",
     "GerritClientReviewer",
     "GerritReviewer",
@@ -1269,19 +4379,29 @@ __all__ = [
     "MIN_CONFIDENCE_FOR_PLUS_TWO",
     "MergerDeps",
     "MergerLLM",
+    "MERGER_PROMPT_VERSION",
     "MergerReason",
+    "MergerRiskTier",
+    "MultiFileStrategySelection",
     "PatchsetPushResult",
     "PatchsetPusher",
+    "ProposalReview",
+    "REVIEW_MODEL",
     "Resolution",
     "ResolutionOutcome",
     "ReviewerResult",
     "SYSTEM_PROMPT",
     "TestRunResult",
     "TestRunner",
+    "_classify_coupling",
+    "build_context_pack",
     "build_prompt",
+    "build_review_prompt",
+    "classify_conflict_risk",
     "get_failure_count",
     "is_security_sensitive",
     "parse_conflict_block",
     "reset_failure_counts_for_tests",
     "resolve_conflict",
+    "try_deterministic_merge",
 ]

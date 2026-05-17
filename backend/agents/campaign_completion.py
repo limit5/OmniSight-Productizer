@@ -23,6 +23,7 @@ from backend.agents.xp_engine import BASE_TASK_XP, XpDelta
 
 CAMPAIGN_COMPLETION_BONUS_MULTIPLIER = 2
 CAMPAIGN_COMPLETION_BADGE_PREFIX = "campaign_complete"
+CAMPAIGN_COMPLETION_STATUS = "campaign_complete"
 
 _BADGE_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -81,7 +82,7 @@ def campaign_completion_reward(
         xp_delta=XpDelta(
             agent_id=clean_agent_id,
             xp=bonus_xp,
-            status="campaign_complete",
+            status=CAMPAIGN_COMPLETION_STATUS,
             base_xp=base_xp,
             multiplier=float(bonus_multiplier),
         ),
@@ -127,6 +128,7 @@ def _required(field: str, value: str) -> str:
 __all__ = [
     "CAMPAIGN_COMPLETION_BADGE_PREFIX",
     "CAMPAIGN_COMPLETION_BONUS_MULTIPLIER",
+    "CAMPAIGN_COMPLETION_STATUS",
     "CampaignCompletionReward",
     "campaign_completion_badge_id",
     "campaign_completion_reward",

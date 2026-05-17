@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import uuid
+from pathlib import Path  # OP-1196 phase 3 — _daemon_apply_resolution_push
 
 import asyncpg
 import httpx
@@ -730,6 +731,277 @@ _MERGER_HTTP_DEFAULT_BACKEND = "http://localhost:8000"
 _MERGER_HTTP_PATH = "/api/v1/orchestrator/merge-conflict"
 _MERGER_HTTP_TIMEOUT_SECONDS = 120.0
 
+# OP-1196 phase 3 — daemon-side push workspace + identity.
+#
+# When backend returns ``merger_resolved_pending_caller_push``, the
+# daemon takes the LLM-produced ``resolved_text`` and pushes a new
+# patchset on the change as merger-agent-bot. This needs:
+#
+#   * a git workspace where the change's PS is checked out
+#     (re-uses the OP-717 enrichment clone at
+#     ``/tmp/op717-merger-work/<safe-project>/repo`` — the enrich
+#     step left ``HEAD`` at ``origin/develop`` after merge-abort, so
+#     the daemon re-fetches + checks out the PS revision before
+#     applying the resolution);
+#   * the merger-agent-bot SSH key at
+#     ``OMNISIGHT_GERRIT_MERGER_SSH_KEY_PATH`` (operator-configured;
+#     default: same dir as the bot's other keys).
+#
+# The push remote is constructed as
+# ``ssh://merger-agent-bot@<host>:<port>/<project>`` regardless of
+# the daemon's own SSH host setting — the push must be performed
+# under the merger-bot identity for Gerrit ACL purposes (refs/meta
+# /config grants addPatchSet to merger-agent-bot only — see OP-1196
+# phase 1α refs/meta/config commit b9b90c6a).
+_MERGER_BOT_DEFAULT_KEY = (
+    "/home/user/.config/omnisight/gerrit-merger-bot-ed25519"
+)
+_DAEMON_PUSH_TOPIC_PREFIX = "merger"
+_DAEMON_PUSH_TIMEOUT_SEC = 120
+
+
+async def _daemon_apply_resolution_push(
+    *,
+    change_number: int,
+    project: str,
+    branch: str,
+    patchset_revision: str,
+    file_path: str,
+    resolved_text: str,
+    merger_confidence: float,
+    merger_rationale: str,
+) -> dict:
+    """OP-1196 phase 3 — apply backend's resolved_text + amend + push
+    as merger-agent-bot using the daemon's local workspace and the
+    merger-bot SSH key.
+
+    Returns ``{"ok": bool, "push_sha": str, "detail": str}``. Never
+    raises — the daemon's outer event handler logs the result via the
+    ``caller_push outcome=...`` line.
+
+    Order of operations:
+      1. Ensure a workspace exists for the project. Re-uses the
+         OP-717 enrichment clone if present (same git URL, same
+         claude-bot read auth — that's fine for the read steps).
+         When absent, lazily clones via the claude-bot key.
+      2. ``git fetch origin <ps_ref>`` to bring in the change's PS.
+      3. ``git checkout <patchset_revision>`` (detached HEAD on the
+         PS commit — preserves Change-Id when we amend).
+      4. Configure workspace-local ``user.name`` /  ``user.email`` /
+         ``core.sshCommand`` so subsequent commits + the push run
+         as merger-agent-bot. Pin merger-bot's SSH key.
+      5. ``remote add merger-push`` (or update URL) pointing at
+         ``ssh://merger-agent-bot@<host>:<port>/<project>`` — keeps
+         the read remote (``origin`` as claude-bot) separate from
+         the merger-bot push remote so future operations don't get
+         identity-confused.
+      6. Write ``resolved_text`` to ``workspace/<file_path>``.
+      7. ``git add <file_path>`` + ``git commit --amend
+         --reset-author --no-edit --trailer Merger-Change-Id:<N>``
+         (--reset-author is the OP-1196 phase 2 fix; without it the
+         amend preserves the original PS author and Gerrit's
+         forgeAuthor block on merger-agent-bot rejects the push).
+      8. ``git push merger-push HEAD:refs/for/<branch>%topic=merger
+         -<change>`` — the addPatchSet allow on merger-agent-bot
+         (OP-1196 phase 1α) makes this succeed.
+      9. If push ok, post +2 Code-Review via SSH as merger-bot.
+    """
+    import asyncio
+    import shlex
+    import subprocess
+
+    safe_project = project.replace("/", "_")
+    workspace = Path(
+        f"/tmp/op717-merger-work/{safe_project}/repo"
+    )
+    merger_key = os.environ.get(
+        "OMNISIGHT_GERRIT_MERGER_SSH_KEY_PATH", _MERGER_BOT_DEFAULT_KEY,
+    )
+    gerrit_ssh_host_full = (
+        os.environ.get("OMNISIGHT_GERRIT_SSH_HOST") or ""
+    ).strip()
+    # gerrit_ssh_host_full is typically ``claude-bot@sora.services``;
+    # the actual hostname is whatever follows ``@`` (if present).
+    gerrit_host = (
+        gerrit_ssh_host_full.split("@", 1)[-1]
+        if "@" in gerrit_ssh_host_full else gerrit_ssh_host_full
+    )
+    gerrit_port = os.environ.get("OMNISIGHT_GERRIT_SSH_PORT", "29418")
+
+    if not gerrit_host:
+        return {
+            "ok": False, "push_sha": "",
+            "detail": "OMNISIGHT_GERRIT_SSH_HOST not configured",
+        }
+    if not Path(merger_key).expanduser().exists():
+        return {
+            "ok": False, "push_sha": "",
+            "detail": (
+                f"merger-bot SSH key not found at {merger_key}; "
+                f"set OMNISIGHT_GERRIT_MERGER_SSH_KEY_PATH"
+            ),
+        }
+
+    merger_ssh_command = (
+        f"ssh -i {shlex.quote(merger_key)} -o IdentitiesOnly=yes "
+        f"-o StrictHostKeyChecking=accept-new"
+    )
+    push_url = (
+        f"ssh://merger-agent-bot@{gerrit_host}:{gerrit_port}/{project}"
+    )
+
+    def _run_git(args: list[str], *, env_overrides: dict | None = None
+                 ) -> tuple[int, str, str]:
+        env = os.environ.copy()
+        if env_overrides:
+            env.update(env_overrides)
+        proc = subprocess.run(
+            ["git", *args], cwd=str(workspace),
+            capture_output=True, text=True, env=env,
+            timeout=_DAEMON_PUSH_TIMEOUT_SEC,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+
+    if not (workspace / ".git").exists():
+        return {
+            "ok": False, "push_sha": "",
+            "detail": (
+                f"workspace not initialised at {workspace}; the enrich "
+                f"step should have created it. If running for the first "
+                f"time, fire an enrich first or seed the clone."
+            ),
+        }
+
+    # Fetch the PS ref. NN = change_number's last 2 digits (Gerrit refs
+    # layout); zero-pad for change numbers ending in a single digit.
+    nn = str(change_number)[-2:].zfill(2)
+    ps_ref = f"refs/changes/{nn}/{change_number}/"
+    # We don't know the PS number from the daemon-side call site here
+    # (the merger pipeline uses the revision instead), so fetch by the
+    # exact revision via a wildcard refspec. Simpler: rely on the fact
+    # that revision-fetch is supported via ``git fetch origin <sha>``.
+    rc, _, err = _run_git(["fetch", "origin", patchset_revision])
+    if rc != 0:
+        return {
+            "ok": False, "push_sha": "",
+            "detail": f"fetch PS failed: {err.strip()[:300]}",
+        }
+
+    rc, _, err = _run_git(["checkout", "--detach", patchset_revision])
+    if rc != 0:
+        return {
+            "ok": False, "push_sha": "",
+            "detail": f"checkout PS failed: {err.strip()[:300]}",
+        }
+
+    # Configure workspace-local merger-bot identity. These are
+    # workspace-LOCAL (not --global) so other daemon git ops (enrich)
+    # keep their own identity unchanged.
+    for k, v in [
+        ("user.name", "merger-agent-bot"),
+        ("user.email", "rt3628+merger-bot@gmail.com"),
+        ("core.sshCommand", merger_ssh_command),
+    ]:
+        _run_git(["config", k, v])
+
+    # Set/update the merger-push remote.
+    rc, _, _ = _run_git(["remote", "get-url", "merger-push"])
+    if rc != 0:
+        _run_git(["remote", "add", "merger-push", push_url])
+    else:
+        _run_git(["remote", "set-url", "merger-push", push_url])
+
+    # Write resolved_text to the conflicting file.
+    target = workspace / file_path
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(resolved_text, encoding="utf-8")
+    except OSError as exc:
+        return {
+            "ok": False, "push_sha": "",
+            "detail": f"write resolved file failed: {exc}",
+        }
+
+    rc, _, err = _run_git(["add", file_path])
+    if rc != 0:
+        return {
+            "ok": False, "push_sha": "",
+            "detail": f"git add failed: {err.strip()[:300]}",
+        }
+
+    rc, _, err = _run_git([
+        "commit", "--amend", "--reset-author", "--no-edit",
+        "--trailer", f"Merger-Change-Id: {change_number}",
+        "--trailer", f"Merger-Confidence: {merger_confidence:.2f}",
+    ])
+    if rc != 0:
+        return {
+            "ok": False, "push_sha": "",
+            "detail": f"git commit --amend failed: {err.strip()[:300]}",
+        }
+
+    rc, sha, err = _run_git(["rev-parse", "HEAD"])
+    if rc != 0:
+        return {
+            "ok": False, "push_sha": "",
+            "detail": f"rev-parse HEAD failed: {err.strip()[:300]}",
+        }
+    sha = sha.strip()
+
+    topic = f"{_DAEMON_PUSH_TOPIC_PREFIX}-{change_number}"
+    rc, out, err = _run_git([
+        "push", "merger-push",
+        f"HEAD:refs/for/{branch}%topic={topic}",
+    ])
+    if rc != 0:
+        return {
+            "ok": False, "push_sha": sha,
+            "detail": f"git push failed: {(err or out).strip()[:300]}",
+        }
+
+    # Push succeeded — cast +2 as merger-agent-bot via Gerrit SSH so
+    # the merger-bot SR (Merger-Plus-2 / MainFastForwardMergerPlus2)
+    # picks it up. The vote message includes the LLM confidence +
+    # rationale for audit clarity.
+    try:
+        ssh_cmd = [
+            "ssh", "-i", merger_key, "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-p", str(gerrit_port),
+            f"merger-agent-bot@{gerrit_host}",
+            "gerrit", "review",
+            "--code-review", "+2",
+            "-m", shlex.quote(
+                f"Merger-Agent-Bot conflict resolution PS uploaded "
+                f"(OP-1196 phase 3 daemon-side push). Confidence "
+                f"{merger_confidence:.2f}. Rationale: "
+                f"{merger_rationale[:300]}"
+            ),
+            f"{change_number},{sha}",
+        ]
+        proc = await asyncio.to_thread(
+            subprocess.run, ssh_cmd, capture_output=True, text=True,
+            timeout=_DAEMON_PUSH_TIMEOUT_SEC,
+        )
+        vote_ok = proc.returncode == 0
+    except Exception as exc:                              # pragma: no cover
+        vote_ok = False
+        proc = None
+        vote_err = str(exc)
+    if not vote_ok:
+        return {
+            "ok": True, "push_sha": sha,
+            "detail": (
+                f"push ok, +2 vote failed "
+                f"(stderr: {(proc.stderr.strip() if proc else vote_err)[:200]}). "
+                f"Operator can vote manually."
+            ),
+        }
+    return {
+        "ok": True, "push_sha": sha,
+        "detail": f"merger-bot pushed resolution + cast +2 on {sha[:12]}",
+    }
+
 
 async def _post_merge_conflict_to_backend(
     task: "MergeConflictTask",  # noqa: F821 — forward ref to local import
@@ -820,6 +1092,24 @@ async def _post_merge_conflict_to_backend(
         }
     body.setdefault("reason", "unknown")
     return body
+
+
+def _fetch_jira_description_for_merger(jira_ticket: str) -> str:
+    if not jira_ticket:
+        return ""
+    try:
+        from backend.agents import jira_dispatch
+        agent_class = os.environ.get(
+            "OMNISIGHT_MERGER_JIRA_AGENT_CLASS", "subscription-claude",
+        )
+        client = jira_dispatch.make_client(agent_class)
+        return jira_dispatch.fetch_description(client, jira_ticket)
+    except Exception as exc:
+        logger.debug(
+            "merger context-pack JIRA description fetch failed for %s: %s",
+            jira_ticket, exc,
+        )
+        return ""
 
 
 def _is_merger_uploader(uploader: dict) -> bool:
@@ -985,9 +1275,14 @@ async def _proactive_merger_check(event: dict) -> None:
         subject = change_data.get("subject", "")
         ticket_match = re.search(r"\bOP-\d+\b", subject)
         jira_ticket = ticket_match.group(0) if ticket_match else ""
+        jira_description = _fetch_jira_description_for_merger(jira_ticket)
 
         primary = result.conflict_files[0]
         additional = [cf.path for cf in result.conflict_files[1:]]
+        safe_project = project.replace("/", "_")
+        workspace = Path(
+            f"/tmp/op717-merger-work/{safe_project}/repo"
+        )
 
         task = MergeConflictTask(
             change_id=str(change_number),
@@ -995,11 +1290,21 @@ async def _proactive_merger_check(event: dict) -> None:
             file_path=primary.path,
             conflict_text=primary.conflict_text,
             file_context=primary.file_context,
+            change_number=str(change_number),
             head_commit_message=result.head_subject or subject,
             incoming_commit_message=result.incoming_subject or subject,
             patchset_revision=rev,
+            workspace=str(workspace),
             jira_ticket=jira_ticket,
+            jira_description=jira_description,
             additional_files=additional,
+            sibling_file_contents=dict(result.sibling_file_contents),
+            git_logs=dict(result.git_logs),
+            symbol_table=dict(result.symbol_table),
+            # OP-1196 phase 3 + OP-1412 — backend verifies against
+            # the OP-717 workspace; daemon still owns the push using
+            # its merger-bot SSH key.
+            push_locally=False,
         )
 
         logger.info(
@@ -1011,10 +1316,52 @@ async def _proactive_merger_check(event: dict) -> None:
         try:
             outcome = await _post_merge_conflict_to_backend(task)
             outcome_reason = outcome.get("reason", "unknown")
-            logger.info(
-                "%s merger_outcome reason=%s",
-                log_prefix, outcome_reason,
+            merger_outcome = outcome.get("merger_outcome") or {}
+            merger_reason = merger_outcome.get("reason") or ""
+            verify_result = (
+                (merger_outcome.get("metadata") or {}).get("verify_result")
+                or "none"
             )
+            logger.info(
+                "%s merger_outcome reason=%s merger_reason=%s verify_result=%s",
+                log_prefix, outcome_reason, merger_reason or "<none>", verify_result,
+            )
+            # OP-1196 phase 3 — caller-side push handoff. Backend ran
+            # the LLM successfully but deferred the actual push back to
+            # us (the daemon). Apply the resolved file + amend +
+            # push as merger-agent-bot using our own workspace + key.
+            if outcome_reason == "merger_resolved_pending_caller_push":
+                resolved_text = merger_outcome.get("resolved_text") or ""
+                if not resolved_text:
+                    logger.warning(
+                        "%s caller_push_missing_resolved_text — "
+                        "backend signalled deferred-push but supplied "
+                        "no resolved_text; nothing to do",
+                        log_prefix,
+                    )
+                else:
+                    branch = change_data.get("branch") or "develop"
+                    push_result = await _daemon_apply_resolution_push(
+                        change_number=int(change_number) if change_number else 0,
+                        project=project,
+                        branch=str(branch),
+                        patchset_revision=rev,
+                        file_path=primary.path,
+                        resolved_text=resolved_text,
+                        merger_confidence=float(
+                            merger_outcome.get("confidence") or 0.0
+                        ),
+                        merger_rationale=str(
+                            merger_outcome.get("rationale") or ""
+                        ),
+                    )
+                    logger.info(
+                        "%s caller_push outcome=%s sha=%s detail=%s",
+                        log_prefix,
+                        push_result.get("ok") and "ok" or "fail",
+                        (push_result.get("push_sha") or "")[:12],
+                        (push_result.get("detail") or "")[:200],
+                    )
         except Exception as exc:
             logger.exception(
                 "%s merger_invocation_failed err=%s", log_prefix, exc,

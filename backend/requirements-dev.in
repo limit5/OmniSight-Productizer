@@ -44,6 +44,8 @@
 pytest==8.3.5
 pytest-asyncio==1.0.0
 pytest-cov==6.0.0
+# OP-1284: property-based tests for backend.agents.jira_dispatch contracts.
+hypothesis==6.152.7
 
 # --- HTTP mocking (httpx mock; httpx itself is a PROD dep, not here) --
 # Used by FS-series provider adapter tests (FS.1 db_provisioning /
