@@ -72,6 +72,15 @@ class Severity(str, Enum):
 
 @dataclass(frozen=True)
 class AIReviewVerdict:
+    """Structured verdict returned by the LLM review pass.
+
+    Wraps the model's :class:`Severity` ruling alongside a short
+    human-readable ``summary`` (surfaced in the Gerrit comment / batch
+    dashboard) and an optional ``finding_count`` so downstream gates
+    (e.g. :func:`can_auto_plus_one`) can branch on whether the verdict
+    is APPROVE without re-parsing free text.
+    """
+
     severity: Severity
     summary: str = ""
     finding_count: int = 0
@@ -79,6 +88,15 @@ class AIReviewVerdict:
 
 @dataclass(frozen=True)
 class ChangeFile:
+    """One file entry inside a :class:`Change`'s patchset.
+
+    Mirrors Gerrit's per-file diff metadata: ``file`` is the repo-
+    relative path (Gerrit's synthetic ``/COMMIT_MSG`` pseudo-file is
+    passed through unchanged and filtered out downstream), and
+    ``insertions`` / ``deletions`` are the per-file LOC counts used
+    by the size gates and safety-path checks.
+    """
+
     file: str
     insertions: int = 0
     deletions: int = 0
