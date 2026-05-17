@@ -30,10 +30,11 @@ import json
 from pathlib import Path
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 from backend.agents import ai_reviewer, reviewer_safety
 from backend.agents.ai_reviewer import (
-    MODEL_HAIKU,
     review_patchset,
     reset_throttle,
 )
@@ -66,6 +67,152 @@ def audit_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 def _stub_pricing(provider, model):
     return (1.0, 5.0)
+
+
+SAFE_TEXT = st.text(
+    alphabet=st.characters(
+        blacklist_categories=("Cs",),
+        blacklist_characters="\x00",
+    ),
+    max_size=4096,
+)
+SAFE_LABEL = st.text(
+    alphabet=st.characters(
+        blacklist_categories=("Cs", "Cc"),
+        blacklist_characters='"<>',
+    ),
+    max_size=64,
+)
+KEY_BODY = st.text(
+    alphabet=st.sampled_from(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+    ),
+    min_size=20,
+    max_size=64,
+)
+KEY_SHAPES = st.one_of(
+    KEY_BODY.map(lambda body: f"sk-ant-{body}"),
+    KEY_BODY.map(lambda body: f"glpat-{body}"),
+    KEY_BODY.map(lambda body: f"ga-{body}"),
+    KEY_BODY.map(lambda body: f"ak-{body}"),
+)
+
+
+# ── OP-1325: public API property tests ───────────────────────────────
+
+
+@settings(max_examples=75, deadline=None)
+@given(label=SAFE_LABEL, text=st.one_of(st.none(), SAFE_TEXT))
+def test_wrap_untrusted_property_preserves_text_and_escapes_delimiters(
+    label: str,
+    text: str | None,
+) -> None:
+    wrapped = wrap_untrusted(label, text)  # type: ignore[arg-type]
+
+    if not text:
+        assert wrapped == ""
+        return
+
+    expected_open = (
+        UNTRUSTED_DELIM_OPEN[:-1] + f' label="{label}">'
+        if label
+        else UNTRUSTED_DELIM_OPEN
+    )
+    assert isinstance(wrapped, str)
+    assert wrapped.startswith(expected_open + "\n")
+    assert wrapped.endswith("\n" + UNTRUSTED_DELIM_CLOSE)
+    assert wrapped.count(UNTRUSTED_DELIM_OPEN) == (0 if label else 1)
+    assert wrapped.count(UNTRUSTED_DELIM_CLOSE) == 1
+    assert UNTRUSTED_DELIM_OPEN.replace("<", "&lt;") in wrapped or (
+        UNTRUSTED_DELIM_OPEN not in text
+    )
+    assert UNTRUSTED_DELIM_CLOSE.replace("<", "&lt;") in wrapped or (
+        UNTRUSTED_DELIM_CLOSE not in text
+    )
+
+
+@settings(max_examples=75, deadline=None)
+@given(text=SAFE_TEXT)
+def test_egress_filter_property_is_idempotent(text: str) -> None:
+    sanitized, matches = egress_filter(text)
+    sanitized_again, matches_again = egress_filter(sanitized)
+
+    assert isinstance(sanitized, str)
+    assert isinstance(matches, list)
+    assert sanitized_again == sanitized
+    assert matches_again == []
+    for match in matches:
+        assert match not in sanitized
+
+
+@settings(max_examples=50, deadline=None)
+@given(keys=st.lists(KEY_SHAPES, max_size=12))
+def test_egress_filter_property_redacts_all_generated_key_shapes(
+    keys: list[str],
+) -> None:
+    text = " ".join(f"prefix-{idx} {key} suffix-{idx}" for idx, key in enumerate(keys))
+    sanitized, matches = egress_filter(text)
+
+    assert sorted(matches) == sorted(keys)
+    for key in keys:
+        assert key not in sanitized
+    assert sanitized.count(REDACTION_TOKEN) == len(keys)
+
+
+@settings(max_examples=40, deadline=None)
+@given(
+    blocks=st.lists(
+        st.tuples(SAFE_LABEL, st.one_of(st.just(""), SAFE_TEXT)),
+        max_size=16,
+    )
+)
+def test_join_untrusted_blocks_property_skips_empty_and_is_deterministic(
+    blocks: list[tuple[str, str]],
+) -> None:
+    joined = reviewer_safety.join_untrusted_blocks(blocks)
+    joined_again = reviewer_safety.join_untrusted_blocks(blocks)
+    non_empty = [(label, text) for label, text in blocks if text]
+
+    assert joined_again == joined
+    assert isinstance(joined, str)
+    assert joined.count(UNTRUSTED_DELIM_CLOSE) == len(non_empty)
+    if non_empty:
+        assert joined.split("\n")[-1] == UNTRUSTED_DELIM_CLOSE
+    else:
+        assert joined == ""
+
+
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+@given(reply=SAFE_TEXT, prompt=SAFE_TEXT)
+def test_post_process_reply_property_returns_filter_result_and_audits(
+    tmp_path: Path,
+    reply: str,
+    prompt: str,
+) -> None:
+    log_path = tmp_path / "audit.log"
+    log_path.unlink(missing_ok=True)
+    alerts: list[int] = []
+    expected_sanitized, expected_matches = egress_filter(reply)
+
+    sanitized, matches = post_process_reply(
+        reply,
+        input_text=prompt,
+        log_path=log_path,
+        alert_callback=alerts.append,
+    )
+
+    assert sanitized == expected_sanitized
+    assert matches == expected_matches
+    assert alerts == ([len(matches)] if matches else [])
+
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["redaction_count"] == len(matches)
+    assert set(rows[0]) == {"ts", "input_hash", "output_hash", "redaction_count"}
 
 
 # ── AC #1: delimiter wraps title (change subject) ─────────────────────
