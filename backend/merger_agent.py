@@ -1337,6 +1337,7 @@ def classify_conflict_risk(
 def _classify_coupling(
     file_paths: list[str],
     workspace: str,
+    conflict_text: str = "",
 ) -> list[set[str]]:
     """Return connected components for files that should be resolved together."""
     deadline = time.monotonic() + 20.0
@@ -1364,6 +1365,7 @@ def _classify_coupling(
     definitions: dict[str, set[str]] = {}
     references: dict[str, set[str]] = {}
     imports: dict[str, set[str]] = {}
+    field_references: dict[str, set[str]] = {}
 
     if root.is_dir():
         try:
@@ -1385,10 +1387,12 @@ def _classify_coupling(
             definitions[path] = set()
             references[path] = set()
             imports[path] = set()
+            field_references[path] = set()
             continue
         definitions[path] = _top_level_symbols(tree)
         references[path] = _referenced_symbols(tree)
         imports[path] = _imported_modules(tree)
+        field_references[path] = _field_like_symbols(tree)
 
     target_set = set(targets)
     for path in targets:
@@ -1408,6 +1412,18 @@ def _classify_coupling(
         for right in targets:
             if left != right and _is_test_source_pair(left, right):
                 union(left, right)
+
+    data_flow_fields = _data_flow_fields_for_targets(
+        root,
+        targets,
+        field_references,
+        conflict_text,
+        deadline,
+    )
+    for files in data_flow_fields.values():
+        ordered = [path for path in targets if path in files]
+        for path in ordered[1:]:
+            union(ordered[0], path)
 
     components: dict[str, set[str]] = {}
     for path in targets:
@@ -1474,6 +1490,105 @@ def _imported_modules(tree: ast.AST) -> set[str]:
                 if alias.name != "*"
             )
     return modules
+
+
+def _field_like_symbols(tree: ast.AST) -> set[str]:
+    fields: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute):
+            fields.add(node.attr)
+        elif isinstance(node, ast.keyword) and node.arg:
+            fields.add(node.arg)
+        elif (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+        ):
+            fields.add(node.slice.value)
+        elif isinstance(node, ast.Dict):
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                    fields.add(key.value)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            fields.add(node.target.id)
+    return {field for field in fields if _is_data_flow_field_name(field)}
+
+
+def _data_flow_fields_for_targets(
+    root: Path,
+    targets: list[str],
+    field_references: dict[str, set[str]],
+    conflict_text: str,
+    deadline: float,
+) -> dict[str, set[str]]:
+    target_set = set(targets)
+    candidates = set().union(*(field_references.get(path, set()) for path in targets))
+    conflict_fields = _field_names_from_text(conflict_text)
+    if conflict_fields:
+        candidates &= conflict_fields
+    if not candidates:
+        return {}
+
+    codebase_references: dict[str, set[str]] = {field: set() for field in candidates}
+    if root.is_dir():
+        try:
+            paths = root.rglob("*.py")
+            for path in paths:
+                if time.monotonic() > deadline:
+                    break
+                rel_path = _normalise_rel_path(path.relative_to(root).as_posix())
+                tree = _parse_workspace_python(root, rel_path)
+                if tree is None:
+                    continue
+                fields = _field_like_symbols(tree) & candidates
+                for field in fields:
+                    codebase_references[field].add(rel_path)
+        except OSError:
+            return {}
+
+    return {
+        field: files
+        for field, files in codebase_references.items()
+        if len(files) >= 3 and files <= target_set
+    }
+
+
+def _field_names_from_text(text: str) -> set[str]:
+    if not text:
+        return set()
+    fields: set[str] = set()
+    for block in parse_conflict_block(text):
+        fields.update(_field_names_from_lines(block.head_lines))
+        fields.update(_field_names_from_lines(block.incoming_lines))
+    if not fields:
+        fields.update(_field_names_from_lines(text.splitlines()))
+    return fields
+
+
+def _field_names_from_lines(lines: list[str]) -> set[str]:
+    fields: set[str] = set()
+    for line in lines:
+        fields.update(
+            match.group("field")
+            for match in re.finditer(r"[.\[]['\"]?(?P<field>[A-Za-z_][A-Za-z0-9_]*)", line)
+        )
+        fields.update(
+            match.group("field")
+            for match in re.finditer(r"\b(?P<field>[A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        )
+        fields.update(
+            match.group("field")
+            for match in re.finditer(r"['\"](?P<field>[A-Za-z_][A-Za-z0-9_]*)['\"]\s*:", line)
+        )
+    return {field for field in fields if _is_data_flow_field_name(field)}
+
+
+def _is_data_flow_field_name(name: str) -> bool:
+    return (
+        len(name) >= 3
+        and not name.startswith("_")
+        and name not in {"self", "cls", "args", "kwargs", "return"}
+    )
 
 
 def _resolve_imported_path(
@@ -1793,6 +1908,7 @@ async def resolve_conflict(
         coupling_components = _classify_coupling(
             [request.file_path, *extra],
             request.workspace or os.getcwd(),
+            request.conflict_text,
         )
         coupling_summary = [sorted(component) for component in coupling_components]
         logger.info(

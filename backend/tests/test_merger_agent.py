@@ -391,6 +391,60 @@ class TestClassifyConflictRisk:
         assert risk.tier is ma.MergerRiskTier.medium
         assert "multi_file_high_coupling" in risk.reasons
 
+    def test_data_flow_coupled_conflict_routes_high_coupling(self, tmp_path):
+        conflict = (
+            "<<<<<<< HEAD\n"
+            "payload[\"caller_workspace\"] = workspace\n"
+            "=======\n"
+            "payload[\"caller_workspace\"] = request.workspace\n"
+            ">>>>>>> feature/caller-workspace\n"
+        )
+        _write_file(
+            tmp_path,
+            "backend/webhooks.py",
+            "def enqueue(workspace):\n"
+            "    return {\"caller_workspace\": workspace}\n",
+        )
+        _write_file(
+            tmp_path,
+            "backend/merge_arbiter.py",
+            "def verify(task):\n"
+            "    return task.caller_workspace\n",
+        )
+        _write_file(
+            tmp_path,
+            "backend/tests/test_proactive_merger_op714.py",
+            "def test_caller_workspace(payload):\n"
+            "    assert payload[\"caller_workspace\"].endswith(\"runner\")\n",
+        )
+        req = _base_request(
+            file_path="backend/webhooks.py",
+            conflict=conflict,
+            additional_files=[
+                "backend/merge_arbiter.py",
+                "backend/tests/test_proactive_merger_op714.py",
+            ],
+        )
+        req.workspace = str(tmp_path)
+        blocks = ma.parse_conflict_block(req.conflict_text)
+        coupling_components = ma._classify_coupling(
+            [req.file_path, *req.additional_files],
+            req.workspace,
+            req.conflict_text,
+        )
+
+        risk = ma.classify_conflict_risk(req, blocks, coupling_components)
+
+        assert _sorted_components(coupling_components) == [
+            [
+                "backend/merge_arbiter.py",
+                "backend/tests/test_proactive_merger_op714.py",
+                "backend/webhooks.py",
+            ],
+        ]
+        assert risk.tier is ma.MergerRiskTier.medium
+        assert "multi_file_high_coupling" in risk.reasons
+
     def test_multi_file_high_coupling_oversize_is_high(self):
         req = _base_request(
             conflict=OVERSIZED_CONFLICT,
@@ -526,6 +580,89 @@ class TestClassifyCoupling:
         assert _sorted_components(components) == [
             ["backend/alpha.py", "backend/beta.py", "backend/gamma.py"],
             ["backend/loose.py"],
+        ]
+
+    def test_data_flow_field_connects_three_file_contract(self, tmp_path):
+        conflict = (
+            "<<<<<<< HEAD\n"
+            "payload[\"caller_workspace\"] = workspace\n"
+            "=======\n"
+            "payload[\"caller_workspace\"] = request.workspace\n"
+            ">>>>>>> feature/caller-workspace\n"
+        )
+        _write_file(
+            tmp_path,
+            "backend/webhooks.py",
+            "def enqueue(workspace):\n"
+            "    return {\"caller_workspace\": workspace}\n",
+        )
+        _write_file(
+            tmp_path,
+            "backend/merge_arbiter.py",
+            "def verify(task):\n"
+            "    return task.caller_workspace\n",
+        )
+        _write_file(
+            tmp_path,
+            "backend/tests/test_proactive_merger_op714.py",
+            "def test_caller_workspace(payload):\n"
+            "    assert payload[\"caller_workspace\"].endswith(\"runner\")\n",
+        )
+
+        components = ma._classify_coupling(
+            [
+                "backend/webhooks.py",
+                "backend/merge_arbiter.py",
+                "backend/tests/test_proactive_merger_op714.py",
+            ],
+            str(tmp_path),
+            conflict,
+        )
+
+        assert _sorted_components(components) == [
+            [
+                "backend/merge_arbiter.py",
+                "backend/tests/test_proactive_merger_op714.py",
+                "backend/webhooks.py",
+            ],
+        ]
+
+    def test_data_flow_field_requires_whole_conflict_set(self, tmp_path):
+        conflict = (
+            "<<<<<<< HEAD\n"
+            "payload[\"caller_workspace\"] = workspace\n"
+            "=======\n"
+            "payload[\"caller_workspace\"] = request.workspace\n"
+            ">>>>>>> feature/caller-workspace\n"
+        )
+        _write_file(
+            tmp_path,
+            "backend/webhooks.py",
+            "def enqueue(workspace):\n"
+            "    return {\"caller_workspace\": workspace}\n",
+        )
+        _write_file(
+            tmp_path,
+            "backend/merge_arbiter.py",
+            "def verify(task):\n"
+            "    return task.caller_workspace\n",
+        )
+        _write_file(
+            tmp_path,
+            "backend/tests/test_proactive_merger_op714.py",
+            "def test_caller_workspace(payload):\n"
+            "    assert payload[\"caller_workspace\"].endswith(\"runner\")\n",
+        )
+
+        components = ma._classify_coupling(
+            ["backend/webhooks.py", "backend/merge_arbiter.py"],
+            str(tmp_path),
+            conflict,
+        )
+
+        assert _sorted_components(components) == [
+            ["backend/merge_arbiter.py"],
+            ["backend/webhooks.py"],
         ]
 
     def test_syntax_errors_degrade_to_singleton(self, tmp_path):
