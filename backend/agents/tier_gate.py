@@ -38,7 +38,7 @@ from typing import Any
 #: Tier X is the only tier with a level/skill floor in ADR-0008.
 TIER_X = "X"
 
-#: W7.3 (OP-148): BP.C T-shirt size -> minimum character-card level.
+#: W7.3 (OP-1361): BP.C T-shirt size -> minimum character-card level.
 #: S stays open to fresh agents, M starts at the first talent milestone,
 #: and XL starts at the second talent milestone while Tier X remains the
 #: separate Lv 50 + skill-Lv 3 expert gate.
