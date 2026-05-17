@@ -84,6 +84,12 @@ if _AVAILABLE:
         buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
         registry=REGISTRY,
     )
+    model_mapping_violation_total = Counter(
+        "omnisight_model_mapping_violation_total",
+        "LLM provider/model mapping guardrail violations by Guild and mode",
+        labelnames=("guild_id", "mode"),
+        registry=REGISTRY,
+    )
 
     # SSE ───────────────────────────────────────────────────────
     sse_subscribers = Gauge(
@@ -812,6 +818,7 @@ else:
     decision_total = decision_resolve_seconds = _NoOp()  # type: ignore
     pipeline_step_seconds = _NoOp()  # type: ignore
     provider_failure_total = provider_latency_seconds = _NoOp()  # type: ignore
+    model_mapping_violation_total = _NoOp()  # type: ignore
     sse_subscribers = sse_dropped_total = _NoOp()  # type: ignore
     workflow_step_total = _NoOp()  # type: ignore
     auth_login_total = _NoOp()  # type: ignore
@@ -925,6 +932,7 @@ def reset_for_tests() -> None:
         return
     global REGISTRY, decision_total, decision_resolve_seconds
     global pipeline_step_seconds, provider_failure_total, provider_latency_seconds
+    global model_mapping_violation_total
     global sse_subscribers, sse_dropped_total, workflow_step_total
     global auth_login_total, subprocess_orphan_total, persist_failure_total
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
@@ -987,6 +995,11 @@ def reset_for_tests() -> None:
         labelnames=("provider", "model"),
         buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120),
         registry=REGISTRY,
+    )
+    model_mapping_violation_total = Counter(
+        "omnisight_model_mapping_violation_total",
+        "LLM provider/model mapping guardrail violations by Guild and mode",
+        labelnames=("guild_id", "mode"), registry=REGISTRY,
     )
     sse_subscribers = Gauge(
         "omnisight_sse_subscribers", "SSE subscribers", registry=REGISTRY,
