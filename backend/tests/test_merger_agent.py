@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+from backend import merge_arbiter as arb
 from backend import merger_agent as ma
 
 
@@ -103,6 +104,10 @@ class _FakeLLM:
             return (self.payload, self.tokens)
         import json
         return (json.dumps(self.payload), self.tokens)
+
+
+def _confirming_review_llm(tokens: int = 100) -> _FakeLLM:
+    return _FakeLLM("CONFIRM\npreserves both sides' intent", tokens=tokens)
 
 
 @dataclass
@@ -251,6 +256,7 @@ def test_scenario_simple_conflict_merger_plus_two():
     events, audit = _audit_sink()
     deps = ma.MergerDeps(
         llm=llm, pusher=pusher, reviewer=reviewer,
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True), audit=audit,
     )
 
@@ -273,6 +279,122 @@ def test_scenario_simple_conflict_merger_plus_two():
     assert any(a == "merger.plus_two_voted" for a, _, _ in events)
 
 
+def test_op1406_confirmed_sandwich_pushes_after_second_llm_agrees():
+    proposer = _FakeLLM({
+        "resolved_block": "    return f'Hello {name}!'\n",
+        "confidence": 0.95,
+        "rationale": "HEAD wording preserves the greeting intent",
+        "new_logic_detected": False,
+    }, tokens=200)
+    reviewer_llm = _FakeLLM(
+        "CONFIRM\nBoth sides only differ in wording; intent is preserved.",
+        tokens=50,
+    )
+    pusher = _FakePusher()
+    deps = ma.MergerDeps(
+        llm=proposer,
+        review_llm=reviewer_llm,
+        pusher=pusher,
+        reviewer=_FakeReviewer(),
+        test_runner=_test_runner(True),
+    )
+
+    outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
+
+    assert outcome.reason is ma.MergerReason.plus_two_voted
+    assert pusher.calls
+    assert len(proposer.calls) == 1
+    assert len(reviewer_llm.calls) == 1
+    assert "Original conflict:" in reviewer_llm.calls[0]
+    assert "LLM-A proposed resolved file:" in reviewer_llm.calls[0]
+    assert outcome.metadata["merger_sandwich_decision"] == "confirm"
+    assert outcome.metadata["review_model"] == ma.REVIEW_MODEL
+
+
+def test_op1406_review_object_abstains_and_keeps_transcripts():
+    proposer = _FakeLLM({
+        "resolved_block": "    return f'Hello {name}!'\n",
+        "confidence": 0.95,
+        "rationale": "HEAD wording only",
+        "new_logic_detected": False,
+    })
+    reviewer_llm = _FakeLLM(
+        "OBJECT\nIncoming side wanted the shorter greeting; rationale is thin."
+    )
+    pusher = _FakePusher()
+    deps = ma.MergerDeps(
+        llm=proposer,
+        review_llm=reviewer_llm,
+        pusher=pusher,
+        reviewer=_FakeReviewer(),
+        test_runner=_test_runner(True),
+    )
+
+    outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
+
+    assert outcome.reason is ma.MergerReason.refused_review_objected
+    assert pusher.calls == []
+    assert outcome.metadata["merger_sandwich_decision"] == "object"
+    assert "resolved_block" in outcome.metadata["proposal_response"]
+    assert "OBJECT" in outcome.metadata["review_response"]
+    assert "Original conflict:" in outcome.metadata["review_prompt"]
+
+
+def test_op1406_arbiter_routes_review_object_with_transcripts():
+    class _Jira:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def open_abstain_ticket(self, **kwargs: Any) -> arb.JiraTicketResult:
+            self.calls.append(kwargs)
+            return arb.JiraTicketResult(ok=True, ticket="OP-MERGE-1")
+
+    class _Notifier:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def notify(self, **kwargs: Any) -> None:
+            self.calls.append(kwargs)
+
+    async def merger(req: ma.ConflictRequest) -> ma.ResolutionOutcome:
+        deps = ma.MergerDeps(
+            llm=_FakeLLM({
+                "resolved_block": "    return f'Hello {name}!'\n",
+                "confidence": 0.95,
+                "rationale": "HEAD wording only",
+                "new_logic_detected": False,
+            }),
+            review_llm=_FakeLLM("OBJECT\nDoes not justify dropping incoming."),
+            pusher=_FakePusher(),
+            reviewer=_FakeReviewer(),
+            test_runner=_test_runner(True),
+        )
+        return await ma.resolve_conflict(req, deps=deps)
+
+    jira = _Jira()
+    notifier = _Notifier()
+    task = arb.MergeConflictTask(
+        change_id="Iabc123",
+        project="omnisight",
+        file_path="backend/greetings.py",
+        conflict_text=SIMPLE_CONFLICT,
+        push_locally=True,
+        jira_ticket="OP-1406",
+    )
+    outcome = _run(arb.on_merge_conflict_webhook(
+        task,
+        deps=arb.ArbiterDeps(merger=merger, jira=jira, notifier=notifier),
+    ))
+
+    assert outcome.reason is arb.ArbiterReason.merger_abstained_jira_ticket_opened
+    assert jira.calls
+    assert notifier.calls
+    payload = notifier.calls[0]["payload"]
+    assert payload["merger_sandwich_decision"] == "object"
+    assert "resolved_block" in payload["proposal_transcript"]
+    assert "OBJECT" in payload["review_transcript"]
+
+
 # ──────────────────────────────────────────────────────────────
 #  Scenario 2 — Ambiguous conflict → abstain
 # ──────────────────────────────────────────────────────────────
@@ -289,6 +411,7 @@ def test_scenario_low_confidence_abstain():
     reviewer = _FakeReviewer()
     deps = ma.MergerDeps(
         llm=llm, pusher=pusher, reviewer=reviewer,
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
 
@@ -309,6 +432,7 @@ def test_new_logic_forces_abstain_even_at_high_confidence():
     })
     deps = ma.MergerDeps(
         llm=llm, pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -334,6 +458,7 @@ def test_scenario_security_file_refusal():
     reviewer = _FakeReviewer()
     deps = ma.MergerDeps(
         llm=llm, pusher=pusher, reviewer=reviewer,
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     req = _base_request(
@@ -366,6 +491,7 @@ def test_scenario_test_failure_blocks_push():
     reviewer = _FakeReviewer()
     deps = ma.MergerDeps(
         llm=llm, pusher=pusher, reviewer=reviewer,
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(False, "2 failed"),
     )
     outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -423,6 +549,7 @@ def test_multi_file_abstain():
     })
     deps = ma.MergerDeps(
         llm=llm, pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     req = _base_request(additional_files=["backend/utils.py"])
@@ -436,6 +563,7 @@ def test_oversized_conflict_abstain():
         llm=_FakeLLM({"resolved_block": "x", "confidence": 0.99,
                       "rationale": "", "new_logic_detected": False}),
         pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     req = _base_request(conflict=OVERSIZED_CONFLICT)
@@ -448,6 +576,7 @@ def test_no_conflict_refusal():
         llm=_FakeLLM({"resolved_block": "", "confidence": 0.99,
                       "rationale": "", "new_logic_detected": False}),
         pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     req = _base_request(conflict="no markers here\n")
@@ -464,6 +593,7 @@ def test_push_fail_no_vote_and_escalates():
     reviewer = _FakeReviewer()
     deps = ma.MergerDeps(
         llm=llm, pusher=pusher, reviewer=reviewer,
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -476,6 +606,7 @@ def test_llm_unavailable_abstain_and_counts():
     deps = ma.MergerDeps(
         llm=_FakeLLM(""),
         pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -487,6 +618,7 @@ def test_llm_invalid_json_abstain_and_counts():
     deps = ma.MergerDeps(
         llm=_FakeLLM("this is not JSON"),
         pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -499,6 +631,7 @@ def test_three_strike_escalation_refuses_retry():
     deps = ma.MergerDeps(
         llm=_FakeLLM(""),
         pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     for _ in range(ma.MAX_FAILURES_PER_CHANGE):
@@ -515,6 +648,7 @@ def test_success_resets_failure_counter():
     deps_fail = ma.MergerDeps(
         llm=_FakeLLM(""),
         pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     _run(ma.resolve_conflict(_base_request(), deps=deps_fail))
@@ -526,6 +660,7 @@ def test_success_resets_failure_counter():
             "rationale": "ok", "new_logic_detected": False,
         }),
         pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     out = _run(ma.resolve_conflict(_base_request(), deps=deps_ok))
@@ -669,6 +804,7 @@ def test_op1403_synthetic_guild_shape_prompt_mentions_guild_and_guild_id():
         llm=llm,
         pusher=_ExplodingPusher(),
         reviewer=_ExplodingReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     req = _base_request(file_path="backend/agents/llm.py", conflict=conflict)
@@ -723,6 +859,7 @@ def test_op1404_synthetic_add_vs_add_micro_conflict_preserves_both_helpers():
         llm=llm,
         pusher=_ExplodingPusher(),
         reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
         test_runner=_test_runner(True),
     )
     req = _base_request(
@@ -911,6 +1048,7 @@ class TestMetrics:
                 "rationale": "", "new_logic_detected": False,
             }),
             pusher=_FakePusher(), reviewer=_FakeReviewer(),
+            review_llm=_confirming_review_llm(),
             test_runner=_test_runner(True),
         )
         _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -926,6 +1064,7 @@ class TestMetrics:
             llm=_FakeLLM({"resolved_block": "", "confidence": 0,
                           "rationale": "", "new_logic_detected": False}),
             pusher=_FakePusher(), reviewer=_FakeReviewer(),
+            review_llm=_confirming_review_llm(),
             test_runner=_test_runner(True),
         )
         _run(ma.resolve_conflict(
@@ -1005,6 +1144,7 @@ class TestOp694HashtagOnSuccess:
             pusher=_FakePusher(),
             reviewer=_FakeReviewer(),
             hashtag_setter=hashtag_setter,
+            review_llm=_confirming_review_llm(),
             test_runner=_test_runner(True),
         )
         outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -1029,6 +1169,7 @@ class TestOp694HashtagOnSuccess:
             pusher=_FakePusher(),
             reviewer=_FakeReviewer(),
             hashtag_setter=hashtag_setter,
+            review_llm=_confirming_review_llm(),
             test_runner=_test_runner(True),
         )
         outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -1049,6 +1190,7 @@ class TestOp694HashtagOnSuccess:
             pusher=_FakePusher(),
             reviewer=_FakeReviewer(),
             hashtag_setter=hashtag_setter,
+            review_llm=_confirming_review_llm(),
             test_runner=_test_runner(True),
         )
         outcome = _run(ma.resolve_conflict(_base_request(), deps=deps))
@@ -1122,6 +1264,7 @@ class TestPushLocallyDeferredToCaller:
         events, audit = _audit_sink()
         deps = ma.MergerDeps(
             llm=llm, pusher=_ExplodingPusher(), reviewer=_ExplodingReviewer(),
+            review_llm=_confirming_review_llm(),
             test_runner=_test_runner(True), audit=audit,
         )
 
@@ -1160,6 +1303,7 @@ class TestPushLocallyDeferredToCaller:
         reviewer = _FakeReviewer()
         deps = ma.MergerDeps(
             llm=llm, pusher=pusher, reviewer=reviewer,
+            review_llm=_confirming_review_llm(),
             test_runner=_test_runner(True),
         )
         req = _base_request()  # push_locally default True
@@ -1189,7 +1333,9 @@ class TestPushLocallyDeferredToCaller:
 
         deps = ma.MergerDeps(
             llm=llm, pusher=_ExplodingPusher(),
-            reviewer=_ExplodingReviewer(), test_runner=_test_runner(True),
+            reviewer=_ExplodingReviewer(),
+            review_llm=_confirming_review_llm(),
+            test_runner=_test_runner(True),
         )
         req = _base_request()
         req.push_locally = False

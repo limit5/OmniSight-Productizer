@@ -83,6 +83,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = os.environ.get(
     "OMNISIGHT_MERGER_MODEL", "anthropic/claude-opus-4-7"
 )
+REVIEW_MODEL = os.environ.get(
+    "OMNISIGHT_MERGER_REVIEW_MODEL", "anthropic/claude-3-5-haiku"
+)
 
 # Gate thresholds.  Tweak via env for A/B'ing in production.
 MIN_CONFIDENCE_FOR_PLUS_TWO = float(
@@ -103,6 +106,12 @@ CONTEXT_PACK_TOKEN_LIMIT = int(
 )
 _CONTEXT_PACK_CHARS_PER_TOKEN = 4
 _CONTEXT_PACK_GIT_LOG_LINES = 50
+REVIEW_COST_CAP_USD = float(
+    os.environ.get("OMNISIGHT_MERGER_REVIEW_COST_CAP_USD", "0.02")
+)
+_DEFAULT_TOKEN_COST_USD = float(
+    os.environ.get("OMNISIGHT_MERGER_TOKEN_COST_USD", "0.000003")
+)
 
 # Bumped for OP-1404: explicit take-both feature-preservation rubric.
 MERGER_PROMPT_VERSION = "merger-prompt-v2-op1404"
@@ -165,6 +174,7 @@ class MergerReason(str, Enum):
     refused_escalated = "refused_escalated"
     refused_push_failed = "refused_push_failed"
     refused_new_logic_detected = "refused_new_logic_detected"
+    refused_review_objected = "refused_review_objected"
     # OP-1196 phase 3 — daemon-side push wiring (Option C). When the
     # caller (e.g., the gerrit-jira-bridge daemon) sets
     # ``request.push_locally=False``, the merger runs through all the
@@ -264,6 +274,19 @@ class Resolution:
     diff: str                       # unified diff scoped to conflict region
     changed_blocks: int             # should equal # conflict blocks in input
     changed_identifiers: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ProposalReview:
+    """Second-LLM review of a proposed conflict resolution."""
+
+    confirmed: bool
+    reason: str
+    raw_response: str
+    prompt: str
+    model: str
+    tokens_used: int = 0
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -415,6 +438,20 @@ async def _default_llm(prompt: str) -> tuple[str, int]:
         return await live_ask_fn(DEFAULT_MODEL, prompt)
     except Exception as exc:
         logger.warning("merger_agent: live_ask_fn raised: %s", exc)
+        return ("", 0)
+
+
+async def _default_review_llm(prompt: str) -> tuple[str, int]:
+    """Cost-efficient reviewer LLM for the second half of the sandwich."""
+    try:
+        from backend.iq_runner import live_ask_fn
+    except Exception as exc:                           # pragma: no cover
+        logger.warning("merger_agent: live_ask_fn unavailable: %s", exc)
+        return ("", 0)
+    try:
+        return await live_ask_fn(REVIEW_MODEL, prompt)
+    except Exception as exc:
+        logger.warning("merger_agent: review live_ask_fn raised: %s", exc)
         return ("", 0)
 
 
@@ -664,6 +701,7 @@ class MergerDeps:
     """Inject-at-call-time bundle so tests don't need to monkey-patch."""
 
     llm: MergerLLM = _default_llm
+    review_llm: MergerLLM = _default_review_llm
     pusher: PatchsetPusher = field(default_factory=GitPatchsetPusher)
     reviewer: GerritReviewer = field(default_factory=GerritClientReviewer)
     hashtag_setter: HashtagSetter = field(default_factory=GerritClientHashtagSetter)
@@ -968,6 +1006,99 @@ def build_prompt(
         "described above."
     )
     return "\n".join(parts)
+
+
+def build_review_prompt(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    resolution: Resolution,
+) -> str:
+    """Prompt for LLM-B: independently review LLM-A's resolution."""
+    parts: list[str] = [
+        "SYSTEM: You are an independent merge-resolution reviewer. "
+        "You do not propose edits. You only decide whether the proposed "
+        "resolution preserves both sides' intent.",
+        "",
+        f"FILE: {req.file_path}",
+        f"Gerrit change number: {req.change_number or '(unknown)'}",
+        f"JIRA ticket: {req.jira_ticket or '(none supplied)'}",
+        "",
+        "Original conflict:",
+        req.conflict_text,
+        "",
+        "LLM-A proposed resolved file:",
+        resolution.resolved_text,
+        "",
+        "LLM-A diff explanation:",
+        resolution.diff,
+        "",
+        f"LLM-A rationale: {resolution.rationale}",
+        f"LLM-A confidence: {resolution.confidence:.2f}",
+        "",
+        "Review rubric:",
+        TAKE_BOTH_FEATURE_PRESERVATION_RUBRIC,
+        "",
+        "Does this resolution preserve both sides' intent?",
+        "Does it handle all five rubric cases above?",
+        "Reply on the first line with exactly CONFIRM or OBJECT, then "
+        "give one short reason.",
+    ]
+    for i, blk in enumerate(blocks, start=1):
+        parts.extend([
+            "",
+            f"Conflict block {i} HEAD:",
+            "\n".join(blk.head_lines),
+            f"Conflict block {i} INCOMING:",
+            "\n".join(blk.incoming_lines),
+        ])
+    return "\n".join(parts)
+
+
+def _estimate_llm_cost(tokens_used: int) -> float:
+    return max(0.0, float(tokens_used) * _DEFAULT_TOKEN_COST_USD)
+
+
+def _observe_llm_cost(cost_usd: float) -> None:
+    try:
+        metrics.merger_llm_cost_usd_total.inc(cost_usd)
+    except Exception:
+        pass
+
+
+async def _review_proposal(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    resolution: Resolution,
+    *,
+    deps: MergerDeps,
+) -> ProposalReview:
+    """Ask LLM-B to confirm or object to LLM-A's resolution."""
+    prompt = build_review_prompt(req, blocks, resolution)
+    try:
+        raw, tokens = await deps.review_llm(prompt)
+    except Exception as exc:
+        logger.warning("merger_agent: review llm raised: %s", exc)
+        raw, tokens = "", 0
+
+    cost_usd = _estimate_llm_cost(tokens)
+    _observe_llm_cost(cost_usd)
+    first = (raw.strip().splitlines() or [""])[0].strip().upper()
+    confirmed = first == "CONFIRM" and cost_usd <= REVIEW_COST_CAP_USD
+    reason = raw.strip() or "review LLM returned empty response"
+    if cost_usd > REVIEW_COST_CAP_USD:
+        reason = (
+            f"review cost ${cost_usd:.6f} exceeded cap "
+            f"${REVIEW_COST_CAP_USD:.6f}; raw={reason[:500]}"
+        )
+    return ProposalReview(
+        confirmed=confirmed,
+        reason=reason,
+        raw_response=raw,
+        prompt=prompt,
+        model=REVIEW_MODEL,
+        tokens_used=tokens,
+        cost_usd=cost_usd,
+    )
 
 
 def is_security_sensitive(file_path: str) -> bool:
@@ -1363,6 +1494,7 @@ async def resolve_conflict(
     prompt = build_prompt(request, blocks, risk, context_pack=context_pack)
     try:
         raw, _tokens = await deps.llm(prompt)
+        _observe_llm_cost(_estimate_llm_cost(_tokens))
     except Exception as exc:
         logger.warning("merger_agent: llm raised: %s", exc)
         raw = ""
@@ -1431,7 +1563,46 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 8. Test gate (before push — spec: "fail => don't push") ──
+    # ── 8. Independent LLM-B review gate ────────────────────────
+    review = await _review_proposal(request, blocks, resolution, deps=deps)
+    sandwich_decision = "confirm" if review.confirmed else "object"
+    logger.info(
+        "merger_sandwich_decision=%s change=%s file=%s model=%s cost_usd=%.6f",
+        sandwich_decision,
+        request.change_number or change_id,
+        request.file_path,
+        review.model,
+        review.cost_usd,
+    )
+    review_meta = {
+        **risk_meta,
+        "merger_sandwich_decision": sandwich_decision,
+        "review_model": review.model,
+        "review_cost_usd": review.cost_usd,
+        "review_tokens_used": review.tokens_used,
+        "review_prompt": review.prompt,
+        "review_response": review.raw_response,
+        "proposal_prompt": prompt,
+        "proposal_response": raw,
+    }
+    if not review.confirmed:
+        outcome = _build_abstain(
+            request,
+            MergerReason.refused_review_objected,
+            confidence=resolution.confidence,
+            rationale=(
+                "LLM-B objected to LLM-A's proposed resolution; "
+                f"{review.reason}"
+            ),
+            diff_preview=resolution.diff,
+            metadata=review_meta,
+        )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    # ── 9. Test gate (before push — spec: "fail => don't push") ──
     test_result = await deps.test_runner(request)
     if not test_result.ok:
         _bump_failure(change_id)
@@ -1441,7 +1612,7 @@ async def resolve_conflict(
                        f"{test_result.summary or test_result.command}"),
             confidence=resolution.confidence,
             diff_preview=resolution.diff,
-            metadata=risk_meta,
+            metadata=review_meta,
         )
         outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.test_result = {
@@ -1454,7 +1625,7 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 9. Push patchset ────────────────────────────────────────
+    # ── 10. Push patchset ───────────────────────────────────────
     commit_message = _build_patchset_message(request, resolution)
 
     # OP-1196 phase 3 — caller-side push handoff (Option C). The
@@ -1476,7 +1647,7 @@ async def resolve_conflict(
                 f"pushing, and posting the +2 vote)."
             ),
             diff_preview=resolution.diff,
-            metadata=risk_meta,
+            metadata=review_meta,
         )
         outcome.resolved_text = resolution.resolved_text
         outcome.changed_identifiers = list(resolution.changed_identifiers)
@@ -1507,7 +1678,7 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 10. Post +2 vote ────────────────────────────────────────
+    # ── 11. Post +2 vote ────────────────────────────────────────
     review_sha = push.sha or request.patchset_revision
     review_message = _build_review_message(request, resolution, push)
     review = await deps.reviewer.post_review(
@@ -1527,7 +1698,7 @@ async def resolve_conflict(
                        f"{review.reason}; human to take over"),
             diff_preview=resolution.diff,
             metadata={
-                **risk_meta,
+                **review_meta,
                 "push_sha": push.sha,
                 "review_url": push.review_url,
             },
@@ -1541,7 +1712,7 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 10b. Mark change with Merge-Conflict-Resolved hashtag ────
+    # ── 11b. Mark change with Merge-Conflict-Resolved hashtag ────
     # OP-694: the Gerrit Merger-Plus-2 submit-requirement is gated on
     # this hashtag (`applicableIf = hashtag:Merge-Conflict-Resolved`).
     # Setting it here is what makes the +2 we just cast actually count
@@ -1571,7 +1742,7 @@ async def resolve_conflict(
             change_id, hashtag_set_reason,
         )
 
-    # ── 11. Success — +2 voted ───────────────────────────────────
+    # ── 12. Success — +2 voted ───────────────────────────────────
     _reset_failure(change_id)
     outcome = ResolutionOutcome(
         change_id=change_id,
@@ -1587,7 +1758,7 @@ async def resolve_conflict(
         test_result={"ok": True, "summary": test_result.summary,
                      "command": test_result.command},
         metadata={
-            **risk_meta,
+            **review_meta,
             "conflict_lines": total_lines,
             "blocks": len(blocks),
             "hashtag_set_ok": hashtag_set_ok,
@@ -1758,6 +1929,8 @@ __all__ = [
     "MergerRiskTier",
     "PatchsetPushResult",
     "PatchsetPusher",
+    "ProposalReview",
+    "REVIEW_MODEL",
     "Resolution",
     "ResolutionOutcome",
     "ReviewerResult",
@@ -1766,6 +1939,7 @@ __all__ = [
     "TestRunner",
     "build_context_pack",
     "build_prompt",
+    "build_review_prompt",
     "classify_conflict_risk",
     "get_failure_count",
     "is_security_sensitive",

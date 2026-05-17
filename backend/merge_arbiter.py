@@ -823,6 +823,14 @@ async def on_merge_conflict_webhook(
 
     )
     merger_outcome = await deps.merger(req)
+    sandwich_decision = merger_outcome.metadata.get("merger_sandwich_decision")
+    if sandwich_decision:
+        logger.info(
+            "merger_sandwich_decision=%s change_id=%s file=%s",
+            sandwich_decision,
+            task.change_id,
+            task.file_path,
+        )
     return await _route_merger_outcome(task, merger_outcome, deps)
 
 
@@ -943,6 +951,7 @@ async def _handle_non_plus_two(
         ma.MergerReason.refused_llm_unavailable,
         ma.MergerReason.refused_llm_invalid_json,
         ma.MergerReason.refused_new_logic_detected,
+        ma.MergerReason.refused_review_objected,
     }
 
     if outcome.reason in reason_map:
@@ -989,6 +998,11 @@ async def _handle_non_plus_two(
             "jira_opened_ok": jira_ok,
             "parent_jira": task.jira_ticket,
             "assignee": task.catc_owner,
+            "merger_sandwich_decision": outcome.metadata.get(
+                "merger_sandwich_decision", ""
+            ),
+            "proposal_transcript": outcome.metadata.get("proposal_response", ""),
+            "review_transcript": outcome.metadata.get("review_response", ""),
         },
     )
 

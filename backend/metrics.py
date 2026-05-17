@@ -559,6 +559,11 @@ if _AVAILABLE:
         buckets=(0.0, 0.1, 0.25, 0.5, 0.75, 0.85, 0.9, 0.95, 0.99, 1.0),
         registry=REGISTRY,
     )
+    merger_llm_cost_usd_total = Counter(
+        "omnisight_merger_llm_cost_usd_total",
+        "Estimated merger LLM spend per conflict, including proposal and review",
+        registry=REGISTRY,
+    )
 
     # Phase 63-E: episodic memory quality decay ────────────────
     memory_decay_total = Counter(
@@ -884,6 +889,7 @@ else:
     merger_abstain_total = _NoOp()  # type: ignore
     merger_security_refusal_total = _NoOp()  # type: ignore
     merger_confidence = _NoOp()  # type: ignore
+    merger_llm_cost_usd_total = _NoOp()  # type: ignore
     awaiting_human_pending = _NoOp()  # type: ignore
     awaiting_human_age_seconds = _NoOp()  # type: ignore
     worker_pool_capacity = _NoOp()  # type: ignore
@@ -964,6 +970,7 @@ def reset_for_tests() -> None:
     global worker_lifecycle_total, worker_task_total, worker_task_seconds
     global merger_plus_two_total, merger_abstain_total
     global merger_security_refusal_total, merger_confidence
+    global merger_llm_cost_usd_total
     global awaiting_human_pending, awaiting_human_age_seconds
     global worker_pool_capacity
     global process_start_time
@@ -1303,6 +1310,11 @@ def reset_for_tests() -> None:
         "omnisight_merger_agent_confidence",
         "Merger Agent confidence",
         buckets=(0.0, 0.1, 0.25, 0.5, 0.75, 0.85, 0.9, 0.95, 0.99, 1.0),
+        registry=REGISTRY,
+    )
+    merger_llm_cost_usd_total = Counter(
+        "omnisight_merger_llm_cost_usd_total",
+        "Estimated merger LLM spend per conflict",
         registry=REGISTRY,
     )
     awaiting_human_pending = Gauge(
