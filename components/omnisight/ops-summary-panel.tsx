@@ -15,7 +15,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import {
   Activity, AlertTriangle, DollarSign, Flame, Radio, Shield, ShieldAlert, Clock3, Cpu, Brain,
-  Layers, TimerReset, Gauge, Zap, TrendingUp,
+  Layers, TimerReset, Gauge, Zap, TrendingUp, GitBranch,
 } from "lucide-react"
 import { getOpsSummary, forceTurboOverride, type OpsSummary } from "@/lib/api"
 
@@ -95,6 +95,19 @@ export function OpsSummaryPanel() {
           <Kpi icon={Clock3} label="WATCHDOG"
                value={data.watchdog_age_s === null ? "—" : `${Math.round(data.watchdog_age_s)}s`}
                tone={data.watchdog_age_s === null || data.watchdog_age_s > 120 ? "warn" : "ok"} />
+        </div>
+      )}
+
+      {/* BP.K.5: per-Guild pending-decision split. Hidden when the backend
+          has no Guild-scoped metrics so metadata-light deployments keep the
+          compact six-KPI layout unchanged. */}
+      {data && data.guild_metrics && data.guild_metrics.length > 0 && (
+        <div className="px-3 pb-2 -mt-1" data-testid="ops-guild-metrics-section">
+          <div className="font-mono text-[9px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] mb-1 flex items-center gap-1">
+            <GitBranch size={10} aria-hidden />
+            GUILD METRICS
+          </div>
+          <GuildMetricsRow entries={data.guild_metrics} />
         </div>
       )}
 
@@ -229,6 +242,39 @@ function Kpi({
       <div className={`font-mono text-[14px] font-semibold tabular-nums leading-none mt-0.5 ${TONE_CLASS[tone]}`}>
         {value}
       </div>
+    </div>
+  )
+}
+
+function GuildMetricsRow({ entries }: {
+  entries: NonNullable<OpsSummary["guild_metrics"]>
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 font-mono text-[10px] tabular-nums"
+      data-testid="ops-guild-metrics-row"
+    >
+      {entries.map((entry) => {
+        const tone: Tone = entry.decisions_pending > 10
+          ? "warn"
+          : entry.decisions_pending > 0 ? "info" : "ok"
+        return (
+          <span
+            key={entry.guild}
+            data-testid="ops-guild-metric"
+            data-guild={entry.guild}
+            title={`${entry.guild}: ${entry.decisions_pending} pending decisions`}
+            className="inline-flex min-w-0 items-center gap-1 rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.2))] bg-white/5 px-1.5 py-1"
+          >
+            <span className="truncate max-w-[7rem] text-[var(--muted-foreground,#94a3b8)]">
+              {entry.guild.toUpperCase()}
+            </span>
+            <span className={TONE_CLASS[tone]}>
+              {entry.decisions_pending}
+            </span>
+          </span>
+        )
+      })}
     </div>
   )
 }

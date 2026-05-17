@@ -4476,6 +4476,13 @@ export interface OpsSummary {
   /** Phase 64-C-LOCAL UX-6: T3 runner dispatch breakdown. local + bundle
    * always present; ssh / qemu populated once those runners land. */
   t3_runners?: { local: number; ssh: number; qemu: number; bundle: number }
+  /** BP.K.5: per-Guild operational split for the compact ops panel.
+   * Currently sourced from pending decisions carrying ``guild_id`` (or
+   * transition-period ``agent_type``) metadata. */
+  guild_metrics?: Array<{
+    guild: string
+    decisions_pending: number
+  }>
   /** R2 (#308): the single agent with the highest current semantic-entropy
    * score, or null if the monitor hasn't produced a measurement yet. */
   highest_entropy_agent?: {
