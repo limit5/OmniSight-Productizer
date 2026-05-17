@@ -60,6 +60,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import difflib
 import json
 import logging
 import os
@@ -124,8 +125,8 @@ _DEFAULT_TOKEN_COST_USD = float(
     os.environ.get("OMNISIGHT_MERGER_TOKEN_COST_USD", "0.000003")
 )
 
-# Bumped for OP-1435: split-test guidance for shared setup conflicts.
-MERGER_PROMPT_VERSION = "merger-prompt-v3-op1435"
+# Bumped for OP-1426: whole-batch multi-file resolution schema.
+MERGER_PROMPT_VERSION = "merger-prompt-v4-op1426"
 
 # 3-strike rule (mirrors CLAUDE.md L1 Agent Behavior).
 MAX_FAILURES_PER_CHANGE = 3
@@ -322,6 +323,8 @@ class Resolution:
     diff: str                       # unified diff scoped to conflict region
     changed_blocks: int             # should equal # conflict blocks in input
     changed_identifiers: list[str] = field(default_factory=list)
+    file_resolutions: list[dict[str, Any]] = field(default_factory=list)
+    changed_identifiers_by_file: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -859,9 +862,9 @@ Take-both feature-preservation rubric:
 
 SYSTEM_PROMPT = (
     f"Prompt version: {MERGER_PROMPT_VERSION}\n\n"
-    "You are a merge conflict resolution expert.  You receive one Git "
-    "conflict block (HEAD side + incoming side) and must produce a "
-    "single unified resolution that PRESERVES THE LOGICAL INTENT OF BOTH "
+    "You are a merge conflict resolution expert.  You receive one or more "
+    "Git conflict files (HEAD side + incoming side) and must produce "
+    "unified resolutions that PRESERVE THE LOGICAL INTENT OF BOTH "
     "commits.  You MUST NOT introduce any logic, function, call, "
     "variable, or statement that does not appear in either half of the "
     "conflict or in the provided file context.  If you cannot preserve "
@@ -870,7 +873,8 @@ SYSTEM_PROMPT = (
     "a compromise.\n\n"
     + TAKE_BOTH_FEATURE_PRESERVATION_RUBRIC
     + "\nOutput STRICTLY a JSON object matching this schema:\n"
-    '{"resolved_block": "<text that replaces the conflict block>",'
+    '{"resolved_blocks": [{"file_path": "<repo-relative path>",'
+    ' "resolved_text": "<complete resolved file text>"}],'
     ' "confidence": <float 0..1>,'
     ' "rationale": "<one-paragraph explanation>",'
     ' "new_logic_detected": <bool; true if you had to invent anything>}'
@@ -1117,7 +1121,7 @@ def _format_sections_trimmed(sections: Collection[str]) -> str:
 
 def build_prompt_with_size_gate(
     req: ConflictRequest,
-    blocks: list[ConflictBlock],
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
     risk: ConflictRisk,
     *,
     cross_file_directive: str = "",
@@ -1160,6 +1164,7 @@ def _select_multi_file_strategy(
     req: ConflictRequest,
     blocks: list[ConflictBlock],
     coupling_components: list[set[str]],
+    blocks_by_file: dict[str, list[ConflictBlock]] | None = None,
 ) -> MultiFileStrategySelection:
     """Select the multi-file route after coupling and prompt-size checks."""
     risk = classify_conflict_risk(req, blocks, coupling_components)
@@ -1181,8 +1186,15 @@ def _select_multi_file_strategy(
         component_risk = classify_conflict_risk(
             component_req, blocks, [set(component_files)],
         )
+        prompt_blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]] = blocks
+        if blocks_by_file is not None:
+            prompt_blocks = {
+                path: file_blocks
+                for path, file_blocks in blocks_by_file.items()
+                if path in component_files
+            }
         prompt_gate = build_prompt_with_size_gate(
-            component_req, blocks, component_risk,
+            component_req, prompt_blocks, component_risk,
         )
         prompt_evaluations.append({
             "component_files": component_files,
@@ -1220,9 +1232,37 @@ def _select_multi_file_strategy(
     )
 
 
+def _collect_conflict_blocks_by_file(
+    req: ConflictRequest,
+    primary_blocks: list[ConflictBlock],
+) -> dict[str, list[ConflictBlock]]:
+    blocks_by_file = {req.file_path: primary_blocks}
+    if not req.additional_files:
+        return blocks_by_file
+
+    texts = _conflict_texts_by_file(req, [req.file_path, *req.additional_files])
+    for path in req.additional_files:
+        text = texts.get(path, "")
+        if not text or "<<<<<<<" not in text:
+            continue
+        blocks = parse_conflict_block(text)
+        if blocks:
+            blocks_by_file[path] = blocks
+    return blocks_by_file
+
+
+def _normalize_blocks_by_file(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
+) -> dict[str, list[ConflictBlock]]:
+    if isinstance(blocks, dict):
+        return {path: list(file_blocks) for path, file_blocks in blocks.items()}
+    return {req.file_path: list(blocks)}
+
+
 def build_prompt(
     req: ConflictRequest,
-    blocks: list[ConflictBlock],
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
     risk: ConflictRisk | None = None,
     *,
     context_pack: str | None = None,
@@ -1230,13 +1270,17 @@ def build_prompt(
 ) -> str:
     """Deterministic prompt — inlines the conflict + commit messages +
     the provided file context, and repeats the no-new-logic guardrail."""
-    risk = risk or classify_conflict_risk(req, blocks)
+    blocks_by_file = _normalize_blocks_by_file(req, blocks)
+    primary_blocks = blocks_by_file.get(req.file_path, [])
+    risk = risk or classify_conflict_risk(req, primary_blocks)
     if context_pack is None:
-        context_pack = build_context_pack(req, blocks)
+        context_pack = build_context_pack(req, primary_blocks)
     parts: list[str] = [
         "SYSTEM: " + SYSTEM_PROMPT,
         "",
-        f"FILE: {req.file_path}",
+        f"PRIMARY FILE: {req.file_path}",
+        "FILES TO RESOLVE:",
+        *[f"  - {path}" for path in blocks_by_file],
         f"Structural risk tier: {risk.tier.value}",
         "Structural risk signals: "
         + (", ".join(risk.reasons) if risk.reasons else "(none)"),
@@ -1261,18 +1305,25 @@ def build_prompt(
         "",
         "Conflict blocks:",
     ])
-    for i, blk in enumerate(blocks, start=1):
-        parts.extend([
-            f"  Block {i} (lines {blk.start_line}-{blk.end_line}):",
-            f"    HEAD [{blk.head_label}]:",
-            *[f"      {line}" for line in blk.head_lines],
-            f"    INCOMING [{blk.incoming_label}]:",
-            *[f"      {line}" for line in blk.incoming_lines],
-        ])
+    for path, file_blocks in blocks_by_file.items():
+        parts.append(f"  File: {path}")
+        for i, blk in enumerate(file_blocks, start=1):
+            parts.extend([
+                f"    Block {i} (lines {blk.start_line}-{blk.end_line}):",
+                f"      HEAD [{blk.head_label}]:",
+                *[f"        {line}" for line in blk.head_lines],
+                f"      INCOMING [{blk.incoming_label}]:",
+                *[f"        {line}" for line in blk.incoming_lines],
+            ])
     parts.append("")
     parts.append(
-        "Return ONE JSON object (no prose, no fences) with the schema "
-        "described above."
+        "Return ONE JSON object (no prose, no fences): "
+        '{"resolved_blocks": [{"file_path": "<repo-relative path>", '
+        '"resolved_text": "<complete resolved file text>"}], '
+        '"confidence": <float 0..1>, '
+        '"rationale": "<one-paragraph explanation>", '
+        '"new_logic_detected": <bool; true if you had to invent anything>}. '
+        "Include one resolved_blocks entry for every file listed above."
     )
     return "\n".join(parts)
 
@@ -2206,12 +2257,69 @@ def _parse_llm_response(raw: str) -> dict[str, Any]:
 
 def _assemble_resolution(
     req: ConflictRequest,
-    blocks: list[ConflictBlock],
+    blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]],
     llm_payload: dict[str, Any],
 ) -> Resolution:
-    """Splice the LLM's ``resolved_block`` back into the original file,
-    preserving every line outside the conflict region."""
-    all_empty_hunk = all(b.n_conflict_lines == 0 for b in blocks)
+    """Assemble the LLM resolution, preserving legacy single-file payloads."""
+    blocks_by_file = _normalize_blocks_by_file(req, blocks)
+    source_by_file = _conflict_texts_by_file(req, blocks_by_file.keys())
+    all_blocks = [
+        block
+        for file_blocks in blocks_by_file.values()
+        for block in file_blocks
+    ]
+    all_empty_hunk = all(b.n_conflict_lines == 0 for b in all_blocks)
+
+    file_payloads = _resolved_file_payloads(llm_payload)
+    if file_payloads:
+        resolved_by_file: dict[str, str] = {}
+        for item in file_payloads:
+            file_path = item.get("file_path") or item.get("path")
+            resolved_text = item.get("resolved_text") or item.get("text")
+            if not isinstance(file_path, str) or not isinstance(resolved_text, str):
+                raise _LLMParseError(
+                    "resolved_blocks entries must include file_path and "
+                    "resolved_text strings"
+                )
+            if file_path not in blocks_by_file:
+                raise _LLMParseError(f"unexpected resolved file {file_path!r}")
+            if not resolved_text and not all_empty_hunk:
+                raise _LLMParseError(f"resolved_text missing for {file_path!r}")
+            resolved_by_file[file_path] = resolved_text
+
+        missing = [path for path in blocks_by_file if path not in resolved_by_file]
+        if missing:
+            raise _LLMParseError(
+                "resolved_blocks missing file(s): " + ", ".join(missing)
+            )
+
+        confidence, rationale = _resolution_confidence_and_rationale(llm_payload)
+        changed_by_file = {
+            path: _extract_changed_identifiers(path, text)
+            for path, text in resolved_by_file.items()
+        }
+        file_resolutions = [
+            {
+                "file_path": path,
+                "resolved_text": resolved_by_file[path],
+                "changed_identifiers": changed_by_file[path],
+            }
+            for path in blocks_by_file
+        ]
+        return Resolution(
+            resolved_text=resolved_by_file[req.file_path],
+            confidence=confidence,
+            rationale=rationale,
+            diff=_make_file_diff(source_by_file, resolved_by_file),
+            changed_blocks=sum(
+                len(file_blocks) for file_blocks in blocks_by_file.values()
+            ),
+            changed_identifiers=changed_by_file.get(req.file_path, []),
+            file_resolutions=file_resolutions,
+            changed_identifiers_by_file=changed_by_file,
+        )
+
+    primary_blocks = blocks_by_file.get(req.file_path, [])
     resolved_block = str(llm_payload.get("resolved_block", ""))
     if "resolved_block" not in llm_payload:
         raise _LLMParseError("resolved_block missing")
@@ -2228,13 +2336,13 @@ def _assemble_resolution(
         llm_payload["resolved_blocks"], list
     ):
         blocks_out = [str(b) for b in llm_payload["resolved_blocks"]]
-        if len(blocks_out) != len(blocks):
+        if len(blocks_out) != len(primary_blocks):
             raise _LLMParseError(
                 f"resolved_blocks length {len(blocks_out)} != "
-                f"conflict blocks {len(blocks)}"
+                f"conflict blocks {len(primary_blocks)}"
             )
     else:
-        blocks_out = [resolved_block] * len(blocks)
+        blocks_out = [resolved_block] * len(primary_blocks)
 
     # Do the splices right-to-left so earlier offsets stay valid.
     matches = list(_CONFLICT_RE.finditer(text))
@@ -2242,27 +2350,94 @@ def _assemble_resolution(
         m = matches[idx]
         text = text[: m.start()] + blocks_out[idx] + text[m.end() :]
 
-    confidence = float(llm_payload.get("confidence", 0.0))
-    if confidence < 0:
-        confidence = 0.0
-    if confidence > 1:
-        confidence = 1.0
-    rationale = str(llm_payload.get("rationale", ""))
+    confidence, rationale = _resolution_confidence_and_rationale(llm_payload)
     new_logic = bool(llm_payload.get("new_logic_detected", False))
 
     if new_logic:
         # Clamp confidence hard — the prompt asked for exactly this.
         confidence = min(confidence, 0.3)
 
-    diff = _make_block_diff(req.file_path, blocks, blocks_out)
+    diff = _make_block_diff(req.file_path, primary_blocks, blocks_out)
+    changed_identifiers = _extract_changed_identifiers(req.file_path, text)
     return Resolution(
         resolved_text=text,
         confidence=confidence,
         rationale=rationale or "(no rationale supplied)",
         diff=diff,
-        changed_blocks=len(blocks),
-        changed_identifiers=_extract_changed_identifiers(req.file_path, text),
+        changed_blocks=len(primary_blocks),
+        changed_identifiers=changed_identifiers,
+        file_resolutions=[{
+            "file_path": req.file_path,
+            "resolved_text": text,
+            "changed_identifiers": changed_identifiers,
+        }],
+        changed_identifiers_by_file={req.file_path: changed_identifiers},
     )
+
+
+def _resolved_file_payloads(llm_payload: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = llm_payload.get("resolved_blocks")
+    if not isinstance(raw, list) or not raw:
+        return []
+    if all(isinstance(item, dict) for item in raw):
+        return raw
+    return []
+
+
+def _resolution_confidence_and_rationale(
+    llm_payload: dict[str, Any],
+) -> tuple[float, str]:
+    confidence = float(llm_payload.get("confidence", 0.0))
+    if confidence < 0:
+        confidence = 0.0
+    if confidence > 1:
+        confidence = 1.0
+    rationale = str(llm_payload.get("rationale", ""))
+    if bool(llm_payload.get("new_logic_detected", False)):
+        confidence = min(confidence, 0.3)
+    return confidence, rationale or "(no rationale supplied)"
+
+
+def _conflict_texts_by_file(
+    req: ConflictRequest,
+    file_paths: Collection[str],
+) -> dict[str, str]:
+    texts: dict[str, str] = {req.file_path: req.conflict_text}
+    for path in file_paths:
+        if path == req.file_path:
+            continue
+        if path in req.sibling_file_contents:
+            texts[path] = req.sibling_file_contents[path]
+            continue
+        if not req.workspace:
+            texts[path] = ""
+            continue
+        rel = Path(path)
+        if rel.is_absolute() or ".." in rel.parts:
+            texts[path] = ""
+            continue
+        try:
+            texts[path] = (Path(req.workspace) / rel).read_text(encoding="utf-8")
+        except OSError:
+            texts[path] = ""
+    return texts
+
+
+def _make_file_diff(
+    before_by_file: dict[str, str],
+    after_by_file: dict[str, str],
+) -> str:
+    chunks: list[str] = []
+    for path, after in after_by_file.items():
+        before = before_by_file.get(path, "")
+        chunks.extend(difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+            lineterm="",
+        ))
+    return "\n".join(chunks)
 
 
 def _extract_changed_identifiers(file_path: str, resolved_text: str) -> list[str]:
@@ -3426,11 +3601,14 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
+    blocks_by_file = _collect_conflict_blocks_by_file(request, blocks)
+
     if extra:
         multi_file_strategy = _select_multi_file_strategy(
             request,
             blocks,
             coupling_components or [],
+            blocks_by_file,
         )
         strategy_meta = {
             "additional_files": extra,
@@ -3473,7 +3651,12 @@ async def resolve_conflict(
                 strategy_meta=strategy_meta,
             )
 
-    nested_blocks = [b for b in blocks if b.has_nested_markers]
+    nested_blocks = [
+        b
+        for file_blocks in blocks_by_file.values()
+        for b in file_blocks
+        if b.has_nested_markers
+    ]
     if nested_blocks:
         logger.warning(
             "nested_marker_warning change_id=%s file=%s blocks=%s",
@@ -3492,10 +3675,16 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    total_lines = sum(b.n_conflict_lines for b in blocks)
+    total_lines = sum(
+        b.n_conflict_lines
+        for file_blocks in blocks_by_file.values()
+        for b in file_blocks
+    )
     deterministic: ResolutionOutcome | None = None
-    if total_lines > MAX_CONFLICT_LINES and is_constructor_behavior_signature_candidate(
-        blocks,
+    if (
+        total_lines > MAX_CONFLICT_LINES
+        and len(blocks_by_file) == 1
+        and is_constructor_behavior_signature_candidate(blocks)
     ):
         deterministic = try_deterministic_merge(request, blocks)
         if (
@@ -3523,7 +3712,8 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    deterministic = deterministic or try_deterministic_merge(request, blocks)
+    if len(blocks_by_file) == 1:
+        deterministic = deterministic or try_deterministic_merge(request, blocks)
     if (
         deterministic is not None
         and (
@@ -3710,7 +3900,9 @@ async def resolve_conflict(
         return outcome
 
     # ── 6. LLM call ──────────────────────────────────────────────
-    prompt_gate = build_prompt_with_size_gate(request, blocks, risk)
+    prompt_blocks: list[ConflictBlock] | dict[str, list[ConflictBlock]]
+    prompt_blocks = blocks_by_file if len(blocks_by_file) > 1 else blocks
+    prompt_gate = build_prompt_with_size_gate(request, prompt_blocks, risk)
     logger.info(
         "merger_agent: context_pack_bytes=%d merger_prompt_version=%s "
         "merger_prompt_size_bytes=%d sections_trimmed=%s "
@@ -3766,7 +3958,7 @@ async def resolve_conflict(
 
     try:
         payload = _parse_llm_response(raw)
-        resolution = _assemble_resolution(request, blocks, payload)
+        resolution = _assemble_resolution(request, prompt_blocks, payload)
     except _LLMParseError as exc:
         _bump_failure(change_id)
         outcome = _build_abstain(
@@ -3785,6 +3977,22 @@ async def resolve_conflict(
     except Exception:
         pass
 
+    resolution_meta = {
+        "file_resolutions": list(resolution.file_resolutions),
+        "changed_identifiers_by_file": dict(
+            resolution.changed_identifiers_by_file
+        ),
+    }
+    if resolution.file_resolutions:
+        resolution_meta["resolved_files"] = {
+            item["file_path"]: item["resolved_text"]
+            for item in resolution.file_resolutions
+            if (
+                isinstance(item.get("file_path"), str)
+                and isinstance(item.get("resolved_text"), str)
+            )
+        }
+
     # ── 6. New-logic gate ────────────────────────────────────────
     if bool(payload.get("new_logic_detected", False)):
         outcome = _build_abstain(
@@ -3793,7 +4001,7 @@ async def resolve_conflict(
             rationale=(f"LLM self-reported new logic invention; "
                        f"{resolution.rationale}"),
             diff_preview=resolution.diff,
-            metadata=risk_meta,
+            metadata={**risk_meta, **resolution_meta},
         )
         outcome.changed_identifiers = list(resolution.changed_identifiers)
         _observe_metric(outcome)
@@ -3808,7 +4016,7 @@ async def resolve_conflict(
             rationale=(f"confidence {resolution.confidence:.2f} < "
                        f"{MIN_CONFIDENCE_FOR_PLUS_TWO}; {resolution.rationale}"),
             diff_preview=resolution.diff,
-            metadata=risk_meta,
+            metadata={**risk_meta, **resolution_meta},
         )
         outcome.changed_identifiers = list(resolution.changed_identifiers)
         _observe_metric(outcome)
@@ -3828,6 +4036,7 @@ async def resolve_conflict(
     )
     review_meta = {
         **risk_meta,
+        **resolution_meta,
         "merger_sandwich_decision": sandwich_decision,
         "review_model": review.model,
         "review_cost_usd": review.cost_usd,
@@ -3922,7 +4131,7 @@ async def resolve_conflict(
             rationale=f"Gerrit push failed: {push.reason}",
             confidence=resolution.confidence,
             diff_preview=resolution.diff,
-            metadata=risk_meta,
+            metadata={**risk_meta, **resolution_meta},
         )
         outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.failure_count = get_failure_count(change_id)

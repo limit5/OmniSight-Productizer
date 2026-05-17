@@ -1151,6 +1151,102 @@ def test_multi_file_whole_batch_runs_llm(tmp_path, caplog):
     assert "backend/utils.py" in caplog.text
 
 
+def test_multi_file_whole_batch_resolves_two_files_in_one_llm_call(tmp_path):
+    primary_conflict = (
+        "from backend.utils import format_name\n\n"
+        "def greet(name):\n"
+        "<<<<<<< HEAD\n"
+        "    return f'Hello {name}!'\n"
+        "=======\n"
+        "    return f'Hello {format_name(name)}!'\n"
+        ">>>>>>> feature/name-helper\n"
+    )
+    helper_conflict = (
+        "def format_name(name):\n"
+        "<<<<<<< HEAD\n"
+        "    return name\n"
+        "=======\n"
+        "    return name.strip()\n"
+        ">>>>>>> feature/name-helper\n"
+    )
+    primary_resolved = (
+        "from backend.utils import format_name\n\n"
+        "def greet(name):\n"
+        "    return f'Hello {format_name(name)}!'\n"
+    )
+    helper_resolved = (
+        "def format_name(name):\n"
+        "    return name.strip()\n"
+    )
+    _write_file(
+        tmp_path,
+        "backend/greetings.py",
+        "from backend.utils import format_name\n\n"
+        "def greet(name):\n"
+        "    return f'Hello {format_name(name)}!'\n",
+    )
+    _write_file(
+        tmp_path,
+        "backend/utils.py",
+        "def format_name(name):\n"
+        "    return name.strip()\n",
+    )
+    llm = _FakeLLM({
+        "resolved_blocks": [
+            {
+                "file_path": "backend/greetings.py",
+                "resolved_text": primary_resolved,
+            },
+            {
+                "file_path": "backend/utils.py",
+                "resolved_text": helper_resolved,
+            },
+        ],
+        "confidence": 0.96,
+        "rationale": "both files keep the shared helper intent",
+        "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_FakePusher(),
+        reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+    req = _base_request(
+        conflict=primary_conflict,
+        additional_files=["backend/utils.py"],
+    )
+    req.workspace = str(tmp_path)
+    req.sibling_file_contents = {"backend/utils.py": helper_conflict}
+    req.push_locally = False
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert len(llm.calls) == 1
+    assert '"resolved_blocks": [{"file_path"' in llm.calls[0]
+    assert "File: backend/greetings.py" in llm.calls[0]
+    assert "File: backend/utils.py" in llm.calls[0]
+    assert outcome.resolved_text == primary_resolved
+    assert outcome.metadata["resolved_files"] == {
+        "backend/greetings.py": primary_resolved,
+        "backend/utils.py": helper_resolved,
+    }
+    assert outcome.metadata["file_resolutions"] == [
+        {
+            "file_path": "backend/greetings.py",
+            "resolved_text": primary_resolved,
+            "changed_identifiers": ["greet", "name"],
+        },
+        {
+            "file_path": "backend/utils.py",
+            "resolved_text": helper_resolved,
+            "changed_identifiers": ["format_name", "name"],
+        },
+    ]
+
+
 def test_multi_file_per_file_fallback_for_independent_components(tmp_path):
     _write_file(tmp_path, "backend/greetings.py", "def greet(name):\n    return name\n")
     _write_file(
@@ -1523,7 +1619,10 @@ def test_op1435_prompt_contains_take_both_rubric_and_version():
     blocks = ma.parse_conflict_block(SIMPLE_CONFLICT)
     prompt = ma.build_prompt(_base_request(), blocks)
 
-    assert ma.MERGER_PROMPT_VERSION == "merger-prompt-v3-op1435"
+    assert ma.MERGER_PROMPT_VERSION == "merger-prompt-v4-op1426"
+    assert "resolved_blocks" in prompt
+    assert "file_path" in prompt
+    assert "resolved_text" in prompt
     assert "Take-both feature-preservation rubric" in prompt
     assert "ADD-vs-ADD distinct symbols" in prompt
     assert "RENAME DETECTION" in prompt
