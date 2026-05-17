@@ -52,7 +52,7 @@ from typing import Any, Awaitable, Callable
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
-from backend.agents.tools import AGENT_TOOLS, TOOL_MAP, set_active_workspace
+from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -107,12 +107,16 @@ def _get_llm(bind_tools_for: str | None = None, model_name: str = ""):
         model_name: Per-agent model spec (e.g. "openrouter:qwen/qwen3-235b").
                     If empty, uses global settings.llm_provider/model.
 
-    Z.6.3: ollama is not short-circuited here — AGENT_TOOLS is provider-agnostic
+    Z.6.3: ollama is not short-circuited here — GUILD_TOOLS is provider-agnostic
     (keyed by agent_type, not provider).  ``get_llm()`` applies
     ``llm.bind_tools()`` uniformly for every provider including ollama, using
     the path established in Z.6.2.
     """
-    tools = AGENT_TOOLS.get(bind_tools_for, []) if bind_tools_for else None
+    tools = (
+        (GUILD_TOOLS.get(bind_tools_for) or AGENT_TOOLS.get(bind_tools_for, []))
+        if bind_tools_for
+        else None
+    )
     provider, model = _parse_model_spec(model_name)
     return get_llm(provider=provider, model=model, bind_tools=tools or None)
 
@@ -775,7 +779,8 @@ def _specialist_node_factory(agent_type: str):
         tool_calls = _rule_based_tool_calls(cmd)
         if tool_calls:
             # Filter to only tools this agent has access to
-            allowed = {t.name for t in AGENT_TOOLS.get(agent_type, [])}
+            allowed_tools = GUILD_TOOLS.get(agent_type) or AGENT_TOOLS.get(agent_type, [])
+            allowed = {t.name for t in allowed_tools}
             tool_calls = [tc for tc in tool_calls if tc.tool_name in allowed]
 
         if tool_calls:
