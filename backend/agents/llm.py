@@ -943,7 +943,39 @@ def _model_mapping_mode(configured_mode: object | None = None) -> str:
     return mode
 
 
-def _model_mapping_guardrail_allows(provider: str, model: str | None) -> bool:
+def _metric_guild_id(guild_id: str | None) -> str:
+    """Return the low-cardinality Guild label for BP.F metrics."""
+    if not guild_id:
+        return "unknown"
+    slug = str(guild_id).strip().lower().replace("-", "_")
+    if not slug:
+        return "unknown"
+    try:
+        from backend.agent_guild_dual_write import guild_id_for_agent_type
+        return guild_id_for_agent_type(slug) or "unknown"
+    except Exception as exc:  # pragma: no cover - metric best-effort
+        logger.debug("model mapping guild label normalisation skipped: %s", exc)
+        return "unknown"
+
+
+def _record_model_mapping_violation(*, guild_id: str | None, mode: str) -> None:
+    """Increment the BP.F provider mapping guardrail violation counter."""
+    try:
+        from backend import metrics as _m
+        _m.model_mapping_violation_total.labels(
+            guild_id=_metric_guild_id(guild_id),
+            mode=mode,
+        ).inc()
+    except Exception as exc:  # pragma: no cover - metric best-effort
+        logger.debug("model mapping violation metric skipped: %s", exc)
+
+
+def _model_mapping_guardrail_allows(
+    provider: str,
+    model: str | None,
+    *,
+    guild_id: str | None = None,
+) -> bool:
     """Apply BP.F's provider mapping guardrail for one ``get_llm()`` call."""
     try:
         from backend.agents import routing_policy
@@ -985,6 +1017,7 @@ def _model_mapping_guardrail_allows(provider: str, model: str | None) -> bool:
         "from configs/model_mapping.yaml providers=%r"
     )
     args = (provider, model, sorted(providers))
+    _record_model_mapping_violation(guild_id=guild_id, mode=mode)
     if mode == "enforce":
         logger.error(message, *args)
         return False
@@ -1143,6 +1176,7 @@ def get_llm(
     *,
     allow_failover: bool = True,
     guild: str | None = None,
+    guild_id: str | None = None,
 ) -> BaseChatModel | None:
     """Create or retrieve a cached LLM instance.
 
@@ -1162,6 +1196,9 @@ def get_llm(
             provider/model override was passed, BP.F's Guild mapping
             supplies the primary provider/model. Failover then tries
             that Guild's mapped provider before the global fallback tail.
+        guild_id: Optional Guild/legacy agent id for BP.F guardrail
+            metrics. Missing or unrecognised values are labelled
+            ``unknown`` to keep metric cardinality bounded.
 
     Returns:
         A LangChain chat model, or None if the provider can't be initialized.
@@ -1193,7 +1230,7 @@ def get_llm(
             guild_model=guild_model,
         )
 
-    if not _model_mapping_guardrail_allows(provider, model):
+    if not _model_mapping_guardrail_allows(provider, model, guild_id=guild_id):
         return None
 
     cache_key = f"{provider}:{model}:{id(bind_tools) if bind_tools else 'none'}"

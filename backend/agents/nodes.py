@@ -124,6 +124,7 @@ def _get_llm(bind_tools_for: str | None = None, model_name: str = ""):
         model=model,
         bind_tools=tools or None,
         guild=guild,
+        guild_id=bind_tools_for,
     )
 
 
