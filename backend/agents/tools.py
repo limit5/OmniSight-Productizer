@@ -2277,6 +2277,7 @@ async def web_search(
             tenant_id=tenant_id,
             max_results=5,
             include_answer=True,
+            audit=False,
         )
     except WebSearchRateLimited as exc:
         await _audit_web_search_query(
