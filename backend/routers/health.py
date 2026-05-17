@@ -118,20 +118,28 @@ async def _check_db() -> tuple[bool, str]:
 
 
 async def _check_migrations() -> tuple[bool, str]:
-    """Compare alembic's current head with the migrations directory.
+    """Compare alembic's current head with the migrations DAG heads.
 
     We avoid importing SQLAlchemy's heavy env setup — instead we do a
     direct read against the ``alembic_version`` table (populated by
-    alembic after each upgrade) and compare it with the newest version
-    file on disk.  Returns (ok, detail).  If the alembic table doesn't
-    exist yet (fresh install), we treat that as *not* ready — a newly
-    booted process should run migrations before serving traffic.
+    alembic after each upgrade) and compare it with the DAG head leaves
+    on disk.  Returns (ok, detail).  If the alembic table doesn't
+    exist yet (fresh install), we treat that as *ready* via the legacy
+    schema path — db.init() builds the raw schema for non-alembic dev
+    flows.
 
     SP-5.9 (2026-04-21): SQLite-vs-PG dialect dispatch removed
     (runtime is PG-only now). Always uses ``information_schema.tables``
-    for the "does alembic_version exist?" probe. If a future rollback
-    needs the SQLite path, it'll come back through the compat wrapper
-    or a fresh dialect check.
+    for the "does alembic_version exist?" probe.
+
+    OP-1447 (2026-05-18): replaced the alphabetical filename-sort
+    heuristic with ``alembic.script.ScriptDirectory.get_heads()``. The
+    old logic inferred "latest revision" from the lexicographically
+    last filename in ``alembic/versions/``, which broke once merge-node
+    files named ``m_*.py`` were added — ASCII ``'m' > '0'-'9'`` put
+    them after the numeric files, so the probe declared
+    ``migration_pending`` even when the DB was at the real numeric
+    head (e.g. ``0242``). Querying the DAG directly is order-insensitive.
     """
     try:
         from backend.db_pool import get_pool
@@ -153,27 +161,26 @@ async def _check_migrations() -> tuple[bool, str]:
     if not current:
         return False, "alembic_version_empty"
 
-    versions_dir = Path(__file__).resolve().parents[1] / "alembic" / "versions"
-    try:
-        files = sorted(
-            f.name for f in versions_dir.iterdir()
-            if f.is_file() and f.suffix == ".py" and not f.name.startswith("_")
-        )
-    except FileNotFoundError:
+    script_dir = Path(__file__).resolve().parents[1] / "alembic"
+    if not script_dir.is_dir():
         return True, f"current={current},no_versions_dir"
 
-    if not files:
+    try:
+        from alembic.config import Config
+        from alembic.script import ScriptDirectory
+
+        cfg = Config()
+        cfg.set_main_option("script_location", str(script_dir))
+        heads = set(ScriptDirectory.from_config(cfg).get_heads())
+    except Exception as exc:
+        return False, f"alembic_script_dir_unreadable: {type(exc).__name__}: {exc}"
+
+    if not heads:
         return True, f"current={current},no_migrations"
 
-    # Alembic version files are conventionally named ``NNNN_<slug>.py``;
-    # the numeric prefix of the last file is the latest revision.
-    latest_file = files[-1]
-    latest_prefix = latest_file.split("_", 1)[0]
-    if latest_prefix and latest_prefix not in current:
-        # We compare by prefix membership rather than equality because
-        # alembic stores the full revision ID — tolerant of either
-        # scheme (short-hash or numeric prefix).
-        return False, f"migration_pending: current={current} latest_file={latest_file}"
+    if current not in heads:
+        heads_str = "|".join(sorted(heads))
+        return False, f"migration_pending: current={current} heads={heads_str}"
 
     return True, f"current={current}"
 

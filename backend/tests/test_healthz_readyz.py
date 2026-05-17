@@ -107,6 +107,68 @@ async def test_check_migrations_legacy_schema_is_allowed(client):
     assert "legacy" in detail or "current=" in detail
 
 
+@pytest.mark.asyncio
+async def test_check_migrations_passes_when_db_at_numeric_head_with_m_merge_files(
+    monkeypatch,
+):
+    """OP-1447 regression — filename-sort bug.
+
+    Before the fix, ``_check_migrations`` alphabetically sorted the
+    filenames in ``alembic/versions/`` and used the last filename's
+    prefix as the "latest revision". The versions/ directory contains
+    merge-node files named ``m_*.py`` (e.g.
+    ``m_audit_29_final_merge_remaining_heads_*.py``). ASCII
+    ``'m' > '0'-'9'``, so the last alphabetical filename is a merge
+    node, which made ``latest_prefix='m'`` and ``'m' not in '0242'``
+    → False, ``migration_pending`` — even when the DB was at the
+    actual head ``0242``.
+
+    The fix asks alembic for the DAG heads directly via
+    ``ScriptDirectory.get_heads()``, which is order-insensitive. This
+    test pins the DB version to ``0242`` and verifies the readiness
+    check passes despite the m_*.py files in versions/.
+    """
+    from backend import db_pool
+
+    class _FakeConn:
+        async def fetchval(self, sql, *args):
+            if "information_schema.tables" in sql:
+                return True
+            if "FROM alembic_version" in sql:
+                return "0242"
+            return None
+
+    class _Acquire:
+        def __init__(self, conn): self._conn = conn
+        async def __aenter__(self): return self._conn
+        async def __aexit__(self, *a): return None
+
+    class _FakePool:
+        def acquire(self): return _Acquire(_FakeConn())
+
+    monkeypatch.setattr(db_pool, "get_pool", lambda: _FakePool())
+
+    # Sanity: the versions/ directory does in fact contain m_*.py merge
+    # nodes — otherwise this test wouldn't actually exercise the bug.
+    from pathlib import Path as _Path
+    versions_dir = (
+        _Path(health_mod.__file__).resolve().parents[1] / "alembic" / "versions"
+    )
+    m_files = sorted(p.name for p in versions_dir.iterdir() if p.name.startswith("m_"))
+    assert m_files, (
+        "test premise broken: alembic/versions/ no longer contains m_*.py "
+        "merge nodes — update this test if the DAG was flattened"
+    )
+
+    ok, detail = await health_mod._check_migrations()
+    assert ok is True, (
+        f"OP-1447: _check_migrations must report ready when DB is at "
+        f"numeric head 0242 despite m_*.py files in versions/; got "
+        f"detail={detail!r}"
+    )
+    assert "current=0242" in detail
+
+
 def test_check_provider_chain_requires_credential_or_ollama(monkeypatch):
     """At least one chain entry must have credentials — except ollama,
     which is treated as always-available (local fallback)."""
