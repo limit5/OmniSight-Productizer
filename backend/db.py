@@ -317,6 +317,11 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         ("event_log", sa.Column("project_id", _t(), _fk_proj())),
         ("artifacts", sa.Column("project_id", _t(), _fk_proj())),
         ("user_preferences", sa.Column("project_id", _t(), _fk_proj())),
+        # BP.B.1 (OP-249, alembic 0241): nullable guild dimension on
+        # durable execution / debugging / audit trace tables.
+        ("workflow_runs", sa.Column("guild_id", _t())),
+        ("debug_findings", sa.Column("guild_id", _t())),
+        ("audit_log", sa.Column("guild_id", _t())),
         # AS.0.2 (alembic 0056): per-tenant auth feature gating. TEXT-of-JSON
         # on SQLite, JSONB on PG. Default '{}' = no AS opinion.
         ("tenants", sa.Column("auth_features", _t(), nullable=False, server_default="{}")),
@@ -882,7 +887,10 @@ CREATE TABLE IF NOT EXISTS debug_findings (
     tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
     -- Y1 row 7 (#277): project_id (alembic 0038). See artifacts above
     -- for the forward-reference rationale.
-    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    -- BP.B.1 (OP-249, alembic 0241): nullable until guild-aware
+    -- writers are updated.
+    guild_id        TEXT
 );
 
 CREATE TABLE IF NOT EXISTS decision_rules (
@@ -918,7 +926,10 @@ CREATE TABLE IF NOT EXISTS workflow_runs (
     tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
     -- Y1 row 7 (#277): project_id (alembic 0038). See artifacts above
     -- for the forward-reference rationale.
-    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL
+    project_id      TEXT REFERENCES projects(id) ON DELETE SET NULL,
+    -- BP.B.1 (OP-249, alembic 0241): nullable until guild-aware
+    -- writers are updated.
+    guild_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_workflow_runs_status ON workflow_runs(status);
@@ -949,7 +960,10 @@ CREATE TABLE IF NOT EXISTS audit_log (
     prev_hash       TEXT NOT NULL DEFAULT '',
     curr_hash       TEXT NOT NULL,
     session_id      TEXT,
-    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id)
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    -- BP.B.1 (OP-249, alembic 0241): nullable until guild-aware
+    -- writers are updated.
+    guild_id        TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
