@@ -96,7 +96,9 @@ _HTML_COMMENT_RE = re.compile(r"<!--[\s\S]*?-->")
 _HIDDEN_ELEMENT_RE = re.compile(
     r"<(?P<tag>div|span|p|section|aside|template|script|style)\b"
     r"(?=[^>]*(?:\bhidden\b|display\s*:\s*none|visibility\s*:\s*hidden|"
-    r"opacity\s*:\s*0|font-size\s*:\s*0))"
+    r"opacity\s*:\s*0|font-size\s*:\s*0|aria-hidden\s*=\s*['\"]?true|"
+    r"class\s*=\s*['\"][^'\"]*\b(?:hidden|sr-only|visually-hidden|"
+    r"screen-reader-text)\b))"
     r"[^>]*>[\s\S]*?</(?P=tag)>",
     re.IGNORECASE,
 )
