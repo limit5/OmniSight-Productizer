@@ -1053,12 +1053,96 @@ def _per_tenant_circuit_open(provider: str) -> bool:
         return False
 
 
+def _split_provider_chain(raw: str) -> list[str]:
+    """Return a normalised, de-duplicated provider chain."""
+
+    chain: list[str] = []
+    seen: set[str] = set()
+    for item in raw.split(","):
+        provider = item.strip().lower()
+        if not provider or provider in seen:
+            continue
+        chain.append(provider)
+        seen.add(provider)
+    return chain
+
+
+def _guild_model_override(guild: str | None) -> tuple[str | None, str | None]:
+    """Resolve BP.F's ``provider:model`` mapping for one Guild.
+
+    Missing or malformed mappings degrade to ``(None, None)`` so legacy
+    callers keep using the global provider/model pair.
+    """
+
+    if not guild:
+        return None, None
+    try:
+        from backend.agents import routing_policy
+
+        coerced = routing_policy._coerce_guild(guild)
+        if coerced is None:
+            return None, None
+        guild_specs, _ = routing_policy._load_model_routing_matrix()
+        model_spec = guild_specs.get(coerced.value, "")
+        provider = routing_policy._provider_from_model_spec(model_spec)
+        if provider is None:
+            return None, None
+        _, _, model = model_spec.partition(":")
+        return provider, model.strip() or None
+    except Exception as exc:
+        logger.debug("Guild model override unavailable for %r: %s", guild, exc)
+        return None, None
+
+
+def _fallback_chain_for_guild(
+    *,
+    guild: str | None,
+    primary_provider: str,
+    guild_provider: str | None,
+) -> list[str]:
+    """Build the provider failover order for a Guild-scoped LLM call."""
+
+    global_chain = _split_provider_chain(settings.llm_fallback_chain)
+    preferred = (guild_provider or "").strip().lower()
+    chain: list[str] = []
+    seen = {primary_provider.strip().lower()}
+    if guild and preferred and preferred not in seen:
+        chain.append(preferred)
+        seen.add(preferred)
+    for provider in global_chain:
+        if provider in seen:
+            continue
+        chain.append(provider)
+        seen.add(provider)
+    return chain
+
+
+def _model_for_provider(
+    provider: str,
+    *,
+    guild_provider: str | None,
+    guild_model: str | None,
+) -> str | None:
+    """Return the default model override appropriate for ``provider``."""
+
+    if provider == guild_provider and guild_model:
+        return guild_model
+    if provider == settings.llm_provider:
+        return settings.get_model_name()
+    if provider == "ollama":
+        ollama_default = (getattr(settings, "ollama_model", "") or "").strip()
+        if ollama_default:
+            return ollama_default
+    return None
+
+
 def get_llm(
     provider: str | None = None,
     model: str | None = None,
     bind_tools: list | None = None,
     *,
     allow_failover: bool = True,
+    guild: str | None = None,
 ) -> BaseChatModel | None:
     """Create or retrieve a cached LLM instance.
 
@@ -1074,6 +1158,10 @@ def get_llm(
             initialise, with no cascade. Used by
             :func:`get_cheapest_model` so a missing DeepSeek key does
             not silently route a utility call to flagship Opus.
+        guild: Optional BP.B Guild slug. When provided and no explicit
+            provider/model override was passed, BP.F's Guild mapping
+            supplies the primary provider/model. Failover then tries
+            that Guild's mapped provider before the global fallback tail.
 
     Returns:
         A LangChain chat model, or None if the provider can't be initialized.
@@ -1084,7 +1172,8 @@ def get_llm(
         logger.info("Token budget frozen — LLM disabled, using rule-based fallback")
         return None
 
-    provider = provider or settings.llm_provider
+    guild_provider, guild_model = _guild_model_override(guild)
+    provider = provider or guild_provider or settings.llm_provider
     # Per-provider model resolution:
     #   1. Explicit caller override wins.
     #   2. Primary provider → ``settings.get_model_name()`` which honours
@@ -1098,12 +1187,11 @@ def get_llm(
     #   4. Any other non-primary provider → ``None`` and the adapter
     #      falls back to its own hardcoded default.
     if model is None:
-        if provider == settings.llm_provider:
-            model = settings.get_model_name()
-        elif provider == "ollama":
-            ollama_default = (getattr(settings, "ollama_model", "") or "").strip()
-            if ollama_default:
-                model = ollama_default
+        model = _model_for_provider(
+            provider,
+            guild_provider=guild_provider,
+            guild_model=guild_model,
+        )
 
     if not _model_mapping_guardrail_allows(provider, model):
         return None
@@ -1131,10 +1219,12 @@ def get_llm(
                 return None
             # Primary provider also failed — record so its breaker opens.
             _record_provider_failure(provider, reason="primary_init_failed")
-            chain = [p.strip() for p in settings.llm_fallback_chain.split(",") if p.strip()]
+            chain = _fallback_chain_for_guild(
+                guild=guild,
+                primary_provider=provider,
+                guild_provider=guild_provider,
+            )
             for fallback_provider in chain:
-                if fallback_provider == provider:
-                    continue  # Skip the one that already failed
                 # Per-tenant per-key breaker takes precedence; legacy
                 # global cooldown is consulted as a secondary guard so
                 # operator-set bypasses still work (and tests that
@@ -1147,13 +1237,18 @@ def get_llm(
                     logger.debug("Skipping %s (legacy cooldown, failed %ds ago)", fallback_provider, int(time.time() - last_fail))
                     continue
                 try:
-                    llm = _create_llm(fallback_provider, None)
+                    fallback_model = _model_for_provider(
+                        fallback_provider,
+                        guild_provider=guild_provider,
+                        guild_model=guild_model,
+                    )
+                    llm = _create_llm(fallback_provider, fallback_model)
                 except Exception as exc:
                     _record_provider_failure(fallback_provider, reason=str(exc)[:120])
                     continue
                 if llm is not None:
                     provider = fallback_provider
-                    model = None
+                    model = fallback_model
                     _record_provider_success(fallback_provider)
                     logger.info("Failover: %s → %s", settings.llm_provider, fallback_provider)
                     break
