@@ -3792,6 +3792,47 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
     ),
     gitlabCi: getVal("ci", "gitlab_ci_enabled", "ci_gitlab_enabled") === "true",
   }
+  const activeProviderId = (
+    (dirty["llm_provider"] as string | undefined) ??
+    String(settingsData["llm"]?.["provider"] ?? "")
+  ).trim()
+  const activeProvider = providers.find((p) => p.id === activeProviderId)
+  const guildEnablementRows = [
+    {
+      id: "llm-routing",
+      label: "LLM routing",
+      detail: activeProviderId
+        ? `${activeProvider?.name ?? activeProviderId}${activeProvider?.configured ? " configured" : " selected"}`
+        : "no provider selected",
+      ready: activeProviderId.length > 0,
+    },
+    {
+      id: "git-forge",
+      label: "Git forge",
+      detail: tabStatus.git ? "repository credentials present" : "no repository credentials",
+      ready: tabStatus.git,
+    },
+    {
+      id: "code-review",
+      label: "Code review",
+      detail: tabStatus.gerrit ? "Gerrit enabled" : "Gerrit not enabled",
+      ready: tabStatus.gerrit,
+    },
+    {
+      id: "event-intake",
+      label: "Event intake",
+      detail: tabStatus.webhooks ? "webhooks or notifications configured" : "no webhook intake configured",
+      ready: tabStatus.webhooks,
+    },
+    {
+      id: "delivery-loop",
+      label: "Delivery loop",
+      detail: tabStatus.cicd ? "CI/CD trigger configured" : "CI/CD trigger not configured",
+      ready: tabStatus.cicd,
+    },
+  ] as const
+  const guildEnablementReadyCount = guildEnablementRows.filter((row) => row.ready).length
+  const guildEnablementReady = guildEnablementRows[0].ready && guildEnablementReadyCount >= 3
   const badgeClass = (ok: boolean) =>
     ok
       ? "bg-[var(--validation-emerald)]"
@@ -4079,7 +4120,7 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
               glance which tabs still need attention. Active probe results
               live inside the per-section TEST button. */}
           <Tabs defaultValue="git" className="w-full gap-2">
-            <TabsList className="h-auto w-full grid grid-cols-4 bg-[var(--background)] border border-[var(--border)] p-0.5">
+            <TabsList className="h-auto w-full grid grid-cols-5 bg-[var(--background)] border border-[var(--border)] p-0.5">
               <TabsTrigger
                 value="git"
                 className="font-mono text-[10px] tracking-fui py-1 data-[state=active]:bg-[var(--neural-blue)]/10 data-[state=active]:text-[var(--neural-blue)]"
@@ -4119,6 +4160,17 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                   title={badgeTitle(tabStatus.cicd)}
                 />
                 CI/CD
+              </TabsTrigger>
+              <TabsTrigger
+                value="guilds"
+                className="font-mono text-[10px] tracking-fui py-1 data-[state=active]:bg-[var(--neural-blue)]/10 data-[state=active]:text-[var(--neural-blue)]"
+                data-testid="guild-enablement-tab"
+              >
+                <span
+                  className={`inline-block w-1.5 h-1.5 rounded-full ${badgeClass(guildEnablementReady)}`}
+                  title={badgeTitle(guildEnablementReady)}
+                />
+                GUILDS
               </TabsTrigger>
             </TabsList>
 
@@ -4616,6 +4668,64 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                 />
                 <div className="font-mono text-[8px] text-[var(--muted-foreground)]/70 pt-1 leading-tight">
                   Uses the GitLab URL + Token from the Git tab.
+                </div>
+              </SettingsSection>
+            </TabsContent>
+
+            {/* BP.K.6 / Bootstrap C1 — Guild Enablement Step 6. This is a
+                readiness panel over existing integration state only: no new
+                runtime setting, schema field, or bootstrap gate is introduced
+                here. */}
+            <TabsContent value="guilds" className="space-y-2 mt-0">
+              <TabStatusBadge
+                status={guildEnablementReady ? "connected" : "not_configured"}
+                testId="tab-status-badge-guilds"
+              />
+              <SettingsSection
+                title="GUILD ENABLEMENT — BOOTSTRAP C1"
+                status={guildEnablementReady}
+                statusTestId="guild-enablement-section-dot"
+              >
+                <div
+                  data-testid="guild-enablement-section"
+                  data-ready-count={guildEnablementReadyCount}
+                  data-total-count={guildEnablementRows.length}
+                  className="space-y-2"
+                >
+                  <div className="flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1.5">
+                    <Users size={12} className="text-[var(--neural-blue)] shrink-0" />
+                    <div className="min-w-0 flex-1">
+                      <div className="font-mono text-[10px] text-[var(--foreground)]">
+                        Step 6 readiness: {guildEnablementReadyCount}/{guildEnablementRows.length}
+                      </div>
+                      <div className="font-mono text-[8px] text-[var(--muted-foreground)] leading-tight">
+                        C1 enables Guild routing once provider routing plus enough integration surfaces are present.
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-1.5">
+                    {guildEnablementRows.map((row) => (
+                      <div
+                        key={row.id}
+                        data-testid={`guild-enablement-row-${row.id}`}
+                        data-ready={row.ready ? "true" : "false"}
+                        className="flex items-center gap-2 rounded border border-[var(--border)] bg-[var(--background)] px-2 py-1.5"
+                      >
+                        {row.ready ? (
+                          <Check size={12} className="text-[var(--validation-emerald)] shrink-0" />
+                        ) : (
+                          <AlertTriangle size={12} className="text-[var(--hardware-orange)] shrink-0" />
+                        )}
+                        <span className="font-mono text-[10px] text-[var(--foreground)] w-24 shrink-0">
+                          {row.label}
+                        </span>
+                        <span className="font-mono text-[9px] text-[var(--muted-foreground)] truncate">
+                          {row.detail}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </SettingsSection>
             </TabsContent>
