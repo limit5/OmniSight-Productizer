@@ -65,6 +65,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -1292,6 +1293,184 @@ def classify_conflict_risk(
     return ConflictRisk(MergerRiskTier.low, ())
 
 
+def _classify_coupling(
+    file_paths: list[str],
+    workspace: str,
+) -> list[set[str]]:
+    """Return connected components for files that should be resolved together."""
+    deadline = time.monotonic() + 20.0
+    root = Path(workspace).expanduser().resolve()
+    targets = [_normalise_rel_path(path) for path in file_paths]
+    targets = [path for path in dict.fromkeys(targets) if path]
+    if not targets:
+        return []
+
+    parent = {path: path for path in targets}
+
+    def find(path: str) -> str:
+        while parent[path] != path:
+            parent[path] = parent[parent[path]]
+            path = parent[path]
+        return path
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    module_to_path: dict[str, str] = {}
+    definitions: dict[str, set[str]] = {}
+    references: dict[str, set[str]] = {}
+    imports: dict[str, set[str]] = {}
+
+    if root.is_dir():
+        try:
+            for path in root.rglob("*.py"):
+                if time.monotonic() > deadline:
+                    break
+                rel_path = _normalise_rel_path(path.relative_to(root).as_posix())
+                module_to_path[_module_name_for_path(rel_path)] = rel_path
+                if rel_path.endswith("/__init__.py"):
+                    module_to_path[_module_name_for_path(rel_path[:-12])] = rel_path
+        except OSError:
+            module_to_path = {}
+
+    for path in targets:
+        if time.monotonic() > deadline:
+            continue
+        tree = _parse_workspace_python(root, path)
+        if tree is None:
+            definitions[path] = set()
+            references[path] = set()
+            imports[path] = set()
+            continue
+        definitions[path] = _top_level_symbols(tree)
+        references[path] = _referenced_symbols(tree)
+        imports[path] = _imported_modules(tree)
+
+    target_set = set(targets)
+    for path in targets:
+        for imported in imports.get(path, set()):
+            imported_path = _resolve_imported_path(imported, module_to_path)
+            if imported_path in target_set and imported_path != path:
+                union(path, imported_path)
+
+    for left in targets:
+        for right in targets:
+            if left == right:
+                continue
+            if definitions.get(left, set()) & references.get(right, set()):
+                union(left, right)
+
+    for left in targets:
+        for right in targets:
+            if left != right and _is_test_source_pair(left, right):
+                union(left, right)
+
+    components: dict[str, set[str]] = {}
+    for path in targets:
+        components.setdefault(find(path), set()).add(path)
+    return list(components.values())
+
+
+def _normalise_rel_path(path: str) -> str:
+    return path.strip().replace("\\", "/").lstrip("./")
+
+
+def _module_name_for_path(path: str) -> str:
+    path = _normalise_rel_path(path)
+    if path.endswith(".py"):
+        path = path[:-3]
+    if path.endswith("/__init__"):
+        path = path[:-9]
+    return path.replace("/", ".")
+
+
+def _parse_workspace_python(root: Path, rel_path: str) -> ast.AST | None:
+    target = (root / rel_path).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None
+    try:
+        source = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    try:
+        return ast.parse(source, filename=rel_path)
+    except SyntaxError:
+        return None
+
+
+def _top_level_symbols(tree: ast.AST) -> set[str]:
+    symbols: set[str] = set()
+    for node in getattr(tree, "body", []):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            symbols.add(node.name)
+    return symbols
+
+
+def _referenced_symbols(tree: ast.AST) -> set[str]:
+    refs: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            refs.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            refs.add(node.attr)
+    return refs
+
+
+def _imported_modules(tree: ast.AST) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            modules.add(node.module)
+            modules.update(
+                f"{node.module}.{alias.name}" for alias in node.names
+                if alias.name != "*"
+            )
+    return modules
+
+
+def _resolve_imported_path(
+    imported: str,
+    module_to_path: dict[str, str],
+) -> str | None:
+    module = imported
+    while module:
+        if module in module_to_path:
+            return module_to_path[module]
+        module = module.rpartition(".")[0]
+    return None
+
+
+def _is_test_source_pair(left: str, right: str) -> bool:
+    return (
+        _source_for_test_path(left) == right
+        or _source_for_test_path(right) == left
+        or _test_targets_package(left, right)
+        or _test_targets_package(right, left)
+    )
+
+
+def _source_for_test_path(path: str) -> str | None:
+    if not path.startswith("backend/tests/test_") or not path.endswith(".py"):
+        return None
+    name = path.removeprefix("backend/tests/test_")
+    return f"backend/{name}"
+
+
+def _test_targets_package(test_path: str, source_path: str) -> bool:
+    source = _source_for_test_path(test_path)
+    if source is None or not source_path.endswith(".py"):
+        return False
+    package = source.removesuffix(".py")
+    return source_path.startswith(f"{package}/")
+
+
 _PY_SIGNATURE_RE = re.compile(r"^\s*(?:async\s+def|def)\s+\w+\s*\((?P<params>[^)]*)\)")
 _IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
 
@@ -1570,12 +1749,27 @@ async def resolve_conflict(
     # ── 3. Multi-file gate ───────────────────────────────────────
     extra = [p for p in request.additional_files if p and p != request.file_path]
     if extra:
+        coupling_components = _classify_coupling(
+            [request.file_path, *extra],
+            request.workspace or os.getcwd(),
+        )
+        coupling_summary = [sorted(component) for component in coupling_components]
+        logger.info(
+            "merger_agent: multi-file coupling summary "
+            "jira=%s change=%s components=%s",
+            request.jira_ticket or "(none)",
+            request.change_number or request.change_id or "(unknown)",
+            coupling_summary,
+        )
         outcome = _build_abstain(
             request, MergerReason.abstained_multi_file,
             confidence=0.0,
             rationale=(f"patchset touches {len(extra) + 1} files; "
                        f"merger only auto-votes on single-file conflicts"),
-            metadata={"additional_files": extra},
+            metadata={
+                "additional_files": extra,
+                "coupling_components": coupling_summary,
+            },
         )
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
@@ -2122,6 +2316,7 @@ __all__ = [
     "SYSTEM_PROMPT",
     "TestRunResult",
     "TestRunner",
+    "_classify_coupling",
     "build_context_pack",
     "build_prompt",
     "build_review_prompt",

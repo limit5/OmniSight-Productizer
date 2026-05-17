@@ -168,6 +168,16 @@ def _audit_sink():
     return events, sink
 
 
+def _write_file(root, rel_path: str, text: str) -> None:
+    path = root / rel_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+def _sorted_components(components: list[set[str]]) -> list[list[str]]:
+    return sorted(sorted(component) for component in components)
+
+
 @pytest.fixture(autouse=True)
 def _reset_counters():
     ma.reset_failure_counts_for_tests()
@@ -285,6 +295,112 @@ class TestParseConflict:
         blocks = ma.parse_conflict_block(text)
         assert len(blocks) == 1
         assert blocks[0].has_nested_markers is True
+
+
+class TestClassifyCoupling:
+
+    def test_independent_files_stay_separate(self, tmp_path):
+        _write_file(tmp_path, "backend/alpha.py", "def alpha():\n    return 1\n")
+        _write_file(tmp_path, "backend/beta.py", "def beta():\n    return 2\n")
+
+        components = ma._classify_coupling(
+            ["backend/alpha.py", "backend/beta.py"], str(tmp_path),
+        )
+
+        assert _sorted_components(components) == [
+            ["backend/alpha.py"],
+            ["backend/beta.py"],
+        ]
+
+    def test_import_edge_connects_files(self, tmp_path):
+        _write_file(
+            tmp_path,
+            "backend/alpha.py",
+            "from backend.beta import Beta\n\nvalue = Beta()\n",
+        )
+        _write_file(tmp_path, "backend/beta.py", "class Beta:\n    pass\n")
+
+        components = ma._classify_coupling(
+            ["backend/alpha.py", "backend/beta.py"], str(tmp_path),
+        )
+
+        assert _sorted_components(components) == [
+            ["backend/alpha.py", "backend/beta.py"],
+        ]
+
+    def test_symbol_overlap_connects_references(self, tmp_path):
+        _write_file(tmp_path, "backend/provider.py", "def shared_symbol():\n    pass\n")
+        _write_file(
+            tmp_path,
+            "backend/consumer.py",
+            "def call():\n    return shared_symbol()\n",
+        )
+
+        components = ma._classify_coupling(
+            ["backend/provider.py", "backend/consumer.py"], str(tmp_path),
+        )
+
+        assert _sorted_components(components) == [
+            ["backend/consumer.py", "backend/provider.py"],
+        ]
+
+    def test_test_source_pair_connects_file_and_test(self, tmp_path):
+        _write_file(tmp_path, "backend/widget.py", "def render():\n    return 'ok'\n")
+        _write_file(
+            tmp_path,
+            "backend/tests/test_widget.py",
+            "def test_render():\n    assert True\n",
+        )
+
+        components = ma._classify_coupling(
+            ["backend/widget.py", "backend/tests/test_widget.py"], str(tmp_path),
+        )
+
+        assert _sorted_components(components) == [
+            ["backend/tests/test_widget.py", "backend/widget.py"],
+        ]
+
+    def test_mixed_signals_form_transitive_components(self, tmp_path):
+        _write_file(
+            tmp_path,
+            "backend/alpha.py",
+            "from backend.beta import Beta\n\ndef build():\n    return Beta()\n",
+        )
+        _write_file(tmp_path, "backend/beta.py", "class Beta:\n    pass\n")
+        _write_file(
+            tmp_path,
+            "backend/gamma.py",
+            "def use_beta():\n    return Beta()\n",
+        )
+        _write_file(tmp_path, "backend/loose.py", "def loose():\n    return None\n")
+
+        components = ma._classify_coupling(
+            [
+                "backend/alpha.py",
+                "backend/beta.py",
+                "backend/gamma.py",
+                "backend/loose.py",
+            ],
+            str(tmp_path),
+        )
+
+        assert _sorted_components(components) == [
+            ["backend/alpha.py", "backend/beta.py", "backend/gamma.py"],
+            ["backend/loose.py"],
+        ]
+
+    def test_syntax_errors_degrade_to_singleton(self, tmp_path):
+        _write_file(tmp_path, "backend/broken.py", "def broken(:\n")
+        _write_file(tmp_path, "backend/ok.py", "def ok():\n    return True\n")
+
+        components = ma._classify_coupling(
+            ["backend/broken.py", "backend/ok.py"], str(tmp_path),
+        )
+
+        assert _sorted_components(components) == [
+            ["backend/broken.py"],
+            ["backend/ok.py"],
+        ]
 
 
 class TestSecuritySensitive:
@@ -631,7 +747,13 @@ def test_many_ai_votes_without_human_rejected():
 # ──────────────────────────────────────────────────────────────
 
 
-def test_multi_file_abstain():
+def test_multi_file_abstain(tmp_path, caplog):
+    _write_file(tmp_path, "backend/greetings.py", "def greet(name):\n    return name\n")
+    _write_file(
+        tmp_path,
+        "backend/utils.py",
+        "from backend.greetings import greet\n\nvalue = greet('Ada')\n",
+    )
     llm = _FakeLLM({
         "resolved_block": "ok\n", "confidence": 0.99,
         "rationale": "trivial", "new_logic_detected": False,
@@ -642,9 +764,19 @@ def test_multi_file_abstain():
         test_runner=_test_runner(True),
     )
     req = _base_request(additional_files=["backend/utils.py"])
+    req.workspace = str(tmp_path)
+    req.jira_ticket = "OP-1424"
+    caplog.set_level(logging.INFO, logger=ma.__name__)
+
     outcome = _run(ma.resolve_conflict(req, deps=deps))
+
     assert outcome.reason is ma.MergerReason.abstained_multi_file
     assert llm.calls == []
+    assert outcome.metadata["coupling_components"] == [
+        ["backend/greetings.py", "backend/utils.py"],
+    ]
+    assert "multi-file coupling summary jira=OP-1424" in caplog.text
+    assert "backend/utils.py" in caplog.text
 
 
 def test_oversized_conflict_abstain():
