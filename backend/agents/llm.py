@@ -75,6 +75,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -913,12 +914,74 @@ _cache: dict[str, BaseChatModel] = {}
 _provider_failures: dict[str, float] = {}  # provider → last_failure_timestamp
 PROVIDER_COOLDOWN = 300  # 5 minutes — don't retry a failed provider within this window
 _PROVIDER_FAILURES_MAX = 256  # cap to bound memory
+_MODEL_MAPPING_MODE_ENV = "OMNISIGHT_MODEL_MAPPING_MODE"
+_MODEL_MAPPING_MODES = frozenset({"enforce", "warn", "advisory"})
 
 # Lock guards composite read-modify-write on _provider_failures (record +
 # prune). CPython single dict ops are atomic, but iteration during prune
 # from another thread/coroutine would raise RuntimeError.
 import threading as _threading
 _provider_failures_lock = _threading.Lock()
+
+
+def _model_mapping_guardrail_allows(provider: str, model: str | None) -> bool:
+    """Apply BP.F's provider mapping guardrail for one ``get_llm()`` call."""
+    try:
+        from backend.agents import routing_policy
+        import yaml  # pyyaml — already used by routing_policy.
+
+        raw = yaml.safe_load(
+            routing_policy._MODEL_MAPPING_PATH.read_text(encoding="utf-8")
+        ) or {}
+    except OSError:
+        return True
+    except Exception as exc:
+        logger.warning("model mapping guardrail config unavailable: %s", exc)
+        return True
+
+    if isinstance(raw, dict):
+        raw_providers = raw.get("providers")
+        configured_mode = raw.get("mode")
+    else:
+        raw_providers = {}
+        configured_mode = None
+    providers = {
+        str(item).strip().lower()
+        for item in raw_providers
+        if isinstance(raw_providers, dict) and str(item).strip()
+    }
+
+    if not providers:
+        return True
+
+    if not isinstance(provider, str):
+        return True
+    provider_id = provider.strip().lower()
+    if provider_id in providers:
+        return True
+
+    mode = (
+        os.environ.get(_MODEL_MAPPING_MODE_ENV, "").strip().lower()
+        or (configured_mode.strip().lower() if isinstance(configured_mode, str) else "")
+        or "advisory"
+    )
+    if mode not in _MODEL_MAPPING_MODES:
+        logger.warning(
+            "Unknown %s=%r; using advisory model mapping mode",
+            _MODEL_MAPPING_MODE_ENV,
+            mode,
+        )
+        mode = "advisory"
+    message = (
+        "LLM provider mapping violation: provider=%r model=%r is absent "
+        "from configs/model_mapping.yaml providers=%r"
+    )
+    args = (provider, model, sorted(providers))
+    if mode == "enforce":
+        logger.error(message, *args)
+        return False
+    (logger.warning if mode == "warn" else logger.info)(message, *args)
+    return True
 
 
 def _record_provider_failure(provider: str, ts: float | None = None,
@@ -1033,6 +1096,9 @@ def get_llm(
             ollama_default = (getattr(settings, "ollama_model", "") or "").strip()
             if ollama_default:
                 model = ollama_default
+
+    if not _model_mapping_guardrail_allows(provider, model):
+        return None
 
     cache_key = f"{provider}:{model}:{id(bind_tools) if bind_tools else 'none'}"
     cached = _cache.get(cache_key)
