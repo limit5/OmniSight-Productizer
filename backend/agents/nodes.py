@@ -11,7 +11,7 @@ Graph topology (high level)
 1. ``orchestrator_node`` — decides conversational vs task and, for
    tasks, picks the primary specialist (firmware / software /
    validator / reporter / reviewer / general).
-2. Specialist nodes (built by :func:`_specialist_node_factory` and
+2. Guild nodes (built by :func:`_guild_node_factory` and
    exported as ``firmware_node``, ``software_node``, …) — plan the
    work and either answer directly or emit ``tool_calls``.
 3. ``tool_executor_node`` — runs the requested tools (in the agent's
@@ -548,8 +548,12 @@ def _maybe_emit_vite_retry_budget(state: GraphState) -> dict:
     }
 
 
-def _specialist_node_factory(agent_type: str):
-    """Build a specialist node bound to ``agent_type``.
+def _guild_node_factory(
+    guild: str | None = None,
+    *,
+    agent_type: str | None = None,
+):
+    """Build a Guild node bound to ``guild``.
 
     Produces the async coroutine exported as e.g. ``firmware_node``
     or ``software_node``. The returned node:
@@ -574,9 +578,20 @@ def _specialist_node_factory(agent_type: str):
       per-agent answer from ``_FALLBACK_ANSWERS``.
 
     The returned function has ``__name__`` set to
-    ``<agent_type>_node`` so LangGraph debugging output is
-    meaningful.
+    ``<guild>_node`` so LangGraph debugging output is meaningful.
+
+    ``agent_type`` remains accepted as the legacy keyword alias while
+    downstream prompt/tool/action registries still use those slug
+    values as their lookup keys.
     """
+    if guild is None:
+        if agent_type is None:
+            raise TypeError("_guild_node_factory() missing required argument: 'guild'")
+        guild = agent_type
+    elif agent_type is not None and agent_type != guild:
+        raise ValueError("guild and legacy agent_type alias must match")
+
+    agent_type = guild
 
     async def node(state: GraphState) -> dict:
         cmd = state.user_command
@@ -816,6 +831,11 @@ def _specialist_node_factory(agent_type: str):
 
     node.__name__ = f"{agent_type}_node"
     return node
+
+
+def _specialist_node_factory(agent_type: str):
+    """Backward-compatible alias for :func:`_guild_node_factory`."""
+    return _guild_node_factory(agent_type=agent_type)
 
 
 _FALLBACK_ANSWERS = {
@@ -1899,9 +1919,9 @@ def summarizer_node(state: GraphState) -> dict:
 #  Exported node instances
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-firmware_node = _specialist_node_factory("firmware")
-software_node = _specialist_node_factory("software")
-validator_node = _specialist_node_factory("validator")
-reporter_node = _specialist_node_factory("reporter")
-reviewer_node = _specialist_node_factory("reviewer")
-general_node = _specialist_node_factory("general")
+firmware_node = _guild_node_factory("firmware")
+software_node = _guild_node_factory("software")
+validator_node = _guild_node_factory("validator")
+reporter_node = _guild_node_factory("reporter")
+reviewer_node = _guild_node_factory("reviewer")
+general_node = _guild_node_factory("general")
