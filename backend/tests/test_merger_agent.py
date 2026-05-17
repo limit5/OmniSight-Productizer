@@ -1134,22 +1134,25 @@ def test_build_prompt_contains_system_and_blocks():
     assert "backend/greetings.py" in prompt
 
 
-def test_op1404_prompt_contains_take_both_rubric_and_version():
+def test_op1435_prompt_contains_take_both_rubric_and_version():
     blocks = ma.parse_conflict_block(SIMPLE_CONFLICT)
     prompt = ma.build_prompt(_base_request(), blocks)
 
-    assert ma.MERGER_PROMPT_VERSION == "merger-prompt-v2-op1404"
+    assert ma.MERGER_PROMPT_VERSION == "merger-prompt-v3-op1435"
     assert "Take-both feature-preservation rubric" in prompt
     assert "ADD-vs-ADD distinct symbols" in prompt
     assert "RENAME DETECTION" in prompt
     assert "DOCSTRING COLLISION" in prompt
     assert "SIGNATURE OVERLAP" in prompt
+    assert "SPLIT TESTS WITH SHARED SETUP" in prompt
     assert "ABSTAIN BIAS" in prompt
     assert "both sides add distinct symbols" in prompt
     assert "same shape, similar docstring, or" in prompt
     assert "identical body" in prompt
     assert "docstring entries for the same parameter" in prompt
     assert "keep both parameters in the resolved signature" in prompt
+    assert "do not collapse them into one merged test method" in prompt
+    assert "Duplicate the complete setup in each method" in prompt
     assert "name the unresolved reason class" in prompt
 
 
