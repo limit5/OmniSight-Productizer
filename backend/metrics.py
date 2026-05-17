@@ -292,7 +292,7 @@ if _AVAILABLE:
     )
     # `skill_load_latency_ms` — wall-clock time each skill-loading
     # call took. Buckets go up to 1s because the most expensive
-    # phase (scanning configs/roles/** for the catalog + reading
+    # phase (scanning configs/guilds/** for the catalog + reading
     # skill bodies) should normally finish in <50ms; a 1s+ bucket
     # is a red flag that filesystem I/O or YAML parsing has stalled.
     skill_load_latency_ms = Histogram(
