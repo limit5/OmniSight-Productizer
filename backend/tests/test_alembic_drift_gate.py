@@ -196,12 +196,17 @@ def test_check_drift_unreachable_db_returns_two():
 # ── Synthetic Integration AC: subprocess exits 1 within 3 s ──────────
 
 
-def test_synthetic_drift_subprocess_fails_fast(tmp_path):
-    """Integration AC: image-at-0200 against DB-at-bogus-rev → exit 1 < 3 s
-    with structured diagnostic on stderr.
+def test_synthetic_divergent_drift_subprocess_fails_fast(tmp_path):
+    """Integration AC: image-at-real-head against DB-at-unknown-rev →
+    divergent → exit 1 < 3 s with structured diagnostic on stderr.
+
+    Uses a synthetic revision string the alembic DAG has never seen so
+    the classifier falls through to ``divergent``. ``image_ahead`` is
+    the rolling-deploy case which since OP-1448 exits 0 (covered by
+    ``test_image_ahead_subprocess_defers_to_startup_hook``).
     """
     db = tmp_path / "synthetic_drift.db"
-    _make_sqlite_with_version(db, version="0200")
+    _make_sqlite_with_version(db, version="deadbeef_not_a_real_rev")
 
     env = {
         **os.environ,
@@ -245,13 +250,64 @@ def test_synthetic_drift_subprocess_fails_fast(tmp_path):
     payload = json.loads(json_lines[-1])
     assert payload["event"] == "alembic_drift_gate"
     assert payload["reason"] == "alembic_head_drift"
+    assert payload["db_head"] == ["deadbeef_not_a_real_rev"]
+    assert payload["image_head"], "image_head must be reported"
+    assert payload["drift_direction"] == "divergent"
+
+
+def test_image_ahead_subprocess_defers_to_startup_hook(tmp_path):
+    """OP-1448 AC: image-ahead drift exits 0 (was 1) so the uvicorn
+    lifespan can reach OP-1166 ``maybe_run_startup_upgrade``.
+
+    Pins the DB to an old numeric ancestor (``0200``) of the current
+    image head; the classifier returns ``image_ahead`` and ``main()``
+    demotes the diagnostic to a warning + exits 0 instead of fail-
+    closing the container. Before the fix this exited 1 and put the
+    backend into CrashLoopBackOff (v0.5.0-rc2-hotfix1 incident,
+    2026-05-18).
+    """
+    db = tmp_path / "image_ahead.db"
+    _make_sqlite_with_version(db, version="0200")
+
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(REPO_ROOT),
+        "OMNISIGHT_DATABASE_PATH": str(db),
+    }
+    for k in (
+        "SQLALCHEMY_URL",
+        "OMNISIGHT_DATABASE_URL",
+        "DATABASE_URL",
+        "OMNISIGHT_SKIP_ALEMBIC_DRIFT_GATE",
+    ):
+        env.pop(k, None)
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "backend.alembic_drift_gate"],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert proc.returncode == 0, (
+        f"expected image_ahead to exit 0 (defer to startup hook), got "
+        f"{proc.returncode}; stderr={proc.stderr!r}"
+    )
+
+    json_lines = [
+        line for line in proc.stderr.strip().splitlines() if line.startswith("{")
+    ]
+    assert json_lines, f"no JSON diagnostic on stderr: {proc.stderr!r}"
+    payload = json.loads(json_lines[-1])
+    assert payload["event"] == "alembic_drift_gate"
+    assert payload["level"] == "warning"
+    assert payload["reason"] == "image_ahead_deferring_to_startup_hook"
+    assert payload["drift_direction"] == "image_ahead"
     assert payload["db_head"] == ["0200"]
     assert payload["image_head"], "image_head must be reported"
-    assert payload["drift_direction"] in {
-        "image_ahead",
-        "db_ahead",
-        "divergent",
-    }
+    assert "maybe_run_startup_upgrade" in payload["remediation_hint"]
 
 
 def test_skip_env_short_circuits_to_zero(tmp_path):

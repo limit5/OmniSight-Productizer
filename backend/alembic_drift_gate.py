@@ -15,21 +15,27 @@ ExecStartPre) and:
 
 * Compares the script-directory heads (image's view of the migration tree)
   against ``MigrationContext.get_current_heads()`` (DB's view).
-* On mismatch: prints a structured JSON diagnostic to stderr
-  (``image_head``, ``db_head``, ``drift_direction``) and exits ``1``.
-  **No recovery is attempted** — operator decides whether to upgrade the
-  DB (``alembic upgrade head``) or roll the image back to a version whose
-  heads match the DB. Recovery here would mask the divergence and was the
-  exact failure mode the incident exposed.
 * On match: exits ``0`` so the next stage in CMD/ExecStart can run.
+* On ``image_ahead`` drift (forward linear — image newer than DB, the
+  normal rolling-deploy case): exits ``0`` after emitting a warning
+  diagnostic, deferring auto-recovery to OP-1166
+  ``maybe_run_startup_upgrade`` in the uvicorn lifespan (OP-1448).
+* On ``db_ahead`` or ``divergent`` drift: prints a structured JSON
+  ``fatal`` diagnostic to stderr (``image_head``, ``db_head``,
+  ``drift_direction``) and exits ``1``. **No recovery is attempted** —
+  the image is older than the DB, or the trees have diverged, and no
+  auto-recovery is safe. Operator must roll the image forward, restore
+  from backup, or otherwise reconcile manually.
 
 Exit codes:
 
-* ``0`` — heads match, OR the gate was intentionally bypassed via
+* ``0`` — heads match, OR drift is ``image_ahead`` (deferred to startup
+  hook, OP-1448), OR the gate was intentionally bypassed via
   ``OMNISIGHT_SKIP_ALEMBIC_DRIFT_GATE=1`` (emergency escape hatch), OR
   the DB has no ``alembic_version`` table yet (fresh install — migrations
   have not been run, no drift possible).
-* ``1`` — drift detected. Structured diagnostic on stderr.
+* ``1`` — ``db_ahead`` or ``divergent`` drift. Structured diagnostic
+  on stderr.
 * ``2`` — drift check itself failed (script dir unreadable, DB
   unreachable). Operator must investigate before letting backend start.
 
@@ -271,6 +277,29 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     code, payload = check_drift(db_url, _script_dir_path())
+    # OP-1448: forward linear drift (image ahead of DB) is the normal
+    # rolling-deploy case that OP-1166 ``maybe_run_startup_upgrade``
+    # handles inside the uvicorn lifespan (registered in
+    # ``backend/main.py``). Fail-closing here put the container into a
+    # CrashLoopBackOff that never reached the lifespan hook — the
+    # v0.5.0-rc2-hotfix1 deploy (2026-05-18) had to set
+    # ``OMNISIGHT_SKIP_ALEMBIC_DRIFT_GATE=1`` in prod to recover.
+    # Demote ``image_ahead`` to a warning and exit 0 so the gate defers
+    # to the well-tested startup hook. ``db_ahead`` (image stale) and
+    # ``divergent`` (botched merge / partial restore) still fail-closed:
+    # no auto-recovery is safe for those, the operator must act.
+    if code == 1 and payload.get("drift_direction") == "image_ahead":
+        payload = {
+            **payload,
+            "level": "warning",
+            "reason": "image_ahead_deferring_to_startup_hook",
+            "remediation_hint": (
+                "Container continues; OP-1166 maybe_run_startup_upgrade "
+                "will run `alembic upgrade head` in the uvicorn lifespan"
+            ),
+        }
+        _emit(payload)
+        return 0
     _emit(payload)
     return code
 
