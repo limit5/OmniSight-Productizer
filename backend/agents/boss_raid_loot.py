@@ -42,14 +42,15 @@ def boss_raid_loot_reward(
     agent_id: str,
     raid_id: str,
     boss_raid_completed: bool,
-    boss_raid_eligible: bool = True,
+    boss_raid_eligible: bool = False,
     talent_points: int = BOSS_RAID_TALENT_POINTS,
 ) -> BossRaidLootReward | None:
     """Return boss-only loot after a completed eligible boss raid.
 
     Non-boss tasks, incomplete raids, or raids that failed the W21.1 eligibility
-    gate return ``None`` so callers can evaluate the helper from a generic task
-    completion path without accidentally granting exclusive loot.
+    gate return ``None``. The eligibility signal is opt-in so callers can
+    evaluate the helper from a generic task-completion path without accidentally
+    granting exclusive loot.
     """
 
     if not _clean_bool(boss_raid_completed, field="boss_raid_completed"):
