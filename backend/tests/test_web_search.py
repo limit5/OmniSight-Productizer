@@ -30,6 +30,18 @@ def test_runtime_config_defaults_to_disabled_with_five_dollar_budget(monkeypatch
     assert config.daily_budget_usd == DEFAULT_DAILY_BUDGET_USD
 
 
+def test_runtime_config_reads_trimmed_env_fallbacks(monkeypatch) -> None:
+    from backend.web_search import WebSearchRuntimeConfig
+
+    monkeypatch.setenv("OMNISIGHT_WEB_SEARCH_PROVIDER", " TAVILY ")
+    monkeypatch.setenv("OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD", " 0.25 ")
+
+    config = WebSearchRuntimeConfig.from_settings()
+
+    assert config.provider == "tavily"
+    assert config.daily_budget_usd == 0.25
+
+
 @pytest.mark.parametrize("provider", ["none", "tavily", "exa", "perplexity"])
 def test_runtime_config_accepts_declared_provider_set(provider: str) -> None:
     from backend.web_search import WebSearchRuntimeConfig
@@ -211,6 +223,27 @@ def test_in_memory_cost_store_refund_never_goes_negative() -> None:
     assert store.spend_today("tenant-a", now=now) == 0.0
 
 
+def test_default_cost_store_falls_back_to_in_memory_when_redis_unavailable(
+    monkeypatch,
+    caplog,
+) -> None:
+    import backend.web_search as web_search
+    from backend.web_search import InMemoryWebSearchCostStore
+
+    class _BrokenRedisStore:
+        def __init__(self, redis_url: str) -> None:
+            assert redis_url == "redis://localhost:6379/0"
+            raise RuntimeError("redis unavailable")
+
+    monkeypatch.setenv("OMNISIGHT_REDIS_URL", "redis://localhost:6379/0")
+    monkeypatch.setattr(web_search, "RedisWebSearchCostStore", _BrokenRedisStore)
+
+    store = web_search._default_cost_store()
+
+    assert isinstance(store, InMemoryWebSearchCostStore)
+    assert "using in-memory" in caplog.text
+
+
 def test_cost_tracker_raises_budget_exceeded_without_reserving_overrun() -> None:
     from backend.web_search import (
         InMemoryWebSearchCostStore,
@@ -283,6 +316,56 @@ def test_tavily_client_requires_api_key_before_rate_or_cost_gates() -> None:
 
     with pytest.raises(WebSearchCredentialMissing):
         client.search("latest Intel guidance", tenant_id="tenant-a")
+
+
+def test_tavily_client_uses_legacy_tavily_api_key_env_fallback(monkeypatch) -> None:
+    from backend.web_search import (
+        InMemoryWebSearchCostStore,
+        TavilyWebSearchClient,
+        WebSearchCostTracker,
+    )
+
+    calls: list[dict] = []
+
+    class _Gate:
+        def check(self, tenant_id: str) -> None:
+            return None
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"results": []}
+
+    class _HttpClient:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN003
+            return False
+
+        def post(self, endpoint: str, *, json: dict, headers: dict):  # noqa: A002
+            calls.append({"endpoint": endpoint, "json": json, "headers": headers})
+            return _Response()
+
+    monkeypatch.delenv("OMNISIGHT_TAVILY_API_KEY", raising=False)
+    monkeypatch.setenv("TAVILY_API_KEY", "legacy-tvly-test")
+
+    response = TavilyWebSearchClient(
+        rate_gate=_Gate(),
+        cost_tracker=WebSearchCostTracker(
+            store=InMemoryWebSearchCostStore(),
+            daily_budget_usd=1.0,
+        ),
+        client_factory=_HttpClient,
+    ).search("latest guidance", tenant_id="tenant-a")
+
+    assert response.error == ""
+    assert calls[0]["headers"]["Authorization"] == "Bearer legacy-tvly-test"
 
 
 def test_tavily_client_posts_bounded_payload_and_parses_results() -> None:
@@ -428,6 +511,54 @@ def test_tavily_client_refunds_cost_reservation_on_provider_http_error() -> None
     response = client.search("latest guidance", tenant_id="tenant-a", now=now)
 
     assert response.error.startswith("HTTPStatusError: boom")
+    assert response.cost_usd_estimated == 0.008
+    assert store.spend_today("tenant-a", now=now) == 0.0
+
+
+def test_tavily_client_refunds_cost_reservation_on_provider_json_error() -> None:
+    from backend.web_search import (
+        InMemoryWebSearchCostStore,
+        TavilyWebSearchClient,
+        WebSearchCostTracker,
+    )
+
+    store = InMemoryWebSearchCostStore()
+
+    class _Gate:
+        def check(self, tenant_id: str) -> None:
+            return None
+
+    class _Response:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            raise ValueError("invalid json")
+
+    class _HttpClient:
+        def __init__(self, **kwargs):  # noqa: ANN003
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN003
+            return False
+
+        def post(self, endpoint: str, *, json: dict, headers: dict):  # noqa: A002
+            return _Response()
+
+    client = TavilyWebSearchClient(
+        api_key="tvly-test",
+        rate_gate=_Gate(),
+        cost_tracker=WebSearchCostTracker(store=store, daily_budget_usd=1.0),
+        client_factory=_HttpClient,
+    )
+    now = datetime(2026, 5, 5, tzinfo=timezone.utc)
+
+    response = client.search("latest guidance", tenant_id="tenant-a", now=now)
+
+    assert response.error == "ValueError: invalid json"
     assert response.cost_usd_estimated == 0.008
     assert store.spend_today("tenant-a", now=now) == 0.0
 
