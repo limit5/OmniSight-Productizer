@@ -110,6 +110,34 @@ def _extract_failed_test(output: str) -> str:
     return ""
 
 
+def _pytest_runtime_seconds(output: str) -> float:
+    total = 0.0
+    duration_re = re.compile(
+        r"^\s*(?P<seconds>\d+(?:\.\d+)?)s\s+(?P<phase>setup|call|teardown)\s+"
+    )
+    for line in output.splitlines():
+        match = duration_re.match(line)
+        if match and match.group("phase") == "call":
+            total += float(match.group("seconds"))
+    return total
+
+
+def _classify_pytest_timeout(output: str, timeout: float) -> str:
+    if _pytest_runtime_seconds(output) > (timeout * 0.5):
+        return "slow"
+    return "hung"
+
+
+def _timeout_output(stdout: str | bytes | None, stderr: str | bytes | None) -> str:
+    parts: list[str] = []
+    for value in (stdout, stderr):
+        if isinstance(value, bytes):
+            parts.append(value.decode(errors="replace"))
+        elif value:
+            parts.append(value)
+    return "".join(parts)
+
+
 def _remaining_seconds(deadline: float) -> float:
     return max(0.1, deadline - time.monotonic())
 
@@ -419,6 +447,7 @@ class VerifyRunResult:
     ok: bool
     stage: str
     summary: str
+    verify_outcome: str = ""
     command: str = ""
     stdout: str = ""
     scratch_path: str = ""
@@ -467,6 +496,7 @@ class _DefaultResolutionVerifier:
                         f"verify step exceeded {VERIFY_TIMEOUT_SECONDS}s "
                         "before push"
                     ),
+                    verify_outcome="hung",
                 ),
             )
         except Exception as exc:
@@ -520,7 +550,7 @@ class _DefaultResolutionVerifier:
                 k_expr = " or ".join(identifiers)
                 pytest_args = [
                     "python3", "-m", "pytest", "-k", k_expr,
-                    f"--timeout={PYTEST_TIMEOUT_SECONDS}", "-x",
+                    f"--timeout={PYTEST_TIMEOUT_SECONDS}", "--durations=0", "-x",
                 ]
                 result = self._run(
                     pytest_args,
@@ -535,6 +565,7 @@ class _DefaultResolutionVerifier:
                     ok=True,
                     stage="pytest",
                     summary="pytest skipped: no changed identifiers extracted",
+                    verify_outcome="green",
                     scratch_path=scratch,
                 )
 
@@ -582,11 +613,19 @@ class _DefaultResolutionVerifier:
                 timeout=timeout,
             )
         except subprocess.TimeoutExpired as exc:
-            output = (exc.stdout or "") + (exc.stderr or "")
+            output = _timeout_output(exc.stdout, exc.stderr)
+            verify_outcome = (
+                _classify_pytest_timeout(output, timeout)
+                if stage == "pytest" else "hung"
+            )
             return VerifyRunResult(
                 ok=False,
                 stage=stage,
-                summary=f"{stage} timed out after {timeout:.1f}s",
+                summary=(
+                    f"{stage} timed out after {timeout:.1f}s "
+                    f"(verify_outcome={verify_outcome})"
+                ),
+                verify_outcome=verify_outcome,
                 command=command,
                 stdout=output,
                 scratch_path=cwd,
@@ -599,6 +638,7 @@ class _DefaultResolutionVerifier:
                 f"{stage} passed" if proc.returncode == 0
                 else f"{stage} failed with exit {proc.returncode}"
             ),
+            verify_outcome="green" if proc.returncode == 0 else "red",
             command=command,
             stdout=output,
             failed_test=_extract_failed_test(output),
@@ -699,6 +739,7 @@ class _DefaultResolutionVerifier:
             metadata={
                 **outcome.metadata,
                 "verify_result": "green",
+                "verify_outcome": "green",
                 "verify_stage": verify_result.stage,
                 "hashtag_set_ok": ht_res.ok,
                 "hashtag_set_reason": ht_res.reason,
@@ -738,6 +779,7 @@ class _DefaultResolutionVerifier:
             metadata={
                 **outcome.metadata,
                 "verify_result": "red",
+                "verify_outcome": result.verify_outcome or "red",
                 "verify_stage": result.stage,
             },
             changed_identifiers=list(outcome.changed_identifiers),
@@ -1216,8 +1258,10 @@ async def _route_merger_outcome(
                 outcome=outcome,
             )
             logger.info(
-                "merge_arbiter.verify_result=%s change_id=%s stage=%s",
+                "merge_arbiter.verify_result=%s verify_outcome=%s "
+                "change_id=%s stage=%s",
                 verified.metadata.get("verify_result", "unknown"),
+                verified.metadata.get("verify_outcome", "unknown"),
                 task.change_id,
                 verified.metadata.get("verify_stage", ""),
             )
