@@ -5,6 +5,17 @@ produced by C2's ``runner_incidents`` table) so the runner can answer
 "what cascaded into this ticket's prior failure?" at pickup time and so
 operators can render a 7-day failure landscape for incident review.
 
+OP-1449 (3d-memory activation): the F6 ``/api/v1/project-state`` causal
+axis used to consult ``getattr(failure_graph, "_DEFAULT_INCIDENT_SOURCE",
+None)`` — an attribute that was never assigned, so the axis always
+returned an empty ``neighbours`` list even when ``runner_incidents`` had
+thousands of rows. :func:`default_incident_source` is the wired entry
+point: it returns a :class:`PostgresIncidentSource` when the env DSN
+points at Postgres (the production path against the C2 table) and
+falls back to an :class:`InMemoryIncidentSource` populated from the
+:mod:`backend.agents.incident_recorder` buffer otherwise (covers the
+dev SQLite path and unit tests).
+
 Causality model (three edge kinds, all directed from earlier → later):
 
 * ``same_mutex_window`` — incidents X and Y share a ``mutex_label`` and
@@ -191,6 +202,176 @@ class InMemoryIncidentSource:
             if inc.incident_id == incident_id:
                 return inc
         return None
+
+
+# OP-1449 — Postgres-backed incident source. Keeps ``failure_graph``
+# importable without sqlalchemy by lazy-importing inside the methods;
+# the rest of this module remains pure-Python with no required external
+# dependencies (per the module docstring).
+
+
+class PostgresIncidentSource:
+    """Read ``runner_incidents`` rows from Postgres via SQLAlchemy.
+
+    Used by :func:`default_incident_source` when ``OMNISIGHT_DATABASE_URL``
+    points at Postgres. The query mirrors
+    ``scripts/generate_failure_graph_fixture.fetch_runner_incidents``
+    (which produces the same shape for fixture-driven incident review),
+    plus an optional ``ticket_key`` index hint so per-ticket lookups can
+    use ``idx_runner_incidents_ticket_key``.
+
+    Rows where ``failure_class = 'MEMORY_RECALL_AUDIT'`` are skipped —
+    those are the C6 audit slot and do not represent runner failures.
+    """
+
+    def __init__(self, engine: "object") -> None:
+        self._engine = engine
+
+    @classmethod
+    def from_database_url(cls, url: str) -> "PostgresIncidentSource":
+        import sqlalchemy as sa  # noqa: PLC0415 — lazy
+
+        engine = sa.create_engine(url, future=True)
+        return cls(engine)
+
+    def list_since(self, since: datetime) -> Iterable[RunnerIncident]:
+        import sqlalchemy as sa  # noqa: PLC0415 — lazy
+
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        stmt = sa.text(
+            """
+            SELECT incident_id, ticket_key, failure_class, mutex_label,
+                   created_at, summary
+            FROM runner_incidents
+            WHERE created_at >= :since
+              AND failure_class != 'MEMORY_RECALL_AUDIT'
+            ORDER BY created_at ASC, incident_id ASC
+            """
+        )
+        try:
+            with self._engine.begin() as conn:
+                rows = conn.execute(stmt, {"since": since}).mappings().all()
+        except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+            log.warning(
+                "PostgresIncidentSource.list_since degrade since=%s err=%s: %s",
+                since.isoformat(),
+                type(exc).__name__,
+                exc,
+            )
+            return []
+        return [_row_to_incident(dict(row)) for row in rows]
+
+    def get(self, incident_id: str) -> RunnerIncident | None:
+        import sqlalchemy as sa  # noqa: PLC0415 — lazy
+
+        stmt = sa.text(
+            """
+            SELECT incident_id, ticket_key, failure_class, mutex_label,
+                   created_at, summary
+            FROM runner_incidents
+            WHERE incident_id = :incident_id
+              AND failure_class != 'MEMORY_RECALL_AUDIT'
+            """
+        )
+        try:
+            with self._engine.begin() as conn:
+                row = conn.execute(stmt, {"incident_id": incident_id}).mappings().first()
+        except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+            log.warning(
+                "PostgresIncidentSource.get degrade incident_id=%s err=%s: %s",
+                incident_id,
+                type(exc).__name__,
+                exc,
+            )
+            return None
+        return _row_to_incident(dict(row)) if row else None
+
+
+def _row_to_incident(row: dict) -> RunnerIncident:
+    """Coerce a ``runner_incidents`` row dict to :class:`RunnerIncident`.
+
+    Accepts both Postgres ``TIMESTAMPTZ`` (already ``datetime``) and SQLite
+    ``TEXT`` (parsed via ``datetime.fromisoformat``) so the same projection
+    works against either dialect. Defensive against legacy ``Z`` suffix on
+    the timestamp string — the SQLite path stores the python repr which
+    keeps the offset, but log archives backfilled via
+    ``scripts/backfill_runner_incidents.py`` round-trip via ISO strings.
+    """
+    occurred_at = row["created_at"]
+    if isinstance(occurred_at, str):
+        occurred_at = datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
+    elif occurred_at is None:
+        occurred_at = datetime.now(timezone.utc)
+    return RunnerIncident(
+        incident_id=str(row["incident_id"]),
+        ticket_key=str(row["ticket_key"]),
+        failure_class=str(row["failure_class"]),
+        mutex_label=row.get("mutex_label"),
+        occurred_at=occurred_at,
+        summary=str(row.get("summary") or ""),
+    )
+
+
+def default_incident_source() -> IncidentSource:
+    """Return the production incident source.
+
+    Resolution order (per OP-1449 wiring):
+
+    1. ``OMNISIGHT_DATABASE_URL`` / ``DATABASE_URL`` set to a Postgres
+       DSN — return a :class:`PostgresIncidentSource` against the
+       ``runner_incidents`` table.
+    2. ``OMNISIGHT_DATABASE_URL`` / ``DATABASE_URL`` set to a non-PG
+       URL (e.g. SQLite) — return a :class:`PostgresIncidentSource`
+       against that engine anyway; the same SQL works against SQLite
+       because :mod:`backend.alembic.versions.0206_runner_incidents`
+       ships dialect-symmetric DDL.
+    3. No DSN configured — fall back to an :class:`InMemoryIncidentSource`
+       populated from the
+       :func:`backend.agents.incident_recorder.get_runner_incidents`
+       in-process buffer. This is the dev-mode + unit-test path; the
+       buffer is empty on a fresh process so the causal axis still
+       degrades to "no neighbours" but at least the wiring works.
+    """
+    import os  # noqa: PLC0415 — lazy
+
+    dsn = (
+        os.environ.get("OMNISIGHT_DATABASE_URL")
+        or os.environ.get("DATABASE_URL")
+        or ""
+    ).strip()
+    if dsn:
+        try:
+            return PostgresIncidentSource.from_database_url(dsn)
+        except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+            log.warning(
+                "default_incident_source: DSN connect failed, "
+                "falling back to in-memory buffer err=%s: %s",
+                type(exc).__name__,
+                exc,
+            )
+
+    try:
+        from backend.agents.incident_recorder import (  # noqa: PLC0415 — lazy
+            get_runner_incidents,
+        )
+    except ImportError:
+        return InMemoryIncidentSource([])
+
+    incidents: list[RunnerIncident] = []
+    for rec in get_runner_incidents():
+        occurred_at = datetime.fromtimestamp(rec.created_at, tz=timezone.utc)
+        incidents.append(
+            RunnerIncident(
+                incident_id=rec.incident_id,
+                ticket_key=rec.ticket_key,
+                failure_class=rec.failure_class.value,
+                mutex_label=rec.mutex_label,
+                occurred_at=occurred_at,
+                summary=rec.summary,
+            )
+        )
+    return InMemoryIncidentSource(incidents)
 
 
 class _Clock(Protocol):
