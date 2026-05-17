@@ -58,6 +58,7 @@ Public entry points
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import os
@@ -259,6 +260,7 @@ class Resolution:
     rationale: str
     diff: str                       # unified diff scoped to conflict region
     changed_blocks: int             # should equal # conflict blocks in input
+    changed_identifiers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -277,6 +279,7 @@ class ResolutionOutcome:
     failure_count: int = 0
     test_result: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+    changed_identifiers: list[str] = field(default_factory=list)
     # OP-1196 phase 3 — full resolved file content (NOT just diff preview),
     # populated whenever the LLM produces a confident-enough resolution.
     # Used by callers that opted into deferred-push mode
@@ -1118,7 +1121,42 @@ def _assemble_resolution(
         rationale=rationale or "(no rationale supplied)",
         diff=diff,
         changed_blocks=len(blocks),
+        changed_identifiers=_extract_changed_identifiers(req.file_path, text),
     )
+
+
+def _extract_changed_identifiers(file_path: str, resolved_text: str) -> list[str]:
+    """Best-effort pytest ``-k`` terms from resolved Python content."""
+    if not file_path.endswith(".py"):
+        return []
+    try:
+        tree = ast.parse(resolved_text)
+    except SyntaxError:
+        return []
+
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str) -> None:
+        if value and value not in seen:
+            seen.add(value)
+            names.append(value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            _add(node.name)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for arg in [
+                *node.args.posonlyargs,
+                *node.args.args,
+                *node.args.kwonlyargs,
+            ]:
+                _add(arg.arg)
+            if node.args.vararg:
+                _add(node.args.vararg.arg)
+            if node.args.kwarg:
+                _add(node.args.kwarg.arg)
+    return names
 
 
 def _make_block_diff(
@@ -1330,6 +1368,7 @@ async def resolve_conflict(
             diff_preview=resolution.diff,
             metadata=risk_meta,
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
@@ -1344,6 +1383,7 @@ async def resolve_conflict(
             diff_preview=resolution.diff,
             metadata=risk_meta,
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
@@ -1360,6 +1400,7 @@ async def resolve_conflict(
             diff_preview=resolution.diff,
             metadata=risk_meta,
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.test_result = {
             "ok": False,
             "summary": test_result.summary,
@@ -1395,6 +1436,7 @@ async def resolve_conflict(
             metadata=risk_meta,
         )
         outcome.resolved_text = resolution.resolved_text
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
@@ -1416,6 +1458,7 @@ async def resolve_conflict(
             diff_preview=resolution.diff,
             metadata=risk_meta,
         )
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.failure_count = get_failure_count(change_id)
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
@@ -1448,6 +1491,7 @@ async def resolve_conflict(
         )
         outcome.push_sha = push.sha
         outcome.review_url = push.review_url
+        outcome.changed_identifiers = list(resolution.changed_identifiers)
         outcome.test_result = {"ok": True, "summary": test_result.summary,
                                "command": test_result.command}
         _observe_metric(outcome)
@@ -1506,6 +1550,7 @@ async def resolve_conflict(
             "hashtag_set_ok": hashtag_set_ok,
             "hashtag_set_reason": hashtag_set_reason,
         },
+        changed_identifiers=list(resolution.changed_identifiers),
     )
     _observe_metric(outcome)
     await _safe_audit(deps.audit, outcome)

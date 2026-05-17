@@ -28,12 +28,15 @@ COPY backend/requirements.txt ./requirements.txt
 # runner's `--require-hashes` install fails on any package lacking a
 # prebuilt wheel (zxcvbn-python et al).
 #
-# FX.6.7 (2026-05-04): the prod lockfile no longer carries pytest /
-# pytest-asyncio / pytest-cov / respx / pip-audit / ruff / mypy — those
-# moved to backend/requirements-dev.txt and are NOT copied into the
-# runtime image. The previous defensive ``pip uninstall -y pytest …``
-# step right after this install is gone (it was a no-op once the
-# packages stopped being resolved into the lockfile).
+# FX.6.7 (2026-05-04): the prod lockfile no longer carries pytest-asyncio /
+# pytest-cov / respx / pip-audit / ruff / mypy — those moved to
+# backend/requirements-dev.txt and are NOT copied into the runtime image.
+# OP-1405 restored runtime pytest + pytest-timeout only because
+# merge_arbiter shells out to `python3 -m pytest --timeout=60` in a
+# scratch worktree before merger-agent-bot pushes conflict resolutions.
+# The previous defensive ``pip uninstall -y pytest …`` step right after
+# this install is gone (it was a no-op once the packages stopped being
+# resolved into the lockfile).
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
 # OP-899: Cognee's current resolver graph pulls LiteLLM with an OpenAI

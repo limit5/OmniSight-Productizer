@@ -49,11 +49,17 @@ Design properties
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
+import shlex
+import shutil
+import subprocess
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
 from backend import merger_agent as ma
@@ -67,12 +73,56 @@ from backend.submit_rule import (
 logger = logging.getLogger(__name__)
 
 
+async def asyncio_wait_for_thread(
+    fn: Callable[[], ma.ResolutionOutcome],
+    *,
+    timeout: int,
+) -> ma.ResolutionOutcome:
+    return await asyncio.wait_for(asyncio.to_thread(fn), timeout=timeout)
+
+
+def _run_async_blocking(awaitable):
+    return asyncio.run(awaitable)
+
+
+def _pytest_identifiers(identifiers: list[str]) -> list[str]:
+    safe: list[str] = []
+    seen: set[str] = set()
+    for ident in identifiers:
+        if ident.isidentifier() and ident not in seen:
+            seen.add(ident)
+            safe.append(ident)
+    return safe
+
+
+def _extract_failed_test(output: str) -> str:
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("FAILED "):
+            return stripped.split()[1]
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("______") and stripped.endswith("______"):
+            return stripped.strip("_ ").strip()
+    return ""
+
+
+def _remaining_seconds(deadline: float) -> float:
+    return max(0.1, deadline - time.monotonic())
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Tunables
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 HUMAN_PENDING_WARN_HOURS = int(
     os.environ.get("OMNISIGHT_ARBITER_HUMAN_WARN_HOURS", "24")
+)
+VERIFY_TIMEOUT_SECONDS = int(
+    os.environ.get("OMNISIGHT_MERGER_VERIFY_TIMEOUT_SECONDS", "120")
+)
+PYTEST_TIMEOUT_SECONDS = int(
+    os.environ.get("OMNISIGHT_MERGER_PYTEST_TIMEOUT_SECONDS", "60")
 )
 
 
@@ -256,6 +306,15 @@ class GerritVoteRevoker(Protocol):
     ) -> dict: ...
 
 
+class ResolutionVerifier(Protocol):
+    async def verify_and_push(
+        self,
+        *,
+        task: MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+    ) -> ma.ResolutionOutcome: ...
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Default collaborator wrappers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -352,6 +411,337 @@ class _DefaultGerritVoteRevoker:
             return {"error": f"gerrit revoke failed: {exc}"}
 
 
+@dataclass
+class VerifyRunResult:
+    ok: bool
+    stage: str
+    summary: str
+    command: str = ""
+    stdout: str = ""
+    scratch_path: str = ""
+    failed_test: str = ""
+
+
+class _DefaultResolutionVerifier:
+    """Build-then-verify gate for LLM conflict resolutions.
+
+    The merger agent is invoked in deferred-push mode so this verifier can
+    apply the resolved file to a scratch git worktree, run py_compile and
+    a targeted pytest subset, then push from the scratch worktree only if
+    both checks are green.
+    """
+
+    def __init__(
+        self,
+        *,
+        pusher: ma.PatchsetPusher | None = None,
+        reviewer: ma.GerritReviewer | None = None,
+        hashtag_setter: ma.HashtagSetter | None = None,
+    ) -> None:
+        self._pusher = pusher or ma.GitPatchsetPusher()
+        self._reviewer = reviewer or ma.GerritClientReviewer()
+        self._hashtag_setter = hashtag_setter or ma.GerritClientHashtagSetter()
+
+    async def verify_and_push(
+        self,
+        *,
+        task: MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+    ) -> ma.ResolutionOutcome:
+        try:
+            return await asyncio_wait_for_thread(
+                lambda: self._verify_and_push_sync(task, outcome),
+                timeout=VERIFY_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            return self._failed_outcome(
+                task,
+                outcome,
+                VerifyRunResult(
+                    ok=False,
+                    stage="timeout",
+                    summary=(
+                        f"verify step exceeded {VERIFY_TIMEOUT_SECONDS}s "
+                        "before push"
+                    ),
+                ),
+            )
+        except Exception as exc:
+            return self._failed_outcome(
+                task,
+                outcome,
+                VerifyRunResult(
+                    ok=False,
+                    stage="scratch",
+                    summary=f"verify setup failed: {exc}",
+                ),
+            )
+
+    def _verify_and_push_sync(
+        self,
+        task: MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+    ) -> ma.ResolutionOutcome:
+        if not task.workspace:
+            return self._failed_outcome(
+                task,
+                outcome,
+                VerifyRunResult(
+                    ok=False,
+                    stage="scratch",
+                    summary="no workspace provided for scratch verification",
+                ),
+            )
+
+        deadline = time.monotonic() + VERIFY_TIMEOUT_SECONDS
+        scratch = self._create_scratch_worktree(task.workspace)
+        try:
+            target = Path(scratch) / task.file_path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(outcome.resolved_text, encoding="utf-8")
+
+            touched_files = [task.file_path, *task.additional_files]
+            py_files = [p for p in touched_files if p.endswith(".py")]
+            for file_path in py_files:
+                result = self._run(
+                    ["python3", "-m", "py_compile", file_path],
+                    cwd=scratch,
+                    stage="py_compile",
+                    timeout=_remaining_seconds(deadline),
+                )
+                if not result.ok:
+                    return self._failed_outcome(task, outcome, result)
+
+            identifiers = _pytest_identifiers(outcome.changed_identifiers)
+            if identifiers:
+                k_expr = " or ".join(identifiers)
+                pytest_args = [
+                    "python3", "-m", "pytest", "-k", k_expr,
+                    f"--timeout={PYTEST_TIMEOUT_SECONDS}", "-x",
+                ]
+                result = self._run(
+                    pytest_args,
+                    cwd=scratch,
+                    stage="pytest",
+                    timeout=_remaining_seconds(deadline),
+                )
+                if not result.ok:
+                    return self._failed_outcome(task, outcome, result)
+            else:
+                result = VerifyRunResult(
+                    ok=True,
+                    stage="pytest",
+                    summary="pytest skipped: no changed identifiers extracted",
+                    scratch_path=scratch,
+                )
+
+            return self._push_verified(task, outcome, scratch, result)
+        finally:
+            self._cleanup_scratch(task.workspace, scratch)
+
+    def _create_scratch_worktree(self, workspace: str) -> str:
+        parent = tempfile.mkdtemp(prefix="merger-verify-")
+        scratch = str(Path(parent) / "worktree")
+        proc = subprocess.run(
+            ["git", "-C", workspace, "worktree", "add", "--detach", scratch, "HEAD"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            shutil.rmtree(parent, ignore_errors=True)
+            raise RuntimeError(proc.stderr or proc.stdout or "git worktree add failed")
+        return scratch
+
+    @staticmethod
+    def _cleanup_scratch(workspace: str, scratch: str) -> None:
+        subprocess.run(
+            ["git", "-C", workspace, "worktree", "remove", "--force", scratch],
+            capture_output=True,
+            text=True,
+        )
+        shutil.rmtree(str(Path(scratch).parent), ignore_errors=True)
+
+    @staticmethod
+    def _run(
+        args: list[str],
+        *,
+        cwd: str,
+        stage: str,
+        timeout: float,
+    ) -> VerifyRunResult:
+        command = " ".join(shlex.quote(a) for a in args)
+        try:
+            proc = subprocess.run(
+                args,
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            output = (exc.stdout or "") + (exc.stderr or "")
+            return VerifyRunResult(
+                ok=False,
+                stage=stage,
+                summary=f"{stage} timed out after {timeout:.1f}s",
+                command=command,
+                stdout=output,
+                scratch_path=cwd,
+            )
+        output = (proc.stdout or "") + (proc.stderr or "")
+        return VerifyRunResult(
+            ok=proc.returncode == 0,
+            stage=stage,
+            summary=(
+                f"{stage} passed" if proc.returncode == 0
+                else f"{stage} failed with exit {proc.returncode}"
+            ),
+            command=command,
+            stdout=output,
+            failed_test=_extract_failed_test(output),
+            scratch_path=cwd,
+        )
+
+    def _push_verified(
+        self,
+        task: MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+        scratch: str,
+        verify_result: VerifyRunResult,
+    ) -> ma.ResolutionOutcome:
+        resolution = ma.Resolution(
+            resolved_text=outcome.resolved_text,
+            confidence=outcome.confidence,
+            rationale=outcome.rationale,
+            diff=outcome.diff_preview,
+            changed_blocks=1,
+            changed_identifiers=list(outcome.changed_identifiers),
+        )
+        push = _run_async_blocking(self._pusher.push(
+            change_id=task.change_id,
+            project=task.project,
+            workspace=scratch,
+            file_path=task.file_path,
+            resolved_text=outcome.resolved_text,
+            commit_message=ma._build_patchset_message(  # type: ignore[attr-defined]
+                ma.ConflictRequest(
+                    change_id=task.change_id,
+                    project=task.project,
+                    file_path=task.file_path,
+                    conflict_text=task.conflict_text,
+                    patchset_revision=task.patchset_revision,
+                    workspace=scratch,
+                    additional_files=list(task.additional_files),
+                ),
+                resolution,
+            ),
+        ))
+        if not push.ok:
+            failed = VerifyRunResult(
+                ok=False,
+                stage="push",
+                summary=f"Gerrit push failed: {push.reason}",
+                scratch_path=scratch,
+            )
+            return self._failed_outcome(task, outcome, failed)
+
+        review = _run_async_blocking(self._reviewer.post_review(
+            commit_sha=push.sha or task.patchset_revision,
+            project=task.project,
+            message=ma._build_review_message(  # type: ignore[attr-defined]
+                ma.ConflictRequest(
+                    change_id=task.change_id,
+                    project=task.project,
+                    file_path=task.file_path,
+                    conflict_text=task.conflict_text,
+                ),
+                resolution,
+                push,
+            ),
+            score=int(ma.LabelVote.plus_two),
+        ))
+        if not review.ok:
+            return self._failed_outcome(
+                task,
+                outcome,
+                VerifyRunResult(
+                    ok=False,
+                    stage="review",
+                    summary=f"Gerrit review failed: {review.reason}",
+                    scratch_path=scratch,
+                ),
+            )
+
+        ht_res = _run_async_blocking(self._hashtag_setter.add_hashtag(
+            change_id=task.change_id,
+            project=task.project,
+            hashtag=ma.CONFLICT_RESOLVED_HASHTAG,
+        ))
+
+        passed = ma.ResolutionOutcome(
+            change_id=task.change_id,
+            file_path=task.file_path,
+            reason=ma.MergerReason.plus_two_voted,
+            voted_score=ma.LabelVote.plus_two,
+            confidence=outcome.confidence,
+            rationale=outcome.rationale,
+            diff_preview=outcome.diff_preview,
+            push_sha=push.sha,
+            review_url=push.review_url,
+            test_result={
+                "ok": True,
+                "summary": verify_result.summary,
+                "command": verify_result.command,
+            },
+            metadata={
+                **outcome.metadata,
+                "verify_result": "green",
+                "verify_stage": verify_result.stage,
+                "hashtag_set_ok": ht_res.ok,
+                "hashtag_set_reason": ht_res.reason,
+            },
+            changed_identifiers=list(outcome.changed_identifiers),
+        )
+        return passed
+
+    @staticmethod
+    def _failed_outcome(
+        task: MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+        result: VerifyRunResult,
+    ) -> ma.ResolutionOutcome:
+        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        tail = "\n".join(lines[-30:])
+        failed_test = result.failed_test or "(no failed test identified)"
+        rationale = (
+            f"verify step failed at {result.stage}: {result.summary}; "
+            f"failed_test={failed_test}; last_30_lines:\n{tail}"
+        )
+        failed = ma.ResolutionOutcome(
+            change_id=task.change_id,
+            file_path=task.file_path,
+            reason=ma.MergerReason.refused_test_failure,
+            voted_score=ma.LabelVote.abstain,
+            confidence=outcome.confidence,
+            rationale=rationale,
+            diff_preview=outcome.diff_preview,
+            test_result={
+                "ok": False,
+                "summary": result.summary,
+                "command": result.command,
+                "failed_test": failed_test,
+                "last_30_lines": tail,
+            },
+            metadata={
+                **outcome.metadata,
+                "verify_result": "red",
+                "verify_stage": result.stage,
+            },
+            changed_identifiers=list(outcome.changed_identifiers),
+        )
+        return failed
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Dependency bundle
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -364,6 +754,7 @@ class ArbiterDeps:
     notifier: Notifier = field(default_factory=_DefaultNotifier)
     submitter: GerritSubmitter = field(default_factory=_DefaultGerritSubmitter)
     revoker: GerritVoteRevoker = field(default_factory=_DefaultGerritVoteRevoker)
+    verifier: ResolutionVerifier = field(default_factory=_DefaultResolutionVerifier)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -422,8 +813,14 @@ async def on_merge_conflict_webhook(
         sibling_file_contents=dict(task.sibling_file_contents),
         git_logs=dict(task.git_logs),
         symbol_table=dict(task.symbol_table),
-        # OP-1196 phase 3 — pass through the deferred-push flag.
-        push_locally=task.push_locally,
+        # OP-1196 phase 3 + OP-1405 — pass through the deferred-push
+        # flag. OP-1405 routes local-push requests through the
+        # arbiter's scratch-worktree verifier before the actual push:
+        # the merger returns the resolved file only, the arbiter
+        # py_compile + targeted-pytest verifies, and only green checks
+        # cause the real push.
+        push_locally=False if task.push_locally else task.push_locally,
+
     )
     merger_outcome = await deps.merger(req)
     return await _route_merger_outcome(task, merger_outcome, deps)
@@ -495,6 +892,19 @@ async def _route_merger_outcome(
     # workspace + SSH key. Backend does NOT open a JIRA abstain
     # ticket here — the caller will complete the resolution.
     if outcome.reason is ma.MergerReason.deferred_push_to_caller:
+        if task.push_locally:
+            verified = await deps.verifier.verify_and_push(
+                task=task,
+                outcome=outcome,
+            )
+            logger.info(
+                "merge_arbiter.verify_result=%s change_id=%s stage=%s",
+                verified.metadata.get("verify_result", "unknown"),
+                task.change_id,
+                verified.metadata.get("verify_stage", ""),
+            )
+            return await _route_merger_outcome(task, verified, deps)
+
         return ArbiterOutcome(
             change_id=task.change_id,
             reason=ArbiterReason.merger_resolved_pending_caller_push,

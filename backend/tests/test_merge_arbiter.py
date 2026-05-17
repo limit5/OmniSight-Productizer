@@ -17,6 +17,7 @@ branches:
 from __future__ import annotations
 
 import asyncio
+import subprocess
 from typing import Any
 
 import pytest
@@ -106,6 +107,25 @@ class _StubRevoker:
     async def revoke(self, *, commit, project, message):
         self.calls.append({"commit": commit, "project": project, "message": message})
         return {"status": "ok"} if self.ok else {"error": "revoke failed"}
+
+
+class _StubPusher:
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+
+    async def push(self, **kwargs):
+        self.calls.append(kwargs)
+        return ma.PatchsetPushResult(ok=True, sha="feedface")
+
+
+class _StubReviewer:
+    async def post_review(self, **kwargs):
+        return ma.ReviewerResult(ok=True)
+
+
+class _StubHashtagSetter:
+    async def add_hashtag(self, **kwargs):
+        return ma.HashtagSetterResult(ok=True)
 
 
 def _merger_runner(outcome: ma.ResolutionOutcome):
@@ -471,7 +491,51 @@ def _deferred_push_outcome(task: arb.MergeConflictTask) -> ma.ResolutionOutcome:
         diff_preview="--- (conflict)\n+++ (resolved)\n@@ ... @@\n+x = 42\n",
     )
     o.resolved_text = "x = 42  # resolved\n"
+    o.changed_identifiers = ["greet"]
     return o
+
+
+def _deferred_resolution(
+    task: arb.MergeConflictTask,
+    *,
+    resolved_text: str,
+    changed_identifiers: list[str] | None = None,
+) -> ma.ResolutionOutcome:
+    return ma.ResolutionOutcome(
+        change_id=task.change_id,
+        file_path=task.file_path,
+        reason=ma.MergerReason.deferred_push_to_caller,
+        voted_score=ma.LabelVote.abstain,
+        confidence=0.94,
+        rationale="LLM produced a deferred resolution",
+        diff_preview="diff",
+        resolved_text=resolved_text,
+        changed_identifiers=changed_identifiers or ["greet"],
+    )
+
+
+def _git_workspace(tmp_path):
+    ws = tmp_path / "repo"
+    (ws / "backend").mkdir(parents=True)
+    (ws / "backend" / "greetings.py").write_text(
+        "def greet(name):\n    return f'Hello {name}!'\n",
+        encoding="utf-8",
+    )
+    (ws / "test_greetings.py").write_text(
+        "from backend.greetings import greet\n\n"
+        "def test_greet():\n"
+        "    assert greet('Ada') == 'Hello Ada!'\n",
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init"], cwd=ws, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"],
+                   cwd=ws, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"],
+                   cwd=ws, check=True)
+    subprocess.run(["git", "add", "."], cwd=ws, check=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=ws,
+                   check=True, capture_output=True)
+    return ws
 
 
 class TestDeferredPushRouting:
@@ -483,7 +547,7 @@ class TestDeferredPushRouting:
     """
 
     def test_deferred_push_routes_to_pending_caller_push(self):
-        task = _task()
+        task = _task(push_locally=False)
         deps = arb.ArbiterDeps(
             merger=_merger_runner(_deferred_push_outcome(task)),
             jira=_StubJira(),
@@ -503,7 +567,7 @@ class TestDeferredPushRouting:
         """The caller is expected to complete the resolution. Opening
         an abstain ticket here would create confusing noise — the
         flow is mid-execution, not abandoned."""
-        task = _task()
+        task = _task(push_locally=False)
         stub_jira = _StubJira()
         deps = arb.ArbiterDeps(
             merger=_merger_runner(_deferred_push_outcome(task)),
@@ -536,3 +600,60 @@ class TestDeferredPushRouting:
             "conflict_text": "...", "push_locally": False,
         })
         assert rt2.push_locally is False
+
+
+class TestBuildThenVerify:
+
+    def test_broken_resolution_abstains_without_pushing(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        task = _task(workspace=str(ws))
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text="def greet(name):\n    return 'unterminated\n",
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "red"
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "py_compile"
+
+    def test_semantically_wrong_resolution_abstains_with_pytest_output(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        task = _task(workspace=str(ws))
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text="def greet(name):\n    return f'Hi {name}!'\n",
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        test_result = outcome.merger_outcome["test_result"]
+        assert test_result["ok"] is False
+        assert "test_greet" in test_result["last_30_lines"]
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "pytest"

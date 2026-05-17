@@ -51,6 +51,12 @@ tree-sitter-typescript==0.21.2
 # the next major is audited.
 anthropic==0.100.0
 
+# --- Merger verification runtime --------------------------------------
+# OP-1405: merge_arbiter runs targeted `python3 -m pytest --timeout=60`
+# in scratch worktrees before merger-agent-bot pushes a patchset.
+pytest==8.3.5
+pytest-timeout==2.3.1
+
 # --- Reports (Jinja + PDF; weasyprint is non-Windows only) -------------
 jinja2==3.1.6
 markdown==3.10.2
