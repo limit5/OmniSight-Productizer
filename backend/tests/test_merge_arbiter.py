@@ -128,6 +128,32 @@ class _StubHashtagSetter:
         return ma.HashtagSetterResult(ok=True)
 
 
+class _StubVerifier:
+    def __init__(self):
+        self.calls: list[dict[str, Any]] = []
+
+    async def verify_and_push(
+        self,
+        *,
+        task: arb.MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+    ) -> ma.ResolutionOutcome:
+        self.calls.append({"task": task, "outcome": outcome})
+        return ma.ResolutionOutcome(
+            change_id=task.change_id,
+            file_path=task.file_path,
+            reason=ma.MergerReason.plus_two_voted,
+            voted_score=ma.LabelVote.plus_two,
+            confidence=outcome.confidence,
+            rationale=outcome.rationale,
+            diff_preview=outcome.diff_preview,
+            push_sha="verified-low-risk",
+            review_url="https://gerrit.example/change/low-risk",
+            metadata={**outcome.metadata, "verify_result": "green"},
+            resolved_text=outcome.resolved_text,
+        )
+
+
 def _merger_runner(outcome: ma.ResolutionOutcome):
     async def run(_req: ma.ConflictRequest) -> ma.ResolutionOutcome:
         run.called_with = _req
@@ -237,6 +263,134 @@ def test_merge_conflict_passes_context_pack_fields_to_merger():
     assert seen[0].symbol_table["backend/greetings.py"].startswith(
         "function greet"
     )
+
+
+def test_classify_risk_covers_low_medium_and_high_tiers():
+    low = ma.parse_conflict_block(
+        "<<<<<<< HEAD\n"
+        "def head_helper():\n"
+        "    return 'head'\n"
+        "=======\n"
+        "def incoming_helper():\n"
+        "    return 'incoming'\n"
+        ">>>>>>> feature/helpers\n"
+    )
+    medium = ma.parse_conflict_block(
+        "<<<<<<< HEAD\n"
+        "def resolve(guild, guild_id):\n"
+        "    return guild_id\n"
+        "=======\n"
+        "def resolve(guild, tenant_id):\n"
+        "    return tenant_id\n"
+        ">>>>>>> feature/signature\n"
+    )
+    high = ma.parse_conflict_block(
+        "<<<<<<< HEAD\n"
+        "if enabled:\n"
+        "    run_fast()\n"
+        "=======\n"
+        "if enabled:\n"
+        "    run_safe()\n"
+        ">>>>>>> feature/control-flow\n"
+    )
+
+    assert arb._classify_risk(low).tier is ma.MergerRiskTier.low
+    assert arb._classify_risk(medium).tier is ma.MergerRiskTier.medium
+    assert arb._classify_risk(high).tier is ma.MergerRiskTier.high
+
+
+def test_signature_overlap_is_medium_and_invokes_merger_path():
+    seen: list[ma.ConflictRequest] = []
+
+    async def merger(req: ma.ConflictRequest) -> ma.ResolutionOutcome:
+        seen.append(req)
+        return _plus_two_outcome(_task())
+
+    task = _task(
+        change_number="883",
+        conflict_text=(
+            "<<<<<<< HEAD\n"
+            "def resolve(guild, guild_id):\n"
+            "    return guild_id\n"
+            "=======\n"
+            "def resolve(guild, tenant_id):\n"
+            "    return tenant_id\n"
+            ">>>>>>> feature/signature\n"
+        ),
+    )
+    deps = arb.ArbiterDeps(
+        merger=merger,
+        jira=_StubJira(),
+        notifier=_StubNotifier(),
+    )
+
+    outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+    assert outcome.reason is arb.ArbiterReason.merger_plus_two_awaiting_human
+    assert len(seen) == 1
+    assert seen[0].change_number == "883"
+
+
+def test_low_risk_add_only_take_both_without_merger():
+    async def merger(_req: ma.ConflictRequest) -> ma.ResolutionOutcome:
+        raise AssertionError("LOW risk conflict must not invoke merger LLM path")
+
+    verifier = _StubVerifier()
+    task = _task(
+        conflict_text=(
+            "<<<<<<< HEAD\n"
+            "=======\n"
+            "def incoming_helper():\n"
+            "    return 'incoming'\n"
+            ">>>>>>> feature/helpers\n"
+        ),
+    )
+    deps = arb.ArbiterDeps(
+        merger=merger,
+        jira=_StubJira(),
+        notifier=_StubNotifier(),
+        verifier=verifier,
+    )
+
+    outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+    assert outcome.reason is arb.ArbiterReason.merger_plus_two_awaiting_human
+    assert len(verifier.calls) == 1
+    low_outcome = verifier.calls[0]["outcome"]
+    assert low_outcome.metadata["risk_tier"] == "LOW"
+    assert low_outcome.metadata["deterministic_take_both"] is True
+    assert "def incoming_helper" in low_outcome.resolved_text
+
+
+def test_high_risk_control_flow_escalates_without_merger():
+    async def merger(_req: ma.ConflictRequest) -> ma.ResolutionOutcome:
+        raise AssertionError("HIGH risk conflict must not invoke merger LLM path")
+
+    jira = _StubJira(ok=True, ticket="PROJ-HIGH")
+    task = _task(
+        conflict_text=(
+            "<<<<<<< HEAD\n"
+            "if enabled:\n"
+            "    run_fast()\n"
+            "=======\n"
+            "if enabled:\n"
+            "    run_safe()\n"
+            ">>>>>>> feature/control-flow\n"
+        ),
+    )
+    deps = arb.ArbiterDeps(
+        merger=merger,
+        jira=jira,
+        notifier=_StubNotifier(),
+    )
+
+    outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+    assert outcome.reason is arb.ArbiterReason.merger_refused_escalated
+    assert outcome.jira_ticket_created == "PROJ-HIGH"
+    assert len(jira.calls) == 1
+    assert jira.calls[0]["merger_reason"] == "refused_escalated"
+    assert "risk_tier=HIGH" in jira.calls[0]["merger_rationale"]
 
 
 def test_merger_plus_two_emits_awaiting_human_sse():

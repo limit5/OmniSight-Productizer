@@ -49,13 +49,16 @@ Design properties
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import time
 from dataclasses import asdict, dataclass, field
 from enum import Enum
@@ -770,6 +773,290 @@ def reset_arbiter_state_for_tests() -> None:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Pre-LLM structural risk gate
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+_DOCSTRING_DELIM_RE = re.compile(r"^\s*(?:[rRuUbBfF]{0,2})?('{3}|\"{3})")
+_DOC_ENTRY_RE = re.compile(r"^\s*(?::param\s+|@param\s+)?([A-Za-z_][\w-]*)\s*:")
+
+
+def _classify_risk(conflict_regions: list[ma.ConflictBlock]) -> ma.ConflictRisk:
+    """Classify merge-conflict structure before invoking the merger LLM."""
+    high: list[str] = []
+    medium: list[str] = []
+
+    for region in conflict_regions:
+        head = _content_lines(region.head_lines)
+        incoming = _content_lines(region.incoming_lines)
+
+        if not head or not incoming:
+            continue
+
+        if _is_comment_or_doc_only(head) and _is_comment_or_doc_only(incoming):
+            if _docstring_entry_keys(head) & _docstring_entry_keys(incoming):
+                medium.append("docstring_entry_overlap")
+            continue
+
+        if _has_class_hierarchy_change(head, incoming):
+            high.append("class_hierarchy_change")
+        if _has_control_flow_overlap(head, incoming):
+            high.append("control_flow_overlap")
+        if _has_same_function_body_replacement(head, incoming):
+            high.append("same_function_body_replacement")
+
+        if _has_signature_overlap(head, incoming):
+            medium.append("signature_overlap")
+        if _has_overlapping_helper_function(head, incoming):
+            medium.append("overlapping_helper_function")
+
+        if high or medium:
+            continue
+
+        if not _has_distinct_new_symbols(head, incoming):
+            medium.append("edit_overlap")
+
+    if high:
+        return ma.ConflictRisk(ma.MergerRiskTier.high, tuple(dict.fromkeys(high)))
+    if medium:
+        return ma.ConflictRisk(ma.MergerRiskTier.medium, tuple(dict.fromkeys(medium)))
+    return ma.ConflictRisk(ma.MergerRiskTier.low, ())
+
+
+def _content_lines(lines: list[str]) -> list[str]:
+    return [line for line in lines if line.strip()]
+
+
+def _is_comment_or_doc_only(lines: list[str]) -> bool:
+    in_docstring = False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if in_docstring:
+            if "'''" in stripped or '"""' in stripped:
+                in_docstring = False
+            continue
+        if stripped.startswith("#"):
+            continue
+        if _DOCSTRING_DELIM_RE.match(stripped):
+            if stripped.count("'''") == 1 and stripped.count('"""') == 0:
+                in_docstring = True
+            elif stripped.count('"""') == 1 and stripped.count("'''") == 0:
+                in_docstring = True
+            continue
+        return False
+    return True
+
+
+def _docstring_entry_keys(lines: list[str]) -> set[str]:
+    keys: set[str] = set()
+    for line in lines:
+        match = _DOC_ENTRY_RE.match(line.strip().lstrip("#").strip())
+        if match:
+            keys.add(match.group(1))
+    return keys
+
+
+def _parse_snippet(lines: list[str]) -> ast.AST | None:
+    source = textwrap.dedent("\n".join(lines)).strip("\n")
+    if not source.strip():
+        return None
+    try:
+        return ast.parse(source)
+    except SyntaxError:
+        wrapped = "def __conflict__():\n" + textwrap.indent(source, "    ")
+        try:
+            return ast.parse(wrapped)
+        except SyntaxError:
+            return None
+
+
+def _function_signatures(lines: list[str]) -> dict[str, str]:
+    tree = _parse_snippet(lines)
+    if tree is None:
+        return {}
+    signatures: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "__conflict__":
+                continue
+            signatures[node.name] = ast.dump(node.args, include_attributes=False)
+    return signatures
+
+
+def _function_body_shapes(lines: list[str]) -> dict[str, str]:
+    tree = _parse_snippet(lines)
+    if tree is None:
+        return {}
+    bodies: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "__conflict__":
+                continue
+            body = ast.Module(body=node.body, type_ignores=[])
+            bodies[node.name] = ast.dump(body, include_attributes=False)
+    return bodies
+
+
+def _class_bases(lines: list[str]) -> dict[str, str]:
+    tree = _parse_snippet(lines)
+    if tree is None:
+        return {}
+    bases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            bases[node.name] = ast.dump(node.bases, include_attributes=False)
+    return bases
+
+
+def _top_level_symbols(lines: list[str]) -> set[str]:
+    tree = _parse_snippet(lines)
+    if not isinstance(tree, ast.Module):
+        return set()
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+    return names
+
+
+def _control_flow_shapes(lines: list[str]) -> dict[str, set[str]]:
+    tree = _parse_snippet(lines)
+    if tree is None:
+        return {}
+    shapes: dict[str, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            key = f"if:{ast.dump(node.test, include_attributes=False)}"
+        elif isinstance(node, (ast.For, ast.AsyncFor)):
+            key = f"for:{ast.dump(node.target, include_attributes=False)}"
+        elif isinstance(node, ast.While):
+            key = f"while:{ast.dump(node.test, include_attributes=False)}"
+        else:
+            continue
+        shapes.setdefault(key, set()).add(ast.dump(node, include_attributes=False))
+    return shapes
+
+
+def _has_signature_overlap(head: list[str], incoming: list[str]) -> bool:
+    left = _function_signatures(head)
+    right = _function_signatures(incoming)
+    return any(name in right and right[name] != sig for name, sig in left.items())
+
+
+def _has_overlapping_helper_function(head: list[str], incoming: list[str]) -> bool:
+    left = _top_level_symbols(head)
+    right = _top_level_symbols(incoming)
+    return bool(left and right and left & right)
+
+
+def _has_distinct_new_symbols(head: list[str], incoming: list[str]) -> bool:
+    left = _top_level_symbols(head)
+    right = _top_level_symbols(incoming)
+    return bool(left and right and not (left & right))
+
+
+def _has_class_hierarchy_change(head: list[str], incoming: list[str]) -> bool:
+    left = _class_bases(head)
+    right = _class_bases(incoming)
+    return any(name in right and right[name] != bases for name, bases in left.items())
+
+
+def _has_control_flow_overlap(head: list[str], incoming: list[str]) -> bool:
+    left = _control_flow_shapes(head)
+    right = _control_flow_shapes(incoming)
+    for key, shapes in left.items():
+        if key in right and shapes != right[key]:
+            return True
+    return False
+
+
+def _has_same_function_body_replacement(head: list[str], incoming: list[str]) -> bool:
+    left_signatures = _function_signatures(head)
+    right_signatures = _function_signatures(incoming)
+    left_bodies = _function_body_shapes(head)
+    right_bodies = _function_body_shapes(incoming)
+    for name, body in left_bodies.items():
+        if (
+            name in right_bodies
+            and left_signatures.get(name) == right_signatures.get(name)
+            and body != right_bodies[name]
+        ):
+            return True
+    return False
+
+
+def _risk_metadata(risk: ma.ConflictRisk) -> dict[str, Any]:
+    return {
+        "risk_tier": risk.tier.value,
+        "risk_reasons": list(risk.reasons),
+    }
+
+
+def _take_both_resolution(conflict_text: str, blocks: list[ma.ConflictBlock]) -> str:
+    resolved_blocks = [
+        "\n".join([*block.head_lines, *block.incoming_lines])
+        for block in blocks
+    ]
+    text = conflict_text
+    matches = list(ma._CONFLICT_RE.finditer(text))  # type: ignore[attr-defined]
+    for idx in range(len(matches) - 1, -1, -1):
+        text = (
+            text[: matches[idx].start()]
+            + resolved_blocks[idx]
+            + text[matches[idx].end() :]
+        )
+    return text
+
+
+def _build_low_risk_outcome(
+    task: MergeConflictTask,
+    blocks: list[ma.ConflictBlock],
+    risk: ma.ConflictRisk,
+) -> ma.ResolutionOutcome:
+    resolved_text = _take_both_resolution(task.conflict_text, blocks)
+    return ma.ResolutionOutcome(
+        change_id=task.change_id,
+        file_path=task.file_path,
+        reason=ma.MergerReason.deferred_push_to_caller,
+        voted_score=ma.LabelVote.abstain,
+        confidence=1.0,
+        rationale="risk_tier=LOW; deterministic take-both resolution before LLM",
+        diff_preview=ma._make_block_diff(  # type: ignore[attr-defined]
+            task.file_path,
+            blocks,
+            [
+                "\n".join([*block.head_lines, *block.incoming_lines])
+                for block in blocks
+            ],
+        ),
+        metadata={**_risk_metadata(risk), "deterministic_take_both": True},
+        resolved_text=resolved_text,
+    )
+
+
+def _build_high_risk_outcome(
+    task: MergeConflictTask,
+    risk: ma.ConflictRisk,
+) -> ma.ResolutionOutcome:
+    reasons = ",".join(risk.reasons) or "structural_high_risk"
+    return ma.ResolutionOutcome(
+        change_id=task.change_id,
+        file_path=task.file_path,
+        reason=ma.MergerReason.refused_escalated,
+        voted_score=ma.LabelVote.abstain,
+        confidence=0.0,
+        rationale=(
+            "risk_tier=HIGH before LLM invocation; "
+            f"reason={reasons}; human escalation required"
+        ),
+        diff_preview="",
+        metadata=_risk_metadata(risk),
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public entry points
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -795,6 +1082,29 @@ async def on_merge_conflict_webhook(
             reason=ArbiterReason.invalid_payload,
             detail="change_id, project, and file_path are required",
         )
+
+    blocks = ma.parse_conflict_block(task.conflict_text)
+    if blocks:
+        risk = _classify_risk(blocks)
+        logger.info(
+            "merge_arbiter.risk_tier=%s change_id=%s file=%s reasons=%s",
+            risk.tier.value,
+            task.change_id,
+            task.file_path,
+            ",".join(risk.reasons) or "none",
+        )
+        if risk.tier is ma.MergerRiskTier.low:
+            return await _route_merger_outcome(
+                task,
+                _build_low_risk_outcome(task, blocks, risk),
+                deps,
+            )
+        if risk.tier is ma.MergerRiskTier.high:
+            return await _route_merger_outcome(
+                task,
+                _build_high_risk_outcome(task, risk),
+                deps,
+            )
 
     req = ma.ConflictRequest(
         change_id=task.change_id,
@@ -1163,6 +1473,7 @@ __all__ = [
     "Notifier",
     "GerritSubmitter",
     "GerritVoteRevoker",
+    "_classify_risk",
     "check_change_ready",
     "on_human_vote_recorded",
     "on_merge_conflict_webhook",
