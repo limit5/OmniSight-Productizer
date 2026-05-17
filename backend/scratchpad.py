@@ -274,6 +274,7 @@ def save(
     *,
     trigger: str = "turn_interval",
     task_id: str | None = None,
+    guild_id: str | None = None,
     emit: bool = True,
 ) -> SaveResult:
     """Write the scratchpad for ``agent_id`` atomically.
@@ -306,6 +307,7 @@ def save(
             "subtask": state.subtask,
             "trigger": trigger,
             "task_id": task_id,
+            "guild_id": guild_id,
             "updated_at": state.updated_at,
             "updated_at_iso": (
                 datetime.fromtimestamp(state.updated_at, tz=timezone.utc).isoformat()
@@ -327,17 +329,29 @@ def save(
         )
 
     # Metrics + SSE are best-effort and live OUTSIDE the lock.
-    _post_save_broadcast(result, task_id=task_id, emit=emit)
+    _post_save_broadcast(result, task_id=task_id, guild_id=guild_id, emit=emit)
     return result
 
 
-def _post_save_broadcast(result: SaveResult, *, task_id: str | None, emit: bool) -> None:
+def _post_save_broadcast(
+    result: SaveResult,
+    *,
+    task_id: str | None,
+    guild_id: str | None,
+    emit: bool,
+) -> None:
+    guild_label = str(guild_id or "unknown")
     try:
         from backend import metrics as _m
         _m.scratchpad_saves_total.labels(
-            agent_id=result.agent_id, trigger=result.trigger,
+            agent_id=result.agent_id,
+            guild_id=guild_label,
+            trigger=result.trigger,
         ).inc()
-        _m.scratchpad_size_bytes.labels(agent_id=result.agent_id).set(result.size_bytes)
+        _m.scratchpad_size_bytes.labels(
+            agent_id=result.agent_id,
+            guild_id=guild_label,
+        ).set(result.size_bytes)
     except Exception:
         pass
     if not emit:
@@ -557,6 +571,7 @@ class AutoContinuation:
         *,
         agent_id: str | None = None,
         task_id: str | None = None,
+        guild_id: str | None = None,
         emit: bool = True,
     ) -> ContinuationOutcome:
         """``first`` is the initial (text, stop_reason) tuple. ``continue_fn``
@@ -578,7 +593,11 @@ class AutoContinuation:
                 # when scrolling the stitched output. The separator is
                 # intentionally on its own line so it won't split mid-code.
                 text = _stitch(text, delta)
-            _bump_continuation(agent_id=agent_id, provider=self.provider)
+            _bump_continuation(
+                agent_id=agent_id,
+                guild_id=guild_id,
+                provider=self.provider,
+            )
             if emit:
                 _emit_continuation(
                     agent_id=agent_id,
@@ -618,11 +637,18 @@ def _stitch(prior: str, delta: str) -> str:
     return prior + delta
 
 
-def _bump_continuation(*, agent_id: str | None, provider: str) -> None:
+def _bump_continuation(
+    *,
+    agent_id: str | None,
+    guild_id: str | None = None,
+    provider: str,
+) -> None:
     try:
         from backend import metrics as _m
         _m.token_continuation_total.labels(
-            agent_id=agent_id or "-", provider=provider,
+            agent_id=agent_id or "-",
+            guild_id=guild_id or "unknown",
+            provider=provider,
         ).inc()
     except Exception:
         pass

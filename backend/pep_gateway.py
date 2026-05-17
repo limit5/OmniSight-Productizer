@@ -525,21 +525,36 @@ def _bump_metric(dec: PepDecision) -> None:
         from backend import metrics
         if not metrics.is_available():
             return
+        guild_id = dec.guild_id or "unknown"
         metrics.pep_decisions_total.labels(
-            decision=dec.action.value, tier=dec.tier, rule=dec.rule or "none"
+            decision=dec.action.value,
+            tier=dec.tier,
+            rule=dec.rule or "none",
+            guild_id=guild_id,
         ).inc()
         if dec.action == PepAction.deny:
-            metrics.pep_deny_total.labels(rule=dec.rule or "none").inc()
+            metrics.pep_deny_total.labels(
+                rule=dec.rule or "none",
+                guild_id=guild_id,
+            ).inc()
     except Exception as exc:
         logger.debug("pep metric bump failed: %s", exc)
 
 
-def _bump_hold_duration(duration_seconds: float, outcome: str) -> None:
+def _bump_hold_duration(
+    duration_seconds: float,
+    outcome: str,
+    *,
+    guild_id: str = "",
+) -> None:
     try:
         from backend import metrics
         if not metrics.is_available():
             return
-        metrics.pep_hold_duration_seconds.labels(outcome=outcome).observe(duration_seconds)
+        metrics.pep_hold_duration_seconds.labels(
+            outcome=outcome,
+            guild_id=guild_id or "unknown",
+        ).observe(duration_seconds)
     except Exception as exc:
         logger.debug("pep hold-duration bump failed: %s", exc)
 
@@ -764,21 +779,21 @@ async def evaluate(
     if outcome == "approved":
         dec.action = PepAction.auto_allow
         dec.reason = "operator approved"
-        _bump_hold_duration(duration, "approved")
+        _bump_hold_duration(duration, "approved", guild_id=dec.guild_id)
         _emit_sse(dec)
         _emit_audit(dec, action_override="pep.approve")
         _bump_metric(dec)
     elif outcome == "rejected":
         dec.action = PepAction.deny
         dec.reason = "operator rejected"
-        _bump_hold_duration(duration, "rejected")
+        _bump_hold_duration(duration, "rejected", guild_id=dec.guild_id)
         _emit_sse(dec)
         _emit_audit(dec, action_override="pep.reject")
         _bump_metric(dec)
     else:  # timeout / unknown → fail closed
         dec.action = PepAction.deny
         dec.reason = f"operator decision timed out ({outcome})"
-        _bump_hold_duration(duration, "timeout")
+        _bump_hold_duration(duration, "timeout", guild_id=dec.guild_id)
         _emit_sse(dec)
         _emit_audit(dec, action_override="pep.deny")
         _bump_metric(dec)

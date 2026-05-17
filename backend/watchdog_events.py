@@ -262,6 +262,17 @@ async def emit(
     payload.setdefault("level", spec.default_level)
     payload.setdefault("source", spec.default_source)
 
+    try:
+        from backend import metrics as _m
+        _m.watchdog_events_total.labels(
+            event=WatchdogEvent(event).value if isinstance(event, str) else event.value,
+            severity=spec.severity.value,
+            source=str(payload.get("source") or spec.default_source),
+            guild_id=str(payload.get("guild_id") or "unknown"),
+        ).inc()
+    except Exception:
+        pass
+
     return await send_notification(
         tier=spec.tiers,
         severity=spec.severity,
