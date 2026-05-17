@@ -158,6 +158,24 @@ def test_discover_source_files_filters_git_tree(tmp_path, monkeypatch):
     ]
 
 
+def test_source_file_for_path_rejects_parent_directory_traversal(tmp_path):
+    _write(tmp_path / "outside.py", "print('must not be aliased')\n")
+
+    source = idx.source_file_for_path(tmp_path, "../outside.py")
+
+    assert source is None
+
+
+def test_source_file_for_path_rejects_binary_files(tmp_path):
+    path = tmp_path / "backend" / "blob.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"print('before')\n\0print('after')\n")
+
+    source = idx.source_file_for_path(tmp_path, "backend/blob.py")
+
+    assert source is None
+
+
 def test_post_merge_hook_fast_path_matches_indexable_paths():
     assert hook._merge_touches_indexable_path(["docs/guide.md"])
     assert hook._merge_touches_indexable_path(["configs/skills/demo/SKILL.md"])
@@ -232,6 +250,26 @@ async def test_incremental_indexes_changed_and_deletes_removed(tmp_path):
     assert result.deleted_files == 2
     assert ("t-acme", "docs/removed.md") in store.deletes
     assert ("t-acme", "README.md") in store.deletes
+
+
+@pytest.mark.asyncio
+async def test_incremental_dedupes_equivalent_changed_paths(tmp_path):
+    _write(tmp_path / "docs" / "guide.md", "# Guide\n")
+    store = FakeStore()
+    indexer = idx.WorkspaceRagIndexer(
+        repo_root=tmp_path,
+        tenant_id="t-acme",
+        embedder=FakeEmbedder(),
+        store=store,
+    )
+
+    result = await indexer.index_changed_paths(
+        ["docs/guide.md", "./docs/guide.md", "docs\\guide.md"]
+    )
+
+    assert result.indexed_files == 1
+    assert result.deleted_files == 0
+    assert store.deletes == [("t-acme", "docs/guide.md")]
 
 
 @pytest.mark.asyncio
