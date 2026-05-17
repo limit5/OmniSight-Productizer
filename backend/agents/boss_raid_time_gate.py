@@ -202,7 +202,8 @@ def boss_raid_time_gate(
     ------
     TypeError
         If ``raid_id`` is not a :class:`str`, or if either datetime is
-        not a :class:`~datetime.datetime` instance.
+        not a :class:`~datetime.datetime` instance, or if ``completed``
+        is not a :class:`bool`.
     ValueError
         If ``raid_id`` is empty after stripping, if either datetime is
         timezone-naive, or if ``checked_at < started_at``.
@@ -218,13 +219,14 @@ def boss_raid_time_gate(
     clean_raid_id = _required("raid_id", raid_id)
     start = _clean_datetime("started_at", started_at)
     check = _clean_datetime("checked_at", checked_at)
+    clean_completed = _clean_bool(completed, field="completed")
     if check < start:
         raise ValueError("checked_at must be >= started_at")
 
     deadline = start + BOSS_RAID_COMPLETION_WINDOW
     elapsed = check - start
     remaining = max(deadline - check, timedelta(0))
-    status = _gate_status(check, deadline, completed=completed)
+    status = _gate_status(check, deadline, completed=clean_completed)
     return BossRaidTimeGate(
         raid_id=clean_raid_id,
         started_at=start,
@@ -301,6 +303,14 @@ def _clean_datetime(field: str, value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field} must be timezone-aware")
     return value.astimezone(timezone.utc)
+
+
+def _clean_bool(value: bool, *, field: str) -> bool:
+    """Validate a public-API boolean flag without accepting truthy values."""
+
+    if not isinstance(value, bool):
+        raise TypeError(f"{field} must be a bool")
+    return value
 
 
 def _required(field: str, value: str) -> str:
