@@ -1129,6 +1129,13 @@ def _classify_risk(conflict_regions: list[ma.ConflictBlock]) -> ma.ConflictRisk:
         if not _has_distinct_new_symbols(head, incoming):
             medium.append("edit_overlap")
 
+    if high and ma.is_constructor_behavior_signature_candidate(conflict_regions):
+        high = [
+            reason for reason in high
+            if reason != "same_function_body_replacement"
+        ]
+        medium.append("signature_body_compat_candidate")
+
     if high:
         return ma.ConflictRisk(ma.MergerRiskTier.high, tuple(dict.fromkeys(high)))
     if medium:

@@ -2337,15 +2337,21 @@ def try_deterministic_merge(
     matches = list(_CONFLICT_RE.finditer(req.conflict_text))
     if len(matches) != len(blocks):
         return None
-    for block, match in zip(blocks, matches):
-        prefix = req.conflict_text[:match.start()]
-        suffix = req.conflict_text[match.end():]
-        resolved = _deterministic_block_resolution(block, prefix, suffix)
-        if resolved is None:
-            return None
-        resolved_block, pattern = resolved
-        resolved_blocks.append(resolved_block)
-        patterns.append(pattern)
+    coordinated = _resolve_constructor_behavior_signature_candidate(
+        req.conflict_text, blocks, matches,
+    )
+    if coordinated is not None:
+        resolved_blocks, patterns = coordinated
+    else:
+        for block, match in zip(blocks, matches):
+            prefix = req.conflict_text[:match.start()]
+            suffix = req.conflict_text[match.end():]
+            resolved = _deterministic_block_resolution(block, prefix, suffix)
+            if resolved is None:
+                return None
+            resolved_block, pattern = resolved
+            resolved_blocks.append(resolved_block)
+            patterns.append(pattern)
 
     text = req.conflict_text
     for idx in range(len(matches) - 1, -1, -1):
@@ -2413,6 +2419,214 @@ def _deterministic_block_resolution(
 
 def _join_block_lines(lines: list[str]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _resolve_constructor_behavior_signature_candidate(
+    conflict_text: str,
+    blocks: list[ConflictBlock],
+    matches: list[re.Match[str]],
+) -> tuple[list[str], list[str]] | None:
+    if len(blocks) < 2:
+        return None
+
+    init_idx = -1
+    init_resolved = ""
+    state_attr = ""
+    for idx, block in enumerate(blocks):
+        resolved = _resolve_constructor_state_signature_block(
+            block.head_lines, block.incoming_lines,
+        )
+        if resolved is not None:
+            init_idx = idx
+            init_resolved, state_attr = resolved
+            break
+    if init_idx < 0:
+        return None
+
+    body_idx = -1
+    body_resolved = ""
+    for idx, block in enumerate(blocks):
+        if idx == init_idx:
+            continue
+        resolved = _resolve_state_conditional_body_block(
+            block.head_lines, block.incoming_lines, state_attr,
+        )
+        if resolved is not None:
+            body_idx = idx
+            body_resolved = resolved
+            break
+    if body_idx < 0:
+        return None
+
+    resolved_blocks: list[str] = []
+    patterns: list[str] = []
+    for idx, block in enumerate(blocks):
+        if idx == init_idx:
+            resolved_blocks.append(init_resolved)
+            patterns.append("signature compatibility candidate")
+            continue
+        if idx == body_idx:
+            resolved_blocks.append(body_resolved)
+            patterns.append("signature compatibility candidate")
+            continue
+        match = matches[idx]
+        prefix = conflict_text[:match.start()]
+        suffix = conflict_text[match.end():]
+        resolved = _deterministic_block_resolution(block, prefix, suffix)
+        if resolved is None:
+            return None
+        resolved_block, pattern = resolved
+        resolved_blocks.append(resolved_block)
+        patterns.append(pattern)
+
+    text = conflict_text
+    for idx in range(len(matches) - 1, -1, -1):
+        match = matches[idx]
+        text = text[: match.start()] + resolved_blocks[idx] + text[match.end():]
+    try:
+        compile(text, "<signature-body-candidate>", "exec")
+    except SyntaxError:
+        return None
+    return resolved_blocks, patterns
+
+
+def is_constructor_behavior_signature_candidate(
+    blocks: list[ConflictBlock],
+) -> bool:
+    state_attr = ""
+    init_seen = False
+    for block in blocks:
+        resolved = _resolve_constructor_state_signature_block(
+            block.head_lines, block.incoming_lines,
+        )
+        if resolved is not None:
+            _init_text, state_attr = resolved
+            init_seen = True
+            break
+    if not init_seen or not state_attr:
+        return False
+    return any(
+        _resolve_state_conditional_body_block(
+            block.head_lines, block.incoming_lines, state_attr,
+        )
+        is not None
+        for block in blocks
+    )
+
+
+def _resolve_constructor_state_signature_block(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _single_simple_function(head_lines)
+    incoming = _single_simple_function(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_node, head_source, head_indent = head
+    incoming_node, incoming_source, incoming_indent = incoming
+    if type(head_node) is not type(incoming_node):
+        return None
+    if head_node.name != "__init__" or incoming_node.name != "__init__":
+        return None
+    if head_node.decorator_list or incoming_node.decorator_list:
+        return None
+
+    head_params = _simple_params(head_node)
+    incoming_params = _simple_params(incoming_node)
+    if head_params is None or incoming_params is None:
+        return None
+    signature_parts = _signature_union_parts(head_params, incoming_params)
+    if signature_parts is None:
+        return None
+
+    common_names = {name for name, _default in head_params} & {
+        name for name, _default in incoming_params
+    }
+    added_names = [
+        name
+        for name, _default in [*head_params, *incoming_params]
+        if name not in common_names and name != "self"
+    ]
+    if len(added_names) != 1:
+        return None
+    state_param = added_names[0]
+
+    head_body = _function_body_lines(head_source, head_node)
+    incoming_body = _function_body_lines(incoming_source, incoming_node)
+    state_attr = (
+        _assigned_self_attr_from_param(incoming_node, state_param)
+        or _assigned_self_attr_from_param(head_node, state_param)
+    )
+    if not state_attr:
+        return None
+
+    merged_body = _unique_body_lines([*head_body, *incoming_body])
+    if not merged_body:
+        return None
+
+    indent = head_indent or incoming_indent
+    child = indent + "    "
+    lines = [
+        f"{indent}def __init__({', '.join(signature_parts)}):",
+        *_indent_function_body(merged_body, child),
+    ]
+    return _join_block_lines(lines), state_attr
+
+
+def _resolve_state_conditional_body_block(
+    head_lines: list[str],
+    incoming_lines: list[str],
+    state_attr: str,
+) -> str | None:
+    head = _single_simple_function(head_lines)
+    incoming = _single_simple_function(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_node, head_source, head_indent = head
+    incoming_node, incoming_source, incoming_indent = incoming
+    if type(head_node) is not type(incoming_node):
+        return None
+    if head_node.name != incoming_node.name or head_node.name == "__init__":
+        return None
+    if head_node.decorator_list or incoming_node.decorator_list:
+        return None
+    if ast.dump(head_node.args) != ast.dump(incoming_node.args):
+        return None
+
+    head_body = _function_body_lines(head_source, head_node)
+    incoming_body = _function_body_lines(incoming_source, incoming_node)
+    head_return = _returns_self_attr(head_node, state_attr)
+    incoming_return = _returns_self_attr(incoming_node, state_attr)
+    if head_return == incoming_return:
+        return None
+    if incoming_return:
+        injected_body = incoming_body
+        fallback_body = head_body
+    else:
+        injected_body = head_body
+        fallback_body = incoming_body
+
+    prefix_len = _common_prefix_len(injected_body, fallback_body)
+    prefix = injected_body[:prefix_len]
+    fallback_tail = fallback_body[prefix_len:]
+    if not fallback_tail:
+        return None
+
+    indent = head_indent or incoming_indent
+    child = indent + "    "
+    grandchild = child + "    "
+    async_prefix = "async " if isinstance(head_node, ast.AsyncFunctionDef) else ""
+    signature = _function_signature_text(head_source, head_node)
+    if signature is None:
+        return None
+    lines = [
+        f"{indent}{async_prefix}def {head_node.name}({signature}):",
+        *_indent_function_body(prefix, child),
+        f"{child}if self.{state_attr} is not None:",
+        f"{grandchild}return self.{state_attr}",
+        *_indent_function_body(fallback_tail, child),
+    ]
+    return _join_block_lines(lines)
 
 
 def _resolve_add_method_to_class(
@@ -2674,6 +2888,122 @@ def _resolve_signature_compat_candidate(
         *_indent_function_body(fallback_body, grandchild),
     ]
     return _join_block_lines(lines), "signature compatibility candidate"
+
+
+def _signature_union_parts(
+    head_params: list[tuple[str, str | None]],
+    incoming_params: list[tuple[str, str | None]],
+) -> list[str] | None:
+    if not head_params or not incoming_params:
+        return None
+    union_names = [name for name, _default in head_params]
+    union_names.extend(
+        name for name, _default in incoming_params if name not in union_names
+    )
+    common_names = {name for name, _default in head_params} & {
+        name for name, _default in incoming_params
+    }
+    if {name for name in union_names if name != "self"} == (
+        common_names - {"self"}
+    ):
+        return None
+    defaults = {
+        **{name: default for name, default in head_params if default is not None},
+        **{
+            name: default
+            for name, default in incoming_params
+            if default is not None
+        },
+    }
+    signature_parts: list[str] = []
+    seen_default = False
+    for name in union_names:
+        default = defaults.get(name)
+        if name not in common_names and default is None:
+            default = "None"
+        if default is None and seen_default:
+            default = "None"
+        if default is not None:
+            seen_default = True
+        signature_parts.append(f"{name}={default}" if default is not None else name)
+    return signature_parts
+
+
+def _assigned_self_attr_from_param(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    param_name: str,
+) -> str:
+    for child in ast.walk(node):
+        if not isinstance(child, (ast.Assign, ast.AnnAssign)):
+            continue
+        value = child.value
+        if not isinstance(value, ast.Name) or value.id != param_name:
+            continue
+        targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+        for target in targets:
+            if (
+                isinstance(target, ast.Attribute)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "self"
+            ):
+                return target.attr
+    return ""
+
+
+def _unique_body_lines(lines: list[str]) -> list[str]:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        key = line.strip()
+        if not key:
+            if merged and merged[-1].strip():
+                merged.append(line)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(line)
+    while merged and not merged[-1].strip():
+        merged.pop()
+    return merged
+
+
+def _returns_self_attr(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    attr_name: str,
+) -> bool:
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Return):
+            continue
+        value = child.value
+        if (
+            isinstance(value, ast.Attribute)
+            and isinstance(value.value, ast.Name)
+            and value.value.id == "self"
+            and value.attr == attr_name
+        ):
+            return True
+    return False
+
+
+def _common_prefix_len(left: list[str], right: list[str]) -> int:
+    count = 0
+    for left_line, right_line in zip(left, right):
+        if left_line.strip() != right_line.strip():
+            break
+        count += 1
+    return count
+
+
+def _function_signature_text(
+    source: str,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> str | None:
+    del source
+    try:
+        return ast.unparse(node.args)
+    except Exception:
+        return None
 
 
 def _single_simple_function(
@@ -3163,6 +3493,24 @@ async def resolve_conflict(
         return outcome
 
     total_lines = sum(b.n_conflict_lines for b in blocks)
+    deterministic: ResolutionOutcome | None = None
+    if total_lines > MAX_CONFLICT_LINES and is_constructor_behavior_signature_candidate(
+        blocks,
+    ):
+        deterministic = try_deterministic_merge(request, blocks)
+        if (
+            deterministic is not None
+            and deterministic.metadata.get("signature_compat_candidate") is True
+        ):
+            logger.info(
+                "merger_path=deterministic change=%s file=%s patterns=%s",
+                request.change_number or change_id,
+                request.file_path,
+                deterministic.metadata.get("deterministic_patterns", []),
+            )
+            _observe_metric(deterministic)
+            await _safe_audit(deps.audit, deterministic)
+            return deterministic
     if total_lines > MAX_CONFLICT_LINES:
         outcome = _build_abstain(
             request, MergerReason.abstained_oversized,
@@ -3175,7 +3523,7 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    deterministic = try_deterministic_merge(request, blocks)
+    deterministic = deterministic or try_deterministic_merge(request, blocks)
     if (
         deterministic is not None
         and (

@@ -422,6 +422,88 @@ def test_signature_compat_candidate_replays_through_stub_verifier():
     assert "if guild_id is not None:" in candidate.resolved_text
 
 
+def test_signature_compat_candidate_replays_constructor_and_behavior_body():
+    async def merger(req: ma.ConflictRequest) -> ma.ResolutionOutcome:
+        deps = ma.MergerDeps(
+            llm=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("signature candidate should skip LLM")
+            ),
+            pusher=_StubPusher(),
+            reviewer=_StubReviewer(),
+            review_llm=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("signature candidate should skip review LLM")
+            ),
+            test_runner=lambda _req: (_ for _ in ()).throw(
+                AssertionError("arbiter verifier owns candidate validation")
+            ),
+        )
+        return await ma.resolve_conflict(req, deps=deps)
+
+    verifier = _StubVerifier()
+    task = _task(
+        change_number="932",
+        file_path="backend/tests/test_merge_arbiter.py",
+        conflict_text=(
+            "class _StubVerifier:\n"
+            "<<<<<<< HEAD\n"
+            "    def __init__(self):\n"
+            "        self.calls: list[dict[str, Any]] = []\n"
+            "=======\n"
+            "    def __init__(self, outcome: ma.ResolutionOutcome | None = None):\n"
+            "        self.outcome = outcome\n"
+            "        self.calls: list[dict[str, Any]] = []\n"
+            ">>>>>>> feature/injected-verifier\n"
+            "\n"
+            "<<<<<<< HEAD\n"
+            "    async def verify_and_push(\n"
+            "        self,\n"
+            "        *,\n"
+            "        task: arb.MergeConflictTask,\n"
+            "        outcome: ma.ResolutionOutcome,\n"
+            "    ) -> ma.ResolutionOutcome:\n"
+            "        self.calls.append({\"task\": task, \"outcome\": outcome})\n"
+            "        return ma.ResolutionOutcome(\n"
+            "            change_id=task.change_id,\n"
+            "            file_path=task.file_path,\n"
+            "            reason=ma.MergerReason.plus_two_voted,\n"
+            "            voted_score=ma.LabelVote.plus_two,\n"
+            "            confidence=outcome.confidence,\n"
+            "            rationale=outcome.rationale,\n"
+            "            diff_preview=outcome.diff_preview,\n"
+            "        )\n"
+            "=======\n"
+            "    async def verify_and_push(\n"
+            "        self,\n"
+            "        *,\n"
+            "        task: arb.MergeConflictTask,\n"
+            "        outcome: ma.ResolutionOutcome,\n"
+            "    ) -> ma.ResolutionOutcome:\n"
+            "        self.calls.append({\"task\": task, \"outcome\": outcome})\n"
+            "        return self.outcome\n"
+            ">>>>>>> feature/injected-verifier\n"
+        ),
+    )
+    deps = arb.ArbiterDeps(
+        merger=merger,
+        jira=_StubJira(),
+        notifier=_StubNotifier(),
+        verifier=verifier,
+    )
+
+    outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+    assert outcome.reason is arb.ArbiterReason.merger_plus_two_awaiting_human
+    assert len(verifier.calls) == 1
+    candidate = verifier.calls[0]["outcome"]
+    assert candidate.reason is ma.MergerReason.deferred_push_to_caller
+    assert candidate.metadata["signature_compat_candidate"] is True
+    assert "def __init__(self, outcome=None):" in candidate.resolved_text
+    assert "self.outcome = outcome" in candidate.resolved_text
+    assert "if self.outcome is not None:" in candidate.resolved_text
+    assert "return self.outcome" in candidate.resolved_text
+    assert "return ma.ResolutionOutcome(" in candidate.resolved_text
+
+
 def test_high_risk_control_flow_escalates_without_merger():
     async def merger(_req: ma.ConflictRequest) -> ma.ResolutionOutcome:
         raise AssertionError("HIGH risk conflict must not invoke merger LLM path")
