@@ -191,6 +191,43 @@ def _reset_counters():
 # ──────────────────────────────────────────────────────────────
 
 
+def test_signature_compat_candidate_returns_deferred_shim_without_llm():
+    conflict = (
+        "<<<<<<< HEAD\n"
+        "def by_guild(self, guild):\n"
+        "    return self.lookup(guild)\n"
+        "=======\n"
+        "def by_guild(self, guild_id):\n"
+        "    return self.lookup_by_id(guild_id)\n"
+        ">>>>>>> feature/guild-id\n"
+    )
+
+    async def test_runner(_req: ma.ConflictRequest) -> ma.TestRunResult:
+        raise AssertionError("candidate shim must be verified by arbiter")
+
+    deps = ma.MergerDeps(
+        llm=_FakeLLM(AssertionError("LLM should not build signature candidate")),
+        pusher=_FakePusher(),
+        reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=test_runner,
+    )
+    req = _base_request(conflict=conflict)
+    req.push_locally = False
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert outcome.metadata["signature_compat_candidate"] is True
+    assert outcome.metadata["merger_path"] == "signature_compat_candidate"
+    assert "def by_guild(self, guild=None, guild_id=None):" in outcome.resolved_text
+    assert "if guild_id is not None:" in outcome.resolved_text
+    assert "return self.lookup_by_id(guild_id)" in outcome.resolved_text
+    assert "else:" in outcome.resolved_text
+    assert "return self.lookup(guild)" in outcome.resolved_text
+    assert "<<<<<<<" not in outcome.resolved_text
+
+
 class TestParseConflict:
 
     def test_single_block(self):

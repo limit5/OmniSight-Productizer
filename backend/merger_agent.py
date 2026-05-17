@@ -64,6 +64,7 @@ import logging
 import os
 import re
 import subprocess
+import textwrap
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -1844,7 +1845,12 @@ def try_deterministic_merge(
     req: ConflictRequest,
     blocks: list[ConflictBlock],
 ) -> ResolutionOutcome | None:
-    """Resolve narrow AST-safe take-both conflicts without calling an LLM."""
+    """Resolve narrow AST-safe conflicts without calling an LLM.
+
+    Signature-compat shims are candidate resolutions only: they return a
+    deferred-push outcome so the arbiter's verifier must validate before
+    any push.
+    """
     if not blocks:
         return None
 
@@ -1868,20 +1874,33 @@ def try_deterministic_merge(
         text = text[: match.start()] + resolved_blocks[idx] + text[match.end():]
 
     diff = _make_block_diff(req.file_path, blocks, resolved_blocks)
+    is_signature_candidate = "signature compatibility candidate" in patterns
+    reason = (
+        MergerReason.deferred_push_to_caller
+        if is_signature_candidate
+        else MergerReason.resolved_deterministic_merge
+    )
     outcome = _build_abstain(
         req,
-        MergerReason.resolved_deterministic_merge,
+        reason,
         confidence=1.0,
         rationale=(
-            "deterministic AST trivial merge: "
+            "candidate AST merge: " if is_signature_candidate
+            else "deterministic AST trivial merge: "
+        ) + (
             f"{', '.join(dict.fromkeys(patterns))}"
         ),
         diff_preview=diff,
         metadata={
-            "merger_path": "deterministic",
+            "merger_path": (
+                "signature_compat_candidate"
+                if is_signature_candidate
+                else "deterministic"
+            ),
             "deterministic_patterns": list(dict.fromkeys(patterns)),
             "conflict_lines": sum(block.n_conflict_lines for block in blocks),
             "blocks": len(blocks),
+            "signature_compat_candidate": is_signature_candidate,
         },
     )
     outcome.resolved_text = text
@@ -1894,6 +1913,7 @@ def _deterministic_block_resolution(
     prefix: str,
 ) -> tuple[str, str] | None:
     resolvers = (
+        _resolve_signature_compat_candidate,
         lambda head, incoming: _resolve_dunder_all_union(head, incoming, prefix),
         _resolve_import_union,
         _resolve_distinct_symbol_adds,
@@ -1913,6 +1933,143 @@ def _join_block_lines(lines: list[str]) -> str:
 
 def _literal_sort_key(value: str) -> tuple[str, str]:
     return (value.lower(), value)
+
+
+def _resolve_signature_compat_candidate(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _single_simple_function(head_lines)
+    incoming = _single_simple_function(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_node, head_source, head_indent = head
+    incoming_node, incoming_source, incoming_indent = incoming
+    if type(head_node) is not type(incoming_node):
+        return None
+    if head_node.name != incoming_node.name:
+        return None
+    if head_node.decorator_list or incoming_node.decorator_list:
+        return None
+    if _simple_param_names(head_node) == _simple_param_names(incoming_node):
+        return None
+    head_params = _simple_params(head_node)
+    incoming_params = _simple_params(incoming_node)
+    if head_params is None or incoming_params is None:
+        return None
+
+    union_names = [name for name, _default in head_params]
+    union_names.extend(
+        name for name, _default in incoming_params if name not in union_names
+    )
+    common_names = {name for name, _default in head_params} & {
+        name for name, _default in incoming_params
+    }
+    defaults = {
+        **{name: default for name, default in head_params if default is not None},
+        **{
+            name: default
+            for name, default in incoming_params
+            if default is not None
+        },
+    }
+    signature_parts: list[str] = []
+    seen_default = False
+    for name in union_names:
+        default = defaults.get(name)
+        if name not in common_names and default is None:
+            default = "None"
+        if default is None and seen_default:
+            default = "None"
+        if default is not None:
+            seen_default = True
+        signature_parts.append(f"{name}={default}" if default is not None else name)
+
+    incoming_only = [
+        name for name, _default in incoming_params if name not in common_names
+    ]
+    head_only = [name for name, _default in head_params if name not in common_names]
+    guard_names = incoming_only or head_only
+    if not guard_names:
+        return None
+
+    guard = " or ".join(f"{name} is not None" for name in guard_names)
+    if incoming_only:
+        guarded_source = incoming_source
+        guarded_node = incoming_node
+        fallback_source = head_source
+        fallback_node = head_node
+    else:
+        guarded_source = head_source
+        guarded_node = head_node
+        fallback_source = incoming_source
+        fallback_node = incoming_node
+    guarded_body = _function_body_lines(guarded_source, guarded_node)
+    fallback_body = _function_body_lines(fallback_source, fallback_node)
+    if not guarded_body or not fallback_body:
+        return None
+
+    indent = head_indent or incoming_indent
+    child = indent + "    "
+    grandchild = child + "    "
+    async_prefix = "async " if isinstance(head_node, ast.AsyncFunctionDef) else ""
+    lines = [
+        f"{indent}{async_prefix}def {head_node.name}({', '.join(signature_parts)}):",
+        f"{child}if {guard}:",
+        *_indent_function_body(guarded_body, grandchild),
+        f"{child}else:",
+        *_indent_function_body(fallback_body, grandchild),
+    ]
+    return _join_block_lines(lines), "signature compatibility candidate"
+
+
+def _single_simple_function(
+    lines: list[str],
+) -> tuple[ast.FunctionDef | ast.AsyncFunctionDef, str, str] | None:
+    source = _join_block_lines(lines)
+    indent = _first_indent(lines)
+    try:
+        tree = ast.parse(textwrap.dedent(source))
+    except SyntaxError:
+        return None
+    if len(tree.body) != 1 or not isinstance(
+        tree.body[0],
+        (ast.FunctionDef, ast.AsyncFunctionDef),
+    ):
+        return None
+    return tree.body[0], textwrap.dedent(source), indent
+
+
+def _simple_param_names(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+    return [arg.arg for arg in node.args.args]
+
+
+def _simple_params(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[tuple[str, str | None]] | None:
+    args = node.args
+    if args.posonlyargs or args.vararg or args.kwonlyargs or args.kwarg:
+        return None
+    defaults = [None] * (len(args.args) - len(args.defaults))
+    defaults.extend(ast.unparse(default) for default in args.defaults)
+    return [(arg.arg, default) for arg, default in zip(args.args, defaults)]
+
+
+def _function_body_lines(
+    source: str,
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> list[str]:
+    end_lineno = getattr(node, "end_lineno", None)
+    if end_lineno is None:
+        return []
+    return source.splitlines()[node.body[0].lineno - 1:end_lineno]
+
+
+def _indent_function_body(lines: list[str], indent: str) -> list[str]:
+    return [
+        indent + line[4:] if line.startswith("    ") else indent + line
+        for line in lines
+    ]
 
 
 def _parse_single_assign(lines: list[str]) -> ast.Assign | None:
@@ -2290,13 +2447,27 @@ async def resolve_conflict(
         return outcome
 
     deterministic = try_deterministic_merge(request, blocks)
-    if deterministic is not None:
+    if (
+        deterministic is not None
+        and (
+            request.push_locally
+            or deterministic.metadata.get("signature_compat_candidate") is True
+        )
+    ):
         logger.info(
             "merger_path=deterministic change=%s file=%s patterns=%s",
             request.change_number or change_id,
             request.file_path,
             deterministic.metadata.get("deterministic_patterns", []),
         )
+        if (
+            deterministic.reason is MergerReason.deferred_push_to_caller
+            and not request.push_locally
+        ):
+            _observe_metric(deterministic)
+            await _safe_audit(deps.audit, deterministic)
+            return deterministic
+
         test_result = await deps.test_runner(request)
         if not test_result.ok:
             _bump_failure(change_id)
