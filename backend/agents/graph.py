@@ -54,15 +54,33 @@ from __future__ import annotations
 import os
 from types import MappingProxyType
 
-from backend.llm_adapter import HumanMessage
+from backend.llm_adapter import END, HumanMessage, StateGraph
 from backend.agents.state import GraphState
+from backend.agents.nodes import (
+    _should_retry,
+    _specialist_node_factory,
+    context_compression_gate,
+    conversation_node,
+    error_check_node,
+    firmware_node,
+    general_node,
+    orchestrator_node,
+    reporter_node,
+    reviewer_node,
+    software_node,
+    summarizer_node,
+    tool_executor_node,
+    validator_node,
+)
 from backend.graph_topology import (
+    STANDARD_SPECIALISTS,
     TopologySize,
     VALID_TOPOLOGY_SIZES,
     build_topology,
     _check_tool_calls,
-    _route_after_orchestrator,
+    _route_after_orchestrator,  # noqa: F401 - legacy re-export
 )
+from backend.sandbox_tier import Guild
 from backend.security.llm_firewall import (
     BLOCKED_REFUSAL_MESSAGE,
     FirewallResult,
@@ -72,6 +90,18 @@ from backend.security.llm_firewall import (
 
 TOPOLOGY_MODE_ENV = "OMNISIGHT_TOPOLOGY_MODE"
 VALID_TOPOLOGY_MODES: tuple[str, ...] = ("legacy", "smxl")
+GUILD_GRAPH_NODES: tuple[str, ...] = tuple(guild.value for guild in Guild)
+_GUILD_ROUTE_NAMES = frozenset((*STANDARD_SPECIALISTS, *GUILD_GRAPH_NODES))
+_LEGACY_NODE_FACTORIES = MappingProxyType(
+    {
+        "firmware": firmware_node,
+        "software": software_node,
+        "validator": validator_node,
+        "reporter": reporter_node,
+        "reviewer": reviewer_node,
+        "general": general_node,
+    }
+)
 
 
 def get_topology_mode() -> str:
@@ -88,7 +118,77 @@ def get_topology_mode() -> str:
 
 def build_graph(size: TopologySize = "M"):
     """Construct and compile the requested S/M/XL topology graph."""
+    if size == "M":
+        return _build_m_guild_topology()
     return build_topology(size)
+
+
+def _route_after_orchestrator_with_guilds(state: GraphState) -> str:
+    """Route to conversation, a legacy specialist, or a mounted Guild node."""
+    if state.is_conversational:
+        return "conversation"
+    return state.routed_to if state.routed_to in _GUILD_ROUTE_NAMES else "general"
+
+
+def _build_m_guild_topology():
+    """Build the M topology with BP.B Guild nodes mounted.
+
+    The legacy specialist nodes stay mounted for backward compatibility
+    during the BP.B dual-write window. Guild slugs are also valid nodes so
+    BP.B.4 routing can hand off to Guild names without another graph-level
+    change.
+    """
+    builder = StateGraph(GraphState)
+
+    builder.add_node("orchestrator", orchestrator_node)
+    for name, node in _LEGACY_NODE_FACTORIES.items():
+        builder.add_node(name, node)
+    for guild_name in GUILD_GRAPH_NODES:
+        if guild_name not in _LEGACY_NODE_FACTORIES:
+            builder.add_node(guild_name, _specialist_node_factory(guild_name))
+    builder.add_node("tool_executor", tool_executor_node)
+    builder.add_node("error_check", error_check_node)
+    builder.add_node("conversation", conversation_node)
+    builder.add_node("context_gate", context_compression_gate)
+    builder.add_node("summarizer", summarizer_node)
+
+    builder.set_entry_point("orchestrator")
+    route_targets = {
+        "conversation": "conversation",
+        **{name: name for name in (*STANDARD_SPECIALISTS, *GUILD_GRAPH_NODES)},
+    }
+    builder.add_conditional_edges(
+        "orchestrator",
+        _route_after_orchestrator_with_guilds,
+        route_targets,
+    )
+    builder.add_edge("conversation", "context_gate")
+
+    for node_name in route_targets:
+        if node_name == "conversation":
+            continue
+        builder.add_conditional_edges(
+            node_name,
+            _check_tool_calls,
+            {
+                "tool_executor": "tool_executor",
+                "context_gate": "context_gate",
+            },
+        )
+
+    builder.add_edge("tool_executor", "error_check")
+    builder.add_conditional_edges(
+        "error_check",
+        _should_retry,
+        {
+            **{name: name for name in (*STANDARD_SPECIALISTS, *GUILD_GRAPH_NODES)},
+            "summarizer": "context_gate",
+        },
+    )
+    builder.add_edge("context_gate", "summarizer")
+    builder.add_edge("summarizer", END)
+
+    return builder.compile()
 
 
 # Singleton compiled graphs.
