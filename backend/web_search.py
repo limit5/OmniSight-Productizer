@@ -62,6 +62,8 @@ DEFAULT_TENANT_RATE_WINDOW_SECONDS = 60.0
 DEFAULT_DAILY_BUDGET_USD = 5.00
 DEFAULT_TAVILY_CREDIT_USD = 0.008
 KNOWN_WEB_SEARCH_PROVIDERS = frozenset({"none", "tavily", "exa", "perplexity"})
+WEB_SEARCH_PROVIDER_ENV = "OMNISIGHT_WEB_SEARCH_PROVIDER"
+WEB_SEARCH_DAILY_BUDGET_USD_ENV = "OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD"
 
 SearchDepth = Literal["basic", "advanced"]
 SearchTopic = Literal["general", "news", "finance"]
@@ -92,8 +94,8 @@ class WebSearchRuntimeConfig:
     @classmethod
     def from_settings(cls, settings: Any | None = None) -> "WebSearchRuntimeConfig":
         if settings is None:
-            provider_raw = os.environ.get("OMNISIGHT_WEB_SEARCH_PROVIDER", "")
-            budget_raw: Any = os.environ.get("OMNISIGHT_WEB_SEARCH_DAILY_BUDGET_USD", "")
+            provider_raw = os.environ.get(WEB_SEARCH_PROVIDER_ENV, "")
+            budget_raw: Any = os.environ.get(WEB_SEARCH_DAILY_BUDGET_USD_ENV, "")
         else:
             provider_raw = getattr(settings, "web_search_provider", "")
             budget_raw = getattr(settings, "web_search_daily_budget_usd", "")
@@ -754,6 +756,8 @@ __all__ = [
     "WebSearchResponse",
     "WebSearchResult",
     "WebSearchRuntimeConfig",
+    "WEB_SEARCH_DAILY_BUDGET_USD_ENV",
+    "WEB_SEARCH_PROVIDER_ENV",
     "UnsupportedWebSearchProviderError",
     "estimate_tavily_cost_usd",
     "make_web_search_client",
