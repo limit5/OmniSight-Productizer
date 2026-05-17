@@ -36,6 +36,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_DIR = REPO_ROOT / "backend" / "alembic"
 
 
+@pytest.fixture(scope="module")
+def real_script():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config()
+    cfg.set_main_option("script_location", str(SCRIPT_DIR))
+    return ScriptDirectory.from_config(cfg)
+
+
 # ── _classify_drift unit table ───────────────────────────────────────
 
 
@@ -54,8 +64,48 @@ SCRIPT_DIR = REPO_ROOT / "backend" / "alembic"
         (["a", "b"], ["a", "c"], "divergent"),
     ],
 )
-def test_classify_drift(image, db, expected):
-    assert _classify_drift(image, db) == expected
+def test_classify_drift(image, db, expected, real_script):
+    # Synthetic letters resolve to ResolutionError against the real DAG;
+    # the classifier's identity short-circuit + exception handling preserves
+    # the original set-semantic test contract while the production path uses
+    # ancestry (see test_classify_drift_forward_linear_mixed_prefix).
+    assert _classify_drift(image, db, real_script) == expected
+
+
+def test_classify_drift_forward_linear_mixed_prefix(real_script):
+    """OP-1446 regression: forward linear drift across a numeric → m_* merge
+    → numeric chain must classify as ``image_ahead`` (DB needs upgrade), not
+    ``divergent``.
+
+    Reproduces the v0.5.0-rc2 prod scenario: image baked at numeric head
+    ``0242``, DB still at the prior merge node ``m_2026_05_16_3head`` which
+    is an ancestor of ``0242`` per the alembic DAG. Set-equality alone
+    flagged this as divergent and halted the deploy.
+    """
+    heads = real_script.get_heads()
+    assert "0242" in heads, (
+        "fixture assumes 0242 is a current image head; if migrations "
+        "advanced, pick a descendant of m_2026_05_16_3head"
+    )
+    walk = [
+        s.revision
+        for s in real_script.iterate_revisions("0242", "m_2026_05_16_3head")
+    ]
+    assert walk, (
+        "fixture assumes m_2026_05_16_3head is an ancestor of 0242 in the "
+        "alembic DAG (walk should not be empty)"
+    )
+
+    assert (
+        _classify_drift(["0242"], ["m_2026_05_16_3head"], real_script)
+        == "image_ahead"
+    )
+    # Symmetry: the reverse direction must classify as db_ahead, not
+    # divergent (image is stale relative to a DB that ran ahead).
+    assert (
+        _classify_drift(["m_2026_05_16_3head"], ["0242"], real_script)
+        == "db_ahead"
+    )
 
 
 def test_redact_strips_password():
