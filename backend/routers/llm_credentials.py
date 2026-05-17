@@ -92,6 +92,15 @@ async def list_llm_credentials(
     enabled_only: bool = Query(False),
     user: _au.User = Depends(_au.require_admin),
 ):
+    """List LLM credentials for the caller's tenant.
+
+    Returns a ``{"items": [...], "count": N}`` envelope. Each row has its
+    secret rendered as a :func:`backend.secret_store.fingerprint` —
+    plaintext keys never leave the server. ``provider`` narrows to a
+    single provider (validated against ``_PROVIDER_PATTERN``);
+    ``enabled_only=True`` drops disabled rows. Tenant scoping is enforced
+    by :func:`_ensure_tenant` + ``tenant_where_pg`` in the service layer.
+    """
     _ensure_tenant(user)
     items = await _lc.list_credentials(
         provider=provider, enabled_only=enabled_only,
@@ -104,6 +113,13 @@ async def get_llm_credential_endpoint(
     credential_id: str,
     user: _au.User = Depends(_au.require_admin),
 ):
+    """Return a single LLM credential row (masked) for the caller's tenant.
+
+    Raises ``HTTPException(404)`` when ``credential_id`` does not exist
+    inside the caller's tenant — the service layer's tenant filter makes
+    a cross-tenant id indistinguishable from a missing one (intentional;
+    do not leak existence across tenants).
+    """
     _ensure_tenant(user)
     row = await _lc.get_credential(credential_id)
     if row is None:
@@ -121,6 +137,17 @@ async def create_llm_credential(
     body: LLMCredentialCreate,
     user: _au.User = Depends(_au.require_admin),
 ):
+    """Create a new LLM credential inside the caller's tenant.
+
+    Returns 201 with the masked row on success. ``body.value`` is
+    Fernet-encrypted server-side before the INSERT — only the fingerprint
+    surfaces back. Maps service-layer errors to HTTP:
+
+    * :class:`backend.llm_credentials.LLMCredentialConflict` → 409
+      (e.g. duplicate ``(tenant, provider, label)``).
+    * :class:`ValueError` → 400 (validation that Pydantic could not catch,
+      such as provider-specific key shape).
+    """
     _ensure_tenant(user)
     try:
         out = await _lc.create_credential(
@@ -145,6 +172,15 @@ async def update_llm_credential(
     body: LLMCredentialUpdate,
     user: _au.User = Depends(_au.require_admin),
 ):
+    """Partial-update an LLM credential — fields unset in the body are not touched.
+
+    Honors :class:`LLMCredentialUpdate` semantics: a field omitted from
+    the request body means "leave alone"; passing ``value=""`` clears the
+    stored key; passing a non-empty ``value`` rotates it (re-encrypted
+    server-side). 404 if the credential is missing inside the caller's
+    tenant, 409 on conflict (e.g. promoting a second default for the same
+    provider), 400 on service-layer validation error.
+    """
     _ensure_tenant(user)
     updates = {
         k: v for k, v in body.model_dump(exclude_unset=True).items()
@@ -166,6 +202,19 @@ async def delete_llm_credential(
     auto_elect_new_default: bool = Query(True),
     user: _au.User = Depends(_au.require_admin),
 ):
+    """Delete an LLM credential and (by default) elect a replacement default.
+
+    When the deleted row was the tenant's default for its provider and
+    ``auto_elect_new_default`` is true (the default), the service layer
+    picks the next-most-recent enabled credential for that provider and
+    promotes it — avoiding a "no default" gap that would silently break
+    downstream callers. Set ``auto_elect_new_default=false`` to skip
+    that and leave the provider without a default.
+
+    Response: ``{"status": "deleted", ...service-layer detail}``.
+    Errors: 404 if missing in tenant, 409 if the service refuses
+    (e.g. the credential is pinned by an active dependency).
+    """
     _ensure_tenant(user)
     try:
         out = await _lc.delete_credential(
