@@ -24,6 +24,7 @@ Plus:
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -763,6 +764,53 @@ def test_context_pack_size_cap_prioritises_conflict_then_git_log(monkeypatch):
     assert "recent git intent" in pack or "[context-pack truncated]" in pack
     assert len(pack) <= ma.CONTEXT_PACK_TOKEN_LIMIT * 4
     assert "sibling text that should be truncated" not in pack
+
+
+def test_context_pack_marks_missing_sibling_file(tmp_path, caplog):
+    req = _base_request(additional_files=["backend/missing.py"])
+    req.workspace = str(tmp_path)
+    req.jira_ticket = "OP-1414"
+
+    caplog.set_level(logging.WARNING, logger=ma.__name__)
+    pack = ma.build_context_pack(req, ma.parse_conflict_block(req.conflict_text))
+
+    assert "## Sibling file: backend/missing.py" in pack
+    assert "workspace read failed: missing_file" in pack
+    assert "file not found" in pack
+    assert "jira=OP-1414" in caplog.text
+    assert "path=backend/missing.py" in caplog.text
+
+
+def test_context_pack_marks_empty_sibling_file(tmp_path, caplog):
+    path = tmp_path / "backend" / "empty.py"
+    path.parent.mkdir()
+    path.write_text("")
+    req = _base_request(additional_files=["backend/empty.py"])
+    req.workspace = str(tmp_path)
+    req.jira_ticket = "OP-1414"
+
+    caplog.set_level(logging.WARNING, logger=ma.__name__)
+    pack = ma.build_context_pack(req, ma.parse_conflict_block(req.conflict_text))
+
+    assert "## Sibling file: backend/empty.py" in pack
+    assert "(file is empty)" in pack
+    assert "workspace read failed" not in pack
+    assert "backend/empty.py" not in caplog.text
+
+
+def test_context_pack_marks_unsafe_sibling_path(tmp_path, caplog):
+    req = _base_request(additional_files=["../outside.py"])
+    req.workspace = str(tmp_path)
+    req.jira_ticket = "OP-1414"
+
+    caplog.set_level(logging.WARNING, logger=ma.__name__)
+    pack = ma.build_context_pack(req, ma.parse_conflict_block(req.conflict_text))
+
+    assert "## Sibling file: ../outside.py" in pack
+    assert "workspace read failed: unsafe_path" in pack
+    assert "outside workspace" in pack
+    assert "jira=OP-1414" in caplog.text
+    assert "path=../outside.py" in caplog.text
 
 
 def test_op1403_synthetic_guild_shape_prompt_mentions_guild_and_guild_id():
