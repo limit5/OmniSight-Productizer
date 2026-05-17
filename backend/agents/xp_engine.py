@@ -13,7 +13,7 @@ W4 sub-wave coverage in this module
   that delivers the ADR-0008 "sigmoid late-game" property.
 - W4.3 (OP-1351): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
   ``FIRST_TIME_SKILL_MULTIPLIER``.
-- W4.4 (OP-135): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
+- W4.4 (OP-1352): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
 - W18.2 (OP-1389): secondary-class XP earns 0.5× before Lv 30 and
   returns to 1.0× from Lv 30 onward.
 - W18.3 (OP-1390): dual-class agents in party tasks earn the hybrid
@@ -56,7 +56,7 @@ TIER_L_PLUS_MULTIPLIER = 2.0
 # earns a 3.0× XP bump per ADR-0008 -- discovery reward, stacks with
 # outcome and Tier-L+ multipliers.
 FIRST_TIME_SKILL_MULTIPLIER = 3.0
-# W4.4 (OP-135): Anti-grinding clamp per ADR-0008 §"XP curve" -- when the
+# W4.4 (OP-1352): Anti-grinding clamp per ADR-0008 §"XP curve" -- when the
 # runner detects that the same canonical task hash has already been
 # awarded to this agent within the last 24h, the XP delta for the repeat
 # is multiplied by 0.2 (i.e. ×0.2, an 80% haircut). Stacks multiplicatively
@@ -344,7 +344,7 @@ def _outcome_multiplier(outcome: TaskOutcome) -> float:
         _clean_active_buff_ids(outcome.active_buff_ids)
     )
     multiplier *= xp_multiplier_for_debuff_ids(_effective_debuff_ids(outcome))
-    # W4.4 (OP-135): anti-grinding clamp -- same canonical task hash
+    # W4.4 (OP-1352): anti-grinding clamp -- same canonical task hash
     # repeated within 24h takes a flat 0.2× haircut on top of every
     # earlier multiplier. The flag is computed runner-side and passed
     # in; see :data:`DUPLICATE_TASK_MULTIPLIER` for the contract.
