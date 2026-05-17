@@ -186,6 +186,7 @@ class MergerReason(str, Enum):
     refused_push_failed = "refused_push_failed"
     refused_new_logic_detected = "refused_new_logic_detected"
     refused_review_objected = "refused_review_objected"
+    resolved_deterministic_merge = "resolved_deterministic_merge"
     # OP-1196 phase 3 — daemon-side push wiring (Option C). When the
     # caller (e.g., the gerrit-jira-bridge daemon) sets
     # ``request.push_locally=False``, the merger runs through all the
@@ -1839,6 +1840,308 @@ def _make_block_diff(
     return "\n".join(out)
 
 
+def try_deterministic_merge(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+) -> ResolutionOutcome | None:
+    """Resolve narrow AST-safe take-both conflicts without calling an LLM."""
+    if not blocks:
+        return None
+
+    resolved_blocks: list[str] = []
+    patterns: list[str] = []
+    matches = list(_CONFLICT_RE.finditer(req.conflict_text))
+    if len(matches) != len(blocks):
+        return None
+    for block, match in zip(blocks, matches):
+        prefix = req.conflict_text[:match.start()]
+        resolved = _deterministic_block_resolution(block, prefix)
+        if resolved is None:
+            return None
+        resolved_block, pattern = resolved
+        resolved_blocks.append(resolved_block)
+        patterns.append(pattern)
+
+    text = req.conflict_text
+    for idx in range(len(matches) - 1, -1, -1):
+        match = matches[idx]
+        text = text[: match.start()] + resolved_blocks[idx] + text[match.end():]
+
+    diff = _make_block_diff(req.file_path, blocks, resolved_blocks)
+    outcome = _build_abstain(
+        req,
+        MergerReason.resolved_deterministic_merge,
+        confidence=1.0,
+        rationale=(
+            "deterministic AST trivial merge: "
+            f"{', '.join(dict.fromkeys(patterns))}"
+        ),
+        diff_preview=diff,
+        metadata={
+            "merger_path": "deterministic",
+            "deterministic_patterns": list(dict.fromkeys(patterns)),
+            "conflict_lines": sum(block.n_conflict_lines for block in blocks),
+            "blocks": len(blocks),
+        },
+    )
+    outcome.resolved_text = text
+    outcome.changed_identifiers = _extract_changed_identifiers(req.file_path, text)
+    return outcome
+
+
+def _deterministic_block_resolution(
+    block: ConflictBlock,
+    prefix: str,
+) -> tuple[str, str] | None:
+    resolvers = (
+        lambda head, incoming: _resolve_dunder_all_union(head, incoming, prefix),
+        _resolve_import_union,
+        _resolve_distinct_symbol_adds,
+        _resolve_dict_literal_adds,
+        _resolve_comment_docstring_adds,
+    )
+    for resolver in resolvers:
+        resolved = resolver(block.head_lines, block.incoming_lines)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _join_block_lines(lines: list[str]) -> str:
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _literal_sort_key(value: str) -> tuple[str, str]:
+    return (value.lower(), value)
+
+
+def _parse_single_assign(lines: list[str]) -> ast.Assign | None:
+    try:
+        tree = ast.parse(_join_block_lines(lines))
+    except SyntaxError:
+        return None
+    if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Assign):
+        return None
+    return tree.body[0]
+
+
+def _string_list_assignment(
+    lines: list[str],
+    target_name: str,
+) -> tuple[str, list[str]] | None:
+    assign = _parse_single_assign(lines)
+    if assign is None or len(assign.targets) != 1:
+        return None
+    target = assign.targets[0]
+    if not isinstance(target, ast.Name) or target.id != target_name:
+        return None
+    if not isinstance(assign.value, (ast.List, ast.Tuple)):
+        return None
+    values: list[str] = []
+    for elt in assign.value.elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, str):
+            return None
+        values.append(elt.value)
+    return target.id, values
+
+
+def _resolve_dunder_all_union(
+    head_lines: list[str],
+    incoming_lines: list[str],
+    prefix: str = "",
+) -> tuple[str, str] | None:
+    head = _string_list_assignment(head_lines, "__all__")
+    incoming = _string_list_assignment(incoming_lines, "__all__")
+    if head is not None and incoming is not None:
+        values = sorted(set(head[1]) | set(incoming[1]), key=_literal_sort_key)
+        lines = ["__all__ = ["]
+        lines.extend(f'    "{value}",' for value in values)
+        lines.append("]")
+        return _join_block_lines(lines), "__all__ list union"
+
+    if "__all__" not in prefix[-500:]:
+        return None
+    head_entries = _string_list_entries(head_lines)
+    incoming_entries = _string_list_entries(incoming_lines)
+    if head_entries is None or incoming_entries is None:
+        return None
+    indent = _first_indent([*head_lines, *incoming_lines])
+    values = sorted(
+        set(head_entries) | set(incoming_entries),
+        key=_literal_sort_key,
+    )
+    lines = [f'{indent}"{value}",' for value in values]
+    return _join_block_lines(lines), "__all__ list union"
+
+
+def _string_list_entries(lines: list[str]) -> list[str] | None:
+    meaningful = [line.strip() for line in lines if line.strip()]
+    if not meaningful:
+        return None
+    try:
+        expr = ast.parse("[" + "\n".join(meaningful) + "\n]", mode="eval")
+    except SyntaxError:
+        return None
+    if not isinstance(expr.body, ast.List):
+        return None
+    values: list[str] = []
+    for elt in expr.body.elts:
+        if not isinstance(elt, ast.Constant) or not isinstance(elt.value, str):
+            return None
+        values.append(elt.value)
+    return values
+
+
+def _resolve_import_union(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _import_statements(head_lines)
+    incoming = _import_statements(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    imports = sorted(set(head) | set(incoming), key=str.lower)
+    return _join_block_lines(imports), "import statement union"
+
+
+def _import_statements(lines: list[str]) -> list[str] | None:
+    if not lines or any(line[:1].isspace() for line in lines if line.strip()):
+        return None
+    try:
+        tree = ast.parse(_join_block_lines(lines))
+    except SyntaxError:
+        return None
+    if not tree.body:
+        return None
+    imports: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            return None
+        imports.append(ast.unparse(node))
+    return imports
+
+
+def _resolve_distinct_symbol_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _top_level_symbol_blocks(head_lines)
+    incoming = _top_level_symbol_blocks(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_names = {name for name, _text in head}
+    incoming_names = {name for name, _text in incoming}
+    if not head_names or not incoming_names or head_names & incoming_names:
+        return None
+    ordered = sorted([*head, *incoming], key=lambda item: _literal_sort_key(item[0]))
+    return "\n\n".join(text.rstrip("\n") for _name, text in ordered) + "\n", (
+        "add/add distinct symbol"
+    )
+
+
+def _top_level_symbol_blocks(lines: list[str]) -> list[tuple[str, str]] | None:
+    source = _join_block_lines(lines)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    if not tree.body:
+        return None
+    symbols: list[tuple[str, str]] = []
+    source_lines = source.splitlines()
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            return None
+        end_lineno = getattr(node, "end_lineno", None)
+        if end_lineno is None:
+            return None
+        block_text = "\n".join(source_lines[node.lineno - 1:end_lineno]) + "\n"
+        symbols.append((node.name, block_text))
+    return symbols
+
+
+def _resolve_dict_literal_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    head = _dict_entries(head_lines)
+    incoming = _dict_entries(incoming_lines)
+    if head is None or incoming is None:
+        return None
+    head_keys = {key for key, _line in head}
+    incoming_keys = {key for key, _line in incoming}
+    if not head_keys or not incoming_keys or head_keys & incoming_keys:
+        return None
+    entries = sorted([*head, *incoming], key=lambda item: _literal_sort_key(item[0]))
+    return _join_block_lines([line for _key, line in entries]), (
+        "dict literal disjoint additions"
+    )
+
+
+def _dict_entries(lines: list[str]) -> list[tuple[str, str]] | None:
+    meaningful = [line for line in lines if line.strip()]
+    if not meaningful:
+        return None
+    source = "{\n" + "\n".join(meaningful) + "\n}"
+    try:
+        expr = ast.parse(source, mode="eval")
+    except SyntaxError:
+        return None
+    if not isinstance(expr.body, ast.Dict):
+        return None
+    if len(expr.body.keys) != len(meaningful):
+        return None
+    entries: list[tuple[str, str]] = []
+    for key_node, line in zip(expr.body.keys, meaningful):
+        if not isinstance(key_node, ast.Constant):
+            return None
+        key = key_node.value
+        if not isinstance(key, (str, int, float, bool)):
+            return None
+        entries.append((str(key), line))
+    return entries
+
+
+def _resolve_comment_docstring_adds(
+    head_lines: list[str],
+    incoming_lines: list[str],
+) -> tuple[str, str] | None:
+    if not _comment_or_docstring_lines(head_lines):
+        return None
+    if not _comment_or_docstring_lines(incoming_lines):
+        return None
+    indent = _first_indent([*head_lines, *incoming_lines])
+    separator = f"{indent}# ---"
+    return _join_block_lines([*head_lines, separator, *incoming_lines]), (
+        "add-only docstring/comment"
+    )
+
+
+def _comment_or_docstring_lines(lines: list[str]) -> bool:
+    meaningful = [line for line in lines if line.strip()]
+    if not meaningful:
+        return False
+    if all(line.lstrip().startswith("#") for line in meaningful):
+        return True
+    try:
+        tree = ast.parse(_join_block_lines(meaningful))
+    except SyntaxError:
+        return False
+    return all(
+        isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for node in tree.body
+    )
+
+
+def _first_indent(lines: list[str]) -> str:
+    for line in lines:
+        if line.strip():
+            return line[: len(line) - len(line.lstrip())]
+    return ""
+
+
 def _is_oversized(blocks: list[ConflictBlock], resolution: Resolution) -> bool:
     total = sum(b.n_conflict_lines for b in blocks)
     if total > MAX_CONFLICT_LINES:
@@ -1985,6 +2288,144 @@ async def resolve_conflict(
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
         return outcome
+
+    deterministic = try_deterministic_merge(request, blocks)
+    if deterministic is not None:
+        logger.info(
+            "merger_path=deterministic change=%s file=%s patterns=%s",
+            request.change_number or change_id,
+            request.file_path,
+            deterministic.metadata.get("deterministic_patterns", []),
+        )
+        test_result = await deps.test_runner(request)
+        if not test_result.ok:
+            _bump_failure(change_id)
+            outcome = _build_refusal(
+                request,
+                MergerReason.refused_test_failure,
+                rationale=(
+                    "deterministic merge verifier failed: "
+                    f"{test_result.summary or test_result.command}"
+                ),
+                confidence=deterministic.confidence,
+                diff_preview=deterministic.diff_preview,
+                metadata=deterministic.metadata,
+            )
+            outcome.changed_identifiers = list(deterministic.changed_identifiers)
+            outcome.test_result = {
+                "ok": False,
+                "summary": test_result.summary,
+                "command": test_result.command,
+            }
+            outcome.failure_count = get_failure_count(change_id)
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+
+        deterministic.test_result = {
+            "ok": True,
+            "summary": test_result.summary,
+            "command": test_result.command,
+        }
+        if not request.push_locally:
+            _observe_metric(deterministic)
+            await _safe_audit(deps.audit, deterministic)
+            return deterministic
+
+        resolution = Resolution(
+            resolved_text=deterministic.resolved_text,
+            confidence=deterministic.confidence,
+            rationale=deterministic.rationale,
+            diff=deterministic.diff_preview,
+            changed_blocks=len(blocks),
+            changed_identifiers=list(deterministic.changed_identifiers),
+        )
+        commit_message = _build_patchset_message(request, resolution)
+        push = await deps.pusher.push(
+            change_id=change_id,
+            project=request.project,
+            workspace=request.workspace,
+            file_path=request.file_path,
+            resolved_text=resolution.resolved_text,
+            commit_message=commit_message,
+        )
+        if not push.ok:
+            _bump_failure(change_id)
+            outcome = _build_refusal(
+                request,
+                MergerReason.refused_push_failed,
+                rationale=f"Gerrit push failed: {push.reason}",
+                confidence=resolution.confidence,
+                diff_preview=resolution.diff,
+                metadata=deterministic.metadata,
+            )
+            outcome.changed_identifiers = list(resolution.changed_identifiers)
+            outcome.failure_count = get_failure_count(change_id)
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+
+        review_sha = push.sha or request.patchset_revision
+        review = await deps.reviewer.post_review(
+            commit_sha=review_sha,
+            project=request.project,
+            message=_build_review_message(request, resolution, push),
+            score=int(LabelVote.plus_two),
+        )
+        if not review.ok:
+            outcome = _build_abstain(
+                request,
+                MergerReason.abstained_low_confidence,
+                confidence=resolution.confidence,
+                rationale=(
+                    f"deterministic patchset pushed but +2 vote call failed: "
+                    f"{review.reason}; human to take over"
+                ),
+                diff_preview=resolution.diff,
+                metadata={
+                    **deterministic.metadata,
+                    "push_sha": push.sha,
+                    "review_url": push.review_url,
+                },
+            )
+            outcome.push_sha = push.sha
+            outcome.review_url = push.review_url
+            outcome.changed_identifiers = list(resolution.changed_identifiers)
+            outcome.test_result = deterministic.test_result
+            _observe_metric(outcome)
+            await _safe_audit(deps.audit, outcome)
+            return outcome
+
+        hashtag_set_ok = True
+        hashtag_set_reason = ""
+        try:
+            ht_res = await deps.hashtag_setter.add_hashtag(
+                change_id=change_id,
+                project=request.project,
+                hashtag=CONFLICT_RESOLVED_HASHTAG,
+            )
+            hashtag_set_ok = ht_res.ok
+            hashtag_set_reason = ht_res.reason
+        except Exception as exc:                           # pragma: no cover
+            hashtag_set_ok = False
+            hashtag_set_reason = f"hashtag_setter raised: {exc!r}"
+
+        _reset_failure(change_id)
+        deterministic.voted_score = LabelVote.plus_two
+        deterministic.push_sha = push.sha
+        deterministic.review_url = push.review_url
+        deterministic.failure_count = 0
+        deterministic.metadata = {
+            **deterministic.metadata,
+            "push_sha": push.sha,
+            "review_url": push.review_url,
+            "hashtag_set_ok": hashtag_set_ok,
+            "hashtag_set_reason": hashtag_set_reason,
+        }
+        _observe_metric(deterministic)
+        await _safe_audit(deps.audit, deterministic)
+        _emit_sse_voted(deterministic)
+        return deterministic
 
     # ── 5. Structural risk gate ─────────────────────────────────
     risk = classify_conflict_risk(request, blocks)
@@ -2494,4 +2935,5 @@ __all__ = [
     "parse_conflict_block",
     "reset_failure_counts_for_tests",
     "resolve_conflict",
+    "try_deterministic_merge",
 ]

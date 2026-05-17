@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -224,9 +225,121 @@ def test_replay_case_matches_operator_resolution_or_abstains(case_name: str):
 
     outcome = _run(ma.resolve_conflict(req, deps=deps))
 
-    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    if case_name == "change_930":
+        assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
+        assert outcome.metadata["merger_path"] == "deterministic"
+        assert deps.llm.calls == []
+    else:
+        assert outcome.reason is ma.MergerReason.deferred_push_to_caller
     assert outcome.resolved_text == expected
     assert not _has_conflict_markers(outcome.resolved_text)
+
+
+def test_change_930_replay_uses_deterministic_dunder_all_union(caplog):
+    caplog.set_level(logging.INFO, logger="backend.merger_agent")
+    req = replay_case("change_930")
+    expected = _read_fixture_text(_fixture_path("change_930", "after", req.file_path))
+    deps = ma.MergerDeps(
+        llm=_FakeLLM("LLM must not run for deterministic __all__ union"),
+        pusher=_ExplodingPusher(),
+        reviewer=_ExplodingReviewer(),
+        test_runner=_passing_test_runner,
+        audit=_audit_sink,
+    )
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
+    assert outcome.resolved_text == expected
+    assert outcome.test_result == {
+        "ok": True,
+        "summary": "OP-1430 replay fixture",
+        "command": "",
+    }
+    assert outcome.metadata["merger_path"] == "deterministic"
+    assert outcome.metadata["deterministic_patterns"] == ["__all__ list union"]
+    assert deps.llm.calls == []
+    assert any("merger_path=deterministic" in r.message for r in caplog.records)
+
+
+def _deterministic_req(conflict_text: str) -> ma.ConflictRequest:
+    return ma.ConflictRequest(
+        change_id="I-deterministic",
+        project="OmniSight-Productizer",
+        file_path="backend/example.py",
+        conflict_text=conflict_text,
+        push_locally=False,
+    )
+
+
+def _conflict_text(
+    head: str,
+    incoming: str,
+    *,
+    prefix: str = "",
+    suffix: str = "",
+) -> str:
+    return (
+        f"{prefix}{'<' * 7} HEAD\n"
+        f"{head}"
+        f"{'=' * 7}\n"
+        f"{incoming}"
+        f"{'>' * 7} branch\n"
+        f"{suffix}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("conflict_text", "expected", "pattern"),
+    [
+        (
+            _conflict_text("import os\n", "from pathlib import Path\n"),
+            "from pathlib import Path\nimport os\n",
+            "import statement union",
+        ),
+        (
+            _conflict_text(
+                "def beta():\n    return \"beta\"\n",
+                "class Alpha:\n    pass\n",
+            ),
+            "class Alpha:\n    pass\n\n"
+            "def beta():\n    return \"beta\"\n",
+            "add/add distinct symbol",
+        ),
+        (
+            _conflict_text(
+                "    \"beta\": 2,\n",
+                "    \"alpha\": 1,\n",
+                prefix="CONFIG = {\n",
+                suffix="}\n",
+            ),
+            "CONFIG = {\n    \"alpha\": 1,\n    \"beta\": 2,\n}\n",
+            "dict literal disjoint additions",
+        ),
+        (
+            _conflict_text("# explain beta\n", "# explain alpha\n"),
+            "# explain beta\n# ---\n# explain alpha\n",
+            "add-only docstring/comment",
+        ),
+    ],
+)
+def test_deterministic_merge_pattern_handlers(conflict_text, expected, pattern):
+    req = _deterministic_req(conflict_text)
+    deps = ma.MergerDeps(
+        llm=_FakeLLM("LLM must not run for deterministic merge"),
+        pusher=_ExplodingPusher(),
+        reviewer=_ExplodingReviewer(),
+        test_runner=_passing_test_runner,
+        audit=_audit_sink,
+    )
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
+    assert outcome.resolved_text == expected
+    assert outcome.metadata["deterministic_patterns"] == [pattern]
+    assert outcome.test_result["ok"] is True
+    assert deps.llm.calls == []
 
 
 def test_change_932_replay_keeps_shared_setup_tests_split():
