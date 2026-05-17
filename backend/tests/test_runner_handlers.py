@@ -468,7 +468,7 @@ async def test_knowledge_retrieval_returns_cited_chunks(
         runner_handlers, "_build_embedder_from_env", lambda: embedder
     )
 
-    async def fake_build_store():
+    async def fake_build_store() -> tuple[_FakeKnowledgeStore, _FakeCloseable]:
         return store, closeable
 
     monkeypatch.setattr(runner_handlers, "_build_store_from_env", fake_build_store)
