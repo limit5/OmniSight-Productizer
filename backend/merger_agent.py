@@ -167,6 +167,14 @@ class LabelVote(int, Enum):
     plus_two = 2
 
 
+class MergerRiskTier(str, Enum):
+    """Structural risk tier computed before the merger LLM is invoked."""
+
+    low = "LOW"
+    medium = "MEDIUM"
+    high = "HIGH"
+
+
 @dataclass
 class ConflictBlock:
     """One ``<<<<<<<`` ... ``>>>>>>>`` section inside a file."""
@@ -181,6 +189,14 @@ class ConflictBlock:
     @property
     def n_conflict_lines(self) -> int:
         return len(self.head_lines) + len(self.incoming_lines)
+
+
+@dataclass(frozen=True)
+class ConflictRisk:
+    """Pre-LLM structural risk signal for merge-conflict routing."""
+
+    tier: MergerRiskTier
+    reasons: tuple[str, ...] = ()
 
 
 @dataclass
@@ -677,7 +693,15 @@ SYSTEM_PROMPT = (
     "conflict or in the provided file context.  If you cannot preserve "
     "both intents without introducing new logic, output a low confidence "
     "score and explain the ambiguity in the rationale — do NOT fabricate "
-    "a compromise.  Output STRICTLY a JSON object matching this schema:\n"
+    "a compromise.  Take-both rubric: when the two sides add distinct "
+    "parameters, routing branches, metrics/logging fields, validation "
+    "guards, or side-effect calls, keep both features unless they are "
+    "mutually exclusive.  For edit/edit signature overlap, preserve every "
+    "call-site-observable parameter from both sides and use only names "
+    "already present in either side or in the supplied file context.  For "
+    "param naming collisions, keep the semantic data flow from both halves; "
+    "do not drop a metric, route key, or validation path merely because "
+    "the names overlap.  Output STRICTLY a JSON object matching this schema:\n"
     '{"resolved_block": "<text that replaces the conflict block>",'
     ' "confidence": <float 0..1>,'
     ' "rationale": "<one-paragraph explanation>",'
@@ -707,13 +731,21 @@ def parse_conflict_block(text: str) -> list[ConflictBlock]:
     return blocks
 
 
-def build_prompt(req: ConflictRequest, blocks: list[ConflictBlock]) -> str:
+def build_prompt(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    risk: ConflictRisk | None = None,
+) -> str:
     """Deterministic prompt — inlines the conflict + commit messages +
     the provided file context, and repeats the no-new-logic guardrail."""
+    risk = risk or classify_conflict_risk(req, blocks)
     parts: list[str] = [
         "SYSTEM: " + SYSTEM_PROMPT,
         "",
         f"FILE: {req.file_path}",
+        f"Structural risk tier: {risk.tier.value}",
+        "Structural risk signals: "
+        + (", ".join(risk.reasons) if risk.reasons else "(none)"),
         f"HEAD commit message:\n{req.head_commit_message.strip()}",
         f"Incoming commit message:\n{req.incoming_commit_message.strip()}",
         "",
@@ -745,6 +777,101 @@ def is_security_sensitive(file_path: str) -> bool:
     ``backend/auth/session.py``, and ``configs/prod/app.yaml`` all trip."""
     norm = file_path.strip().replace("\\", "/").lower()
     return any(pat in norm for pat in _SECURITY_PATH_PATTERNS)
+
+
+def classify_conflict_risk(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+) -> ConflictRisk:
+    """Classify structural merge risk before spending an LLM call.
+
+    LOW means the conflict is a narrow line edit. MEDIUM is the intended
+    LLM-resolution lane for edit/edit overlaps that still fit the hard
+    gates. HIGH is reserved for shapes the current one-block JSON
+    contract cannot safely verify before push.
+    """
+    reasons: list[str] = []
+
+    if len(blocks) > 1:
+        reasons.append("multiple_conflict_blocks")
+    if len(req.additional_files) > 0:
+        reasons.append("additional_files_present")
+
+    total_lines = sum(block.n_conflict_lines for block in blocks)
+    if total_lines > max(1, int(MAX_CONFLICT_LINES * 0.75)):
+        reasons.append("near_line_limit")
+
+    for block in blocks:
+        if _has_signature_overlap(block):
+            reasons.append("signature_overlap")
+        if _has_param_name_collision(block):
+            reasons.append("param_name_collision")
+        if _has_take_both_feature_shape(block):
+            reasons.append("take_both_feature_shape")
+
+    deduped = tuple(dict.fromkeys(reasons))
+    high_reasons = {
+        "multiple_conflict_blocks",
+        "additional_files_present",
+        "near_line_limit",
+    }
+    if any(reason in high_reasons for reason in deduped):
+        return ConflictRisk(MergerRiskTier.high, deduped)
+    if deduped:
+        return ConflictRisk(MergerRiskTier.medium, deduped)
+    return ConflictRisk(MergerRiskTier.low, ())
+
+
+_PY_SIGNATURE_RE = re.compile(r"^\s*(?:async\s+def|def)\s+\w+\s*\((?P<params>[^)]*)\)")
+_IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _has_signature_overlap(block: ConflictBlock) -> bool:
+    return bool(_signature_params(block.head_lines)) and bool(
+        _signature_params(block.incoming_lines)
+    )
+
+
+def _signature_params(lines: list[str]) -> set[str]:
+    params: set[str] = set()
+    for line in lines:
+        match = _PY_SIGNATURE_RE.match(line)
+        if not match:
+            continue
+        for raw in match.group("params").split(","):
+            name = raw.strip().split("=", 1)[0].split(":", 1)[0].strip()
+            if name and name not in {"self", "cls", "*", "/"}:
+                params.add(name.lstrip("*"))
+    return params
+
+
+def _has_param_name_collision(block: ConflictBlock) -> bool:
+    head_params = _signature_params(block.head_lines)
+    incoming_params = _signature_params(block.incoming_lines)
+    if not head_params or not incoming_params:
+        return False
+    if head_params & incoming_params:
+        return True
+    for left in head_params:
+        for right in incoming_params:
+            if left.startswith(f"{right}_") or right.startswith(f"{left}_"):
+                return True
+    return False
+
+
+def _has_take_both_feature_shape(block: ConflictBlock) -> bool:
+    head_names = set(_IDENT_RE.findall("\n".join(block.head_lines)))
+    incoming_names = set(_IDENT_RE.findall("\n".join(block.incoming_lines)))
+    head_unique = head_names - incoming_names
+    incoming_unique = incoming_names - head_names
+    return bool(head_unique and incoming_unique)
+
+
+def _risk_metadata(risk: ConflictRisk) -> dict[str, Any]:
+    return {
+        "risk_tier": risk.tier.value,
+        "risk_reasons": list(risk.reasons),
+    }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -970,8 +1097,26 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
+    # ── 5. Structural risk gate ─────────────────────────────────
+    risk = classify_conflict_risk(request, blocks)
+    risk_meta = _risk_metadata(risk)
+    if risk.tier is MergerRiskTier.high:
+        outcome = _build_abstain(
+            request,
+            MergerReason.abstained_low_confidence,
+            confidence=0.0,
+            rationale=(
+                "structural risk HIGH before LLM invocation; "
+                f"signals={','.join(risk.reasons) or 'none'}"
+            ),
+            metadata={**risk_meta, "conflict_lines": total_lines},
+        )
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
     # ── 5. LLM call ──────────────────────────────────────────────
-    prompt = build_prompt(request, blocks)
+    prompt = build_prompt(request, blocks, risk)
     try:
         raw, _tokens = await deps.llm(prompt)
     except Exception as exc:
@@ -984,6 +1129,7 @@ async def resolve_conflict(
             request, MergerReason.refused_llm_unavailable,
             confidence=0.0,
             rationale="LLM returned empty response",
+            metadata=risk_meta,
         )
         outcome.failure_count = get_failure_count(change_id)
         _observe_metric(outcome)
@@ -999,7 +1145,7 @@ async def resolve_conflict(
             request, MergerReason.refused_llm_invalid_json,
             confidence=0.0,
             rationale=f"LLM returned invalid payload: {exc}",
-            metadata={"raw_head": raw[:200]},
+            metadata={**risk_meta, "raw_head": raw[:200]},
         )
         outcome.failure_count = get_failure_count(change_id)
         _observe_metric(outcome)
@@ -1019,6 +1165,7 @@ async def resolve_conflict(
             rationale=(f"LLM self-reported new logic invention; "
                        f"{resolution.rationale}"),
             diff_preview=resolution.diff,
+            metadata=risk_meta,
         )
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
@@ -1032,6 +1179,7 @@ async def resolve_conflict(
             rationale=(f"confidence {resolution.confidence:.2f} < "
                        f"{MIN_CONFIDENCE_FOR_PLUS_TWO}; {resolution.rationale}"),
             diff_preview=resolution.diff,
+            metadata=risk_meta,
         )
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
@@ -1047,6 +1195,7 @@ async def resolve_conflict(
                        f"{test_result.summary or test_result.command}"),
             confidence=resolution.confidence,
             diff_preview=resolution.diff,
+            metadata=risk_meta,
         )
         outcome.test_result = {
             "ok": False,
@@ -1080,6 +1229,7 @@ async def resolve_conflict(
                 f"pushing, and posting the +2 vote)."
             ),
             diff_preview=resolution.diff,
+            metadata=risk_meta,
         )
         outcome.resolved_text = resolution.resolved_text
         _observe_metric(outcome)
@@ -1101,6 +1251,7 @@ async def resolve_conflict(
             rationale=f"Gerrit push failed: {push.reason}",
             confidence=resolution.confidence,
             diff_preview=resolution.diff,
+            metadata=risk_meta,
         )
         outcome.failure_count = get_failure_count(change_id)
         _observe_metric(outcome)
@@ -1126,7 +1277,11 @@ async def resolve_conflict(
             rationale=(f"patchset pushed but +2 vote call failed: "
                        f"{review.reason}; human to take over"),
             diff_preview=resolution.diff,
-            metadata={"push_sha": push.sha, "review_url": push.review_url},
+            metadata={
+                **risk_meta,
+                "push_sha": push.sha,
+                "review_url": push.review_url,
+            },
         )
         outcome.push_sha = push.sha
         outcome.review_url = push.review_url
@@ -1182,6 +1337,7 @@ async def resolve_conflict(
         test_result={"ok": True, "summary": test_result.summary,
                      "command": test_result.command},
         metadata={
+            **risk_meta,
             "conflict_lines": total_lines,
             "blocks": len(blocks),
             "hashtag_set_ok": hashtag_set_ok,
@@ -1335,6 +1491,7 @@ __all__ = [
     "AUDIT_ENTITY_KIND",
     "ConflictBlock",
     "ConflictRequest",
+    "ConflictRisk",
     "DEFAULT_MODEL",
     "GerritClientReviewer",
     "GerritReviewer",
@@ -1346,6 +1503,7 @@ __all__ = [
     "MergerDeps",
     "MergerLLM",
     "MergerReason",
+    "MergerRiskTier",
     "PatchsetPushResult",
     "PatchsetPusher",
     "Resolution",
@@ -1355,6 +1513,7 @@ __all__ = [
     "TestRunResult",
     "TestRunner",
     "build_prompt",
+    "classify_conflict_risk",
     "get_failure_count",
     "is_security_sensitive",
     "parse_conflict_block",
