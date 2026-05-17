@@ -51,7 +51,10 @@ def record_usage(provider: str, tokens: int, ts: datetime | None = None) -> None
     """Record one usage event and refresh the cached quota state."""
     provider = _normalise_provider(provider)
     if tokens < 0:
-        raise ValueError("tokens must be non-negative")
+        raise ValueError(
+            f"backend.agents.provider_quota_tracker.record_usage: "
+            f"tokens must be non-negative (provider={provider!r}, tokens={tokens})"
+        )
     event_ts = _normalise_ts(ts)
     update_state: QuotaState | None = None
     update_reason = "usage_recorded"
@@ -96,7 +99,11 @@ def get_quota_state(provider: str) -> QuotaState:
 def is_at_cap(provider: str, scope: QuotaScope) -> bool:
     """Return whether the provider is at the configured cap for *scope*."""
     if scope not in ("5h", "weekly"):
-        raise ValueError(f"unknown quota scope: {scope!r}")
+        raise ValueError(
+            f"backend.agents.provider_quota_tracker.is_at_cap: "
+            f"unknown quota scope {scope!r} "
+            f"(provider={provider!r}, valid scopes: '5h', 'weekly')"
+        )
     state = get_quota_state(provider)
     if state.circuit_state == "open" and _ratelimit_is_exhausted(state.provider):
         return True
@@ -109,7 +116,11 @@ def reset_window(provider: str, scope: QuotaScope) -> None:
     """Clear usage events for one rolling window and close the circuit."""
     provider = _normalise_provider(provider)
     if scope not in ("5h", "weekly"):
-        raise ValueError(f"unknown quota scope: {scope!r}")
+        raise ValueError(
+            f"backend.agents.provider_quota_tracker.reset_window: "
+            f"unknown quota scope {scope!r} "
+            f"(provider={provider!r}, valid scopes: '5h', 'weekly')"
+        )
     interval = "5 hours" if scope == "5h" else "7 days"
     update_state: QuotaState | None = None
 
@@ -160,7 +171,10 @@ def reset_window(provider: str, scope: QuotaScope) -> None:
 def _normalise_provider(provider: str) -> str:
     out = provider.strip()
     if not out:
-        raise ValueError("provider must be non-empty")
+        raise ValueError(
+            f"backend.agents.provider_quota_tracker._normalise_provider: "
+            f"provider must be non-empty after strip() (got {provider!r})"
+        )
     return out
 
 
@@ -213,7 +227,15 @@ def _read_ratelimit_snapshot(provider: str) -> Any:
             if value is not None:
                 return value
     except Exception as exc:
-        logger.debug("provider quota rate-limit fallback skipped: %s", exc)
+        logger.debug(
+            "backend.agents.provider_quota_tracker._read_ratelimit_snapshot: "
+            "provider quota rate-limit fallback skipped for provider %r "
+            "(namespace=%r): %s: %s",
+            provider,
+            RATELIMIT_KV_NAMESPACE,
+            type(exc).__name__,
+            exc,
+        )
     return None
 
 
@@ -240,9 +262,12 @@ def _coerce_remaining(value: object) -> int | None:
 def _connect() -> PsycopgConnection:
     dsn = _resolve_dsn()
     if not dsn:
+        checked = ("OMNISIGHT_DATABASE_URL", "DATABASE_URL", "OMNI_TEST_PG_URL")
+        present = [k for k in checked if (os.environ.get(k) or "").strip()]
         raise RuntimeError(
-            "provider_quota_tracker requires a PostgreSQL DSN via "
-            "OMNISIGHT_DATABASE_URL, DATABASE_URL, or OMNI_TEST_PG_URL"
+            f"backend.agents.provider_quota_tracker._connect: "
+            f"requires a PostgreSQL DSN via one of {list(checked)}; "
+            f"set-but-non-postgres env vars: {present or 'none'}"
         )
     return psycopg2.connect(dsn)
 
@@ -347,7 +372,11 @@ def _cap_for(provider: str, scope: QuotaScope) -> int:
         try:
             return int(raw)
         except ValueError as exc:
-            raise ValueError(f"{env_name} must be an integer") from exc
+            raise ValueError(
+                f"backend.agents.provider_quota_tracker._cap_for: "
+                f"{env_name} must be an integer "
+                f"(provider={provider!r}, scope={scope!r}, got {raw!r})"
+            ) from exc
     if scope == "5h":
         return DEFAULT_5H_CAP_TOKENS
     return DEFAULT_WEEKLY_CAP_TOKENS
@@ -445,12 +474,26 @@ def _emit_quota_update(
             broadcast_scope="user",
         )
     except Exception as exc:
-        logger.debug("provider quota SSE publish failed: %s", exc)
+        logger.debug(
+            "backend.agents.provider_quota_tracker._emit_quota_update: "
+            "provider quota SSE publish failed for provider %r "
+            "(reason=%r, scopes=%s): %s: %s",
+            state.provider,
+            reason,
+            list(scopes),
+            type(exc).__name__,
+            exc,
+        )
 
 
 def _row_to_state(row: object) -> QuotaState:
     if row is None:
-        raise RuntimeError("provider_quota_state upsert returned no row")
+        raise RuntimeError(
+            "backend.agents.provider_quota_tracker._row_to_state: "
+            "provider_quota_state upsert returned no row "
+            "(expected RETURNING clause to yield one row from the "
+            "INSERT...ON CONFLICT in _refresh_state)"
+        )
     return QuotaState(
         provider=row["provider"],
         rolling_5h_tokens=int(row["rolling_5h_tokens"]),
