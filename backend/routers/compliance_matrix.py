@@ -27,6 +27,11 @@ ComplianceMatrix = Literal["medical", "automotive", "industrial", "military"]
 
 router = APIRouter(prefix="/compliance-matrix", tags=["compliance-matrix"])
 
+# HTTP status returned when the requested compliance matrix is not in the
+# `_MATRIX_RUNNERS` registry. Promoted to a named constant so the lookup
+# failure path reads as a contract, not a literal code.
+_MATRIX_NOT_FOUND_STATUS = 404
+
 
 class ComplianceMatrixCheckRequest(BaseModel):
     """Request body for one auxiliary compliance matrix check."""
@@ -94,7 +99,7 @@ def _auxiliary_matrix_runner(matrix: ComplianceMatrix) -> _MatrixRunner:
         if name == matrix:
             return runner
     raise HTTPException(
-        status_code=404,
+        status_code=_MATRIX_NOT_FOUND_STATUS,
         detail=f"Compliance matrix {matrix!r} not found",
     )
 
