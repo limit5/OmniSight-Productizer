@@ -1427,6 +1427,89 @@ def test_develop_drift_cooldown_survives_bridge_restart(
     )
 
 
+def test_develop_drift_sweep_abstains_on_stale_patchset(
+    tmp_path, monkeypatch,
+) -> None:
+    """OP-1440: merger-time drift re-check skips stale PSes before spawn."""
+    import subprocess as _sub
+
+    now = 1_800_000_000.0
+    open_change = (
+        '{"id":"Iop1440","number":901,"project":"omnisight/x",'
+        '"branch":"develop","subject":"[OP-1440] stale drift target",'
+        '"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abc901",'
+        f'"createdOn":{now - 15 * 86400},'
+        '"uploader":{"username":"alice"},"parents":[{"revision":"base15"}],'
+        '"ref":"refs/changes/01/901/1"}}\n'
+        '{"type":"stats","rowCount":1,"runTimeMilliseconds":12}'
+    )
+    run_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        run_calls.append(args)
+        if args[:3] == ["git", "rev-list", "--count"]:
+            return _sub.CompletedProcess(
+                args=args, returncode=0, stdout="101\n", stderr="",
+            )
+        return _sub.CompletedProcess(
+            args=args, returncode=0, stdout=open_change, stderr="",
+        )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b")]}\'\n{\"mergeable\":false}"
+
+    comments: list[tuple[str, str]] = []
+    monkeypatch.setattr(bridge.time, "time", lambda: now)
+    monkeypatch.setattr(jira_dispatch.time, "time", lambda: now)
+    monkeypatch.setattr(
+        jira_dispatch,
+        "add_comment",
+        lambda client, key, text, idem_key=None: comments.append((key, text)),
+    )
+
+    logs: list[tuple[str, str, dict[str, Any]]] = []
+    spawned: list[dict[str, Any]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        bridge.BridgeConfig(
+            cursor_file=tmp_path / "event-cursor.json",
+            gerrit_rest_base_url="https://gerrit.example",
+        ),
+        sleep=lambda _: None,
+        run_command=fake_run,
+        urlopen=lambda req, timeout=30: FakeResponse(),
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+    b._spawn_proactive_merger_thread = (  # type: ignore[method-assign]
+        lambda event: spawned.append(event)
+    )
+
+    triggered = b._run_develop_drift_sweep(
+        project="omnisight/x", merged_sha="develop-tip-2",
+    )
+
+    assert triggered == 0
+    assert spawned == []
+    assert any(call[:3] == ["git", "rev-list", "--count"] for call in run_calls)
+    assert comments and comments[0][0] == "OP-1440"
+    assert "[merger-ps-staleness-abstain]" in comments[0][1]
+    assert "age_days=15.0" in comments[0][1]
+    assert "commits_behind=101" in comments[0][1]
+    assert any(
+        ev == "merger_drift_re_eval_skipped_stale_ps"
+        and kw["reason"] == "staleness_exceeded"
+        for _level, ev, kw in logs
+    )
+
+
 # ──────────────────────────────────────────────────────────────────────
 #  OP-1196 phase 3b — startup conflict backfill
 # ──────────────────────────────────────────────────────────────────────

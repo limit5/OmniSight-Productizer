@@ -1130,6 +1130,87 @@ def test_pre_pickup_ok_blocks_provider_quota_before_description(monkeypatch) -> 
     assert reason == "provider_quota_exhausted:openai-subscription:5h"
 
 
+def test_pickup_staleness_warns_at_eight_days(monkeypatch) -> None:
+    """OP-1440: stale existing PS warns past 7 days but does not block."""
+    now = 1_800_000_000.0
+    comments: list[str] = []
+    change = {
+        "number": 1440,
+        "subject": "[OP-1440] stale ps",
+        "currentPatchSet": {
+            "createdOn": now - 8 * 86400,
+            "parents": [{"revision": "parent8"}],
+        },
+    }
+
+    monkeypatch.setattr(
+        jd, "_query_open_change_for_ticket_staleness",
+        lambda key, agent_class, instance_id=None: change,
+    )
+    monkeypatch.setattr(
+        jd,
+        "add_comment",
+        lambda client, key, text, idem_key=None: comments.append(text),
+    )
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout="26\n", stderr="")
+
+    monkeypatch.setattr(jd.subprocess, "run", fake_run)
+
+    ok, reason = jd.pickup_staleness_check(
+        _fake_dispatch_client(), "OP-1440", now_ts=now
+    )
+
+    assert ok is True
+    assert reason.startswith("ps staleness warning:")
+    assert len(comments) == 1
+    assert "[runner-ps-staleness-warn]" in comments[0]
+    assert "age_days=8.0" in comments[0]
+    assert "commits_behind=26" in comments[0]
+
+
+def test_pickup_staleness_abstains_at_fifteen_days(monkeypatch) -> None:
+    """OP-1440: stale existing PS abstains past 14 days."""
+    now = 1_800_000_000.0
+    comments: list[str] = []
+    change = {
+        "number": 1441,
+        "subject": "[OP-1440] stale ps",
+        "currentPatchSet": {
+            "createdOn": now - 15 * 86400,
+            "parents": ["parent15"],
+        },
+    }
+
+    monkeypatch.setattr(
+        jd, "_query_open_change_for_ticket_staleness",
+        lambda key, agent_class, instance_id=None: change,
+    )
+    monkeypatch.setattr(
+        jd,
+        "add_comment",
+        lambda client, key, text, idem_key=None: comments.append(text),
+    )
+
+    def fake_run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout="101\n", stderr="")
+
+    monkeypatch.setattr(jd.subprocess, "run", fake_run)
+
+    ok, reason = jd.pickup_staleness_check(
+        _fake_dispatch_client(), "OP-1440", now_ts=now
+    )
+
+    assert ok is False
+    assert reason.startswith("ps staleness exceeded:")
+    assert len(comments) == 1
+    assert "[runner-ps-staleness-abstain]" in comments[0]
+    assert "age_days=15.0" in comments[0]
+    assert "commits_behind=101" in comments[0]
+    assert "rebase the Gerrit patchset manually" in comments[0]
+
+
 # ── OP-687: mutex enforcement at pre-pickup ───────────────────────
 
 

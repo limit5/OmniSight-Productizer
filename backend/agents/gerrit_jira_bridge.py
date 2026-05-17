@@ -1563,6 +1563,20 @@ class GerritJiraBridge:
                 continue
             if not self._should_re_evaluate_drift(change_key, mergeable):
                 continue
+            staleness = jira_dispatch.assess_patchset_staleness(
+                change_obj.get("currentPatchSet") or {},
+                run_command=self.run_command,
+            )
+            if staleness is not None and staleness.should_abstain:
+                self._post_merger_staleness_abstain(change_obj, staleness)
+                self.log(
+                    "INFO", "merger_drift_re_eval_skipped_stale_ps",
+                    reason="staleness_exceeded",
+                    change=str(change_obj.get("number") or ""),
+                    age_days=round(staleness.age_days, 1),
+                    commits_behind=staleness.commits_behind,
+                )
+                continue
             event = self._synthesize_patchset_created_event(change_obj)
             self.log(
                 "INFO", "merger_drift_re_eval_triggered",
@@ -1582,6 +1596,37 @@ class GerritJiraBridge:
             scanned=len(changes), triggered=triggered,
         )
         return triggered
+
+    def _post_merger_staleness_abstain(
+        self,
+        change_obj: dict[str, Any],
+        staleness: jira_dispatch.PatchSetStaleness,
+    ) -> None:
+        """Flag a stale PS in JIRA instead of invoking the merger."""
+        ticket_keys = extract_ticket_keys_from_subject(
+            str(change_obj.get("subject") or "")
+        )
+        if not ticket_keys:
+            return
+        comment = jira_dispatch._format_ps_staleness_comment(
+            marker="merger-ps-staleness-abstain",
+            assessment=staleness,
+            change_number=change_obj.get("number") or change_obj.get("_number"),
+        )
+        for ticket_key in ticket_keys:
+            try:
+                jira_dispatch.add_comment(
+                    self.client,
+                    ticket_key,
+                    comment,
+                    idem_key=f"merger-ps-staleness-abstain-{ticket_key}",
+                )
+            except Exception as exc:
+                self.log(
+                    "WARN", "merger_staleness_jira_comment_failed",
+                    ticket=ticket_key,
+                    err=f"{type(exc).__name__}: {exc}",
+                )
 
     def _query_open_develop_changes(self) -> list[dict[str, Any]]:
         cmd = self._ssh_cmd(
