@@ -341,13 +341,15 @@ def test_op1406_review_object_abstains_and_keeps_transcripts():
     assert "Original conflict:" in outcome.metadata["review_prompt"]
 
 
-def test_op1406_arbiter_routes_review_object_with_transcripts():
+def test_op1413_arbiter_routes_review_object_with_jira_transcripts():
     class _Jira:
         def __init__(self) -> None:
             self.calls: list[dict[str, Any]] = []
+            self.descriptions: list[str] = []
 
         async def open_abstain_ticket(self, **kwargs: Any) -> arb.JiraTicketResult:
             self.calls.append(kwargs)
+            self.descriptions.append(arb.build_abstain_ticket_description(**kwargs))
             return arb.JiraTicketResult(ok=True, ticket="OP-MERGE-1")
 
     class _Notifier:
@@ -380,7 +382,7 @@ def test_op1406_arbiter_routes_review_object_with_transcripts():
         file_path="backend/greetings.py",
         conflict_text=SIMPLE_CONFLICT,
         push_locally=True,
-        jira_ticket="OP-1406",
+        jira_ticket="OP-1413",
     )
     outcome = _run(arb.on_merge_conflict_webhook(
         task,
@@ -389,6 +391,15 @@ def test_op1406_arbiter_routes_review_object_with_transcripts():
 
     assert outcome.reason is arb.ArbiterReason.merger_abstained_jira_ticket_opened
     assert jira.calls
+    assert jira.descriptions
+    description = jira.descriptions[0]
+    assert "## 2-LLM Sandwich Disagreement" in description
+    assert "LLM-A proposal transcript" in description
+    assert "LLM-B review transcript" in description
+    assert "Original conflict:" in description
+    assert "resolved_block" in description
+    assert "OBJECT" in description
+    assert "<details><summary>" in description
     assert notifier.calls
     payload = notifier.calls[0]["payload"]
     assert payload["merger_sandwich_decision"] == "object"
