@@ -3,14 +3,15 @@
 /**
  * Phase 50A — Pipeline Timeline.
  *
- * Horizontal stepper that shows every pipeline phase with its lifecycle
- * state (idle / active / done / overdue) plus a velocity readout. Polls
- * the /pipeline/timeline endpoint every 10s (cheap, memory-only state
- * on the backend) and refreshes on any pipeline SSE event.
+ * Topology-switchable stepper that shows every pipeline phase with its
+ * lifecycle state (idle / active / done / overdue) plus a velocity
+ * readout. Polls the /pipeline/timeline endpoint every 10s (cheap,
+ * memory-only state on the backend) and refreshes on any pipeline SSE
+ * event.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { Activity, AlertTriangle, CheckCircle2, Circle, Clock3, Zap } from "lucide-react"
+import { Activity, AlertTriangle, CheckCircle2, Circle, Clock3, Workflow, Zap } from "lucide-react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 import {
   type PipelineTimeline,
@@ -21,6 +22,33 @@ import {
 } from "@/lib/api"
 
 const POLL_MS = 10_000
+type TopologyDisplay = "S" | "M" | "XL"
+
+const TOPOLOGY_DISPLAY: Record<
+  TopologyDisplay,
+  { label: string; bodyClass: string; itemClass: string; laneLabel: string }
+> = {
+  S: {
+    label: "Single track",
+    bodyClass: "relative flex flex-col gap-2 p-3 overflow-x-auto",
+    itemClass: "w-full",
+    laneLabel: "S-LANE",
+  },
+  M: {
+    label: "Standard DAG",
+    bodyClass: "relative flex flex-col xl:flex-row xl:items-stretch gap-2 p-3 overflow-x-auto",
+    itemClass: "flex-1 min-w-0 xl:min-w-[140px]",
+    laneLabel: "M-DAG",
+  },
+  XL: {
+    label: "Fractal matrix",
+    bodyClass: "relative grid grid-cols-1 sm:grid-cols-2 2xl:grid-cols-3 gap-2 p-3 overflow-x-auto",
+    itemClass: "min-w-0",
+    laneLabel: "XL-MATRIX",
+  },
+}
+
+const TOPOLOGY_ORDER: TopologyDisplay[] = ["S", "M", "XL"]
 
 const STATUS_STYLE: Record<
   PipelineTimelineStep["status"],
@@ -56,7 +84,9 @@ export function PipelineTimeline() {
   const [data, setData] = useState<PipelineTimeline | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [topologyDisplay, setTopologyDisplay] = useState<TopologyDisplay>("M")
   const mountedRef = useRef(true)
+  const topology = TOPOLOGY_DISPLAY[topologyDisplay]
 
   const refresh = useCallback(async () => {
     try {
@@ -101,7 +131,7 @@ export function PipelineTimeline() {
       className="holo-glass-simple corner-brackets-full rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))]"
       aria-label="Pipeline Timeline"
     >
-      <header className="flex items-center justify-between px-3 py-2 border-b border-[var(--neural-border,rgba(148,163,184,0.35))]">
+      <header className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 border-b border-[var(--neural-border,rgba(148,163,184,0.35))]">
         <div className="flex items-center gap-2">
           <Clock3 className="w-4 h-4 text-[var(--neural-cyan,#67e8f9)]" aria-hidden />
           <h2 className="font-mono text-sm tracking-wider text-[var(--neural-cyan,#67e8f9)]">
@@ -109,36 +139,73 @@ export function PipelineTimeline() {
           </h2>
           <PanelHelp doc="panels-overview" />
         </div>
-        {data && (
-          // Allow the stat row to wrap instead of pushing width out of
-          // the parent column. `shrink` (not `shrink-0`) + flex-wrap
-          // keeps it on one line when there's room and stacks it when
-          // the column is narrow (e.g. the dashboard's far-right aside).
-          <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums justify-end">
-            <span className="flex items-center gap-1">
-              <Zap className="w-3 h-3 shrink-0" aria-hidden />
-              <span aria-label="tasks completed in the last 7 days" className="text-right inline-block tabular-nums">
-                {data.velocity.tasks_completed_7d}/7d
+        <div className="flex flex-wrap items-center justify-end gap-x-3 gap-y-1">
+          <div
+            className="inline-flex items-center rounded-sm border border-[var(--neural-border,rgba(148,163,184,0.35))] overflow-hidden font-mono text-[10px]"
+            role="group"
+            aria-label="Topology display"
+          >
+            <span
+              className="flex items-center gap-1 px-2 py-1 text-[var(--muted-foreground,#94a3b8)] border-r border-[var(--neural-border,rgba(148,163,184,0.35))]"
+              title="Topology display"
+            >
+              <Workflow className="w-3 h-3" aria-hidden />
+              TOPOLOGY
+            </span>
+            {TOPOLOGY_ORDER.map((size) => {
+              const active = topologyDisplay === size
+              return (
+                <button
+                  key={size}
+                  type="button"
+                  data-testid={`pipeline-topology-${size}`}
+                  aria-label={`${TOPOLOGY_DISPLAY[size].label} topology display`}
+                  aria-pressed={active}
+                  onClick={() => setTopologyDisplay(size)}
+                  className={`min-w-8 px-2 py-1 transition-colors ${
+                    active
+                      ? "bg-[var(--neural-cyan,#67e8f9)]/15 text-[var(--neural-cyan,#67e8f9)]"
+                      : "text-[var(--muted-foreground,#94a3b8)] hover:text-[var(--foreground,#e2e8f0)]"
+                  }`}
+                  title={TOPOLOGY_DISPLAY[size].label}
+                >
+                  {size}
+                </button>
+              )
+            })}
+          </div>
+
+          {data && (
+            // Allow the stat row to wrap instead of pushing width out of
+            // the parent column. `shrink` (not `shrink-0`) + flex-wrap
+            // keeps it on one line when there's room and stacks it when
+            // the column is narrow (e.g. the dashboard's far-right aside).
+            <span className="font-mono text-[10px] text-[var(--muted-foreground,#94a3b8)] flex flex-wrap items-center gap-x-3 gap-y-1 tabular-nums justify-end">
+              <span className="flex items-center gap-1">
+                <Zap className="w-3 h-3 shrink-0" aria-hidden />
+                <span aria-label="tasks completed in the last 7 days" className="text-right inline-block tabular-nums">
+                  {data.velocity.tasks_completed_7d}/7d
+                </span>
+              </span>
+              <span
+                aria-label="average step duration"
+                className="inline-block text-right truncate"
+                style={{ maxWidth: 90 }}
+                title={`avg step duration ${formatDuration(data.velocity.avg_step_seconds)}`}
+              >
+                AVG {formatDuration(data.velocity.avg_step_seconds)}
+              </span>
+              <span
+                aria-label="pipeline completion estimate"
+                className="inline-block text-right truncate"
+                style={{ maxWidth: 110 }}
+                title={`ETA ${formatEta(data.velocity.eta_completion)}`}
+              >
+                ETA {formatEta(data.velocity.eta_completion)}
               </span>
             </span>
-            <span
-              aria-label="average step duration"
-              className="inline-block text-right truncate"
-              style={{ maxWidth: 90 }}
-              title={`avg step duration ${formatDuration(data.velocity.avg_step_seconds)}`}
-            >
-              AVG {formatDuration(data.velocity.avg_step_seconds)}
-            </span>
-            <span
-              aria-label="pipeline completion estimate"
-              className="inline-block text-right truncate"
-              style={{ maxWidth: 110 }}
-              title={`ETA ${formatEta(data.velocity.eta_completion)}`}
-            >
-              ETA {formatEta(data.velocity.eta_completion)}
-            </span>
-          </span>
-        )}
+          )}
+        </div>
       </header>
 
       {error && (
@@ -158,12 +225,11 @@ export function PipelineTimeline() {
 
       {data && (
         <ol
-          // Stack vertically by default (narrow right-aside layout);
-          // only switch to horizontal flow when there's real room
-          // (xl+ ~ full-width panel). md was too aggressive — it fired
-          // inside the 240 px dashboard column and cards clipped.
-          className="relative flex flex-col xl:flex-row xl:items-stretch gap-2 p-3 overflow-x-auto"
+          // Each topology keeps the narrow right-aside layout vertical
+          // first, then expands only when there is room.
+          className={topology.bodyClass}
           aria-label="pipeline phases"
+          data-topology-display={topologyDisplay}
         >
           {data.steps.map((step, idx) => {
             const style = STATUS_STYLE[step.status]
@@ -181,7 +247,8 @@ export function PipelineTimeline() {
                 key={step.id}
                 data-testid={`timeline-step-${step.id}`}
                 data-status={step.status}
-                className="relative flex-1 min-w-0 xl:min-w-[140px] rounded-sm border p-2 flex flex-col gap-1.5 overflow-hidden"
+                data-topology-lane={topology.laneLabel}
+                className={`relative ${topology.itemClass} rounded-sm border p-2 flex flex-col gap-1.5 overflow-hidden`}
                 style={{
                   borderColor: style.color,
                   boxShadow:
@@ -198,6 +265,10 @@ export function PipelineTimeline() {
                     {style.label}
                   </span>
                 </div>
+
+                <span className="font-mono text-[8px] tracking-[0.18em] text-[var(--muted-foreground,#94a3b8)] truncate">
+                  {topology.laneLabel}
+                </span>
 
                 <div className="flex items-center gap-1.5">
                   <span
