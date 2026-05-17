@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -9,7 +10,7 @@ import pytest
 
 from backend.agents import tool_call_wrapper as wrapper
 from backend.agents.tool_call_wrapper import RetryPolicy, invoke_tool, invoke_tool_sync
-from backend.agents.tool_dispatcher import ToolDispatcher
+from backend.agents.tool_dispatcher import ToolDispatcher, ToolResult
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +58,85 @@ async def test_invoke_tool_retries_transient_error_then_succeeds() -> None:
     assert calls == 2
     assert result.content == "ok"
     assert not result.is_error
+
+
+@pytest.mark.asyncio
+async def test_invoke_tool_retries_transient_message_then_succeeds() -> None:
+    dispatcher = ToolDispatcher()
+    calls = 0
+
+    def handler(_args):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("rate limit later")
+        return "ok"
+
+    dispatcher.register("Read", handler)
+
+    result = await invoke_tool(
+        "Read",
+        {},
+        RetryPolicy(transient_retries=1, backoff_seconds=0),
+        dispatcher=dispatcher,
+    )
+
+    assert calls == 2
+    assert result.content == "ok"
+    assert not result.is_error
+
+
+@pytest.mark.asyncio
+async def test_invoke_tool_timeout_branch_returns_error_result() -> None:
+    dispatcher = ToolDispatcher()
+
+    async def handler(_args):
+        await asyncio.sleep(0.01)
+        return "late"
+
+    dispatcher.register("Read", handler)
+
+    result = await invoke_tool(
+        "Read",
+        {"path": "slow"},
+        RetryPolicy(transient_retries=0, backoff_seconds=0),
+        timeout=0.001,
+        dispatcher=dispatcher,
+        tool_use_id="tu_timeout",
+    )
+
+    assert result.tool_use_id == "tu_timeout"
+    assert result.is_error
+    assert _payload(result) == {
+        "error": "timeout",
+        "tool_name": "Read",
+        "exception_type": "TimeoutError",
+        "message": "",
+    }
+
+
+@pytest.mark.asyncio
+async def test_invoke_tool_wraps_dispatcher_pre_result_exception() -> None:
+    class RaisingDispatcher:
+        def execute(self, _tool_use_id, _name, _args):
+            raise LookupError("dispatcher unavailable")
+
+    result = await invoke_tool(
+        "Read",
+        {},
+        RetryPolicy(transient_retries=0, backoff_seconds=0),
+        dispatcher=RaisingDispatcher(),
+        tool_use_id="tu_raised",
+    )
+
+    assert result.tool_use_id == "tu_raised"
+    assert result.is_error
+    assert _payload(result) == {
+        "error": "tool_raised",
+        "tool_name": "Read",
+        "exception_type": "LookupError",
+        "message": "dispatcher unavailable",
+    }
 
 
 @pytest.mark.asyncio
@@ -171,3 +251,11 @@ def test_invoke_tool_sync_entry_point() -> None:
 
     assert result.content == "sync ok"
     assert not result.is_error
+
+
+def test_decode_error_handles_malformed_and_non_object_content() -> None:
+    malformed = ToolResult(tool_use_id="tu_bad", content="not-json", is_error=True)
+    non_object = ToolResult(tool_use_id="tu_list", content='["timeout"]', is_error=True)
+
+    assert wrapper._decode_error(malformed) == {"error": "not-json"}
+    assert wrapper._decode_error(non_object) == {"error": "['timeout']"}
