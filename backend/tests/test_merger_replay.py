@@ -322,6 +322,19 @@ def _conflict_text(
             "dict literal disjoint additions",
         ),
         (
+            _conflict_text(
+                "        merger_reason=merger_reason,\n",
+                "        verify_result=verify_result,\n",
+                prefix='logger.info("merge result",\n',
+                suffix=")\n",
+            ),
+            'logger.info("merge result",\n'
+            "        merger_reason=merger_reason,\n"
+            "        verify_result=verify_result,\n"
+            ")\n",
+            "call keyword disjoint additions",
+        ),
+        (
             _conflict_text("# explain beta\n", "# explain alpha\n"),
             "# explain beta\n# ---\n# explain alpha\n",
             "add-only docstring/comment",
@@ -344,6 +357,54 @@ def test_deterministic_merge_pattern_handlers(conflict_text, expected, pattern):
     assert outcome.resolved_text == expected
     assert outcome.metadata["deterministic_patterns"] == [pattern]
     assert outcome.test_result["ok"] is True
+    assert deps.llm.calls == []
+
+
+def test_change_932_webhooks_log_field_union_preserves_both_fields():
+    conflict_text = _conflict_text(
+        "                merger_reason=merger_reason or \"<none>\",\n",
+        "                verify_result=verify_result,\n",
+        prefix=(
+            "            logger.info(\n"
+            "                \"%s merger_outcome reason=%s\",\n"
+            "                log_prefix,\n"
+            "                outcome_reason,\n"
+        ),
+        suffix="            )\n",
+    )
+    expected = (
+        "            logger.info(\n"
+        "                \"%s merger_outcome reason=%s\",\n"
+        "                log_prefix,\n"
+        "                outcome_reason,\n"
+        "                merger_reason=merger_reason or \"<none>\",\n"
+        "                verify_result=verify_result,\n"
+        "            )\n"
+    )
+    req = ma.ConflictRequest(
+        change_id="I-change-932-webhooks-log-field-union",
+        project="omnisight/OmniSight-Productizer",
+        file_path="backend/routers/webhooks.py",
+        conflict_text=conflict_text,
+        push_locally=False,
+    )
+    deps = ma.MergerDeps(
+        llm=_FakeLLM("LLM must not run for deterministic log field union"),
+        pusher=_ExplodingPusher(),
+        reviewer=_ExplodingReviewer(),
+        test_runner=_passing_test_runner,
+        audit=_audit_sink,
+    )
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
+    assert outcome.resolved_text == expected
+    assert outcome.metadata["deterministic_patterns"] == [
+        "call keyword disjoint additions"
+    ]
+    assert "merger_reason=merger_reason" in outcome.resolved_text
+    assert "verify_result=verify_result" in outcome.resolved_text
     assert deps.llm.calls == []
 
 
