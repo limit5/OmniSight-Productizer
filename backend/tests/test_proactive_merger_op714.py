@@ -388,6 +388,51 @@ class TestProactiveMergerInvokes:
             for r in caplog.records
         )
 
+    async def test_logs_arbiter_and_underlying_merger_reason(
+        self, caplog, merger_http_env,
+    ):
+        """OP-1421 — bridge log must preserve the specific MergerReason
+        even when the arbiter maps it to a generic refusal bucket."""
+        mock_client = MagicMock()
+        mock_client.query_change = AsyncMock(return_value={
+            "hashtags": [], "subject": "[OP-1421] refused other",
+        })
+        mock_client.add_hashtag = AsyncMock(return_value={"status": "ok"})
+
+        from backend.agents.conflict_enrichment import (
+            ConflictFile, EnrichmentResult,
+        )
+        enrichment = EnrichmentResult(
+            mergeable=False,
+            conflict_files=[ConflictFile(
+                path="x.py",
+                conflict_text="<<<<<<< x\na\n=======\nb\n>>>>>>> y\n",
+                file_context="",
+            )],
+        )
+
+        http_patch, http_client = _patch_httpx_post(_make_httpx_response(
+            json_body={
+                "ok": True,
+                "reason": "merger_refused_other",
+                "merger_outcome": {"reason": "refused_no_conflict"},
+            },
+        ))
+
+        with patch("backend.gerrit.gerrit_client", mock_client), \
+             http_patch, \
+             patch("backend.agents.conflict_enrichment.enrich_via_local_merge",
+                   AsyncMock(return_value=enrichment)), \
+             caplog.at_level("INFO", logger="backend.routers.webhooks"):
+            await _proactive_merger_check(_event(change_number=1421, ps_number=3))
+
+        http_client.post.assert_awaited_once()
+        assert any(
+            "merger_outcome reason=merger_refused_other "
+            "merger_reason=refused_no_conflict" in r.message
+            for r in caplog.records
+        )
+
     async def test_skips_too_many_conflicts(self, caplog, merger_http_env):
         """If enrichment caps out (>5 files) → set hashtag, no merger call."""
         mock_client = MagicMock()

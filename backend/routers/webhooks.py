@@ -1310,16 +1310,17 @@ async def _proactive_merger_check(event: dict) -> None:
         try:
             outcome = await _post_merge_conflict_to_backend(task)
             outcome_reason = outcome.get("reason", "unknown")
+            merger_outcome = outcome.get("merger_outcome") or {}
+            merger_reason = merger_outcome.get("reason") or ""
             logger.info(
-                "%s merger_outcome reason=%s",
-                log_prefix, outcome_reason,
+                "%s merger_outcome reason=%s merger_reason=%s",
+                log_prefix, outcome_reason, merger_reason or "<none>",
             )
             # OP-1196 phase 3 — caller-side push handoff. Backend ran
             # the LLM successfully but deferred the actual push back to
             # us (the daemon). Apply the resolved file + amend +
             # push as merger-agent-bot using our own workspace + key.
             if outcome_reason == "merger_resolved_pending_caller_push":
-                merger_outcome = outcome.get("merger_outcome") or {}
                 resolved_text = merger_outcome.get("resolved_text") or ""
                 if not resolved_text:
                     logger.warning(
