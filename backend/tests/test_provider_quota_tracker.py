@@ -426,3 +426,101 @@ def test_same_provider_lock_serializes_writer(quota_dsn: str) -> None:
 
     holder.join(timeout=2)
     assert tracker.get_quota_state(provider).weekly_tokens == 3
+
+
+def test_invalid_quota_scopes_are_rejected() -> None:
+    provider = _provider("bad-scope")
+
+    with pytest.raises(ValueError, match="unknown quota scope"):
+        tracker.is_at_cap(provider, "monthly")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="unknown quota scope"):
+        tracker.reset_window(provider, "monthly")  # type: ignore[arg-type]
+
+
+def test_connect_requires_postgres_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OMNISIGHT_DATABASE_URL", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///tmp/test.db")
+    monkeypatch.delenv("OMNI_TEST_PG_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="requires a PostgreSQL DSN"):
+        tracker._connect()
+
+
+def test_invalid_provider_cap_env_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider("bad-cap")
+    monkeypatch.setenv(
+        f"OMNISIGHT_PROVIDER_CAP_{tracker._env_provider(provider)}_5H",
+        "not-an-int",
+    )
+
+    with pytest.raises(ValueError, match="must be an integer"):
+        tracker._cap_for(provider, "5h")
+
+
+def test_ratelimit_snapshot_opens_closed_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider("rl-open")
+    state = tracker.QuotaState(
+        provider=provider,
+        rolling_5h_tokens=0,
+        weekly_tokens=0,
+        last_reset_at=None,
+        last_cap_hit_at=None,
+        circuit_state="closed",
+    )
+    monkeypatch.setattr(
+        tracker,
+        "_read_ratelimit_snapshot",
+        lambda provider: {"remaining_requests": "0"},
+    )
+
+    out = tracker._with_ratelimit_fallback(state)
+
+    assert out.circuit_state == "open"
+    assert out.last_cap_hit_at is not None
+
+
+def test_ratelimit_fallback_preserves_open_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    last_cap_hit_at = datetime.now(timezone.utc)
+    state = tracker.QuotaState(
+        provider=_provider("rl-already-open"),
+        rolling_5h_tokens=0,
+        weekly_tokens=0,
+        last_reset_at=None,
+        last_cap_hit_at=last_cap_hit_at,
+        circuit_state="open",
+    )
+    monkeypatch.setattr(
+        tracker,
+        "_read_ratelimit_snapshot",
+        lambda provider: {"remaining_requests": "10"},
+    )
+
+    assert tracker._with_ratelimit_fallback(state) == state
+
+
+def test_ratelimit_snapshot_ignores_non_exhausted_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tracker,
+        "_read_ratelimit_snapshot",
+        lambda provider: {
+            "remaining_requests": "not-a-number",
+            "remaining_tokens": "1",
+        },
+    )
+
+    assert tracker._ratelimit_is_exhausted(_provider("rl-nonzero")) is False
+
+
+def test_ratelimit_keys_include_base_subscription_provider() -> None:
+    assert tracker._ratelimit_keys_for("anthropic-subscription") == [
+        "anthropic-subscription",
+        "anthropic",
+    ]
