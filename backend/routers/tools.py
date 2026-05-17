@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter
 
-from backend.agents.tools import ALL_TOOLS, AGENT_TOOLS
+from backend.agents.tools import AGENT_TOOLS, ALL_TOOLS, GUILD_TOOLS
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -22,7 +22,7 @@ async def list_tools():
 @router.get("/by-agent/{agent_type}")
 async def tools_for_agent(agent_type: str):
     """List tools available to a specific agent type."""
-    tools = AGENT_TOOLS.get(agent_type, [])
+    tools = GUILD_TOOLS.get(agent_type) or AGENT_TOOLS.get(agent_type, [])
     return [
         {
             "name": t.name,
