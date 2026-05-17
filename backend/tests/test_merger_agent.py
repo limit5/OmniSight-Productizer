@@ -209,6 +209,83 @@ class TestParseConflict:
     def test_no_conflict(self):
         assert ma.parse_conflict_block("no markers here\n") == []
 
+    @pytest.mark.parametrize(
+        ("text", "head_lines", "incoming_lines", "incoming_label"),
+        [
+            (
+                "<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> feature/normal\n",
+                ["A"],
+                ["B"],
+                "feature/normal",
+            ),
+            (
+                "<<<<<<< HEAD\n=======\nB\n>>>>>>> feature/empty-head\n",
+                [],
+                ["B"],
+                "feature/empty-head",
+            ),
+            (
+                "<<<<<<< HEAD\nA\n=======\n>>>>>>> feature/empty-incoming\n",
+                ["A"],
+                [],
+                "feature/empty-incoming",
+            ),
+            (
+                "<<<<<<< HEAD\r\nA\r\n=======\r\nB\r\n>>>>>>> feature/crlf\r\n",
+                ["A"],
+                ["B"],
+                "feature/crlf",
+            ),
+            (
+                "<<<<<<< HEAD\nA\n=======\nB\n>>>>>>> feature/no-eof-newline",
+                ["A"],
+                ["B"],
+                "feature/no-eof-newline",
+            ),
+            (
+                "<<<<<<< HEAD\nA\n=======\nB\n>>>>>>>\n",
+                ["A"],
+                ["B"],
+                "",
+            ),
+            (
+                "<<<<<<<\n=======\n>>>>>>>\n",
+                [],
+                [],
+                "",
+            ),
+        ],
+    )
+    def test_operator_audit_fixture_cases(
+        self,
+        text: str,
+        head_lines: list[str],
+        incoming_lines: list[str],
+        incoming_label: str,
+    ):
+        blocks = ma.parse_conflict_block(text)
+        assert len(blocks) == 1
+        assert blocks[0].head_lines == head_lines
+        assert blocks[0].incoming_lines == incoming_lines
+        assert blocks[0].incoming_label == incoming_label
+
+    def test_operator_audit_nested_markers_flagged(self):
+        text = (
+            "<<<<<<< HEAD\n"
+            "outer head\n"
+            "<<<<<<< HEAD\n"
+            "inner head\n"
+            "=======\n"
+            "inner incoming\n"
+            ">>>>>>> feature/inner\n"
+            "=======\n"
+            "outer incoming\n"
+            ">>>>>>> feature/outer\n"
+        )
+        blocks = ma.parse_conflict_block(text)
+        assert len(blocks) == 1
+        assert blocks[0].has_nested_markers is True
+
 
 class TestSecuritySensitive:
 
@@ -594,6 +671,97 @@ def test_no_conflict_refusal():
     req = _base_request(conflict="no markers here\n")
     outcome = _run(ma.resolve_conflict(req, deps=deps))
     assert outcome.reason is ma.MergerReason.refused_no_conflict
+
+
+def test_nested_conflict_markers_refused_before_llm(caplog):
+    llm = _FakeLLM({
+        "resolved_block": "should not be used\n",
+        "confidence": 0.99,
+        "rationale": "",
+        "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+    conflict = (
+        "<<<<<<< HEAD\n"
+        "outer head\n"
+        "<<<<<<< HEAD\n"
+        "inner head\n"
+        "=======\n"
+        "inner incoming\n"
+        ">>>>>>> feature/inner\n"
+        "=======\n"
+        "outer incoming\n"
+        ">>>>>>> feature/outer\n"
+    )
+    with caplog.at_level(logging.WARNING):
+        outcome = _run(ma.resolve_conflict(
+            _base_request(conflict=conflict), deps=deps,
+        ))
+
+    assert outcome.reason is ma.MergerReason.refused_nested_markers
+    assert outcome.metadata == {"nested_marker_start_lines": [1]}
+    assert llm.calls == []
+    assert "nested_marker_warning" in caplog.text
+
+
+def test_crlf_conflict_file_processes_deferred_resolution():
+    llm = _FakeLLM({
+        "resolved_block": "    return f'Hello {name}!'\r\n",
+        "confidence": 0.95,
+        "rationale": "keeps greeting behavior",
+        "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+    conflict = (
+        "def greet(name):\r\n"
+        "<<<<<<< HEAD\r\n"
+        "    return f'Hello {name}!'\r\n"
+        "=======\r\n"
+        "    return f'Hi {name}!'\r\n"
+        ">>>>>>> feature/greeting\r\n"
+    )
+    req = _base_request(conflict=conflict)
+    req.push_locally = False
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert llm.calls
+    assert "<<<<<<<" not in outcome.resolved_text
+    assert "return f'Hello {name}!'" in outcome.resolved_text
+
+
+def test_all_empty_conflict_hunk_processes_as_real_conflict():
+    llm = _FakeLLM({
+        "resolved_block": "",
+        "confidence": 0.95,
+        "rationale": "delete empty conflict hunk",
+        "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_FakePusher(), reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+    req = _base_request(conflict="prefix\n<<<<<<<\n=======\n>>>>>>>\nsuffix\n")
+    req.push_locally = False
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert llm.calls
+    assert outcome.resolved_text == "prefix\nsuffix\n"
 
 
 def test_push_fail_no_vote_and_escalates():

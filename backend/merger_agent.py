@@ -144,13 +144,13 @@ _SECURITY_PATH_PATTERNS: tuple[str, ...] = (
 
 # Conflict block regex (captures HEAD + incoming halves).
 _CONFLICT_RE = re.compile(
-    r"<<<<<<<\s+(?P<head_label>.+?)\n"
+    r"^<<<<<<<[ \t]*(?P<head_label>[^\r\n]*)\r?\n"
     r"(?P<head>.*?)"
-    r"(?:\|{7}.+?\n.*?)?"      # optional diff3 ancestor section
-    r"=======\n"
+    r"(?:^\|{7}[^\r\n]*\r?\n.*?)?"      # optional diff3 ancestor section
+    r"^=======[^\r\n]*(?:\r?\n|$)"
     r"(?P<incoming>.*?)"
-    r">>>>>>>\s+(?P<incoming_label>.+?)(?:\n|$)",
-    re.DOTALL,
+    r"^>>>>>>>[ \t]*(?P<incoming_label>[^\r\n]*)(?:\r?\n|$)",
+    re.DOTALL | re.MULTILINE,
 )
 
 
@@ -169,6 +169,7 @@ class MergerReason(str, Enum):
     refused_security_file = "refused_security_file"
     refused_test_failure = "refused_test_failure"
     refused_no_conflict = "refused_no_conflict"
+    refused_nested_markers = "refused_nested_markers"
     refused_llm_unavailable = "refused_llm_unavailable"
     refused_llm_invalid_json = "refused_llm_invalid_json"
     refused_escalated = "refused_escalated"
@@ -210,6 +211,7 @@ class ConflictBlock:
     incoming_lines: list[str]
     start_line: int
     end_line: int
+    has_nested_markers: bool = False
 
     @property
     def n_conflict_lines(self) -> int:
@@ -823,6 +825,7 @@ def parse_conflict_block(text: str) -> list[ConflictBlock]:
     for m in _CONFLICT_RE.finditer(text):
         head = m.group("head") or ""
         incoming = m.group("incoming") or ""
+        has_nested_markers = "<<<<<<<" in head or "<<<<<<<" in incoming
         head_lines = head.splitlines()
         incoming_lines = incoming.splitlines()
         start = text[: m.start()].count("\n") + 1
@@ -834,6 +837,7 @@ def parse_conflict_block(text: str) -> list[ConflictBlock]:
             incoming_lines=incoming_lines,
             start_line=start,
             end_line=end,
+            has_nested_markers=has_nested_markers,
         ))
     return blocks
 
@@ -1312,8 +1316,11 @@ def _assemble_resolution(
 ) -> Resolution:
     """Splice the LLM's ``resolved_block`` back into the original file,
     preserving every line outside the conflict region."""
+    all_empty_hunk = all(b.n_conflict_lines == 0 for b in blocks)
     resolved_block = str(llm_payload.get("resolved_block", ""))
-    if not resolved_block:
+    if "resolved_block" not in llm_payload:
+        raise _LLMParseError("resolved_block missing")
+    if not resolved_block and not all_empty_hunk:
         raise _LLMParseError("resolved_block missing or empty")
 
     # We only support the single-block path for auto-vote; a multi-
@@ -1511,6 +1518,25 @@ async def resolve_conflict(
         outcome = _build_refusal(
             request, MergerReason.refused_no_conflict,
             rationale="no <<<<<<< / ======= / >>>>>>> markers found",
+        )
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    nested_blocks = [b for b in blocks if b.has_nested_markers]
+    if nested_blocks:
+        logger.warning(
+            "nested_marker_warning change_id=%s file=%s blocks=%s",
+            request.change_id,
+            request.file_path,
+            [b.start_line for b in nested_blocks],
+        )
+        outcome = _build_refusal(
+            request, MergerReason.refused_nested_markers,
+            rationale="nested conflict markers found inside parsed conflict block",
+            metadata={"nested_marker_start_lines": [
+                b.start_line for b in nested_blocks
+            ]},
         )
         _observe_metric(outcome)
         await _safe_audit(deps.audit, outcome)
