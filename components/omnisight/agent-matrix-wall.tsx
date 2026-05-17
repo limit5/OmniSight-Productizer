@@ -241,6 +241,7 @@ export interface Agent {
   name: string
   type: "firmware" | "software" | "reporter" | "validator" | "reviewer" | "custom"
   subType?: string
+  guild?: string
   status: AgentStatus
   progress: { current: number; total: number }
   thoughtChain: string
