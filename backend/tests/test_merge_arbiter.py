@@ -17,6 +17,7 @@ branches:
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 from typing import Any
 
@@ -149,7 +150,11 @@ class _StubVerifier:
             diff_preview=outcome.diff_preview,
             push_sha="verified-low-risk",
             review_url="https://gerrit.example/change/low-risk",
-            metadata={**outcome.metadata, "verify_result": "green"},
+            metadata={
+                **outcome.metadata,
+                "verify_result": "green",
+                "verify_outcome": "green",
+            },
             resolved_text=outcome.resolved_text,
         )
 
@@ -757,6 +762,91 @@ class TestDeferredPushRouting:
 
 
 class TestBuildThenVerify:
+
+    def test_pytest_timeout_with_aggregate_runtime_marks_slow(self, monkeypatch):
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0],
+                timeout=kwargs["timeout"],
+                output=(
+                    "============================= slowest durations "
+                    "=============================\n"
+                    "31.00s call     test_a.py::test_first\n"
+                    "30.00s call     test_b.py::test_second\n"
+                ),
+                stderr="",
+            )
+
+        monkeypatch.setattr(arb.subprocess, "run", fake_run)
+
+        result = arb._DefaultResolutionVerifier._run(  # type: ignore[attr-defined]
+            ["python3", "-m", "pytest", "-k", "greet"],
+            cwd="/tmp/scratch",
+            stage="pytest",
+            timeout=120.0,
+        )
+
+        assert result.ok is False
+        assert result.verify_outcome == "slow"
+        assert "verify_outcome=slow" in result.summary
+
+    def test_pytest_timeout_with_zero_test_runtime_marks_hung(self, monkeypatch):
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0],
+                timeout=kwargs["timeout"],
+                output="collecting ...\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(arb.subprocess, "run", fake_run)
+
+        result = arb._DefaultResolutionVerifier._run(  # type: ignore[attr-defined]
+            ["python3", "-m", "pytest", "-k", "greet"],
+            cwd="/tmp/scratch",
+            stage="pytest",
+            timeout=120.0,
+        )
+
+        assert result.ok is False
+        assert result.verify_outcome == "hung"
+        assert "verify_outcome=hung" in result.summary
+
+    def test_verify_outcome_metric_label_is_logged(self, caplog):
+        class SlowVerifier:
+            async def verify_and_push(self, *, task, outcome):
+                return ma.ResolutionOutcome(
+                    change_id=task.change_id,
+                    file_path=task.file_path,
+                    reason=ma.MergerReason.refused_test_failure,
+                    voted_score=ma.LabelVote.abstain,
+                    confidence=outcome.confidence,
+                    rationale="aggregate pytest runtime exceeded verifier cap",
+                    diff_preview=outcome.diff_preview,
+                    metadata={
+                        **outcome.metadata,
+                        "verify_result": "red",
+                        "verify_outcome": "slow",
+                        "verify_stage": "pytest",
+                    },
+                )
+
+        task = _task()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text="def greet(name):\n    return f'Hello {name}!'\n",
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=SlowVerifier(),
+        )
+
+        with caplog.at_level(logging.INFO, logger="backend.merge_arbiter"):
+            outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert "verify_outcome=slow" in caplog.text
 
     def test_broken_resolution_abstains_without_pushing(self, tmp_path):
         ws = _git_workspace(tmp_path)
