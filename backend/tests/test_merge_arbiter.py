@@ -675,6 +675,7 @@ def _deferred_resolution(
     *,
     resolved_text: str,
     changed_identifiers: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> ma.ResolutionOutcome:
     return ma.ResolutionOutcome(
         change_id=task.change_id,
@@ -686,6 +687,7 @@ def _deferred_resolution(
         diff_preview="diff",
         resolved_text=resolved_text,
         changed_identifiers=changed_identifiers or ["greet"],
+        metadata=metadata or {},
     )
 
 
@@ -711,6 +713,14 @@ def _git_workspace(tmp_path):
     subprocess.run(["git", "commit", "-m", "initial"], cwd=ws,
                    check=True, capture_output=True)
     return ws
+
+
+def _add_name_helper(ws) -> None:
+    (ws / "backend" / "name_helpers.py").write_text(
+        "def format_name(name):\n    return name\n",
+        encoding="utf-8",
+    )
+    _commit_all(ws, "add name helper")
 
 
 def _commit_all(ws, message: str) -> None:
@@ -1054,6 +1064,102 @@ class TestBuildThenVerify:
         test_result = outcome.merger_outcome["test_result"]
         assert test_result["ok"] is False
         assert "test_greet" in test_result["last_30_lines"]
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "pytest"
+
+    def test_multi_file_resolution_applies_all_files_before_pytest(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        _add_name_helper(ws)
+        task = _task(
+            workspace=str(ws),
+            push_locally=False,
+            additional_files=["backend/name_helpers.py"],
+        )
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text=(
+                    "from backend.name_helpers import format_name\n\n"
+                    "def greet(name):\n"
+                    "    return f'Hello {format_name(name)}!'\n"
+                ),
+                metadata={
+                    "resolved_files": {
+                        "backend/name_helpers.py": (
+                            "def format_name(name):\n"
+                            "    return name\n"
+                        ),
+                    },
+                    "changed_identifiers_by_file": {
+                        "backend/name_helpers.py": ["format_name"],
+                    },
+                },
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_resolved_pending_caller_push
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "green"
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "replay"
+
+    def test_broken_cross_file_resolution_abstains_with_pytest_output(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        _add_name_helper(ws)
+        task = _task(
+            workspace=str(ws),
+            push_locally=False,
+            additional_files=["backend/name_helpers.py"],
+        )
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text=(
+                    "from backend.name_helpers import format_name\n\n"
+                    "def greet(name):\n"
+                    "    return f'Hello {format_name(name)}!'\n"
+                ),
+                metadata={
+                    "file_resolutions": [
+                        {
+                            "file_path": "backend/name_helpers.py",
+                            "resolved_text": (
+                                "def format_name(name):\n"
+                                "    return name.upper()\n"
+                            ),
+                            "changed_identifiers": ["format_name"],
+                        },
+                    ],
+                },
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        test_result = outcome.merger_outcome["test_result"]
+        assert test_result["ok"] is False
+        assert "test_greet" in test_result["last_30_lines"]
+        assert "-k 'greet or format_name'" in test_result["command"]
         assert outcome.merger_outcome["metadata"]["verify_stage"] == "pytest"
 
     def test_replay_fixture_suite_runs_after_targeted_pytest(self, tmp_path):

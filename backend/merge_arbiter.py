@@ -611,11 +611,16 @@ class _DefaultResolutionVerifier:
         deadline = time.monotonic() + VERIFY_TIMEOUT_SECONDS
         scratch = self._create_scratch_worktree(task.workspace)
         try:
-            target = Path(scratch) / task.file_path
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(outcome.resolved_text, encoding="utf-8")
+            resolved_files = self._resolved_file_texts(
+                task,
+                outcome,
+            )
+            for file_path, resolved_text in resolved_files.items():
+                target = Path(scratch) / file_path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(resolved_text, encoding="utf-8")
 
-            touched_files = self._touched_files(task)
+            touched_files = self._touched_files(task, resolved_files)
             result = self._run_conflict_marker_scan(
                 touched_files,
                 cwd=scratch,
@@ -635,7 +640,9 @@ class _DefaultResolutionVerifier:
                 if not result.ok:
                     return self._failed_outcome(task, outcome, result)
 
-            identifiers = _pytest_identifiers(outcome.changed_identifiers)
+            identifiers = _pytest_identifiers(
+                self._changed_identifiers(outcome),
+            )
             if identifiers:
                 k_expr = " or ".join(identifiers)
                 pytest_args = [
@@ -673,12 +680,80 @@ class _DefaultResolutionVerifier:
             self._cleanup_scratch(task.workspace, scratch)
 
     @staticmethod
-    def _touched_files(task: MergeConflictTask) -> list[str]:
+    def _touched_files(
+        task: MergeConflictTask,
+        resolved_files: dict[str, str] | None = None,
+    ) -> list[str]:
         touched: list[str] = []
-        for file_path in [task.file_path, *task.additional_files]:
+        for file_path in [
+            task.file_path,
+            *task.additional_files,
+            *(resolved_files or {}).keys(),
+        ]:
             if file_path and file_path not in touched:
                 touched.append(file_path)
         return touched
+
+    @staticmethod
+    def _resolved_file_texts(
+        task: MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+    ) -> dict[str, str]:
+        resolved: dict[str, str] = {}
+        if task.file_path:
+            resolved[task.file_path] = outcome.resolved_text
+
+        raw = outcome.metadata.get("resolved_files")
+        if isinstance(raw, dict):
+            for file_path, text in raw.items():
+                if isinstance(file_path, str) and isinstance(text, str):
+                    resolved[file_path] = text
+
+        raw = outcome.metadata.get("file_resolutions")
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                file_path = item.get("file_path") or item.get("path")
+                text = item.get("resolved_text") or item.get("text")
+                if isinstance(file_path, str) and isinstance(text, str):
+                    resolved[file_path] = text
+        elif isinstance(raw, dict):
+            for file_path, text in raw.items():
+                if isinstance(file_path, str) and isinstance(text, str):
+                    resolved[file_path] = text
+
+        return resolved
+
+    @staticmethod
+    def _changed_identifiers(outcome: ma.ResolutionOutcome) -> list[str]:
+        identifiers: list[str] = []
+        for ident in outcome.changed_identifiers:
+            if ident not in identifiers:
+                identifiers.append(ident)
+
+        by_file = outcome.metadata.get("changed_identifiers_by_file")
+        if isinstance(by_file, dict):
+            for values in by_file.values():
+                if not isinstance(values, list):
+                    continue
+                for ident in values:
+                    if isinstance(ident, str) and ident not in identifiers:
+                        identifiers.append(ident)
+
+        raw = outcome.metadata.get("file_resolutions")
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                values = item.get("changed_identifiers")
+                if not isinstance(values, list):
+                    continue
+                for ident in values:
+                    if isinstance(ident, str) and ident not in identifiers:
+                        identifiers.append(ident)
+
+        return identifiers
 
     def _run_conflict_marker_scan(
         self,
