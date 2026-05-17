@@ -57,6 +57,7 @@ import os
 from pathlib import Path
 
 from backend.config import settings
+from backend.submit_rule import evaluate_submit_rule
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +319,13 @@ class GerritClient:
 
     # ─── Query ───
 
-    async def query_change(self, change_id: str, project: str = "") -> dict | None:
+    async def query_change(
+        self,
+        change_id: str,
+        project: str = "",
+        *,
+        include_dependencies: bool = False,
+    ) -> dict | None:
         """Query a Gerrit change by Change-Id or change number.
 
         Returns parsed JSON dict or None if not found.
@@ -327,9 +334,10 @@ class GerritClient:
         if account is None:
             logger.warning("Gerrit query: no account configured")
             return None
+        dep_flag = " --dependencies" if include_dependencies else ""
         rc, out, err = await self._ssh_with(
             account,
-            f'gerrit query --format=JSON --current-patch-set "change:{change_id}"',
+            f'gerrit query --format=JSON --current-patch-set{dep_flag} "change:{change_id}"',
         )
         if rc != 0:
             logger.warning("Gerrit query failed: %s", err)
@@ -467,6 +475,20 @@ class GerritClient:
         if account is None:
             return {"error": "Gerrit not configured"}
         proj = self._project_for(account, project)
+        change = await self.query_change(
+            commit,
+            project=proj,
+            include_dependencies=True,
+        )
+        blockers = _depends_on_blockers(change or {})
+        if blockers:
+            decision = evaluate_submit_rule([], depends_on_blockers=blockers)
+            return {
+                "error": decision.detail,
+                "reason": decision.reason.value,
+                "missing": list(decision.missing),
+                "depends_on_blockers": list(decision.depends_on_blockers),
+            }
         rc, out, err = await self._ssh_with(
             account,
             f'gerrit review --project "{proj}" --submit {commit}',
@@ -558,6 +580,19 @@ class GerritClient:
         if rc != 0:
             return {"status": "error", "message": err}
         return {"status": "ok", "version": out}
+
+
+def _depends_on_blockers(change: dict) -> list[dict]:
+    """Return Gerrit dependency entries that are not already merged."""
+    blockers: list[dict] = []
+    for dep in change.get("dependsOn") or ():
+        if not isinstance(dep, dict):
+            continue
+        status = str(dep.get("status") or "").strip().upper()
+        if status in {"MERGED", "SUBMITTED"}:
+            continue
+        blockers.append(dep)
+    return blockers
 
 
 # Singleton
