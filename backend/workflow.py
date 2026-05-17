@@ -42,6 +42,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
 
+from backend.agent_guild_dual_write import guild_id_from_values, sync_agent_type_guild_id
 from backend.db_context import tenant_insert_value, tenant_where_pg
 from backend.db_pool import get_pool
 
@@ -132,19 +133,21 @@ async def start(kind: str, *, metadata: dict[str, Any] | None = None,
         existing = await get_run(run_id)
         if existing:
             return existing
+    run_metadata = sync_agent_type_guild_id(metadata)
     run = WorkflowRun(
         id=run_id or _uid("wf"),
         kind=kind,
         started_at=time.time(),
-        metadata=metadata or {},
+        metadata=run_metadata,
     )
     async with get_pool().acquire() as conn:
         await conn.execute(
             "INSERT INTO workflow_runs "
-            "(id, kind, started_at, status, metadata, tenant_id) "
-            "VALUES ($1, $2, $3, 'running', $4, $5)",
+            "(id, kind, started_at, status, metadata, tenant_id, guild_id) "
+            "VALUES ($1, $2, $3, 'running', $4, $5, $6)",
             run.id, run.kind, run.started_at,
             json.dumps(run.metadata), tenant_insert_value(),
+            guild_id_from_values(run.metadata),
         )
 
     # Q.3-SUB-1 (#297): cross-device SSE broadcast. Best-effort —
@@ -460,9 +463,10 @@ async def update_run_metadata(run_id: str, expected_version: int,
     existing = await get_run(run_id)
     if not existing:
         raise ValueError(f"run {run_id} not found")
-    merged = {**existing.metadata, **metadata}
+    merged = sync_agent_type_guild_id({**existing.metadata, **metadata})
     new_version = await _bump_version(run_id, expected_version, {
         "metadata": json.dumps(merged),
+        "guild_id": guild_id_from_values(merged),
     })
     # Status is unchanged for metadata-only patches — emit so other
     # devices still see the version bump (etag refresh).
