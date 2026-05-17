@@ -2,9 +2,11 @@
 
 > **Status**: v0.5.0 partial ship (RPG.W1-W14 core + W15-W17 + W19-W20
 > shipped; W18 + W21 deferred). Last reviewed
-> 2026-05-11 (W12 promoted to **Live** via OP-217; W13 promoted to
-> **Live** via OP-218; W14 promoted to **Live** via OP-219;
-> W17 promoted to **Live** via OP-220).
+> 2026-05-17 (W11.3 periodic verification pass via OP-1377; W12
+> promoted to **Live** via OP-217; W13 promoted to **Live** via OP-218;
+> W14 promoted to **Live** via OP-219; W17 promoted to **Live** via OP-220;
+> W3.3 promoted to **Live** via OP-130 on 2026-05-16; W19 fusion
+> hardening landed via OP-1391 + OP-1392 on 2026-05-17).
 > **Authoritative spec**: [ADR-0008 — Agent RPG Class & Skill Leveling
 > System](/docs/adr/ADR-0008-agent-rpg-class-skill-leveling/). This doc covers
 > *operation*, not design — when the two diverge, ADR-0008 wins and this
@@ -22,8 +24,8 @@ having to re-derive the curve from the ADR every time.
 The RPG system ships in waves. Some of the surfaces ADR-0008 describes
 are **structural slots** (module + helper present, no live data path
 yet); some are fully live. Treat the table below as the source of
-truth on what an operator can act on **today** (2026-05-08 — v0.5.0
-target ship).
+truth on what an operator can act on **today** (2026-05-17 — v0.5.0
+target ship; W11.3 periodic verification pass per OP-1377).
 
 | Wave   | Module / surface                                              | Status today               |
 | ------ | ------------------------------------------------------------- | -------------------------- |
@@ -36,11 +38,11 @@ target ship).
 | W11.3  | This document                                                 | **Live**                   |
 | W15.1  | `backend/agents/buff_registry.py` — Fresh Tokens / Streak / Well-Rested  | **Live** (XP multiplier inputs) |
 | W15.2  | `backend/agents/debuff_registry.py` — Burnout / Stale Memory             | **Live**                  |
-| W16.1  | `backend/agents/achievement_registry.py` + unlock daemon                 | **Live**                  |
-| W19.1  | `backend/agents/skill_fusion.py` — Lv5 fusion preview                    | **Live**                  |
-| W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title` |
+| W16.1  | `backend/agents/achievement_registry.py` + unlock daemon (alembic 0240 milestone table per OP-1385; in-memory unlock store per OP-1386) | **Live**                  |
+| W19.1  | `backend/agents/skill_fusion.py` — Lv5 fusion preview (OP-1391 exact-Lv5 gate + OP-1392 level deltas) | **Live**                  |
+| W20.2  | `backend/agents/campaign_progress.py` — chapter ledger                   | **Live**; alembic 0201 adds `tasks.rpg_campaign_id` + `rpg_campaign_title`; W20.3 completion status string exported as `campaign_completion.CAMPAIGN_COMPLETION_STATUS` (OP-1396) |
 | W3.2   | `backend/agents/style_fingerprint.py` — pure SHA-256 generator over last-N `(commit_style / test_pattern / refactor_tendency)` | **Live** (OP-129) |
-| W3.3   | `backend/agents/style_fingerprint_cron.py` — daily recompute sweep + drift logging | **Live** (OP-130) — helper + drift threshold live; systemd timer wiring still owned by devops |
+| W3.3   | `backend/agents/style_fingerprint_cron.py` — daily recompute sweep + drift logging | **Live** as of 2026-05-16 (OP-130) — helper + drift threshold live; systemd timer wiring still owned by devops |
 | W5-W7  | L1/L2/L3 memory hooks, L3 reflection RAG, routing integration | **Deferred** (W5.1 BP.M dim-memory scoping + W7.2 tier gate landed standalone — see "BP.M dim memory scoping (W5.1)" and "Tier gating (W7.2)" below) |
 | W5.1   | `backend/agents/skill_memory.py` — `(agent_id, skill_id)`-tagged BP.M dim memory adapter over pgvector | **Live** (OP-137) — `vectorize_distilled_skills` + `retrieve_distilled_skills` ship; W5.2 auto-distil hook + W5.3 latency tests follow |
 | W7.2   | `backend/agents/tier_gate.py` — Tier X requires Lv ≥ 50 + skill ≥ Lv 3 | **Live** (OP-147) — pure helper + async resolver; W7.1 wires the call site once `prefer_agent_id` lands |
@@ -444,6 +446,17 @@ the operator believes was earned, the unlock criteria may have a bug —
 file a ticket against RPG.W16 with the `(agent_id, achievement_id,
 date)` triple.
 
+Storage layout: alembic 0240 (OP-1385) creates the
+`agent_achievement_milestone` table and seeds the five registry-backed
+milestone definitions (delivery, quality, mentorship, challenge,
+learning). The auto-unlock scanner consumes an
+`AchievementUnlockStore` (Protocol) — the in-memory implementation
+`InMemoryAchievementUnlockStore` in
+`backend/agents/achievement_unlock_daemon.py` (OP-1386) provides
+metric snapshots + idempotent unlock persistence + inspection helpers
+for non-DB contexts (CI, local dev); production wires the same
+Protocol against the alembic 0240 table.
+
 ---
 
 ## Campaign progress (W20)
@@ -460,6 +473,19 @@ The `campaign_progress.py` module computes per-campaign chapter state
 (open / in-progress / closed). There is no UI for campaign management
 today; create campaigns by setting `rpg_campaign_id` on the task row
 directly when dispatching.
+
+Campaign **completion** rewards an XP delta whose `status` field is
+pinned to the `CAMPAIGN_COMPLETION_STATUS` constant in
+`backend/agents/campaign_completion.py` (W20.3 — OP-1396; sibling
+constants: `CAMPAIGN_COMPLETION_BONUS_MULTIPLIER` for the XP multiplier
+on `BASE_TASK_XP` and `CAMPAIGN_COMPLETION_BADGE_PREFIX` for the
+per-campaign badge id). Operator dashboards and downstream reward
+consumers should import these constants rather than hard-coding the
+strings / multiplier, so a future tuning lands in one place. The
+helper itself (`campaign_completion_reward(...)`) is pure — no DB
+writes — and returns `None` until `completed_tasks == total_tasks`,
+so callers can evaluate it after every task completion without
+double-applying a reward.
 
 ---
 
@@ -1428,6 +1454,26 @@ helper is exposed to the frontend via:
 Now that W12 is live (OP-217), the confirm button writes to
 `agent_skill_state`; before W12 shipped, this was a preview-only
 surface.
+
+### Fusion gate + level deltas (W19.1 hardening — OP-1391 / OP-1392)
+
+The W19.1 hybrid-recipe path in `skill_fusion.py` requires **both
+observed component skills at exactly Lv 5** before resolving an
+explicit recipe (OP-1391). A near-miss — e.g. one Lv 5 + one Lv 4 —
+does not partially resolve; the preview returns no recipe so the UI
+never shows a confirmable card the backend would refuse.
+
+On a successful fusion, the helper surfaces the post-fusion ledger
+explicitly (OP-1392):
+
+| Output field | Value |
+|---|---|
+| Each component skill | Lv 4 (one level lower than the consumed Lv 5) |
+| Newly created hybrid skill | Lv 3 |
+
+Operators reading the preview payload should treat these deltas as
+the **contract** — the same numbers are written to `agent_skill_state`
+when the operator confirms.
 
 ---
 
