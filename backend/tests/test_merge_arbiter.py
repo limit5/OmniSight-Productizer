@@ -374,6 +374,54 @@ def test_low_risk_add_only_take_both_without_merger():
     assert "def incoming_helper" in low_outcome.resolved_text
 
 
+def test_signature_compat_candidate_replays_through_stub_verifier():
+    async def merger(req: ma.ConflictRequest) -> ma.ResolutionOutcome:
+        deps = ma.MergerDeps(
+            llm=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("signature candidate should skip LLM")
+            ),
+            pusher=_StubPusher(),
+            reviewer=_StubReviewer(),
+            review_llm=lambda _prompt: (_ for _ in ()).throw(
+                AssertionError("signature candidate should skip review LLM")
+            ),
+            test_runner=lambda _req: (_ for _ in ()).throw(
+                AssertionError("arbiter verifier owns candidate validation")
+            ),
+        )
+        return await ma.resolve_conflict(req, deps=deps)
+
+    verifier = _StubVerifier()
+    task = _task(
+        change_number="932",
+        conflict_text=(
+            "<<<<<<< HEAD\n"
+            "def by_guild(self, guild):\n"
+            "    return self.lookup(guild)\n"
+            "=======\n"
+            "def by_guild(self, guild_id):\n"
+            "    return self.lookup_by_id(guild_id)\n"
+            ">>>>>>> feature/guild-id\n"
+        ),
+    )
+    deps = arb.ArbiterDeps(
+        merger=merger,
+        jira=_StubJira(),
+        notifier=_StubNotifier(),
+        verifier=verifier,
+    )
+
+    outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+    assert outcome.reason is arb.ArbiterReason.merger_plus_two_awaiting_human
+    assert len(verifier.calls) == 1
+    candidate = verifier.calls[0]["outcome"]
+    assert candidate.reason is ma.MergerReason.deferred_push_to_caller
+    assert candidate.metadata["signature_compat_candidate"] is True
+    assert "def by_guild(self, guild=None, guild_id=None):" in candidate.resolved_text
+    assert "if guild_id is not None:" in candidate.resolved_text
+
+
 def test_high_risk_control_flow_escalates_without_merger():
     async def merger(_req: ma.ConflictRequest) -> ma.ResolutionOutcome:
         raise AssertionError("HIGH risk conflict must not invoke merger LLM path")
