@@ -650,7 +650,9 @@ class _DefaultResolutionVerifier:
                     scratch_path=scratch,
                 )
 
-            return self._push_verified(task, outcome, scratch, result)
+            if task.push_locally:
+                return self._push_verified(task, outcome, scratch, result)
+            return self._verified_deferred(task, outcome, result)
         finally:
             self._cleanup_scratch(task.workspace, scratch)
 
@@ -828,6 +830,37 @@ class _DefaultResolutionVerifier:
             changed_identifiers=list(outcome.changed_identifiers),
         )
         return passed
+
+    @staticmethod
+    def _verified_deferred(
+        task: MergeConflictTask,
+        outcome: ma.ResolutionOutcome,
+        verify_result: VerifyRunResult,
+    ) -> ma.ResolutionOutcome:
+        return ma.ResolutionOutcome(
+            change_id=task.change_id,
+            file_path=task.file_path,
+            reason=ma.MergerReason.deferred_push_to_caller,
+            voted_score=ma.LabelVote.abstain,
+            confidence=outcome.confidence,
+            rationale=outcome.rationale,
+            diff_preview=outcome.diff_preview,
+            push_sha=outcome.push_sha,
+            review_url=outcome.review_url,
+            failure_count=outcome.failure_count,
+            test_result={
+                "ok": True,
+                "summary": verify_result.summary,
+                "command": verify_result.command,
+            },
+            metadata={
+                **outcome.metadata,
+                "verify_result": "green",
+                "verify_stage": verify_result.stage,
+            },
+            changed_identifiers=list(outcome.changed_identifiers),
+            resolved_text=outcome.resolved_text,
+        )
 
     @staticmethod
     def _failed_outcome(
@@ -1333,19 +1366,19 @@ async def _route_merger_outcome(
     # workspace + SSH key. Backend does NOT open a JIRA abstain
     # ticket here — the caller will complete the resolution.
     if outcome.reason is ma.MergerReason.deferred_push_to_caller:
-        if task.push_locally:
-            verified = await deps.verifier.verify_and_push(
-                task=task,
-                outcome=outcome,
-            )
-            logger.info(
-                "merge_arbiter.verify_result=%s verify_outcome=%s "
-                "change_id=%s stage=%s",
-                verified.metadata.get("verify_result", "unknown"),
-                verified.metadata.get("verify_outcome", "unknown"),
-                task.change_id,
-                verified.metadata.get("verify_stage", ""),
-            )
+        verified = await deps.verifier.verify_and_push(
+            task=task,
+            outcome=outcome,
+        )
+        logger.info(
+            "merge_arbiter.verify_result=%s verify_outcome=%s "
+            "change_id=%s stage=%s",
+            verified.metadata.get("verify_result", "unknown"),
+            verified.metadata.get("verify_outcome", "unknown"),
+            task.change_id,
+            verified.metadata.get("verify_stage", ""),
+        )
+        if verified.reason is not ma.MergerReason.deferred_push_to_caller:
             return await _route_merger_outcome(task, verified, deps)
 
         return ArbiterOutcome(
@@ -1359,7 +1392,7 @@ async def _route_merger_outcome(
                 f"to its workspace, amending as merger-agent-bot, "
                 f"pushing to refs/for/<branch>, and posting the +2 vote."
             ),
-            merger_outcome=outcome.to_dict(),
+            merger_outcome=verified.to_dict(),
         )
 
     # Any non-+2 outcome — branch by reason.

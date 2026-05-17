@@ -1279,6 +1279,10 @@ async def _proactive_merger_check(event: dict) -> None:
 
         primary = result.conflict_files[0]
         additional = [cf.path for cf in result.conflict_files[1:]]
+        safe_project = project.replace("/", "_")
+        workspace = Path(
+            f"/tmp/op717-merger-work/{safe_project}/repo"
+        )
 
         task = MergeConflictTask(
             change_id=str(change_number),
@@ -1290,14 +1294,16 @@ async def _proactive_merger_check(event: dict) -> None:
             head_commit_message=result.head_subject or subject,
             incoming_commit_message=result.incoming_subject or subject,
             patchset_revision=rev,
+            workspace=str(workspace),
             jira_ticket=jira_ticket,
             jira_description=jira_description,
             additional_files=additional,
             sibling_file_contents=dict(result.sibling_file_contents),
             git_logs=dict(result.git_logs),
             symbol_table=dict(result.symbol_table),
-            # OP-1196 phase 3 — daemon does the push using its host
-            # workspace + merger-bot SSH key. Backend has neither.
+            # OP-1196 phase 3 + OP-1412 — backend verifies against
+            # the OP-717 workspace; daemon still owns the push using
+            # its merger-bot SSH key.
             push_locally=False,
         )
 
@@ -1312,9 +1318,13 @@ async def _proactive_merger_check(event: dict) -> None:
             outcome_reason = outcome.get("reason", "unknown")
             merger_outcome = outcome.get("merger_outcome") or {}
             merger_reason = merger_outcome.get("reason") or ""
+            verify_result = (
+                (merger_outcome.get("metadata") or {}).get("verify_result")
+                or "none"
+            )
             logger.info(
-                "%s merger_outcome reason=%s merger_reason=%s",
-                log_prefix, outcome_reason, merger_reason or "<none>",
+                "%s merger_outcome reason=%s merger_reason=%s verify_result=%s",
+                log_prefix, outcome_reason, merger_reason or "<none>", verify_result,
             )
             # OP-1196 phase 3 — caller-side push handoff. Backend ran
             # the LLM successfully but deferred the actual push back to

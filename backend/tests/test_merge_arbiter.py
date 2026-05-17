@@ -130,7 +130,8 @@ class _StubHashtagSetter:
 
 
 class _StubVerifier:
-    def __init__(self):
+    def __init__(self, outcome: ma.ResolutionOutcome | None = None):
+        self.outcome = outcome
         self.calls: list[dict[str, Any]] = []
 
     async def verify_and_push(
@@ -140,6 +141,8 @@ class _StubVerifier:
         outcome: ma.ResolutionOutcome,
     ) -> ma.ResolutionOutcome:
         self.calls.append({"task": task, "outcome": outcome})
+        if self.outcome is not None:
+            return self.outcome
         return ma.ResolutionOutcome(
             change_id=task.change_id,
             file_path=task.file_path,
@@ -654,6 +657,15 @@ def _deferred_push_outcome(task: arb.MergeConflictTask) -> ma.ResolutionOutcome:
     return o
 
 
+def _verified_deferred_push_outcome(
+    task: arb.MergeConflictTask,
+) -> ma.ResolutionOutcome:
+    o = _deferred_push_outcome(task)
+    o.metadata = {"verify_result": "green", "verify_stage": "pytest"}
+    o.test_result = {"ok": True, "summary": "pytest passed", "command": "pytest"}
+    return o
+
+
 def _deferred_resolution(
     task: arb.MergeConflictTask,
     *,
@@ -707,20 +719,26 @@ class TestDeferredPushRouting:
 
     def test_deferred_push_routes_to_pending_caller_push(self):
         task = _task(push_locally=False)
+        merger_outcome = _deferred_push_outcome(task)
+        verifier = _StubVerifier(_verified_deferred_push_outcome(task))
         deps = arb.ArbiterDeps(
-            merger=_merger_runner(_deferred_push_outcome(task)),
+            merger=_merger_runner(merger_outcome),
             jira=_StubJira(),
             notifier=_StubNotifier(),
+            verifier=verifier,
         )
 
         outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
 
+        assert len(verifier.calls) == 1
+        assert verifier.calls[0]["outcome"] is merger_outcome
         assert outcome.reason is arb.ArbiterReason.merger_resolved_pending_caller_push
         # The merger_outcome dict must include resolved_text so the
         # daemon caller can apply it.
         assert outcome.merger_outcome is not None
         assert outcome.merger_outcome.get("resolved_text") == "x = 42  # resolved\n"
         assert outcome.merger_outcome.get("reason") == "deferred_push_to_caller"
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "green"
 
     def test_deferred_push_does_NOT_open_jira_abstain_ticket(self):
         """The caller is expected to complete the resolution. Opening
@@ -732,6 +750,7 @@ class TestDeferredPushRouting:
             merger=_merger_runner(_deferred_push_outcome(task)),
             jira=stub_jira,
             notifier=_StubNotifier(),
+            verifier=_StubVerifier(_verified_deferred_push_outcome(task)),
         )
 
         outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
@@ -741,6 +760,35 @@ class TestDeferredPushRouting:
             "deferred-push path must not open a JIRA abstain ticket"
         )
         assert outcome.jira_ticket_created is None
+
+    def test_deferred_push_verify_red_abstains_without_caller_push(self):
+        task = _task(push_locally=False)
+        verified = ma.ResolutionOutcome(
+            change_id=task.change_id,
+            file_path=task.file_path,
+            reason=ma.MergerReason.refused_test_failure,
+            voted_score=ma.LabelVote.abstain,
+            confidence=0.93,
+            rationale="verify step failed at py_compile",
+            diff_preview="diff",
+            test_result={"ok": False, "summary": "py_compile failed"},
+            metadata={"verify_result": "red", "verify_stage": "py_compile"},
+            resolved_text="x = 42  # resolved\n",
+        )
+        verifier = _StubVerifier(verified)
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_push_outcome(task)),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=verifier,
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert len(verifier.calls) == 1
+        assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "red"
 
     def test_push_locally_default_true_unaffected(self):
         """Backwards-compat: omitting push_locally in the request keeps
@@ -847,6 +895,33 @@ class TestBuildThenVerify:
 
         assert outcome.reason is arb.ArbiterReason.merger_refused_test_failure
         assert "verify_outcome=slow" in caplog.text
+
+    def test_push_deferred_resolution_is_verified_without_pushing(self, tmp_path):
+        ws = _git_workspace(tmp_path)
+        task = _task(workspace=str(ws), push_locally=False)
+        pusher = _StubPusher()
+        deps = arb.ArbiterDeps(
+            merger=_merger_runner(_deferred_resolution(
+                task,
+                resolved_text="def greet(name):\n    return f'Hello {name}!'\n",
+            )),
+            jira=_StubJira(),
+            notifier=_StubNotifier(),
+            verifier=arb._DefaultResolutionVerifier(  # type: ignore[attr-defined]
+                pusher=pusher,
+                reviewer=_StubReviewer(),
+                hashtag_setter=_StubHashtagSetter(),
+            ),
+        )
+
+        outcome = _run(arb.on_merge_conflict_webhook(task, deps=deps))
+
+        assert outcome.reason is arb.ArbiterReason.merger_resolved_pending_caller_push
+        assert pusher.calls == []
+        assert outcome.merger_outcome is not None
+        assert outcome.merger_outcome["metadata"]["verify_result"] == "green"
+        assert outcome.merger_outcome["metadata"]["verify_stage"] == "pytest"
+        assert outcome.merger_outcome["test_result"]["ok"] is True
 
     def test_broken_resolution_abstains_without_pushing(self, tmp_path):
         ws = _git_workspace(tmp_path)
