@@ -1166,7 +1166,7 @@ def _select_multi_file_strategy(
     coupling_components: list[set[str]],
     blocks_by_file: dict[str, list[ConflictBlock]] | None = None,
 ) -> MultiFileStrategySelection:
-    """Select the multi-file route after coupling and prompt-size checks."""
+    """Select the multi-file route after coupling and hard-gate checks."""
     risk = classify_conflict_risk(req, blocks, coupling_components)
     prompt_evaluations: list[dict[str, Any]] = []
     ordered_components = [
@@ -1193,6 +1193,18 @@ def _select_multi_file_strategy(
                 for path, file_blocks in blocks_by_file.items()
                 if path in component_files
             }
+        component_blocks = (
+            [
+                block
+                for file_blocks in prompt_blocks.values()
+                for block in file_blocks
+            ]
+            if isinstance(prompt_blocks, dict)
+            else list(prompt_blocks)
+        )
+        component_conflict_lines = sum(
+            block.n_conflict_lines for block in component_blocks
+        )
         prompt_gate = build_prompt_with_size_gate(
             component_req, prompt_blocks, component_risk,
         )
@@ -1205,6 +1217,7 @@ def _select_multi_file_strategy(
             ),
             "risk_tier": component_risk.tier.value,
             "risk_reasons": list(component_risk.reasons),
+            "conflict_lines": component_conflict_lines,
             "prompt_size_bytes": prompt_gate.prompt_size_bytes,
             "prompt_limit_bytes": prompt_gate.limit_bytes,
             "sections_trimmed": list(prompt_gate.sections_trimmed),
@@ -1214,8 +1227,12 @@ def _select_multi_file_strategy(
     any_component_oversized = any(
         evaluation["oversized"] for evaluation in prompt_evaluations
     )
+    any_component_conflict_oversized = any(
+        evaluation["conflict_lines"] > MAX_CONFLICT_LINES
+        for evaluation in prompt_evaluations
+    )
     split_reasons = {"multi_file_coupled_oversize"}
-    if any_component_oversized or any(
+    if any_component_oversized or any_component_conflict_oversized or any(
         reason in split_reasons for reason in risk.reasons
     ):
         reason = MergerReason.multi_file_split_too_large
