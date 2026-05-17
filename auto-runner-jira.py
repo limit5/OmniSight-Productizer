@@ -1574,6 +1574,183 @@ def _handle_ops_only_forward_transition(
     return 0
 
 
+# OP-1401: phrase set the abstaining CLI puts in its AC-verification /
+# last-comment text to mean "this is already on develop, nothing to
+# commit". A match here after a NoCommitsOnBranchError tells the runner
+# to archive forward as ``runner-detected-shipped`` rather than start a
+# revert-to-stoploss loop (post-mortem from the 2026-05-17 53-ticket
+# batch where claude / codex both correctly abstained but the only
+# recovery path was revert → stoploss after 3 reverts in 15 minutes).
+_ALREADY_SHIPPED_PHRASES: tuple[str, ...] = (
+    "already implemented",
+    "already shipped",
+    "already on develop",
+    "already merged",
+    "already exists on develop",
+    "implementation is already shipped",
+    "implementation already exists",
+    "no code changes",
+    "no code change needed",
+    "no code changes needed",
+    "no code changes required",
+    "no edits required",
+    "no edits needed",
+    "nothing to commit",
+    "nothing to implement",
+)
+
+
+def _comment_body_text(comment: dict) -> str:
+    """Flatten a JIRA ADF or plaintext comment body into a single string."""
+    body = comment.get("body")
+    if isinstance(body, str):
+        return body
+    chunks: list[str] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            if node.get("type") == "text":
+                chunks.append(str(node.get("text", "")))
+            for child in node.get("content", []) or []:
+                walk(child)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(body)
+    return "".join(chunks)
+
+
+def _cli_detected_already_shipped(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    *,
+    scan_limit: int = 5,
+) -> bool:
+    """Return True when the runner-bot's most-recent comment(s) signal
+    that the implementation is already on develop.
+
+    OP-1401: 53 tickets on 2026-05-17 wedged on the stoploss circuit
+    because the CLI (claude / codex both) correctly abstained — the
+    work was genuinely already shipped on develop — but the runner's
+    only recovery path was revert-to-To Do; three reverts in 15
+    minutes tripped the stoploss. This helper layers a cheap
+    phrase-match on top of the existing NoCommitsOnBranchError signal
+    so those cases archive forward instead.
+
+    Bot-author scoping (``accountId == client.bot_account_id``)
+    prevents an operator triage note that quotes one of the trigger
+    phrases from causing a false archive. A fetch fault degrades to
+    ``False`` — the caller falls through to the standard OP-827
+    revert path, never worse than before this guard existed.
+    """
+    try:
+        response = jira_dispatch._request(
+            client,
+            "GET",
+            f"/issue/{key}/comment?orderBy=-created&maxResults={scan_limit}",
+        )
+    except Exception as exc:  # noqa: BLE001 — degrade to revert path
+        print(
+            f"[runner] {key}: could not scan recent comments for an "
+            f"already-shipped abstention ({type(exc).__name__}: {exc}); "
+            f"falling through to the standard no-commits handler",
+            file=sys.stderr,
+        )
+        return False
+    comments = response.get("comments", []) or []
+    bot_account_id = getattr(client, "bot_account_id", None)
+    for comment in comments[:scan_limit]:
+        if not isinstance(comment, dict):
+            continue
+        # Bot-author scope: only the runner's own CLI comment can
+        # archive the ticket. Operator triage notes that happen to
+        # quote one of the phrases must NOT trigger the archive.
+        author = comment.get("author") or {}
+        if bot_account_id and author.get("accountId") != bot_account_id:
+            continue
+        text = _comment_body_text(comment).lower()
+        if not text:
+            continue
+        for phrase in _ALREADY_SHIPPED_PHRASES:
+            if phrase in text:
+                return True
+    return False
+
+
+def _handle_runner_detected_shipped(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+) -> int:
+    """Archive an already-shipped ticket forward instead of revert-looping.
+
+    OP-1401: stamps ``runner-detected-shipped`` for operator audit and
+    walks the workflow to Published via the existing force-walk path.
+    On any forward-walk fault we degrade to revert-to-TODO so a
+    transient JIRA error never silently leaves the ticket wedged In
+    Progress (the OP-811-class symptom). Stopping at Published rather
+    than Archived is intentional — Published is the workflow's
+    "shipped, no further action" state and only one transition is
+    valid from Published to Archived; the ticket description licences
+    "Archived (or whatever 'no-action-needed' state)".
+    """
+    try:
+        jira_dispatch.add_label(client, key, "runner-detected-shipped")
+    except Exception as exc:  # noqa: BLE001 — label is observability, not gate
+        print(
+            f"[runner] {key}: failed to add `runner-detected-shipped` label "
+            f"({type(exc).__name__}: {exc}); continuing with forward walk",
+            file=sys.stderr,
+        )
+    try:
+        jira_dispatch.add_comment(
+            client,
+            key,
+            (
+                "[runner-detected-shipped] CLI exit=0 + 0 commits + "
+                "abstention-comment phrase match (OP-1401). Implementation "
+                "is already on develop, so walking the ticket forward to "
+                "Published instead of reverting to To Do — this is the "
+                "no-action-needed recovery path that the 2026-05-17 "
+                "53-ticket batch was missing (revert→stoploss loop)."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 — audit comment is informational
+        print(
+            f"[runner] {key}: failed to post `runner-detected-shipped` "
+            f"audit comment ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+    try:
+        jira_dispatch.force_walk_to_published(client, key)
+    except Exception as exc:  # noqa: BLE001 — degrade to revert
+        print(
+            f"[runner] {key}: force_walk_to_published failed for "
+            f"already-shipped detection ({type(exc).__name__}: {exc}); "
+            f"falling back to revert-to-TODO so the ticket does not "
+            f"silently wedge In Progress",
+            file=sys.stderr,
+        )
+        try:
+            jira_dispatch.transition_back_to_todo(
+                client,
+                key,
+                "[runner-detected-shipped] forward-walk failed; reverting "
+                "for operator triage.",
+            )
+        except Exception as revert_err:  # noqa: BLE001
+            print(
+                f"[runner] {key}: revert-to-TODO also failed: {revert_err}",
+                file=sys.stderr,
+            )
+        return 1
+    print(
+        f"[runner] {key} runner-detected-shipped → walked forward to Published "
+        f"(no revert, no stoploss tick)"
+    )
+    return 0
+
+
 def _handle_gerrit_push_failure(
     client: "jira_dispatch.DispatchClient",
     key: str,
@@ -2524,6 +2701,46 @@ def main() -> int:
                 )
                 _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return rc_fwd
+            # OP-1401: detect already-shipped abstention BEFORE the OP-827
+            # revert path. CLI exit=0 + 0 commits + recent bot-authored
+            # comment containing an already-shipped phrase means the work
+            # is genuinely on develop and there is nothing for the runner
+            # to do; archiving forward sidesteps the revert→stoploss loop
+            # that wedged 53 tickets on 2026-05-17. Order matters here —
+            # the ops-only check above MUST run first (its label is the
+            # operator's explicit "no commits expected" sigil), and the
+            # CLI-self-revert check earlier guarantees we don't archive a
+            # ticket the CLI already pushed to To Do under §11.
+            if _cli_detected_already_shipped(client, snapshot.key):
+                print(
+                    f"[runner] {snapshot.key} CLI produced 0 commits + "
+                    f"already-shipped phrase match → archiving forward "
+                    f"(skipping OP-827 revert)"
+                )
+                rc_shipped = _handle_runner_detected_shipped(
+                    client, snapshot.key,
+                )
+                _run_memory_writeback(
+                    client,
+                    snapshot.key,
+                    outcome=(
+                        memory_writeback.OUTCOME_SUCCESS
+                        if rc_shipped == 0
+                        else memory_writeback.OUTCOME_FAILURE
+                    ),
+                    summary=(
+                        "runner-detected-shipped (0 commits + "
+                        "abstention-comment phrase match)"
+                    ),
+                    failure_class=(
+                        None
+                        if rc_shipped == 0
+                        else "RUNNER_DETECTED_SHIPPED_FORWARD_FAIL"
+                    ),
+                    area=metric_meta.get("area"),
+                )
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+                return rc_shipped
             # OP-827 fix: claude/codex CLI exited without committing. Posting AC
             # and exiting bypasses the commit, so there is nothing to push and
             # the right move is to revert to To Do for fresh re-pickup. Leaving
