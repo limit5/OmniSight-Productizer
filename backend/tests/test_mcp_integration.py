@@ -21,8 +21,10 @@ ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §5.6
 
 from __future__ import annotations
 
+import json
 import sys
 import types
+import urllib.error
 from typing import Any
 
 import pytest
@@ -36,6 +38,7 @@ from backend.agents.mcp_integration import (
     default_catalog_by_name,
     is_mcp_tool,
     parse_mcp_tool_name,
+    query_mcp_tool_list,
 )
 
 
@@ -382,6 +385,7 @@ async def test_run_with_tools_forwards_mcp_servers(monkeypatch):
     class _StubClient:
         def __init__(self, **kwargs):  # noqa: ARG002
             self.messages = _StubMessages()
+            self.beta = types.SimpleNamespace(messages=self.messages)
 
     fake.Anthropic = _StubClient  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "anthropic", fake)
@@ -548,3 +552,111 @@ def test_build_registry_from_env_custom_alias_map():
     cfg = reg.get("claude_ai_Figma")
     assert cfg is not None
     assert cfg.authorization_token == "abc"
+
+
+# ─── query_mcp_tool_list ─────────────────────────────────────────
+
+
+class _ProbeResponse:
+    def __init__(self, body: str) -> None:
+        self._body = body.encode()
+
+    def __enter__(self) -> "_ProbeResponse":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def test_query_mcp_tool_list_posts_tools_list_and_extracts_names():
+    captured: dict[str, Any] = {}
+
+    def opener(request, timeout):  # noqa: ANN001
+        captured["url"] = request.full_url
+        captured["method"] = request.get_method()
+        captured["timeout"] = timeout
+        captured["authorization"] = request.get_header("Authorization")
+        captured["body"] = types.SimpleNamespace(**json.loads(request.data.decode()))
+        return _ProbeResponse(
+            """{
+              "jsonrpc": "2.0",
+              "result": {
+                "tools": [
+                  {"name": "getTicket"},
+                  {"name": "searchTickets"},
+                  {"name": 123},
+                  "not-a-tool"
+                ]
+              }
+            }"""
+        )
+
+    cfg = MCPServerConfig(
+        name="mcp_jira",
+        url="https://mcp.example/jira",
+        authorization_token="tok-jira",
+    )
+    result = query_mcp_tool_list(cfg, opener=opener, timeout=2.5)
+
+    assert captured["url"] == "https://mcp.example/jira"
+    assert captured["method"] == "POST"
+    assert captured["timeout"] == 2.5
+    assert captured["authorization"] == "Bearer tok-jira"
+    assert captured["body"].method == "tools/list"
+    assert result.server_name == "mcp_jira"
+    assert result.url == "https://mcp.example/jira"
+    assert result.tool_names == ("getTicket", "searchTickets")
+
+
+def test_query_mcp_tool_list_empty_body_returns_empty_result():
+    def opener(request, timeout):  # noqa: ANN001, ARG001
+        assert request.get_header("Authorization") is None
+        return _ProbeResponse("")
+
+    cfg = MCPServerConfig(name="public_mcp", url="https://mcp.example/public")
+    result = query_mcp_tool_list(cfg, opener=opener)
+
+    assert result.tool_names == ()
+    assert result.raw == {}
+
+
+def test_query_mcp_tool_list_reraises_http_error():
+    err = urllib.error.HTTPError(
+        "https://mcp.example/jira",
+        503,
+        "unavailable",
+        hdrs=None,
+        fp=None,
+    )
+
+    def opener(request, timeout):  # noqa: ANN001, ARG001
+        raise err
+
+    cfg = MCPServerConfig(name="mcp_jira", url="https://mcp.example/jira")
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        query_mcp_tool_list(cfg, opener=opener)
+
+    assert exc_info.value is err
+
+
+def test_query_mcp_tool_list_wraps_os_error_without_leaking_token():
+    def opener(request, timeout):  # noqa: ANN001, ARG001
+        raise TimeoutError("socket timed out")
+
+    cfg = MCPServerConfig(
+        name="mcp_jira",
+        url="https://mcp.example/jira",
+        authorization_token="secret-token",
+    )
+    with pytest.raises(ConnectionError) as exc_info:
+        query_mcp_tool_list(cfg, opener=opener, timeout=1.0)
+
+    message = str(exc_info.value)
+    assert "mcp_jira" in message
+    assert "timeout=1.0s" in message
+    assert "authorization_token=<set>" in message
+    assert "secret-token" not in message
+    assert isinstance(exc_info.value.__cause__, TimeoutError)
