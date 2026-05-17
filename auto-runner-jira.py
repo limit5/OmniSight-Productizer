@@ -1343,6 +1343,33 @@ def _release_ticket_claim_if_acquired(
     )
 
 
+def _clear_assignee_after_revert(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+) -> None:
+    """Best-effort assignee clear after reverting a claimed ticket."""
+    try:
+        jira_dispatch.clear_assignee(client, key)
+    except Exception as exc:  # noqa: BLE001 — release path must fail open
+        print(f"[runner] clear_assignee failed: {exc}", file=sys.stderr)
+
+
+def _revert_cli_failure_to_todo(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    rc: int,
+    claim: "jira_dispatch.ClaimResult | None",
+) -> None:
+    """Revert a non-zero CLI run and release the runner's JIRA claim."""
+    jira_dispatch.transition_back_to_todo(
+        client,
+        key,
+        f"CLI exited {rc}; needs operator review.",
+    )
+    _clear_assignee_after_revert(client, key)
+    _release_ticket_claim_if_acquired(client, key, claim)
+
+
 def _finalize_successful_push(
     client: "jira_dispatch.DispatchClient",
     key: str,
@@ -2532,6 +2559,7 @@ def main() -> int:
         # sweeper could clean up. Symptom: post-incident `runner-rescue
         # dump` showed stale `state=active` rows older than the original
         # CLI run with no live owner process.
+        _clear_assignee_after_revert(client, snapshot.key)
         _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         return 1
     runner_metrics_recorder.record_completion_sync(
@@ -2760,6 +2788,7 @@ def main() -> int:
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            _clear_assignee_after_revert(client, snapshot.key)
             _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except jira_dispatch.WorktreeDirtyError as e:
@@ -2781,6 +2810,7 @@ def main() -> int:
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            _clear_assignee_after_revert(client, snapshot.key)
             _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except Exception as e:
@@ -2813,6 +2843,7 @@ def main() -> int:
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
+            _clear_assignee_after_revert(client, snapshot.key)
             _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
 
@@ -2894,7 +2925,7 @@ def main() -> int:
         jira_dispatch.transition_back_to_todo(client, snapshot.key, "API agent_class not yet supported in auto-runner-jira.py MVP")
     else:
         print(f"[runner] {snapshot.key} CLI failed rc={rc}; reverting ticket")
-        jira_dispatch.transition_back_to_todo(client, snapshot.key, f"CLI exited {rc}; needs operator review.")
+        _revert_cli_failure_to_todo(client, snapshot.key, rc, claim)
         _run_memory_writeback(
             client,
             snapshot.key,
