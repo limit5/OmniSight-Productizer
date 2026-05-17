@@ -1,5 +1,10 @@
 """B12 — Cloudflare Tunnel wizard REST endpoints.
 
+This router drives the operator-facing wizard that provisions a Cloudflare
+Tunnel + DNS records for an OmniSight install. It owns the lifecycle of the
+encrypted CF API token, the tunnel object, the ingress configuration, and
+the CNAME records pointed at ``<tunnel-id>.cfargotunnel.com``.
+
 Endpoints:
   POST /cloudflare/validate-token  — verify token, return accounts
   GET  /cloudflare/zones           — list zones for an account
@@ -7,6 +12,19 @@ Endpoints:
   GET  /cloudflare/status          — tunnel health (connector up, DNS propagated)
   POST /cloudflare/rotate-token    — replace stored CF token
   DELETE /cloudflare/tunnel        — teardown tunnel + DNS records
+
+Auth: all endpoints route through :func:`_require_operator_or_bootstrap`,
+which downgrades to "no session required" only while the first-install
+wizard is active (see that function's docstring for the exact semantics).
+
+State: the encrypted CF token, connector token, and the (tunnel, zone,
+hostnames) tuple live in an in-memory dict on this module. The wizard also
+mirrors a subset to ``bootstrap_state`` via :mod:`backend.bootstrap` so the
+finalize gate survives a restart — but the in-memory copy is the source of
+truth for the duration of the running process.
+
+All Cloudflare API calls go through :class:`CloudflareClient`; vendor errors
+are normalised to FastAPI :class:`HTTPException` via :func:`_map_cf_error`.
 """
 
 from __future__ import annotations
@@ -82,18 +100,26 @@ REQUIRED_TOKEN_SCOPES = [
 
 
 def _get_state() -> dict[str, Any]:
+    """Return the live in-memory wizard state dict (not a copy)."""
     return _stored_state
 
 
 def _set_state(key: str, value: Any) -> None:
+    """Write ``key`` → ``value`` into the in-memory wizard state."""
     _stored_state[key] = value
 
 
 def _clear_state() -> None:
+    """Wipe all wizard state — used at the end of a successful teardown."""
     _stored_state.clear()
 
 
 def _reset_for_tests() -> None:
+    """Test-only hook: wipe state between cases.
+
+    Imported by the test fixture in ``test_cloudflare_tunnel.py``; module-
+    level state would otherwise leak across tests.
+    """
     _stored_state.clear()
 
 
@@ -152,6 +178,15 @@ class ZoneItem(BaseModel):
 # ── Error mapping helper ─────────────────────────────────────────
 
 def _map_cf_error(exc: CloudflareAPIError) -> HTTPException:
+    """Translate a :class:`CloudflareAPIError` into an HTTP response.
+
+    Status mapping:
+      * :class:`InvalidTokenError`   → 401 (token bad or revoked)
+      * :class:`MissingScopeError`   → 403 (token missing required scopes)
+      * :class:`ConflictError`       → 409 (resource already exists)
+      * :class:`RateLimitError`      → 429 (with retry hint from CF)
+      * any other CF API error      → 502 (upstream failure)
+    """
     if isinstance(exc, InvalidTokenError):
         return HTTPException(status_code=401, detail="Invalid or revoked Cloudflare API token.")
     if isinstance(exc, MissingScopeError):
@@ -167,6 +202,12 @@ def _map_cf_error(exc: CloudflareAPIError) -> HTTPException:
 
 
 def _client_from_stored() -> CloudflareClient:
+    """Build a :class:`CloudflareClient` from the encrypted token in state.
+
+    Raises ``HTTP 400`` if no token has been stored — i.e. the caller skipped
+    ``POST /validate-token``. The token is decrypted via :mod:`secret_store`
+    on each call; we deliberately do not cache the plaintext anywhere.
+    """
     encrypted = _get_state().get("encrypted_token")
     if not encrypted:
         raise HTTPException(status_code=400, detail="No Cloudflare token stored. Run validate-token first.")
@@ -178,7 +219,22 @@ def _client_from_stored() -> CloudflareClient:
 
 @router.post("/validate-token", response_model=ValidateTokenResponse)
 async def validate_token(body: ValidateTokenRequest, _user=Depends(_require)):
-    """Verify a CF API token and return available accounts."""
+    """Verify a Cloudflare API token and persist it for later wizard steps.
+
+    Calls ``/user/tokens/verify`` and ``/accounts`` against the CF v4 API. On
+    success, the plaintext token is encrypted via :mod:`secret_store` and
+    stashed in the router's in-memory state alongside its fingerprint, so
+    subsequent endpoints (``/zones``, ``/provision``, etc.) can build a
+    client without the operator re-typing the token. An audit log entry is
+    emitted with the fingerprint and the account count — never the token
+    itself.
+
+    Returns the token fingerprint and the list of accounts the token can see
+    (used by the wizard UI to populate the account selector).
+
+    Errors are surfaced via :func:`_map_cf_error` — typically 401 (bad
+    token), 403 (missing scope), or 429 (rate limited).
+    """
     client = CloudflareClient(body.api_token)
     try:
         await client.verify_token()
@@ -203,7 +259,15 @@ async def validate_token(body: ValidateTokenRequest, _user=Depends(_require)):
 
 @router.get("/zones", response_model=list[ZoneItem])
 async def list_zones(account_id: str, _user=Depends(_require)):
-    """List zones for the given account."""
+    """List DNS zones visible to the stored token for ``account_id``.
+
+    Used by the wizard UI to populate the zone selector once the operator
+    has picked an account. Requires a prior ``POST /validate-token`` — if
+    no token has been stored, :func:`_client_from_stored` raises 400.
+
+    The result is intentionally trimmed to ``(id, name)`` only via
+    :class:`ZoneItem`; richer fields are kept server-side.
+    """
     client = _client_from_stored()
     try:
         zones = await client.list_zones(account_id)
@@ -214,10 +278,38 @@ async def list_zones(account_id: str, _user=Depends(_require)):
 
 @router.post("/provision", response_model=ProvisionResponse)
 async def provision_tunnel(body: ProvisionRequest, _user=Depends(_require)):
-    """Create tunnel + ingress config + DNS CNAME records.
+    """Provision a Cloudflare Tunnel and its DNS records end-to-end.
 
-    Idempotent: if a tunnel with the same name exists, reuses it.
-    On partial failure, rolls back created resources.
+    Steps, in order, with progress published to the event bus under the
+    ``cf_tunnel_provision`` channel (step, status, detail) so the wizard UI
+    can stream updates:
+
+      1. Look up an existing tunnel by name; reuse it if found.
+      2. Create the tunnel with a fresh 32-byte secret if no reuse.
+      3. PUT the ingress config (one rule per hostname → ``localhost:8000``,
+         with a final ``http_status:404`` catch-all).
+      4. Fetch the connector token, encrypt it, store it in state.
+      5. Create a CNAME per hostname pointing at
+         ``<tunnel-id>.cfargotunnel.com``. Pre-existing records are tolerated
+         (logged + skipped, not treated as failure).
+      6. Run a no-op health probe step purely for UI progress.
+
+    Idempotency: re-running with the same tunnel name reuses the existing
+    tunnel and tolerates pre-existing CNAMEs, so the wizard is safe to retry.
+
+    Rollback: on any :class:`CloudflareAPIError` after partial progress, the
+    handler deletes every DNS record it created and — only if it created the
+    tunnel in this call — deletes the tunnel as well. Reused tunnels are
+    never deleted on rollback.
+
+    Side effects on success: persists tunnel/zone metadata in state, emits
+    an audit log entry, and marks the bootstrap wizard's ``cf_tunnel``
+    step complete via :mod:`backend.bootstrap` so the finalize gate flips
+    green even across a restart (in-memory state alone would not survive).
+    Bootstrap write failures are logged but do not fail the request.
+
+    Hostnames default to ``omnisight.<zone>`` and ``api.omnisight.<zone>``
+    when the request omits an explicit list.
     """
     client = _client_from_stored()
     hostnames = body.hostnames or [f"omnisight.{body.zone_name}", f"api.omnisight.{body.zone_name}"]
@@ -227,6 +319,7 @@ async def provision_tunnel(body: ProvisionRequest, _user=Depends(_require)):
     tunnel_reused = False
 
     def _emit(step: str, status: str, detail: str = ""):
+        """Publish a wizard progress event for the streaming UI."""
         bus.publish("cf_tunnel_provision", {"step": step, "status": status, "detail": detail})
 
     try:
@@ -334,7 +427,21 @@ async def provision_tunnel(body: ProvisionRequest, _user=Depends(_require)):
 
 @router.get("/status", response_model=StatusResponse)
 async def tunnel_status(_user=Depends(_require)):
-    """Return current tunnel health status."""
+    """Return the current tunnel health snapshot.
+
+    Returns ``provisioned=False`` (and nothing else) in two cases: no tunnel
+    has ever been provisioned in this process, or CF reports no tunnel by
+    the stored name (e.g. someone deleted it out-of-band in the CF dash).
+
+    Otherwise the response carries the tunnel id/name/status, a
+    ``connector_online`` flag derived from the tunnel's ``connections``
+    list (true iff at least one connector is not pending reconnect), and
+    the current DNS records for the stored hostnames.
+
+    DNS lookup failures are swallowed silently — the tunnel may still be
+    healthy even if a per-zone read happens to fail — so the response
+    represents a best-effort snapshot rather than a strict health gate.
+    """
     tunnel_id = _get_state().get("tunnel_id")
     if not tunnel_id:
         return StatusResponse(provisioned=False)
@@ -381,7 +488,17 @@ async def tunnel_status(_user=Depends(_require)):
 
 @router.post("/rotate-token")
 async def rotate_token(body: RotateTokenRequest, _user=Depends(_require)):
-    """Replace stored CF API token."""
+    """Replace the stored Cloudflare API token in place.
+
+    Verifies the new token against ``/user/tokens/verify`` *before* it
+    overwrites the old one in state — a bad new token leaves the existing
+    token untouched and returns a 4xx via :func:`_map_cf_error`.
+
+    Emits an audit log entry recording the before/after fingerprints (never
+    the tokens themselves). Note that the encrypted connector token cached
+    during provisioning is not rotated here — it is a separate CF artefact
+    issued per tunnel and survives an API-token rotation.
+    """
     client = CloudflareClient(body.new_api_token)
     try:
         await client.verify_token()
@@ -404,7 +521,20 @@ async def rotate_token(body: RotateTokenRequest, _user=Depends(_require)):
 
 @router.delete("/tunnel", response_model=TeardownResponse)
 async def teardown_tunnel(_user=Depends(_require)):
-    """Delete tunnel and associated DNS records."""
+    """Delete the provisioned tunnel and every CNAME we created for it.
+
+    Returns 404 if no tunnel is recorded in state — the route is not an
+    "ensure absent" idempotent operation, it expects something to remove.
+
+    Ordering matters: DNS records are deleted *first* (resolved by listing
+    each stored hostname in the stored zone), then the tunnel itself. Doing
+    it the other way around would briefly leave CNAMEs pointing at a
+    deleted tunnel and resolve to 1001 errors. Per-DNS failures are logged
+    but do not abort the teardown — a tunnel delete failure does, mapped
+    via :func:`_map_cf_error`.
+
+    Emits an audit log entry and clears all router state on success.
+    """
     tunnel_id = _get_state().get("tunnel_id")
     if not tunnel_id:
         raise HTTPException(status_code=404, detail="No tunnel provisioned.")
