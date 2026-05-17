@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -104,7 +105,7 @@ async def list_git_accounts(
     ),
     enabled_only: bool = Query(False),
     user: _au.User = Depends(_au.require_admin),
-):
+) -> dict[str, Any]:
     _ensure_tenant(user)
     items = await _ga.list_accounts(
         platform=platform, enabled_only=enabled_only,
@@ -116,7 +117,7 @@ async def list_git_accounts(
 async def get_git_account(
     account_id: str,
     user: _au.User = Depends(_au.require_admin),
-):
+) -> dict[str, Any]:
     _ensure_tenant(user)
     row = await _ga.get_account(account_id)
     if row is None:
@@ -133,7 +134,7 @@ async def get_git_account(
 async def create_git_account(
     body: GitAccountCreate,
     user: _au.User = Depends(_au.require_admin),
-):
+) -> dict[str, Any]:
     _ensure_tenant(user)
     try:
         out = await _ga.create_account(
@@ -165,7 +166,7 @@ async def update_git_account(
     account_id: str,
     body: GitAccountUpdate,
     user: _au.User = Depends(_au.require_admin),
-):
+) -> dict[str, Any]:
     _ensure_tenant(user)
     updates = {
         k: v for k, v in body.model_dump(exclude_unset=True).items()
@@ -186,7 +187,7 @@ async def delete_git_account(
     account_id: str,
     auto_elect_new_default: bool = Query(True),
     user: _au.User = Depends(_au.require_admin),
-):
+) -> dict[str, Any]:
     _ensure_tenant(user)
     try:
         out = await _ga.delete_account(
@@ -208,7 +209,7 @@ async def delete_git_account(
 async def _probe_token_for(
     platform: str, token: str, instance_url: str, ssh_host: str,
     ssh_port: int,
-) -> dict:
+) -> dict[str, Any]:
     """Dispatch to the correct platform probe.
 
     Reuses the Bootstrap Step-3.5 probes from
@@ -232,7 +233,7 @@ async def _probe_token_for(
     return {"status": "error", "message": f"Unknown platform {platform!r}"}
 
 
-async def _probe_jira_token(token: str, instance_url: str) -> dict:
+async def _probe_jira_token(token: str, instance_url: str) -> dict[str, Any]:
     """Minimal JIRA probe — ``GET /rest/api/3/myself`` with Bearer.
 
     JIRA Cloud's PAT-ish credential is a Basic-auth user:token combo
@@ -285,7 +286,7 @@ async def _probe_jira_token(token: str, instance_url: str) -> dict:
 async def test_git_account(
     account_id: str,
     user: _au.User = Depends(_au.require_admin),
-):
+) -> dict[str, Any]:
     _ensure_tenant(user)
     row = await _ga.get_account(account_id)
     if row is None:
@@ -325,7 +326,7 @@ async def test_git_account(
 async def resolve_account_for_url(
     url: str = Query(..., min_length=1, max_length=2048),
     user: _au.User = Depends(_au.require_admin),
-):
+) -> dict[str, Any]:
     """Return the ``git_accounts`` row that :func:`pick_account_for_url`
     would pick for *url*, plus a short ``matched_via`` tag describing
     WHICH resolver step produced the match so operators can debug
@@ -361,7 +362,7 @@ async def resolve_account_for_url(
     }
 
 
-def _classify_match(picked: dict, url: str) -> str:
+def _classify_match(picked: dict[str, Any], url: str) -> str:
     """Best-effort tag of WHICH pick step matched *url*.
 
     Matches against:
