@@ -3714,13 +3714,7 @@ async def resolve_conflict(
 
     if len(blocks_by_file) == 1:
         deterministic = deterministic or try_deterministic_merge(request, blocks)
-    if (
-        deterministic is not None
-        and (
-            request.push_locally
-            or deterministic.metadata.get("signature_compat_candidate") is True
-        )
-    ):
+    if deterministic is not None:
         logger.info(
             "merger_path=deterministic change=%s file=%s patterns=%s",
             request.change_number or change_id,

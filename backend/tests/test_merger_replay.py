@@ -230,7 +230,11 @@ def test_replay_case_matches_operator_resolution_or_abstains(case_name: str):
 
     outcome = _run(ma.resolve_conflict(req, deps=deps))
 
-    if case_name == "change_930":
+    if case_name in {"change_930", "change_932"}:
+        # change_930: __all__ list union (deterministic AST helper, OP-1430/1431)
+        # change_932: add_method_to_class on test classes (deterministic, OP-1433/1438)
+        # Both are handled by deterministic helpers BEFORE the LLM after the
+        # OP-1444 gate fix unblocked deterministic on push_locally=False.
         assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
         assert outcome.metadata["merger_path"] == "deterministic"
         assert deps.llm.calls == []
@@ -431,7 +435,13 @@ def test_change_932_replay_keeps_shared_setup_tests_split():
 
     outcome = _run(ma.resolve_conflict(req, deps=deps))
 
-    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    # OP-1433's deterministic add_method_to_class resolver handles this conflict
+    # shape (two distinct test methods in the same class) WITHOUT calling the
+    # LLM. The OP-1444 gate fix unblocks deterministic on push_locally=False,
+    # so this case now resolves deterministically — the LLM split-test rubric
+    # remains in SYSTEM_PROMPT for cases the deterministic helper cannot
+    # handle.
+    assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
     assert outcome.resolved_text == expected
     assert outcome.resolved_text.count(
         "async def test_logs_arbiter_and_underlying_merger_reason"
@@ -441,5 +451,4 @@ def test_change_932_replay_keeps_shared_setup_tests_split():
     ) == 1
     assert "merger_reason=refused_no_conflict" in outcome.resolved_text
     assert "verify_result=red" in outcome.resolved_text
-    assert "SPLIT TESTS WITH SHARED SETUP" in deps.llm.calls[0]
-    assert "do not collapse them into one merged test method" in deps.llm.calls[0]
+    assert deps.llm.calls == []
