@@ -143,7 +143,7 @@ class InjectRequest(BaseModel):
 @router.post("/chatops/inject")
 async def chatops_inject(
     req: InjectRequest,
-    _user=Depends(_au.require_operator),
+    _user: _au.User = Depends(_au.require_operator),
 ) -> dict[str, Any]:
     try:
         hint = agent_hints.inject(
@@ -163,14 +163,14 @@ class SendRequest(BaseModel):
     channel: str = Field(..., description="discord | teams | line | *")
     title: str = Field(default="OmniSight")
     body: str
-    buttons: list[dict] = Field(default_factory=list)
-    meta: dict = Field(default_factory=dict)
+    buttons: list[dict[str, Any]] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
 
 
 @router.post("/chatops/send")
 async def chatops_send(
     req: SendRequest,
-    _user=Depends(_au.require_operator),
+    _user: _au.User = Depends(_au.require_operator),
 ) -> dict[str, Any]:
     btns = [
         bridge.Button(
@@ -201,7 +201,7 @@ class PepDecisionRequest(BaseModel):
 async def pep_decision(
     pep_id: str,
     req: PepDecisionRequest,
-    _user=Depends(_au.require_operator),
+    _user: _au.User = Depends(_au.require_operator),
 ) -> dict[str, Any]:
     """Resolve a PEP held id directly (alias for the R1 button round-trip).
 
