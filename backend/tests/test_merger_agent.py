@@ -945,6 +945,110 @@ def test_context_pack_size_cap_prioritises_conflict_then_git_log(monkeypatch):
     assert "sibling text that should be truncated" not in pack
 
 
+def test_prompt_size_gate_trims_context_pack_sections(monkeypatch, caplog):
+    req = _base_request()
+    req.jira_ticket = "OP-1420"
+    req.jira_description = "keep jira context"
+    req.git_logs = {req.file_path: "GIT_CONTEXT " * 9000}
+    req.sibling_file_contents = {"backend/sibling.py": "SIBLING_CONTEXT " * 9000}
+    req.symbol_table = {"backend/greetings.py": "SYMBOL_CONTEXT " * 9000}
+    req.push_locally = False
+
+    blocks = ma.parse_conflict_block(req.conflict_text)
+    risk = ma.classify_conflict_risk(req, blocks)
+    trimmed_context = ma.build_context_pack(
+        req,
+        blocks,
+        omit_sections=("git_log", "sibling_files", "symbol_table"),
+    )
+    trimmed_prompt = ma.build_prompt(
+        req, blocks, risk, context_pack=trimmed_context,
+    )
+    monkeypatch.setattr(
+        ma,
+        "PROMPT_INPUT_HARD_LIMIT_BYTES",
+        len(trimmed_prompt.encode("utf-8")) + 16,
+    )
+
+    llm = _FakeLLM({
+        "resolved_block": "    return f'Hello {name}!'\n",
+        "confidence": 0.95,
+        "rationale": "HEAD intent preserved",
+        "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_FakePusher(),
+        reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+
+    caplog.set_level(logging.INFO, logger=ma.__name__)
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert len(llm.calls) == 1
+    assert "keep jira context" in llm.calls[0]
+    assert "GIT_CONTEXT" not in llm.calls[0]
+    assert "SIBLING_CONTEXT" not in llm.calls[0]
+    assert "SYMBOL_CONTEXT" not in llm.calls[0]
+    assert "merger_prompt_size_bytes=" in caplog.text
+    assert "sections_trimmed=[git_log,sibling_files,symbol_table]" in caplog.text
+
+
+def test_prompt_size_gate_abstains_after_full_trim(monkeypatch, caplog):
+    req = _base_request()
+    req.jira_ticket = "OP-1420"
+    req.git_logs = {req.file_path: "GIT_CONTEXT " * 2000}
+    req.sibling_file_contents = {"backend/sibling.py": "SIBLING_CONTEXT " * 2000}
+    req.symbol_table = {"backend/greetings.py": "SYMBOL_CONTEXT " * 2000}
+
+    blocks = ma.parse_conflict_block(req.conflict_text)
+    risk = ma.classify_conflict_risk(req, blocks)
+    trimmed_context = ma.build_context_pack(
+        req,
+        blocks,
+        omit_sections=("git_log", "sibling_files", "symbol_table"),
+    )
+    trimmed_prompt = ma.build_prompt(
+        req, blocks, risk, context_pack=trimmed_context,
+    )
+    monkeypatch.setattr(
+        ma,
+        "PROMPT_INPUT_HARD_LIMIT_BYTES",
+        len(trimmed_prompt.encode("utf-8")) - 1,
+    )
+
+    llm = _FakeLLM({
+        "resolved_block": "    return f'Hello {name}!'\n",
+        "confidence": 0.95,
+        "rationale": "HEAD intent preserved",
+        "new_logic_detected": False,
+    })
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_FakePusher(),
+        reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=_test_runner(True),
+    )
+
+    caplog.set_level(logging.INFO, logger=ma.__name__)
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.abstained_prompt_oversized
+    assert len(llm.calls) == 0
+    assert outcome.metadata["sections_trimmed"] == [
+        "git_log", "sibling_files", "symbol_table",
+    ]
+    assert outcome.metadata["prompt_size_bytes"] > outcome.metadata[
+        "prompt_limit_bytes"
+    ]
+    assert "merger_prompt_size_bytes=" in caplog.text
+    assert "sections_trimmed=[git_log,sibling_files,symbol_table]" in caplog.text
+
+
 def test_context_pack_marks_missing_sibling_file(tmp_path, caplog):
     req = _base_request(additional_files=["backend/missing.py"])
     req.workspace = str(tmp_path)

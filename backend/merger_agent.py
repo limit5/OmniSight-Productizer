@@ -68,7 +68,7 @@ import threading
 from dataclasses import asdict, dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Awaitable, Callable, Collection, Protocol
 
 from backend import metrics
 from backend.gerrit import gerrit_client as _default_gerrit_client
@@ -106,6 +106,10 @@ CONTEXT_PACK_TOKEN_LIMIT = int(
 )
 _CONTEXT_PACK_CHARS_PER_TOKEN = 4
 _CONTEXT_PACK_GIT_LOG_LINES = 50
+PROMPT_INPUT_HARD_LIMIT_BYTES = int(
+    os.environ.get("OMNISIGHT_MERGER_PROMPT_LIMIT_BYTES", "150000")
+)
+_CONTEXT_PACK_TRIM_ORDER = ("git_log", "sibling_files", "symbol_table")
 REVIEW_COST_CAP_USD = float(
     os.environ.get("OMNISIGHT_MERGER_REVIEW_COST_CAP_USD", "0.02")
 )
@@ -166,6 +170,7 @@ class MergerReason(str, Enum):
     abstained_low_confidence = "abstained_low_confidence"
     abstained_multi_file = "abstained_multi_file"
     abstained_oversized = "abstained_oversized"
+    abstained_prompt_oversized = "abstained_prompt_oversized"
     refused_security_file = "refused_security_file"
     refused_test_failure = "refused_test_failure"
     refused_no_conflict = "refused_no_conflict"
@@ -232,6 +237,18 @@ class WorkspaceReadFailure:
 
     reason: str
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class PromptSizeGateResult:
+    """Prompt + context pack after applying the oversized-input trim cascade."""
+
+    prompt: str
+    context_pack: str
+    prompt_size_bytes: int
+    limit_bytes: int
+    sections_trimmed: tuple[str, ...]
+    oversized: bool
 
 
 @dataclass
@@ -970,7 +987,12 @@ def _truncate_section(
     return section[:keep].rstrip() + suffix
 
 
-def build_context_pack(req: ConflictRequest, blocks: list[ConflictBlock]) -> str:
+def build_context_pack(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    *,
+    omit_sections: Collection[str] | None = None,
+) -> str:
     """Build the pre-resolution context pack with deterministic priority.
 
     Priority order follows OP-1403: conflict file, recent git log, JIRA
@@ -981,37 +1003,43 @@ def build_context_pack(req: ConflictRequest, blocks: list[ConflictBlock]) -> str
     if limit <= 0:
         return ""
 
+    omitted = set(omit_sections or ())
     file_contents = _collect_file_contents(req)
     conflict_file = file_contents.pop(req.file_path, req.conflict_text)
-    git_log = req.git_logs.get(req.file_path) or _git_region_log(
-        req.workspace, req.file_path, blocks,
-    )
+    git_log = ""
+    if "git_log" not in omitted:
+        git_log = req.git_logs.get(req.file_path) or _git_region_log(
+            req.workspace, req.file_path, blocks,
+        )
 
     sections: list[tuple[str, str, str]] = [
         (f"Conflict file: {req.file_path}", conflict_file, "(none supplied)"),
-        (
-            f"Recent git log for {req.file_path}",
-            git_log,
-            "(none supplied)",
-        ),
         (
             f"JIRA ticket {req.jira_ticket or '(unknown)'}",
             req.jira_description,
             "(none supplied)",
         ),
     ]
-    for path in sorted(file_contents):
-        sections.append((
-            f"Sibling file: {path}",
-            file_contents[path],
-            "(file is empty)",
-        ))
-    for path in sorted(req.symbol_table):
-        sections.append((
-            f"Develop symbol table: {path}",
-            req.symbol_table[path],
+    if "git_log" not in omitted:
+        sections.insert(1, (
+            f"Recent git log for {req.file_path}",
+            git_log,
             "(none supplied)",
         ))
+    if "sibling_files" not in omitted:
+        for path in sorted(file_contents):
+            sections.append((
+                f"Sibling file: {path}",
+                file_contents[path],
+                "(file is empty)",
+            ))
+    if "symbol_table" not in omitted:
+        for path in sorted(req.symbol_table):
+            sections.append((
+                f"Develop symbol table: {path}",
+                req.symbol_table[path],
+                "(none supplied)",
+            ))
 
     out = ""
     for title, content, empty_label in sections:
@@ -1028,6 +1056,47 @@ def build_context_pack(req: ConflictRequest, blocks: list[ConflictBlock]) -> str
         if len(out) >= limit:
             break
     return out[:limit].strip()
+
+
+def _prompt_size_bytes(prompt: str) -> int:
+    return len(prompt.encode("utf-8"))
+
+
+def _format_sections_trimmed(sections: Collection[str]) -> str:
+    return "[" + ",".join(sections) + "]"
+
+
+def build_prompt_with_size_gate(
+    req: ConflictRequest,
+    blocks: list[ConflictBlock],
+    risk: ConflictRisk,
+) -> PromptSizeGateResult:
+    """Build a prompt, trimming lower-priority context before LLM input.
+
+    The context-pack budget is token-ish and local to the context block.
+    This gate measures the final UTF-8 prompt bytes after the system
+    prompt, rubric, commit messages, and conflict blocks are present.
+    """
+    limit = max(0, PROMPT_INPUT_HARD_LIMIT_BYTES)
+    sections_trimmed: tuple[str, ...] = ()
+
+    while True:
+        context_pack = build_context_pack(
+            req, blocks, omit_sections=sections_trimmed,
+        )
+        prompt = build_prompt(req, blocks, risk, context_pack=context_pack)
+        prompt_size = _prompt_size_bytes(prompt)
+        oversized = prompt_size > limit
+        if not oversized or len(sections_trimmed) == len(_CONTEXT_PACK_TRIM_ORDER):
+            return PromptSizeGateResult(
+                prompt=prompt,
+                context_pack=context_pack,
+                prompt_size_bytes=prompt_size,
+                limit_bytes=limit,
+                sections_trimmed=sections_trimmed,
+                oversized=oversized,
+            )
+        sections_trimmed = _CONTEXT_PACK_TRIM_ORDER[:len(sections_trimmed) + 1]
 
 
 def build_prompt(
@@ -1573,17 +1642,41 @@ async def resolve_conflict(
         await _safe_audit(deps.audit, outcome)
         return outcome
 
-    # ── 5. LLM call ──────────────────────────────────────────────
-    context_pack = build_context_pack(request, blocks)
+    # ── 6. LLM call ──────────────────────────────────────────────
+    prompt_gate = build_prompt_with_size_gate(request, blocks, risk)
     logger.info(
         "merger_agent: context_pack_bytes=%d merger_prompt_version=%s "
-        "change=%s file=%s",
-        len(context_pack.encode("utf-8")),
+        "merger_prompt_size_bytes=%d sections_trimmed=%s "
+        "prompt_limit_bytes=%d change=%s file=%s",
+        len(prompt_gate.context_pack.encode("utf-8")),
         MERGER_PROMPT_VERSION,
+        prompt_gate.prompt_size_bytes,
+        _format_sections_trimmed(prompt_gate.sections_trimmed),
+        prompt_gate.limit_bytes,
         request.change_number or change_id,
         request.file_path,
     )
-    prompt = build_prompt(request, blocks, risk, context_pack=context_pack)
+    if prompt_gate.oversized:
+        outcome = _build_abstain(
+            request,
+            MergerReason.abstained_prompt_oversized,
+            confidence=0.0,
+            rationale=(
+                "LLM prompt remained over the hard input-size gate after "
+                "trimming lower-priority context-pack sections"
+            ),
+            metadata={
+                **risk_meta,
+                "prompt_size_bytes": prompt_gate.prompt_size_bytes,
+                "prompt_limit_bytes": prompt_gate.limit_bytes,
+                "sections_trimmed": list(prompt_gate.sections_trimmed),
+            },
+        )
+        _observe_metric(outcome)
+        await _safe_audit(deps.audit, outcome)
+        return outcome
+
+    prompt = prompt_gate.prompt
     try:
         raw, _tokens = await deps.llm(prompt)
         _observe_llm_cost(_estimate_llm_cost(_tokens))
