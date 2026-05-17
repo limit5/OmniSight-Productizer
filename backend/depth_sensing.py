@@ -54,6 +54,114 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONFIG_PATH = _PROJECT_ROOT / "configs" / "depth_sensing.yaml"
 
 
+# ── Module constants ──────────────────────────────────────────────────────
+# Thresholds, limits, and physical/algorithmic tuning knobs promoted from
+# inline literals so they can be reviewed, tuned, and grepped from one place.
+# Behaviour-preserving: each constant equals the literal it replaced.
+
+# Hashing -- _depth_frame_hash truncates the digest and the input chunk.
+# Tests assert ``len(hash) == 16``; keep aligned with that contract.
+_DEPTH_HASH_INPUT_LIMIT_BYTES = 4096
+_DEPTH_HASH_DIGEST_LEN = 16
+
+# Knuth multiplicative hash constant -- used to mix sensor_id + frame_count
+# into a deterministic seed for synthetic depth capture.
+_KNUTH_HASH_MULTIPLIER = 2654435761
+
+# Numerical zero-tolerance thresholds for 3D vector / quaternion math.
+_VECTOR_NORM_EPSILON = 1e-12             # vector mag below this -> degenerate
+_PHASE_DENOMINATOR_EPSILON = 1e-6        # |I0-I2| below this -> phase set to 0
+
+# Rounding precision for fields published on the public data classes.
+_DEPTH_FRAME_ROUND_DP = 4                # DepthFrame.min/max_depth
+_POSE_ROUND_DP = 6                       # SlamPose.position/orientation
+_CONFIDENCE_ROUND_DP = 4                 # SlamPose.confidence
+
+# Depth clip range applied by structured-light and stereo decoders (metres).
+# Below _MIN_DECODED_DEPTH_M the result is treated as no-depth.
+_MIN_DECODED_DEPTH_M = 0.01
+_MAX_STRUCTURED_LIGHT_DEPTH_M = 10.0
+_MAX_STEREO_DEPTH_M = 100.0
+
+# Disparity and pattern-decode thresholds.
+_VALID_DISPARITY_THRESHOLD = 0.5         # disparity_to_depth: d > 0.5 = valid
+_GRAY_CODE_FALLBACK_DISPARITY = 0.5      # used when binary==column
+_MIN_PHASE_DISPARITY = 0.1               # phase-shift floor to avoid div-by-0
+_BINARY_PATTERN_THRESHOLD = 127          # gray-code: pixel > 127 -> bit set
+_MISSING_PIXEL_VALUE = 128               # mid-grey default when index OOR
+
+# Structured-light pattern parameters.
+_PHASE_SHIFT_NUM_STEPS = 4               # 4-step phase shift
+_PHASE_SHIFT_PERIODS_PER_WIDTH = 8.0     # sinusoidal periods across width
+_PHASE_SHIFT_DC_OFFSET = 127.5           # midpoint of 0..255 sinusoid
+_PHASE_SHIFT_AMPLITUDE = 127.5
+_SPECKLE_INTENSITY_DISPARITY_DIVISOR = 25.5  # maps 0..255 diff -> 1..11 disp
+
+# Stereo block-matching tuning.
+_BM_MAX_DISPARITIES = 64                 # cap num_disparities for basic BM
+_SGBM_DISPARITY_STEP = 4                 # stride along disparity axis (speed)
+_BM_DISPARITY_STEP = 8
+
+# Point cloud filter / normal-estimation subsampling caps.
+# These divisors set the stride into the point list for brute-force kNN
+# so the simulated filters stay O(n) rather than O(n^2) on dense clouds.
+_STATISTICAL_OUTLIER_SAMPLE_DIVISOR = 500
+_STATISTICAL_OUTLIER_NEIGHBOUR_DIVISOR = 200
+_RADIUS_OUTLIER_SAMPLE_DIVISOR = 500
+_NORMAL_NEIGHBOUR_SAMPLE_DIVISOR = 500
+
+# Registration defaults (overridden by config YAML when present).
+_DEFAULT_ICP_MAX_ITERATIONS = 50
+_DEFAULT_ICP_TOLERANCE = 1e-6
+_DEFAULT_ICP_MAX_CORRESPONDENCE_M = 0.05
+_ICP_POINT_SAMPLE_LIMIT = 200            # cap on points used for fitness calc
+
+# Simulated ICP / NDT convergence factors.  These are not physical
+# parameters but they shape the synthetic convergence curve so test
+# recipes can assert ``result.fitness > 0.5``.
+_ICP_POINT_TO_POINT_DECAY = 0.7
+_ICP_POINT_TO_PLANE_DECAY = 0.5
+_DEFAULT_NDT_RESOLUTION = 1.0
+_DEFAULT_NDT_STEP_SIZE = 0.1
+_DEFAULT_NDT_MAX_ITERATIONS = 35
+_NDT_INITIAL_FITNESS = 0.3
+_NDT_INITIAL_RMSE = 0.1
+_NDT_RMSE_DECAY = 0.75
+_NDT_FITNESS_STEP = 0.03
+
+# SLAM simulated-trajectory parameters.
+_VISUAL_SLAM_ANGULAR_STEP_RAD = 0.05     # radians per frame on circular path
+_VISUAL_SLAM_RADIUS_M = 1.0
+_VISUAL_SLAM_VERTICAL_DRIFT_M = 0.001    # per-frame z drift
+_VISUAL_SLAM_CONFIDENCE_DECAY = 0.005    # per-frame
+_VISUAL_SLAM_MIN_CONFIDENCE = 0.5
+
+_LIDAR_SLAM_STEP_M = 0.05
+_LIDAR_SLAM_LATERAL_AMPLITUDE_M = 0.1
+_LIDAR_SLAM_LATERAL_FREQ = 0.1
+_LIDAR_SLAM_YAW_PER_FRAME = 0.02
+_LIDAR_SLAM_CONFIDENCE_DECAY = 0.003
+_LIDAR_SLAM_MIN_CONFIDENCE = 0.6
+
+_SLAM_MAP_SAMPLE_DIVISOR = 100           # subsample factor for map accumulation
+
+# Calibration input minimums and reprojection-error scale factors.
+_MIN_INTRINSIC_FRAMES = 3
+_MIN_STEREO_PAIRS = 5
+_MIN_TOF_DISTANCES = 2
+_INTRINSIC_REPROJECTION_SCALE = 0.5      # error ~ scale / sqrt(num_frames)
+_STEREO_REPROJECTION_SCALE = 0.3
+
+# ToF physical constants (calibration model).
+_TOF_MODULATION_FREQ_HZ = 20e6           # 20 MHz modulation
+_SPEED_OF_LIGHT_M_PER_S = 3e8
+
+# ToF phase-calibration model parameters.
+_TOF_WIGGLING_AMPLITUDE_M = 0.002        # 2 mm sinusoidal residual
+_TOF_TEMP_COEFF_RAD_PER_DEGC = 0.001
+_TOF_REFERENCE_TEMP_DEGC = 25.0
+
+
 # ── Enums ─────────────────────────────────────────────────────────────────
 
 
@@ -308,10 +416,10 @@ def _depth_frame_hash(frame: DepthFrame) -> str:
     """Compute deterministic hash of a DepthFrame."""
     h = hashlib.sha256()
     h.update(struct.pack(">II", frame.width, frame.height))
-    h.update(frame.depth_data[:min(len(frame.depth_data), 4096)])
+    h.update(frame.depth_data[:min(len(frame.depth_data), _DEPTH_HASH_INPUT_LIMIT_BYTES)])
     h.update(frame.sensor_id.encode())
     h.update(struct.pack(">I", frame.frame_number))
-    return h.hexdigest()[:16]
+    return h.hexdigest()[:_DEPTH_HASH_DIGEST_LEN]
 
 
 def _identity_matrix_4x4() -> list[list[float]]:
@@ -530,7 +638,7 @@ def _quaternion_from_axis_angle(axis: tuple, angle_rad: float) -> tuple:
     half = angle_rad / 2.0
     s = math.sin(half)
     norm = math.sqrt(axis[0] ** 2 + axis[1] ** 2 + axis[2] ** 2)
-    if norm < 1e-12:
+    if norm < _VECTOR_NORM_EPSILON:
         return (1.0, 0.0, 0.0, 0.0)
     ax = axis[0] / norm
     ay = axis[1] / norm
@@ -660,7 +768,7 @@ class _BaseToFAdapter(DepthSensor):
         w, h = self._config.resolution
 
         # Deterministic seed from sensor hash and frame number
-        seed = _sensor_hash(self._sensor_id) ^ (self._frame_count * 2654435761)
+        seed = _sensor_hash(self._sensor_id) ^ (self._frame_count * _KNUTH_HASH_MULTIPLIER)
         depth_data = _generate_synthetic_depth(
             w, h, "flat_wall", noise_std=self._NOISE_STD, seed=seed,
         )
@@ -675,7 +783,8 @@ class _BaseToFAdapter(DepthSensor):
             width=w, height=h, depth_data=depth_data,
             timestamp=time.time(), sensor_id=self._sensor_id,
             frame_number=self._frame_count,
-            min_depth=round(min_d, 4), max_depth=round(max_d, 4),
+            min_depth=round(min_d, _DEPTH_FRAME_ROUND_DP),
+            max_depth=round(max_d, _DEPTH_FRAME_ROUND_DP),
         )
         self._frame_count += 1
         return frame
@@ -782,7 +891,7 @@ class StructuredLightCodec:
         if self._pattern_type == StructuredLightPattern.gray_code.value:
             return max(1, int(math.ceil(math.log2(self._width))))
         elif self._pattern_type == StructuredLightPattern.phase_shift.value:
-            return 4  # 4-step phase shift
+            return _PHASE_SHIFT_NUM_STEPS
         elif self._pattern_type == StructuredLightPattern.speckle.value:
             return 1  # single shot
         return 1
@@ -831,13 +940,15 @@ class StructuredLightCodec:
         Phase offsets: 0, pi/2, pi, 3pi/2.
         """
         patterns: list[bytes] = []
-        period = self._width / 8.0  # 8 periods across width
-        for step in range(4):
+        period = self._width / _PHASE_SHIFT_PERIODS_PER_WIDTH
+        for step in range(_PHASE_SHIFT_NUM_STEPS):
             phase_offset = step * math.pi / 2.0
             row_data = bytearray(self._width * self._height)
             for row in range(self._height):
                 for col in range(self._width):
-                    val = 127.5 + 127.5 * math.sin(2.0 * math.pi * col / period + phase_offset)
+                    val = _PHASE_SHIFT_DC_OFFSET + _PHASE_SHIFT_AMPLITUDE * math.sin(
+                        2.0 * math.pi * col / period + phase_offset
+                    )
                     row_data[row * self._width + col] = max(0, min(255, int(val)))
             patterns.append(bytes(row_data))
         return patterns
@@ -912,7 +1023,7 @@ class StructuredLightCodec:
                         pixel = frames[bit][idx] if isinstance(frames[bit], (bytes, bytearray)) else 0
                     else:
                         pixel = 0
-                    if pixel > 127:
+                    if pixel > _BINARY_PATTERN_THRESHOLD:
                         gray_val |= (1 << (num_bits - 1 - bit))
 
                 # Gray to binary
@@ -923,10 +1034,13 @@ class StructuredLightCodec:
                     mask >>= 1
 
                 # Disparity from column correspondence
-                disparity = abs(binary_val - col) if binary_val != col else 0.5
+                disparity = (
+                    abs(binary_val - col) if binary_val != col
+                    else _GRAY_CODE_FALLBACK_DISPARITY
+                )
                 if disparity > 0:
                     z = (baseline * focal_length) / disparity
-                    z = max(0.01, min(z, 10.0))
+                    z = max(_MIN_DECODED_DEPTH_M, min(z, _MAX_STRUCTURED_LIGHT_DEPTH_M))
                 else:
                     z = 0.0
 
@@ -943,7 +1057,8 @@ class StructuredLightCodec:
             width=w, height=h, depth_data=depth_bytes,
             timestamp=time.time(), sensor_id="structured_light_gray_code",
             frame_number=0,
-            min_depth=round(min_d, 4), max_depth=round(max_d, 4),
+            min_depth=round(min_d, _DEPTH_FRAME_ROUND_DP),
+            max_depth=round(max_d, _DEPTH_FRAME_ROUND_DP),
         )
 
     def _decode_phase_shift(self, frames: list[bytes],
@@ -965,20 +1080,20 @@ class StructuredLightCodec:
         depths: list[float] = []
         min_d = float("inf")
         max_d = 0.0
-        period = w / 8.0
+        period = w / _PHASE_SHIFT_PERIODS_PER_WIDTH
 
         for row in range(h):
             for col in range(w):
                 idx = row * w + col
-                i0 = frames[0][idx] if idx < len(frames[0]) else 128
-                i1 = frames[1][idx] if idx < len(frames[1]) else 128
-                i2 = frames[2][idx] if idx < len(frames[2]) else 128
-                i3 = frames[3][idx] if idx < len(frames[3]) else 128
+                i0 = frames[0][idx] if idx < len(frames[0]) else _MISSING_PIXEL_VALUE
+                i1 = frames[1][idx] if idx < len(frames[1]) else _MISSING_PIXEL_VALUE
+                i2 = frames[2][idx] if idx < len(frames[2]) else _MISSING_PIXEL_VALUE
+                i3 = frames[3][idx] if idx < len(frames[3]) else _MISSING_PIXEL_VALUE
 
                 # 4-step phase recovery: phi = atan2(I3 - I1, I0 - I2)
                 num = float(i3) - float(i1)
                 den = float(i0) - float(i2)
-                if abs(den) < 1e-6 and abs(num) < 1e-6:
+                if abs(den) < _PHASE_DENOMINATOR_EPSILON and abs(num) < _PHASE_DENOMINATOR_EPSILON:
                     phase = 0.0
                 else:
                     phase = math.atan2(num, den)
@@ -990,11 +1105,11 @@ class StructuredLightCodec:
                 # Column correspondence from phase
                 col_proj = (phase / (2.0 * math.pi)) * period
                 disparity = abs(col_proj - (col % period))
-                if disparity < 0.1:
-                    disparity = 0.1  # avoid division by zero
+                if disparity < _MIN_PHASE_DISPARITY:
+                    disparity = _MIN_PHASE_DISPARITY  # avoid division by zero
 
                 z = (baseline * focal_length) / disparity
-                z = max(0.01, min(z, 10.0))
+                z = max(_MIN_DECODED_DEPTH_M, min(z, _MAX_STRUCTURED_LIGHT_DEPTH_M))
                 depths.append(z)
                 if z > 0:
                     min_d = min(min_d, z)
@@ -1008,7 +1123,8 @@ class StructuredLightCodec:
             width=w, height=h, depth_data=depth_bytes,
             timestamp=time.time(), sensor_id="structured_light_phase_shift",
             frame_number=0,
-            min_depth=round(min_d, 4), max_depth=round(max_d, 4),
+            min_depth=round(min_d, _DEPTH_FRAME_ROUND_DP),
+            max_depth=round(max_d, _DEPTH_FRAME_ROUND_DP),
         )
 
     def _decode_speckle(self, frames: list[bytes],
@@ -1040,14 +1156,14 @@ class StructuredLightCodec:
         for row in range(h):
             for col in range(w):
                 idx = row * w + col
-                captured_val = frame[idx] if idx < len(frame) else 128
-                ref_val = ref_pattern[idx] if idx < len(ref_pattern) else 128
+                captured_val = frame[idx] if idx < len(frame) else _MISSING_PIXEL_VALUE
+                ref_val = ref_pattern[idx] if idx < len(ref_pattern) else _MISSING_PIXEL_VALUE
 
                 # Simple correlation: estimate disparity from intensity difference
                 diff = abs(int(captured_val) - int(ref_val))
-                disparity = 1.0 + diff / 25.5  # map 0-255 diff to 1-11 disparity
+                disparity = 1.0 + diff / _SPECKLE_INTENSITY_DISPARITY_DIVISOR
                 z = (baseline * focal_length) / disparity
-                z = max(0.01, min(z, 10.0))
+                z = max(_MIN_DECODED_DEPTH_M, min(z, _MAX_STRUCTURED_LIGHT_DEPTH_M))
                 depths.append(z)
                 if z > 0:
                     min_d = min(min_d, z)
@@ -1061,7 +1177,8 @@ class StructuredLightCodec:
             width=w, height=h, depth_data=depth_bytes,
             timestamp=time.time(), sensor_id="structured_light_speckle",
             frame_number=0,
-            min_depth=round(min_d, 4), max_depth=round(max_d, 4),
+            min_depth=round(min_d, _DEPTH_FRAME_ROUND_DP),
+            max_depth=round(max_d, _DEPTH_FRAME_ROUND_DP),
         )
 
 
@@ -1192,7 +1309,7 @@ class StereoPipeline:
                 best_d = 0
                 best_cost = float("inf")
 
-                for d in range(0, min(num_disp, col + 1), 4):  # step by 4 for speed
+                for d in range(0, min(num_disp, col + 1), _SGBM_DISPARITY_STEP):
                     cost = 0.0
                     count = 0
                     for dy in range(-half, half + 1):
@@ -1220,7 +1337,7 @@ class StereoPipeline:
     def _compute_bm(self, left: bytes, right: bytes,
                     width: int, height: int) -> bytes:
         """Simulated basic Block Matching (faster, sparser than SGBM)."""
-        num_disp = min(self._config.num_disparities, 64)
+        num_disp = min(self._config.num_disparities, _BM_MAX_DISPARITIES)
         block = self._config.block_size
         half = block // 2
         disparities: list[float] = []
@@ -1230,7 +1347,7 @@ class StereoPipeline:
                 best_d = 0
                 best_cost = float("inf")
 
-                for d in range(0, min(num_disp, col + 1), 8):  # step by 8
+                for d in range(0, min(num_disp, col + 1), _BM_DISPARITY_STEP):
                     cost = 0.0
                     count = 0
                     for dx in range(-half, half + 1):
@@ -1268,9 +1385,9 @@ class StereoPipeline:
         fl = self._config.focal_length
 
         for d in disp_values:
-            if d > 0.5:  # valid disparity threshold
+            if d > _VALID_DISPARITY_THRESHOLD:
                 z = (bl * fl) / d
-                z = max(0.01, min(z, 100.0))
+                z = max(_MIN_DECODED_DEPTH_M, min(z, _MAX_STEREO_DEPTH_M))
             else:
                 z = 0.0
             depths.append(z)
@@ -1287,8 +1404,8 @@ class StereoPipeline:
             timestamp=time.time(),
             sensor_id="stereo",
             frame_number=0,
-            min_depth=round(min_d, 4),
-            max_depth=round(max_d, 4),
+            min_depth=round(min_d, _DEPTH_FRAME_ROUND_DP),
+            max_depth=round(max_d, _DEPTH_FRAME_ROUND_DP),
         )
 
 
@@ -1430,13 +1547,13 @@ class PointCloudProcessor:
             return cloud
 
         # Compute mean distance to k nearest neighbours (brute force, capped for speed)
-        sample_step = max(1, n // 500)
+        sample_step = max(1, n // _STATISTICAL_OUTLIER_SAMPLE_DIVISOR)
         mean_dists: list[float] = []
 
         for i in range(0, n, sample_step):
             dists = []
             px, py, pz = cloud.points[i]
-            for j in range(0, n, max(1, n // 200)):
+            for j in range(0, n, max(1, n // _STATISTICAL_OUTLIER_NEIGHBOUR_DIVISOR)):
                 if i == j:
                     continue
                 qx, qy, qz = cloud.points[j]
@@ -1462,7 +1579,7 @@ class PointCloudProcessor:
         for i in range(n):
             px, py, pz = cloud.points[i]
             dists = []
-            for j in range(0, n, max(1, n // 200)):
+            for j in range(0, n, max(1, n // _STATISTICAL_OUTLIER_NEIGHBOUR_DIVISOR)):
                 if i == j:
                     continue
                 qx, qy, qz = cloud.points[j]
@@ -1490,7 +1607,7 @@ class PointCloudProcessor:
         for i in range(n):
             px, py, pz = cloud.points[i]
             count = 0
-            for j in range(0, n, max(1, n // 500)):
+            for j in range(0, n, max(1, n // _RADIUS_OUTLIER_SAMPLE_DIVISOR)):
                 if i == j:
                     continue
                 qx, qy, qz = cloud.points[j]
@@ -1555,7 +1672,7 @@ class PointCloudProcessor:
         n = cloud.point_count
         normals: list[tuple] = []
         r2 = radius * radius
-        step = max(1, n // 500)  # subsample target for neighbour search
+        step = max(1, n // _NORMAL_NEIGHBOUR_SAMPLE_DIVISOR)  # subsample target
 
         for i in range(n):
             px, py, pz = cloud.points[i]
@@ -1579,7 +1696,7 @@ class PointCloudProcessor:
                 ny = a[2] * b[0] - a[0] * b[2]
                 nz = a[0] * b[1] - a[1] * b[0]
                 mag = math.sqrt(nx * nx + ny * ny + nz * nz)
-                if mag > 1e-12:
+                if mag > _VECTOR_NORM_EPSILON:
                     normals.append((nx / mag, ny / mag, nz / mag))
                 else:
                     normals.append((0.0, 0.0, 1.0))
@@ -1873,16 +1990,17 @@ class RegistrationEngine:
 
         cfg = _get_cfg()
         reg_entries = cfg.get("registration", [])
-        self._max_iterations = 50
-        self._tolerance = 1e-6
-        self._max_correspondence_distance = 0.05
+        self._max_iterations = _DEFAULT_ICP_MAX_ITERATIONS
+        self._tolerance = _DEFAULT_ICP_TOLERANCE
+        self._max_correspondence_distance = _DEFAULT_ICP_MAX_CORRESPONDENCE_M
 
         for entry in reg_entries:
             if entry.get("id") == algorithm:
-                self._max_iterations = entry.get("max_iterations", 50)
-                self._tolerance = entry.get("tolerance", 1e-6)
+                self._max_iterations = entry.get(
+                    "max_iterations", _DEFAULT_ICP_MAX_ITERATIONS)
+                self._tolerance = entry.get("tolerance", _DEFAULT_ICP_TOLERANCE)
                 self._max_correspondence_distance = entry.get(
-                    "max_correspondence_distance", 0.05)
+                    "max_correspondence_distance", _DEFAULT_ICP_MAX_CORRESPONDENCE_M)
                 break
 
     @property
@@ -1932,17 +2050,17 @@ class RegistrationEngine:
         transform = [row[:] for row in initial_transform]  # deep copy
 
         # Compute initial fitness
-        src_pts = _apply_transform(source.points[:200], transform)
-        tgt_pts = target.points[:200]
+        src_pts = _apply_transform(source.points[:_ICP_POINT_SAMPLE_LIMIT], transform)
+        tgt_pts = target.points[:_ICP_POINT_SAMPLE_LIMIT]
         fitness, rmse = _compute_fitness(src_pts, tgt_pts,
                                          self._max_correspondence_distance)
 
         iterations_run = 0
         prev_rmse = rmse
-        convergence_factor = 0.7  # error decreases by 30% each iteration
+        convergence_factor = _ICP_POINT_TO_POINT_DECAY
 
         if self._algorithm == RegistrationAlgorithm.icp_point_to_plane.value:
-            convergence_factor = 0.5  # faster convergence with plane constraint
+            convergence_factor = _ICP_POINT_TO_PLANE_DECAY
 
         for it in range(self._max_iterations):
             iterations_run = it + 1
@@ -1954,7 +2072,7 @@ class RegistrationEngine:
             transform[1][3] += delta_ty
 
             # Update fitness and RMSE
-            src_pts = _apply_transform(source.points[:200], transform)
+            src_pts = _apply_transform(source.points[:_ICP_POINT_SAMPLE_LIMIT], transform)
             fitness, rmse = _compute_fitness(src_pts, tgt_pts,
                                              self._max_correspondence_distance)
 
@@ -1994,25 +2112,31 @@ class RegistrationEngine:
                 ndt_cfg = entry
                 break
 
-        ndt_cfg.get("resolution", 1.0) if ndt_cfg else 1.0
-        step_size = ndt_cfg.get("step_size", 0.1) if ndt_cfg else 0.1
-        max_iter = ndt_cfg.get("max_iterations", 35) if ndt_cfg else 35
+        ndt_cfg.get("resolution", _DEFAULT_NDT_RESOLUTION) if ndt_cfg else _DEFAULT_NDT_RESOLUTION
+        step_size = (
+            ndt_cfg.get("step_size", _DEFAULT_NDT_STEP_SIZE)
+            if ndt_cfg else _DEFAULT_NDT_STEP_SIZE
+        )
+        max_iter = (
+            ndt_cfg.get("max_iterations", _DEFAULT_NDT_MAX_ITERATIONS)
+            if ndt_cfg else _DEFAULT_NDT_MAX_ITERATIONS
+        )
 
         # Simulate grid-based convergence
-        fitness = 0.3
-        rmse = 0.1
+        fitness = _NDT_INITIAL_FITNESS
+        rmse = _NDT_INITIAL_RMSE
         iterations_run = 0
 
         for it in range(max_iter):
             iterations_run = it + 1
             transform[0][3] += step_size * 0.01 * (1.0 - fitness)
-            rmse *= 0.75
-            fitness = min(1.0, fitness + 0.03)
+            rmse *= _NDT_RMSE_DECAY
+            fitness = min(1.0, fitness + _NDT_FITNESS_STEP)
             if rmse < self._tolerance:
                 break
 
-        src_pts = _apply_transform(source.points[:200], transform)
-        tgt_pts = target.points[:200]
+        src_pts = _apply_transform(source.points[:_ICP_POINT_SAMPLE_LIMIT], transform)
+        tgt_pts = target.points[:_ICP_POINT_SAMPLE_LIMIT]
         real_fitness, real_rmse = _compute_fitness(
             src_pts, tgt_pts, self._max_correspondence_distance)
 
@@ -2119,7 +2243,7 @@ class SlamHook:
             fx, fy = cam[0][0], cam[1][1]
             cx, cy = cam[0][2], cam[1][2]
             depths = _unpack_depth(depth_frame.depth_data, pixel_count)
-            step = max(1, pixel_count // 100)
+            step = max(1, pixel_count // _SLAM_MAP_SAMPLE_DIVISOR)
             for i in range(0, pixel_count, step):
                 z = depths[i]
                 if z > 0:
@@ -2140,24 +2264,31 @@ class SlamHook:
         Generates a smooth circular trajectory with small drift.
         """
         fid = self._frame_id
-        angle = fid * 0.05  # radians per frame
-        radius = 1.0
+        angle = fid * _VISUAL_SLAM_ANGULAR_STEP_RAD
+        radius = _VISUAL_SLAM_RADIUS_M
 
         x = radius * math.cos(angle)
         y = radius * math.sin(angle)
-        z = 0.0 + fid * 0.001  # small vertical drift
+        z = 0.0 + fid * _VISUAL_SLAM_VERTICAL_DRIFT_M
 
         # Quaternion from yaw angle
         quat = _quaternion_from_axis_angle((0.0, 0.0, 1.0), angle)
 
-        confidence = max(0.5, 1.0 - fid * 0.005)
+        confidence = max(
+            _VISUAL_SLAM_MIN_CONFIDENCE,
+            1.0 - fid * _VISUAL_SLAM_CONFIDENCE_DECAY,
+        )
 
         return SlamPose(
-            position=(round(x, 6), round(y, 6), round(z, 6)),
-            orientation=tuple(round(q, 6) for q in quat),
+            position=(
+                round(x, _POSE_ROUND_DP),
+                round(y, _POSE_ROUND_DP),
+                round(z, _POSE_ROUND_DP),
+            ),
+            orientation=tuple(round(q, _POSE_ROUND_DP) for q in quat),
             timestamp=time.time(),
             frame_id=fid,
-            confidence=round(confidence, 4),
+            confidence=round(confidence, _CONFIDENCE_ROUND_DP),
         )
 
     def _process_lidar(self, depth_frame: DepthFrame) -> SlamPose:
@@ -2166,21 +2297,29 @@ class SlamHook:
         Generates a forward-moving trajectory with scan-to-map matching.
         """
         fid = self._frame_id
-        step_size = 0.05
+        step_size = _LIDAR_SLAM_STEP_M
 
         x = fid * step_size
-        y = 0.1 * math.sin(fid * 0.1)
+        y = _LIDAR_SLAM_LATERAL_AMPLITUDE_M * math.sin(fid * _LIDAR_SLAM_LATERAL_FREQ)
         z = 0.0
 
-        quat = _quaternion_from_axis_angle((0.0, 0.0, 1.0), fid * 0.02)
-        confidence = max(0.6, 1.0 - fid * 0.003)
+        quat = _quaternion_from_axis_angle(
+            (0.0, 0.0, 1.0), fid * _LIDAR_SLAM_YAW_PER_FRAME)
+        confidence = max(
+            _LIDAR_SLAM_MIN_CONFIDENCE,
+            1.0 - fid * _LIDAR_SLAM_CONFIDENCE_DECAY,
+        )
 
         return SlamPose(
-            position=(round(x, 6), round(y, 6), round(z, 6)),
-            orientation=tuple(round(q, 6) for q in quat),
+            position=(
+                round(x, _POSE_ROUND_DP),
+                round(y, _POSE_ROUND_DP),
+                round(z, _POSE_ROUND_DP),
+            ),
+            orientation=tuple(round(q, _POSE_ROUND_DP) for q in quat),
             timestamp=time.time(),
             frame_id=fid,
-            confidence=round(confidence, 4),
+            confidence=round(confidence, _CONFIDENCE_ROUND_DP),
         )
 
     def get_trajectory(self) -> list[SlamPose]:
@@ -2228,7 +2367,7 @@ class CalibrationEngine:
         with reprojection error proportional to the number of input frames.
         """
         num_frames = len(frames)
-        if num_frames < 3:
+        if num_frames < _MIN_INTRINSIC_FRAMES:
             return CalibrationResult(
                 calibration_type=CalibrationType.intrinsic.value,
                 reprojection_error=float("inf"),
@@ -2239,7 +2378,7 @@ class CalibrationEngine:
             )
 
         # More frames -> lower reprojection error (diminishing returns)
-        reproj_error = 0.5 / math.sqrt(num_frames)
+        reproj_error = _INTRINSIC_REPROJECTION_SCALE / math.sqrt(num_frames)
 
         # Simulated intrinsics
         fx = 520.0 + 2.0 * (num_frames % 5)
@@ -2276,13 +2415,13 @@ class CalibrationEngine:
         fundamental matrix, and per-camera intrinsics.
         """
         num = min(len(left_frames), len(right_frames))
-        if num < 5:
+        if num < _MIN_STEREO_PAIRS:
             return {
                 "success": False,
-                "error": f"Need at least 5 stereo pairs, got {num}",
+                "error": f"Need at least {_MIN_STEREO_PAIRS} stereo pairs, got {num}",
             }
 
-        reproj_error = 0.3 / math.sqrt(num)
+        reproj_error = _STEREO_REPROJECTION_SCALE / math.sqrt(num)
 
         # Simulated baseline = ~12cm horizontal
         R = [
@@ -2343,13 +2482,16 @@ class CalibrationEngine:
             return {"success": False, "error": "No reference distances provided"}
 
         distances = sorted(frames_at_distances.keys())
-        if len(distances) < 2:
-            return {"success": False, "error": "Need at least 2 reference distances"}
+        if len(distances) < _MIN_TOF_DISTANCES:
+            return {
+                "success": False,
+                "error": f"Need at least {_MIN_TOF_DISTANCES} reference distances",
+            }
 
         # Simulate phase measurement at each distance
         phase_measurements: list[dict] = []
-        modulation_freq = 20e6  # 20 MHz
-        speed_of_light = 3e8
+        modulation_freq = _TOF_MODULATION_FREQ_HZ
+        speed_of_light = _SPEED_OF_LIGHT_M_PER_S
         wavelength = speed_of_light / (2.0 * modulation_freq)
 
         for dist in distances:
@@ -2385,7 +2527,7 @@ class CalibrationEngine:
         }
 
         # Wiggling correction (simplified sinusoidal error model)
-        wiggling_amplitude = 0.002  # 2mm
+        wiggling_amplitude = _TOF_WIGGLING_AMPLITUDE_M
         wiggling_period = wavelength / 2.0
 
         return {
@@ -2399,8 +2541,8 @@ class CalibrationEngine:
             },
             "temperature_compensation": {
                 "enabled": True,
-                "coefficient_rad_per_degC": 0.001,
-                "reference_temp_degC": 25.0,
+                "coefficient_rad_per_degC": _TOF_TEMP_COEFF_RAD_PER_DEGC,
+                "reference_temp_degC": _TOF_REFERENCE_TEMP_DEGC,
             },
             "measurements": phase_measurements,
             "timestamp": time.time(),
