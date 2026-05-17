@@ -104,16 +104,49 @@ def _script_dir_path() -> Path:
     return Path(__file__).resolve().parent / "alembic"
 
 
+def _is_ancestor_of_any(rev: str, candidates: Iterable[str], script: Any) -> bool:
+    """True when ``rev`` is an ancestor of (or equal to) any candidate in the
+    alembic revision DAG. Walks ``script.iterate_revisions(cand, rev)``; an
+    empty walk for ``cand == rev`` still counts as ancestry (a head is its
+    own ancestor for drift-direction purposes). Unknown / unrelated revisions
+    raise ``RevisionError`` which is swallowed and treated as "not ancestor".
+    """
+    from alembic.script.revision import RevisionError
+
+    for cand in candidates:
+        if cand == rev:
+            return True
+        try:
+            list(script.iterate_revisions(cand, rev))
+        except RevisionError:
+            continue
+        return True
+    return False
+
+
 def _classify_drift(
-    image_heads: Iterable[str], db_heads: Iterable[str]
+    image_heads: Iterable[str],
+    db_heads: Iterable[str],
+    script: Any,
 ) -> str:
-    image_set = set(image_heads)
-    db_set = set(db_heads)
-    if image_set == db_set:
+    """Classify drift using the alembic revision DAG, not set membership.
+
+    Set-equality alone misclassifies forward linear drift (e.g.
+    ``image=0242``, ``db=m_2026_05_16_3head`` where ``m_2026_05_16_3head`` is
+    an ancestor of ``0242``) as ``divergent``, blocking the startup gate even
+    though ``alembic upgrade head`` would advance the DB cleanly (OP-1446).
+    """
+    image_list = list(image_heads)
+    db_list = list(db_heads)
+    if set(image_list) == set(db_list):
         return "match"
-    if db_set and db_set.issubset(image_set):
+    if db_list and all(
+        _is_ancestor_of_any(d, image_list, script) for d in db_list
+    ):
         return "image_ahead"
-    if image_set and image_set.issubset(db_set):
+    if image_list and all(
+        _is_ancestor_of_any(i, db_list, script) for i in image_list
+    ):
         return "db_ahead"
     return "divergent"
 
@@ -189,7 +222,7 @@ def check_drift(db_url: str, script_dir: Path) -> tuple[int, dict[str, Any]]:
             "db_heads": [],
         }
 
-    drift_direction = _classify_drift(image_heads, db_heads)
+    drift_direction = _classify_drift(image_heads, db_heads, script)
     if drift_direction == "match":
         return 0, {
             "level": "info",
