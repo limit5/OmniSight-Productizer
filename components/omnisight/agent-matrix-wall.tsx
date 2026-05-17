@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, Settings, Eye } from "lucide-react"
+import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, ShieldCheck, Settings, Eye, Users } from "lucide-react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 
 export type AgentStatus = "idle" | "running" | "success" | "error" | "warning" | "booting" | "awaiting_confirmation" | "materializing"
@@ -40,6 +40,35 @@ export interface AgentHistoryEntry {
 }
 
 export type MaterializationPhase = "idle" | "ejection" | "wireframe" | "components" | "bootup" | "complete"
+export type AgentGuildDimension =
+  | "architect"
+  | "sa_sd"
+  | "ux"
+  | "pm"
+  | "gateway"
+  | "bsp"
+  | "hal"
+  | "algo_cv"
+  | "optical"
+  | "isp"
+  | "audio"
+  | "frontend"
+  | "backend"
+  | "sre"
+  | "qa"
+  | "auditor"
+  | "red_team"
+  | "forensics"
+  | "intel"
+  | "reporter"
+  | "custom"
+export type AgentComplianceState = "verified" | "evidence" | "watch" | "blocked" | "not_applicable"
+
+export interface AgentComplianceBadge {
+  status: AgentComplianceState
+  label?: string
+  detail?: string
+}
 
 // AI model display — supports both known models and dynamic strings from backend
 export type AIModel = string
@@ -216,6 +245,8 @@ export interface Agent {
   progress: { current: number; total: number }
   thoughtChain: string
   aiModel?: AIModel
+  guild?: AgentGuildDimension | string
+  compliance?: AgentComplianceState | AgentComplianceBadge
   subTasks?: SubTask[]
   history?: AgentHistoryEntry[]
   messages?: AgentMessage[]
@@ -273,6 +304,30 @@ export const AGENT_TYPES = {
   }
 } as const
 
+const GUILD_INFO: Record<AgentGuildDimension, { label: string; shortLabel: string; color: string }> = {
+  architect: { label: "Architect Guild", shortLabel: "Architect", color: "#8b5cf6" },
+  sa_sd: { label: "SA-SD Guild", shortLabel: "SA-SD", color: "#6366f1" },
+  ux: { label: "UX Guild", shortLabel: "UX", color: "#d946ef" },
+  pm: { label: "PM Guild", shortLabel: "PM", color: "#f59e0b" },
+  gateway: { label: "Gateway Guild", shortLabel: "Gateway", color: "#06b6d4" },
+  bsp: { label: "BSP Guild", shortLabel: "BSP", color: "var(--hardware-orange)" },
+  hal: { label: "HAL Guild", shortLabel: "HAL", color: "#f97316" },
+  algo_cv: { label: "Algo-CV Guild", shortLabel: "Algo-CV", color: "#22c55e" },
+  optical: { label: "Optical Guild", shortLabel: "Optical", color: "#84cc16" },
+  isp: { label: "ISP Guild", shortLabel: "ISP", color: "#eab308" },
+  audio: { label: "Audio Guild", shortLabel: "Audio", color: "#14b8a6" },
+  frontend: { label: "Frontend Guild", shortLabel: "Frontend", color: "#ec4899" },
+  backend: { label: "Backend Guild", shortLabel: "Backend", color: "var(--neural-blue)" },
+  sre: { label: "SRE Guild", shortLabel: "SRE", color: "#64748b" },
+  qa: { label: "QA Guild", shortLabel: "QA", color: "var(--validation-emerald)" },
+  auditor: { label: "Auditor Guild", shortLabel: "Auditor", color: "#a855f7" },
+  red_team: { label: "RedTeam Guild", shortLabel: "RedTeam", color: "var(--critical-red)" },
+  forensics: { label: "Forensics Guild", shortLabel: "Forensics", color: "#0ea5e9" },
+  intel: { label: "Intel Guild", shortLabel: "Intel", color: "#38bdf8" },
+  reporter: { label: "Reporter Guild", shortLabel: "Reporter", color: "var(--artifact-purple)" },
+  custom: { label: "Custom Guild", shortLabel: "Custom", color: "var(--muted-foreground)" },
+}
+
 // Empty default — real agents come from backend via useEngine hook
 export const defaultAgents: Agent[] = []
 
@@ -296,6 +351,147 @@ function getResultColor(result: AgentHistoryEntry["result"]): string {
     case "warning": return "var(--hardware-orange)"
     default: return "var(--muted-foreground)"
   }
+}
+
+function isKnownGuild(guild: string | undefined): guild is AgentGuildDimension {
+  return !!guild && Object.prototype.hasOwnProperty.call(GUILD_INFO, guild)
+}
+
+function normalizeGuild(guild: string | undefined): string | undefined {
+  return guild?.trim().toLowerCase().replace(/[-\s]+/g, "_") || undefined
+}
+
+function deriveAgentGuild(agent: Agent): string {
+  const explicit = normalizeGuild(agent.guild)
+  if (explicit) return explicit
+
+  const subType = normalizeGuild(agent.subType)
+  switch (subType) {
+    case "bsp":
+    case "isp":
+    case "hal":
+      return subType
+    case "algorithm":
+    case "ai_deploy":
+      return "algo_cv"
+    case "middleware":
+      return "backend"
+    case "sdet":
+      return "qa"
+    case "security":
+      return "red_team"
+    case "compliance":
+      return "auditor"
+    case "documentation":
+      return "reporter"
+    case "code_review":
+      return "qa"
+  }
+
+  switch (agent.type) {
+    case "firmware": return "bsp"
+    case "software": return "backend"
+    case "validator": return "qa"
+    case "reporter": return "reporter"
+    case "reviewer": return "qa"
+    default: return "custom"
+  }
+}
+
+function guildDisplay(guild: string): { label: string; shortLabel: string; color: string } {
+  if (isKnownGuild(guild)) return GUILD_INFO[guild]
+  const label = guild
+    .split("_")
+    .filter(Boolean)
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ") || "Custom"
+  return { label: `${label} Guild`, shortLabel: label, color: "var(--muted-foreground)" }
+}
+
+function complianceBadge(agent: Agent, guild: string): Required<AgentComplianceBadge> {
+  if (typeof agent.compliance === "string") {
+    return {
+      status: agent.compliance,
+      label: complianceLabel(agent.compliance),
+      detail: "Compliance state supplied by agent runtime",
+    }
+  }
+  if (agent.compliance) {
+    const status = agent.compliance.status
+    return {
+      status,
+      label: agent.compliance.label || complianceLabel(status),
+      detail: agent.compliance.detail || "Compliance state supplied by agent runtime",
+    }
+  }
+  if (agent.status === "error") {
+    return { status: "blocked", label: "Blocked", detail: "Agent is halted before compliance evidence can be trusted" }
+  }
+  if (guild === "auditor" || agent.subType === "compliance") {
+    return { status: "verified", label: "Evidence", detail: "Compliance evidence path is active for this agent" }
+  }
+  if (guild === "reporter") {
+    return { status: "evidence", label: "Report", detail: "Agent can collect and package compliance evidence" }
+  }
+  if (agent.status === "warning" || agent.status === "awaiting_confirmation") {
+    return { status: "watch", label: "Watch", detail: "Compliance-sensitive state requires operator attention" }
+  }
+  return { status: "not_applicable", label: "N/A", detail: "No compliance workflow is attached to this agent" }
+}
+
+function complianceLabel(status: AgentComplianceState): string {
+  switch (status) {
+    case "verified": return "Verified"
+    case "evidence": return "Evidence"
+    case "watch": return "Watch"
+    case "blocked": return "Blocked"
+    default: return "N/A"
+  }
+}
+
+function complianceColor(status: AgentComplianceState): string {
+  switch (status) {
+    case "verified": return "var(--validation-emerald)"
+    case "evidence": return "var(--artifact-purple)"
+    case "watch": return "var(--hardware-orange)"
+    case "blocked": return "var(--critical-red)"
+    default: return "var(--muted-foreground)"
+  }
+}
+
+function AgentDimensionBadges({ agent }: { agent: Agent }) {
+  const guild = deriveAgentGuild(agent)
+  const guildInfo = guildDisplay(guild)
+  const compliance = complianceBadge(agent, guild)
+  const compColor = complianceColor(compliance.status)
+  return (
+    <>
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+        style={{
+          backgroundColor: `color-mix(in srgb, ${guildInfo.color} 16%, transparent)`,
+          color: guildInfo.color
+        }}
+        title={guildInfo.label}
+        data-agent-guild={guild}
+      >
+        <Users size={8} />
+        {guildInfo.shortLabel}
+      </span>
+      <span
+        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+        style={{
+          backgroundColor: `color-mix(in srgb, ${compColor} 16%, transparent)`,
+          color: compColor
+        }}
+        title={compliance.detail}
+        data-compliance-status={compliance.status}
+      >
+        <ShieldCheck size={8} />
+        {compliance.label}
+      </span>
+    </>
+  )
 }
 
 function getAgentBorderClass(type: string, status: AgentStatus, cognitive?: AgentCognitiveHealth): string {
@@ -688,38 +884,37 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
           )}
         </div>
         
-        {/* Row 2: Role (subType) + AI Model */}
-        {(agent.subType || agent.aiModel) && (
-          <div className="flex items-center gap-1.5 mb-2 flex-wrap">
-            {agent.subType && (
+        {/* Row 2: Guild + Compliance + Role (subType) + AI Model */}
+        <div className="flex items-center gap-1.5 mb-2 flex-wrap">
+          <AgentDimensionBadges agent={agent} />
+          {agent.subType && (
+            <span
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+              style={{
+                backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'} 15%, transparent)`,
+                color: AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'
+              }}
+            >
+              <Shield size={8} />
+              {agent.subType}
+            </span>
+          )}
+          {agent.aiModel && (() => {
+            const info = getModelInfo(agent.aiModel)
+            return (
               <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono"
                 style={{
-                  backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'} 15%, transparent)`,
-                  color: AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'
+                  backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
+                  color: info.color
                 }}
               >
-                <Shield size={8} />
-                {agent.subType}
+                <Sparkles size={8} />
+                {info.shortLabel}
               </span>
-            )}
-            {agent.aiModel && (() => {
-              const info = getModelInfo(agent.aiModel)
-              return (
-                <span
-                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono"
-                  style={{
-                    backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
-                    color: info.color
-                  }}
-                >
-                  <Sparkles size={8} />
-                  {info.shortLabel}
-                </span>
-              )
-            })()}
-          </div>
-        )}
+            )
+          })()}
+        </div>
         
         {/* Row 3: Progress Dots */}
         <TaskDots progress={agent.progress} status={agent.status} />
@@ -1379,6 +1574,14 @@ export function AgentMatrixWall({
   const successCount = agents.filter(a => a.status === "success").length
   const awaitingCount = agents.filter(a => a.status === "awaiting_confirmation").length
   const materializingCount = materializingAgents.length
+  const guildCounts = [...agents, ...materializingAgents].reduce<Record<string, number>>((acc, agent) => {
+    const guild = deriveAgentGuild(agent)
+    acc[guild] = (acc[guild] || 0) + 1
+    return acc
+  }, {})
+  const topGuilds = Object.entries(guildCounts)
+    .sort((a, b) => b[1] - a[1] || guildDisplay(a[0]).shortLabel.localeCompare(guildDisplay(b[0]).shortLabel))
+    .slice(0, 4)
   
   // Handle spawning a new agent via Shadow Node
   const handleSpawnAgent = useCallback((type: Agent["type"], tools?: string[], subType?: string, aiModel?: string) => {
@@ -1462,6 +1665,29 @@ export function AgentMatrixWall({
                 {awaitingCount}
               </span>
             )}
+          </div>
+        )}
+        {topGuilds.length > 0 && (
+          <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+            {topGuilds.map(([guild, count]) => {
+              const info = guildDisplay(guild)
+              return (
+                <span
+                  key={guild}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded font-mono text-[9px] uppercase"
+                  style={{
+                    backgroundColor: `color-mix(in srgb, ${info.color} 14%, transparent)`,
+                    color: info.color
+                  }}
+                  title={`${info.label}: ${count} agent${count === 1 ? "" : "s"}`}
+                  data-matrix-guild={guild}
+                >
+                  <Users size={8} />
+                  {info.shortLabel}
+                  <span className="tabular-nums">{count}</span>
+                </span>
+              )
+            })}
           </div>
         )}
       </div>
