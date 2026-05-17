@@ -111,6 +111,10 @@ PROMPT_INPUT_HARD_LIMIT_BYTES = int(
     os.environ.get("OMNISIGHT_MERGER_PROMPT_LIMIT_BYTES", "150000")
 )
 _CONTEXT_PACK_TRIM_ORDER = ("git_log", "sibling_files", "symbol_table")
+_GIT_REGION_LOG_TIMEOUT_SECONDS = 20
+_GIT_REGION_LOG_TIMEOUT_MARKER = (
+    "[git log timed out after 20s - partial history may exist]"
+)
 REVIEW_COST_CAP_USD = float(
     os.environ.get("OMNISIGHT_MERGER_REVIEW_COST_CAP_USD", "0.02")
 )
@@ -927,8 +931,15 @@ def _git_region_log(
                 cwd=root_path,
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=_GIT_REGION_LOG_TIMEOUT_SECONDS,
             )
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "merger_agent: git region log timed out after %ss for %s",
+                _GIT_REGION_LOG_TIMEOUT_SECONDS,
+                file_path,
+            )
+            return _GIT_REGION_LOG_TIMEOUT_MARKER
         except (OSError, subprocess.SubprocessError):
             continue
         if proc.returncode == 0 and proc.stdout.strip():
