@@ -228,6 +228,63 @@ def test_signature_compat_candidate_returns_deferred_shim_without_llm():
     assert "<<<<<<<" not in outcome.resolved_text
 
 
+def test_signature_compat_candidate_merges_constructor_and_behavior_body():
+    conflict = (
+        "class _StubVerifier:\n"
+        "<<<<<<< HEAD\n"
+        "    def __init__(self):\n"
+        "        self.calls = []\n"
+        "=======\n"
+        "    def __init__(self, outcome=None):\n"
+        "        self.outcome = outcome\n"
+        "        self.calls = []\n"
+        ">>>>>>> feature/injected-outcome\n"
+        "\n"
+        "<<<<<<< HEAD\n"
+        "    async def verify_and_push(self, *, task, outcome):\n"
+        "        self.calls.append({\"task\": task, \"outcome\": outcome})\n"
+        "        return ResolutionOutcome(\n"
+        "            change_id=task.change_id,\n"
+        "            file_path=task.file_path,\n"
+        "            reason=MergerReason.plus_two_voted,\n"
+        "        )\n"
+        "=======\n"
+        "    async def verify_and_push(self, *, task, outcome):\n"
+        "        self.calls.append({\"task\": task, \"outcome\": outcome})\n"
+        "        return self.outcome\n"
+        ">>>>>>> feature/injected-outcome\n"
+    )
+
+    deps = ma.MergerDeps(
+        llm=_FakeLLM(AssertionError("LLM should not build signature candidate")),
+        pusher=_FakePusher(),
+        reviewer=_FakeReviewer(),
+        review_llm=_confirming_review_llm(),
+        test_runner=lambda _req: (_ for _ in ()).throw(
+            AssertionError("arbiter verifier owns candidate validation")
+        ),
+    )
+    req = _base_request(
+        file_path="backend/tests/test_merge_arbiter.py",
+        conflict=conflict,
+        change_id="Iop1436",
+    )
+    req.push_locally = False
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert outcome.metadata["signature_compat_candidate"] is True
+    assert outcome.resolved_text is not None
+    assert "def __init__(self, outcome=None):" in outcome.resolved_text
+    assert "self.outcome = outcome" in outcome.resolved_text
+    assert "if self.outcome is not None:" in outcome.resolved_text
+    assert "return self.outcome" in outcome.resolved_text
+    assert "return ResolutionOutcome(" in outcome.resolved_text
+    assert "<<<<<<<" not in outcome.resolved_text
+    compile(outcome.resolved_text, "test_merge_arbiter.py", "exec")
+
+
 class TestParseConflict:
 
     def test_single_block(self):
