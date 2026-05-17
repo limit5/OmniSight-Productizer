@@ -114,6 +114,72 @@ def _remaining_seconds(deadline: float) -> float:
     return max(0.1, deadline - time.monotonic())
 
 
+def _code_fence_for(text: str) -> str:
+    fence = "```"
+    while fence in text:
+        fence += "`"
+    return fence
+
+
+def _collapsed_transcript_block(title: str, transcript: str) -> list[str]:
+    fence = _code_fence_for(transcript)
+    return [
+        f"<details><summary>{title}</summary>",
+        "",
+        f"{fence}text",
+        transcript,
+        fence,
+        "",
+        "</details>",
+    ]
+
+
+def _llm_transcript(*, prompt: str, response: str) -> str:
+    parts: list[str] = []
+    if prompt:
+        parts.extend(["Prompt:", prompt])
+    if response:
+        if parts:
+            parts.append("")
+        parts.extend(["Response:", response])
+    return "\n".join(parts)
+
+
+def build_abstain_ticket_description(
+    *,
+    parent: str,
+    assignee: str,
+    change_id: str,
+    merger_reason: str,
+    merger_rationale: str,
+    file_path: str,
+    proposer_transcript: str = "",
+    reviewer_transcript: str = "",
+) -> str:
+    lines = [
+        "## Merger Abstain",
+        f"- Parent: {parent or '(none)'}",
+        f"- Assignee: {assignee}",
+        f"- Change-Id: {change_id}",
+        f"- File: `{file_path}`",
+        f"- Reason: `{merger_reason}`",
+        "",
+        "## Rationale",
+        merger_rationale,
+    ]
+    if proposer_transcript or reviewer_transcript:
+        lines += ["", "## 2-LLM Sandwich Disagreement"]
+        if proposer_transcript:
+            lines += ["", *_collapsed_transcript_block(
+                "LLM-A proposal transcript", proposer_transcript,
+            )]
+        if reviewer_transcript:
+            lines += ["", *_collapsed_transcript_block(
+                "LLM-B review transcript", reviewer_transcript,
+            )]
+    return "\n".join(lines)
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Tunables
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -265,6 +331,8 @@ class JiraTicketOpener(Protocol):
         merger_reason: str,
         merger_rationale: str,
         file_path: str,
+        proposer_transcript: str = "",
+        reviewer_transcript: str = "",
     ) -> "JiraTicketResult": ...
 
 
@@ -340,7 +408,19 @@ class _DefaultJiraOpener:
         merger_reason: str,
         merger_rationale: str,
         file_path: str,
+        proposer_transcript: str = "",
+        reviewer_transcript: str = "",
     ) -> JiraTicketResult:
+        description = build_abstain_ticket_description(
+            parent=parent,
+            assignee=assignee,
+            change_id=change_id,
+            merger_reason=merger_reason,
+            merger_rationale=merger_rationale,
+            file_path=file_path,
+            proposer_transcript=proposer_transcript,
+            reviewer_transcript=reviewer_transcript,
+        )
         try:
             from backend import jira_adapter as _ja  # noqa: F401
         except Exception as exc:
@@ -360,7 +440,8 @@ class _DefaultJiraOpener:
             ok=False,
             reason=(
                 "no live JIRA client bound; ticket creation deferred to "
-                "intent_bridge (see _default_jira_opener note)"
+                "intent_bridge (see _default_jira_opener note); "
+                f"description_len={len(description)}"
             ),
         )
 
@@ -1279,6 +1360,14 @@ async def _handle_non_plus_two(
     else:
         assignee = task.catc_owner or "orchestrator-oncall"
         parent = task.jira_ticket or ""
+        proposer_transcript = _llm_transcript(
+            prompt=str(outcome.metadata.get("proposal_prompt", "") or ""),
+            response=str(outcome.metadata.get("proposal_response", "") or ""),
+        )
+        reviewer_transcript = _llm_transcript(
+            prompt=str(outcome.metadata.get("review_prompt", "") or ""),
+            response=str(outcome.metadata.get("review_response", "") or ""),
+        )
         res = await deps.jira.open_abstain_ticket(
             parent=parent,
             assignee=assignee,
@@ -1286,6 +1375,8 @@ async def _handle_non_plus_two(
             merger_reason=outcome.reason.value,
             merger_rationale=outcome.rationale,
             file_path=task.file_path,
+            proposer_transcript=proposer_transcript,
+            reviewer_transcript=reviewer_transcript,
         )
         jira_ticket = res.ticket if res.ok else ""
         jira_ok = res.ok
@@ -1473,7 +1564,11 @@ __all__ = [
     "Notifier",
     "GerritSubmitter",
     "GerritVoteRevoker",
+<<<<<<< HEAD
     "_classify_risk",
+=======
+    "build_abstain_ticket_description",
+>>>>>>> ae1ce59d ([OP-1413] Attach sandwich transcripts to abstain tickets)
     "check_change_ready",
     "on_human_vote_recorded",
     "on_merge_conflict_webhook",
