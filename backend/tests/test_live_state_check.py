@@ -164,3 +164,161 @@ def test_check_kinds_signature_takes_two_args() -> None:
         assert len(params) == 2, f"{kind} handler must take 2 args, got {len(params)}"
         assert params[0].name == "expected"
         assert params[1].name == "cwd"
+
+
+# ── Transition-boundary TOCTOU re-read ───────────────────────────
+
+
+def _fields(
+    *,
+    assignee: str | None = "acct-1",
+    status: str = "In Progress",
+    labels: list[str] | None = None,
+    links: list[dict] | None = None,
+) -> dict:
+    assignee_payload = {"accountId": assignee} if assignee is not None else None
+    return {
+        "assignee": assignee_payload,
+        "status": {"name": status},
+        "labels": labels or [],
+        "issuelinks": links or [],
+    }
+
+
+def _blocks_link(key: str | None, status: str = "To Do") -> dict:
+    inward: dict = {"fields": {"status": {"name": status}}}
+    if key is not None:
+        inward["key"] = key
+    return {
+        "type": {"name": "Blocks"},
+        "inwardIssue": inward,
+    }
+
+
+def test_snapshot_from_fields_captures_mutable_ticket_state() -> None:
+    fields = _fields(
+        assignee="acct-7",
+        status="In Progress",
+        labels=["runner", "class:normal"],
+        links=[
+            _blocks_link("OP-1"),
+            {"type": {"name": "Relates"}, "inwardIssue": {"key": "OP-2"}},
+            _blocks_link(None),
+        ],
+    )
+
+    snap = lsc._snapshot_from_fields("OP-1308", fields)
+
+    assert snap.key == "OP-1308"
+    assert snap.assignee_account_id == "acct-7"
+    assert snap.status_name == "In Progress"
+    assert snap.labels == frozenset({"runner", "class:normal"})
+    assert snap.blocker_keys == frozenset({"OP-1"})
+
+
+def test_evaluate_recheck_detects_assignee_change() -> None:
+    snap = lsc._snapshot_from_fields("OP-1308", _fields(assignee="acct-1"))
+
+    result = lsc._evaluate_recheck(snap, _fields(assignee="acct-2"))
+
+    assert not result.ok
+    assert result.action == "abort_assignee_changed"
+    assert "assignee diverged" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("live_status", "action"),
+    [
+        ("To Do", "abort_reverted"),
+        ("Under Review", "abort_already_advanced"),
+    ],
+)
+def test_evaluate_recheck_detects_status_drift(live_status: str, action: str) -> None:
+    snap = lsc._snapshot_from_fields("OP-1308", _fields(status="In Progress"))
+
+    result = lsc._evaluate_recheck(snap, _fields(status=live_status))
+
+    assert not result.ok
+    assert result.action == action
+    assert live_status in result.reason
+
+
+def test_evaluate_recheck_detects_new_operator_window_label() -> None:
+    snap = lsc._snapshot_from_fields(
+        "OP-1308",
+        _fields(labels=["area:backend"]),
+    )
+
+    result = lsc._evaluate_recheck(
+        snap,
+        _fields(labels=["area:backend", "class:operator-window-live"]),
+    )
+
+    assert not result.ok
+    assert result.action == "abort_operator_window"
+    assert "operator-window/rehearsal" in result.reason
+
+
+def test_evaluate_recheck_detects_new_unpublished_blocker() -> None:
+    snap = lsc._snapshot_from_fields(
+        "OP-1308",
+        _fields(links=[_blocks_link("OP-1", status="Published")]),
+    )
+
+    result = lsc._evaluate_recheck(
+        snap,
+        _fields(links=[
+            _blocks_link("OP-1", status="Published"),
+            _blocks_link("OP-2", status="In Progress"),
+        ]),
+    )
+
+    assert not result.ok
+    assert result.action == "abort_newly_blocked"
+    assert "OP-2(In Progress)" in result.reason
+
+
+def test_evaluate_recheck_allows_published_new_blocker() -> None:
+    snap = lsc._snapshot_from_fields("OP-1308", _fields())
+
+    result = lsc._evaluate_recheck(
+        snap,
+        _fields(links=[_blocks_link("OP-2", status="Published")]),
+    )
+
+    assert result.ok
+    assert result.action == "ok"
+
+
+def test_recheck_transition_boundary_state_can_be_disabled(monkeypatch) -> None:
+    snap = lsc._snapshot_from_fields("OP-1308", _fields())
+    monkeypatch.setenv(lsc._TOCTOU_REREAD_ENV, "false")
+
+    result = lsc.recheck_transition_boundary_state(object(), "OP-1308", snap)
+
+    assert result.ok
+    assert result.action == "disabled"
+
+
+def test_recheck_transition_boundary_state_uses_ttl_cache(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_fetch(client, key: str) -> dict:
+        calls.append(key)
+        return _fields()
+
+    monkeypatch.setattr(lsc, "_toctou_fetch_live", fake_fetch)
+    lsc._toctou_reset_cache()
+    try:
+        snap = lsc.capture_transition_boundary_snapshot(object(), "OP-1308", now=10.0)
+        result = lsc.recheck_transition_boundary_state(
+            object(),
+            "OP-1308",
+            snap,
+            now=20.0,
+        )
+    finally:
+        lsc._toctou_reset_cache()
+
+    assert result.ok
+    assert calls == ["OP-1308"]
