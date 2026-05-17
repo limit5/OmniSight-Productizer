@@ -122,8 +122,8 @@ _DEFAULT_TOKEN_COST_USD = float(
     os.environ.get("OMNISIGHT_MERGER_TOKEN_COST_USD", "0.000003")
 )
 
-# Bumped for OP-1404: explicit take-both feature-preservation rubric.
-MERGER_PROMPT_VERSION = "merger-prompt-v2-op1404"
+# Bumped for OP-1435: split-test guidance for shared setup conflicts.
+MERGER_PROMPT_VERSION = "merger-prompt-v3-op1435"
 
 # 3-strike rule (mirrors CLAUDE.md L1 Agent Behavior).
 MAX_FAILURES_PER_CHANGE = 3
@@ -812,9 +812,20 @@ Take-both feature-preservation rubric:
    - Preserve defaults, keyword-only markers, type annotations, and call
      ordering unless the context proves a rename.
 
-5. ABSTAIN BIAS:
+5. SPLIT TESTS WITH SHARED SETUP:
+   - When a conflict spans two test methods that share the same setup
+     pattern, do not collapse them into one merged test method.
+   - Shared setup includes the same mock names, fixture imports, helper
+     calls, patch decorators, or context-manager patches.
+   - If the methods diverge in assert lines, patched return payloads, or
+     `_event(...)` arguments, emit two separate test methods.
+   - Duplicate the complete setup in each method so each branch keeps its
+     own assertion intent.
+
+6. ABSTAIN BIAS:
    - If you cannot identify whether ADD-vs-ADD, rename detection,
-     docstring collision, or signature overlap applies, abstain.
+     docstring collision, signature overlap, or split-test preservation
+     applies, abstain.
    - Emit a low confidence score and name the unresolved reason class in
      the rationale instead of interleaving lines or picking one side.
 """

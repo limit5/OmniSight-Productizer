@@ -22,6 +22,7 @@ EXPECTED_CASES = (
     "change_883",
     "change_899",
     "change_930",
+    "change_932",
 )
 ALLOW_MARKER_TOKEN = "op-698-allow-conflict-marker"
 _CONFLICT_RE = re.compile(
@@ -226,3 +227,40 @@ def test_replay_case_matches_operator_resolution_or_abstains(case_name: str):
     assert outcome.reason is ma.MergerReason.deferred_push_to_caller
     assert outcome.resolved_text == expected
     assert not _has_conflict_markers(outcome.resolved_text)
+
+
+def test_change_932_replay_keeps_shared_setup_tests_split():
+    req = replay_case("change_932")
+    expected = _read_fixture_text(_fixture_path(
+        "change_932", "after", req.file_path,
+    ))
+    blocks = _resolved_blocks(req.conflict_text, expected)
+    deps = ma.MergerDeps(
+        llm=_FakeLLM({
+            "resolved_block": blocks[0],
+            "resolved_blocks": blocks,
+            "confidence": 0.99,
+            "rationale": "OP-1435 replay preserves split test methods",
+            "new_logic_detected": False,
+        }),
+        review_llm=_FakeLLM("CONFIRM\nfixture output keeps both test methods"),
+        pusher=_ExplodingPusher(),
+        reviewer=_ExplodingReviewer(),
+        test_runner=_passing_test_runner,
+        audit=_audit_sink,
+    )
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert outcome.resolved_text == expected
+    assert outcome.resolved_text.count(
+        "async def test_logs_arbiter_and_underlying_merger_reason"
+    ) == 1
+    assert outcome.resolved_text.count(
+        "async def test_drift_verify_red_does_not_call_caller_push"
+    ) == 1
+    assert "merger_reason=refused_no_conflict" in outcome.resolved_text
+    assert "verify_result=red" in outcome.resolved_text
+    assert "SPLIT TESTS WITH SHARED SETUP" in deps.llm.calls[0]
+    assert "do not collapse them into one merged test method" in deps.llm.calls[0]
