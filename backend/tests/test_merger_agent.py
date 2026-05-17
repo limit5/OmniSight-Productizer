@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1364,6 +1365,37 @@ def test_context_pack_marks_unsafe_sibling_path(tmp_path, caplog):
     assert "outside workspace" in pack
     assert "jira=OP-1414" in caplog.text
     assert "path=../outside.py" in caplog.text
+
+
+def test_git_region_log_timeout_returns_marker_and_logs_warning(
+    tmp_path, monkeypatch, caplog,
+):
+    ws = tmp_path / "repo"
+    ws.mkdir()
+    (ws / ".git").mkdir()
+    blocks = [
+        ma.ConflictBlock(
+            start_line=10,
+            end_line=14,
+            head_label="HEAD",
+            incoming_label="feature/greeting",
+            head_lines=["    return f'Hello {name}!'"],
+            incoming_lines=["    return f'Hi {name}!'"],
+        )
+    ]
+
+    def slow_git_log(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd="git log", timeout=20)
+
+    monkeypatch.setattr(ma.subprocess, "run", slow_git_log)
+    caplog.set_level("WARNING", logger=ma.__name__)
+
+    log = ma._git_region_log(str(ws), "backend/greetings.py", blocks)
+
+    assert "git log timed out after 20s" in log
+    assert "partial history may exist" in log
+    assert "git region log timed out after 20s" in caplog.text
+    assert "backend/greetings.py" in caplog.text
 
 
 def test_op1403_synthetic_guild_shape_prompt_mentions_guild_and_guild_id():
