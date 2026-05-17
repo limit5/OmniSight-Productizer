@@ -1608,11 +1608,8 @@ __all__ = [
     "Notifier",
     "GerritSubmitter",
     "GerritVoteRevoker",
-<<<<<<< HEAD
     "_classify_risk",
-=======
     "build_abstain_ticket_description",
->>>>>>> ae1ce59d ([OP-1413] Attach sandwich transcripts to abstain tickets)
     "check_change_ready",
     "on_human_vote_recorded",
     "on_merge_conflict_webhook",
