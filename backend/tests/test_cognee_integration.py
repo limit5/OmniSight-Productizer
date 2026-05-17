@@ -21,8 +21,47 @@ from typing import Any, Sequence
 from unittest.mock import patch
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from backend.agents import cognee_integration as ci
+
+
+SAFE_TEXT = st.text(
+    alphabet=st.characters(exclude_categories=("Cs",)),
+    max_size=512,
+)
+SAFE_ID = st.text(
+    alphabet=st.characters(
+        categories=("Ll", "Lu", "Nd"),
+        include_characters="-_.",
+    ),
+    min_size=1,
+    max_size=80,
+)
+SOURCE_KINDS = st.sampled_from(
+    [
+        ci.SOURCE_KIND_CODE,
+        ci.SOURCE_KIND_JIRA,
+        ci.SOURCE_KIND_GERRIT,
+        ci.SOURCE_KIND_LESSON,
+        ci.SOURCE_KIND_ANTIPATTERN,
+    ]
+)
+QUERY_HITS = st.fixed_dictionaries(
+    {
+        "identifier": SAFE_ID,
+        "content": SAFE_TEXT,
+        "score": st.floats(
+            min_value=-1_000_000,
+            max_value=1_000_000,
+            allow_nan=False,
+            allow_infinity=False,
+        ),
+        "kind": SOURCE_KINDS,
+        "metadata": st.dictionaries(SAFE_ID, SAFE_TEXT, max_size=5),
+    }
+)
 
 
 # ── Stub Cognee module + adapters ──────────────────────────────────────
@@ -95,6 +134,194 @@ def repo_with_code_and_lessons(tmp_path: Path) -> Path:
         },
     )
     return repo
+
+
+# ── OP-1333: property tests for public API contracts ───────────────────
+
+
+@settings(max_examples=75, deadline=None)
+@given(password=SAFE_TEXT)
+def test_config_validate_password_only_rejects_default(password: str) -> None:
+    config = ci.CogneeConfig(neo4j_password=password)
+
+    if password.strip() == ci.DEFAULT_NEO4J_USER:
+        with pytest.raises(ci.Neo4jPasswordDefault):
+            config.validate_password()
+    else:
+        config.validate_password()
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    hits=st.lists(QUERY_HITS, max_size=25),
+    tenant_id=SAFE_ID,
+    top_k=st.integers(min_value=0, max_value=30),
+    kinds=st.lists(SOURCE_KINDS, min_size=1, max_size=5),
+)
+def test_adapter_search_normalizes_results_and_dataset_scope(
+    hits: list[dict[str, Any]],
+    tenant_id: str,
+    top_k: int,
+    kinds: list[str],
+) -> None:
+    fake = _FakeCognee(search_response=hits)
+    adapter = _adapter(fake, tenant_id=tenant_id)
+
+    results = asyncio.run(adapter.search("query", kinds=kinds, top_k=top_k))
+
+    expected_len = min(len(hits), top_k) if top_k > 0 else len(hits)
+    assert isinstance(results, tuple)
+    assert len(results) == expected_len
+    assert all(isinstance(result, ci.CogneeQueryResult) for result in results)
+    assert [result.identifier for result in results] == [
+        str(hit["identifier"]) for hit in hits[:expected_len]
+    ]
+    assert fake.searches == [
+        ("query", tuple(f"{tenant_id}:{kind}" for kind in kinds))
+    ]
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    sources=st.lists(
+        st.builds(
+            ci.IngestSource,
+            kind=SOURCE_KINDS,
+            identifier=SAFE_ID,
+            content=SAFE_TEXT,
+            metadata=st.dictionaries(SAFE_ID, SAFE_TEXT, max_size=5),
+        ),
+        max_size=20,
+    )
+)
+def test_adapter_ingest_report_is_idempotent_for_same_sources(
+    sources: list[ci.IngestSource],
+) -> None:
+    fake = _FakeCognee()
+    adapter = _adapter(fake)
+
+    first = asyncio.run(adapter.ingest(sources))
+    second = asyncio.run(adapter.ingest(sources))
+
+    assert first == second
+    assert first.sources_seen == len(sources)
+    assert first.sources_ingested == len(sources)
+    assert first.failures == ()
+    assert len(fake.added) == len(sources) * 2
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    key=st.one_of(st.none(), SAFE_ID),
+    title=SAFE_TEXT,
+    description=SAFE_TEXT,
+    comments=SAFE_TEXT,
+    status=SAFE_TEXT,
+)
+def test_collect_jira_sources_filters_empty_keys_and_preserves_fields(
+    key: str | None,
+    title: str,
+    description: str,
+    comments: str,
+    status: str,
+) -> None:
+    snapshots = [
+        {
+            "key": key,
+            "title": title,
+            "description": description,
+            "comments": comments,
+            "status": status,
+        }
+    ]
+
+    sources = ci.collect_jira_sources(snapshots)
+
+    if not key:
+        assert sources == []
+    else:
+        assert len(sources) == 1
+        assert sources[0].kind == ci.SOURCE_KIND_JIRA
+        assert sources[0].identifier == key
+        assert sources[0].metadata == {"status": status}
+        assert all(
+            part in sources[0].content
+            for part in (key, title, description, comments)
+            if part
+        )
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    changes=st.lists(
+        st.fixed_dictionaries(
+            {
+                "change_id": st.one_of(st.none(), SAFE_ID),
+                "subject": SAFE_TEXT,
+                "diff": SAFE_TEXT,
+                "comments": SAFE_TEXT,
+                "branch": SAFE_TEXT,
+                "ps": SAFE_TEXT,
+            }
+        ),
+        max_size=20,
+    )
+)
+def test_collect_gerrit_sources_filters_empty_ids_and_preserves_order(
+    changes: list[dict[str, str | None]],
+) -> None:
+    sources = ci.collect_gerrit_sources(changes)
+    keyed_changes = [change for change in changes if change.get("change_id")]
+
+    assert [source.identifier for source in sources] == [
+        str(change["change_id"]) for change in keyed_changes
+    ]
+    assert all(source.kind == ci.SOURCE_KIND_GERRIT for source in sources)
+    assert [source.metadata["branch"] for source in sources] == [
+        str(change.get("branch") or "") for change in keyed_changes
+    ]
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    title=st.text(alphabet=" \t\n\r", max_size=40),
+    ac=st.text(alphabet=" \t\n\r", max_size=40),
+)
+def test_retrieve_lessons_empty_query_returns_empty_without_adapter(
+    title: str,
+    ac: str,
+) -> None:
+    assert (
+        ci.retrieve_lessons_via_cognee(
+            Path("unused-lessons-dir"),
+            ticket_title=title,
+            acceptance_criteria=ac,
+            adapter=None,
+        )
+        == ()
+    )
+
+
+@settings(max_examples=75, deadline=None)
+@given(
+    hits=st.lists(QUERY_HITS, min_size=1, max_size=10),
+    token_budget=st.integers(max_value=0),
+)
+def test_build_repo_map_non_positive_budget_returns_empty(
+    hits: list[dict[str, Any]],
+    token_budget: int,
+) -> None:
+    fake = _FakeCognee(search_response=hits)
+
+    rendered = ci.build_repo_map_via_cognee(
+        Path("."),
+        ticket_text="seed",
+        token_budget=token_budget,
+        adapter=_adapter(fake),
+    )
+
+    assert rendered == ""
+    assert fake.searches[0][1] == ("t-default:code",)
 
 
 # ── 1. Initial ingestion ───────────────────────────────────────────────
