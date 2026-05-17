@@ -281,6 +281,7 @@ class SemanticEntropyMonitor:
         output: str,
         *,
         task_id: str | None = None,
+        guild_id: str | None = None,
         force_check: bool = False,
     ) -> dict | None:
         """Record an output and, if this is an Nth round, compute entropy.
@@ -326,6 +327,7 @@ class SemanticEntropyMonitor:
         payload = {
             "agent_id": agent_id,
             "task_id": task_id,
+            "guild_id": guild_id,
             "entropy_score": round(score, 4),
             "threshold_warn": self.warn_threshold,
             "threshold_deadlock": self.dead_threshold,
@@ -377,15 +379,19 @@ def reset_for_tests() -> None:
 def _broadcast(payload: dict, *, recent_outputs: list[str]) -> None:
     """Emit SSE event, bump metrics, fire deadlock finding if needed."""
     agent_id = payload["agent_id"]
+    guild_id = str(payload.get("guild_id") or "unknown")
     score = float(payload["entropy_score"])
     verdict = payload["verdict"]
 
     # Prometheus gauge — best-effort, never raise.
     try:
         from backend import metrics as _m
-        _m.semantic_entropy_score.labels(agent_id=agent_id).set(score)
+        _m.semantic_entropy_score.labels(agent_id=agent_id, guild_id=guild_id).set(score)
         if verdict == "deadlock":
-            _m.cognitive_deadlock_total.labels(agent_id=agent_id).inc()
+            _m.cognitive_deadlock_total.labels(
+                agent_id=agent_id,
+                guild_id=guild_id,
+            ).inc()
     except Exception:
         pass
 
@@ -444,10 +450,17 @@ def record_output(
     output: str,
     *,
     task_id: str | None = None,
+    guild_id: str | None = None,
     force_check: bool = False,
 ) -> dict | None:
     """Module-level shortcut used by agents / orchestrator hooks."""
-    return _MONITOR.ingest(agent_id, output, task_id=task_id, force_check=force_check)
+    return _MONITOR.ingest(
+        agent_id,
+        output,
+        task_id=task_id,
+        guild_id=guild_id,
+        force_check=force_check,
+    )
 
 
 def snapshot_all() -> list[dict]:
