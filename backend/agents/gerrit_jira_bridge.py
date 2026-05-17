@@ -130,6 +130,55 @@ def save_cursor(event_id: str, ts: datetime, path: Path = CURSOR_FILE) -> None:
     tmp.replace(path)
 
 
+def load_drift_cooldown_state(path: Path) -> tuple[dict[str, bool], dict[str, float]]:
+    """Return persisted develop-drift cooldown state."""
+    if not path.exists():
+        return {}, {}
+    data = json.loads(path.read_text())
+    changes = data.get("changes", {})
+    if not isinstance(changes, dict):
+        return {}, {}
+
+    last_seen_mergeable: dict[str, bool] = {}
+    last_re_eval: dict[str, float] = {}
+    for raw_key, raw_state in changes.items():
+        if not isinstance(raw_state, dict):
+            continue
+        key = str(raw_key)
+        mergeable = raw_state.get("last_seen_mergeable")
+        if isinstance(mergeable, bool):
+            last_seen_mergeable[key] = mergeable
+        re_eval = raw_state.get("last_re_eval_ts")
+        if isinstance(re_eval, (int, float)):
+            last_re_eval[key] = float(re_eval)
+    return last_seen_mergeable, last_re_eval
+
+
+def save_drift_cooldown_state(
+    last_seen_mergeable: dict[str, bool],
+    last_re_eval: dict[str, float],
+    path: Path,
+) -> None:
+    """Atomically persist develop-drift cooldown state with private mode."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    changes = {
+        change_key: {
+            "last_seen_mergeable": mergeable,
+            "last_re_eval_ts": last_re_eval.get(change_key),
+        }
+        for change_key, mergeable in sorted(last_seen_mergeable.items())
+    }
+    for change_key, re_eval in sorted(last_re_eval.items()):
+        changes.setdefault(change_key, {
+            "last_seen_mergeable": None,
+            "last_re_eval_ts": re_eval,
+        })
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"changes": changes}, sort_keys=True))
+    tmp.chmod(0o600)
+    tmp.replace(path)
+
+
 def heartbeat_path_from_env(env: dict[str, str] | None = None) -> Path:
     """Resolve the bridge heartbeat file path. SP-B-X-009 (OP-1067)."""
 
@@ -259,6 +308,7 @@ class BridgeConfig:
     max_backoff_seconds: float = 60.0
     alert_after_failures: int = 10
     cursor_file: Path | None = CURSOR_FILE
+    drift_cooldown_file: Path | None = None
     # OP-733 — debounce window for auto-rebase sweeps. A batch +2 of N
     # changes can fire N change-merged events within seconds; the
     # debounce coalesces them into a single sweep on the most recent
@@ -531,6 +581,7 @@ class GerritJiraBridge:
         self._develop_drift_lock = Lock()
         self._develop_drift_last_seen_mergeable: dict[str, bool] = {}
         self._develop_drift_last_re_eval: dict[str, float] = {}
+        self._load_develop_drift_cooldown_state()
         # SP-B-X-019 / OP-1077 — independent heartbeat-thread state.
         # The maintenance-tick loop runs *inside* ``stream_forever``'s
         # blocking SSH read, so it stalls during quiet Gerrit periods.
@@ -1619,14 +1670,53 @@ class GerritJiraBridge:
             host = host.rsplit("@", 1)[1]
         return f"https://{host}:29420"
 
+    def _develop_drift_cooldown_file(self) -> Path | None:
+        if self.config.drift_cooldown_file is not None:
+            return self.config.drift_cooldown_file
+        if self.config.cursor_file is None:
+            return None
+        return self.config.cursor_file.with_name("drift-cooldown.json")
+
+    def _load_develop_drift_cooldown_state(self) -> None:
+        path = self._develop_drift_cooldown_file()
+        if path is None:
+            return
+        try:
+            (
+                self._develop_drift_last_seen_mergeable,
+                self._develop_drift_last_re_eval,
+            ) = load_drift_cooldown_state(path)
+        except Exception as exc:
+            self.log(
+                "WARN", "merger_drift_cooldown_load_failed",
+                path=str(path), err=f"{type(exc).__name__}: {exc}",
+            )
+
+    def _save_develop_drift_cooldown_state(self) -> None:
+        path = self._develop_drift_cooldown_file()
+        if path is None:
+            return
+        try:
+            save_drift_cooldown_state(
+                self._develop_drift_last_seen_mergeable,
+                self._develop_drift_last_re_eval,
+                path,
+            )
+        except Exception as exc:
+            self.log(
+                "WARN", "merger_drift_cooldown_save_failed",
+                path=str(path), err=f"{type(exc).__name__}: {exc}",
+            )
+
     def _should_re_evaluate_drift(
         self, change_key: str, mergeable: bool,
     ) -> bool:
-        now = time.monotonic()
+        now = time.time()
         with self._develop_drift_lock:
             previous = self._develop_drift_last_seen_mergeable.get(change_key)
             if mergeable:
                 self._develop_drift_last_seen_mergeable[change_key] = True
+                self._save_develop_drift_cooldown_state()
                 return False
             if previous is False:
                 return False
@@ -1643,6 +1733,7 @@ class GerritJiraBridge:
                 return False
             self._develop_drift_last_seen_mergeable[change_key] = False
             self._develop_drift_last_re_eval[change_key] = now
+            self._save_develop_drift_cooldown_state()
             return True
 
     # ─── change-merged → auto-rebase sweep (OP-733) ──────────────────
