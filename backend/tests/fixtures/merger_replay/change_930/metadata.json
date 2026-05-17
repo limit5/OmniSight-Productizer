@@ -1,0 +1,29 @@
+{
+  "after_commit_message": "[OP-1413] hotfix: strip leftover conflict markers in merge_arbiter __all__\n\nEmergency follow-up to #930 merge \u2014 PS-2 contained unresolved conflict\nmarkers in backend/merge_arbiter.py:1611-1615 because my prior Edit\ncall errored (file not read first) but the subsequent git add +\nrebase --continue + push proceeded anyway, committing the broken file.\nGerrit reported mergeable=true (no further conflict vs develop) so the\nchange merged before the SyntaxError was caught.\n\nResolution: take-both for the __all__ entries \u2014 both `_classify_risk`\n(from E lever / classifier landing) and `build_abstain_ticket_description`\n(from D sandwich transcript work) belong in the exports.\n\n[Tier-S]\n\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nCo-Authored-By: claude-bot <rt3628+claude-bot@gmail.com>\nCo-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>\nChange-Id: I785309a4f549d543fa65769953c4c8a9c0ece67e",
+  "after_patchset": "9981715a8a69414c265d25c01bff221a263fa2b2",
+  "before_commit_message": "Merge \"[OP-1413] Attach sandwich transcripts to abstain tickets\" into develop",
+  "before_patchset": "1ca9032fa8c38580e5cb25a1a9f9944601b1bbe2",
+  "case": "change_930",
+  "change_number": "930",
+  "changed_files": [
+    "backend/merge_arbiter.py"
+  ],
+  "common_ancestor": "26238f523e4cc0a8610be273937b32efb96c724d",
+  "conflict_files": [
+    "backend/merge_arbiter.py"
+  ],
+  "expected_replay": "matches_operator_resolution",
+  "fixture_contents": {
+    "after": "Operator-resolved file content from the post-resolution patch set.",
+    "ancestor": "Old parent file content used as the three-way merge base.",
+    "before": "Git merge-file reconstruction from rebase target parent, old parent, and pre-resolution patch set."
+  },
+  "jira_description": "#930 (`__all__` 1-line): a=no b=yes-with-verify",
+  "operator_audit": {
+    "per_file": "yes-with-verify",
+    "whole_batch": "no"
+  },
+  "project": "omnisight/OmniSight-Productizer",
+  "rebase_target_parent": "1ca9032fa8c38580e5cb25a1a9f9944601b1bbe2",
+  "subject": "[OP-1413] hotfix: strip leftover conflict markers in merge_arbiter __all__"
+}

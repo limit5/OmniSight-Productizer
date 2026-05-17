@@ -1,0 +1,35 @@
+{
+  "after_commit_message": "[OP-1403] Expand merger context pack\n\nAdd a priority-capped merger context pack before the LLM call. The pack includes the full conflict file, recent git intent, JIRA context, sibling file contents, and develop symbol-table data when supplied by the proactive merger path.\n\nWire the extra fields through orchestrator and arbiter payloads, and teach conflict enrichment/webhooks to collect sibling contents, git logs, symbol tables, change_number, and JIRA descriptions for backend delegation.\n\n[Tier-B]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\n\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\n\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I53df789721649aef53f33f66326850cb3039fd24",
+  "after_patchset": "0375cd689aee865c654847e941b6af3edba680db",
+  "before_commit_message": "[OP-1403] Expand merger context pack\n\nAdd a priority-capped merger context pack before the LLM call. The pack includes the full conflict file, recent git intent, JIRA context, sibling file contents, and develop symbol-table data when supplied by the proactive merger path.\n\nWire the extra fields through orchestrator and arbiter payloads, and teach conflict enrichment/webhooks to collect sibling contents, git logs, symbol tables, change_number, and JIRA descriptions for backend delegation.\n\n[Tier-B]\n\nCo-Authored-By: GPT-5.5 (codex-cli) <noreply@openai.com>\n\nCo-Authored-By: codex-bot <rt3628+codex-bot@gmail.com>\n\nCo-Authored-By: nanakusa sora <rt3628@hotmail.com>\nChange-Id: I53df789721649aef53f33f66326850cb3039fd24",
+  "before_patchset": "9e9dfa60b5d8cf6745d4a56a18e22af0374720de",
+  "case": "change_899",
+  "change_number": "899",
+  "changed_files": [
+    "backend/agents/conflict_enrichment.py",
+    "backend/merge_arbiter.py",
+    "backend/merger_agent.py",
+    "backend/routers/orchestrator.py",
+    "backend/routers/webhooks.py",
+    "backend/tests/test_merge_arbiter.py",
+    "backend/tests/test_merger_agent.py"
+  ],
+  "common_ancestor": "f4517eab433e4091a4309c708de586984515ca2e",
+  "conflict_files": [
+    "backend/merger_agent.py"
+  ],
+  "expected_replay": "abstain_oversized",
+  "fixture_contents": {
+    "after": "Operator-resolved file content from the post-resolution patch set.",
+    "ancestor": "Old parent file content used as the three-way merge base.",
+    "before": "Git merge-file reconstruction from rebase target parent, old parent, and pre-resolution patch set."
+  },
+  "jira_description": "#899 (7 files A lever): a=no b=yes",
+  "operator_audit": {
+    "per_file": "yes",
+    "whole_batch": "no"
+  },
+  "project": "omnisight/OmniSight-Productizer",
+  "rebase_target_parent": "ce32f9640b38e9f4090559c1617be8e746503876",
+  "subject": "[OP-1403] Expand merger context pack"
+}

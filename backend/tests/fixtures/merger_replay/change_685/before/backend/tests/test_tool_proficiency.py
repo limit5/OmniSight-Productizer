@@ -1,0 +1,1095 @@
+# op-698-allow-conflict-marker: intentional replay fixture conflict markers
+"""RPG.W13 -- contract tests for ``backend/agents/tool_proficiency.py``.
+
+Covers the 9 AC cases listed on OP-218:
+
+1. ``record_tool_invocation`` increments invocation_count + success_count.
+2. Lv 1→2 threshold transition (≥ 10 success / ≥ 0.70 ratio).
+3. Lv 2→3 threshold transition (≥ 50 success / ≥ 0.80 ratio).
+4. Lv 3→4 threshold transition (≥ 200 success / ≥ 0.85 ratio).
+5. Lv 4→5 threshold transition (≥ 500 success / ≥ 0.90 ratio).
+6. ``can_invoke_at_level`` refuses when current Lv < required.
+7. ``can_invoke_at_level`` allows when current Lv ≥ required.
+8. Telemetry lag (>24h) fail-open: invocation allowed but warning logged.
+9. Missing-config permissive default + rebuild idempotent replay.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from backend.agents.mp_w17_telemetry_consumer import consume_batch, consume_event
+from backend.agents.mp_w17_telemetry_consumer import consume_invocation_log_line
+from backend.agents.mp_w17_telemetry_consumer import payload_from_invocation_log
+from backend.agents.tool_proficiency import (
+    InMemoryToolProficiencyStore,
+    LEVEL_REQUIREMENTS,
+    MAX_TOOL_LEVEL,
+    ProficiencyGateConfigMissing,
+    TOOL_LEVEL_SPECS,
+    ToolLevelSpec,
+    ToolProficiencyState,
+    build_feature_unlock_gate,
+    can_invoke_at_level,
+    capability_for_level,
+    compute_tool_level,
+    get_required_level,
+    install_feature_unlock_gate,
+    list_proficiencies,
+    record_tool_invocation,
+    reset_gate_config_cache_for_tests,
+    tool_level_spec,
+)
+
+
+AGENT = "agent-alpha"
+TOOL = "Read"
+T0 = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+def _seed_invocations(success: int, fail: int) -> tuple[int, int]:
+    return success + fail, success
+
+
+# ── compute_tool_level ──────────────────────────────────────────────
+
+
+def test_compute_tool_level_lv1_floor():
+    assert compute_tool_level(0, 0) == 1
+    assert compute_tool_level(1, 0) == 1
+    assert compute_tool_level(1, 1) == 1
+    assert compute_tool_level(9, 9) == 1  # below the 10-success threshold
+
+
+def test_compute_tool_level_lv2_threshold_transition():
+    # AC #2 — Lv 1→2: ≥ 10 success and ≥ 0.70 ratio.
+    invocation_count, success_count = _seed_invocations(success=10, fail=3)
+    assert compute_tool_level(invocation_count, success_count) == 2
+    # Just below ratio threshold.
+    invocation_count, success_count = _seed_invocations(success=10, fail=5)
+    # 10 / 15 = 0.6667 < 0.70 → stays at Lv 1.
+    assert compute_tool_level(invocation_count, success_count) == 1
+
+
+def test_compute_tool_level_lv3_threshold_transition():
+    # AC #3 — Lv 2→3: ≥ 50 success and ≥ 0.80 ratio.
+    invocation_count, success_count = _seed_invocations(success=50, fail=10)
+    # 50 / 60 ≈ 0.833 ≥ 0.80 → Lv 3.
+    assert compute_tool_level(invocation_count, success_count) == 3
+    # Just under success count.
+    invocation_count, success_count = _seed_invocations(success=49, fail=10)
+    assert compute_tool_level(invocation_count, success_count) == 2
+
+
+def test_compute_tool_level_lv4_threshold_transition():
+    # AC #4 — Lv 3→4: ≥ 200 success and ≥ 0.85 ratio.
+    invocation_count, success_count = _seed_invocations(success=200, fail=30)
+    # 200 / 230 ≈ 0.8696 ≥ 0.85 → Lv 4.
+    assert compute_tool_level(invocation_count, success_count) == 4
+
+
+def test_compute_tool_level_lv5_threshold_transition():
+    # AC #5 — Lv 4→5: ≥ 500 success and ≥ 0.90 ratio.
+    invocation_count, success_count = _seed_invocations(success=500, fail=50)
+    # 500 / 550 ≈ 0.909 ≥ 0.90 → Lv 5.
+    assert compute_tool_level(invocation_count, success_count) == 5
+
+
+def test_compute_tool_level_lv3_requires_ratio_and_success_count():
+    # W13.7 — both sides of the Lv 3 gate are required.
+    invocation_count, success_count = _seed_invocations(success=50, fail=13)
+    assert compute_tool_level(invocation_count, success_count) == 2
+
+
+def test_compute_tool_level_returns_highest_satisfied_level():
+    invocation_count, success_count = _seed_invocations(success=500, fail=40)
+    assert compute_tool_level(invocation_count, success_count) == 5
+
+
+def test_compute_tool_level_lv5_ratio_boundary_is_inclusive():
+    invocation_count, success_count = _seed_invocations(success=500, fail=55)
+    assert success_count / invocation_count >= 0.90
+    assert compute_tool_level(invocation_count, success_count) == 5
+
+
+def test_compute_tool_level_invalid_inputs_raise():
+    with pytest.raises(TypeError):
+        compute_tool_level(True, 0)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        compute_tool_level(-1, 0)
+    with pytest.raises(ValueError):
+        compute_tool_level(5, 6)  # success > invocations
+
+
+def test_capability_for_level_covers_full_ladder():
+    for level in range(1, MAX_TOOL_LEVEL + 1):
+        assert isinstance(capability_for_level(level), str)
+    with pytest.raises(ValueError):
+        capability_for_level(0)
+    with pytest.raises(ValueError):
+        capability_for_level(99)
+
+
+def test_tool_level_specs_pin_op179_ladder_semantics():
+    assert tuple(TOOL_LEVEL_SPECS) == (1, 2, 3, 4, 5)
+    assert tool_level_spec(1) == ToolLevelSpec(1, 0, 0.0, "basic_invoke")
+    assert tool_level_spec(2) == ToolLevelSpec(2, 10, 0.70, "chain_two_calls")
+    assert tool_level_spec(3) == ToolLevelSpec(3, 50, 0.80, "batch_ops")
+    assert tool_level_spec(4) == ToolLevelSpec(
+        4, 200, 0.85, "advanced_flags_cross_guild_a2a"
+    )
+    assert tool_level_spec(5) == ToolLevelSpec(
+        5, 500, 0.90, "author_new_mcp_wrapper"
+    )
+    assert all(
+        tool_level_spec(level).capability == capability_for_level(level)
+        for level in range(1, MAX_TOOL_LEVEL + 1)
+    )
+
+
+def test_tool_level_spec_rejects_out_of_range_level():
+    with pytest.raises(ValueError):
+        tool_level_spec(0)
+    with pytest.raises(ValueError):
+        tool_level_spec(6)
+
+
+def test_tool_level_spec_dataclass_validates_shape():
+    with pytest.raises(ValueError):
+        ToolLevelSpec(0, 0, 0.0, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, -1, 0.0, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, 0, 1.1, "basic_invoke")
+    with pytest.raises(ValueError):
+        ToolLevelSpec(1, 0, 0.0, "   ")
+
+
+# ── record_tool_invocation ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_increments_and_bootstraps():
+    # AC #1 — first invocation creates a row, increments counters.
+    store = InMemoryToolProficiencyStore()
+    recorded = await record_tool_invocation(
+        store, AGENT, TOOL, "success", now=T0
+    )
+    assert recorded.bootstrapped is True
+    assert recorded.invocation_count == 1
+    assert recorded.success_count == 1
+    assert recorded.previous_level == 1
+    assert recorded.new_level == 1
+
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.invocation_count == 1
+    assert state.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_counts_failures_only_in_invocation():
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+    await record_tool_invocation(store, AGENT, TOOL, "fail", now=T0)
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.invocation_count == 2
+    assert state.success_count == 1
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_crosses_lv1_to_lv2_emits_level_up():
+    # AC #2 — driving the recorder past the Lv 2 threshold emits a level-up.
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+
+    def _emit(agent_id: str, tool_id: str, prev: int, new: int) -> None:
+        level_ups.append((agent_id, tool_id, prev, new))
+
+    # 10 successes + 3 failures = ratio 0.769 ≥ 0.70 + 10 successes ≥ 10.
+    for _ in range(10):
+        await record_tool_invocation(
+            store, AGENT, TOOL, "success", now=T0, emit_level_up=_emit
+        )
+    for _ in range(3):
+        await record_tool_invocation(
+            store, AGENT, TOOL, "fail", now=T0, emit_level_up=_emit
+        )
+
+    assert any(transition[3] >= 2 for transition in level_ups)
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.level == 2
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_emits_direct_lv1_to_lv3_level_up():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=1,
+            invocation_count=49,
+            success_count=49,
+            last_used_at=T0,
+        )
+    )
+
+    recorded = await record_tool_invocation(
+        store,
+        AGENT,
+        TOOL,
+        "success",
+        now=T0,
+        emit_level_up=lambda *args: level_ups.append(args),
+    )
+
+    assert recorded.previous_level == 1
+    assert recorded.new_level == 3
+    assert level_ups == [(AGENT, TOOL, 1, 3)]
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_emits_each_threshold_once():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    seeds = (
+        (1, 9, 9, 2),
+        (2, 49, 49, 3),
+        (3, 199, 199, 4),
+        (4, 499, 499, 5),
+    )
+    for previous_level, invocations, successes, expected_level in seeds:
+        tool_id = f"{TOOL}-{expected_level}"
+        await store.upsert_state(
+            ToolProficiencyState(
+                agent_id=AGENT,
+                tool_id=tool_id,
+                level=previous_level,
+                invocation_count=invocations,
+                success_count=successes,
+                last_used_at=T0,
+            )
+        )
+        recorded = await record_tool_invocation(
+            store,
+            AGENT,
+            tool_id,
+            "success",
+            now=T0,
+            emit_level_up=lambda *args: level_ups.append(args),
+        )
+        assert recorded.new_level == expected_level
+
+    assert level_ups == [
+        (AGENT, "Read-2", 1, 2),
+        (AGENT, "Read-3", 2, 3),
+        (AGENT, "Read-4", 3, 4),
+        (AGENT, "Read-5", 4, 5),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_does_not_emit_on_same_level_success():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+
+    recorded = await record_tool_invocation(
+        store,
+        AGENT,
+        TOOL,
+        "success",
+        now=T0,
+        emit_level_up=lambda *args: level_ups.append(args),
+    )
+
+    assert recorded.previous_level == recorded.new_level == 3
+    assert level_ups == []
+
+
+@pytest.mark.asyncio
+async def test_record_tool_invocation_does_not_emit_when_failure_holds_level():
+    store = InMemoryToolProficiencyStore()
+    level_ups: list[tuple[str, str, int, int]] = []
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=1,
+            invocation_count=9,
+            success_count=9,
+            last_used_at=T0,
+        )
+    )
+
+    recorded = await record_tool_invocation(
+        store,
+        AGENT,
+        TOOL,
+        "fail",
+        now=T0,
+        emit_level_up=lambda *args: level_ups.append(args),
+    )
+
+    assert recorded.new_level == 1
+    assert recorded.invocation_count == 10
+    assert recorded.success_count == 9
+    assert level_ups == []
+
+
+# ── can_invoke_at_level ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_refuses_when_under_required_level():
+    # AC #6 — gate refuse when under level.
+    store = InMemoryToolProficiencyStore()
+    # Seed an agent at Lv 1 by recording one invocation.
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    blocked: list[tuple[str, str, int, int]] = []
+
+    def _emit(agent_id: str, tool_id: str, current: int, required: int) -> None:
+        blocked.append((agent_id, tool_id, current, required))
+
+    allowed = await can_invoke_at_level(
+        store, AGENT, TOOL, required_level=3, now=T0,
+        emit_gate_blocked=_emit,
+    )
+    assert allowed is False
+    assert blocked == [(AGENT, TOOL, 1, 3)]
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_allows_when_at_or_above_required_level():
+    # AC #7 — gate allow when at/above level.
+    store = InMemoryToolProficiencyStore()
+    # Force a Lv 3 row directly.
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+    assert await can_invoke_at_level(
+        store, AGENT, TOOL, required_level=3, now=T0
+    )
+    assert await can_invoke_at_level(
+        store, AGENT, TOOL, required_level=2, now=T0
+    )
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_first_time_bootstrap_allows_lv1():
+    # First-time invocation: no row exists, Lv 1 bootstrap allows when required <= 1.
+    store = InMemoryToolProficiencyStore()
+    assert await can_invoke_at_level(
+        store, AGENT, TOOL, required_level=1, now=T0
+    )
+    assert not await can_invoke_at_level(
+        store, AGENT, TOOL, required_level=2, now=T0
+    )
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_first_time_lv2_refusal_emits_blocked_event():
+    store = InMemoryToolProficiencyStore()
+    blocked: list[tuple[str, str, int, int]] = []
+
+    allowed = await can_invoke_at_level(
+        store,
+        AGENT,
+        TOOL,
+        required_level=2,
+        now=T0,
+        emit_gate_blocked=lambda *args: blocked.append(args),
+    )
+
+    assert allowed is False
+    assert blocked == [(AGENT, TOOL, 1, 2)]
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_rejects_required_level_outside_ladder():
+    store = InMemoryToolProficiencyStore()
+    with pytest.raises(ValueError):
+        await can_invoke_at_level(store, AGENT, TOOL, required_level=0, now=T0)
+    with pytest.raises(ValueError):
+        await can_invoke_at_level(store, AGENT, TOOL, required_level=6, now=T0)
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_stale_low_level_still_refuses_after_warning(caplog):
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=2,
+            invocation_count=20,
+            success_count=15,
+            last_used_at=T0 - timedelta(days=2),
+        )
+    )
+    with caplog.at_level("WARNING"):
+        allowed = await can_invoke_at_level(
+            store, AGENT, TOOL, required_level=3, now=T0
+        )
+
+    assert allowed is False
+    assert any("TelemetryConsumerLag" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_can_invoke_telemetry_lag_fails_open(caplog):
+    # AC #8 — proficiency state >24h stale, allow but warn.
+    store = InMemoryToolProficiencyStore()
+    stale_when = T0 - timedelta(days=2)
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=2,
+            invocation_count=20,
+            success_count=15,
+            last_used_at=stale_when,
+        )
+    )
+    with caplog.at_level("WARNING"):
+        allowed = await can_invoke_at_level(
+            store, AGENT, TOOL, required_level=2, now=T0
+        )
+    assert allowed is True
+    assert any("TelemetryConsumerLag" in record.message for record in caplog.records)
+
+
+# ── gate config loading ─────────────────────────────────────────────
+
+
+def test_get_required_level_missing_entry_defaults_to_lv1(tmp_path: Path):
+    # AC #9 — missing config entry → Lv 1 (permissive).
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 1\n", encoding="utf-8")
+    assert get_required_level("Read", config_path=config) == 1
+    assert get_required_level("AnUnknownTool", config_path=config) == 1
+
+
+def test_get_required_level_lv3_entry(tmp_path: Path):
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text(
+        "gates:\n  mcp__filesystem__write_multiple_files: 3\n",
+        encoding="utf-8",
+    )
+    assert get_required_level(
+        "mcp__filesystem__write_multiple_files", config_path=config
+    ) == 3
+
+
+def test_get_required_level_missing_file_raises(tmp_path: Path):
+    reset_gate_config_cache_for_tests()
+    with pytest.raises(ProficiencyGateConfigMissing):
+        get_required_level("Read", config_path=tmp_path / "nope.yaml")
+
+
+def test_shipped_gates_yaml_loads_with_top10_tools():
+    # DoD — ``config/tool_proficiency_gates.yaml`` ships with the
+    # W17.2 hardened top-10 (Read/Edit/Bash/Grep/Glob/...) plus one
+    # representative OP-179 gate at each higher tool level.
+    reset_gate_config_cache_for_tests()
+    repo_root = Path(__file__).resolve().parents[2]
+    shipped = repo_root / "config" / "tool_proficiency_gates.yaml"
+    assert shipped.is_file()
+    for tool in ("Read", "Edit", "Bash", "Grep", "Glob",
+                 "Write", "Agent", "WebFetch", "Skill", "ToolSearch"):
+        assert get_required_level(tool, config_path=shipped) == 1
+    assert get_required_level("Task", config_path=shipped) == 2
+    assert get_required_level(
+        "mcp__filesystem__write_multiple_files", config_path=shipped
+    ) == 3
+    assert get_required_level("CrossGuildHandoff", config_path=shipped) == 4
+    assert get_required_level("AuthorMcpWrapper", config_path=shipped) == 5
+
+
+# ── W17.7 consumer + idempotent rebuild ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_consumes_w17_event_shape():
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "success": True,
+            "timestamp": T0.isoformat(),
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 1
+    assert recorded.success_count == 1
+
+
+@pytest.mark.asyncio
+<<<<<<< /tmp/tmp901i4b4q/ours
+async def test_telemetry_consumer_detects_nested_invocation_and_outcome():
+    """OP-182 — W13 can derive proficiency from invocation + outcome payloads."""
+=======
+async def test_telemetry_consumer_accepts_tool_id_alias():
+>>>>>>> /tmp/tmp901i4b4q/theirs
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+<<<<<<< /tmp/tmp901i4b4q/ours
+            "invocation": {
+                "tool_name": TOOL,
+                "agent_id": AGENT,
+                "timestamp": T0.isoformat(),
+            },
+            "outcome": {"is_error": False},
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 1
+    assert recorded.success_count == 1
+
+    recorded = await consume_event(
+        store,
+        {
+            "invocation": {
+                "tool_name": TOOL,
+                "agent_id": AGENT,
+                "timestamp": T0.isoformat(),
+            },
+            "outcome": {"is_error": True},
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 2
+=======
+            "tool_id": TOOL,
+            "agent_id": AGENT,
+            "success": True,
+            "timestamp": T0.isoformat(),
+        },
+    )
+    assert recorded is not None
+    assert recorded.tool_id == TOOL
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_status_ok_counts_as_success():
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "status": "ok",
+            "timestamp": T0.isoformat(),
+        },
+    )
+    assert recorded is not None
+>>>>>>> /tmp/tmp901i4b4q/theirs
+    assert recorded.success_count == 1
+
+
+@pytest.mark.asyncio
+<<<<<<< /tmp/tmp901i4b4q/ours
+async def test_telemetry_consumer_detects_invocation_log_line():
+    """OP-182 — replaying logged tool_invocation JSON updates proficiency."""
+    store = InMemoryToolProficiencyStore()
+    line = (
+        'INFO events.tool_invocation {"agent_id": "agent-alpha", '
+        '"tool_name": "Read", "outcome": "success", '
+        '"timestamp": "2026-01-01T00:00:00+00:00"}'
+    )
+    payload = payload_from_invocation_log(line)
+    assert payload is not None
+    assert payload["agent_id"] == AGENT
+
+    recorded = await consume_invocation_log_line(store, line)
+
+    assert recorded is not None
+    assert recorded.agent_id == AGENT
+    assert recorded.tool_id == TOOL
+    assert recorded.success_count == 1
+=======
+async def test_telemetry_consumer_unknown_status_counts_as_failure():
+    store = InMemoryToolProficiencyStore()
+    recorded = await consume_event(
+        store,
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "status": "timeout",
+            "timestamp": T0.isoformat(),
+        },
+    )
+    assert recorded is not None
+    assert recorded.invocation_count == 1
+    assert recorded.success_count == 0
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_preserves_event_timestamp():
+    store = InMemoryToolProficiencyStore()
+    await consume_event(
+        store,
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "success": True,
+            "timestamp": T0.isoformat(),
+        },
+    )
+
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.last_used_at == T0
+>>>>>>> /tmp/tmp901i4b4q/theirs
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_drops_events_missing_agent_or_tool():
+    store = InMemoryToolProficiencyStore()
+    payloads = [
+        {"tool_name": TOOL, "success": True},          # no agent_id → drop
+        {"agent_id": AGENT, "success": True},          # no tool_name → drop
+        {"agent_id": AGENT, "tool_name": TOOL, "success": True},
+    ]
+    stats = await consume_batch(store, payloads)
+    assert stats.received == 3
+    assert stats.applied == 1
+    assert stats.dropped_missing_agent == 1
+    assert stats.dropped_missing_tool == 1
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_batch_scores_level_up_handoff():
+    store = InMemoryToolProficiencyStore()
+    payloads = [
+        {
+            "tool_name": TOOL,
+            "agent_id": AGENT,
+            "success": True,
+            "timestamp": T0.isoformat(),
+        }
+        for _ in range(10)
+    ]
+
+    stats = await consume_batch(store, payloads)
+
+    assert stats.received == 10
+    assert stats.applied == 10
+    assert stats.level_ups == 1
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.level == 2
+
+
+@pytest.mark.asyncio
+async def test_telemetry_consumer_batch_scores_mixed_success_and_failure():
+    store = InMemoryToolProficiencyStore()
+    payloads = [
+        {"tool_name": TOOL, "agent_id": AGENT, "success": True},
+        {"tool_name": TOOL, "agent_id": AGENT, "success": False},
+        {"tool_name": TOOL, "agent_id": AGENT, "status": "passed"},
+        {"tool_name": TOOL, "agent_id": AGENT, "status": "errored"},
+    ]
+
+    stats = await consume_batch(store, payloads)
+
+    assert stats.received == 4
+    assert stats.applied == 4
+    assert stats.level_ups == 0
+    state = await store.get_state(AGENT, TOOL)
+    assert state is not None
+    assert state.invocation_count == 4
+    assert state.success_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rebuild_is_idempotent_when_replayed_twice():
+    # AC #9 — replay from history is idempotent.
+    payloads = [
+        {"tool_name": TOOL, "agent_id": AGENT, "success": True, "timestamp": T0.isoformat()},
+        {"tool_name": TOOL, "agent_id": AGENT, "success": True, "timestamp": T0.isoformat()},
+        {"tool_name": TOOL, "agent_id": AGENT, "success": False, "timestamp": T0.isoformat()},
+    ]
+    first = InMemoryToolProficiencyStore()
+    await consume_batch(first, payloads)
+    first_state = await first.get_state(AGENT, TOOL)
+
+    second = InMemoryToolProficiencyStore()
+    await consume_batch(second, payloads)
+    second_state = await second.get_state(AGENT, TOOL)
+
+    assert first_state is not None and second_state is not None
+    assert first_state.invocation_count == second_state.invocation_count == 3
+    assert first_state.success_count == second_state.success_count == 2
+    assert first_state.level == second_state.level
+
+
+@pytest.mark.asyncio
+async def test_list_proficiencies_returns_only_target_agent_rows():
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+    await record_tool_invocation(store, AGENT, "Edit", "success", now=T0)
+    await record_tool_invocation(store, "agent-beta", TOOL, "success", now=T0)
+
+    rows = await list_proficiencies(store, AGENT)
+    tool_ids = sorted(row.tool_id for row in rows)
+    assert tool_ids == ["Edit", "Read"]
+
+
+# ── Dispatcher gate wiring (W13 §"Feature-unlock gating") ───────────
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_proficiency_gate_blocks_when_under_required_level():
+    """AC #3 -- low-Lv agent attempts a Lv-3 batch op → refused.
+
+    Wires the helper into the dispatcher and asserts the dispatcher
+    returns a ``tool_proficiency_insufficient`` error envelope when the
+    gate refuses. This is the operator-visible refusal path.
+    """
+    import json
+
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    store = InMemoryToolProficiencyStore()
+    # Seed the agent at Lv 1 so the gate against required_level=3 refuses.
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    dispatcher = ToolDispatcher()
+
+    # Use a Read handler to avoid registering a real batch tool.
+    async def _read(payload):  # noqa: ANN001 - test handler
+        return "ok"
+
+    dispatcher.register("Read", _read)
+
+    async def _gate(tool_name: str, agent_id: str) -> bool:
+        return await can_invoke_at_level(
+            store, agent_id, tool_name, required_level=3, now=T0
+        )
+
+    dispatcher.set_proficiency_gate(_gate, agent_id=AGENT)
+    result = await dispatcher.execute("u-1", "Read", {"file_path": "/tmp/x"})
+    assert result.is_error
+    payload = json.loads(result.content)
+    assert payload["error"] == "tool_proficiency_insufficient"
+    assert payload["agent_id"] == AGENT
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_proficiency_gate_allows_at_or_above_level():
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+    dispatcher = ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001
+        return "ok"
+
+    dispatcher.register("Read", _read)
+
+    async def _gate(tool_name: str, agent_id: str) -> bool:
+        return await can_invoke_at_level(
+            store, agent_id, tool_name, required_level=3, now=T0
+        )
+
+    dispatcher.set_proficiency_gate(_gate, agent_id=AGENT)
+    result = await dispatcher.execute("u-2", "Read", {"file_path": "/tmp/x"})
+    assert not result.is_error
+    assert result.content == "ok"
+
+
+# ── W13.3 (OP-180) feature-unlock gate factory + dispatcher install ─
+
+
+@pytest.mark.asyncio
+async def test_build_feature_unlock_gate_reads_required_level_from_yaml(
+    tmp_path: Path,
+):
+    """W13.3 — the factory closure must consult the YAML per-call.
+
+    A Lv-1 agent against ``mcp__filesystem__write_multiple_files`` (Lv 3)
+    refuses; the same agent against an un-listed tool (defaults to Lv 1)
+    is allowed. Both decisions ride through the same closure.
+    """
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text(
+        "gates:\n"
+        "  mcp__filesystem__write_multiple_files: 3\n"
+        "  Read: 1\n",
+        encoding="utf-8",
+    )
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    gate = build_feature_unlock_gate(store, config_path=config, now=T0)
+
+    # Lv-3 gate refuses a Lv-1 agent.
+    assert (
+        await gate("mcp__filesystem__write_multiple_files", AGENT)
+    ) is False
+    # Lv-1 gate (Read) allows the same agent.
+    assert await gate("Read", AGENT) is True
+    # Un-listed tool defaults to Lv 1 — allowed.
+    assert await gate("AnUnknownTool", AGENT) is True
+
+
+@pytest.mark.asyncio
+async def test_build_feature_unlock_gate_allows_when_agent_at_required_lv(
+    tmp_path: Path,
+):
+    """W13.3 — once the agent reaches the gate's Lv, the gate allows."""
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text(
+        "gates:\n  mcp__filesystem__write_multiple_files: 3\n",
+        encoding="utf-8",
+    )
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id="mcp__filesystem__write_multiple_files",
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+    gate = build_feature_unlock_gate(store, config_path=config, now=T0)
+    assert (
+        await gate("mcp__filesystem__write_multiple_files", AGENT)
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_install_feature_unlock_gate_wires_dispatcher_refusal(
+    tmp_path: Path,
+):
+    """W13.3 — ``install_feature_unlock_gate`` wires the dispatcher so a
+    Lv-1 agent attempting a Lv-3 gated tool surfaces a structured
+    ``tool_proficiency_insufficient`` ``tool_result`` instead of running
+    the handler.
+
+    This is the canonical W13.3 acceptance: a fresh agent attempts a
+    tool the YAML has gated at Lv 3 and the dispatcher refuses the call
+    instead of forwarding to the handler. The test uses ``Read`` as the
+    handler name (the dispatcher validates the name against the schema
+    registry on ``register``); the YAML in this test maps ``Read: 3`` to
+    re-create the same semantics as the shipped
+    ``mcp__filesystem__write_multiple_files: 3`` entry without needing
+    to register a new schema.
+    """
+    import json
+
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 3\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    await record_tool_invocation(store, AGENT, TOOL, "success", now=T0)
+
+    dispatcher = ToolDispatcher()
+
+    handler_calls: list[dict] = []
+
+    async def _read_handler(payload):  # noqa: ANN001 - test handler
+        handler_calls.append(payload)
+        return "ok"
+
+    dispatcher.register("Read", _read_handler)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=AGENT,
+        config_path=config, now=T0,
+    )
+
+    # Lv-1 agent against a Lv-3-required tool → refused.
+    result = await dispatcher.execute("u-1", "Read", {"file_path": "/x"})
+    assert result.is_error
+    payload = json.loads(result.content)
+    assert payload["error"] == "tool_proficiency_insufficient"
+    assert payload["agent_id"] == AGENT
+    assert payload["tool_name"] == "Read"
+    assert handler_calls == []  # gate refused before handler ran
+
+
+@pytest.mark.asyncio
+async def test_install_feature_unlock_gate_allows_when_agent_qualified(
+    tmp_path: Path,
+):
+    """W13.3 — once the agent's proficiency clears the YAML gate, the
+    dispatcher forwards to the handler unchanged. YAML at ``Read: 3``,
+    seeded agent at Lv 3 → handler runs."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 3\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    await store.upsert_state(
+        ToolProficiencyState(
+            agent_id=AGENT,
+            tool_id=TOOL,
+            level=3,
+            invocation_count=60,
+            success_count=50,
+            last_used_at=T0,
+        )
+    )
+
+    dispatcher = ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001
+        return "ok"
+
+    dispatcher.register("Read", _read)
+
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id=AGENT,
+        config_path=config, now=T0,
+    )
+
+    result = await dispatcher.execute("u-2", "Read", {"file_path": "/tmp/x"})
+    assert not result.is_error
+    assert result.content == "ok"
+
+
+def test_install_feature_unlock_gate_rejects_blank_agent_id(tmp_path: Path):
+    """W13.3 — install refuses an empty agent_id because the dispatcher
+    only consults the gate when ``_current_agent_id is not None``.
+    Letting a blank string slip through would silently bypass the gate
+    for every dispatch on that dispatcher instance."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 1\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    dispatcher = ToolDispatcher()
+    with pytest.raises(ValueError):
+        install_feature_unlock_gate(
+            dispatcher, store=store, agent_id="",
+            config_path=config, now=T0,
+        )
+
+
+def test_install_feature_unlock_gate_rescopes_to_new_agent(tmp_path: Path):
+    """W13.3 — re-installing with a different ``agent_id`` is the
+    supported way to re-scope an already-running dispatcher; the public
+    contract advertises this so a long-lived dispatcher can switch
+    between agents without rebuilding."""
+    from backend.agents.tool_dispatcher import ToolDispatcher
+
+    reset_gate_config_cache_for_tests()
+    config = tmp_path / "tool_proficiency_gates.yaml"
+    config.write_text("gates:\n  Read: 1\n", encoding="utf-8")
+    store = InMemoryToolProficiencyStore()
+    dispatcher = ToolDispatcher()
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id="agent-one",
+        config_path=config, now=T0,
+    )
+    assert dispatcher._current_agent_id == "agent-one"
+    install_feature_unlock_gate(
+        dispatcher, store=store, agent_id="agent-two",
+        config_path=config, now=T0,
+    )
+    assert dispatcher._current_agent_id == "agent-two"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_tool_invocation_telemetry_includes_agent_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """OP-182 — dispatcher telemetry carries the agent_id needed by W13."""
+    from backend.agents import tool_dispatcher as td
+
+    calls: list[dict[str, object]] = []
+
+    def _emit(
+        tool_name: str,
+        duration_ms: float,
+        success: bool,
+        args_size_bytes: int,
+        *,
+        agent_id: str | None = None,
+    ) -> None:
+        calls.append({
+            "tool_name": tool_name,
+            "success": success,
+            "agent_id": agent_id,
+        })
+
+    monkeypatch.setattr(td, "emit_tool_invocation", _emit)
+
+    dispatcher = td.ToolDispatcher()
+
+    async def _read(payload):  # noqa: ANN001
+        return "ok"
+
+    dispatcher.register("Read", _read)
+    dispatcher.set_proficiency_gate(None, agent_id=AGENT)
+
+    result = await dispatcher.execute("u-op-182", "Read", {"file_path": "/tmp/x"})
+
+    assert not result.is_error
+    assert calls == [{
+        "tool_name": "Read",
+        "success": True,
+        "agent_id": AGENT,
+    }]
+
+
+# ── Constants sanity ─────────────────────────────────────────────────
+
+
+def test_level_requirements_monotonic():
+    # ADR sanity: thresholds must be monotonic both on counts and ratio.
+    levels = sorted(LEVEL_REQUIREMENTS)
+    counts = [LEVEL_REQUIREMENTS[lv][0] for lv in levels]
+    ratios = [LEVEL_REQUIREMENTS[lv][1] for lv in levels]
+    assert counts == sorted(counts)
+    assert ratios == sorted(ratios)
