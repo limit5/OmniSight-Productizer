@@ -60,9 +60,10 @@ class ReflectionSummary:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        _required("tenant_id", self.tenant_id)
-        _required("ticket_key", self.ticket_key)
-        _required("summary", self.summary)
+        object.__setattr__(self, "tenant_id", _required("tenant_id", self.tenant_id))
+        object.__setattr__(self, "ticket_key", _required("ticket_key", self.ticket_key))
+        object.__setattr__(self, "summary", _required("summary", self.summary))
+        object.__setattr__(self, "failure_type", self.failure_type.strip())
         if self.outcome not in VALID_REFLECTION_OUTCOMES:
             raise ValueError(
                 f"outcome must be one of {sorted(VALID_REFLECTION_OUTCOMES)}"
@@ -70,17 +71,16 @@ class ReflectionSummary:
 
     @property
     def source_path(self) -> str:
-        return f"{REFLECTION_SOURCE_PREFIX}{self.ticket_key.strip()}/{self.outcome}"
+        return f"{REFLECTION_SOURCE_PREFIX}{self.ticket_key}/{self.outcome}"
 
     def text_for_embedding(self) -> str:
         bits = [
-            f"ticket: {self.ticket_key.strip()}",
+            f"ticket: {self.ticket_key}",
             f"outcome: {self.outcome}",
         ]
-        failure_type = self.failure_type.strip()
-        if failure_type:
-            bits.append(f"failure_type: {failure_type}")
-        bits.append(f"summary: {self.summary.strip()}")
+        if self.failure_type:
+            bits.append(f"failure_type: {self.failure_type}")
+        bits.append(f"summary: {self.summary}")
         return "\n".join(bits)
 
     def to_metadata(self) -> dict[str, Any]:
@@ -88,13 +88,12 @@ class ReflectionSummary:
         metadata.update(
             {
                 "kind": REFLECTION_RAG_KIND,
-                "ticket_key": self.ticket_key.strip(),
+                "ticket_key": self.ticket_key,
                 "outcome": self.outcome,
             }
         )
-        failure_type = self.failure_type.strip()
-        if failure_type:
-            metadata["failure_type"] = failure_type
+        if self.failure_type:
+            metadata["failure_type"] = self.failure_type
         return metadata
 
 
