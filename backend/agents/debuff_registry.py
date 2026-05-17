@@ -21,6 +21,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping
 
 DebuffKind = Literal["xp", "routing_weight"]
+DebuffOutcomeStatus = Literal["success", "partial", "fail", "failed"]
 
 BURNOUT_DEBUFF_ID = "burnout"
 STALE_MEMORY_DEBUFF_ID = "stale_memory"
@@ -47,11 +48,13 @@ class DebuffContext:
     """Explicit runtime context used to evaluate active W15 debuffs.
 
     ``consecutive_failures`` is the caller's current failure streak. A success
-    should reset that value before evaluation, which clears Burnout. The
-    ``last_retrained_at`` timestamp is supplied by the caller for Stale Memory.
+    clears Burnout even if the caller still has a stale pre-success failure
+    count. The ``last_retrained_at`` timestamp is supplied by the caller for
+    Stale Memory.
     """
 
     consecutive_failures: int = 0
+    outcome_status: DebuffOutcomeStatus | None = None
     now: datetime | None = None
     last_retrained_at: datetime | None = None
 
@@ -154,6 +157,11 @@ def routing_weight_multiplier_for_last_retrained_at(
 
 
 def _burnout_active(context: DebuffContext) -> bool:
+    if (
+        context.outcome_status is not None
+        and _clean_outcome_status(context.outcome_status) == "success"
+    ):
+        return False
     return context.consecutive_failures >= BURNOUT_FAILURE_COUNT
 
 
@@ -167,6 +175,8 @@ def _stale_memory_active(context: DebuffContext) -> bool:
 def _validate_context(context: DebuffContext) -> None:
     if context.consecutive_failures < 0:
         raise ValueError("consecutive_failures must be >= 0")
+    if context.outcome_status is not None:
+        _clean_outcome_status(context.outcome_status)
     if context.now is not None:
         _utc(context.now)
     if context.last_retrained_at is not None:
@@ -180,6 +190,17 @@ def _clean_debuff_id(debuff_id: str) -> str:
     if not clean:
         raise ValueError("debuff_id must be non-empty")
     return clean
+
+
+def _clean_outcome_status(status: str) -> DebuffOutcomeStatus:
+    if not isinstance(status, str):
+        raise TypeError("outcome_status must be a string")
+    clean = status.strip().lower()
+    if clean not in ("success", "partial", "fail", "failed"):
+        raise ValueError(
+            "outcome_status must be one of: failed, fail, partial, success"
+        )
+    return clean  # type: ignore[return-value]
 
 
 def _utc(value: datetime) -> datetime:
@@ -215,6 +236,7 @@ __all__ = [
     "DebuffContext",
     "DebuffDefinition",
     "DebuffKind",
+    "DebuffOutcomeStatus",
     "UnknownDebuffError",
     "active_debuff_ids_for_context",
     "active_debuffs_for_context",

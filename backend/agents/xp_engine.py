@@ -35,6 +35,7 @@ from typing import Any, Literal, Mapping
 
 from backend.agents.buff_registry import xp_multiplier_for_buff_ids
 from backend.agents.debuff_registry import (
+    BURNOUT_DEBUFF_ID,
     DebuffContext,
     active_debuff_ids_for_context,
     xp_multiplier_for_debuff_ids,
@@ -440,8 +441,15 @@ def _clean_active_debuff_ids(value: Any) -> tuple[str, ...]:
 def _effective_debuff_ids(outcome: TaskOutcome) -> tuple[str, ...]:
     explicit = _clean_active_debuff_ids(outcome.active_debuff_ids)
     inferred = active_debuff_ids_for_context(
-        DebuffContext(consecutive_failures=outcome.consecutive_failures)
+        DebuffContext(
+            consecutive_failures=outcome.consecutive_failures,
+            outcome_status=outcome.status,
+        )
     )
+    if outcome.status == "success":
+        explicit = tuple(
+            debuff_id for debuff_id in explicit if debuff_id != BURNOUT_DEBUFF_ID
+        )
     return tuple(dict.fromkeys(explicit + inferred))
 
 
