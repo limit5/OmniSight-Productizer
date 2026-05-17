@@ -542,9 +542,29 @@ def test_build_prompt_contains_system_and_blocks():
     blocks = ma.parse_conflict_block(SIMPLE_CONFLICT)
     prompt = ma.build_prompt(_base_request(), blocks)
     assert "merge conflict resolution expert" in prompt
+    assert ma.MERGER_PROMPT_VERSION in prompt
     assert "HEAD" in prompt
     assert "feature/greeting" in prompt
     assert "backend/greetings.py" in prompt
+
+
+def test_op1404_prompt_contains_take_both_rubric_and_version():
+    blocks = ma.parse_conflict_block(SIMPLE_CONFLICT)
+    prompt = ma.build_prompt(_base_request(), blocks)
+
+    assert ma.MERGER_PROMPT_VERSION == "merger-prompt-v2-op1404"
+    assert "Take-both feature-preservation rubric" in prompt
+    assert "ADD-vs-ADD distinct symbols" in prompt
+    assert "RENAME DETECTION" in prompt
+    assert "DOCSTRING COLLISION" in prompt
+    assert "SIGNATURE OVERLAP" in prompt
+    assert "ABSTAIN BIAS" in prompt
+    assert "both sides add distinct symbols" in prompt
+    assert "same shape, similar docstring, or" in prompt
+    assert "identical body" in prompt
+    assert "docstring entries for the same parameter" in prompt
+    assert "keep both parameters in the resolved signature" in prompt
+    assert "name the unresolved reason class" in prompt
 
 
 def test_context_pack_contains_full_conflict_file_git_log_and_jira_desc():
@@ -667,6 +687,64 @@ def test_op1403_synthetic_guild_shape_prompt_mentions_guild_and_guild_id():
     assert "def by_id(self, guild_id)" in prompt
     assert "Resolve guild versus guild_id naming collision" in prompt
     assert "Introduce guild_id alongside guild" in prompt
+
+
+def test_op1404_synthetic_add_vs_add_micro_conflict_preserves_both_helpers():
+    conflict = (
+        "def run_pipeline(value):\n"
+        "    return normalize(value)\n"
+        "\n"
+        "<<<<<<< HEAD\n"
+        "def trim_value(value):\n"
+        "    return value.strip()\n"
+        "=======\n"
+        "def coerce_value(value):\n"
+        "    return str(value)\n"
+        ">>>>>>> feature/coerce-value\n"
+    )
+    llm = _FakeLLM({
+        "resolved_block": (
+            "def trim_value(value):\n"
+            "    return value.strip()\n"
+            "\n"
+            "def coerce_value(value):\n"
+            "    return str(value)\n"
+        ),
+        "confidence": 0.97,
+        "rationale": "ADD-vs-ADD distinct helper functions; take both.",
+        "new_logic_detected": False,
+    })
+
+    class _ExplodingPusher:
+        async def push(self, **kwargs):
+            raise AssertionError("pusher should be skipped")
+
+    deps = ma.MergerDeps(
+        llm=llm,
+        pusher=_ExplodingPusher(),
+        reviewer=_FakeReviewer(),
+        test_runner=_test_runner(True),
+    )
+    req = _base_request(
+        file_path="backend/pipeline.py",
+        conflict=conflict,
+        change_id="Iop1404",
+    )
+    req.push_locally = False
+    req.jira_ticket = "OP-1404"
+    req.jira_description = (
+        "Both sides added distinct helper functions; prefer take-both."
+    )
+
+    outcome = _run(ma.resolve_conflict(req, deps=deps))
+
+    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert outcome.resolved_text is not None
+    assert "def trim_value(value):" in outcome.resolved_text
+    assert "def coerce_value(value):" in outcome.resolved_text
+    prompt = llm.calls[0]
+    assert "ADD-vs-ADD distinct symbols" in prompt
+    assert "prefer a take-both resolution" in prompt
 
 
 # ──────────────────────────────────────────────────────────────

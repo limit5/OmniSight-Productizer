@@ -104,6 +104,9 @@ CONTEXT_PACK_TOKEN_LIMIT = int(
 _CONTEXT_PACK_CHARS_PER_TOKEN = 4
 _CONTEXT_PACK_GIT_LOG_LINES = 50
 
+# Bumped for OP-1404: explicit take-both feature-preservation rubric.
+MERGER_PROMPT_VERSION = "merger-prompt-v2-op1404"
+
 # 3-strike rule (mirrors CLAUDE.md L1 Agent Behavior).
 MAX_FAILURES_PER_CHANGE = 3
 
@@ -704,7 +707,51 @@ def reset_failure_counts_for_tests() -> None:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
+TAKE_BOTH_FEATURE_PRESERVATION_RUBRIC = """\
+Take-both feature-preservation rubric:
+
+1. ADD-vs-ADD distinct symbols:
+   - When both sides add distinct symbols, prefer a take-both resolution.
+   - Symbols include functions, classes, parameters, exports, constants,
+     routing branches, metrics fields, validation guards, and side-effect
+     calls.
+   - Keep both additions unless there is concrete rename evidence or the
+     two behaviors are mutually exclusive.
+
+2. RENAME DETECTION:
+   - Treat two new symbols as a possible rename only when they differ
+     mainly by name and share the same shape, similar docstring, or
+     identical body.
+   - Before unifying, check the conflict context, sibling files, symbol
+     table, and call sites supplied in the context pack.
+   - If unifying, prefer the older or more conventional name and preserve
+     all call-site-observable behavior from both sides.
+
+3. DOCSTRING COLLISION:
+   - When both sides add docstring entries for the same parameter, merge
+     by concatenating the descriptions.
+   - Keep both descriptions unless one is a strict duplicate of the other.
+   - Do not let docstring collisions justify dropping either parameter or
+     its implementation.
+
+4. SIGNATURE OVERLAP:
+   - When both sides add new parameters to the same function signature,
+     keep both parameters in the resolved signature.
+   - In the function body, propagate both values to downstream callers
+     using names already present in the conflict or context.
+   - Preserve defaults, keyword-only markers, type annotations, and call
+     ordering unless the context proves a rename.
+
+5. ABSTAIN BIAS:
+   - If you cannot identify whether ADD-vs-ADD, rename detection,
+     docstring collision, or signature overlap applies, abstain.
+   - Emit a low confidence score and name the unresolved reason class in
+     the rationale instead of interleaving lines or picking one side.
+"""
+
+
 SYSTEM_PROMPT = (
+    f"Prompt version: {MERGER_PROMPT_VERSION}\n\n"
     "You are a merge conflict resolution expert.  You receive one Git "
     "conflict block (HEAD side + incoming side) and must produce a "
     "single unified resolution that PRESERVES THE LOGICAL INTENT OF BOTH "
@@ -713,15 +760,9 @@ SYSTEM_PROMPT = (
     "conflict or in the provided file context.  If you cannot preserve "
     "both intents without introducing new logic, output a low confidence "
     "score and explain the ambiguity in the rationale — do NOT fabricate "
-    "a compromise.  Take-both rubric: when the two sides add distinct "
-    "parameters, routing branches, metrics/logging fields, validation "
-    "guards, or side-effect calls, keep both features unless they are "
-    "mutually exclusive.  For edit/edit signature overlap, preserve every "
-    "call-site-observable parameter from both sides and use only names "
-    "already present in either side or in the supplied file context.  For "
-    "param naming collisions, keep the semantic data flow from both halves; "
-    "do not drop a metric, route key, or validation path merely because "
-    "the names overlap.  Output STRICTLY a JSON object matching this schema:\n"
+    "a compromise.\n\n"
+    + TAKE_BOTH_FEATURE_PRESERVATION_RUBRIC
+    + "\nOutput STRICTLY a JSON object matching this schema:\n"
     '{"resolved_block": "<text that replaces the conflict block>",'
     ' "confidence": <float 0..1>,'
     ' "rationale": "<one-paragraph explanation>",'
@@ -1312,8 +1353,10 @@ async def resolve_conflict(
     # ── 5. LLM call ──────────────────────────────────────────────
     context_pack = build_context_pack(request, blocks)
     logger.info(
-        "merger_agent: context_pack_bytes=%d change=%s file=%s",
+        "merger_agent: context_pack_bytes=%d merger_prompt_version=%s "
+        "change=%s file=%s",
         len(context_pack.encode("utf-8")),
+        MERGER_PROMPT_VERSION,
         request.change_number or change_id,
         request.file_path,
     )
@@ -1710,6 +1753,7 @@ __all__ = [
     "MIN_CONFIDENCE_FOR_PLUS_TWO",
     "MergerDeps",
     "MergerLLM",
+    "MERGER_PROMPT_VERSION",
     "MergerReason",
     "MergerRiskTier",
     "PatchsetPushResult",
