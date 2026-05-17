@@ -1855,7 +1855,8 @@ def try_deterministic_merge(
         return None
     for block, match in zip(blocks, matches):
         prefix = req.conflict_text[:match.start()]
-        resolved = _deterministic_block_resolution(block, prefix)
+        suffix = req.conflict_text[match.end():]
+        resolved = _deterministic_block_resolution(block, prefix, suffix)
         if resolved is None:
             return None
         resolved_block, pattern = resolved
@@ -1892,9 +1893,13 @@ def try_deterministic_merge(
 def _deterministic_block_resolution(
     block: ConflictBlock,
     prefix: str,
+    suffix: str = "",
 ) -> tuple[str, str] | None:
     resolvers = (
         lambda head, incoming: _resolve_dunder_all_union(head, incoming, prefix),
+        lambda head, incoming: _resolve_add_method_to_class(
+            block, prefix, suffix,
+        ),
         _resolve_import_union,
         _resolve_distinct_symbol_adds,
         _resolve_dict_literal_adds,
@@ -1909,6 +1914,175 @@ def _deterministic_block_resolution(
 
 def _join_block_lines(lines: list[str]) -> str:
     return "\n".join(lines) + ("\n" if lines else "")
+
+
+def _resolve_add_method_to_class(
+    block: ConflictBlock,
+    prefix: str,
+    suffix: str,
+) -> tuple[str, str] | None:
+    head_source = prefix + _join_block_lines(block.head_lines) + suffix
+    incoming_source = prefix + _join_block_lines(block.incoming_lines) + suffix
+    try:
+        head_tree = ast.parse(head_source)
+        incoming_tree = ast.parse(incoming_source)
+    except SyntaxError:
+        return None
+
+    head_class = _class_containing_line(head_tree, block.start_line)
+    incoming_class = _class_containing_line(incoming_tree, block.start_line)
+    if head_class is None or incoming_class is None:
+        return None
+    if head_class.name != incoming_class.name:
+        return None
+    if _class_header_text(head_source, head_class) != _class_header_text(
+        incoming_source, incoming_class,
+    ):
+        return None
+    if _class_non_method_fingerprint(head_class) != _class_non_method_fingerprint(
+        incoming_class,
+    ):
+        return None
+
+    head_methods = _class_methods(head_class)
+    incoming_methods = _class_methods(incoming_class)
+    shared_names = set(head_methods) & set(incoming_methods)
+    for name in shared_names:
+        if ast.dump(head_methods[name]) != ast.dump(incoming_methods[name]):
+            return None
+
+    head_added = _methods_within_range(
+        head_class, block.start_line, len(block.head_lines),
+    )
+    incoming_added = _methods_within_range(
+        incoming_class, block.start_line, len(block.incoming_lines),
+    )
+    if not head_added or not incoming_added:
+        return None
+    head_added_names = {method.name for method in head_added}
+    incoming_added_names = {method.name for method in incoming_added}
+    if head_added_names & incoming_added_names:
+        return None
+    if not _conflict_range_is_method_only(
+        head_class, block.start_line, len(block.head_lines),
+    ):
+        return None
+    if not _conflict_range_is_method_only(
+        incoming_class, block.start_line, len(block.incoming_lines),
+    ):
+        return None
+
+    resolved = _add_method_to_class_resolution(
+        _class_header_text(head_source, head_class),
+        [_node_text(head_source, method) for method in head_added],
+        [_node_text(incoming_source, method) for method in incoming_added],
+    )
+    if not resolved:
+        return None
+    try:
+        compile(prefix + resolved + suffix, "<deterministic-merge>", "exec")
+    except SyntaxError:
+        return None
+    return resolved, "add_method_to_class"
+
+
+def _class_containing_line(tree: ast.Module, line: int) -> ast.ClassDef | None:
+    classes = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef)
+        and node.lineno <= line
+        and getattr(node, "end_lineno", node.lineno) >= line
+    ]
+    if not classes:
+        return None
+    return max(classes, key=lambda node: node.lineno)
+
+
+def _class_header_text(source: str, node: ast.ClassDef) -> str:
+    lines = source.splitlines()
+    start = min(
+        [decorator.lineno for decorator in node.decorator_list] or [node.lineno],
+    )
+    body_start = min(
+        [child.lineno for child in node.body] or [node.lineno + 1],
+    )
+    return "\n".join(lines[start - 1:body_start - 1])
+
+
+def _class_methods(
+    node: ast.ClassDef,
+) -> dict[str, ast.FunctionDef | ast.AsyncFunctionDef]:
+    methods: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
+    for child in node.body:
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            methods[child.name] = child
+    return methods
+
+
+def _class_non_method_fingerprint(node: ast.ClassDef) -> list[str]:
+    return [
+        ast.dump(child)
+        for child in node.body
+        if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+
+
+def _methods_within_range(
+    class_node: ast.ClassDef,
+    start_line: int,
+    line_count: int,
+) -> list[ast.FunctionDef | ast.AsyncFunctionDef]:
+    if line_count <= 0:
+        return []
+    end_line = start_line + line_count - 1
+    return [
+        child for child in class_node.body
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and child.lineno >= start_line
+        and getattr(child, "end_lineno", child.lineno) <= end_line
+    ]
+
+
+def _conflict_range_is_method_only(
+    class_node: ast.ClassDef,
+    start_line: int,
+    line_count: int,
+) -> bool:
+    if line_count <= 0:
+        return False
+    end_line = start_line + line_count - 1
+    for child in class_node.body:
+        child_end = getattr(child, "end_lineno", child.lineno)
+        overlaps = child.lineno <= end_line and child_end >= start_line
+        if overlaps and not isinstance(
+            child, (ast.FunctionDef, ast.AsyncFunctionDef),
+        ):
+            return False
+    return True
+
+
+def _node_text(
+    source: str,
+    node: ast.AST,
+) -> str:
+    lines = source.splitlines()
+    return "\n".join(lines[node.lineno - 1:getattr(node, "end_lineno")])
+
+
+def _add_method_to_class_resolution(
+    class_def_head: str,
+    head_methods: list[str],
+    incoming_methods: list[str],
+) -> str:
+    del class_def_head
+    method_blocks = [
+        text.rstrip("\n")
+        for text in [*head_methods, *incoming_methods]
+        if text.strip()
+    ]
+    if not method_blocks:
+        return ""
+    return "\n\n".join(method_blocks) + "\n"
 
 
 def _literal_sort_key(value: str) -> tuple[str, str]:

@@ -1648,13 +1648,100 @@ def test_op1404_synthetic_add_vs_add_micro_conflict_preserves_both_helpers():
 
     outcome = _run(ma.resolve_conflict(req, deps=deps))
 
-    assert outcome.reason is ma.MergerReason.deferred_push_to_caller
+    assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
     assert outcome.resolved_text is not None
     assert "def trim_value(value):" in outcome.resolved_text
     assert "def coerce_value(value):" in outcome.resolved_text
-    prompt = llm.calls[0]
-    assert "ADD-vs-ADD distinct symbols" in prompt
-    assert "prefer a take-both resolution" in prompt
+    assert outcome.metadata["deterministic_patterns"] == ["add/add distinct symbol"]
+    assert llm.calls == []
+
+
+def test_deterministic_merge_adds_disjoint_methods_to_class():
+    conflict = (
+        "class TestBuildThenVerify:\n"
+        "    timeout = 120\n"
+        "\n"
+        "    def existing(self):\n"
+        "        return 'ok'\n"
+        "\n"
+        "<<<<<<< HEAD\n"
+        "    def test_pytest_timeout_marks_slow(self):\n"
+        "        return 'slow'\n"
+        "=======\n"
+        "    async def test_replay_verifies_without_push(self):\n"
+        "        return 'green'\n"
+        ">>>>>>> feature/replay-verify\n"
+    )
+    req = _base_request(
+        file_path="backend/tests/test_merge_arbiter.py",
+        conflict=conflict,
+        change_id="Iop1433",
+    )
+    blocks = ma.parse_conflict_block(req.conflict_text)
+
+    outcome = ma.try_deterministic_merge(req, blocks)
+
+    assert outcome is not None
+    assert outcome.reason is ma.MergerReason.resolved_deterministic_merge
+    assert outcome.resolved_text is not None
+    assert "def test_pytest_timeout_marks_slow" in outcome.resolved_text
+    assert "async def test_replay_verifies_without_push" in outcome.resolved_text
+    assert "<<<<<<<" not in outcome.resolved_text
+    assert outcome.metadata["deterministic_patterns"] == ["add_method_to_class"]
+    compile(outcome.resolved_text, "test_merge_arbiter.py", "exec")
+
+
+def test_deterministic_merge_rejects_shared_method_body_edit_in_class():
+    conflict = (
+        "class TestBuildThenVerify:\n"
+        "    def existing(self):\n"
+        "        return 'ok'\n"
+        "\n"
+        "<<<<<<< HEAD\n"
+        "    def test_replay(self):\n"
+        "        return 'head'\n"
+        "=======\n"
+        "    def test_replay(self):\n"
+        "        return 'incoming'\n"
+        ">>>>>>> feature/replay-verify\n"
+    )
+    req = _base_request(
+        file_path="backend/tests/test_merge_arbiter.py",
+        conflict=conflict,
+        change_id="Iop1433",
+    )
+
+    outcome = ma.try_deterministic_merge(
+        req, ma.parse_conflict_block(req.conflict_text),
+    )
+
+    assert outcome is None
+
+
+def test_deterministic_merge_rejects_class_attribute_edit():
+    conflict = (
+        "class TestBuildThenVerify:\n"
+        "    def existing(self):\n"
+        "        return 'ok'\n"
+        "\n"
+        "<<<<<<< HEAD\n"
+        "    timeout = 120\n"
+        "=======\n"
+        "    def test_replay(self):\n"
+        "        return 'green'\n"
+        ">>>>>>> feature/replay-verify\n"
+    )
+    req = _base_request(
+        file_path="backend/tests/test_merge_arbiter.py",
+        conflict=conflict,
+        change_id="Iop1433",
+    )
+
+    outcome = ma.try_deterministic_merge(
+        req, ma.parse_conflict_block(req.conflict_text),
+    )
+
+    assert outcome is None
 
 
 # ──────────────────────────────────────────────────────────────
