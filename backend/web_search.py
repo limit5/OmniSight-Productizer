@@ -49,6 +49,7 @@ from typing import Any, Callable, Literal, Protocol
 
 import httpx
 
+from backend.db_context import current_tenant_id
 from backend.rate_limit import get_limiter
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,17 @@ def _day_key(now: datetime | None = None) -> str:
     return (now or _utcnow()).astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _resolve_tenant(tenant_id: str | None) -> str:
+    """Resolve effective tenant id: explicit -> contextvar -> ``t-default``."""
+
+    if tenant_id:
+        return tenant_id
+    ctx = current_tenant_id()
+    if ctx:
+        return ctx
+    return "t-default"
+
+
 def _credits_for_depth(search_depth: SearchDepth) -> int:
     return 2 if search_depth == "advanced" else 1
 
@@ -301,7 +313,7 @@ class WebSearchRateGate:
         self.key_prefix = key_prefix
 
     def check(self, tenant_id: str) -> None:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         allowed, retry_after = get_limiter().allow(
             f"{self.key_prefix}:{tid}",
             self.config.capacity,
@@ -340,7 +352,7 @@ class RedisWebSearchCostStore:
         self._prefix = key_prefix
 
     def _key(self, tenant_id: str, now: datetime | None = None) -> str:
-        return f"{self._prefix}:{_day_key(now)}:{tenant_id or 't-default'}"
+        return f"{self._prefix}:{_day_key(now)}:{_resolve_tenant(tenant_id)}"
 
     def _ttl_seconds(self, now: datetime | None = None) -> int:
         # Add a fixed 25h TTL rather than calendar math; a stale daily
@@ -356,7 +368,7 @@ class RedisWebSearchCostStore:
         *,
         now: datetime | None = None,
     ) -> WebSearchBudgetCheck:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         amount = max(0.0, float(amount_usd))
         budget = max(0.0, float(daily_budget_usd))
         result = self._reserve_script(
@@ -390,14 +402,14 @@ class RedisWebSearchCostStore:
         amount = max(0.0, float(amount_usd))
         if amount <= 0:
             return
-        key = self._key(tenant_id or "t-default", now)
+        key = self._key(tenant_id, now)
         pipe = self._client.pipeline()
         pipe.decrbyfloat(key, amount)
         pipe.expire(key, self._ttl_seconds(now))
         pipe.execute()
 
     def spend_today(self, tenant_id: str, *, now: datetime | None = None) -> float:
-        raw = self._client.get(self._key(tenant_id or "t-default", now))
+        raw = self._client.get(self._key(tenant_id, now))
         try:
             return max(0.0, float(raw or 0.0))
         except (TypeError, ValueError):
@@ -419,7 +431,7 @@ class InMemoryWebSearchCostStore:
         *,
         now: datetime | None = None,
     ) -> WebSearchBudgetCheck:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         key = (_day_key(now), tid)
         amount = max(0.0, float(amount_usd))
         budget = max(0.0, float(daily_budget_usd))
@@ -454,7 +466,7 @@ class InMemoryWebSearchCostStore:
         *,
         now: datetime | None = None,
     ) -> None:
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         key = (_day_key(now), tid)
         amount = max(0.0, float(amount_usd))
         with self._lock:
@@ -462,7 +474,7 @@ class InMemoryWebSearchCostStore:
 
     def spend_today(self, tenant_id: str, *, now: datetime | None = None) -> float:
         with self._lock:
-            return self._daily.get((_day_key(now), tenant_id or "t-default"), 0.0)
+            return self._daily.get((_day_key(now), _resolve_tenant(tenant_id)), 0.0)
 
     def clear(self) -> None:
         with self._lock:
@@ -489,7 +501,7 @@ class WebSearchCostTracker:
         now: datetime | None = None,
     ) -> WebSearchCostReservation:
         check = self.store.reserve_daily(
-            tenant_id or "t-default",
+            _resolve_tenant(tenant_id),
             amount_usd,
             self.daily_budget_usd,
             now=now,
@@ -512,7 +524,7 @@ class WebSearchCostTracker:
         self.store.refund(reservation.tenant_id, reservation.amount_usd, now=now)
 
     def spend_today(self, tenant_id: str, *, now: datetime | None = None) -> float:
-        return self.store.spend_today(tenant_id or "t-default", now=now)
+        return self.store.spend_today(_resolve_tenant(tenant_id), now=now)
 
 
 def _default_cost_store() -> WebSearchCostStore:
@@ -562,7 +574,7 @@ class TavilyWebSearchClient:
         self,
         query: str,
         *,
-        tenant_id: str = "t-default",
+        tenant_id: str | None = None,
         max_results: int = DEFAULT_MAX_RESULTS,
         search_depth: SearchDepth = "basic",
         topic: SearchTopic = "general",
@@ -573,7 +585,7 @@ class TavilyWebSearchClient:
         """Execute a Tavily search after tenant rate and cost gates."""
 
         current = now or _utcnow()
-        tid = tenant_id or "t-default"
+        tid = _resolve_tenant(tenant_id)
         cleaned_query = query.strip()
         if not cleaned_query:
             return self._error_response(
