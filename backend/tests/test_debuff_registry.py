@@ -74,6 +74,31 @@ def test_registry_contains_documented_debuffs() -> None:
     assert set(DEBUFF_DEFINITIONS) == {BURNOUT_DEBUFF_ID, STALE_MEMORY_DEBUFF_ID}
 
 
+def test_public_exports_remain_stable() -> None:
+    assert debuff_registry.__all__ == [
+        "BURNOUT_DEBUFF_ID",
+        "BURNOUT_FAILURE_COUNT",
+        "BURNOUT_XP_MULTIPLIER",
+        "DEBUFF_DEFINITIONS",
+        "STALE_MEMORY_DEBUFF_ID",
+        "STALE_MEMORY_IDLE_SECONDS",
+        "STALE_MEMORY_ROUTING_WEIGHT_MULTIPLIER",
+        "DebuffContext",
+        "DebuffDefinition",
+        "DebuffKind",
+        "DebuffOutcomeStatus",
+        "UnknownDebuffError",
+        "active_debuff_ids_for_context",
+        "active_debuffs_for_context",
+        "get_debuff_definition",
+        "list_debuff_definitions",
+        "routing_weight_multiplier_for_context",
+        "routing_weight_multiplier_for_last_retrained_at",
+        "xp_multiplier_for_context",
+        "xp_multiplier_for_debuff_ids",
+    ]
+
+
 def test_list_debuff_definitions_preserves_registry_order() -> None:
     listed = list_debuff_definitions()
     assert tuple(d.debuff_id for d in listed) == tuple(DEBUFF_DEFINITIONS)
@@ -213,6 +238,54 @@ def test_combined_burnout_and_stale_memory_keep_separate_axes() -> None:
     assert routing_weight_multiplier_for_context(context) == pytest.approx(
         STALE_MEMORY_ROUTING_WEIGHT_MULTIPLIER
     )
+
+
+def test_active_debuff_rule_order_is_burnout_then_stale_memory() -> None:
+    stale_retrained = _NOW - timedelta(seconds=STALE_MEMORY_IDLE_SECONDS)
+    context = DebuffContext(
+        consecutive_failures=BURNOUT_FAILURE_COUNT,
+        now=_NOW,
+        last_retrained_at=stale_retrained,
+    )
+
+    assert active_debuff_ids_for_context(context) == (
+        BURNOUT_DEBUFF_ID,
+        STALE_MEMORY_DEBUFF_ID,
+    )
+
+
+@pytest.mark.parametrize(
+    ("debuff_ids", "expected_xp", "expected_routing_weight"),
+    [
+        ((), 1.0, 1.0),
+        ((BURNOUT_DEBUFF_ID,), BURNOUT_XP_MULTIPLIER, 1.0),
+        ((STALE_MEMORY_DEBUFF_ID,), 1.0, STALE_MEMORY_ROUTING_WEIGHT_MULTIPLIER),
+        (
+            (BURNOUT_DEBUFF_ID, STALE_MEMORY_DEBUFF_ID),
+            BURNOUT_XP_MULTIPLIER,
+            STALE_MEMORY_ROUTING_WEIGHT_MULTIPLIER,
+        ),
+    ],
+)
+def test_shared_debuff_multiplier_preserves_empty_known_and_mixed_kind_inputs(
+    debuff_ids: tuple[str, ...],
+    expected_xp: float,
+    expected_routing_weight: float,
+) -> None:
+    assert xp_multiplier_for_debuff_ids(debuff_ids) == pytest.approx(expected_xp)
+    assert debuff_registry._multiplier_for_debuff_ids(  # noqa: SLF001
+        debuff_ids, "routing_weight"
+    ) == pytest.approx(expected_routing_weight)
+
+
+@pytest.mark.parametrize("kind", ["xp", "routing_weight"])
+def test_shared_debuff_multiplier_preserves_unknown_id_validation(
+    kind: debuff_registry.DebuffKind,
+) -> None:
+    with pytest.raises(UnknownDebuffError):
+        debuff_registry._multiplier_for_debuff_ids(  # noqa: SLF001
+            ("does-not-exist",), kind
+        )
 
 
 # ── signature annotation drift guard ────────────────────────────────
