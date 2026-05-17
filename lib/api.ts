@@ -117,6 +117,8 @@ export type SSEEvent =
         push_sha: string
         awaiting_since: number
         jira_ticket: string
+        guild_id?: string
+        size?: string
         timestamp: string
       }
     }
@@ -4648,6 +4650,8 @@ export interface AwaitingHumanEntry {
   awaiting_since: number
   jira_ticket: string
   age_seconds: number
+  guild_id?: string
+  size?: string
 }
 
 export interface OrchestrationSnapshot {

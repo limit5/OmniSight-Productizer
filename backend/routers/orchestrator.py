@@ -296,6 +296,10 @@ class MergeConflictRequest(BaseModel):
     additional_files: list[str] = Field(default_factory=list)
     jira_ticket: str = ""
     catc_owner: str = ""
+    guild_id: str = ""
+    size: str = ""
+    t_shirt_size: str = ""
+    tshirt_size: str = ""
 
     model_config = {"extra": "allow"}
 
@@ -361,6 +365,8 @@ async def merge_conflict_endpoint(
         additional_files=list(model.additional_files),
         jira_ticket=model.jira_ticket,
         catc_owner=model.catc_owner,
+        guild_id=model.guild_id,
+        size=model.size or model.t_shirt_size or model.tshirt_size,
     )
     outcome = await _arb.on_merge_conflict_webhook(task)
 

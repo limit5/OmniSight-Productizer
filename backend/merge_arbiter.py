@@ -125,6 +125,8 @@ class MergeConflictTask:
     additional_files: list[str] = field(default_factory=list)
     jira_ticket: str = ""                # parent story (for abstain ticket)
     catc_owner: str = ""                 # original CATC assignee
+    guild_id: str = ""
+    size: str = ""
     # OP-1196 phase 3 — when False, the merger pipeline runs through
     # the LLM and populates ``ResolutionOutcome.resolved_text`` but
     # the in-process push step is SKIPPED. The caller (typically the
@@ -149,6 +151,10 @@ class MergeConflictTask:
             additional_files=list(d.get("additional_files") or []),
             jira_ticket=str(d.get("jira_ticket") or ""),
             catc_owner=str(d.get("catc_owner") or ""),
+            guild_id=str(d.get("guild_id") or d.get("guild") or ""),
+            size=str(
+                d.get("size") or d.get("t_shirt_size") or d.get("tshirt_size") or ""
+            ),
             # OP-1196 phase 3 — default True for backwards compat. The
             # daemon sets this to False; older clients that don't
             # know about the field stay on the in-process push path.
@@ -433,6 +439,8 @@ async def _route_merger_outcome(
                 push_sha=outcome.push_sha,
                 awaiting_since=now,
                 jira_ticket=task.jira_ticket,
+                guild_id=task.guild_id,
+                size=task.size,
             )
         except Exception as exc:                          # pragma: no cover
             logger.debug("arbiter: awaiting-human registry update failed: %s", exc)
@@ -448,6 +456,8 @@ async def _route_merger_outcome(
                 "push_sha": outcome.push_sha,
                 "awaiting_since": now,
                 "jira_ticket": task.jira_ticket,
+                "guild_id": task.guild_id,
+                "size": task.size,
             },
         )
         return ArbiterOutcome(

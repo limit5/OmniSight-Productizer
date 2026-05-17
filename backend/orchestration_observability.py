@@ -73,6 +73,8 @@ class AwaitingHumanEntry:
     push_sha: str = ""
     awaiting_since: float = 0.0
     jira_ticket: str = ""
+    guild_id: str = ""
+    size: str = ""
 
     @property
     def age_seconds(self) -> float:
@@ -101,6 +103,8 @@ def register_awaiting_human(
     push_sha: str = "",
     awaiting_since: float | None = None,
     jira_ticket: str = "",
+    guild_id: str = "",
+    size: str = "",
 ) -> AwaitingHumanEntry:
     """Insert / refresh a change in the awaiting-human registry.
 
@@ -122,6 +126,8 @@ def register_awaiting_human(
             existing.review_url = review_url or existing.review_url
             existing.push_sha = push_sha or existing.push_sha
             existing.jira_ticket = jira_ticket or existing.jira_ticket
+            existing.guild_id = guild_id or existing.guild_id
+            existing.size = size or existing.size
             entry = existing
         else:
             entry = AwaitingHumanEntry(
@@ -134,6 +140,8 @@ def register_awaiting_human(
                 push_sha=push_sha,
                 awaiting_since=now,
                 jira_ticket=jira_ticket,
+                guild_id=guild_id,
+                size=size,
             )
             _awaiting[change_id] = entry
     _refresh_awaiting_gauge()
@@ -497,6 +505,8 @@ def emit_change_awaiting_human(
     push_sha: str = "",
     awaiting_since: float | None = None,
     jira_ticket: str = "",
+    guild_id: str = "",
+    size: str = "",
     broadcast_scope: str | None = None,
     tenant_id: str | None = None,
 ) -> None:
@@ -509,6 +519,8 @@ def emit_change_awaiting_human(
         "push_sha": push_sha,
         "awaiting_since": float(awaiting_since) if awaiting_since else time.time(),
         "jira_ticket": jira_ticket,
+        "guild_id": guild_id,
+        "size": size,
     }, helper_name="emit_change_awaiting_human",
        broadcast_scope=broadcast_scope,
        tenant_id=tenant_id)
