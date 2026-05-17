@@ -915,6 +915,7 @@ _provider_failures: dict[str, float] = {}  # provider → last_failure_timestamp
 PROVIDER_COOLDOWN = 300  # 5 minutes — don't retry a failed provider within this window
 _PROVIDER_FAILURES_MAX = 256  # cap to bound memory
 _MODEL_MAPPING_MODE_ENV = "OMNISIGHT_MODEL_MAPPING_MODE"
+_MODEL_MAPPING_DEFAULT_MODE = "advisory"
 _MODEL_MAPPING_MODES = frozenset({"enforce", "warn", "advisory"})
 
 # Lock guards composite read-modify-write on _provider_failures (record +
@@ -922,6 +923,24 @@ _MODEL_MAPPING_MODES = frozenset({"enforce", "warn", "advisory"})
 # from another thread/coroutine would raise RuntimeError.
 import threading as _threading
 _provider_failures_lock = _threading.Lock()
+
+
+def _model_mapping_mode(configured_mode: object | None = None) -> str:
+    """Resolve BP.F model-mapping mode from env, config, then default."""
+    mode = os.environ.get(_MODEL_MAPPING_MODE_ENV, "").strip().lower()
+    if not mode and isinstance(configured_mode, str):
+        mode = configured_mode.strip().lower()
+    if not mode:
+        return _MODEL_MAPPING_DEFAULT_MODE
+    if mode not in _MODEL_MAPPING_MODES:
+        logger.warning(
+            "Unknown %s/config mode=%r; using %s model mapping mode",
+            _MODEL_MAPPING_MODE_ENV,
+            mode,
+            _MODEL_MAPPING_DEFAULT_MODE,
+        )
+        return _MODEL_MAPPING_DEFAULT_MODE
+    return mode
 
 
 def _model_mapping_guardrail_allows(provider: str, model: str | None) -> bool:
@@ -960,18 +979,7 @@ def _model_mapping_guardrail_allows(provider: str, model: str | None) -> bool:
     if provider_id in providers:
         return True
 
-    mode = (
-        os.environ.get(_MODEL_MAPPING_MODE_ENV, "").strip().lower()
-        or (configured_mode.strip().lower() if isinstance(configured_mode, str) else "")
-        or "advisory"
-    )
-    if mode not in _MODEL_MAPPING_MODES:
-        logger.warning(
-            "Unknown %s=%r; using advisory model mapping mode",
-            _MODEL_MAPPING_MODE_ENV,
-            mode,
-        )
-        mode = "advisory"
+    mode = _model_mapping_mode(configured_mode)
     message = (
         "LLM provider mapping violation: provider=%r model=%r is absent "
         "from configs/model_mapping.yaml providers=%r"
