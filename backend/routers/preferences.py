@@ -1,4 +1,17 @@
-"""J4 — User preferences API.
+"""User-preference HTTP surface for OmniSight clients.
+
+Backs the per-user key/value store that holds UI state across the
+product: generic ``/user-preferences`` CRUD, onboarding-tour seen
+flags (``tour_seen``, multi-provider, RPG, RPG character card),
+multi-provider modal action records, and war-room panel layouts.
+Mutations persist to the ``user_preferences`` PG table via the
+asyncpg pool and are best-effort broadcast on the event bus so a
+second device owned by the same user re-syncs without polling.
+Multi-provider onboarding decisions are additionally audit-logged,
+and a first-time skip rate above ``MP_ONBOARDING_SKIP_RATE_THRESHOLD``
+raises a P2 notification.
+
+J4 — User preferences API.
 
 GET  /user-preferences         all prefs for current user
 GET  /user-preferences/{key}   single pref
