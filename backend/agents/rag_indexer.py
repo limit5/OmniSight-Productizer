@@ -556,7 +556,15 @@ def _first_markdown_header(lines: list[str]) -> str:
 
 
 def _normalise_rel_path(path: str) -> str:
-    return path.replace("\\", "/").strip().lstrip("./")
+    rel = path.replace("\\", "/").strip()
+    while rel.startswith("./"):
+        rel = rel[2:]
+    if rel.startswith("/"):
+        return ""
+    parts = [part for part in rel.split("/") if part and part != "."]
+    if any(part == ".." for part in parts):
+        return ""
+    return "/".join(parts)
 
 
 def _path_has_skip_dir(rel_path: str) -> bool:
