@@ -85,7 +85,11 @@ async def parse(req: ParseRequest,
             ask_fn = live_ask_fn
             model = f"{_s.llm_provider}/{_s.get_model_name()}"
         except Exception as exc:
-            logger.debug("intent/parse: LLM unavailable, heuristic path: %s", exc)
+            logger.debug(
+                "intent/parse: LLM unavailable (use_llm=%s, text_len=%d), "
+                "falling back to heuristic path: %s",
+                req.use_llm, len(req.text), exc,
+            )
 
     parsed = await _ip.parse_intent(req.text, ask_fn=ask_fn, model=model)
     body = parsed.to_dict()
@@ -120,8 +124,9 @@ async def clarify(req: ClarifyRequest,
         # fail loudly rather than silently doing nothing.
         raise HTTPException(
             status_code=422,
-            detail=f"unknown conflict_id={req.conflict_id!r} or "
-                   f"option_id={req.option_id!r}",
+            detail=f"intent/clarify: unknown conflict_id={req.conflict_id!r} "
+                   f"or option_id={req.option_id!r} for raw_text "
+                   f"(len={len(ps.raw_text)})",
         )
 
     # Phase 68-D: persist the operator's pick to L3 so next parse
@@ -135,7 +140,12 @@ async def clarify(req: ClarifyRequest,
             operator_email=getattr(_user, "email", None),
         )
     except Exception as exc:
-        logger.debug("intent/clarify: memory record failed: %s", exc)
+        logger.debug(
+            "intent/clarify: memory record failed for "
+            "conflict_id=%r option_id=%r operator=%r: %s",
+            req.conflict_id, req.option_id,
+            getattr(_user, "email", None), exc,
+        )
 
     body = updated.to_dict()
     # Re-annotate — a subsequent conflict (second round) should
@@ -160,10 +170,21 @@ async def ingest_repo(req: IngestRepoRequest,
     try:
         spec, intro = await _ingest(req.url)
     except ValueError as exc:
+        logger.warning(
+            "intent/ingest-repo: invalid url=%r: %s", req.url, exc,
+        )
         raise HTTPException(status_code=422, detail=str(exc))
     except PermissionError as exc:
+        logger.warning(
+            "intent/ingest-repo: permission denied for url=%r: %s",
+            req.url, exc,
+        )
         raise HTTPException(status_code=403, detail=str(exc))
     except RuntimeError as exc:
+        logger.warning(
+            "intent/ingest-repo: clone/introspect failed for url=%r: %s",
+            req.url, exc,
+        )
         raise HTTPException(status_code=502, detail=str(exc))
 
     body = spec.to_dict()
@@ -192,7 +213,11 @@ async def upload_docs(
 ) -> dict:
     """Parse uploaded doc files and return a merged ParsedSpec."""
     if not files:
-        raise HTTPException(status_code=422, detail="No files uploaded")
+        raise HTTPException(
+            status_code=422,
+            detail="intent/upload-docs: no files in request (expected >=1 "
+                   "multipart File entry)",
+        )
 
     file_results: list[dict] = []
     combined_text_parts: list[str] = []
@@ -201,17 +226,32 @@ async def upload_docs(
         name = uf.filename or "unknown"
         ext = Path(name).suffix.lower()
         if ext not in _ALLOWED_DOC_EXTENSIONS:
+            logger.info(
+                "intent/upload-docs: rejecting %r — extension %r not in "
+                "allowed set %s",
+                name, ext, sorted(_ALLOWED_DOC_EXTENSIONS),
+            )
             file_results.append({"name": name, "status": "rejected", "reason": f"unsupported extension: {ext}"})
             continue
 
         content = await uf.read()
         if len(content) > _MAX_DOC_SIZE:
+            logger.info(
+                "intent/upload-docs: rejecting %r — size %d bytes exceeds "
+                "limit %d bytes",
+                name, len(content), _MAX_DOC_SIZE,
+            )
             file_results.append({"name": name, "status": "rejected", "reason": "file too large (>2MB)"})
             continue
 
         try:
             text = content.decode("utf-8", errors="replace")
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "intent/upload-docs: utf-8 decode failed for %r "
+                "(size=%d): %s",
+                name, len(content), exc,
+            )
             file_results.append({"name": name, "status": "error", "reason": "decode failed"})
             continue
 
@@ -231,7 +271,11 @@ async def upload_docs(
         ask_fn = live_ask_fn
         model = f"{_s.llm_provider}/{_s.get_model_name()}"
     except Exception as exc:
-        logger.debug("intent/upload-docs: LLM unavailable: %s", exc)
+        logger.debug(
+            "intent/upload-docs: LLM unavailable "
+            "(accepted_files=%d, combined_text_len=%d): %s",
+            len(combined_text_parts), len(combined_text), exc,
+        )
 
     parsed = await _ip.parse_intent(combined_text, ask_fn=ask_fn, model=model)
     body = parsed.to_dict()
