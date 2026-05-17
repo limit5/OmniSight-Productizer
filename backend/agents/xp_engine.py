@@ -11,7 +11,7 @@ W4 sub-wave coverage in this module
 - W4.2 (OP-133 / OP-1350): ``level_threshold`` / ``level_for_xp`` -- the
   ``100 * N**1.4`` cumulative-XP curve plus the ``MAX_LEVEL = 80`` hard cap
   that delivers the ADR-0008 "sigmoid late-game" property.
-- W4.3 (OP-134): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
+- W4.3 (OP-1351): ``OUTCOME_MULTIPLIERS`` + ``TIER_L_PLUS_MULTIPLIER`` +
   ``FIRST_TIME_SKILL_MULTIPLIER``.
 - W4.4 (OP-135): ``DUPLICATE_TASK_MULTIPLIER`` anti-grind clamp.
 - W18.2 (OP-1389): secondary-class XP earns 0.5× before Lv 30 and
@@ -47,11 +47,11 @@ BASE_TASK_XP = 100
 LEVEL_CURVE_BASE_XP = 100
 MAX_LEVEL = 80
 LEVEL_CURVE_EXPONENT = 1.4
-# W4.3 (OP-134): Tier-L+ tasks earn a flat 2.0× XP bump on top of the
+# W4.3 (OP-1351): Tier-L+ tasks earn a flat 2.0× XP bump on top of the
 # outcome multiplier per ADR-0008 §"Outcome multipliers" -- stacks
 # multiplicatively with success/partial/fail and with first-time-skill.
 TIER_L_PLUS_MULTIPLIER = 2.0
-# W4.3 (OP-134): The first task that exercises a new (agent, skill) pair
+# W4.3 (OP-1351): The first task that exercises a new (agent, skill) pair
 # earns a 3.0× XP bump per ADR-0008 -- discovery reward, stacks with
 # outcome and Tier-L+ multipliers.
 FIRST_TIME_SKILL_MULTIPLIER = 3.0
@@ -71,7 +71,7 @@ SECONDARY_CLASS_FULL_XP_LEVEL = 30
 SECONDARY_CLASS_RAMP_MULTIPLIER = 0.5
 HYBRID_SYNERGY_PARTY_XP_MULTIPLIER = 1.15
 
-# W4.3 (OP-134): outcome → XP multiplier per ADR-0008 §"Outcome
+# W4.3 (OP-1351): outcome → XP multiplier per ADR-0008 §"Outcome
 # multipliers". ``failed`` is an alias for ``fail`` (runner emits either
 # spelling); they MUST stay in lock-step. Tier-L+ and first-time-skill
 # bumps stack multiplicatively on top of this base multiplier inside
@@ -325,7 +325,7 @@ def _validate_outcome(outcome: TaskOutcome) -> None:
 
 
 def _outcome_multiplier(outcome: TaskOutcome) -> float:
-    """RPG.W4.3 (OP-134) -- compose the per-task XP multiplier.
+    """RPG.W4.3 (OP-1351) -- compose the per-task XP multiplier.
 
     Stacking order is multiplicative and stable: outcome → Tier-L+ →
     first-time-skill → W15 buffs → W15 debuffs → W4.4 anti-grind →
