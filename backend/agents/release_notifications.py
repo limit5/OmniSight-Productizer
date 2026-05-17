@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -23,6 +24,7 @@ DEFAULT_META_BASE_URL = os.environ.get(
     "https://soraapp.atlassian.net/browse",
 )
 PUBLISHED_STATUS_NAMES = frozenset({"Published", "Done", "Closed", "Resolved", "公開済み"})
+ACTION_TAG_RE = re.compile(r"^\[(BOT|OP|META|REF|GATE|HOLD)\]\s*")
 
 
 @dataclass(frozen=True)
@@ -87,6 +89,10 @@ def _version_from_labels(labels: list[str]) -> str | None:
     return None
 
 
+def _strip_action_tag(summary: str) -> str:
+    return ACTION_TAG_RE.sub("", summary)
+
+
 def _tier_for_version(version: str) -> str:
     return "rc" if "-rc" in version else "prod"
 
@@ -113,7 +119,9 @@ def _meta_key_from_issue(fields: dict[str, Any]) -> str | None:
                 if isinstance(linked_fields, dict)
                 else ""
             )
-            if "meta:release" in linked_labels or summary.startswith("RELEASE-"):
+            if "meta:release" in linked_labels or _strip_action_tag(summary).startswith(
+                "RELEASE-"
+            ):
                 return str(issue["key"])
     return None
 
