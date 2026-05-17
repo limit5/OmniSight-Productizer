@@ -22,6 +22,10 @@ ChapterStatus = Literal["locked", "active", "complete"]
 DEFAULT_CHAPTER_COUNT = 4
 DEFAULT_PROGRESS_BAR_WIDTH = 20
 
+# Percent scale: both the decimal→percent multiplier and the upper cap
+# returned by `_percent` (results above 100% are clamped).
+PERCENT_SCALE = 100
+
 
 @dataclass(frozen=True)
 class CampaignChapter:
@@ -184,7 +188,7 @@ def _required(field: str, value: str) -> str:
 
 
 def _percent(completed: int, total: int) -> int:
-    return min(100, math.floor((completed / total) * 100))
+    return min(PERCENT_SCALE, math.floor((completed / total) * PERCENT_SCALE))
 
 
 def _progress_bar(completed: int, total: int, width: int) -> str:
