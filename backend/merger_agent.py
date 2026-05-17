@@ -224,6 +224,14 @@ class ConflictRisk:
     reasons: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class WorkspaceReadFailure:
+    """Sentinel for sibling-file workspace reads that could not supply text."""
+
+    reason: str
+    detail: str = ""
+
+
 @dataclass
 class ConflictRequest:
     """Input envelope — what the orchestrator hands the merger."""
@@ -846,17 +854,33 @@ def _safe_workspace_file(workspace: str | None, rel_path: str) -> Path | None:
     return target
 
 
-def _read_workspace_text(workspace: str | None, rel_path: str) -> str:
+def _read_workspace_text(
+    workspace: str | None,
+    rel_path: str,
+) -> str | WorkspaceReadFailure:
     target = _safe_workspace_file(workspace, rel_path)
     if target is None:
-        return ""
+        return WorkspaceReadFailure(
+            reason="unsafe_path",
+            detail="path is outside workspace or workspace is unavailable",
+        )
     try:
         raw = target.read_bytes()
+    except FileNotFoundError:
+        return WorkspaceReadFailure(reason="missing_file", detail="file not found")
     except OSError:
-        return ""
+        return WorkspaceReadFailure(reason="read_error", detail="OSError")
     if b"\x00" in raw[:8192]:
         return "<binary file>"
     return raw.decode("utf-8", errors="replace")
+
+
+def _render_workspace_read_failure(
+    path: str,
+    failure: WorkspaceReadFailure,
+) -> str:
+    detail = f": {failure.detail}" if failure.detail else ""
+    return f"[workspace read failed: {failure.reason} for {path}{detail}]"
 
 
 def _git_region_log(
@@ -899,18 +923,39 @@ def _collect_file_contents(req: ConflictRequest) -> dict[str, str]:
         if path == req.file_path:
             out[path] = req.conflict_text
             continue
-        supplied = req.sibling_file_contents.get(path, "")
-        out[path] = supplied or _read_workspace_text(req.workspace, path)
+        if path in req.sibling_file_contents:
+            out[path] = req.sibling_file_contents[path]
+            continue
+        content = _read_workspace_text(req.workspace, path)
+        if isinstance(content, WorkspaceReadFailure):
+            logger.warning(
+                "merger_agent: sibling workspace read failed "
+                "jira=%s change=%s path=%s reason=%s detail=%s",
+                req.jira_ticket or "(none)",
+                req.change_number or req.change_id or "(unknown)",
+                path,
+                content.reason,
+                content.detail,
+            )
+            out[path] = _render_workspace_read_failure(path, content)
+            continue
+        out[path] = content
     for path, content in req.sibling_file_contents.items():
         if path and path not in out:
             out[path] = content
     return out
 
 
-def _truncate_section(title: str, content: str, remaining: int) -> str:
+def _truncate_section(
+    title: str,
+    content: str,
+    remaining: int,
+    *,
+    empty_label: str = "(none supplied)",
+) -> str:
     if remaining <= 0:
         return ""
-    body = content.strip() or "(none supplied)"
+    body = content.strip() or empty_label
     section = f"## {title}\n{body}\n"
     if len(section) <= remaining:
         return section
@@ -938,20 +983,41 @@ def build_context_pack(req: ConflictRequest, blocks: list[ConflictBlock]) -> str
         req.workspace, req.file_path, blocks,
     )
 
-    sections: list[tuple[str, str]] = [
-        (f"Conflict file: {req.file_path}", conflict_file),
-        (f"Recent git log for {req.file_path}", git_log),
-        (f"JIRA ticket {req.jira_ticket or '(unknown)'}", req.jira_description),
+    sections: list[tuple[str, str, str]] = [
+        (f"Conflict file: {req.file_path}", conflict_file, "(none supplied)"),
+        (
+            f"Recent git log for {req.file_path}",
+            git_log,
+            "(none supplied)",
+        ),
+        (
+            f"JIRA ticket {req.jira_ticket or '(unknown)'}",
+            req.jira_description,
+            "(none supplied)",
+        ),
     ]
     for path in sorted(file_contents):
-        sections.append((f"Sibling file: {path}", file_contents[path]))
+        sections.append((
+            f"Sibling file: {path}",
+            file_contents[path],
+            "(file is empty)",
+        ))
     for path in sorted(req.symbol_table):
-        sections.append((f"Develop symbol table: {path}", req.symbol_table[path]))
+        sections.append((
+            f"Develop symbol table: {path}",
+            req.symbol_table[path],
+            "(none supplied)",
+        ))
 
     out = ""
-    for title, content in sections:
+    for title, content, empty_label in sections:
         sep = "\n\n" if out else ""
-        chunk = _truncate_section(title, content, limit - len(out) - len(sep))
+        chunk = _truncate_section(
+            title,
+            content,
+            limit - len(out) - len(sep),
+            empty_label=empty_label,
+        )
         if not chunk:
             break
         out = f"{out}{sep}{chunk}"
