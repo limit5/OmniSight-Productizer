@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import pytest
 
+from backend import imaging_pipeline
 from backend.imaging_pipeline import (
     BitDepth,
     ColorMode,
@@ -156,6 +157,15 @@ class TestEnums:
 # ═══════════════════════════════════════════════════════════════════════
 
 class TestScannerISP:
+    def test_load_config_missing_file_returns_empty_config(self, tmp_path):
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(imaging_pipeline, "_CONFIG_PATH", tmp_path / "missing.yaml")
+            mp.setattr(imaging_pipeline, "_config", None)
+
+            assert imaging_pipeline.list_sensor_types() == []
+
+        imaging_pipeline.reload_config()
+
     def test_list_sensor_types(self):
         sensors = list_sensor_types()
         assert len(sensors) == 2
@@ -318,6 +328,74 @@ class TestScannerISP:
         )
         assert result.success is True
         assert "color_matrix" not in result.stages_applied
+
+    def test_run_isp_pipeline_white_balance_empty_pixels(self):
+        result = run_isp_pipeline(
+            "cis", "grey_8bit",
+            stage_ids=["white_balance"],
+            raw_pixels=[],
+        )
+
+        assert result.success is True
+        assert result.stages_applied == ["white_balance"]
+        assert result.output_pixels == 0
+
+    def test_run_isp_pipeline_white_balance_zero_peak_grey(self):
+        result = run_isp_pipeline(
+            "cis", "grey_8bit",
+            stage_ids=["white_balance"],
+            raw_pixels=[0, 0, 0],
+        )
+
+        assert result.success is True
+        assert result.output_pixels == 3
+
+    def test_run_isp_pipeline_white_balance_zero_peak_rgb(self):
+        result = run_isp_pipeline(
+            "ccd", "rgb_24bit",
+            stage_ids=["white_balance"],
+            raw_pixels=[0, 0, 0],
+        )
+
+        assert result.success is True
+        assert result.output_channels == 3
+
+    def test_run_isp_pipeline_color_matrix_preserves_trailing_pixels(self):
+        result = run_isp_pipeline(
+            "ccd", "rgb_24bit",
+            stage_ids=["color_matrix"],
+            raw_pixels=[10, 20, 30, 40],
+        )
+
+        assert result.success is True
+        assert result.output_pixels == 4
+
+    def test_run_isp_pipeline_short_edge_and_noise_inputs(self):
+        edge = run_isp_pipeline(
+            "cis", "grey_8bit",
+            stage_ids=["edge_enhancement"],
+            raw_pixels=[10, 20],
+        )
+        noise = run_isp_pipeline(
+            "cis", "grey_8bit",
+            stage_ids=["noise_reduction"],
+            raw_pixels=[10, 20],
+        )
+
+        assert edge.success is True
+        assert noise.success is True
+        assert edge.output_pixels == 2
+        assert noise.output_pixels == 2
+
+    def test_run_isp_pipeline_deskew_stage(self):
+        result = run_isp_pipeline(
+            "cis", "grey_8bit",
+            stage_ids=["deskew"],
+            raw_pixels=[10, 20, 30],
+        )
+
+        assert result.success is True
+        assert result.stages_applied == ["deskew"]
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -660,6 +738,9 @@ class TestICCProfiles:
         size = struct.unpack(">I", p.data[:4])[0]
         assert size == p.size
         assert p.data[36:40] == b"acsp"
+
+    def test_encode_xyz_invalid_length_uses_zero_triplet(self):
+        assert imaging_pipeline._encode_xyz([0.1, 0.2]) == b"\x00" * 12
 
     def test_embed_icc_profile_tiff(self):
         r = embed_icc_profile(b"fake_tiff", "tiff", b"fake_icc")
