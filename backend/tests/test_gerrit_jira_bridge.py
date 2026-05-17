@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -658,6 +659,49 @@ def test_malformed_line_increments_parse_errors_and_continues() -> None:
     b.run_once_from_lines(["{bad", _merged_event()])
     assert b.counters.parse_errors == 1
     assert b.counters.transitions_made == 1
+
+
+def test_stream_startup_reaps_stale_merger_verify_worktree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    scratch_root = tmp_path / "tmp"
+    scratch_root.mkdir()
+    stale = scratch_root / "merger-verify-stale"
+    fresh = scratch_root / "merger-verify-fresh"
+    stale.mkdir()
+    fresh.mkdir()
+    (stale / "worktree").mkdir()
+    (fresh / "worktree").mkdir()
+    now = time.time()
+    old = now - bridge.MERGER_VERIFY_REAP_AGE_SECONDS - 60
+    os.utime(stale, (old, old))
+    os.utime(fresh, (now, now))
+
+    b = FakeBridge()
+    b.config.heartbeat_file_path = tmp_path / "heartbeat"
+    monkeypatch.setattr(bridge, "MERGER_VERIFY_SCRATCH_ROOT", scratch_root)
+
+    class FakeProc:
+        stdout = iter([])
+        stderr = None
+
+        def wait(self) -> int:
+            b.stop()
+            return 0
+
+    b.popen_factory = lambda *args, **kwargs: FakeProc()
+
+    b.stream_forever()
+
+    assert not stale.exists()
+    assert fresh.exists()
+    assert any(
+        level == "WARN"
+        and event == "merger_verify_scratch_reaped"
+        and extra["path"] == str(stale)
+        for level, event, extra in b.logs
+    )
 
 
 def test_heartbeat_warns_when_stream_silent_before_first_event() -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -56,6 +57,9 @@ CURSOR_FILE = Path(
 DEFAULT_HEARTBEAT_FILE = "/var/run/omnisight-bridge/heartbeat"
 DEFAULT_HEARTBEAT_FILE_SECONDS = 30.0
 DEFAULT_BRIDGE_STALE_AFTER_SEC = 300
+MERGER_VERIFY_SCRATCH_ROOT = Path("/tmp")
+MERGER_VERIFY_SCRATCH_GLOB = "merger-verify-*"
+MERGER_VERIFY_REAP_AGE_SECONDS = 30 * 60
 
 APPROVED_STATUS_NAMES = {"Approved", "承認済み"}
 ARCHIVED_STATUS_NAMES = {"Archived"}
@@ -189,6 +193,50 @@ def check_bridge_heartbeat(
         return False, float("inf"), target
     age = max(0.0, current - mtime)
     return age <= stale, age, target
+
+
+def reap_stale_merger_verify_worktrees(
+    *,
+    root: Path | None = None,
+    stale_after_seconds: float = MERGER_VERIFY_REAP_AGE_SECONDS,
+    now: float | None = None,
+    logger: Callable[..., None] | None = None,
+) -> int:
+    """Remove stale ``/tmp/merger-verify-*`` scratch worktrees."""
+
+    scratch_root = root if root is not None else MERGER_VERIFY_SCRATCH_ROOT
+    log = logger if logger is not None else structured_log
+    current = now if now is not None else time.time()
+    reaped = 0
+    for path in scratch_root.glob(MERGER_VERIFY_SCRATCH_GLOB):
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        if not path.is_dir():
+            continue
+        age_seconds = max(0.0, current - stat.st_mtime)
+        if age_seconds < stale_after_seconds:
+            continue
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            log(
+                "ERROR",
+                "merger_verify_scratch_reap_failed",
+                err=f"{type(exc).__name__}: {exc}",
+                path=str(path),
+                age_seconds=round(age_seconds, 3),
+            )
+            continue
+        reaped += 1
+        log(
+            "WARN",
+            "merger_verify_scratch_reaped",
+            path=str(path),
+            age_seconds=round(age_seconds, 3),
+        )
+    return reaped
 
 
 @dataclass
@@ -1942,6 +1990,7 @@ class GerritJiraBridge:
             return self._ticket_locks[ticket_key]
 
     def stream_forever(self) -> None:
+        reap_stale_merger_verify_worktrees(logger=self.log)
         # SP-B-X-009 — emit one heartbeat before catchup so the file
         # appears on disk the moment the daemon is up. Without this the
         # gate could read a missing file during the (potentially minute-
