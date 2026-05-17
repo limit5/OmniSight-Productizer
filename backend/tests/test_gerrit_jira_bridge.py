@@ -1228,6 +1228,115 @@ def test_patchset_created_ai_reviewer_independent_of_merger_failure(
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  OP-1409 — develop-tip drift re-evaluation
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_develop_merge_drift_sweep_re_evaluates_newly_unmergeable_ps(
+    tmp_path,
+) -> None:
+    """A develop ``change-merged`` event should sweep open develop PSes
+    and synthesize a proactive-merger event for a newly-unmergeable
+    change."""
+    import subprocess as _sub
+
+    open_change = (
+        '{"id":"Iop1409","number":900,"project":"omnisight/x",'
+        '"branch":"develop","subject":"[OP-1409] drift target",'
+        '"owner":{"username":"alice"},'
+        '"currentPatchSet":{"number":1,"revision":"abc900",'
+        '"uploader":{"username":"alice"},"parents":[{"revision":"base1"}],'
+        '"ref":"refs/changes/00/900/1"}}\n'
+        '{"type":"stats","rowCount":1,"runTimeMilliseconds":12}'
+    )
+    run_calls: list[list[str]] = []
+
+    def fake_run(args, **kwargs):
+        run_calls.append(args)
+        return _sub.CompletedProcess(
+            args=args, returncode=0, stdout=open_change, stderr="",
+        )
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self) -> bytes:
+            return b")]}\'\n{\"mergeable\":false}"
+
+    requested_urls: list[str] = []
+
+    def fake_urlopen(req, timeout=30):
+        requested_urls.append(req.full_url)
+        return FakeResponse()
+
+    logs: list[tuple[str, str, dict[str, Any]]] = []
+    spawned: list[dict[str, Any]] = []
+    b = bridge.GerritJiraBridge(
+        _client(),
+        bridge.BridgeConfig(
+            cursor_file=tmp_path / "event-cursor.json",
+            gerrit_rest_base_url="https://gerrit.example",
+        ),
+        sleep=lambda _: None,
+        run_command=fake_run,
+        urlopen=fake_urlopen,
+        logger=lambda level, ev, **kw: logs.append((level, ev, kw)),
+    )
+    b._handle_change_merged = lambda _event: None  # type: ignore[method-assign]
+    b._schedule_auto_rebase_sweep = lambda _event: None  # type: ignore[method-assign]
+    b._spawn_proactive_merger_thread = (  # type: ignore[method-assign]
+        lambda event: spawned.append(event)
+    )
+
+    class ImmediateScheduler:
+        def schedule(self, *, project: str, merged_sha: str) -> None:
+            b._run_develop_drift_sweep(project=project, merged_sha=merged_sha)
+
+    b._develop_drift_scheduler = ImmediateScheduler()
+
+    b.process_stream_event({
+        "type": "change-merged",
+        "newRev": "develop-tip-2",
+        "change": {
+            "id": "Imerged",
+            "number": 899,
+            "project": "omnisight/x",
+            "branch": "develop",
+            "subject": "[OP-1409] advance develop",
+        },
+    })
+
+    assert len(run_calls) == 1
+    assert run_calls[0][-2:] == ["status:open", "branch:develop"]
+    assert requested_urls == [
+        "https://gerrit.example/changes/900/revisions/current/mergeable"
+    ]
+    assert len(spawned) == 1
+    assert spawned[0]["type"] == "patchset-created"
+    assert spawned[0]["change"]["number"] == 900
+    assert spawned[0]["patchSet"]["number"] == 1
+    assert any(ev == "merger_drift_re_eval_triggered" for _level, ev, _kw in logs)
+
+    b.process_stream_event({
+        "type": "change-merged",
+        "newRev": "develop-tip-3",
+        "change": {
+            "id": "Imerged2",
+            "number": 901,
+            "project": "omnisight/x",
+            "branch": "develop",
+            "subject": "[OP-1409] advance develop again",
+        },
+    })
+
+    assert len(spawned) == 1
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  OP-1196 phase 3b — startup conflict backfill
 # ──────────────────────────────────────────────────────────────────────
 
