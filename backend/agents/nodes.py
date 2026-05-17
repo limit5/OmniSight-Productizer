@@ -118,7 +118,13 @@ def _get_llm(bind_tools_for: str | None = None, model_name: str = ""):
         else None
     )
     provider, model = _parse_model_spec(model_name)
-    return get_llm(provider=provider, model=model, bind_tools=tools or None)
+    guild = bind_tools_for if bind_tools_for in GUILD_TOOLS else None
+    return get_llm(
+        provider=provider,
+        model=model,
+        bind_tools=tools or None,
+        guild=guild,
+    )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
