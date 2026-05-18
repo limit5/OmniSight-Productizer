@@ -262,13 +262,12 @@ class RoutingPolicy:
         task: TaskSpec,
         candidates: list[_Candidate],
     ) -> list[_Candidate]:
-        return [
-            candidate
-            for candidate in candidates
-            if _tier_gate_decision_is_eligible(
-                self._tier_gate_decision(task, candidate)
-            )
-        ]
+        eligible: list[_Candidate] = []
+        for candidate in candidates:
+            decision = self._tier_gate_decision(task, candidate)
+            if _tier_x_eligible(candidate, task, decision):
+                eligible.append(candidate)
+        return eligible
 
     def _tier_gate_decision(
         self,
@@ -416,6 +415,24 @@ def _tier_gate_decision_is_eligible(decision: object | None) -> bool:
     if decision is None:
         return True
     return bool(getattr(decision, "eligible", True))
+
+
+def _tier_x_eligible(
+    candidate: _Candidate,
+    task: TaskSpec,
+    decision: object | None = None,
+) -> bool:
+    """Return whether ``candidate`` clears the Tier X gate for ``task``."""
+    if _normalise_tier(task.tier) != "X":
+        return True
+    if _tier_gate_decision_is_eligible(decision):
+        return True
+    LOG.info(
+        "tier_x_gate skip provider=%s reasons=%s",
+        candidate.provider_id,
+        getattr(decision, "unmet_reasons", ()),
+    )
+    return False
 
 
 def _predicted_cost_usd(task: TaskSpec, adapter: ProviderAdapter) -> float:
