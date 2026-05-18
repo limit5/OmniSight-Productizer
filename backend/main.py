@@ -1589,6 +1589,8 @@ async def _deploy_history(
 _include_versioned_router(_deploy_history_router)
 from backend.routers import external_agents as _external_agents_router  # BP.A2A.6 external A2A agent registry UI
 _include_versioned_router(_external_agents_router.router)
+from backend.routers import bp_fleet_lanes as _bp_fleet_lanes_router  # OP-1504 WP.10 BP fleet UI lanes
+_include_versioned_router(_bp_fleet_lanes_router.router)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard
 _include_versioned_router(_batch_merge_router.router)
 from backend.routers import ci_dead_letter as _ci_dead_letter_router  # OP-741 CI recovery dead-letter dashboard
