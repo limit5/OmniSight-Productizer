@@ -358,9 +358,19 @@ def test_load_default_scopes_three_scope_precedence_matrix(
         description="home only",
     )
     _write_skill_file(
+        home / ".warp" / "skills" / "home-warp-only" / "SKILL.md",
+        name="home-warp-only",
+        description="home warp only",
+    )
+    _write_skill_file(
         project / ".omnisight" / "skills" / "project-only" / "SKILL.md",
         name="project-only",
         description="project only",
+    )
+    _write_skill_file(
+        project / ".warp" / "skills" / "project-warp-only" / "SKILL.md",
+        name="project-warp-only",
+        description="project warp only",
     )
 
     reg = load_default_scopes(project, home=home)
@@ -372,10 +382,14 @@ def test_load_default_scopes_three_scope_precedence_matrix(
     assert reg.provider_rank("shared") == 310
     assert reg.get("home-only").scope == "home"
     assert reg.provider_rank("home-only") == 220
+    assert reg.get("home-warp-only").scope == "home"
+    assert reg.provider_rank("home-warp-only") == 215
     assert reg.get("bundled-only").scope == "bundled"
     assert reg.provider_rank("bundled-only") == 110
     assert reg.get("project-only").scope == "project"
     assert reg.provider_rank("project-only") == 320
+    assert reg.get("project-warp-only").scope == "project"
+    assert reg.provider_rank("project-warp-only") == 315
 
 
 def test_load_default_scopes_project_omnisight_shadows_bundled(
@@ -431,6 +445,33 @@ def test_load_default_scopes_omnisight_provider_shadows_claude_with_warn(
     assert reg.provider_rank("shared") == 320
     assert "overrides" in caplog.text
     assert ".omnisight" in caplog.text
+    assert ".claude" in caplog.text
+
+
+def test_load_default_scopes_warp_provider_shadows_claude_with_warn(
+    tmp_path: Path,
+    caplog,
+) -> None:
+    caplog.set_level(logging.WARNING, logger="backend.agents.skills_loader")
+    project = tmp_path / "proj"
+    home = tmp_path / "fakehome"
+    (project / ".claude" / "skills" / "shared").mkdir(parents=True)
+    (project / ".claude" / "skills" / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: from-claude\n---\nbody-claude\n"
+    )
+    (project / ".warp" / "skills" / "shared").mkdir(parents=True)
+    (project / ".warp" / "skills" / "shared" / "SKILL.md").write_text(
+        "---\nname: shared\ndescription: from-warp\n---\nbody-warp\n"
+    )
+    home.mkdir()
+    reg = load_default_scopes(project, home=home)
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert sk.body == "body-warp\n"
+    assert reg.provider_rank("shared") == 315
+    assert "overrides" in caplog.text
+    assert ".warp" in caplog.text
     assert ".claude" in caplog.text
 
 
@@ -490,12 +531,20 @@ def test_load_default_scopes_same_name_across_all_providers_warns(
             "project claude",
         ),
         (
+            project / ".warp" / "skills" / "shared" / "SKILL.md",
+            "project warp",
+        ),
+        (
             project / ".omnisight" / "skills" / "shared" / "SKILL.md",
             "project omnisight",
         ),
         (
             home / ".claude" / "skills" / "shared" / "SKILL.md",
             "home claude",
+        ),
+        (
+            home / ".warp" / "skills" / "shared" / "SKILL.md",
+            "home warp",
         ),
         (
             home / ".omnisight" / "skills" / "shared" / "SKILL.md",
@@ -528,6 +577,8 @@ def test_load_default_scopes_same_name_across_all_providers_warns(
     assert "overrides" in caplog.text
     assert "shadowed by" in caplog.text
     assert "rank=320" in caplog.text
+    assert "rank=315" in caplog.text
+    assert "rank=215" in caplog.text
     assert "rank=210" in caplog.text
     assert "rank=120" in caplog.text
     assert "rank=110" in caplog.text
@@ -560,6 +611,36 @@ def test_load_default_scopes_home_omnisight_between_project_and_bundled(
     assert sk is not None
     assert sk.scope == "home"
     assert sk.description == "home-omnisight"
+
+
+def test_load_default_scopes_home_warp_between_project_and_bundled(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    (home / ".warp" / "skills" / "homed").mkdir(parents=True)
+    (home / ".warp" / "skills" / "homed" / "SKILL.md").write_text(
+        "---\nname: homed\ndescription: home-warp\n---\nb\n"
+    )
+    (project / "omnisight" / "agents" / "skills" / "homed").mkdir(
+        parents=True
+    )
+    (
+        project
+        / "omnisight"
+        / "agents"
+        / "skills"
+        / "homed"
+        / "SKILL.md"
+    ).write_text(
+        "---\nname: homed\ndescription: bundled-only\n---\nb\n"
+    )
+    reg = load_default_scopes(project, home=home)
+    sk = reg.get("homed")
+    assert sk is not None
+    assert sk.scope == "home"
+    assert sk.description == "home-warp"
+    assert reg.provider_rank("homed") == 215
 
 
 def test_load_default_scopes_bundled_uses_omnisight_agents_skills(
@@ -662,6 +743,32 @@ def test_watch_project_scopes_reloads_added_project_override(
     assert sk is not None
     assert sk.scope == "project"
     assert sk.body == "project-body\n"
+
+
+def test_watch_project_scopes_reloads_added_warp_project_override(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "p"
+    home = tmp_path / "h"
+    bundled = project / "configs" / "skills" / "shared" / "SKILL.md"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_text(
+        "---\nname: shared\ndescription: bundled\n---\nbundled-body\n"
+    )
+
+    reg = watch_project_scopes(project, home=home)
+    assert reg.get("shared").scope == "bundled"
+
+    project_skill = project / ".warp" / "skills" / "shared" / "SKILL.md"
+    project_skill.parent.mkdir(parents=True)
+    project_skill.write_text(
+        "---\nname: shared\ndescription: project warp\n---\nwarp-body\n"
+    )
+    sk = reg.get("shared")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert sk.body == "warp-body\n"
+    assert reg.provider_rank("shared") == 315
 
 
 def test_watch_project_scopes_reloads_deleted_project_override(

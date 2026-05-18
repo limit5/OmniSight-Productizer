@@ -5,17 +5,20 @@ specialist agents can discover, load, and execute markdown-based skills
 from three precedence layers:
 
   1. **Project** — ``<project>/.claude/skills/`` and
-     ``<project>/.omnisight/skills/`` (highest)
-  2. **Home** — ``~/.claude/skills/`` and ``~/.omnisight/skills/``
+     ``<project>/.warp/skills/`` and ``<project>/.omnisight/skills/``
+     (highest)
+  2. **Home** — ``~/.claude/skills/`` and ``~/.warp/skills/`` and
+     ``~/.omnisight/skills/``
   3. **Bundled** — ``<project>/omnisight/agents/skills/`` (lowest,
      ships with repo). ``<project>/configs/skills/`` remains a legacy
      bundled fallback while existing packs are migrated.
 
 Same skill name in a higher scope shadows lower scopes — operators can
 override a bundled skill by dropping a same-named ``SKILL.md`` into
-their project ``.claude/skills/`` or ``.omnisight/skills/``. Within the
-same scope, ``.omnisight/skills`` has higher provider rank than
-``.claude/skills``.
+their project ``.claude/skills/``, ``.warp/skills/``, or
+``.omnisight/skills/``. Within the same scope, ``.omnisight/skills`` has
+higher provider rank than ``.warp/skills``, which has higher provider
+rank than ``.claude/skills``.
 
 Format support:
 
@@ -511,6 +514,7 @@ def _project_scope_signature(
 def _project_scope_dirs(project_root: Path) -> list[tuple[Path, int]]:
     return [
         (project_root / ".claude" / "skills", 310),
+        (project_root / ".warp" / "skills", 315),
         (project_root / ".omnisight" / "skills", 320),
     ]
 
@@ -519,6 +523,7 @@ def _home_scope_dirs(home: Path | None = None) -> list[tuple[Path, int]]:
     h = home or Path.home()
     return [
         (h / ".claude" / "skills", 210),
+        (h / ".warp" / "skills", 215),
         (h / ".omnisight" / "skills", 220),
     ]
 
