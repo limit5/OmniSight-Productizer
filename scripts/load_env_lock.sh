@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# OP-1482 — translate an env lock JSON into shell env vars + (optionally)
+# a Docker `--env-file` formatted file that docker-compose can consume.
+#
+# Usage:
+#
+#   # Source-mode (default): exports OMNISIGHT_BACKEND_DIGEST etc. into
+#   # the caller's shell. Intended for hand-driven deploy runbooks.
+#   source scripts/load_env_lock.sh prod.env.lock.json
+#
+#   # Write-mode: emits a combined `--env-file` chunk on stdout (or to
+#   # the path given by --out). Intended for piping into the deploy
+#   # automation that uses `docker compose --env-file ...`.
+#   scripts/load_env_lock.sh prod.env.lock.json --out /tmp/prod-digests.env
+#
+# Exit codes:
+#   0  — success (env vars populated, file written if --out given)
+#   2  — bad invocation (missing file, malformed JSON, no python3)
+#
+# Notes:
+#   * We deliberately use python3 (stdlib only) to parse the JSON
+#     instead of jq — the runner host may not have jq installed, but
+#     python3 is already an OmniSight runtime dep (it ships in every
+#     Dockerfile / Makefile / CI lane).
+#   * The contract with docker-compose.{prod,staging}.yml is that each
+#     image entry in the lock declares its `env_var` (e.g.
+#     `OMNISIGHT_BACKEND_DIGEST`). Compose interpolates
+#     `${OMNISIGHT_BACKEND_DIGEST}` at `docker compose up` time.
+#   * Source-mode requires the caller to `source` this script (so the
+#     `export` calls land in the caller's environment). When the script
+#     is invoked directly without `--out`, it prints the would-be
+#     exports to stdout so the operator can eyeball them before
+#     committing to the load.
+
+set -euo pipefail
+
+err() { printf 'load_env_lock: %s\n' "$*" >&2; }
+
+usage() {
+  cat <<'EOF' >&2
+Usage:
+  source scripts/load_env_lock.sh <lock.json>        # export vars into caller shell
+  scripts/load_env_lock.sh <lock.json>               # print vars to stdout
+  scripts/load_env_lock.sh <lock.json> --out <path>  # write --env-file to <path>
+EOF
+}
+
+LOCK_PATH="${1:-}"
+if [ -z "${LOCK_PATH}" ] || [ "${LOCK_PATH}" = "-h" ] || [ "${LOCK_PATH}" = "--help" ]; then
+  usage
+  # When sourced we can't `exit 2` without killing the caller's shell,
+  # so signal via return when available, exit otherwise.
+  (return 2 2>/dev/null) || exit 2
+fi
+
+OUT_PATH=""
+if [ "${2:-}" = "--out" ]; then
+  OUT_PATH="${3:-}"
+  if [ -z "${OUT_PATH}" ]; then
+    err "--out requires a path argument"
+    (return 2 2>/dev/null) || exit 2
+  fi
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  err "python3 is required to parse the lock file"
+  (return 2 2>/dev/null) || exit 2
+fi
+
+if [ ! -f "${LOCK_PATH}" ]; then
+  err "lock file not found: ${LOCK_PATH}"
+  (return 2 2>/dev/null) || exit 2
+fi
+
+# Render the lock file's per-image env_var → repository@digest pairs.
+# We emit one shell-safe `KEY=value` per line; values are guaranteed
+# digest-shaped by the lock schema, so no quoting hazards.
+_PAIRS="$(python3 - "${LOCK_PATH}" <<'PY'
+import json, re, sys
+DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+ENV_VAR_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    doc = json.load(f)
+images = doc.get("images") or {}
+if not isinstance(images, dict) or not images:
+    print("ERR: lock file has no 'images' object", file=sys.stderr)
+    sys.exit(2)
+out = []
+for name, entry in images.items():
+    if not isinstance(entry, dict):
+        print(f"ERR: image '{name}' entry is not an object", file=sys.stderr)
+        sys.exit(2)
+    repo = entry.get("repository") or ""
+    digest = entry.get("digest") or ""
+    env_var = entry.get("env_var") or ""
+    if not repo or not DIGEST_RE.match(digest) or not ENV_VAR_RE.match(env_var):
+        print(
+            f"ERR: image '{name}' missing/invalid repository|digest|env_var",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    # Compose interpolates ${VAR} into the `image:` line, which already
+    # carries the `<repo>@` prefix. So the value side is just the
+    # digest — that keeps the env file portable across repo renames
+    # (G3 will eventually move us off ghcr.io).
+    out.append(f"{env_var}={digest}")
+# Add helpful metadata vars for downstream tooling / logging. Not
+# referenced by compose itself, but the runbook curls /api/version
+# and verifies the bundle_id matches what was deployed.
+bundle_id = doc.get("bundle_id") or ""
+env_name = doc.get("env") or ""
+last_promoted = doc.get("last_promoted_at") or ""
+attestation_ref = doc.get("attestation_ref") or ""
+out.append(f"OMNISIGHT_BUNDLE_ID={bundle_id}")
+out.append(f"OMNISIGHT_DEPLOY_ENV={env_name}")
+out.append(f"OMNISIGHT_LOCK_PROMOTED_AT={last_promoted}")
+out.append(f"OMNISIGHT_LOCK_ATTESTATION_REF={attestation_ref}")
+print("\n".join(out))
+PY
+)"
+
+if [ -n "${OUT_PATH}" ]; then
+  # Write as an --env-file chunk. docker-compose ignores blank lines and
+  # `#` comments — we prepend a provenance header.
+  {
+    printf '# Generated by scripts/load_env_lock.sh from %s\n' "${LOCK_PATH}"
+    printf '# Consumed by `docker compose --env-file %s -f docker-compose.*.yml up`.\n' "${OUT_PATH}"
+    printf '%s\n' "${_PAIRS}"
+  } >"${OUT_PATH}"
+  err "wrote ${OUT_PATH}"
+  exit 0
+fi
+
+# Source-mode detection: if BASH_SOURCE[0] != $0, we are being sourced.
+# In source-mode we export the variables; otherwise we just print them
+# so an operator can audit before committing.
+_SOURCED=0
+# `${BASH_SOURCE[0]:-}` is empty in non-bash shells, so we fall back to
+# checking if the script was invoked via a `source` wrapper through $0.
+if [ -n "${BASH_SOURCE[0]:-}" ] && [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+  _SOURCED=1
+fi
+
+if [ "${_SOURCED}" = "1" ]; then
+  # Use `set -a` so each KEY=value assignment is auto-exported.
+  set -a
+  # shellcheck disable=SC2046,SC2086
+  eval "${_PAIRS}"
+  set +a
+else
+  printf '%s\n' "${_PAIRS}"
+fi
