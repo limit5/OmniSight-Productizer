@@ -6,7 +6,9 @@ a request-scoped ``asyncpg.Connection`` parameter that propagates
 to ``_persist()`` and downstream ``db.*`` calls.
 """
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 import uuid
 
 import asyncpg
@@ -168,7 +170,7 @@ async def _persist(agent: Agent, conn: asyncpg.Connection | None = None) -> None
 
 
 @router.get("", response_model=list[Agent])
-async def list_agents():
+async def list_agents() -> list[Agent]:
     # Reads the in-memory mirror — no DB conn needed.
     return list(_agents.values())
 
@@ -488,7 +490,7 @@ async def list_parties_endpoint(
 
 
 @router.get("/parties/synergies")
-async def list_synergies_endpoint():
+async def list_synergies_endpoint() -> list[dict[str, Any]]:
     """RPG.W17: full synergy matrix — populates the Party Hall UI legend."""
     try:
         entries = all_synergies()
@@ -654,7 +656,7 @@ async def complete_party_task_endpoint(
 
 
 @router.get("/{agent_id}", response_model=Agent)
-async def get_agent(agent_id: str):
+async def get_agent(agent_id: str) -> Agent:
     # Reads the in-memory mirror — no DB conn needed.
     if agent_id not in _agents:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -767,7 +769,7 @@ async def delete_agent(
 
 
 @asynccontextmanager
-async def _borrowed_conn(conn: asyncpg.Connection):
+async def _borrowed_conn(conn: asyncpg.Connection) -> AsyncIterator[asyncpg.Connection]:
     yield conn
 
 
