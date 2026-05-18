@@ -51,7 +51,7 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from backend.agents.project_memory import (  # noqa: E402
-    load_all_memory,
+    ProjectMemoryWatcher,
     parse_ignored_paths,
     render_operator_summary as render_memory_operator_summary,
 )
@@ -630,10 +630,16 @@ def main() -> None:
     if DRY_RUN:
         print("🧪 DRY_RUN: startup checks only; no TODO mutation or codex invoke.")
         return
-    memory_files = load_all_memory(Path(BASE_DIR), ignored_paths=RULE_IGNORE_PATHS)
+    # WP.5 FS-watch: re-read rule files only when their mtime/size signature
+    # changes between iterations.
+    memory_watcher = ProjectMemoryWatcher(
+        Path(BASE_DIR),
+        ignored_paths=RULE_IGNORE_PATHS,
+    )
+    initial_snapshot = memory_watcher.poll()
     print(
         render_memory_operator_summary(
-            memory_files,
+            initial_snapshot.memory,
             project_root=Path(BASE_DIR),
             ignore_env_var=RULE_IGNORE_ENV,
         )
@@ -678,14 +684,17 @@ def main() -> None:
             )
             time.sleep(SECTION_COOLDOWN_S)
         last_section = section_title
-        memory_files = load_all_memory(Path(BASE_DIR), ignored_paths=RULE_IGNORE_PATHS)
-        print(
-            render_memory_operator_summary(
-                memory_files,
-                project_root=Path(BASE_DIR),
-                ignore_env_var=RULE_IGNORE_ENV,
+        snapshot = memory_watcher.poll()
+        if snapshot.changed and not snapshot.first:
+            print("🔁 Memory: rule file change detected — reloaded")
+        if snapshot.changed:
+            print(
+                render_memory_operator_summary(
+                    snapshot.memory,
+                    project_root=Path(BASE_DIR),
+                    ignore_env_var=RULE_IGNORE_ENV,
+                )
             )
-        )
 
         # Tier B fix (2026-05-03): runner OWNS main/TODO.md marker.
         # Reserve the item with [~][G] BEFORE dispatching codex so:

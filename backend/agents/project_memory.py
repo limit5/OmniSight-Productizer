@@ -288,6 +288,31 @@ def project_rule_signature(
     return tuple(entries)
 
 
+def user_rule_signature(
+    home: Path | None = None,
+    *,
+    filenames: tuple[str, ...] = USER_RULE_FILENAMES,
+) -> tuple[tuple[str, int, int, int], ...]:
+    """Return a deterministic signature for watched user-home rule files.
+
+    Mirrors :func:`project_rule_signature` for ``~/.claude/<filename>``.
+    Distance is reported as -1 to mark user scope; the value never
+    collides with project distances (which start at 0).
+    """
+    base = (home or Path.home()) / ".claude"
+    entries: list[tuple[str, int, int, int]] = []
+    for fn in filenames:
+        path = base / fn
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if not path.is_file():
+            continue
+        entries.append((str(path), -1, stat.st_mtime_ns, stat.st_size))
+    return tuple(entries)
+
+
 def load_project_memory(
     project_root: Path,
     *,
@@ -367,6 +392,93 @@ def load_all_memory(
         project_root,
         ignored_paths=ignored_paths,
     )
+
+
+@dataclass(frozen=True)
+class MemorySnapshot:
+    """Result of one :meth:`ProjectMemoryWatcher.poll` call.
+
+    ``changed`` is ``True`` on the first poll after construction and
+    whenever the filesystem signature differs from the previous poll.
+    Callers may use it to short-circuit re-rendering the prompt memory
+    block when nothing has actually moved.
+    """
+
+    memory: list[MemoryFile]
+    signature: tuple[tuple[str, int, int, int], ...]
+    changed: bool
+    first: bool
+
+
+class ProjectMemoryWatcher:
+    """Reload-on-change wrapper around :func:`load_all_memory`.
+
+    The runner used to re-read every rule file once per TODO item even
+    when the bytes were identical to the previous iteration. The watcher
+    keeps the loaded :class:`MemoryFile` list in process memory and only
+    re-reads when the combined project + user signature changes.
+
+    Each worker holds its own watcher — no shared module-global state —
+    so two workers reading the same filesystem deterministically observe
+    the same change events without cross-worker locking.
+    """
+
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        home: Path | None = None,
+        ignored_paths: Iterable[Path | str] | None = None,
+        max_parent_depth: int = PROJECT_RULE_PARENT_DEPTH,
+        project_filenames: tuple[str, ...] = PROJECT_RULE_FILENAMES,
+        user_filenames: tuple[str, ...] = USER_RULE_FILENAMES,
+    ) -> None:
+        self.project_root = project_root
+        self.home = home
+        self._ignored_paths = (
+            tuple(ignored_paths) if ignored_paths is not None else ()
+        )
+        self.max_parent_depth = max_parent_depth
+        self.project_filenames = project_filenames
+        self.user_filenames = user_filenames
+        self._memory: list[MemoryFile] = []
+        self._signature: tuple[tuple[str, int, int, int], ...] = ()
+        self._polled = False
+
+    def _current_signature(self) -> tuple[tuple[str, int, int, int], ...]:
+        return project_rule_signature(
+            self.project_root,
+            filenames=self.project_filenames,
+            max_parent_depth=self.max_parent_depth,
+        ) + user_rule_signature(
+            self.home,
+            filenames=self.user_filenames,
+        )
+
+    def poll(self) -> MemorySnapshot:
+        """Return the current snapshot, reloading file contents on change."""
+        sig = self._current_signature()
+        first = not self._polled
+        changed = first or sig != self._signature
+        if changed:
+            self._memory = load_all_memory(
+                self.project_root,
+                home=self.home,
+                ignored_paths=self._ignored_paths,
+            )
+            self._signature = sig
+        self._polled = True
+        return MemorySnapshot(
+            memory=self._memory,
+            signature=sig,
+            changed=changed,
+            first=first,
+        )
+
+    @property
+    def memory(self) -> list[MemoryFile]:
+        """Last loaded memory list. Empty until :meth:`poll` is called."""
+        return self._memory
 
 
 def render_for_prompt(
