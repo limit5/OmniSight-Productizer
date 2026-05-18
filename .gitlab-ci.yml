@@ -1,0 +1,209 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v.*/'
+    - when: never
+
+stages:
+  - build
+  - sign
+  - sbom
+  - attest
+  - audit-emit
+
+variables:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_DRIVER: overlay2
+  DOCKER_BUILDKIT: "1"
+  BUILDKIT_PROGRESS: plain
+  COSIGN_VERSION: v2.4.1
+  SYFT_VERSION: v1.17.0
+  IMAGE_TAG_SHA: "sha-${CI_COMMIT_SHORT_SHA}"
+  COSIGN_CERT_IDENTITY_REGEXP: "^https://sora\\.services:49154/omnisight/OmniSight-Productizer//\\.gitlab-ci\\.yml@refs/tags/v.*$"
+  COSIGN_CERT_OIDC_ISSUER: "https://sora.services:49154"
+
+.tag_rules:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v.*/'
+
+.docker_job:
+  image: docker:27.3.1
+  services:
+    - name: docker:27.3.1-dind
+      command: ["--tls=false"]
+  before_script:
+    - set -euo pipefail
+    - apk add --no-cache bash ca-certificates coreutils curl jq
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+
+.image_matrix:
+  parallel:
+    matrix:
+      - IMAGE_NAME: backend
+        DOCKERFILE: Dockerfile.backend
+      - IMAGE_NAME: frontend
+        DOCKERFILE: Dockerfile.frontend
+      - IMAGE_NAME: bridge
+        DOCKERFILE: Dockerfile.bridge
+
+build-image:
+  extends:
+    - .docker_job
+    - .image_matrix
+    - .tag_rules
+  stage: build
+  timeout: 90m
+  script:
+    - docker buildx create --use --name "omnisight-${CI_PIPELINE_ID}-${IMAGE_NAME}"
+    - docker buildx inspect --bootstrap
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - |
+      docker buildx build \
+        --platform linux/amd64,linux/arm64 \
+        --push \
+        --file "${DOCKERFILE}" \
+        --label "org.opencontainers.image.source=${CI_PROJECT_URL}" \
+        --label "org.opencontainers.image.revision=${CI_COMMIT_SHA}" \
+        --label "org.opencontainers.image.version=${CI_COMMIT_TAG}" \
+        --label "org.opencontainers.image.created=${CI_PIPELINE_CREATED_AT}" \
+        --tag "${IMAGE_BASE}:${CI_COMMIT_TAG}" \
+        --tag "${IMAGE_BASE}:${IMAGE_TAG_SHA}" \
+        --tag "${IMAGE_BASE}:latest" \
+        .
+
+.cosign_job:
+  extends:
+    - .docker_job
+    - .image_matrix
+    - .tag_rules
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: sigstore
+  before_script:
+    - set -euo pipefail
+    - apk add --no-cache bash ca-certificates coreutils curl jq
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+    - curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
+    - chmod +x /usr/local/bin/cosign
+  variables:
+    COSIGN_EXPERIMENTAL: "1"
+    COSIGN_YES: "true"
+
+sign-image:
+  extends: .cosign_job
+  stage: sign
+  needs:
+    - build-image
+  script:
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${IMAGE_TAG_SHA}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - test -n "$DIGEST"
+    - IMAGE_REF="${IMAGE_BASE}@${DIGEST}"
+    - cosign sign --yes --identity-token "$SIGSTORE_ID_TOKEN" "$IMAGE_REF"
+    - |
+      cosign verify \
+        --certificate-identity-regexp "$COSIGN_CERT_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$COSIGN_CERT_OIDC_ISSUER" \
+        "$IMAGE_REF" >/dev/null
+
+sbom-image:
+  extends:
+    - .docker_job
+    - .image_matrix
+    - .tag_rules
+  stage: sbom
+  needs:
+    - sign-image
+  script:
+    - curl -sSfL "https://raw.githubusercontent.com/anchore/syft/main/install.sh" | sh -s -- -b /usr/local/bin "${SYFT_VERSION}"
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${IMAGE_TAG_SHA}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - test -n "$DIGEST"
+    - syft "${IMAGE_BASE}@${DIGEST}" -o cyclonedx-json="sbom-${IMAGE_NAME}.cdx.json"
+  artifacts:
+    name: "image-sbom-${IMAGE_NAME}"
+    paths:
+      - "sbom-${IMAGE_NAME}.cdx.json"
+    expire_in: 90 days
+
+attest-image:
+  extends: .cosign_job
+  stage: attest
+  needs:
+    - sbom-image
+  script:
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${IMAGE_TAG_SHA}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - test -n "$DIGEST"
+    - IMAGE_REF="${IMAGE_BASE}@${DIGEST}"
+    - |
+      jq -n \
+        --arg image "$IMAGE_NAME" \
+        --arg image_ref "$IMAGE_REF" \
+        --arg digest "$DIGEST" \
+        --arg git_sha "$CI_COMMIT_SHA" \
+        --arg git_ref "$CI_COMMIT_REF_NAME" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        '{
+          image: $image,
+          image_ref: $image_ref,
+          digest: $digest,
+          git_sha: $git_sha,
+          git_ref: $git_ref,
+          pipeline_url: $pipeline_url,
+          builder: "gitlab-ci"
+        }' > "attestation-${IMAGE_NAME}.json"
+    - cosign attest --yes --identity-token "$SIGSTORE_ID_TOKEN" --predicate "attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
+  artifacts:
+    name: "image-attestation-${IMAGE_NAME}"
+    paths:
+      - "attestation-${IMAGE_NAME}.json"
+    expire_in: 90 days
+
+audit-emit:
+  extends:
+    - .docker_job
+    - .image_matrix
+    - .tag_rules
+  stage: audit-emit
+  needs:
+    - attest-image
+  script:
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${IMAGE_TAG_SHA}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - test -n "$DIGEST"
+    - |
+      jq -n \
+        --arg event "image.signed_pushed" \
+        --arg image "$IMAGE_NAME" \
+        --arg registry "$CI_REGISTRY" \
+        --arg image_ref "${IMAGE_BASE}@${DIGEST}" \
+        --arg digest "$DIGEST" \
+        --arg git_sha "$CI_COMMIT_SHA" \
+        --arg git_ref "$CI_COMMIT_REF_NAME" \
+        --arg version "$CI_COMMIT_TAG" \
+        --arg actor "$GITLAB_USER_LOGIN" \
+        --arg run_id "$CI_PIPELINE_ID" \
+        --arg run_url "$CI_PIPELINE_URL" \
+        --arg cosign_version "$COSIGN_VERSION" \
+        '{
+          event: $event,
+          image: $image,
+          registry: $registry,
+          image_ref: $image_ref,
+          digest: $digest,
+          git_sha: $git_sha,
+          git_ref: $git_ref,
+          is_release: "true",
+          version: $version,
+          actor: $actor,
+          run_id: $run_id,
+          run_url: $run_url,
+          signed_with: "cosign-keyless-gitlab-oidc",
+          cosign_version: $cosign_version
+        }' > "image-audit-${IMAGE_NAME}.json"
+  artifacts:
+    name: "image-audit-${IMAGE_NAME}"
+    paths:
+      - "image-audit-${IMAGE_NAME}.json"
+    expire_in: 90 days
