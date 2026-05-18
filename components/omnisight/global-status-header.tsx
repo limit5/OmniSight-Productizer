@@ -272,11 +272,15 @@ export function GlobalStatusHeader({
             </div>
           </div>
           
-          {/* Operation Mode */}
-          <ModeSelector />
+          {/* Operation Mode — compact (3-letter MAN/SUP/AUT/TRB + text-[10px])
+            * at lg-2xl to save ~70-100px so Bell + E-STOP fit at 1920px;
+            * full MANUAL/SUPERVISED/... only at 3xl+. */}
+          <div className="3xl:hidden"><ModeSelector compact /></div>
+          <div className="hidden 3xl:block"><ModeSelector /></div>
 
-          {/* SSE Session Filter */}
-          <SSESessionFilter />
+          {/* SSE Session Filter — same compact/full toggle, saves ~30px */}
+          <div className="3xl:hidden"><SSESessionFilter compact /></div>
+          <div className="hidden 3xl:block"><SSESessionFilter /></div>
 
           {/* Host vs Target arch indicator */}
           <ArchIndicator />
@@ -297,8 +301,8 @@ export function GlobalStatusHeader({
           {/* Language Toggle */}
           <LanguageToggle />
 
-          {/* Time */}
-          <div className="font-mono text-sm text-[var(--neural-blue)] tabular-nums">
+          {/* Time — text-xs at <3xl (saves ~15px in "12:34:56"), full text-sm at 3xl+ */}
+          <div className="font-mono text-xs 3xl:text-sm text-[var(--neural-blue)] tabular-nums">
             {time}
           </div>
           
