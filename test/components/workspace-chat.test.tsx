@@ -1301,3 +1301,84 @@ describe("W16.7 preview.next_steps coach card", () => {
     ).toBeNull()
   })
 })
+
+// ─── OP-1506 / WP.12 — ghost-text composer integration ───────────────────
+
+describe("OP-1506 WP.12 — ghost-text composer", () => {
+  it("uses the plain Textarea when no ghostSuggestionProvider is set", () => {
+    render(<WorkspaceChat workspaceType="web" draftPersistenceEnabled={false} />)
+    expect(screen.queryByTestId("chat-ghost-text-container")).toBeNull()
+  })
+
+  it("renders the ghost overlay once the provider yields a suggestion", () => {
+    const provider = (text: string) =>
+      text.startsWith("hel") ? " world (suggested)" : null
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        draftPersistenceEnabled={false}
+        ghostSuggestionProvider={provider}
+      />,
+    )
+    const ta = screen.getByTestId("workspace-chat-input") as HTMLTextAreaElement
+    expect(screen.queryByTestId("chat-ghost-suggestion")).toBeNull()
+    fireEvent.change(ta, { target: { value: "hello" } })
+    expect(screen.getByTestId("chat-ghost-suggestion").textContent).toBe(
+      " world (suggested)",
+    )
+  })
+
+  it("Tab accepts the suggestion into the composer and clears the ghost", () => {
+    const provider = vi.fn((text: string) =>
+      text === "hi" ? " there" : null,
+    )
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        draftPersistenceEnabled={false}
+        ghostSuggestionProvider={provider}
+      />,
+    )
+    const ta = screen.getByTestId("workspace-chat-input") as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: "hi" } })
+    expect(screen.getByTestId("chat-ghost-suggestion").textContent).toBe(" there")
+    fireEvent.keyDown(ta, { key: "Tab" })
+    // The composer's controlled value now includes the accepted slice.
+    expect((screen.getByTestId("workspace-chat-input") as HTMLTextAreaElement).value).toBe(
+      "hi there",
+    )
+    // The provider returned null for "hi there", so the ghost is gone.
+    expect(screen.queryByTestId("chat-ghost-suggestion")).toBeNull()
+  })
+
+  it("ignores a stale async provider response once a fresher batch resolved", async () => {
+    const resolvers: Array<(value: string | null) => void> = []
+    const provider = (text: string) =>
+      new Promise<string | null>((resolve) => {
+        if (text === "a") {
+          resolvers.push(resolve)
+        } else {
+          resolve("FRESH")
+        }
+      })
+    render(
+      <WorkspaceChat
+        workspaceType="web"
+        draftPersistenceEnabled={false}
+        ghostSuggestionProvider={provider}
+      />,
+    )
+    const ta = screen.getByTestId("workspace-chat-input") as HTMLTextAreaElement
+    fireEvent.change(ta, { target: { value: "a" } })
+    // Now type more — second invocation resolves immediately with FRESH.
+    fireEvent.change(ta, { target: { value: "ab" } })
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-ghost-suggestion").textContent).toBe("FRESH")
+    })
+    // Resolve the *stale* first request — it must NOT clobber the fresh one.
+    await act(async () => {
+      resolvers[0]?.("STALE")
+    })
+    expect(screen.getByTestId("chat-ghost-suggestion").textContent).toBe("FRESH")
+  })
+})

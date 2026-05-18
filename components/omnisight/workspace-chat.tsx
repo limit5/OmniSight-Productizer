@@ -62,6 +62,7 @@ import { useOptionalWorkspaceType } from "@/components/omnisight/workspace-conte
 import { useDraftPersistence } from "@/hooks/use-draft-persistence"
 import { useDraftRestore } from "@/hooks/use-draft-restore"
 import { Block } from "./block"
+import { ChatGhostText } from "./chat-ghost-text"
 
 // ─── Public shapes ─────────────────────────────────────────────────────────
 
@@ -283,6 +284,29 @@ export interface WorkspaceChatProps {
   draftPersistenceEnabled?: boolean
   /** Override the slot key — defaults to ``chat:main`` per Q.6 spec. */
   draftSlotKey?: string
+  /**
+   * OP-1506 / WP.12 — Ghost-text suggestion provider.  Called with the
+   * current draft text after each keystroke; the return value is
+   * surfaced as an inline gray-text completion that the operator can
+   * accept (Tab / Ctrl-→), dismiss (Esc) or cycle (Alt-]).  Returning
+   * `null` / `""` / `[]` (or an empty Promise result) hides the
+   * ghost.  Multiple strings opt the composer into Alt-] cycling.
+   *
+   * The provider is caller-supplied so the AI / heuristic plumbing
+   * stays out of this component — mirroring the V0 #7 contract that
+   * `WorkspaceChat` is purely a composition surface.  Async providers
+   * are awaited and stale responses are dropped (latest-keystroke
+   * wins) so a slow round-trip does not stamp a stale suggestion on
+   * top of a fresh draft.
+   */
+  ghostSuggestionProvider?: (
+    text: string,
+  ) =>
+    | string
+    | string[]
+    | null
+    | undefined
+    | Promise<string | string[] | null | undefined>
   className?: string
 }
 
@@ -742,6 +766,7 @@ export function WorkspaceChat({
   readAttachmentsFromFiles,
   draftPersistenceEnabled = true,
   draftSlotKey = "chat:main",
+  ghostSuggestionProvider,
   className,
 }: WorkspaceChatProps) {
   const resolvedType = useResolvedWorkspaceType(workspaceType)
@@ -782,6 +807,49 @@ export function WorkspaceChat({
   const [isDragging, setIsDragging] = React.useState<boolean>(false)
   const fileInputRef = React.useRef<HTMLInputElement | null>(null)
   const logEndRef = React.useRef<HTMLDivElement | null>(null)
+
+  // OP-1506 / WP.12 — Ghost-text state.  ``ghostSuggestions`` holds the
+  // active suggestion tuple sourced from the caller-supplied provider.
+  // ``ghostRequestRef`` tags each provider invocation with a monotonic
+  // id so a slow async return cannot overwrite a fresher response.
+  const [ghostSuggestions, setGhostSuggestions] = React.useState<string[]>([])
+  const ghostRequestRef = React.useRef<number>(0)
+  React.useEffect(() => {
+    if (!ghostSuggestionProvider) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clear cached suggestions when caller removes the provider; not derivable during render.
+      setGhostSuggestions([])
+      return
+    }
+    const requestId = ghostRequestRef.current + 1
+    ghostRequestRef.current = requestId
+    let cancelled = false
+    let result: ReturnType<typeof ghostSuggestionProvider>
+    try {
+      result = ghostSuggestionProvider(draftText)
+    } catch {
+      setGhostSuggestions([])
+      return
+    }
+    const apply = (raw: string | string[] | null | undefined) => {
+      if (cancelled || ghostRequestRef.current !== requestId) return
+      if (raw == null) {
+        setGhostSuggestions([])
+        return
+      }
+      const arr = Array.isArray(raw) ? raw : [raw]
+      setGhostSuggestions(arr.filter((s): s is string => typeof s === "string" && s.length > 0))
+    }
+    if (result && typeof (result as Promise<unknown>).then === "function") {
+      ;(result as Promise<string | string[] | null | undefined>).then(apply, () => {
+        if (!cancelled && ghostRequestRef.current === requestId) setGhostSuggestions([])
+      })
+    } else {
+      apply(result as string | string[] | null | undefined)
+    }
+    return () => {
+      cancelled = true
+    }
+  }, [draftText, ghostSuggestionProvider])
 
   // Toggle annotations: click to select / click again to deselect.
   const toggleAnnotation = React.useCallback((id: string) => {
@@ -1099,17 +1167,34 @@ export function WorkspaceChat({
         )}
 
         <div className="flex items-end gap-2">
-          <Textarea
-            data-testid="workspace-chat-input"
-            aria-label="Chat message"
-            placeholder={placeholderText}
-            value={draftText}
-            disabled={disabled || submitting}
-            onChange={(e) => setDraftText(e.target.value)}
-            onKeyDown={handleKeyDown}
-            rows={2}
-            className="min-h-[48px] flex-1 resize-none text-sm"
-          />
+          {ghostSuggestionProvider ? (
+            <ChatGhostText
+              data-testid="workspace-chat-input"
+              aria-label="Chat message"
+              placeholder={placeholderText}
+              value={draftText}
+              disabled={disabled || submitting}
+              onChange={setDraftText}
+              onKeyDownPassthrough={handleKeyDown}
+              suggestions={ghostSuggestions}
+              onAcceptAll={() => setGhostSuggestions([])}
+              onDismiss={() => setGhostSuggestions([])}
+              rows={2}
+              className="flex-1 text-sm"
+            />
+          ) : (
+            <Textarea
+              data-testid="workspace-chat-input"
+              aria-label="Chat message"
+              placeholder={placeholderText}
+              value={draftText}
+              disabled={disabled || submitting}
+              onChange={(e) => setDraftText(e.target.value)}
+              onKeyDown={handleKeyDown}
+              rows={2}
+              className="min-h-[48px] flex-1 resize-none text-sm"
+            />
+          )}
           <div className="flex flex-col gap-1">
             <input
               ref={fileInputRef}
