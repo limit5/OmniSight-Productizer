@@ -259,7 +259,15 @@ class PostgresIncidentSource:
     def from_database_url(cls, url: str) -> "PostgresIncidentSource":
         import sqlalchemy as sa  # noqa: PLC0415 — lazy
 
-        engine = sa.create_engine(url, future=True)
+        # OP-1452: failure_graph uses SYNC SQLAlchemy (engine.begin()
+        # called via asyncio.to_thread from the F6 axis). Mixing an
+        # asyncpg driver into a sync engine raises MissingGreenlet on
+        # first IO, which the axis catches and degrades to empty
+        # neighbours — making OP-1450's index-served SQL invisible in
+        # prod. Strip the +asyncpg variant so we end up on psycopg2.
+        if url.startswith("postgresql+asyncpg://"):
+            url = "postgresql+psycopg2://" + url[len("postgresql+asyncpg://"):]
+        engine = sa.create_engine(url, future=True, pool_pre_ping=True)
         return cls(engine)
 
     def list_since(self, since: datetime) -> Iterable[RunnerIncident]:
