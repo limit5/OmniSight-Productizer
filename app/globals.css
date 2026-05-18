@@ -87,6 +87,14 @@ html {
 }
 
 @theme inline {
+  /* Custom 3xl breakpoint for header layout (2026-05-18). Default 2xl
+   * (1536px) is reached at 1920px, but global-status-header's right
+   * cluster (WSL2 + USB pills + ModeSelector + SSE + Arch + Help + Lang
+   * + Time + Settings + Bell + EmergencyStop) only fits comfortably at
+   * ≥2160px. Pills are gated on `3xl:` so 1920px renders the lighter
+   * layout (status dots + tooltip preserve a11y).
+   * See: components/omnisight/global-status-header.tsx */
+  --breakpoint-3xl: 2160px;
   --font-sans: var(--font-orbitron), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-fira-code), ui-monospace, monospace;
   --color-background: var(--background);
