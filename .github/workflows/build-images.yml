@@ -18,10 +18,9 @@ name: Build Images
 # Signing model: cosign keyless via the GitHub OIDC token (sigstore /
 # fulcio / rekor). Verifier: `scripts/verify_image_signature.sh`.
 #
-# Retention: a separate scheduled `retention` job runs weekly. Tagged
-# images are kept forever; untagged images older than 30 days are
-# pruned, with a hard floor of "keep the last 20 untagged versions per
-# image" so a deletion bug can never wipe the build history mid-roll.
+# Retention: a separate scheduled `retention` job runs weekly. Immutable
+# release-line tags are kept forever; ephemeral develop/feature/RC/orphan
+# classes are pruned by `scripts/enforce_image_retention.py`.
 #
 # OUT OF SCOPE: this workflow does not run unit tests — that gate is
 # `ci.yml`. Image build presumes the merge to `main` already passed
@@ -380,16 +379,15 @@ jobs:
           retention-days: 90
 
   # =========================================================================
-  # retention — cron-driven prune of untagged versions.
+  # retention — cron-driven prune of GHCR package versions.
   #
-  # Policy (OP-763 spec):
-  #   1. Tagged versions (:v<X.Y.Z>, :latest, any non-empty tag list)
-  #      are kept FOREVER — never touched by this job.
-  #   2. Untagged versions younger than 30 days are kept.
-  #   3. Hard floor: the last 20 untagged versions per package are
-  #      always kept, regardless of age. This survives a clock skew
-  #      bug or a runaway-build window where >20 untagged versions
-  #      arrive in <30 days.
+  # Policy (OP-1480):
+  #   - vX.Y.Z and vX.Y.Z-hotfix-N are immutable and kept forever.
+  #   - vX.Y.Z-rcN is kept until 90d after vX.Y.Z ships, or 30d if the
+  #     parent release has not shipped.
+  #   - develop-<12sha> keeps the newer of 14d or the newest 30 tags.
+  #   - feature-<12sha> and untagged orphan versions are kept 7d.
+  #   - mutable aliases are never deleted as standalone retention targets.
   #
   # `actions/delete-package-versions` does NOT support age filtering,
   # so we drive the GHCR REST API directly. `gh api` honors the
@@ -410,8 +408,17 @@ jobs:
       - name: enforce retention policy
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PACKAGE_NAME: ${{ matrix.package }}
-          OWNER: ${{ github.repository_owner }}
-          MIN_KEEP: "20"
-          MAX_AGE_DAYS: "30"
-        run: bash scripts/enforce_image_retention.sh
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/retention
+          python3 scripts/enforce_image_retention.py \
+            --package "${{ matrix.package }}" \
+            --owner "${{ github.repository_owner }}" \
+            --summary-file "artifacts/retention/${{ matrix.package }}.txt"
+
+      - name: upload retention summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-retention-${{ matrix.package }}
+          path: artifacts/retention/${{ matrix.package }}.txt
+          retention-days: 30
