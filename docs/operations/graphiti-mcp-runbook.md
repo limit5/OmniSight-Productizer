@@ -8,7 +8,7 @@
 
 | Component | Path | Contract |
 |---|---|---|
-| Graphiti service | `docker-compose.yml` `graphiti` profile | Runs `getzep/graphiti:latest` on container port 8000. |
+| Graphiti service | `docker-compose.yml` `graphiti` profile | Runs `zepai/graphiti:latest` on container port 8000. |
 | Public ingress | `deploy/caddy/mcp-graphiti.caddy` | `mcp-graphiti.sora.services` with Caddy-managed TLS. |
 | JIRA ingestion | `backend/integrations/jira_to_graphiti_webhook.py` | JIRA webhook payload -> Graphiti `/ingest/jira`. |
 | Gerrit ingestion | `scripts/bridge_gerrit_to_graphiti.py` | Gerrit stream-events -> Graphiti `/ingest/gerrit`. |
