@@ -13,6 +13,9 @@ against the ``agent_character_card`` table from RPG.W1.1.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -20,6 +23,8 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
 from backend.agents.guild_registry import GUILDS
+
+LOG = logging.getLogger(__name__)
 
 
 ConnFactory = Callable[[], Any]
@@ -708,6 +713,136 @@ def _emit_level_up_safely(previous: CharacterCard, updated: CharacterCard) -> No
             )
     except Exception:
         pass
+
+
+# ── Runner pickup integration (OP-1459) ───────────────────────────
+
+
+@asynccontextmanager
+async def _connect_character_card_from_env() -> AsyncIterator[Any]:
+    """Open a single asyncpg connection from ``OMNISIGHT_DATABASE_URL``.
+
+    Mirrors :mod:`backend.agents.runner_metrics_recorder` so the runner's
+    one-shot RPG.W1.2 write reuses the same env-DSN contract as the
+    telemetry recorder: ``OMNISIGHT_DATABASE_URL`` wins over the generic
+    ``DATABASE_URL``; ``asyncpg`` is imported lazily so non-DB-backed
+    deployments do not need the dependency.
+    """
+    dsn = os.environ.get("OMNISIGHT_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("OMNISIGHT_DATABASE_URL or DATABASE_URL is not set")
+    from backend.db_url import parse as parse_db_url
+
+    parsed = parse_db_url(dsn)
+    if not parsed.is_postgres:
+        raise RuntimeError("agent_character_card requires a Postgres database URL")
+    import asyncpg  # type: ignore[import-not-found]
+
+    conn = await asyncpg.connect(**parsed.asyncpg_connect_kwargs())
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+
+def _resolve_first_task_guild(task_area: str | None) -> str:
+    """Pick the Guild slug used for first-task card creation.
+
+    The runner ticket area can be a comma-separated list of declared
+    areas (`"backend,security"`), `<none>`, or an unknown slug. We pick
+    the first segment that maps cleanly into the registry and fall
+    back to :data:`DEFAULT_GUILD` ("backend") so dispatch never blocks
+    on an unrecognised area — the card is durable identity, not a
+    routing decision.
+    """
+    if not task_area:
+        return DEFAULT_GUILD
+    for raw in task_area.split(","):
+        candidate = raw.strip().lower()
+        if candidate and candidate in GUILDS:
+            return candidate
+    return DEFAULT_GUILD
+
+
+async def ensure_card_for_first_task_from_env(
+    *,
+    agent_id: str,
+    agent_class: str,
+    instance_suffix: str = DEFAULT_INSTANCE_SUFFIX,
+    task_area: str | None = None,
+    specialization_label: str = DEFAULT_SPECIALIZATION_LABEL,
+    conn_factory: ConnFactory | None = None,
+) -> CharacterCard | None:
+    """Run the W1.2 first-task upsert against the env-configured DSN.
+
+    Returns the existing or freshly-created :class:`CharacterCard` row
+    on success, or ``None`` when the call fails open (no DSN, asyncpg
+    unavailable, connection error, schema not yet deployed). Failures
+    are logged at WARNING with prefix ``CharacterCardFirstTaskFailed``
+    so operators can grep journalctl; the caller treats ``None`` as
+    "first-task hook skipped" and continues pickup unblocked.
+
+    ``conn_factory`` is a test seam — production callers omit it and
+    the env-DSN connection helper above is used.
+    """
+    guild = _resolve_first_task_guild(task_area)
+    first_task = FirstTaskCharacterCard(
+        agent_id=agent_id,
+        agent_class=agent_class,
+        task_area=guild,
+        instance_suffix=instance_suffix,
+        specialization_label=specialization_label,
+    )
+    try:
+        if conn_factory is None:
+            async with _connect_character_card_from_env() as conn:
+                store = PostgresCharacterCardStore(_conn_passthrough_factory(conn))
+                return await store.ensure_card_for_first_task(first_task)
+        store = PostgresCharacterCardStore(conn_factory)
+        return await store.ensure_card_for_first_task(first_task)
+    except Exception as exc:  # noqa: BLE001 — runner pickup must never wedge on this
+        LOG.warning(
+            "CharacterCardFirstTaskFailed agent_id=%s agent_class=%s err=%s",
+            agent_id,
+            agent_class,
+            exc,
+        )
+        return None
+
+
+def ensure_card_for_first_task_sync(
+    *,
+    agent_id: str,
+    agent_class: str,
+    instance_suffix: str = DEFAULT_INSTANCE_SUFFIX,
+    task_area: str | None = None,
+    specialization_label: str = DEFAULT_SPECIALIZATION_LABEL,
+) -> CharacterCard | None:
+    """Synchronous wrapper for ``auto-runner-jira.py``.
+
+    Drives a fresh :func:`asyncio.run` loop so the sync dispatch path
+    can call into the asyncpg-backed store without restructuring the
+    runner. Mirrors the ``*_sync`` shape used by
+    :mod:`backend.agents.runner_metrics_recorder`. Must not be invoked
+    from inside an already-running event loop.
+    """
+    return asyncio.run(
+        ensure_card_for_first_task_from_env(
+            agent_id=agent_id,
+            agent_class=agent_class,
+            instance_suffix=instance_suffix,
+            task_area=task_area,
+            specialization_label=specialization_label,
+        )
+    )
+
+
+def _conn_passthrough_factory(conn: Any) -> ConnFactory:
+    @asynccontextmanager
+    async def _factory() -> AsyncIterator[Any]:
+        yield conn
+
+    return _factory
 
 
 assert_character_card_guilds_within_registry()

@@ -52,6 +52,7 @@ sys.path.insert(0, str(REPO))
 from backend.agents import (
     agent_feature_flags,
     capability_matrix,
+    character_card,
     circuit_breaker,
     failure_graph,
     jira_authority_check,
@@ -70,6 +71,7 @@ from backend.agents import (
     runner_workspace_safety,
     scheduler,
 )
+from backend.agents.instance_suffix import CANONICAL_INSTANCE_SUFFIXES
 from backend.agents.operator_notifier import Severity, notify as operator_notify
 from backend.agents.loop_detector import (
     DEFAULT_GRADER_MODEL,
@@ -159,6 +161,58 @@ class UnknownAreaLabelError(ValueError):
 def _bot_username() -> str:
     """Resolve the per-instance bot username for this runner process."""
     return jira_dispatch.resolve_bot_username(AGENT_CLASS, INSTANCE_ID)
+
+
+def _runner_instance_suffix() -> str:
+    """Map ``OMNISIGHT_RUNNER_INSTANCE_ID`` to an ADR-0008 instance_suffix.
+
+    "default" → ``alpha`` (index 0); numeric "N" → the Nth canonical
+    suffix (``beta`` for ``2``, ``gamma`` for ``3``, …). Off-pattern
+    instance IDs fall through unchanged — the character-card schema
+    treats ``instance_suffix`` as opaque, so this is durable rather
+    than dropping the row.
+    """
+    if INSTANCE_ID == "default":
+        return CANONICAL_INSTANCE_SUFFIXES[0]
+    if INSTANCE_ID.isdigit():
+        idx = int(INSTANCE_ID) - 1
+        if 0 <= idx < len(CANONICAL_INSTANCE_SUFFIXES):
+            return CANONICAL_INSTANCE_SUFFIXES[idx]
+    return INSTANCE_ID
+
+
+def _ensure_runner_character_card(ticket_key: str) -> None:
+    """Idempotent RPG.W1.2 first-task hook (OP-1459).
+
+    Composes the per-instance agent identity from the runner env
+    (``agent_id`` = bot_username so two instances of the same class
+    never collide on the row's primary key) and delegates to the
+    character-card store. Best-effort: the helper logs and swallows
+    every exception so dispatch keeps moving even when the
+    ``agent_character_card`` table is absent or unreachable.
+    """
+    try:
+        agent_id = _bot_username()
+    except Exception as exc:  # noqa: BLE001 — never block pickup on identity resolution
+        log.warning(
+            "OP-1459 first-task character-card hook: bot_username resolve "
+            "failed ticket=%s err=%s",
+            ticket_key, exc,
+        )
+        return
+    metric_meta = _LAST_TICKET_METADATA.get(ticket_key, {})
+    task_area = metric_meta.get("area") or None
+    card = character_card.ensure_card_for_first_task_sync(
+        agent_id=agent_id,
+        agent_class=AGENT_CLASS,
+        instance_suffix=_runner_instance_suffix(),
+        task_area=task_area,
+    )
+    if card is not None:
+        print(
+            f"[runner] character-card ensured agent_id={card.agent_id} "
+            f"guild={card.guild} level={card.level}"
+        )
 
 
 def _default_worktree_for(agent_class: str) -> str:
@@ -2458,6 +2512,14 @@ def main() -> int:
         )
         return 0
     print(f"[runner] {snapshot.key} claim acquired (token: {claim.claim_token})")
+
+    # OP-1459 / RPG.W1.2 — first-task character-card upsert. Runs once
+    # per (agent_class × instance_id) on the first pickup that reaches
+    # this point; subsequent pickups return the existing row. The call
+    # is fail-open (logs warning + returns None on any DB/import error)
+    # so a missing migration, a Postgres outage, or the asyncpg
+    # dependency being absent never wedges ticket dispatch.
+    _ensure_runner_character_card(snapshot.key)
 
     # OP-836 sentinel — stamps worktree pre-launch so we can detect post-CLI
     # tamper (CLI deleted it, reset HEAD to non-descendant SHA, swapped
