@@ -50,7 +50,14 @@ non-overlapping data and never read each other's storage (AC #6).
 
 * **Neo4j** — runs in the `cognee` Docker compose profile. Heap 2 G,
   pagecache 512 M, mem_limit 3 G, mem_reservation 1 G. Persistent
-  storage is pinned to `/var/lib/omnisight/neo4j/`.
+  storage is pinned to `/var/lib/omnisight/neo4j/` (FHS-aligned).
+  New prod hosts MUST run the one-time bootstrap
+  (`sudo mkdir -p /var/lib/omnisight/neo4j && sudo chown user:user
+  /var/lib/omnisight/neo4j`) **before** the first
+  `docker compose --profile cognee up` — see
+  [`neo4j-path-migration-2026-05-18.md`](neo4j-path-migration-2026-05-18.md)
+  §4. Older hosts on the `${HOME}/.local/share/omnisight/neo4j/...`
+  path are deprecated; OP-1493 documents the cutover.
 * **pgvector** — reuses the existing OmniSight Postgres instance for
   embeddings (no new service).
 * **Adapter** — `backend/agents/cognee_integration.py`. Lazy-imports
@@ -261,6 +268,7 @@ DoD evidence.
 * Adapter: `backend/agents/cognee_integration.py`
 * Tests: `backend/tests/test_cognee_integration.py`
 * Compose service: `docker-compose.yml` `neo4j` (under `cognee` profile)
+* Path migration runbook (OP-1493, 2026-05-18 cutover): [`neo4j-path-migration-2026-05-18.md`](neo4j-path-migration-2026-05-18.md)
 * B8 baseline (still wired): `backend/agents/repo_map.py`
 * B10 baseline (still wired): `backend/agents/lesson_retrieval.py`
 * Memory Tool (C1 — coexists, separate data): `backend/agents/memory_tool.py`

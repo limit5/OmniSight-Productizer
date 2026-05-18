@@ -151,7 +151,7 @@ services:
   # authenticate to /ingest/* with OMNISIGHT_MCP_GRAPHITI_TOKEN.
   # ──────────────────────────────────────────────────────────────
   graphiti:
-    image: getzep/graphiti:latest
+    image: zepai/graphiti:latest
     profiles: ["graphiti"]
     ports:
       - "${OMNISIGHT_GRAPHITI_PORT:-8003}:8000"
