@@ -44,6 +44,7 @@ projection.
 
 from __future__ import annotations
 
+import functools
 import logging
 import time
 from collections import defaultdict
@@ -238,6 +239,20 @@ class InMemoryIncidentSource:
 # dependencies (per the module docstring).
 
 
+@functools.lru_cache(maxsize=8)
+def _cached_engine(url: str) -> "object":
+    # OP-1455: cache the SQLAlchemy engine per DSN at module scope.
+    # Without this, ``default_incident_source`` recreates the engine on
+    # every causal-axis HTTP request — ``create_engine`` + the first
+    # ``pool_pre_ping`` round-trip add ~130 ms per call and the new
+    # connection pool starts empty, defeating connection reuse. Caching
+    # by DSN string lets concurrent axes share one pool and pays the
+    # ping cost once per process.
+    import sqlalchemy as sa  # noqa: PLC0415 — lazy
+
+    return sa.create_engine(url, future=True, pool_pre_ping=True)
+
+
 class PostgresIncidentSource:
     """Read ``runner_incidents`` rows from Postgres via SQLAlchemy.
 
@@ -255,10 +270,12 @@ class PostgresIncidentSource:
     def __init__(self, engine: "object") -> None:
         self._engine = engine
 
+    @property
+    def engine(self) -> "object":
+        return self._engine
+
     @classmethod
     def from_database_url(cls, url: str) -> "PostgresIncidentSource":
-        import sqlalchemy as sa  # noqa: PLC0415 — lazy
-
         # OP-1452: failure_graph uses SYNC SQLAlchemy (engine.begin()
         # called via asyncio.to_thread from the F6 axis). Mixing an
         # asyncpg driver into a sync engine raises MissingGreenlet on
@@ -267,8 +284,7 @@ class PostgresIncidentSource:
         # prod. Strip the +asyncpg variant so we end up on psycopg2.
         if url.startswith("postgresql+asyncpg://"):
             url = "postgresql+psycopg2://" + url[len("postgresql+asyncpg://"):]
-        engine = sa.create_engine(url, future=True, pool_pre_ping=True)
-        return cls(engine)
+        return cls(_cached_engine(url))
 
     def list_since(self, since: datetime) -> Iterable[RunnerIncident]:
         import sqlalchemy as sa  # noqa: PLC0415 — lazy
