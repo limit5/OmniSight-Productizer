@@ -36,6 +36,7 @@ ENV:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -127,6 +128,7 @@ def _env_int(name: str, default: int) -> int:
 
 LESSON_RECALL_TOP_K = _env_int("OMNISIGHT_LESSON_RECALL_TOP_K", 3)
 ANTIPATTERN_TOP_N = _env_int("OMNISIGHT_ANTIPATTERN_TOP_N", 2)
+REFLECTION_RAG_TOP_K = _env_int("OMNISIGHT_REFLECTION_RAG_TOP_K", 5)
 ORPHAN_SALVAGE_BRANCH_THRESHOLD = int(
     os.environ.get("OMNISIGHT_ORPHAN_SALVAGE_BRANCH_THRESHOLD", "50").strip()
 )
@@ -945,6 +947,62 @@ def _build_lesson_recall_block(key: str, summary: str, description: str) -> str:
     return "\n" + "\n".join(parts) + "\n"
 
 
+def _build_reflection_rag_block(key: str, summary: str, description: str) -> str:
+    """RPG.W6.2 (OP-1357) — inject top-K relevant prior reflection lessons.
+
+    The W6 reflection layer stores success/failure summaries in the shared
+    BP.Q vector store. Pickup prompt construction is sync, so this wrapper
+    constructs the env-configured embedder/store for one retrieval call and
+    closes the store client before returning. Any unavailable dependency
+    degrades to an empty block; runner pickup must remain usable when the
+    semantic lesson layer is offline.
+    """
+    if not agent_feature_flags.reflection_rag_prompt.enabled():
+        return ""
+
+    async def _load() -> str:
+        from backend.agents import reflection_rag
+        from backend.agents.rag_indexer import (
+            DEFAULT_TENANT_ID,
+            _build_embedder_from_env,
+            _build_store_from_env,
+        )
+
+        tenant_id = os.environ.get("OMNISIGHT_RAG_TENANT_ID", DEFAULT_TENANT_ID)
+        embedder = _build_embedder_from_env()
+        store, closeable = await _build_store_from_env()
+        try:
+            return await reflection_rag.build_reflection_lesson_injection(
+                tenant_id=tenant_id,
+                ticket_key=key,
+                ticket_summary=summary,
+                ticket_description=description,
+                embedder=embedder,
+                store=store,
+                top_k=REFLECTION_RAG_TOP_K,
+            )
+        finally:
+            if closeable is not None:
+                await closeable.close()
+
+    try:
+        block = asyncio.run(_load())
+    except Exception as exc:  # noqa: BLE001 — degrade on any retrieval error
+        print(
+            f"[runner] reflection_rag.unavailable key={key} err={exc}",
+            file=sys.stderr,
+        )
+        return ""
+    if not block:
+        print(f"[runner] reflection_rag.empty key={key}", file=sys.stderr)
+        return ""
+    print(
+        f"[runner] reflection_rag.surfaced key={key} top_k={REFLECTION_RAG_TOP_K}",
+        file=sys.stderr,
+    )
+    return "\n" + block.strip() + "\n"
+
+
 def _build_antipattern_block(
     key: str, summary: str, description: str, declared_areas: list[str],
 ) -> str:
@@ -1104,6 +1162,7 @@ def _build_prompt(
     # off) and degrade to an empty string when the KG / cookbook is offline.
     # They sit before the Documentation-rules / AC-verification sections so
     # the CLI reads the context before it is told what to satisfy.
+    reflection_block = _build_reflection_rag_block(key, summary, description)
     lessons_block = _build_lesson_recall_block(key, summary, description)
     antipattern_block = _build_antipattern_block(
         key, summary, description, declared_areas,
@@ -1123,7 +1182,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-{capabilities_block}{fg_block}{ps_block}{ops_only_block}{lessons_block}{antipattern_block}
+{capabilities_block}{fg_block}{ps_block}{ops_only_block}{reflection_block}{lessons_block}{antipattern_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
