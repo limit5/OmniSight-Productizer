@@ -182,6 +182,45 @@ def test_sqlite_constraints_enforce_parents_and_visibility(m0197) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "object_kind",
+    ["block", "runbook", "notebook", "agent_transcript"],
+)
+def test_sqlite_defaults_cover_share_contract_object_kinds(
+    m0197,
+    object_kind: str,
+) -> None:
+    conn = sqlite3.connect(":memory:")
+    _bootstrap_parent_schema(conn)
+    conn.execute("INSERT INTO tenants (id, name) VALUES ('t-a', 'Tenant A')")
+    conn.execute("INSERT INTO users (id, tenant_id) VALUES ('u-a', 't-a')")
+    conn.executescript(m0197._SQLITE_CREATE_TABLE)
+
+    conn.execute(
+        """
+        INSERT INTO shareable_objects (
+            share_id, object_kind, object_id, tenant_id, owner_user_id
+        ) VALUES (
+            ?, ?, 'obj-a', 't-a', 'u-a'
+        )
+        """,
+        (f"sh-{object_kind}", object_kind),
+    )
+
+    row = conn.execute(
+        """
+        SELECT visibility, expires_at, redaction_applied, created_at
+        FROM shareable_objects
+        WHERE share_id = ?
+        """,
+        (f"sh-{object_kind}",),
+    ).fetchone()
+    assert row[0] == "private"
+    assert row[1] is None
+    assert row[2] == "{}"
+    assert row[3]
+
+
 class TestMigratorListsTable:
     def _load_migrator(self):
         import importlib.util as _u
