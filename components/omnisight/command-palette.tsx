@@ -30,6 +30,7 @@ import {
   ExternalLink,
   Command,
   Wand2,
+  Users,
 } from "lucide-react"
 import { useI18n as _useI18n, type Locale } from "@/lib/i18n/context"
 import { listEffectiveSkills, type EffectiveSkill } from "@/lib/api"
@@ -140,6 +141,7 @@ export function CommandPalette({ onNavigatePanel }: Props) {
     { id: "panel-budget",       icon: Gauge,           label: { en: "Go to Budget Strategy", "zh-TW": "前往預算策略", "zh-CN": "前往预算策略", ja: "Budget Strategy へ" }, run: () => navigatePanel("budget"), tags: ["cost", "tier", "retries"] },
     { id: "panel-timeline",     icon: LayoutDashboard, label: { en: "Go to Pipeline Timeline", "zh-TW": "前往 Pipeline Timeline", "zh-CN": "前往 Pipeline Timeline", ja: "Pipeline Timeline へ" }, run: () => navigatePanel("timeline") },
     { id: "panel-rules",        icon: ScrollText,      label: { en: "Go to Decision Rules", "zh-TW": "前往決策規則", "zh-CN": "前往决策规则", ja: "Decision Rules へ" }, run: () => navigatePanel("rules"), tags: ["auto", "override"] },
+    { id: "panel-agents",       icon: Users,           label: { en: "Go to Agent Roster", "zh-TW": "前往 Agent 名冊", "zh-CN": "前往 Agent 名册", ja: "Agent 名簿へ" }, run: () => go("/agents"), tags: ["guild", "character card", "party"] },
     // Tour
     { id: "tour-run",    icon: PlayCircle, label: { en: "Run the 5-step tour", "zh-TW": "重新跑 5 步導覽", "zh-CN": "重新跑 5 步导览", ja: "5 ステップツアーを再実行" }, run: () => go("/?tour=1") },
     { id: "tour-decisions", icon: PlayCircle, label: { en: "Tour: Decision Queue step", "zh-TW": "導覽：Decision Queue 步驟", "zh-CN": "导览：Decision Queue 步骤", ja: "ツアー: Decision Queue" }, run: () => go("/?tour=decision-queue") },
