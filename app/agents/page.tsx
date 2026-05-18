@@ -31,6 +31,7 @@ import {
   type AgentPartyDto,
 } from "@/lib/api"
 import type { AgentGuild } from "@/components/omnisight/agents/CharacterCard"
+import { AgentRosterTour } from "@/components/omnisight/agents/AgentRosterTour"
 import {
   GuildHall,
   type GuildHallGuild,
@@ -234,6 +235,7 @@ export default function AgentsRosterPage() {
       className="min-h-screen bg-[var(--background)] text-[var(--foreground)] p-6 md:p-10"
       data-testid="agents-roster-page"
     >
+      <AgentRosterTour />
       <div className="max-w-6xl mx-auto">
         <header className="flex items-start justify-between gap-4 mb-6 flex-wrap">
           <div>
