@@ -177,10 +177,18 @@ class IncidentSource(Protocol):
     ``runner_incidents`` table; tests inject the in-memory equivalent.
     The Protocol is intentionally tiny — adding methods here forces every
     downstream source to grow them, so keep the surface area minimal.
+
+    ``query_by_ticket`` is the OP-1450 hot-path entry: callers that only
+    need a given ticket's failure-graph neighbourhood get just that
+    ticket's incidents plus their direct edge-candidates, instead of
+    paying the full ``list_since`` window scan.
     """
 
     def list_since(self, since: datetime) -> Iterable[RunnerIncident]: ...
     def get(self, incident_id: str) -> RunnerIncident | None: ...
+    def query_by_ticket(
+        self, ticket_key: str, since: datetime
+    ) -> Iterable[RunnerIncident]: ...
 
 
 @dataclass
@@ -202,6 +210,26 @@ class InMemoryIncidentSource:
             if inc.incident_id == incident_id:
                 return inc
         return None
+
+    def query_by_ticket(
+        self, ticket_key: str, since: datetime
+    ) -> Iterable[RunnerIncident]:
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        in_window = [i for i in self.incidents if i.occurred_at >= since]
+        own = [i for i in in_window if i.ticket_key == ticket_key]
+        if not own:
+            return []
+        own_classes = {i.failure_class for i in own}
+        own_mutexes = {i.mutex_label for i in own if i.mutex_label}
+        return [
+            i for i in in_window
+            if (
+                i.ticket_key == ticket_key
+                or i.failure_class in own_classes
+                or (i.mutex_label is not None and i.mutex_label in own_mutexes)
+            )
+        ]
 
 
 # OP-1449 — Postgres-backed incident source. Keeps ``failure_graph``
@@ -286,6 +314,76 @@ class PostgresIncidentSource:
             )
             return None
         return _row_to_incident(dict(row)) if row else None
+
+    def query_by_ticket(
+        self, ticket_key: str, since: datetime
+    ) -> Iterable[RunnerIncident]:
+        """Return rows sufficient to build the failure-graph neighbourhood
+        of ``ticket_key`` without scanning the whole window.
+
+        The result is the union of:
+          * the ticket's own incidents (via ``idx_runner_incidents_ticket_key``),
+          * any incident sharing one of the ticket's ``failure_class`` values
+            (``idx_runner_incidents_class_area``),
+          * any incident sharing one of the ticket's non-null ``mutex_label``
+            values (``idx_runner_incidents_mutex``).
+
+        This is the OP-1450 hot path: the prior implementation pulled every
+        row in the 7-day window (1935 rows in prod) and built a full
+        ``FailureGraph`` on each request, which timed out the causal axis
+        at ~6.7 s — 11x the 0.6 s budget. The ticket-scoped union here is
+        index-served and returns the few hundred rows that actually
+        participate in ``ticket_key``'s edges.
+        """
+        import sqlalchemy as sa  # noqa: PLC0415 — lazy
+
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        stmt = sa.text(
+            """
+            WITH own AS (
+                SELECT failure_class, mutex_label
+                FROM runner_incidents
+                WHERE ticket_key = :ticket_key
+                  AND created_at >= :since
+                  AND failure_class != 'MEMORY_RECALL_AUDIT'
+            )
+            SELECT incident_id, ticket_key, failure_class, mutex_label,
+                   created_at, summary
+            FROM runner_incidents
+            WHERE created_at >= :since
+              AND failure_class != 'MEMORY_RECALL_AUDIT'
+              AND (
+                ticket_key = :ticket_key
+                OR failure_class IN (SELECT DISTINCT failure_class FROM own)
+                OR (
+                  mutex_label IS NOT NULL
+                  AND mutex_label IN (
+                    SELECT DISTINCT mutex_label
+                    FROM own
+                    WHERE mutex_label IS NOT NULL
+                  )
+                )
+              )
+            ORDER BY created_at ASC, incident_id ASC
+            """
+        )
+        try:
+            with self._engine.begin() as conn:
+                rows = conn.execute(
+                    stmt, {"ticket_key": ticket_key, "since": since}
+                ).mappings().all()
+        except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+            log.warning(
+                "PostgresIncidentSource.query_by_ticket degrade "
+                "ticket_key=%s since=%s err=%s: %s",
+                ticket_key,
+                since.isoformat(),
+                type(exc).__name__,
+                exc,
+            )
+            return []
+        return [_row_to_incident(dict(row)) for row in rows]
 
 
 def _row_to_incident(row: dict) -> RunnerIncident:

@@ -104,18 +104,26 @@ export function GlobalStatusHeader({
       
       {/* Tablet/Desktop Layout */}
       <div className="hidden md:flex items-center justify-between">
-        {/* Logo & Title */}
-        <div className="flex items-center gap-4">
+        {/* Logo & Title — `shrink-0` on the block + `whitespace-nowrap` on
+          * the text rows prevents the title from wrapping into 2+ lines
+          * when the active locale's text is much wider than English
+          * (e.g. Japanese「オムニサイト プロダクタイザー」/「ニューラル
+          * コマンドセンター v2.0」 ~2x Latin width per character). When
+          * the title used to wrap it stretched the header height and
+          * pushed the right cluster off-grid at 1920px (2026-05-18 fix).
+          * `text-base lg:text-lg 3xl:text-lg` keeps the title slightly
+          * smaller until 3xl (2160px) so wide-text locales still fit. */}
+        <div className="flex items-center gap-4 shrink-0">
           <div className="relative">
             <div className="w-10 h-10 rounded-full border-2 border-[var(--neural-blue)] flex items-center justify-center pulse-blue">
               <div className="w-4 h-4 bg-[var(--neural-blue)] rounded-full" />
             </div>
           </div>
-          <div>
-            <h1 className="font-sans text-base lg:text-lg font-bold tracking-fui text-[var(--neural-blue)] text-glow-blue">
+          <div className="min-w-0">
+            <h1 className="font-sans text-sm 3xl:text-lg font-bold tracking-fui text-[var(--neural-blue)] text-glow-blue whitespace-nowrap">
               {tHeader("title")}
             </h1>
-            <p className="font-mono text-xs text-[var(--muted-foreground)]">
+            <p className="font-mono text-[10px] 3xl:text-xs text-[var(--muted-foreground)] whitespace-nowrap">
               {tHeader("subtitle")}
             </p>
           </div>
@@ -166,12 +174,19 @@ export function GlobalStatusHeader({
           *   - WSL2 status now supports "N/A" tri-state (host is not WSL2 —
           *     e.g. native Linux / macOS): muted-gray, not red, so the
           *     header doesn't scream OFFLINE on a perfectly healthy
-          *     non-WSL2 deploy. */}
+          *     non-WSL2 deploy.
+          * 2026-05-18 update: WSL2/USB pills `hidden xl:flex` → `hidden
+          * 3xl:flex`. At 1920px the right cluster (these pills + the
+          * 4-button ModeSelector + SSE + Arch + Help + Lang + Time +
+          * Settings + Bell + EmergencyStop) totalled ~800-1000px and
+          * squashed the layout against the center pipeline progress
+          * (max-w-md). 3xl is defined at 2160px in app/globals.css
+          * `@theme inline`. */}
         <div className="flex items-center gap-2">
-          {/* Status Indicators — only on very-wide screens (xl+).
+          {/* Status Indicators — only on really-wide screens (3xl+ = 2160px+).
             * Each pill has a fixed-width inner span so changing state
             * doesn't push the rest of the header sideways.  */}
-          <div className="hidden xl:flex items-center gap-3 shrink-0">
+          <div className="hidden 3xl:flex items-center gap-3 shrink-0">
             <div className="flex items-center gap-2 shrink-0" style={{ width: 110 }}>
               <div
                 className={`status-dot ${
