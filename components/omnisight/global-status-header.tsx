@@ -136,20 +136,32 @@ export function GlobalStatusHeader({
             </div>
           </div>
           <div className="min-w-0">
-            <h1 className="font-sans text-sm xl:text-base 3xl:text-lg font-bold tracking-fui text-[var(--neural-blue)] text-glow-blue whitespace-nowrap">
+            <h1 className="font-sans text-sm 3xl:text-lg font-bold tracking-fui text-[var(--neural-blue)] text-glow-blue whitespace-nowrap">
               {tHeader("title")}
             </h1>
-            <p className="font-mono text-[10px] xl:text-[11px] 3xl:text-xs text-[var(--muted-foreground)] whitespace-nowrap">
+            <p className="font-mono text-[10px] 3xl:text-xs text-[var(--muted-foreground)] whitespace-nowrap">
               {tHeader("subtitle")}
             </p>
           </div>
         </div>
 
-        {/* Project Pipeline Progress - hidden on tablet, shown on desktop */}
-        <div className="hidden lg:block flex-1 max-w-md mx-8">
-          <div className="flex items-center justify-between mb-1">
-            <span className="font-mono text-xs text-[var(--muted-foreground)]">{tHeader("pipeline")}</span>
-            <span className="font-mono text-xs text-[var(--validation-emerald)]">
+        {/* Project Pipeline Progress — hidden on tablet, shown on desktop.
+          * 2026-05-18 evening followup: `max-w-md` (448px) was too greedy at
+          * 1920px after the dots-always-visible WSL/USB fix (#1021) — the
+          * right cluster (incl. /agents nav icon from OP-1475) overflowed
+          * past viewport, pushing E-STOP off-screen, and the JA-locale
+          * "プロジェクトパイプライン" label wrapped vertically because
+          * justify-between's two children competed for too-narrow space.
+          * Fix: tighten the pipeline container at lg-2xl (max-w-sm + mx-4)
+          * to free ~95px of horizontal real estate; restore full max-w-md
+          * + mx-8 only at 3xl+ where the screen is genuinely wider. Also
+          * add `whitespace-nowrap` + `truncate` to the labels + `gap-2 min-w-0`
+          * on the row so JA-wide text gracefully ellipsis-truncates instead
+          * of wrapping into 2 lines. */}
+        <div className="hidden lg:block flex-1 max-w-sm 3xl:max-w-md mx-4 3xl:mx-8">
+          <div className="flex items-center justify-between gap-2 mb-1 min-w-0">
+            <span className="font-mono text-xs text-[var(--muted-foreground)] whitespace-nowrap truncate min-w-0">{tHeader("pipeline")}</span>
+            <span className="font-mono text-xs text-[var(--validation-emerald)] whitespace-nowrap shrink-0">
               {finished}/{total} {tHeader("complete")}
             </span>
           </div>
