@@ -316,27 +316,23 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
         return {}
 
 
-async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
-    """Best-effort Cognee KG neighbour fetch. Degrades to ``{}``.
+def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
+    """Synchronous Cognee KG fetch executed in a worker thread.
 
-    Per OP-1449: ``CogneeAdapter.search`` honours its own
-    ``query_timeout`` (default 30 s), which is much larger than the
-    structural axis budget (800 ms). To avoid the cognee fetcher being
-    cancelled mid-flight by the per-axis budget — which surfaces in the
-    response as ``structural=null`` rather than the graceful
-    ``kg_neighbours=[]`` — we wrap the call in an inner
-    :func:`asyncio.wait_for` that returns early enough for
-    :func:`fetch_structural_axis` to still hand back a well-formed dict.
+    OP-1456: ``CogneeAdapter.search`` is declared ``async`` but the
+    underlying ``self._cognee.search(...)`` call is synchronous and runs
+    on SQLAlchemy + SQLite. The ``unable to open database file`` retry
+    path inside Cognee can stall for several seconds on tickets with
+    large input sets (observed 7.2 s for OP-214), and because the call
+    is sync it blocks the calling thread — which, when invoked from the
+    event loop, freezes every concurrent axis. The fix is to run the
+    whole adapter interaction in its own thread via
+    :func:`asyncio.to_thread`. The worker thread drives the async
+    ``adapter.search`` through a private ``asyncio.run`` so the OP-1449
+    inner timeout still applies for any await-points inside the adapter.
     """
-    try:
-        from backend.agents import cognee_integration
-    except ImportError:
-        return {}
+    from backend.agents import cognee_integration
 
-    # Leave headroom for the JIRA half + envelope assembly inside the
-    # 800 ms structural budget; if Cognee is slower than this we'd
-    # rather return ``kg_neighbours=[]`` with a logged degrade than have
-    # the whole axis fall back to ``null``.
     inner_budget_sec = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
 
     try:
@@ -351,8 +347,8 @@ async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
         )
         return {}
 
-    try:
-        hits = await asyncio.wait_for(
+    async def _search() -> Any:
+        return await asyncio.wait_for(
             adapter.search(
                 f"ticket neighbours for {ticket_key}",
                 kinds=(cognee_integration.SOURCE_KIND_JIRA,),
@@ -360,6 +356,9 @@ async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
             ),
             timeout=inner_budget_sec,
         )
+
+    try:
+        hits = asyncio.run(_search())
     except asyncio.TimeoutError:
         log.warning(
             "project_state.structural.cognee_inner_timeout ticket=%s "
@@ -387,6 +386,33 @@ async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
             for h in (hits or ())
         ]
     }
+
+
+async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
+    """Best-effort Cognee KG neighbour fetch. Degrades to ``{}``.
+
+    Delegates the actual adapter work to :func:`_blocking_cognee_lookup`
+    running in a worker thread so the event loop stays free for the
+    concurrent causal / temporal axes — see OP-1456 root-cause analysis
+    on OP-214 (structural axis 7.2 s, causal cancelled at 2 s budget
+    despite only needing 321 ms). The graceful-degrade contract from
+    OP-1449 (return ``{}`` so :func:`fetch_structural_axis` still emits a
+    well-formed dict with ``kg_neighbours=[]``) is preserved end-to-end.
+    """
+    try:
+        from backend.agents import cognee_integration  # noqa: F401 — import probe
+    except ImportError:
+        return {}
+    try:
+        return await asyncio.to_thread(_blocking_cognee_lookup, ticket_key)
+    except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+        log.info(
+            "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
+        return {}
 
 
 async def _temporal_graphiti(ticket_key: str) -> dict[str, Any]:
