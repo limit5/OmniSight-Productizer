@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import textwrap
 from datetime import datetime, timezone
 
@@ -223,6 +224,80 @@ def test_cascade_layer_4_jaro_winkler_match():
     assert match.score >= 0.9
     assert match.score < 1.0
     assert "record_output()" in out
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  R60 observability — Jaro-Winkler hits must emit a logger warning
+#  (the N10 ledger is file-backed and operators need live signals too)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_jaro_winkler_layer_emits_logger_warning(caplog):
+    """R60 mitigation: a Jaro-Winkler resolve must surface a stdlib
+    logging event so operators see fuzzy applications in journalctl /
+    CloudWatch without grepping the markdown N10 ledger."""
+    source = textwrap.dedent("""\
+        def provision():
+            prepare_config()
+            apply_config()
+            verify_output()
+    """)
+    search = (
+        "def provision_config():\n"
+        "    prepare_config()\n"
+        "    apply_configs()\n"
+        "    verify_output()\n"
+    )
+
+    with caplog.at_level(logging.WARNING, logger="backend.agents.tools_patch"):
+        match = tp.find_search_replace_match(source, search)
+
+    assert match.layer == 4
+    fuzzy_records = [
+        r for r in caplog.records
+        if r.name == "backend.agents.tools_patch" and r.levelno == logging.WARNING
+    ]
+    assert len(fuzzy_records) == 1
+    record = fuzzy_records[0]
+    assert "Jaro-Winkler" in record.getMessage()
+    assert f"layer={match.layer}" in record.getMessage()
+    assert f"score={match.score:.3f}" in record.getMessage()
+    assert f"byte_range={match.start}-{match.end}" in record.getMessage()
+
+
+@pytest.mark.parametrize(
+    ("source", "search", "expected_layer"),
+    [
+        (
+            "alpha\nbeta\ngamma\n",
+            "alpha\nbeta\ngamma\n",
+            1,
+        ),
+        (
+            "if ready:\n  start()\n  finish()\n",
+            "if ready:\n    start()\n    finish()\n",
+            2,
+        ),
+        (
+            "def render():\n    before()\n    live_middle()\n    after()\n",
+            "def render():\n    before()\n    stale_middle()\n    after()\n",
+            3,
+        ),
+    ],
+    ids=["layer-1-exact", "layer-2-indent", "layer-3-prefix-tail"],
+)
+def test_non_fuzzy_layers_stay_silent(caplog, source, search, expected_layer):
+    """Layers 1-3 are deterministic enough that a warning per hit would be
+    noise — only the Jaro-Winkler layer trips the R60 logging path."""
+    with caplog.at_level(logging.DEBUG, logger="backend.agents.tools_patch"):
+        match = tp.find_search_replace_match(source, search)
+
+    assert match.layer == expected_layer
+    fuzzy_records = [
+        r for r in caplog.records
+        if r.name == "backend.agents.tools_patch"
+        and "Jaro-Winkler" in r.getMessage()
+    ]
+    assert fuzzy_records == []
 
 
 def test_diff_validation_disabled_keeps_exact_match_only(monkeypatch):

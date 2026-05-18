@@ -401,6 +401,21 @@ def find_search_replace_match(
         threshold=jaro_winkler_threshold,
     )
     if match is not None:
+        # R60 mitigation: Jaro-Winkler is the loosest layer in the WP.3
+        # ladder and the most likely to misfire on look-alike code. The
+        # N10 ledger captures the event for retrospective audit; this
+        # warning surfaces the same hit through stdlib logging so live
+        # operators can spot fuzzy applications in journalctl/CloudWatch
+        # without grepping the markdown ledger.
+        logger.warning(
+            "WP.3 cascade resolved via Jaro-Winkler layer "
+            "(layer=%d, score=%.3f, threshold=%.3f, byte_range=%d-%d)",
+            match.layer,
+            match.score,
+            jaro_winkler_threshold,
+            match.start,
+            match.end,
+        )
         return match
     raise PatchNotFound("SEARCH block did not match any run in the source file")
 
