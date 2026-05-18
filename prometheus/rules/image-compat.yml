@@ -1,0 +1,74 @@
+# OP-1483 — FE/BE bundle compatibility alerting rules.
+#
+# Codex's 2026-05-18 morning incident showed prod silently running a
+# backend=hotfix8 + frontend=hotfix5 skew for hours. The two were
+# internal-only hotfixes, so user-visible damage was zero by luck; the
+# next time the skew could carry a contract-changing release.
+#
+# The runtime detector lives in three places:
+#
+#   * backend/main.py::_frontend_compat_observer
+#       FastAPI middleware that drops the X-OmniSight-Frontend-Bundle
+#       + X-OmniSight-Frontend-Api-Contract headers from every inbound
+#       request into backend.frontend_compat and bumps the counter
+#       below when the FE bundle != BE bundle.
+#   * backend/routers/health.py::_check_frontend_compat
+#       Surfaces the in-process ring buffer at /readyz.checks
+#       .frontend_compat_check (operator-facing on the single replica).
+#   * THIS FILE
+#       The fleet-wide alert. The counter is the authoritative
+#       Prometheus surface — /readyz is the eyeball view, this is the
+#       page-out source.
+#
+# Load alongside deploy/observability/prometheus/alerts.yml in
+# Prometheus rule_files. Alertmanager routes on the `severity` label.
+#
+# The JIRA hotfix bridge in
+# ``backend/agents/fe_be_mismatch_bridge.py`` consumes this alert via
+# Alertmanager webhook and auto-files a ticket labelled
+# ``runner-blocked:fe-be-mismatch`` so the runner stops picking up new
+# work while the deploy is being repaired.
+
+groups:
+  - name: omnisight_image_compat
+    interval: 30s
+    rules:
+      # FEBEBundleMismatch — fires the instant the backend sees a
+      # frontend request that names a bundle id other than its own
+      # baked bundle_id. Counter is labelled with (fe_bundle, be_bundle)
+      # so Alertmanager and the auto-filed JIRA ticket can name the
+      # offending versions directly. ``rate(...) > 0`` over a 5-minute
+      # window catches even a single straggler request without
+      # demanding sustained mismatch, which is the right behaviour
+      # for a deploy-skew detector — we want to know about the first
+      # observation, not wait for a flood.
+      - alert: FEBEBundleMismatch
+        expr: rate(omnisight_fe_be_bundle_mismatch_total[5m]) > 0
+        # Fire immediately — for a deploy-skew detector, "wait 5 min
+        # before paging" defeats the purpose. The whole point of this
+        # alert is that Codex's incident ran skewed for HOURS before
+        # anyone noticed; the cost of a false-positive page is hugely
+        # outweighed by the cost of another silent skew.
+        for: 0s
+        labels:
+          severity: critical
+          subsystem: image_pipeline
+          runner_block: "fe-be-mismatch"
+        annotations:
+          summary: "FE bundle != BE bundle on inbound requests"
+          description: |
+            The backend has received at least one request in the last
+            5 minutes carrying X-OmniSight-Frontend-Bundle =
+            {{ $labels.fe_bundle }} while the backend itself reports
+            bundle_id = {{ $labels.be_bundle }}. This is the runtime
+            detector for a deploy that left the FE and BE on different
+            bundle ids — exactly the failure mode from the 2026-05-18
+            morning incident.
+
+            Mismatch rate (per second): {{ $value }}
+
+            Remediation: see docs/operations/fe-be-compat-monitoring.md
+            §"Triage". The auto-filed JIRA ticket
+            (runner-blocked:fe-be-mismatch) will block runner pickups
+            until the deploy is reconciled.
+          runbook_url: "https://internal.docs/omnisight/op-1483-fe-be-mismatch"

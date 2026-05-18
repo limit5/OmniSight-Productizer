@@ -453,6 +453,28 @@ def _check_provider_chain() -> tuple[bool, str]:
     return True, f"ready={','.join(ready)}{suffix}"
 
 
+def _check_frontend_compat() -> dict:
+    """OP-1483 — surface the FE/BE bundle compatibility summary.
+
+    Returns the dict shape pinned by OP-1483 AC#1:
+    ``{ok, detail, observed_fe_bundles, mismatch_count, ...}``. Always
+    observational — never feeds the readyz ``ready`` gate, so a skewed
+    deploy stays in rotation while the FEBEBundleMismatch alert handles
+    the page-out.
+    """
+    from backend import frontend_compat
+    from backend import api_versioning as _av
+
+    try:
+        payload = _av.build_version_payload()
+        be_bundle = payload.get("bundle_id")
+        be_api_required = payload.get("api_required")
+    except Exception:
+        be_bundle = None
+        be_api_required = None
+    return frontend_compat.summary(be_bundle, be_api_required)
+
+
 def _build_readyz_payload(checks: dict, ready: bool) -> dict:
     payload = {
         "status": "ready" if ready else "not_ready",
@@ -619,6 +641,16 @@ async def _readyz_handler(verbose: bool = False) -> JSONResponse:
     # runtime from rotation. See _check_jira docstring for rationale.
     jira_ok, jira_detail = _check_jira()
     checks["jira_ping"] = {"ok": jira_ok, "detail": jira_detail}
+
+    # ── 7. Frontend compat (OP-1483, observational) ──────────────────
+    # Surfaces the ring-buffer summary fed by ``backend.main._frontend_compat_observer``
+    # so operators can spot a FE/BE bundle skew the moment /readyz is
+    # scraped. Strictly observational — the ticket explicitly bans
+    # degrading UX further on a mismatch the request side cannot fix
+    # (see OP-1483 NON-GOALS). The Prometheus counter
+    # ``omnisight_fe_be_bundle_mismatch_total`` is the alert source;
+    # this check is here for the operator who curls /readyz at 03:00.
+    checks["frontend_compat_check"] = _check_frontend_compat()
 
     # OP-1126 AC#3: ?verbose=1 surfaces spec-named aliases for the
     # checks the ticket calls out by name. Historical keys remain so

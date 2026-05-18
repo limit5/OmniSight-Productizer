@@ -431,6 +431,21 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # OP-1483 — FE/BE runtime compatibility detector. Bumped when the
+    # X-OmniSight-Frontend-Bundle header on an inbound request names a
+    # bundle id that does not match the backend's own (baked from
+    # bundle.json at image build time).  The (fe_bundle, be_bundle)
+    # pair lets the alert label the offending versions directly so the
+    # auto-filed JIRA ticket can name them in the summary. Cardinality
+    # is bounded because both sides ship as a single bundle id per
+    # deploy — a rolling restart turns over at most two values at a time.
+    fe_be_bundle_mismatch_total = Counter(
+        "omnisight_fe_be_bundle_mismatch_total",
+        "Inbound requests where frontend bundle id != backend bundle id",
+        labelnames=("fe_bundle", "be_bundle"),
+        registry=REGISTRY,
+    )
+
     # Phase 63-D D3: daily IQ benchmark score per model ─────────
     intelligence_iq_score = Gauge(
         "omnisight_intelligence_iq_score",
@@ -885,6 +900,7 @@ else:
     rtk_fallback_total = _NoOp()  # type: ignore
     rtk_install_status = _NoOp()  # type: ignore
     frontend_build_lag_commits = _NoOp()  # type: ignore
+    fe_be_bundle_mismatch_total = _NoOp()  # type: ignore
     intelligence_iq_score = _NoOp()  # type: ignore
     intelligence_iq_regression_total = _NoOp()  # type: ignore
     rag_prefetch_total = _NoOp()  # type: ignore
@@ -977,7 +993,7 @@ def reset_for_tests() -> None:
     global finetune_eval_score
     global prompt_cache_hit_total, prompt_cache_miss_total
     global rtk_compression_ratio, rtk_fallback_total, rtk_install_status
-    global frontend_build_lag_commits
+    global frontend_build_lag_commits, fe_be_bundle_mismatch_total
     global intelligence_iq_score, intelligence_iq_regression_total
     global rag_prefetch_total
     global memory_decay_total
@@ -1236,6 +1252,12 @@ def reset_for_tests() -> None:
     frontend_build_lag_commits = Gauge(
         "omnisight_frontend_build_lag_commits",
         "Commits between the production frontend build and master HEAD",
+        registry=REGISTRY,
+    )
+    fe_be_bundle_mismatch_total = Counter(
+        "omnisight_fe_be_bundle_mismatch_total",
+        "Inbound requests where frontend bundle id != backend bundle id",
+        labelnames=("fe_bundle", "be_bundle"),
         registry=REGISTRY,
     )
     intelligence_iq_score = Gauge(

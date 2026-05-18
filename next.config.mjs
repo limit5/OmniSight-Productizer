@@ -1,5 +1,6 @@
 import { fileURLToPath } from "node:url"
-import { dirname } from "node:path"
+import { dirname, join } from "node:path"
+import { readFileSync } from "node:fs"
 import createNextIntlPlugin from "next-intl/plugin"
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -14,6 +15,49 @@ const withNextIntl = createNextIntlPlugin("./i18n/request.ts")
 
 /** @type {import('next').NextConfig} */
 const backendUrl = process.env.BACKEND_URL || "http://localhost:8000"
+
+// OP-1483 — bake the bundle id + FE-built-against-api version into
+// `process.env.NEXT_PUBLIC_*` at build time so `lib/api.ts` can emit
+// them as bookkeeping headers on every fetch (the runtime FE/BE compat
+// detector). The source of truth is the checked-in `bundle.json` that
+// `scripts/build_image_bundle.py` overwrites in CI; the placeholder
+// values in the repo-root copy keep local builds working.
+//
+// Env precedence: explicit NEXT_PUBLIC_* from the CI shell wins (lets
+// the deploy SOP override without rewriting bundle.json), then
+// bundle.json if present, then "unknown"/"v1" as the final fallback —
+// same shape Dockerfile.frontend's `ARG BUNDLE_ID=unknown` uses.
+function _resolveBuildManifest() {
+  const fromEnv = (process.env.NEXT_PUBLIC_BUNDLE_ID || "").trim()
+  const contractFromEnv = (process.env.NEXT_PUBLIC_API_CONTRACT || "").trim()
+  let bundleId = fromEnv
+  let apiContract = contractFromEnv
+  if (!bundleId || !apiContract) {
+    try {
+      const raw = readFileSync(join(__dirname, "bundle.json"), "utf-8")
+      const parsed = JSON.parse(raw)
+      if (!bundleId && typeof parsed.bundle_id === "string") {
+        bundleId = parsed.bundle_id
+      }
+      if (
+        !apiContract
+        && parsed.contracts
+        && typeof parsed.contracts.frontend_built_against_api === "string"
+      ) {
+        apiContract = parsed.contracts.frontend_built_against_api
+      }
+    } catch {
+      // bundle.json may be absent in `next dev` standalone usage — fall
+      // through to the defaults below.
+    }
+  }
+  return {
+    bundleId: bundleId || "unknown",
+    apiContract: apiContract || "v1",
+  }
+}
+
+const _buildManifest = _resolveBuildManifest()
 
 const nextConfig = {
   output: "standalone",
@@ -38,6 +82,15 @@ const nextConfig = {
   },
   turbopack: {
     root: __dirname,
+  },
+  // OP-1483 — re-export the resolved manifest as NEXT_PUBLIC_* so the
+  // client bundle can read the values via `process.env.*` at runtime.
+  // Next.js inlines `NEXT_PUBLIC_*` env vars into the client bundle at
+  // build time; this `env` block is the supported way to seed those
+  // values from build-side computation.
+  env: {
+    NEXT_PUBLIC_BUNDLE_ID: _buildManifest.bundleId,
+    NEXT_PUBLIC_API_CONTRACT: _buildManifest.apiContract,
   },
   async rewrites() {
     return [
