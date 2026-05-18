@@ -1,0 +1,28 @@
+{
+  "build_time": "2026-05-18T10:26:46Z",
+  "bundle_id": "v0.5.0-rc4-4218e1c7",
+  "contracts": {
+    "api_required": "v1",
+    "api_supported": [
+      "v1",
+      "v2"
+    ],
+    "db_migration_head": "unknown",
+    "frontend_built_against_api": "v1",
+    "openapi_hash": "b7c9d4f17c619dc1b3fc2474fd7d471074456ece81095b6d1f0126776517a102"
+  },
+  "git_ref": "refs/tags/v0.5.0-rc4",
+  "git_sha": "4218e1c71a1d10915b42843b366464d9a83bea88",
+  "images": {
+    "backend": {
+      "digest": "sha256:79d87465acb8342f0e7996ce4fb41fab91ba510f484301b2f78533fe9d06aab2"
+    },
+    "bridge": {
+      "digest": "sha256:cc82e338f32891e823e60aa8f9073417b1cb035d0c345871665989441344bfcb"
+    },
+    "frontend": {
+      "digest": "sha256:cf099eddc39f99413089cadd100da9fe739f4d6a31c0df75002c3ebd7163c0c8"
+    }
+  },
+  "signatures": []
+}
