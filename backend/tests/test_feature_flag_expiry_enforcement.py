@@ -21,7 +21,7 @@ def _record(
     flag_name: str,
     *,
     expires_at: str | None,
-    tier: FeatureFlagTier = FeatureFlagTier.PREVIEW,
+    tier: FeatureFlagTier = FeatureFlagTier.EARLY_ACCESS,
     state: FeatureFlagState = FeatureFlagState.DISABLED,
     owner: str = "platform",
 ) -> FeatureFlagRecord:
@@ -101,7 +101,7 @@ def test_registry_snapshot_can_feed_expiry_guard() -> None:
     registry = ff.FeatureFlagRegistry(lambda: [
         {
             "flag_name": "wp.expiry.snapshot",
-            "tier": "runtime",
+            "tier": "ga",
             "state": "enabled",
             "expires_at": "2026-05-04T00:00:00Z",
             "owner": "runtime",

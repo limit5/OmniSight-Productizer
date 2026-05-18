@@ -604,7 +604,7 @@ CREATE TABLE IF NOT EXISTS tenants (
 CREATE TABLE IF NOT EXISTS feature_flags (
     flag_name       TEXT PRIMARY KEY,
     tier            TEXT NOT NULL
-                    CHECK (tier IN ('debug','dogfood','preview','release','runtime')),
+                    CHECK (tier IN ('debug','dogfood','early_access','staged','ga')),
     state           TEXT NOT NULL DEFAULT 'disabled'
                     CHECK (state IN ('disabled','enabled')),
     expires_at      TEXT,
