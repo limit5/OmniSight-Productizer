@@ -12,7 +12,14 @@ import type { ReactNode } from "react"
 import { Activity } from "lucide-react"
 
 import { Block, isBlockModelEnabled } from "@/components/omnisight/block"
-import type { CreateShareableObjectRequest } from "@/lib/api"
+import type {
+  CreateShareableObjectRequest,
+  ExecuteRunbookRequest,
+  ExecuteRunbookResponse,
+  RunbookSummary,
+  SaveBlockAsRunbookRequest,
+  SaveBlockAsRunbookResponse,
+} from "@/lib/api"
 
 type SurfaceFixture = {
   surface: string
@@ -322,4 +329,125 @@ describe("<Block />", () => {
       expect(migrated).not.toHaveAttribute("data-block-status")
     },
   )
+
+  it("saves a block as a runbook and re-executes with operator-supplied params", async () => {
+    const runbook: RunbookSummary = {
+      name: "probe-usb",
+      description: "Probe USB",
+      tags: ["command"],
+      source_url: "omnisight://block/block-r1",
+      scope: "project",
+      source_path: "/tmp/.omnisight/runbooks/probe-usb.yaml",
+      params: [
+        {
+          name: "target_soc",
+          type: "string",
+          default: null,
+          description: "(inferred from {{ target_soc }} placeholder)",
+          required: true,
+        },
+      ],
+      steps: [
+        {
+          kind: "command",
+          title: "probe",
+          payload: { command: "lsusb | grep {{ target_soc }}" },
+        },
+      ],
+    }
+    const saveAsRunbook = vi.fn(
+      async (_body: SaveBlockAsRunbookRequest): Promise<SaveBlockAsRunbookResponse> => ({
+        runbook,
+        path: "/tmp/.omnisight/runbooks/probe-usb.yaml",
+        yaml: "name: probe-usb\n",
+      }),
+    )
+    const runRunbook = vi.fn(
+      async (
+        _name: string,
+        _body: ExecuteRunbookRequest,
+      ): Promise<ExecuteRunbookResponse> => ({
+        runbook,
+        blocks: [
+          {
+            block_id: "blk-out-1",
+            parent_id: "block-r1",
+            kind: "runbook_step",
+            payload: { command: "lsusb | grep rk3588" },
+          },
+        ],
+      }),
+    )
+
+    render(
+      <Block
+        blockId="block-r1"
+        tenantId="tenant-1"
+        userId="u-op"
+        kind="command"
+        status="completed"
+        blockTitleText="Probe USB {{ target_soc }}"
+        blockPayload={{ command: "lsusb | grep {{ target_soc }}" }}
+        saveAsRunbook={saveAsRunbook}
+        runRunbook={runRunbook}
+        data-testid="runbook-block"
+      >
+        block body
+      </Block>,
+    )
+
+    fireEvent.contextMenu(screen.getByTestId("runbook-block"))
+    fireEvent.click(await screen.findByTestId("block-save-as-runbook"))
+
+    fireEvent.click(screen.getByTestId("runbook-save-button"))
+
+    await waitFor(() => expect(saveAsRunbook).toHaveBeenCalledTimes(1))
+    expect(saveAsRunbook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        block: expect.objectContaining({
+          block_id: "block-r1",
+          tenant_id: "tenant-1",
+          kind: "command",
+          title: "Probe USB {{ target_soc }}",
+          payload: { command: "lsusb | grep {{ target_soc }}" },
+        }),
+      }),
+    )
+
+    // Parameter prompt surfaces the inferred placeholder.
+    const paramInput = await screen.findByTestId("runbook-param-target_soc")
+    fireEvent.change(paramInput, { target: { value: "rk3588" } })
+    fireEvent.click(screen.getByTestId("runbook-execute-button"))
+
+    await waitFor(() => expect(runRunbook).toHaveBeenCalledTimes(1))
+    expect(runRunbook).toHaveBeenCalledWith(
+      "probe-usb",
+      expect.objectContaining({
+        params: { target_soc: "rk3588" },
+        tenant_id: "tenant-1",
+        parent_block_id: "block-r1",
+      }),
+    )
+    expect(await screen.findByTestId("runbook-run-result")).toHaveTextContent(
+      "Produced 1 block",
+    )
+  })
+
+  it("disables Save as Runbook when block lineage data is missing", async () => {
+    const saveAsRunbook = vi.fn()
+    render(
+      <Block
+        blockId="block-x"
+        kind="command"
+        saveAsRunbook={saveAsRunbook}
+        data-testid="no-tenant-block"
+      >
+        body
+      </Block>,
+    )
+    fireEvent.contextMenu(screen.getByTestId("no-tenant-block"))
+    fireEvent.click(await screen.findByTestId("block-save-as-runbook"))
+    expect(screen.getByTestId("runbook-save-button")).toBeDisabled()
+    expect(saveAsRunbook).not.toHaveBeenCalled()
+  })
 })

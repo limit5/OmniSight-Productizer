@@ -2,7 +2,7 @@
 
 import { useCallback, useMemo, useState } from "react"
 import type { HTMLAttributes, ReactNode } from "react"
-import { Check, Copy, Link2, Loader2, Share2 } from "lucide-react"
+import { BookOpen, Check, Copy, Link2, Loader2, Play, Share2 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import {
   ContextMenu,
@@ -22,8 +22,15 @@ import {
 } from "@/components/ui/dialog"
 import {
   createShareableObject,
+  executeRunbook,
+  saveBlockAsRunbook,
   type CreateShareableObjectRequest,
   type CreateShareableObjectResponse,
+  type ExecuteRunbookRequest,
+  type ExecuteRunbookResponse,
+  type RunbookSummary,
+  type SaveBlockAsRunbookRequest,
+  type SaveBlockAsRunbookResponse,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
@@ -67,11 +74,23 @@ export interface BlockProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
   bodyClassName?: string
   blockId?: string
   tenantId?: string
+  userId?: string
+  projectId?: string
+  sessionId?: string
+  blockPayload?: Record<string, unknown>
+  blockTitleText?: string
   shareRegions?: BlockShareRegion[]
   redactionMask?: BlockRedactionMask
   createShare?: (
     body: CreateShareableObjectRequest,
   ) => Promise<CreateShareableObjectResponse>
+  saveAsRunbook?: (
+    body: SaveBlockAsRunbookRequest,
+  ) => Promise<SaveBlockAsRunbookResponse>
+  runRunbook?: (
+    name: string,
+    body: ExecuteRunbookRequest,
+  ) => Promise<ExecuteRunbookResponse>
 }
 
 export function isBlockModelEnabled(): boolean {
@@ -93,9 +112,16 @@ export function Block({
   bodyClassName,
   blockId,
   tenantId,
+  userId,
+  projectId,
+  sessionId,
+  blockPayload,
+  blockTitleText,
   shareRegions,
   redactionMask,
   createShare = createShareableObject,
+  saveAsRunbook = saveBlockAsRunbook,
+  runRunbook = executeRunbook,
   children,
   ...props
 }: BlockProps) {
@@ -159,6 +185,102 @@ export function Block({
     setTimeout(() => setCopied(false), 1500)
   }, [shareUrl])
 
+  // ─── WP.8: Save Block as Runbook + parameter-prompt re-execute ───
+  const [runbookOpen, setRunbookOpen] = useState(false)
+  const [runbookSaving, setRunbookSaving] = useState(false)
+  const [savedRunbook, setSavedRunbook] = useState<RunbookSummary | null>(null)
+  const [runbookError, setRunbookError] = useState<string | null>(null)
+  const [runbookYaml, setRunbookYaml] = useState<string>("")
+  const [runbookName, setRunbookName] = useState<string>("")
+  const [runbookDescription, setRunbookDescription] = useState<string>("")
+  const [paramValues, setParamValues] = useState<Record<string, string>>({})
+  const [running, setRunning] = useState(false)
+  const [runResult, setRunResult] = useState<ExecuteRunbookResponse | null>(null)
+
+  const handleSaveAsRunbook = useCallback(async () => {
+    if (!blockId || !tenantId || !kind) return
+    setRunbookSaving(true)
+    setRunbookError(null)
+    setSavedRunbook(null)
+    setRunResult(null)
+    try {
+      const titleText = blockTitleText ?? (typeof title === "string" ? title : "")
+      const resp = await saveAsRunbook({
+        block: {
+          block_id: blockId,
+          tenant_id: tenantId,
+          user_id: userId ?? null,
+          project_id: projectId ?? null,
+          session_id: sessionId ?? null,
+          kind,
+          status: status ?? "completed",
+          title: titleText,
+          payload: blockPayload ?? {},
+        },
+        name: runbookName || null,
+        description: runbookDescription || null,
+      })
+      setSavedRunbook(resp.runbook)
+      setRunbookYaml(resp.yaml)
+      // Pre-fill param inputs with the runbook's declared defaults so the
+      // operator only has to override placeholders the synthesizer inferred.
+      const seed: Record<string, string> = {}
+      for (const p of resp.runbook.params) {
+        seed[p.name] = p.default == null ? "" : String(p.default)
+      }
+      setParamValues(seed)
+    } catch (exc) {
+      setRunbookError(exc instanceof Error ? exc.message : String(exc))
+    } finally {
+      setRunbookSaving(false)
+    }
+  }, [
+    blockId,
+    blockPayload,
+    blockTitleText,
+    kind,
+    projectId,
+    runbookDescription,
+    runbookName,
+    saveAsRunbook,
+    sessionId,
+    status,
+    tenantId,
+    title,
+    userId,
+  ])
+
+  const handleExecuteRunbook = useCallback(async () => {
+    if (!savedRunbook || !tenantId) return
+    setRunning(true)
+    setRunbookError(null)
+    setRunResult(null)
+    try {
+      const resp = await runRunbook(savedRunbook.name, {
+        params: { ...paramValues },
+        tenant_id: tenantId,
+        user_id: userId ?? null,
+        project_id: projectId ?? null,
+        session_id: sessionId ?? null,
+        parent_block_id: blockId ?? null,
+      })
+      setRunResult(resp)
+    } catch (exc) {
+      setRunbookError(exc instanceof Error ? exc.message : String(exc))
+    } finally {
+      setRunning(false)
+    }
+  }, [
+    blockId,
+    paramValues,
+    projectId,
+    runRunbook,
+    savedRunbook,
+    sessionId,
+    tenantId,
+    userId,
+  ])
+
   const block = (
     <Element
       data-block-id={blockModelEnabled ? blockId : undefined}
@@ -199,6 +321,13 @@ export function Block({
           <ContextMenuItem onSelect={() => setShareOpen(true)}>
             <Share2 className="mr-2 h-3.5 w-3.5" aria-hidden />
             Share
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => setRunbookOpen(true)}
+            data-testid="block-save-as-runbook"
+          >
+            <BookOpen className="mr-2 h-3.5 w-3.5" aria-hidden />
+            Save as Runbook
           </ContextMenuItem>
         </ContextMenuContent>
       </ContextMenu>
@@ -282,6 +411,178 @@ export function Block({
               {sharing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Share2 className="h-4 w-4" />}
               Create permalink
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={runbookOpen} onOpenChange={setRunbookOpen}>
+        <DialogContent
+          className="sm:max-w-lg"
+          data-testid="block-save-as-runbook-dialog"
+        >
+          <DialogHeader>
+            <DialogTitle>Save Block as Runbook</DialogTitle>
+            <DialogDescription className="sr-only">
+              Synthesize a runbook from this block. Inferred parameters
+              can be edited at execution time.
+            </DialogDescription>
+          </DialogHeader>
+
+          {!savedRunbook && (
+            <div className="space-y-2">
+              <label className="flex flex-col gap-1 font-mono text-[11px]">
+                <span>Name (optional)</span>
+                <input
+                  type="text"
+                  className="rounded-sm border border-[var(--border)] bg-transparent px-2 py-1"
+                  value={runbookName}
+                  onChange={(e) => setRunbookName(e.target.value)}
+                  placeholder="auto from block title"
+                  data-testid="runbook-name-input"
+                />
+              </label>
+              <label className="flex flex-col gap-1 font-mono text-[11px]">
+                <span>Description (optional)</span>
+                <input
+                  type="text"
+                  className="rounded-sm border border-[var(--border)] bg-transparent px-2 py-1"
+                  value={runbookDescription}
+                  onChange={(e) => setRunbookDescription(e.target.value)}
+                  placeholder="auto from block title"
+                />
+              </label>
+            </div>
+          )}
+
+          {savedRunbook && (
+            <div className="space-y-2">
+              <div
+                className="rounded-sm border border-[var(--border)] px-2 py-1.5 font-mono text-[11px]"
+                data-testid="runbook-saved-summary"
+              >
+                <div>
+                  <span className="text-[var(--muted-foreground)]">name: </span>
+                  <span>{savedRunbook.name}</span>
+                </div>
+                <div className="truncate">
+                  <span className="text-[var(--muted-foreground)]">source: </span>
+                  <span>{savedRunbook.source_url}</span>
+                </div>
+              </div>
+              {savedRunbook.params.length > 0 && (
+                <div
+                  className="space-y-1.5"
+                  data-testid="runbook-param-prompt"
+                >
+                  <div className="font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                    Parameters
+                  </div>
+                  {savedRunbook.params.map((p) => (
+                    <label
+                      key={p.name}
+                      className="flex flex-col gap-1 font-mono text-[11px]"
+                    >
+                      <span>
+                        {p.name}{" "}
+                        <span className="text-[var(--muted-foreground)]">
+                          ({p.type}
+                          {p.required ? ", required" : ""})
+                        </span>
+                      </span>
+                      <input
+                        type="text"
+                        className="rounded-sm border border-[var(--border)] bg-transparent px-2 py-1"
+                        value={paramValues[p.name] ?? ""}
+                        onChange={(e) =>
+                          setParamValues((prev) => ({
+                            ...prev,
+                            [p.name]: e.target.value,
+                          }))
+                        }
+                        placeholder={
+                          p.description ||
+                          (p.default == null ? "" : String(p.default))
+                        }
+                        data-testid={`runbook-param-${p.name}`}
+                      />
+                    </label>
+                  ))}
+                </div>
+              )}
+              {runbookYaml && (
+                <details
+                  className="rounded-sm border border-[var(--border)]"
+                  data-testid="runbook-yaml-preview"
+                >
+                  <summary className="cursor-pointer px-2 py-1 font-mono text-[10px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                    YAML preview
+                  </summary>
+                  <pre className="overflow-x-auto px-2 py-1 font-mono text-[10px]">
+                    {runbookYaml}
+                  </pre>
+                </details>
+              )}
+            </div>
+          )}
+
+          {runbookError && (
+            <div
+              className="rounded-sm border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 px-2 py-1.5 font-mono text-[11px] text-[var(--destructive)]"
+              data-testid="runbook-error"
+            >
+              {runbookError}
+            </div>
+          )}
+
+          {runResult && (
+            <div
+              className="rounded-sm border border-[var(--validation-emerald,#10b981)]/40 bg-[var(--validation-emerald,#10b981)]/10 px-2 py-1.5 font-mono text-[11px]"
+              data-testid="runbook-run-result"
+            >
+              Produced {runResult.blocks.length} block
+              {runResult.blocks.length === 1 ? "" : "s"} chained from {blockId}.
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setRunbookOpen(false)}
+              disabled={runbookSaving || running}
+            >
+              Close
+            </Button>
+            {!savedRunbook && (
+              <Button
+                type="button"
+                onClick={handleSaveAsRunbook}
+                disabled={runbookSaving || !blockId || !tenantId || !kind}
+                data-testid="runbook-save-button"
+              >
+                {runbookSaving ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <BookOpen className="h-4 w-4" />
+                )}
+                Save runbook
+              </Button>
+            )}
+            {savedRunbook && (
+              <Button
+                type="button"
+                onClick={handleExecuteRunbook}
+                disabled={running}
+                data-testid="runbook-execute-button"
+              >
+                {running ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Play className="h-4 w-4" />
+                )}
+                Execute
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
