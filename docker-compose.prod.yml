@@ -29,6 +29,10 @@
 # de-duplicates the layer pull when the digest is already present).
 #
 # Knobs (override via env / .env):
+#   OMNISIGHT_REGISTRY         — registry/namespace prefix for OmniSight
+#                                images. Defaults to
+#                                `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}` for
+#                                backwards compatibility until G5 cutover.
 #   OMNISIGHT_GHCR_NAMESPACE   — lowercase GitHub org/user handle that
 #                                owns the GHCR packages. Default
 #                                `your-org` is a placeholder.
@@ -156,7 +160,7 @@ services:
   backend-a:
     # OP-1482: digest-pinned. OMNISIGHT_BACKEND_DIGEST is populated by
     # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
     pull_policy: always
     build:
       context: .
@@ -268,7 +272,7 @@ services:
   backend-b:
     # OP-1482: digest-pinned. OMNISIGHT_BACKEND_DIGEST is populated by
     # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
     pull_policy: always
     build:
       context: .
@@ -415,7 +419,7 @@ services:
   frontend:
     # OP-1482: digest-pinned. OMNISIGHT_FRONTEND_DIGEST is populated by
     # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend@${OMNISIGHT_FRONTEND_DIGEST:?missing OMNISIGHT_FRONTEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-frontend@${OMNISIGHT_FRONTEND_DIGEST:?missing OMNISIGHT_FRONTEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
     pull_policy: always
     build:
       context: .

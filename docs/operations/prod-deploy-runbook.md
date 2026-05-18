@@ -66,6 +66,7 @@ side effect.
 | ---------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
 | `OMNISIGHT_IMAGE_REGISTRY`               | Canonical registry host. **Pin to `registry.gitlab.com`.**       | operator host config; do not fall back to `ghcr.io`             |
 | `OMNISIGHT_IMAGE_NAMESPACE`              | `omnisight/productizer` (unchanged across the cutover)           | repo config                                                     |
+| `OMNISIGHT_REGISTRY`                     | Compose image prefix for `docker-compose.prod.yml` / staging. Defaults to `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}` until G5; set to `sora.services:49154/omnisight` for the GitLab CR mirror after G4 dual-publish. | `.env`, `.env.staging`, or operator shell                       |
 | `OMNISIGHT_GITLAB_CR_USER`               | GitLab CR pull/push principal (deploy-token user)                | 1Password → `omnisight/gitlab-cr/deploy-token`                  |
 | `OMNISIGHT_GITLAB_CR_TOKEN`              | GitLab CR deploy-token secret (read_registry + write_registry)   | same 1Password entry                                            |
 | `OMNISIGHT_PROD_DEPLOY_WEBHOOK_SECRET`   | HMAC-SHA256 key for the `X-Prod-Deploy-Signature` header         | rotated via `scripts/rotate_webhook_secret.sh`                  |
@@ -77,6 +78,7 @@ Validate before triggering:
 ```bash
 : "${OMNISIGHT_IMAGE_REGISTRY:?}"
 : "${OMNISIGHT_IMAGE_NAMESPACE:?}"
+: "${OMNISIGHT_REGISTRY:=ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}"
 : "${OMNISIGHT_GITLAB_CR_USER:?}"
 : "${OMNISIGHT_GITLAB_CR_TOKEN:?}"
 : "${OMNISIGHT_PROD_DEPLOY_WEBHOOK_SECRET:?}"
@@ -88,6 +90,13 @@ echo "$OMNISIGHT_GITLAB_CR_TOKEN" \
 docker manifest inspect \
   "$OMNISIGHT_IMAGE_REGISTRY/$OMNISIGHT_IMAGE_NAMESPACE:$IMAGE_TAG" >/dev/null
 ```
+
+`OMNISIGHT_IMAGE_REGISTRY` remains the orchestrator's canonical
+registry host. `OMNISIGHT_REGISTRY` is the compose-side image prefix
+introduced by OP-1487 so the same digest lock can render either
+`ghcr.io/your-org/omnisight-*` or
+`sora.services:49154/omnisight/omnisight-*` references during the G3-G5
+transition.
 
 If `OMNISIGHT_IMAGE_REGISTRY` is still set to `ghcr.io` on the deploy
 host, **stop** — that is a stale config from the pre-cutover era. Pull

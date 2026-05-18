@@ -81,7 +81,7 @@ services:
 
   backend-a:
     # OP-1482: digest-pinned. Sourced via `scripts/load_env_lock.sh staging.env.lock.json`.
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
     pull_policy: always
     build:
       context: .
@@ -122,7 +122,7 @@ services:
 
   backend-b:
     # OP-1482: digest-pinned. Sourced via `scripts/load_env_lock.sh staging.env.lock.json`.
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
     pull_policy: always
     build:
       context: .
@@ -163,7 +163,7 @@ services:
 
   frontend:
     # OP-1482: digest-pinned. Sourced via `scripts/load_env_lock.sh staging.env.lock.json`.
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend@${OMNISIGHT_FRONTEND_DIGEST:?missing OMNISIGHT_FRONTEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-frontend@${OMNISIGHT_FRONTEND_DIGEST:?missing OMNISIGHT_FRONTEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
     pull_policy: always
     build:
       context: .
