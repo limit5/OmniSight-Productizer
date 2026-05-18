@@ -28,7 +28,7 @@ Before invoking any of the five scenarios, verify:
 | Operator identity propagated | `whoami` on the prod host matches the JIRA approver | identical |
 | Approval surface up | `curl -fsS https://prod.example.com/admin/release-approval/api` | 200 + JSON |
 | Audit log writable | `curl -fsS https://prod.example.com/admin/deploy-audit?limit=1` | 200 + last row |
-| Image registry reachable | `docker pull ghcr.io/omnisight/productizer:<latest>` | `Status: Image is up to date` |
+| Image registry reachable | `docker pull registry.gitlab.com/omnisight/productizer:<latest>` | `Status: Image is up to date` |
 
 If any pre-flight check fails, **halt** and follow §4 (DR) until they
 pass.
@@ -135,7 +135,7 @@ out-of-band.
 
 ```bash
 # Hotfix tag is reachable in registry
-docker pull ghcr.io/omnisight/productizer:v1.0.1
+docker pull registry.gitlab.com/omnisight/productizer:v1.0.1
 
 # Hotfix recorded in deploy_audit
 curl -fsS 'https://prod.example.com/admin/deploy-audit?kind=deploy' \
@@ -172,7 +172,7 @@ curl -fsS 'https://prod.example.com/admin/deploy-audit?kind=deploy' \
 1. Confirm the prior tag is in registry:
 
    ```bash
-   docker manifest inspect ghcr.io/omnisight/productizer:<previous-tag>
+   docker manifest inspect registry.gitlab.com/omnisight/productizer:<previous-tag>
    ```
 
    If missing, halt and escalate — manual rollback is unsafe without
