@@ -143,6 +143,11 @@
     "chineseTraditional": "繁體中文",
     "japanese": "日文"
   },
+  "agentGuildHall": {
+    "title": "代理公會大廳",
+    "subtitle": "檢視所有代理 + 角色卡 + 隊伍",
+    "ariaLabel": "開啟代理公會大廳"
+  },
   "globalStatus": {
     "wsl2Ok": "已偵測到 WSL2 環境",
     "wsl2Na": "主機並非 WSL2（Linux/macOS 原生）— 非錯誤",
