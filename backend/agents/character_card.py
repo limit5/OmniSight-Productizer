@@ -352,6 +352,13 @@ class PostgresCharacterCardStore:
             where = "WHERE c.guild = $1"
 
         async with _acquire(self._factory) as conn:
+            # tasks.created_at / completed_at are TEXT (alembic 0001
+            # baseline DDL is dialect-shared, so the PG compat shim keeps
+            # the SQLite ``datetime('now')`` default by rewriting it to
+            # ``to_char(...)`` rather than promoting the column to
+            # TIMESTAMPTZ). agent_character_card.created_at is TIMESTAMPTZ
+            # per migration 0239. COALESCE refuses to unify the two
+            # without an explicit cast on the tasks side.
             rows = await conn.fetch(
                 f"""
                 SELECT c.agent_id, c."class" AS agent_class, c.instance_suffix,
@@ -362,7 +369,10 @@ class PostgresCharacterCardStore:
                 FROM agent_character_card c
                 LEFT JOIN (
                     SELECT assigned_agent_id,
-                           MAX(COALESCE(completed_at, created_at)) AS last_activity_at
+                           MAX(COALESCE(
+                               completed_at::timestamptz,
+                               created_at::timestamptz
+                           )) AS last_activity_at
                     FROM tasks
                     WHERE assigned_agent_id IS NOT NULL
                     GROUP BY assigned_agent_id
