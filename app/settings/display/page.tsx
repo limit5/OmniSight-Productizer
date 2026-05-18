@@ -80,6 +80,7 @@ import {
 } from "lucide-react"
 
 import { MotionPreview } from "@/components/omnisight/motion-preview"
+import { SyncScopeBadge } from "@/components/omnisight/sync-scope-badge"
 import { Switch } from "@/components/ui/switch"
 import { Toaster } from "@/components/ui/toaster"
 import { toast } from "@/hooks/use-toast"
@@ -95,6 +96,12 @@ import {
   getMotionPreference,
   setMotionPreference,
 } from "@/lib/motion-preferences"
+import { MOTION_PREFERENCE_KEY } from "@/lib/motion-preferences"
+import {
+  fetchSettingsRegistry,
+  findSetting,
+  type SettingMetadata,
+} from "@/lib/settings-registry"
 
 // ─────────────────────────────────────────────────────────────────────
 // Static copy / lookup tables
@@ -149,6 +156,15 @@ export default function DisplaySettingsPage() {
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // WP.6 (OP-1500) — sync-scope badge metadata. Best-effort fetch:
+  // an offline / unauthenticated load leaves ``motionMeta`` as
+  // ``undefined`` and the badge silently renders nothing, so the
+  // motion-level UI continues to work for legacy callers without
+  // the registry. Loaded once, no re-fetch on remount within the tab
+  // (the per-tab memo in ``lib/settings-registry.ts`` handles that).
+  const [motionMeta, setMotionMeta] = useState<SettingMetadata | undefined>(
+    undefined,
+  )
 
   const reducedMotion = usePrefersReducedMotion()
   const battery = useBatteryAwareMotion(userPref)
@@ -166,6 +182,24 @@ export default function DisplaySettingsPage() {
       })
       .finally(() => {
         if (!cancelled) setLoaded(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // WP.6 (OP-1500) — pull the sync-scope metadata once on mount; the
+  // ``<SyncScopeBadge />`` renders nothing if this fetch fails so the
+  // motion-level UX stays identical for callers without the registry.
+  useEffect(() => {
+    let cancelled = false
+    void fetchSettingsRegistry()
+      .then((registry) => {
+        if (cancelled) return
+        setMotionMeta(findSetting(registry.settings, MOTION_PREFERENCE_KEY))
+      })
+      .catch(() => {
+        // Best-effort — leave metadata undefined; badge will hide.
       })
     return () => {
       cancelled = true
@@ -252,9 +286,15 @@ export default function DisplaySettingsPage() {
 
         {/* ── Motion level radios ──────────────────────────────────── */}
         <section className="mb-8">
-          <h2 className="mb-3 flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-[var(--muted-foreground)]">
-            <MonitorSmartphone size={12} /> Motion Level
-          </h2>
+          <div className="mb-3 flex items-center justify-between gap-2">
+            <h2 className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-[var(--muted-foreground)]">
+              <MonitorSmartphone size={12} /> Motion Level
+            </h2>
+            {/* WP.6 (OP-1500) — sync-scope badge: motion is globally
+                synced so the operator immediately knows their choice
+                will follow them across devices. */}
+            <SyncScopeBadge meta={motionMeta} />
+          </div>
           <fieldset
             data-testid="motion-level-radios"
             className="space-y-2"
