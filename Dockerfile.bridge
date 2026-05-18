@@ -65,13 +65,13 @@ RUN groupadd -g 65532 app && \
     mkdir -p /var/lib/omnisight/hardware-bridge/artifacts && \
     chown -R app:app /app /var/lib/omnisight/hardware-bridge
 
-# OP-1479 — bundle manifest baked into the image. CI overwrites the
-# repo-root bundle.json with the real values before invoking
-# `docker build`; local builds use the checked-in placeholder so the
-# COPY always succeeds.
-ARG BUNDLE_ID=unknown
+# OP-1492 — CI stamps the image with the bundle identity and the
+# sha256 of the pre-build bundle.json. The bridge does not serve
+# `/api/version`, so only labels are needed here.
+ARG BUNDLE_ID=
+ARG BUNDLE_SHA=
 LABEL org.opencontainers.image.bundle.id="${BUNDLE_ID}"
-COPY --chown=app:app bundle.json /app/bundle.json
+LABEL org.opencontainers.image.bundle.sha="${BUNDLE_SHA}"
 
 USER app
 

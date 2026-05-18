@@ -84,10 +84,6 @@ jobs:
           - name: bridge
             image: omnisight-bridge
             dockerfile: Dockerfile.bridge
-    outputs:
-      backend_digest: ${{ steps.publish.outputs.backend_digest }}
-      frontend_digest: ${{ steps.publish.outputs.frontend_digest }}
-      bridge_digest: ${{ steps.publish.outputs.bridge_digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -140,10 +136,10 @@ jobs:
 
       - name: compute bundle id
         id: bundle
-        # OP-1479 — derive a stable per-build bundle id from the git
+        # OP-1492 — derive a stable per-build bundle id from the git
         # ref tail + short SHA. Passed as --build-arg BUNDLE_ID so each
         # image's `org.opencontainers.image.bundle.id` label proves what
-        # bundle it was baked from, and re-used by the final
+        # bundle it was associated with, and re-used by the final
         # build_image_bundle.py invocation in `bundle-manifest`.
         run: |
           set -euo pipefail
@@ -154,6 +150,26 @@ jobs:
             tail="${GITHUB_REF##*/}"
           fi
           echo "value=${tail}-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: assemble pre-build bundle manifest
+        id: bundle_sha
+        # OP-1492 — the real image digests do not exist until after
+        # buildx pushes the multi-arch images. This pre-build manifest
+        # uses schema-valid placeholder digests so Dockerfile.backend can
+        # bake `/app/bundle.json`; the final `bundle-manifest` job emits
+        # `bundle-<id>.json` with the real pushed digests.
+        run: |
+          set -euo pipefail
+          placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          python3 scripts/build_image_bundle.py \
+            --git-ref "${GITHUB_REF}" \
+            --git-sha "${GITHUB_SHA}" \
+            --bundle-id "${{ steps.bundle.outputs.value }}" \
+            --backend-digest "${placeholder_digest}" \
+            --frontend-digest "${placeholder_digest}" \
+            --bridge-digest "${placeholder_digest}" \
+            --out bundle.json
+          echo "value=$(sha256sum bundle.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -185,8 +201,10 @@ jobs:
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
             org.opencontainers.image.bundle.id=${{ steps.bundle.outputs.value }}
+            org.opencontainers.image.bundle.sha=${{ steps.bundle_sha.outputs.value }}
           build-args: |
             BUNDLE_ID=${{ steps.bundle.outputs.value }}
+            BUNDLE_SHA=${{ steps.bundle_sha.outputs.value }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
@@ -234,7 +252,9 @@ jobs:
             "run_id": "${{ github.run_id }}",
             "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
             "signed_with": "cosign-keyless",
-            "cosign_version": "${{ env.COSIGN_VERSION }}"
+            "cosign_version": "${{ env.COSIGN_VERSION }}",
+            "bundle_id": "${{ steps.bundle.outputs.value }}",
+            "bundle_sha": "${{ steps.bundle_sha.outputs.value }}"
           }
           JSON
 
@@ -287,14 +307,14 @@ jobs:
           ./scripts/verify_image_signature.sh "${ref}"
 
   # =========================================================================
-  # bundle-manifest — OP-1479 phase V1.
+  # bundle-manifest — OP-1492 phase V1c.
   #
   # Once all three images have been built + verified, collect their
   # digests from the per-image audit artifacts and emit a single
   # `bundle-<id>.json` describing the deployable unit. This is the
-  # central abstraction operators inspect on staging deploys: it lets
-  # them prove that the running image's `org.opencontainers.image.bundle.id`
-  # label matches the bundle artifact they meant to ship.
+  # central abstraction operators inspect on staging deploys. The
+  # Dockerfiles receive a pre-build bundle with placeholder digests; this
+  # artifact is the post-build contract with the real pushed digests.
   # =========================================================================
   bundle-manifest:
     if: github.event_name != 'schedule'
@@ -355,7 +375,7 @@ jobs:
       - name: upload bundle manifest
         uses: actions/upload-artifact@v4
         with:
-          name: bundle-manifest
+          name: bundle-${{ steps.bundle.outputs.value }}.json
           path: artifacts/bundle-${{ steps.bundle.outputs.value }}.json
           retention-days: 90
 

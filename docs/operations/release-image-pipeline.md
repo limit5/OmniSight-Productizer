@@ -35,6 +35,43 @@ All three are multi-arch (`linux/amd64` + `linux/arm64`) so a single
 pull resolves to the correct architecture on x86 cloud VMs and on
 ARM SBCs / Apple-silicon hosts.
 
+## Bundle manifest contract
+
+The image workflow derives one `bundle_id` per git ref + commit and
+passes it into all three Docker builds as `BUNDLE_ID`. It also writes a
+schema-valid pre-build `bundle.json` before `docker/build-push-action`
+runs, computes its sha256, and passes that value as `BUNDLE_SHA`.
+
+Every pushed image carries these OCI labels:
+
+| Label | Meaning |
+|-------|---------|
+| `org.opencontainers.image.bundle.id` | Bundle identity for the git ref + short SHA. |
+| `org.opencontainers.image.bundle.sha` | sha256 of the pre-build `bundle.json` bytes used for the image build. |
+
+Only the backend image bakes `bundle.json` into `/app/bundle.json`,
+because `/api/version` reads that file. The frontend and bridge images
+carry labels only; they do not serve `/api/version`.
+
+The pre-build bundle uses placeholder image digests because the real
+multi-arch digests do not exist until the images are pushed. After all
+three images build and verify, the `bundle-manifest` job downloads the
+per-image audit artifacts, re-runs `scripts/build_image_bundle.py` with
+the real digests, validates the result against
+`omnisight-bundle.schema.json`, and uploads
+`bundle-<bundle_id>.json` as a workflow artifact.
+
+Operator verification:
+
+```bash
+bundle_id=$(docker image inspect ghcr.io/<owner>/omnisight-backend:<tag> \
+  --format '{{ index .Config.Labels "org.opencontainers.image.bundle.id" }}')
+bundle_sha=$(docker image inspect ghcr.io/<owner>/omnisight-backend:<tag> \
+  --format '{{ index .Config.Labels "org.opencontainers.image.bundle.sha" }}')
+docker run --rm ghcr.io/<owner>/omnisight-backend:<tag> cat /app/bundle.json > /tmp/bundle.json
+test "$(sha256sum /tmp/bundle.json | awk '{print $1}')" = "${bundle_sha}"
+```
+
 ## Signing model — cosign keyless
 
 We sign every image **by digest** (not by tag) using cosign keyless,
