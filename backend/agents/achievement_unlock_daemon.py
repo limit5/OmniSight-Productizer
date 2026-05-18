@@ -19,8 +19,9 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol
+from typing import Any, Mapping, Protocol
 
+from backend.agents.achievement_unlock_store import PostgresAchievementUnlockStore
 from backend.agents.achievement_registry import (
     AchievementMetric,
     achievement_milestone_reached,
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 
 Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
+ConnFactory = Callable[[], Any]
 
 
 @dataclass(frozen=True)
@@ -148,6 +150,11 @@ class InMemoryAchievementUnlockStore:
 
     async def list_unlocked_achievements(self) -> tuple[AchievementUnlock, ...]:
         return tuple(self._unlocks.values())
+
+
+def build_postgres_unlock_store(conn_factory: ConnFactory) -> PostgresAchievementUnlockStore:
+    """Return the durable store used by the achievement unlock scanner."""
+    return PostgresAchievementUnlockStore(conn_factory)
 
 
 async def scan_achievement_unlocks(
@@ -278,6 +285,7 @@ __all__ = [
     "AchievementUnlockScanResult",
     "AchievementUnlockStore",
     "InMemoryAchievementUnlockStore",
+    "build_postgres_unlock_store",
     "scan_achievement_unlocks",
     "run_daily_unlock_loop",
 ]
