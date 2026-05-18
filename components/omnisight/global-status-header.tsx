@@ -1,13 +1,27 @@
 "use client"
 
 import { useState, useEffect } from "react"
+import Link from "next/link"
 import { useTranslations } from "next-intl"
+import { Users } from "lucide-react"
+import { useI18n as _useI18n, type Locale } from "@/lib/i18n/context"
 import { EmergencyStop } from "./emergency-stop"
 import { LanguageToggle } from "./language-toggle"
 import { ModeSelector } from "./mode-selector"
 import { HelpMenu } from "./help-menu"
 import { ArchIndicator } from "./arch-indicator"
 import { SSESessionFilter } from "./sse-session-filter"
+
+const AGENT_ROSTER_LABEL: Record<Locale, string> = {
+  en: "Agent Roster",
+  "zh-TW": "Agent 名冊",
+  "zh-CN": "Agent 名册",
+  ja: "エージェント名簿",
+}
+
+function useHeaderLocale(): Locale {
+  try { return _useI18n().locale } catch { return "en" }
+}
 
 interface StatusHeaderProps {
   finished: number
@@ -39,6 +53,8 @@ export function GlobalStatusHeader({
 }: StatusHeaderProps & { settingsButton?: React.ReactNode }) {
   const tHeader = useTranslations("header")
   const tStatus = useTranslations("globalStatus")
+  const locale = useHeaderLocale()
+  const agentRosterLabel = AGENT_ROSTER_LABEL[locale]
   const [time, setTime] = useState("")
   
   useEffect(() => {
@@ -247,6 +263,16 @@ export function GlobalStatusHeader({
 
           {/* Help dropdown (desktop) */}
           <HelpMenu />
+
+          {/* Agent Roster — OP-1475 navigation entry to /agents */}
+          <Link
+            href="/agents"
+            aria-label={agentRosterLabel}
+            title={agentRosterLabel}
+            className="p-1.5 rounded-sm text-[var(--muted-foreground,#94a3b8)] hover:text-[var(--neural-cyan,#67e8f9)] hover:bg-white/5 transition-colors"
+          >
+            <Users className="w-4 h-4" aria-hidden />
+          </Link>
 
           {/* Language Toggle */}
           <LanguageToggle />
