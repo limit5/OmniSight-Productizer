@@ -22,7 +22,7 @@ def test_registry_loads_once_for_hot_path_reads() -> None:
         return [
             {
                 "flag_name": "wp.atomic",
-                "tier": "runtime",
+                "tier": "ga",
                 "state": "enabled",
                 "owner": "platform",
             },
@@ -40,7 +40,7 @@ def test_registry_snapshot_is_immutable() -> None:
     registry = FeatureFlagRegistry(lambda: [
         FeatureFlagRecord(
             flag_name="wp.snapshot",
-            tier=FeatureFlagTier.RELEASE,
+            tier=FeatureFlagTier.GA,
             state=FeatureFlagState.DISABLED,
         ),
     ])
@@ -50,7 +50,7 @@ def test_registry_snapshot_is_immutable() -> None:
     with pytest.raises(TypeError):
         snapshot.flags["wp.snapshot"] = FeatureFlagRecord(  # type: ignore[index]
             flag_name="wp.snapshot",
-            tier=FeatureFlagTier.RELEASE,
+            tier=FeatureFlagTier.GA,
             state=FeatureFlagState.ENABLED,
         )
 
@@ -62,7 +62,7 @@ def test_reload_replaces_snapshot_atomically() -> None:
         return [
             {
                 "flag_name": "wp.reload",
-                "tier": "runtime",
+                "tier": "ga",
                 "state": states[0],
             },
         ]
@@ -88,7 +88,7 @@ def test_invalidate_defers_reload_until_next_read() -> None:
         return [
             {
                 "flag_name": "wp.invalidate",
-                "tier": "runtime",
+                "tier": "ga",
                 "state": state,
             },
         ]
@@ -144,7 +144,7 @@ def test_cross_worker_callback_invalidates_default_registry(monkeypatch) -> None
     registry = FeatureFlagRegistry(lambda: [
         {
             "flag_name": "wp.pubsub",
-            "tier": "runtime",
+            "tier": "ga",
             "state": "enabled",
         },
     ])

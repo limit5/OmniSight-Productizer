@@ -58,11 +58,33 @@ def test_five_tiers_feed_resolution_priority(tier: FeatureFlagTier) -> None:
     assert resolved.source is FeatureFlagResolutionSource.TEST_OVERRIDE
 
 
+def test_registry_snapshot_handles_warp_scale_flag_count() -> None:
+    tiers = tuple(FeatureFlagTier)
+    registry = ff.FeatureFlagRegistry(lambda: [
+        {
+            "flag_name": f"wp.scale.{index:03d}",
+            "tier": tiers[index % len(tiers)].value,
+            "state": "enabled" if index % 2 else "disabled",
+            "owner": "wp",
+        }
+        for index in range(250)
+    ])
+
+    snapshot = registry.snapshot()
+
+    assert len(snapshot.flags) == 250
+    assert snapshot.flags["wp.scale.249"].tier is FeatureFlagTier.GA
+    assert (
+        registry.get_global_state("wp.scale.249")
+        is FeatureFlagState.ENABLED
+    )
+
+
 def test_atomic_snapshot_push_reload_and_expiry_guard(monkeypatch) -> None:
     rows = [
         {
-            "flag_name": "wp.runtime.push",
-            "tier": "runtime",
+            "flag_name": "wp.ga.push",
+            "tier": "ga",
             "state": "disabled",
             "expires_at": "2026-05-06T00:00:00Z",
             "owner": "runtime",
@@ -89,13 +111,13 @@ def test_atomic_snapshot_push_reload_and_expiry_guard(monkeypatch) -> None:
     monkeypatch.setattr(shared_state, "publish_cross_worker", fake_publish)
 
     first = registry.snapshot()
-    assert first.flags["wp.runtime.push"].state is FeatureFlagState.DISABLED
+    assert first.flags["wp.ga.push"].state is FeatureFlagState.DISABLED
     assert calls == 1
 
     rows[0]["state"] = "enabled"
     assert (
         ff.publish_feature_flags_invalidate(
-            flag_name="wp.runtime.push",
+            flag_name="wp.ga.push",
             origin_worker="operator-ui",
         )
         is True
@@ -103,13 +125,13 @@ def test_atomic_snapshot_push_reload_and_expiry_guard(monkeypatch) -> None:
     second = registry.snapshot()
 
     assert first is not second
-    assert first.flags["wp.runtime.push"].state is FeatureFlagState.DISABLED
-    assert second.flags["wp.runtime.push"].state is FeatureFlagState.ENABLED
+    assert first.flags["wp.ga.push"].state is FeatureFlagState.DISABLED
+    assert second.flags["wp.ga.push"].state is FeatureFlagState.ENABLED
     assert calls == 2
     assert published == [
         (
             ff.FEATURE_FLAGS_INVALIDATE_EVENT,
-            {"flag_name": "wp.runtime.push", "origin_worker": "operator-ui"},
+            {"flag_name": "wp.ga.push", "origin_worker": "operator-ui"},
         ),
     ]
     ff.assert_no_expired_feature_flags(second.flags.values(), now=FROZEN_NOW)
@@ -117,12 +139,12 @@ def test_atomic_snapshot_push_reload_and_expiry_guard(monkeypatch) -> None:
     rows[0]["expires_at"] = "2026-05-04T23:59:59Z"
     ff._on_feature_flags_invalidate_event(
         ff.FEATURE_FLAGS_INVALIDATE_EVENT,
-        {"origin_worker": "worker-a", "flag_name": "wp.runtime.push"},
+        {"origin_worker": "worker-a", "flag_name": "wp.ga.push"},
     )
     third = registry.snapshot()
 
     assert second is not third
-    assert third.flags["wp.runtime.push"].state is FeatureFlagState.ENABLED
+    assert third.flags["wp.ga.push"].state is FeatureFlagState.ENABLED
     with pytest.raises(AssertionError) as excinfo:
         ff.assert_no_expired_feature_flags(third.flags.values(), now=FROZEN_NOW)
-    assert "wp.runtime.push" in str(excinfo.value)
+    assert "wp.ga.push" in str(excinfo.value)

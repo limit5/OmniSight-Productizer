@@ -93,9 +93,9 @@ ORDER BY
     CASE tier
         WHEN 'debug' THEN 0
         WHEN 'dogfood' THEN 1
-        WHEN 'preview' THEN 2
-        WHEN 'release' THEN 3
-        WHEN 'runtime' THEN 4
+        WHEN 'early_access' THEN 2
+        WHEN 'staged' THEN 3
+        WHEN 'ga' THEN 4
         ELSE 99
     END,
     flag_name ASC

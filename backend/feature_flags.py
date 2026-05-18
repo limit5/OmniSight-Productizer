@@ -48,16 +48,16 @@ class FeatureFlagTier(str, Enum):
     """Five deployment tiers for rows in ``feature_flags``.
 
     Enum member names mirror the product language (DEBUG / DOGFOOD /
-    PREVIEW / RELEASE / RUNTIME). String values are lowercase because
+    EARLY_ACCESS / STAGED / GA). String values are lowercase because
     they are the stable DB / JSON / log labels used by WP.7.1 and later
     runtime code.
     """
 
     DEBUG = "debug"
     DOGFOOD = "dogfood"
-    PREVIEW = "preview"
-    RELEASE = "release"
-    RUNTIME = "runtime"
+    EARLY_ACCESS = "early_access"
+    STAGED = "staged"
+    GA = "ga"
 
     @classmethod
     def parse(cls, raw: str | "FeatureFlagTier") -> "FeatureFlagTier":
@@ -146,9 +146,9 @@ class FeatureFlagRegistrySnapshot(NamedTuple):
 FEATURE_FLAG_TIER_ORDER: tuple[FeatureFlagTier, ...] = (
     FeatureFlagTier.DEBUG,
     FeatureFlagTier.DOGFOOD,
-    FeatureFlagTier.PREVIEW,
-    FeatureFlagTier.RELEASE,
-    FeatureFlagTier.RUNTIME,
+    FeatureFlagTier.EARLY_ACCESS,
+    FeatureFlagTier.STAGED,
+    FeatureFlagTier.GA,
 )
 
 FEATURE_FLAG_TIER_VALUES: tuple[str, ...] = tuple(
@@ -187,20 +187,20 @@ FEATURE_FLAG_TIER_DEFINITIONS: Mapping[
         audience="internal + early-access",
         purpose="Internal dogfood and early-access cohort",
     ),
-    FeatureFlagTier.PREVIEW: FeatureFlagTierDefinition(
-        label="PREVIEW",
+    FeatureFlagTier.EARLY_ACCESS: FeatureFlagTierDefinition(
+        label="EARLY_ACCESS",
         audience="external tester",
-        purpose="Beta program customers",
+        purpose="Beta program and early-access customers",
     ),
-    FeatureFlagTier.RELEASE: FeatureFlagTierDefinition(
-        label="RELEASE",
-        audience="GA",
+    FeatureFlagTier.STAGED: FeatureFlagTierDefinition(
+        label="STAGED",
+        audience="gradual rollout cohorts",
+        purpose="Staged rollout before general availability",
+    ),
+    FeatureFlagTier.GA: FeatureFlagTierDefinition(
+        label="GA",
+        audience="all customers",
         purpose="Generally available customer-facing flag",
-    ),
-    FeatureFlagTier.RUNTIME: FeatureFlagTierDefinition(
-        label="RUNTIME",
-        audience="server-pushed",
-        purpose="Server-pushed flag adjustable without redeploy",
     ),
 })
 
@@ -224,42 +224,42 @@ FEATURE_FLAG_ENV_KNOBS: Mapping[str, FeatureFlagEnvKnob] = MappingProxyType({
     "OMNISIGHT_KS_ENVELOPE_ENABLED": FeatureFlagEnvKnob(
         env_name="OMNISIGHT_KS_ENVELOPE_ENABLED",
         flag_name="ks.envelope.enabled",
-        tier=FeatureFlagTier.RELEASE,
+        tier=FeatureFlagTier.GA,
         default_state=FeatureFlagState.ENABLED,
         owner="ks",
     ),
     "OMNISIGHT_KS_CMEK_ENABLED": FeatureFlagEnvKnob(
         env_name="OMNISIGHT_KS_CMEK_ENABLED",
         flag_name="ks.cmek.enabled",
-        tier=FeatureFlagTier.PREVIEW,
+        tier=FeatureFlagTier.EARLY_ACCESS,
         default_state=FeatureFlagState.ENABLED,
         owner="ks",
     ),
     "OMNISIGHT_KS_BYOG_ENABLED": FeatureFlagEnvKnob(
         env_name="OMNISIGHT_KS_BYOG_ENABLED",
         flag_name="ks.byog.enabled",
-        tier=FeatureFlagTier.PREVIEW,
+        tier=FeatureFlagTier.EARLY_ACCESS,
         default_state=FeatureFlagState.ENABLED,
         owner="ks",
     ),
     "OMNISIGHT_WP_DIFF_VALIDATION_ENABLED": FeatureFlagEnvKnob(
         env_name="OMNISIGHT_WP_DIFF_VALIDATION_ENABLED",
         flag_name="wp.diff_validation.enabled",
-        tier=FeatureFlagTier.RELEASE,
+        tier=FeatureFlagTier.GA,
         default_state=FeatureFlagState.ENABLED,
         owner="wp",
     ),
     "OMNISIGHT_WP_SKILLS_LOADER_ENABLED": FeatureFlagEnvKnob(
         env_name="OMNISIGHT_WP_SKILLS_LOADER_ENABLED",
         flag_name="wp.skills_loader.enabled",
-        tier=FeatureFlagTier.RELEASE,
+        tier=FeatureFlagTier.GA,
         default_state=FeatureFlagState.ENABLED,
         owner="wp",
     ),
     "OMNISIGHT_WP_BLOCK_MODEL_ENABLED": FeatureFlagEnvKnob(
         env_name="OMNISIGHT_WP_BLOCK_MODEL_ENABLED",
         flag_name="wp.block_model.enabled",
-        tier=FeatureFlagTier.RELEASE,
+        tier=FeatureFlagTier.GA,
         default_state=FeatureFlagState.ENABLED,
         owner="wp",
     ),

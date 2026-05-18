@@ -22,7 +22,7 @@ def _registry(flag_name: str, state: FeatureFlagState) -> FeatureFlagRegistry:
     return FeatureFlagRegistry(lambda: [
         FeatureFlagRecord(
             flag_name=flag_name,
-            tier=FeatureFlagTier.RELEASE,
+            tier=FeatureFlagTier.GA,
             state=state,
             owner="test",
         ),

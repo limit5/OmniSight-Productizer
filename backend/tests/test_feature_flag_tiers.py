@@ -12,16 +12,16 @@ def test_tier_enum_has_exact_five_members() -> None:
     assert [tier.name for tier in FeatureFlagTier] == [
         "DEBUG",
         "DOGFOOD",
-        "PREVIEW",
-        "RELEASE",
-        "RUNTIME",
+        "EARLY_ACCESS",
+        "STAGED",
+        "GA",
     ]
     assert [tier.value for tier in FeatureFlagTier] == [
         "debug",
         "dogfood",
-        "preview",
-        "release",
-        "runtime",
+        "early_access",
+        "staged",
+        "ga",
     ]
 
 
@@ -52,9 +52,12 @@ def test_tier_definitions_are_immutable() -> None:
 
 
 def test_parse_accepts_lowercase_labels_and_enum_members() -> None:
-    assert FeatureFlagTier.parse(FeatureFlagTier.PREVIEW) is FeatureFlagTier.PREVIEW
-    assert FeatureFlagTier.parse("preview") is FeatureFlagTier.PREVIEW
-    assert FeatureFlagTier.parse(" RUNTIME ") is FeatureFlagTier.RUNTIME
+    assert (
+        FeatureFlagTier.parse(FeatureFlagTier.EARLY_ACCESS)
+        is FeatureFlagTier.EARLY_ACCESS
+    )
+    assert FeatureFlagTier.parse("early_access") is FeatureFlagTier.EARLY_ACCESS
+    assert FeatureFlagTier.parse(" GA ") is FeatureFlagTier.GA
 
 
 def test_parse_rejects_unknown_tiers() -> None:

@@ -42,7 +42,7 @@ class _FakeConn:
         self.rows = {
             "wp.diff_validation.enabled": {
                 "flag_name": "wp.diff_validation.enabled",
-                "tier": "release",
+                "tier": "ga",
                 "state": "disabled",
                 "expires_at": None,
                 "owner": "wp",

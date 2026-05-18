@@ -125,8 +125,8 @@ async def test_disabled_state_short_circuits_to_false() -> None:
     """A disabled row resolves False regardless of rollout_pct."""
     conn = _FakeAsyncpgConn(
         rows={
-            "wp.preview.feature": {
-                "flag_name": "wp.preview.feature",
+            "wp.early_access.feature": {
+                "flag_name": "wp.early_access.feature",
                 "state": "disabled",
                 "rollout_pct": 100,
                 "allowed_tenants": "[]",
@@ -134,7 +134,7 @@ async def test_disabled_state_short_circuits_to_false() -> None:
         }
     )
     assert await ff_sdk.is_enabled(
-        "wp.preview.feature", "t-alpha", conn=conn
+        "wp.early_access.feature", "t-alpha", conn=conn
     ) is False
 
 
@@ -287,7 +287,7 @@ async def test_admin_patch_persists_rollout_pct_and_allowed_tenants(
         rows={
             "wp.rollout": {
                 "flag_name": "wp.rollout",
-                "tier": "release",
+                "tier": "ga",
                 "state": "enabled",
                 "expires_at": None,
                 "owner": "wp",
@@ -352,7 +352,7 @@ async def test_admin_patch_writes_audit_row_with_before_and_after(
         rows={
             "wp.rollout": {
                 "flag_name": "wp.rollout",
-                "tier": "release",
+                "tier": "ga",
                 "state": "disabled",
                 "expires_at": None,
                 "owner": "wp",
