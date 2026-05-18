@@ -27,6 +27,7 @@ from backend.agents.project_memory import (
     PROJECT_RULE_TOTAL_MAX_BYTES,
     USER_RULE_FILENAMES,
     MemoryFile,
+    ProjectMemoryWatcher,
     format_memory_size,
     load_all_memory,
     load_project_memory,
@@ -37,6 +38,7 @@ from backend.agents.project_memory import (
     project_rule_signature,
     render_operator_summary,
     render_for_prompt,
+    user_rule_signature,
 )
 
 
@@ -492,6 +494,145 @@ def test_real_repo_returns_only_existing_files() -> None:
     assert conventions.issubset(set(PROJECT_RULE_FILENAMES))
     # CLAUDE.md must be present
     assert "CLAUDE.md" in conventions
+
+
+# ─── user_rule_signature ────────────────────────────────────────
+
+
+def test_user_rule_signature_empty_when_no_dot_claude(tmp_path: Path) -> None:
+    assert user_rule_signature(home=tmp_path) == ()
+
+
+def test_user_rule_signature_tracks_add_change_remove(tmp_path: Path) -> None:
+    base = tmp_path / ".claude"
+    base.mkdir()
+
+    initial = user_rule_signature(home=tmp_path)
+
+    rule_file = base / "CLAUDE.md"
+    rule_file.write_text("first\n")
+    after_add = user_rule_signature(home=tmp_path)
+
+    rule_file.write_text("second body that is longer\n")
+    after_change = user_rule_signature(home=tmp_path)
+
+    rule_file.unlink()
+    after_remove = user_rule_signature(home=tmp_path)
+
+    assert initial == ()
+    assert after_add != initial
+    assert after_change != after_add
+    assert after_remove == ()
+
+
+def test_user_rule_signature_distance_marker_is_negative(tmp_path: Path) -> None:
+    """User-scope rows must use a distance value that can't collide with project."""
+    base = tmp_path / ".claude"
+    base.mkdir()
+    (base / "CLAUDE.md").write_text("rules\n")
+    sig = user_rule_signature(home=tmp_path)
+    assert sig and all(distance == -1 for _path, distance, _m, _s in sig)
+
+
+# ─── ProjectMemoryWatcher (WP.5 FS-watched re-merge) ────────────
+
+
+def test_watcher_first_poll_loads_and_flags_first(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("rule\n")
+    watcher = ProjectMemoryWatcher(tmp_path, home=tmp_path / "nohome")
+
+    snap = watcher.poll()
+
+    assert snap.first is True
+    assert snap.changed is True
+    assert [m.convention for m in snap.memory] == ["CLAUDE.md"]
+    assert snap.memory[0].content.strip() == "rule"
+
+
+def test_watcher_second_poll_is_unchanged_when_files_static(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("rule\n")
+    watcher = ProjectMemoryWatcher(tmp_path, home=tmp_path / "nohome")
+
+    first = watcher.poll()
+    second = watcher.poll()
+
+    assert first.changed is True
+    assert second.changed is False
+    assert second.first is False
+    assert second.signature == first.signature
+    # Memory list identity is preserved across no-op polls so callers can
+    # cheaply detect "nothing happened" without diffing contents.
+    assert second.memory is first.memory
+
+
+def test_watcher_detects_content_edit(tmp_path: Path) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("first\n")
+    watcher = ProjectMemoryWatcher(tmp_path, home=tmp_path / "nohome")
+    watcher.poll()
+
+    # mtime granularity on some filesystems is 1s — bump size so the
+    # signature changes regardless of clock resolution.
+    rule_file.write_text("second body that is longer\n")
+    second = watcher.poll()
+
+    assert second.changed is True
+    assert second.memory[0].content.strip() == "second body that is longer"
+
+
+def test_watcher_detects_file_addition(tmp_path: Path) -> None:
+    (tmp_path / "CLAUDE.md").write_text("rule\n")
+    watcher = ProjectMemoryWatcher(tmp_path, home=tmp_path / "nohome")
+    watcher.poll()
+
+    (tmp_path / "AGENTS.md").write_text("agents\n")
+    second = watcher.poll()
+
+    assert second.changed is True
+    assert {m.convention for m in second.memory} == {"CLAUDE.md", "AGENTS.md"}
+
+
+def test_watcher_detects_file_removal(tmp_path: Path) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("rule\n")
+    watcher = ProjectMemoryWatcher(tmp_path, home=tmp_path / "nohome")
+    watcher.poll()
+
+    rule_file.unlink()
+    second = watcher.poll()
+
+    assert second.changed is True
+    assert second.memory == []
+
+
+def test_watcher_detects_user_home_change(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    home = tmp_path / "home"
+    project.mkdir()
+    (home / ".claude").mkdir(parents=True)
+    (project / "CLAUDE.md").write_text("project\n")
+    watcher = ProjectMemoryWatcher(project, home=home)
+    watcher.poll()
+
+    (home / ".claude" / "CLAUDE.md").write_text("user-rule\n")
+    second = watcher.poll()
+
+    assert second.changed is True
+    scopes = [m.scope for m in second.memory]
+    assert "user" in scopes
+
+
+def test_watcher_honours_ignored_paths(tmp_path: Path) -> None:
+    rule_file = tmp_path / "CLAUDE.md"
+    rule_file.write_text("rule\n")
+    watcher = ProjectMemoryWatcher(
+        tmp_path,
+        home=tmp_path / "nohome",
+        ignored_paths=[rule_file],
+    )
+    snap = watcher.poll()
+    assert len(snap.memory) == 1
+    assert snap.memory[0].ignored is True
 
 
 # ─── Public API surface contract ────────────────────────────────

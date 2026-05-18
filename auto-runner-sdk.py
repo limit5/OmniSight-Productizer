@@ -56,7 +56,7 @@ from backend.agents.mcp_integration import (  # noqa: E402
 )
 from backend.agents import provider_quota_tracker  # noqa: E402
 from backend.agents.project_memory import (  # noqa: E402
-    load_all_memory,
+    ProjectMemoryWatcher,
     parse_ignored_paths,
     render_operator_summary as render_memory_operator_summary,
     render_for_prompt as render_memory_for_prompt,
@@ -799,23 +799,21 @@ async def main() -> None:
 
     # Memory layer banner (just the count + scope split — actual content
     # is loaded fresh per item to honour operator mid-pipeline edits).
-    _initial_memory = load_all_memory(BASE_DIR, ignored_paths=RULE_IGNORE_PATHS)
-    if _initial_memory:
-        print(
-            render_memory_operator_summary(
-                _initial_memory,
-                project_root=BASE_DIR,
-                ignore_env_var=RULE_IGNORE_ENV,
-            )
+    # WP.5 FS-watch: a ProjectMemoryWatcher caches the merged file list
+    # across iterations and only re-reads bytes when the combined
+    # project + user signature (mtime + size) actually changes.
+    memory_watcher = ProjectMemoryWatcher(
+        BASE_DIR,
+        ignored_paths=RULE_IGNORE_PATHS,
+    )
+    _initial_snapshot = memory_watcher.poll()
+    print(
+        render_memory_operator_summary(
+            _initial_snapshot.memory,
+            project_root=BASE_DIR,
+            ignore_env_var=RULE_IGNORE_ENV,
         )
-    else:
-        print(
-            render_memory_operator_summary(
-                _initial_memory,
-                project_root=BASE_DIR,
-                ignore_env_var=RULE_IGNORE_ENV,
-            )
-        )
+    )
 
     dispatcher = make_runner_dispatcher()
 
@@ -929,18 +927,22 @@ async def main() -> None:
                 if HANDOFF_FILE.exists()
                 else "(HANDOFF.md not yet created)"
             )
-            memory_files = load_all_memory(BASE_DIR, ignored_paths=RULE_IGNORE_PATHS)
+            snapshot = memory_watcher.poll()
+            memory_files = snapshot.memory
             memory_block = render_memory_for_prompt(memory_files)
         except OSError as e:
             print(f"❌ 讀取 SOP/TODO/HANDOFF/memory 失敗: {e}")
             sys.exit(1)
-        print(
-            render_memory_operator_summary(
-                memory_files,
-                project_root=BASE_DIR,
-                ignore_env_var=RULE_IGNORE_ENV,
+        if snapshot.changed and not snapshot.first:
+            print("🔁 Memory: rule file change detected — reloaded")
+        if snapshot.changed:
+            print(
+                render_memory_operator_summary(
+                    memory_files,
+                    project_root=BASE_DIR,
+                    ignore_env_var=RULE_IGNORE_ENV,
+                )
             )
-        )
 
         success = False
         run_result: RunResult | None = None
