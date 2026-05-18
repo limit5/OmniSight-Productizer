@@ -43,7 +43,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -305,18 +305,58 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
 
 
 async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
-    """Best-effort Cognee KG neighbour fetch. Degrades to ``{}``."""
+    """Best-effort Cognee KG neighbour fetch. Degrades to ``{}``.
+
+    Per OP-1449: ``CogneeAdapter.search`` honours its own
+    ``query_timeout`` (default 30 s), which is much larger than the
+    structural axis budget (800 ms). To avoid the cognee fetcher being
+    cancelled mid-flight by the per-axis budget — which surfaces in the
+    response as ``structural=null`` rather than the graceful
+    ``kg_neighbours=[]`` — we wrap the call in an inner
+    :func:`asyncio.wait_for` that returns early enough for
+    :func:`fetch_structural_axis` to still hand back a well-formed dict.
+    """
     try:
         from backend.agents import cognee_integration
     except ImportError:
         return {}
+
+    # Leave headroom for the JIRA half + envelope assembly inside the
+    # 800 ms structural budget; if Cognee is slower than this we'd
+    # rather return ``kg_neighbours=[]`` with a logged degrade than have
+    # the whole axis fall back to ``null``.
+    inner_budget_sec = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
+
     try:
         adapter = cognee_integration.CogneeAdapter.from_env()
-        hits = await adapter.search(
-            f"ticket neighbours for {ticket_key}",
-            kinds=(cognee_integration.SOURCE_KIND_JIRA,),
-            top_k=5,
+    except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+        log.info(
+            "project_state.structural.cognee_adapter_unavailable ticket=%s "
+            "err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
         )
+        return {}
+
+    try:
+        hits = await asyncio.wait_for(
+            adapter.search(
+                f"ticket neighbours for {ticket_key}",
+                kinds=(cognee_integration.SOURCE_KIND_JIRA,),
+                top_k=5,
+            ),
+            timeout=inner_budget_sec,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "project_state.structural.cognee_inner_timeout ticket=%s "
+            "inner_budget_sec=%.3f outer_budget_sec=%.3f",
+            ticket_key,
+            inner_budget_sec,
+            STRUCTURAL_BUDGET_SEC,
+        )
+        return {}
     except Exception as exc:  # noqa: BLE001 — degrade per AC #3
         log.info(
             "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
@@ -370,21 +410,52 @@ async def _temporal_graphiti(ticket_key: str) -> dict[str, Any]:
 
 
 async def _causal_failure_neighbours(ticket_key: str) -> dict[str, Any]:
-    """Top-3 failure neighbours for ``ticket_key``."""
+    """Top-3 failure neighbours for ``ticket_key``.
+
+    Resolves the incident source via
+    :func:`failure_graph.default_incident_source` so the production
+    Postgres path (``runner_incidents`` table) is consulted when a DSN is
+    configured. Prior to OP-1449 this read a never-assigned
+    ``_DEFAULT_INCIDENT_SOURCE`` attribute via ``getattr(... None)`` and
+    therefore always returned an empty neighbours list — see the
+    AC #3 wiring requirement.
+    """
     try:
         from backend.agents import failure_graph
     except ImportError:
         return {"ticket": ticket_key, "neighbours": []}
-    incident_source = getattr(failure_graph, "_DEFAULT_INCIDENT_SOURCE", None)
-    if incident_source is None:
-        return {"ticket": ticket_key, "neighbours": []}
+
     try:
-        # 7-day lookback window mirrors the Sprint-C dashboard default.
-        since = datetime.now(timezone.utc).replace(microsecond=0)
-        since = since.replace(day=max(1, since.day - 7))
-        incidents = list(incident_source.list_since(since))
+        incident_source = failure_graph.default_incident_source()
+    except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+        log.info(
+            "project_state.causal.incident_source_unavailable ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
+        return {"ticket": ticket_key, "neighbours": []}
+
+    try:
+        # 7-day lookback mirrors the Sprint-C failure-graph dashboard
+        # default. Use ``timedelta(days=7)`` rather than the prior
+        # ``since.replace(day=since.day - 7)`` which silently collapsed
+        # to a 1-day window on the first week of any month.
+        since = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=7)
+        # ``list_since`` may run SQL; keep the event loop responsive by
+        # delegating the (potentially) blocking driver call to a thread.
+        incidents = list(await asyncio.to_thread(incident_source.list_since, since))
         graph = failure_graph.FailureGraph.build(incidents)
         own = [n for n in graph.nodes.values() if n.ticket_key == ticket_key]
+        if not own:
+            log.info(
+                "project_state.causal.no_own_incidents ticket=%s "
+                "incident_source=%s lookback_since=%s incidents_in_window=%d",
+                ticket_key,
+                type(incident_source).__name__,
+                since.isoformat(),
+                len(incidents),
+            )
         neighbours: list[dict[str, Any]] = []
         for inc in own:
             edges = failure_graph.get_failure_graph_neighbors(
