@@ -442,9 +442,19 @@ async def _causal_failure_neighbours(ticket_key: str) -> dict[str, Any]:
         # ``since.replace(day=since.day - 7)`` which silently collapsed
         # to a 1-day window on the first week of any month.
         since = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(days=7)
-        # ``list_since`` may run SQL; keep the event loop responsive by
-        # delegating the (potentially) blocking driver call to a thread.
-        incidents = list(await asyncio.to_thread(incident_source.list_since, since))
+        # OP-1450: ``query_by_ticket`` is the index-served ticket-scoped
+        # path. The prior ``list_since`` pulled every row in the 7-day
+        # window (1935 in prod) and built a full ``FailureGraph`` on each
+        # request — the in-memory build dominated wall-clock at ~6.7 s,
+        # 11x the 0.6 s causal budget. Scoping the fetch to the ticket's
+        # own incidents plus shared-failure_class / shared-mutex rows
+        # keeps both the SQL set and the in-memory graph small. The
+        # driver call may block, so it stays in ``asyncio.to_thread``.
+        incidents = list(
+            await asyncio.to_thread(
+                incident_source.query_by_ticket, ticket_key, since
+            )
+        )
         graph = failure_graph.FailureGraph.build(incidents)
         own = [n for n in graph.nodes.values() if n.ticket_key == ticket_key]
         if not own:
