@@ -143,6 +143,11 @@
     "chineseTraditional": "繁体字中国語",
     "japanese": "日本語"
   },
+  "agentGuildHall": {
+    "title": "エージェント・ギルドホール",
+    "subtitle": "全エージェント + キャラクターカード + パーティを表示",
+    "ariaLabel": "エージェント・ギルドホールを開く"
+  },
   "globalStatus": {
     "wsl2Ok": "WSL2 環境を検出しました",
     "wsl2Na": "ホストは WSL2 ではありません（Linux/macOS ネイティブ）— エラーではありません",
