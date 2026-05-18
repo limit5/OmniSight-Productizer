@@ -1593,6 +1593,8 @@ from backend.routers import bp_fleet_lanes as _bp_fleet_lanes_router  # OP-1504 
 _include_versioned_router(_bp_fleet_lanes_router.router)
 from backend.routers import shareable_objects as _shareable_objects_router  # OP-1495 WP.1.4 block share permalink
 _include_versioned_router(_shareable_objects_router.router)
+from backend.routers import runbooks as _runbooks_router  # OP-1502 WP.8 runbook primitive
+_include_versioned_router(_runbooks_router.router)
 from backend.routers import batch_merge as _batch_merge_router  # OP-735 R5 AI Reviewer auto-+1 dashboard
 _include_versioned_router(_batch_merge_router.router)
 from backend.routers import ci_dead_letter as _ci_dead_letter_router  # OP-741 CI recovery dead-letter dashboard

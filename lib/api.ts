@@ -6013,6 +6013,98 @@ export async function createShareableObject(
   })
 }
 
+// ─── WP.8 — Runbook primitive (OP-1502) ───
+
+export interface RunbookParam {
+  name: string
+  type: string
+  default: unknown
+  description: string
+  required: boolean
+}
+
+export interface RunbookStep {
+  kind: string
+  title: string
+  payload: Record<string, unknown>
+}
+
+export interface RunbookSummary {
+  name: string
+  description: string
+  tags: string[]
+  source_url: string
+  scope: "project" | "home" | "bundled" | string
+  source_path: string | null
+  params: RunbookParam[]
+  steps: RunbookStep[]
+}
+
+export interface SaveBlockAsRunbookRequest {
+  block: {
+    block_id: string
+    tenant_id: string
+    user_id?: string | null
+    project_id?: string | null
+    session_id?: string | null
+    kind: string
+    status?: string
+    title?: string
+    payload?: Record<string, unknown>
+    metadata?: Record<string, unknown>
+  }
+  name?: string | null
+  description?: string | null
+  tags?: string[]
+  overwrite?: boolean
+}
+
+export interface SaveBlockAsRunbookResponse {
+  runbook: RunbookSummary
+  path: string
+  yaml: string
+}
+
+export interface ExecuteRunbookRequest {
+  params: Record<string, unknown>
+  tenant_id: string
+  user_id?: string | null
+  project_id?: string | null
+  session_id?: string | null
+  parent_block_id?: string | null
+}
+
+export interface ExecuteRunbookResponse {
+  runbook: RunbookSummary
+  blocks: Array<Record<string, unknown>>
+}
+
+export async function listEffectiveRunbooks(): Promise<{
+  items: RunbookSummary[]
+  count: number
+}> {
+  return request<{ items: RunbookSummary[]; count: number }>("/runbooks/effective")
+}
+
+export async function saveBlockAsRunbook(
+  body: SaveBlockAsRunbookRequest,
+): Promise<SaveBlockAsRunbookResponse> {
+  return request<SaveBlockAsRunbookResponse>("/runbooks/save-from-block", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function executeRunbook(
+  name: string,
+  body: ExecuteRunbookRequest,
+): Promise<ExecuteRunbookResponse> {
+  return request<ExecuteRunbookResponse>(
+    `/runbooks/${encodeURIComponent(name)}/execute`,
+    { method: "POST", body: JSON.stringify(body) },
+  )
+}
+
 // ─── API Keys (K6) ─────────────────────────────────────────
 
 export interface ApiKeyItem {
