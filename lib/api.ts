@@ -595,6 +595,45 @@ export function subscribeEvents(
 const FETCH_TIMEOUT = 15_000 // 15 seconds
 const MAX_RETRIES = 2
 
+// ─── OP-1483 — FE/BE compat bookkeeping headers ─────────────────────
+//
+// Every browser-originated request emits two diagnostic headers so the
+// backend can spot a FE/BE skew at /readyz time (and so the Prometheus
+// counter ``omnisight_fe_be_bundle_mismatch_total`` fires the
+// ``FEBEBundleMismatch`` alert). The values are baked at build time:
+//
+//   FRONTEND_BUNDLE_ID            — `process.env.NEXT_PUBLIC_BUNDLE_ID`
+//                                   (Dockerfile.frontend passes the same
+//                                   ARG that goes into the image label;
+//                                   `next.config.mjs` exposes it to
+//                                   client bundles via NEXT_PUBLIC_*).
+//   FRONTEND_API_CONTRACT_VERSION — `process.env.NEXT_PUBLIC_API_CONTRACT`
+//                                   (defaults to "v1" — matches
+//                                   `MIN_FRONTEND_API_VERSION` in
+//                                   backend/api_versioning.py until a
+//                                   FE migrates to v2).
+//
+// We do NOT block on a mismatch (OP-1483 non-goal: alert only, don't
+// degrade UX further) — the headers are observational telemetry.
+const FRONTEND_BUNDLE_ID: string =
+  (process.env.NEXT_PUBLIC_BUNDLE_ID || "unknown").trim() || "unknown"
+const FRONTEND_API_CONTRACT_VERSION: string =
+  (process.env.NEXT_PUBLIC_API_CONTRACT || "v1").trim() || "v1"
+
+/**
+ * Return the OP-1483 FE/BE compat headers the request layer attaches
+ * to every fetch. Exported so the streaming / bootstrap call sites
+ * (which use `fetch` directly rather than going through `request()`)
+ * stay consistent with the central wrapper, and so tests can assert
+ * the exact pair without reaching into module-private state.
+ */
+export function getFrontendCompatHeaders(): Record<string, string> {
+  return {
+    "X-OmniSight-Frontend-Bundle": FRONTEND_BUNDLE_ID,
+    "X-OmniSight-Frontend-Api-Contract": FRONTEND_API_CONTRACT_VERSION,
+  }
+}
+
 function readCookie(name: string): string | null {
   if (typeof document === "undefined") return null
   for (const part of document.cookie.split(";")) {
@@ -885,6 +924,10 @@ async function request<T>(
       // and echoed via X-CSRF-Token for state-changing methods.
       const baseHeaders: Record<string, string> = {
         "Content-Type": "application/json",
+        // OP-1483 — FE/BE compat bookkeeping headers on every fetch.
+        // See `getFrontendCompatHeaders` for the build-time source of
+        // these values and the runtime detector wiring on the backend.
+        ...getFrontendCompatHeaders(),
       }
       if (_currentTenantId) {
         baseHeaders["X-Tenant-Id"] = _currentTenantId
@@ -1334,7 +1377,10 @@ export async function* streamChat(
 ): AsyncGenerator<{ event: string; data: unknown }> {
   const res = await fetch(`${API_V1}/chat/stream`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...getFrontendCompatHeaders(),
+    },
     body: JSON.stringify({ message }),
   })
   if (!res.ok || !res.body) throw new Error(`Stream error: ${res.status}`)
@@ -4966,7 +5012,9 @@ export async function uploadDocs(files: File[]): Promise<UploadDocsResponse> {
   for (const f of files) form.append("files", f)
 
   const method = "POST"
-  const baseHeaders: Record<string, string> = {}
+  const baseHeaders: Record<string, string> = {
+    ...getFrontendCompatHeaders(),
+  }
   if (typeof document !== "undefined") {
     const csrf = document.cookie
       .split("; ")
@@ -5382,7 +5430,13 @@ export async function* streamInvoke(
   const params = qs.toString()
   const res = await fetch(
     `${API_V1}/invoke/stream${params ? `?${params}` : ""}`,
-    { method: "POST", headers: { "Content-Type": "application/json" } },
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...getFrontendCompatHeaders(),
+      },
+    },
   )
   if (!res.ok || !res.body) throw new Error(`Invoke error: ${res.status}`)
 
@@ -6066,6 +6120,7 @@ export async function bootstrapSetAdminPassword(
   const method = "POST"
   const baseHeaders: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getFrontendCompatHeaders(),
   }
   if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
   if (typeof document !== "undefined") {
@@ -6197,6 +6252,7 @@ export async function bootstrapLlmProvision(
   const method = "POST"
   const baseHeaders: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getFrontendCompatHeaders(),
   }
   if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
   if (typeof document !== "undefined") {
@@ -6408,6 +6464,7 @@ export async function bootstrapInitTenant(
 ): Promise<BootstrapInitTenantResponse> {
   const baseHeaders: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getFrontendCompatHeaders(),
   }
   if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
   if (typeof document !== "undefined") {
@@ -6681,6 +6738,7 @@ export async function bootstrapStartServices(
   const method = "POST"
   const baseHeaders: Record<string, string> = {
     "Content-Type": "application/json",
+    ...getFrontendCompatHeaders(),
   }
   if (_currentTenantId) baseHeaders["X-Tenant-Id"] = _currentTenantId
   if (typeof document !== "undefined") {
