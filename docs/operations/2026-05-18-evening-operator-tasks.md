@@ -139,10 +139,13 @@ echo "memory/project_family_f_gerrit_account_gap.md can be updated to status: re
 
 **Goal**: bring up Graphiti container for temporal-axis memory in the 3D memory architecture (per Sprint F memory model).
 
+> **Update 2026-05-18 evening**: Task B surfaced a 4-day silent failure — `omnisight-neo4j` was a bare `docker run` on the default `bridge` network and unreachable from backend services on `omnisight-productizer_default`. The cutover to the compose-managed `neo4j` service (canonical path `/var/lib/omnisight/neo4j/...`) is tracked under **OP-1493**; the runbook lives at [`neo4j-path-migration-2026-05-18.md`](neo4j-path-migration-2026-05-18.md). Run OP-1493 §5.1-5.4 **before** Step B.3 below.
+
 **Blockers**:
 - Image namespace wrong: compose references `getzep/graphiti:latest`, real image is `zepai/graphiti:latest`
 - Needs OpenAI API key for embeddings (Graphiti is an OpenAI-coupled service)
 - Cloudflare Tunnel route is operator dashboard work (defer if needed)
+- Neo4j unreachable across networks — resolved by OP-1493 (see callout above)
 
 ### Pre-flight
 
