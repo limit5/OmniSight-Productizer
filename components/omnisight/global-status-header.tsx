@@ -136,10 +136,10 @@ export function GlobalStatusHeader({
             </div>
           </div>
           <div className="min-w-0">
-            <h1 className="font-sans text-sm 3xl:text-lg font-bold tracking-fui text-[var(--neural-blue)] text-glow-blue whitespace-nowrap">
+            <h1 className="font-sans text-sm xl:text-base 3xl:text-lg font-bold tracking-fui text-[var(--neural-blue)] text-glow-blue whitespace-nowrap">
               {tHeader("title")}
             </h1>
-            <p className="font-mono text-[10px] 3xl:text-xs text-[var(--muted-foreground)] whitespace-nowrap">
+            <p className="font-mono text-[10px] xl:text-[11px] 3xl:text-xs text-[var(--muted-foreground)] whitespace-nowrap">
               {tHeader("subtitle")}
             </p>
           </div>
@@ -191,19 +191,27 @@ export function GlobalStatusHeader({
           *     e.g. native Linux / macOS): muted-gray, not red, so the
           *     header doesn't scream OFFLINE on a perfectly healthy
           *     non-WSL2 deploy.
-          * 2026-05-18 update: WSL2/USB pills `hidden xl:flex` → `hidden
+          * 2026-05-18 update #1: WSL2/USB pills `hidden xl:flex` → `hidden
           * 3xl:flex`. At 1920px the right cluster (these pills + the
           * 4-button ModeSelector + SSE + Arch + Help + Lang + Time +
           * Settings + Bell + EmergencyStop) totalled ~800-1000px and
           * squashed the layout against the center pipeline progress
           * (max-w-md). 3xl is defined at 2160px in app/globals.css
-          * `@theme inline`. */}
+          * `@theme inline`.
+          * 2026-05-18 update #2 (evening, OP-1475 nav icon follow-up):
+          * 3xl-only WSL/USB was too aggressive — at 1920px (the dominant
+          * operator monitor size) users want to SEE env probes without
+          * needing 2160px+ panels. Split visibility: dots always shown
+          * at lg+ (small footprint ~60px total), but the text labels
+          * "WSL2: OK" / "USB: ..." only render at 3xl+ where there's
+          * room. Tooltip on dot preserves info access at lg-3xl. */}
         <div className="flex items-center gap-2">
-          {/* Status Indicators — only on really-wide screens (3xl+ = 2160px+).
-            * Each pill has a fixed-width inner span so changing state
-            * doesn't push the rest of the header sideways.  */}
-          <div className="hidden 3xl:flex items-center gap-3 shrink-0">
-            <div className="flex items-center gap-2 shrink-0" style={{ width: 110 }}>
+          {/* Status Indicators — dots from lg, full text only at 3xl+.
+            * At lg-3xl the dot's `title` tooltip carries the same status
+            * info that the label would show; mouse-hover or screen
+            * readers still get it. */}
+          <div className="hidden lg:flex items-center gap-2 3xl:gap-3 shrink-0">
+            <div className="flex items-center gap-2 shrink-0">
               <div
                 className={`status-dot ${
                   wslStatus === "OK"
@@ -220,7 +228,7 @@ export function GlobalStatusHeader({
                     : tStatus("wsl2Off")
                 }
               />
-              <span className="font-mono text-xs text-[var(--foreground)] whitespace-nowrap">
+              <span className="hidden 3xl:inline font-mono text-xs text-[var(--foreground)] whitespace-nowrap">
                 WSL2:{" "}
                 <span
                   className={`inline-block tabular-nums text-right ${
@@ -239,12 +247,12 @@ export function GlobalStatusHeader({
             </div>
             <div
               className="flex items-center gap-2 shrink-0 overflow-hidden"
-              style={{ width: 140 }}
               title={usbStatus}
             >
               <div className="status-dot status-dot-active shrink-0" />
               <span
-                className="font-mono text-xs text-[var(--foreground)] truncate whitespace-nowrap"
+                className="hidden 3xl:inline font-mono text-xs text-[var(--foreground)] truncate whitespace-nowrap"
+                style={{ maxWidth: 140 }}
                 aria-label={`USB ${usbStatus}`}
               >
                 {usbStatus.length > 14 ? usbStatus.slice(0, 13) + "…" : usbStatus}
