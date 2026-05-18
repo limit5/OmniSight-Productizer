@@ -133,3 +133,49 @@ class TestUserPreferences:
         assert listed.status_code == 200
         items = listed.json()["items"]
         assert items["catalog_density"] == "spacious"
+
+    async def test_onboarding_intention_round_trip(self, _prefs_client: AsyncClient):
+        """WP.4 (OP-1498) — ``onboarding_intention`` is the J4 key the
+        first-run IntentionPicker modal persists against. The router is
+        generic, but locking the literal here keeps frontend ↔ backend
+        drift visible: if either side renames the key the round-trip
+        silently breaks. Mirror constant on the frontend lives in
+        ``components/omnisight/intention-picker.tsx`` and on the backend
+        in ``backend/routers/preferences.py`` (``ONBOARDING_INTENTION_PREF_KEY``).
+        """
+        from backend.routers.preferences import (
+            ONBOARDING_INTENTION_PREF_KEY,
+            ONBOARDING_INTENTION_VALUES,
+        )
+
+        assert ONBOARDING_INTENTION_PREF_KEY == "onboarding_intention"
+        assert set(ONBOARDING_INTENTION_VALUES) == {
+            "hd_verification",
+            "multi_agent_dispatch",
+            "web_app_generation",
+            "sandbox_dev",
+            "exploring",
+        }
+
+        for value in ONBOARDING_INTENTION_VALUES:
+            put = await _prefs_client.put(
+                f"/api/v1/user-preferences/{ONBOARDING_INTENTION_PREF_KEY}",
+                json={"value": value},
+            )
+            assert put.status_code == 200
+            assert put.json() == {
+                "key": ONBOARDING_INTENTION_PREF_KEY,
+                "value": value,
+            }
+
+            get = await _prefs_client.get(
+                f"/api/v1/user-preferences/{ONBOARDING_INTENTION_PREF_KEY}",
+            )
+            assert get.status_code == 200
+            assert get.json()["value"] == value
+
+        # Cross-device sync surface: the journey written here is what a
+        # second device reads on next mount to skip the IntentionPicker.
+        listed = await _prefs_client.get("/api/v1/user-preferences")
+        items = listed.json()["items"]
+        assert items[ONBOARDING_INTENTION_PREF_KEY] == ONBOARDING_INTENTION_VALUES[-1]

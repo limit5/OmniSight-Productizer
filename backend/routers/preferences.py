@@ -45,6 +45,19 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["preferences"])
 
 TOUR_SEEN_PREF_KEY = "tour_seen"
+# WP.4 (OP-1498): per-user onboarding journey, set by the first-run
+# IntentionPicker modal. Mirrors the frontend constant
+# ``INTENTION_PREF_KEY`` in ``components/omnisight/intention-picker.tsx``.
+# Values: ``hd_verification`` | ``multi_agent_dispatch`` |
+# ``web_app_generation`` | ``sandbox_dev`` | ``exploring``.
+ONBOARDING_INTENTION_PREF_KEY = "onboarding_intention"
+ONBOARDING_INTENTION_VALUES = (
+    "hd_verification",
+    "multi_agent_dispatch",
+    "web_app_generation",
+    "sandbox_dev",
+    "exploring",
+)
 SEEN_MP_TOUR_PREF_KEY = "seen_mp_tour"
 SEEN_RPG_TOUR_PREF_KEY = "seen_rpg_tour"
 SEEN_RPG_CHARACTER_CARD_TOUR_PREF_KEY = "seen_rpg_character_card_tour"
