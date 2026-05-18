@@ -4,6 +4,11 @@
 >
 > Audience: release operator cutting a SemVer release branch and tag.
 
+> **2026-05-18 cutover (OP-1474 / META OP-1468):** the second push target
+> in §1 and §2 is now **GitLab** (`git@gitlab.com:omnisight/...`, sora
+> SSH identity), not GitHub. The legacy GitHub remote is now a read-only
+> mirror — see [ADR-0038](../adr/ADR-0038-image-pipeline-on-gitlab.md).
+
 This runbook covers the mechanical release-cut step before the production
 approval workflow takes over. It is intentionally separate from
 `docs/operations/release-runbook.md`, which covers deploy approval,
@@ -19,16 +24,21 @@ git pull --ff-only
 scripts/milestone_check.py --version vX.Y.Z
 ```
 
-Confirm both remotes exist:
+Confirm both remotes exist and that the GitLab origin is wired to the
+sora SSH identity (post-OP-1474 cutover):
 
 ```bash
 git remote get-url gerrit
-git remote get-url origin
+git remote get-url origin       # must be git@gitlab.com:omnisight/<repo>.git
+ssh -i ~/.ssh/id_ed25519_sora -T git@gitlab.com   # expect: "Welcome to GitLab, @sora-release"
 ```
 
 The script pushes the release branch and tag directly to both remotes,
-so the operator account must have branch/tag creation permission in
-Gerrit and GitHub.
+so the sora operator identity must have branch/tag creation permission in
+Gerrit and in the GitLab `omnisight` group. The push uses
+`GIT_SSH_COMMAND='ssh -i ~/.ssh/id_ed25519_sora -F /dev/null'` so the
+sora key is selected even when the operator's default `~/.ssh/config`
+prefers a personal key.
 
 ## 2. Cut the Branch and Tag
 
@@ -46,7 +56,9 @@ scripts/cut_release_branch.sh --version vX.Y.Z --changelog-jira
 
 The script creates `release/vX.Y.Z` from `main`, updates `CHANGELOG.md`,
 asks for a manual tag approval, creates annotated tag `vX.Y.Z`, and
-pushes branch plus tag to Gerrit and GitHub.
+pushes branch plus tag to Gerrit and GitLab (over the sora SSH identity;
+`origin` is now the GitLab remote — GitHub is a read-only mirror as of
+OP-1474).
 
 For automation where a separate approval step already captured the
 operator decision, pass:
@@ -71,8 +83,8 @@ The script refuses existing release branches and tags by default:
 
 | Error | Meaning | Recovery |
 |---|---|---|
-| `ReleaseBranchExists` | `release/vX.Y.Z` exists locally, in Gerrit, or in GitHub | Inspect the existing ref. If replacing it is intentional, rerun with `--override-existing`. |
-| `TagAlreadyExists` | `vX.Y.Z` exists locally, in Gerrit, or in GitHub | Inspect the tag target. If replacing it is intentional, rerun with `--override-existing`. |
+| `ReleaseBranchExists` | `release/vX.Y.Z` exists locally, in Gerrit, or in GitLab | Inspect the existing ref. If replacing it is intentional, rerun with `--override-existing`. |
+| `TagAlreadyExists` | `vX.Y.Z` exists locally, in Gerrit, or in GitLab | Inspect the tag target. If replacing it is intentional, rerun with `--override-existing`. |
 | `ChangelogGenFailed` | JIRA milestone export failed | The script inserts the manual template; fill it before promotion. |
 
 Do not force-push over a release branch or tag without a human decision
