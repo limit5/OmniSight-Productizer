@@ -6,8 +6,9 @@ fires alerts when:
 * the daemon's systemd unit is no longer enabled (P0,
   ``unit_not_loaded`` — the OP-689 case study, where the bridge daemon
   was never installed for two days and we only noticed by accident).
-* the daemon's most-recent heartbeat structured-log line is older
-  than the configured silence window (DEGRADED, ``daemon_silent``).
+* the daemon's heartbeat file mtime or most-recent heartbeat
+  structured-log line is older than the configured silence window
+  (DEGRADED, ``daemon_silent``).
 
 Healthy daemons emit a one-line INFO ``all_green`` record to stdout so
 an operator tailing the journal can confirm the watchdog itself is
@@ -25,8 +26,8 @@ Alert fan-out:
 1. Every alert is appended to ``alerts_path`` as one JSON record per
    line. T1 (OP-722) tails this file as the canonical sink.
 2. If ``notifier_module`` (default ``backend.agents.operator_notifier``)
-   is importable, ``notify(severity, code=..., **fields)`` is called for
-   defence-in-depth; missing modules are silently tolerated so the
+   is importable, ``notify(severity, code=..., message=..., context=fields)``
+   is called for defence-in-depth; missing modules are silently tolerated so the
    watchdog stays useful before T1 is wired in production.
 3. Every alert is also mirrored to stderr — systemd routes that to
    journald, where the T3 journal monitor catches it as the AC #4
@@ -67,6 +68,7 @@ class DaemonSpec:
     unit: str
     scope: str = "user"
     log_path: Path | None = None
+    heartbeat_file_path: Path | None = None
     heartbeat_event: str = "heartbeat"
     max_silence_minutes: int = 10
 
@@ -105,6 +107,11 @@ def load_config(path: Path) -> WatchdogConfig:
                 unit=str(entry["unit"]),
                 scope=str(entry.get("scope", "user")),
                 log_path=Path(entry["log_path"]) if entry.get("log_path") else None,
+                heartbeat_file_path=(
+                    Path(entry["heartbeat_file_path"])
+                    if entry.get("heartbeat_file_path")
+                    else None
+                ),
                 heartbeat_event=str(entry.get("heartbeat_event", "heartbeat")),
                 max_silence_minutes=int(entry.get("max_silence_minutes", 10)),
             )
@@ -191,6 +198,15 @@ def find_latest_heartbeat(
     return latest
 
 
+def find_heartbeat_file_mtime(heartbeat_file_path: Path) -> datetime | None:
+    """Return heartbeat file mtime as UTC, or None when unavailable."""
+    try:
+        mtime = heartbeat_file_path.stat().st_mtime
+    except OSError:
+        return None
+    return datetime.fromtimestamp(mtime, tz=timezone.utc)
+
+
 def _load_notifier(module_name: str | None) -> Any | None:
     if not module_name:
         return None
@@ -221,7 +237,9 @@ class AlertSink:
         notify = getattr(self.notifier, "notify", None) if self.notifier else None
         if callable(notify):
             try:
-                notify(severity, code=code, **fields)
+                message = str(fields.get("message") or f"{code} for watchdog")
+                context = json.loads(json.dumps(fields, sort_keys=True))
+                notify(severity, code=code, message=message, context=context)
             except Exception as exc:
                 # Notifier bug must never crash the watchdog itself —
                 # log + keep going so the file sink still wins.
@@ -260,6 +278,25 @@ def evaluate_daemon(
             ),
         )
 
+    threshold_seconds = spec.max_silence_minutes * 60
+    latest_file = (
+        find_heartbeat_file_mtime(spec.heartbeat_file_path)
+        if spec.heartbeat_file_path is not None
+        else None
+    )
+    if latest_file is not None:
+        file_age_seconds = (now - latest_file).total_seconds()
+        if file_age_seconds <= threshold_seconds:
+            return _structured_log(
+                SEVERITY_INFO,
+                CODE_ALL_GREEN,
+                unit=spec.unit,
+                heartbeat_source="file",
+                heartbeat_file_path=str(spec.heartbeat_file_path),
+                silence_seconds=round(file_age_seconds, 1),
+                threshold_minutes=spec.max_silence_minutes,
+            )
+
     if spec.log_path is None or not spec.log_path.exists():
         return sink.emit(
             SEVERITY_DEGRADED,
@@ -287,13 +324,22 @@ def evaluate_daemon(
         )
 
     age_seconds = (now - latest).total_seconds()
-    threshold_seconds = spec.max_silence_minutes * 60
     if age_seconds > threshold_seconds:
         return sink.emit(
             SEVERITY_DEGRADED,
             CODE_DAEMON_SILENT,
             unit=spec.unit,
             log_path=str(spec.log_path),
+            heartbeat_file_path=(
+                str(spec.heartbeat_file_path)
+                if spec.heartbeat_file_path is not None
+                else None
+            ),
+            heartbeat_file_age_seconds=(
+                round((now - latest_file).total_seconds(), 1)
+                if latest_file is not None
+                else None
+            ),
             silence_minutes=round(age_seconds / 60.0, 2),
             threshold_minutes=spec.max_silence_minutes,
             last_heartbeat=latest.isoformat(),
@@ -303,6 +349,7 @@ def evaluate_daemon(
         SEVERITY_INFO,
         CODE_ALL_GREEN,
         unit=spec.unit,
+        heartbeat_source="log",
         silence_seconds=round(age_seconds, 1),
         threshold_minutes=spec.max_silence_minutes,
     )

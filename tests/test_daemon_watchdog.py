@@ -64,11 +64,13 @@ def _spec(
     *,
     max_silence: int = 10,
     log_filename: str = "bridge.log",
+    heartbeat_file: Path | None = None,
 ) -> wd.DaemonSpec:
     return wd.DaemonSpec(
         unit="gerrit-jira-bridge",
         scope="user",
         log_path=tmp_path / log_filename,
+        heartbeat_file_path=heartbeat_file,
         heartbeat_event="heartbeat",
         max_silence_minutes=max_silence,
     )
@@ -76,6 +78,13 @@ def _spec(
 
 def _sink(tmp_path: Path, *, notifier=None) -> wd.AlertSink:
     return wd.AlertSink(alerts_path=tmp_path / "alerts.jsonl", notifier=notifier)
+
+
+def _touch(path: Path, ts: datetime) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+    epoch = ts.timestamp()
+    os.utime(path, (epoch, epoch))
 
 
 def _read_section(unit: Path, name: str) -> str:
@@ -131,8 +140,8 @@ def test_silent_daemon_dispatches_to_t1_notifier(tmp_path):
 
     class FakeNotifier:
         @staticmethod
-        def notify(severity, *, code, **fields):
-            received.append((severity, code, dict(fields)))
+        def notify(severity, code, message, context=None, **fields):
+            received.append((severity, code, message, context, dict(fields)))
 
     spec = _spec(tmp_path)
     now = datetime.now(timezone.utc)
@@ -142,10 +151,41 @@ def test_silent_daemon_dispatches_to_t1_notifier(tmp_path):
         spec, sink, log_tail_bytes=65_536, now=now, is_enabled=lambda u, s: True
     )
     assert len(received) == 1
-    severity, code, fields = received[0]
+    severity, code, message, context, fields = received[0]
     assert severity == wd.SEVERITY_DEGRADED
     assert code == wd.CODE_DAEMON_SILENT
-    assert fields["unit"] == "gerrit-jira-bridge"
+    assert message
+    assert context["unit"] == "gerrit-jira-bridge"
+    assert fields == {}
+
+
+def test_notifier_dispatch_puts_unit_under_context(tmp_path):
+    """OP-1508: notify() must not receive daemon fields as top-level kwargs."""
+    received = []
+
+    class FakeNotifier:
+        @staticmethod
+        def notify(severity, code, message, context=None, **fields):
+            received.append((severity, code, message, context, dict(fields)))
+
+    sink = _sink(tmp_path, notifier=FakeNotifier)
+    sink.emit(
+        wd.SEVERITY_DEGRADED,
+        wd.CODE_DAEMON_SILENT,
+        unit="gerrit-jira-bridge",
+        log_path=str(tmp_path / "bridge.log"),
+        silence_minutes=12.5,
+        message="daemon heartbeat is stale",
+    )
+
+    assert len(received) == 1
+    severity, code, message, context, fields = received[0]
+    assert severity == wd.SEVERITY_DEGRADED
+    assert code == wd.CODE_DAEMON_SILENT
+    assert message == "daemon heartbeat is stale"
+    assert context["unit"] == "gerrit-jira-bridge"
+    assert context["silence_minutes"] == 12.5
+    assert fields == {}
 
 
 def test_run_returns_nonzero_when_silent(tmp_path, monkeypatch):
@@ -209,6 +249,25 @@ def test_disabled_unit_skips_log_check(tmp_path):
     assert out["code"] == wd.CODE_UNIT_NOT_LOADED
 
 
+def test_disabled_unit_wins_over_fresh_heartbeat_file(tmp_path):
+    """OP-1508: direct file touches cannot hide a disabled systemd unit."""
+    now = datetime.now(timezone.utc)
+    heartbeat_file = tmp_path / "heartbeat"
+    _touch(heartbeat_file, now - timedelta(seconds=5))
+    spec = _spec(tmp_path, heartbeat_file=heartbeat_file)
+    _write_heartbeats(spec.log_path, now - timedelta(minutes=1))
+    sink = _sink(tmp_path)
+    out = wd.evaluate_daemon(
+        spec,
+        sink,
+        log_tail_bytes=65_536,
+        now=now,
+        is_enabled=lambda u, s: False,
+    )
+    assert out["severity"] == wd.SEVERITY_P0
+    assert out["code"] == wd.CODE_UNIT_NOT_LOADED
+
+
 def test_check_unit_loaded_handles_missing_systemctl(tmp_path):
     """Missing / broken systemctl = treat as not-loaded (P0), don't crash.
 
@@ -256,6 +315,48 @@ def test_no_false_positive_when_heartbeat_is_recent(tmp_path):
     # Either the file was never created (preferred) or it is empty.
     if sink.alerts_path.exists():
         assert sink.alerts_path.read_text() == ""
+
+
+def test_fresh_heartbeat_file_beats_stale_log(tmp_path):
+    """OP-1508: quiet Gerrit periods still count alive via heartbeat file."""
+    now = datetime.now(timezone.utc)
+    heartbeat_file = tmp_path / "heartbeat"
+    _touch(heartbeat_file, now - timedelta(seconds=30))
+    spec = _spec(tmp_path, max_silence=10, heartbeat_file=heartbeat_file)
+    _write_heartbeats(spec.log_path, now - timedelta(minutes=60))
+    sink = _sink(tmp_path)
+    out = wd.evaluate_daemon(
+        spec,
+        sink,
+        log_tail_bytes=65_536,
+        now=now,
+        is_enabled=lambda u, s: True,
+    )
+    assert out["level"] == wd.SEVERITY_INFO
+    assert out["event"] == wd.CODE_ALL_GREEN
+    assert out["heartbeat_source"] == "file"
+    if sink.alerts_path.exists():
+        assert sink.alerts_path.read_text() == ""
+
+
+def test_stale_heartbeat_file_and_stale_log_emit_degraded(tmp_path):
+    now = datetime.now(timezone.utc)
+    heartbeat_file = tmp_path / "heartbeat"
+    _touch(heartbeat_file, now - timedelta(minutes=30))
+    spec = _spec(tmp_path, max_silence=10, heartbeat_file=heartbeat_file)
+    _write_heartbeats(spec.log_path, now - timedelta(minutes=25))
+    sink = _sink(tmp_path)
+    out = wd.evaluate_daemon(
+        spec,
+        sink,
+        log_tail_bytes=65_536,
+        now=now,
+        is_enabled=lambda u, s: True,
+    )
+    assert out["severity"] == wd.SEVERITY_DEGRADED
+    assert out["code"] == wd.CODE_DAEMON_SILENT
+    assert out["heartbeat_file_path"] == str(heartbeat_file)
+    assert out["heartbeat_file_age_seconds"] >= 1800
 
 
 def test_run_returns_zero_when_healthy(tmp_path, monkeypatch):
@@ -405,6 +506,19 @@ def test_watchdog_config_yaml_lists_gerrit_bridge():
     )
 
 
+def test_watchdog_config_yaml_sets_bridge_heartbeat_file():
+    import yaml
+
+    raw = yaml.safe_load(CONFIG_PATH.read_text())
+    bridge = next(
+        d for d in raw.get("daemons", []) if d["unit"] == "gerrit-jira-bridge"
+    )
+    assert (
+        bridge["heartbeat_file_path"]
+        == "/home/user/.local/state/omnisight-bridge/heartbeat"
+    )
+
+
 def test_watchdog_config_default_silence_window_at_most_15_min():
     """AC #1 budget: silence threshold + 5 min poll ≤ 15 min."""
     import yaml
@@ -422,5 +536,6 @@ def test_watchdog_config_load_round_trip(tmp_path, monkeypatch):
     """``load_config`` must accept the production YAML untouched."""
     cfg = wd.load_config(CONFIG_PATH)
     assert cfg.daemons, "no daemons parsed from production YAML"
+    assert cfg.daemons[0].heartbeat_file_path is not None
     assert cfg.alerts_path is not None
     assert cfg.notifier_module == "backend.agents.operator_notifier"

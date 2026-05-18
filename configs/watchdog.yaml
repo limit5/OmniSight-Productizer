@@ -7,11 +7,13 @@
 #   1. Runs `systemctl [--user] is-enabled <unit>` — if missing/disabled
 #      it fires a P0 alert with code=unit_not_loaded (covers the
 #      OP-689 "daemon was never installed for two days" failure mode).
-#   2. Tails `log_path` looking for the most-recent structured-log line
-#      whose `event` field equals `heartbeat_event`. If its `timestamp`
-#      is older than `max_silence_minutes`, fires a DEGRADED alert
-#      with code=daemon_silent.
-#   3. Otherwise emits a one-line INFO `all_green` heartbeat to stdout
+#   2. If `heartbeat_file_path` is configured and its mtime is fresher
+#      than `max_silence_minutes`, treats the daemon as alive.
+#   3. Otherwise tails `log_path` looking for the most-recent structured-log
+#      line whose `event` field equals `heartbeat_event`. If its `timestamp`
+#      is older than `max_silence_minutes`, fires a DEGRADED alert with
+#      code=daemon_silent.
+#   4. Otherwise emits a one-line INFO `all_green` heartbeat to stdout
 #      so an operator following journalctl can confirm the watchdog
 #      itself is alive (and to satisfy AC #3 — "no false positive").
 #
@@ -29,6 +31,7 @@ daemons:
   - unit: gerrit-jira-bridge
     scope: user
     log_path: /home/user/work/sora/logs/bridge/systemd.log
+    heartbeat_file_path: /home/user/.local/state/omnisight-bridge/heartbeat
     heartbeat_event: heartbeat
     max_silence_minutes: 10
 
@@ -49,8 +52,8 @@ log_tail_bytes: 262144
 alerts_path: /home/user/work/sora/logs/bridge/watchdog-alerts.jsonl
 
 # Optional Python module dotted path. If importable, the watchdog
-# calls `notifier_module.notify(severity, code=..., **fields)` for
-# every alert in addition to writing the alerts file. T1 (OP-722)
+# calls `notifier_module.notify(severity, code=..., message=..., context=fields)`
+# for every alert in addition to writing the alerts file. T1 (OP-722)
 # delivers `backend.agents.operator_notifier`; until that ticket
 # lands the import silently no-ops and the file sink takes over.
 notifier_module: backend.agents.operator_notifier
