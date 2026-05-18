@@ -106,7 +106,7 @@ Adopted in v0.5.0 — **W1-W11 core + 4 MUST**:
 - W18 Multi-class / dual-class mastery (Lv 50 unlocks secondary Guild)
 - W19 Skill fusion / crafting (two Lv-5 skills → hybrid skill at Lv 3)
 - W20 Quest campaigns / narrative wrapping (multi-task "Operation: Phase 2 Migration")
-- W21 Time-gated boss raids (quarterly large refactor by Lv 50+ party of ≥ 4)
+- W21 Time-gated boss raids (quarterly large refactor by Lv 50+ party of ≥ 4) — see [W21 boss-task design spec](../design/2026-05-18-rpg-w21-boss-task-design.md) (OP-1462)
 
 ### XP curve
 

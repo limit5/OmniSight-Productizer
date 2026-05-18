@@ -1134,6 +1134,77 @@ export async function listAgentCards(filters: { guild?: string; sort_by?: "level
   return request<AgentCardSummary[]>(`/agents/cards${suffix}`)
 }
 
+export interface AgentCardDetail {
+  agent_id: string
+  agent_class: string
+  instance_suffix: string | null
+  guild: string
+  level: number
+  xp: number
+  specialization_label: string
+  style_fingerprint: string
+  created_at: string
+}
+
+export async function getAgentCard(id: string) {
+  return request<AgentCardDetail>(`/agents/${encodeURIComponent(id)}/card`)
+}
+
+export interface AgentAchievementBadge {
+  id?: string
+  kind: string
+  label?: string | null
+  description?: string | null
+  earnedAt?: string | null
+  progressLabel?: string | null
+  rarity?: string | null
+  locked?: boolean | null
+}
+
+export interface AgentAchievementsResponse {
+  agent_id: string
+  unlocked: AgentAchievementBadge[]
+  locked_visible: AgentAchievementBadge[]
+}
+
+export async function getAgentAchievements(id: string) {
+  return request<AgentAchievementsResponse>(`/agents/${encodeURIComponent(id)}/achievements`)
+}
+
+// ── RPG.W17 — Party Hall feed (matches backend `_party_to_dict`) ────
+export interface AgentPartyMemberDto {
+  member_agent_id: string
+  joined_at: string | null
+  released_at: string | null
+}
+
+export interface AgentPartySynergyDto {
+  label: string
+  display_name: string
+  guilds: string[]
+  xp_bonus: number
+  skill_bonus_target: string | null
+  skill_bonus: number | null
+  summary: string
+}
+
+export interface AgentPartyDto {
+  party_id: string
+  name: string
+  synergy_label: string | null
+  synergy_xp_bonus: number
+  active_task_id: string | null
+  active_task_assigned_at: string | null
+  created_at: string
+  disbanded_at: string | null
+  members: AgentPartyMemberDto[]
+  synergy: AgentPartySynergyDto | null
+}
+
+export async function listAgentParties() {
+  return request<AgentPartyDto[]>("/agents/parties")
+}
+
 export async function getAgent(id: string) {
   return request<ApiAgent>(`/agents/${id}`)
 }

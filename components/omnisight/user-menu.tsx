@@ -18,6 +18,7 @@ import {
   Monitor,
   Shield,
   User as UserIcon,
+  Users,
 } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "@/lib/auth-context"
@@ -85,6 +86,16 @@ export function UserMenu() {
               role: {auth.user.role}
             </div>
           </div>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { setOpen(false); router.push("/agents") }}
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--secondary)] text-[var(--foreground)]"
+            data-testid="menu-agents-roster"
+          >
+            <Users size={12} />
+            Agent Roster
+          </button>
           <button
             type="button"
             role="menuitem"

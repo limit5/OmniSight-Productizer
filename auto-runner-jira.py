@@ -36,6 +36,7 @@ ENV:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ sys.path.insert(0, str(REPO))
 from backend.agents import (
     agent_feature_flags,
     capability_matrix,
+    character_card,
     circuit_breaker,
     failure_graph,
     jira_authority_check,
@@ -70,6 +72,7 @@ from backend.agents import (
     runner_workspace_safety,
     scheduler,
 )
+from backend.agents.instance_suffix import CANONICAL_INSTANCE_SUFFIXES
 from backend.agents.operator_notifier import Severity, notify as operator_notify
 from backend.agents.loop_detector import (
     DEFAULT_GRADER_MODEL,
@@ -125,6 +128,7 @@ def _env_int(name: str, default: int) -> int:
 
 LESSON_RECALL_TOP_K = _env_int("OMNISIGHT_LESSON_RECALL_TOP_K", 3)
 ANTIPATTERN_TOP_N = _env_int("OMNISIGHT_ANTIPATTERN_TOP_N", 2)
+REFLECTION_RAG_TOP_K = _env_int("OMNISIGHT_REFLECTION_RAG_TOP_K", 5)
 ORPHAN_SALVAGE_BRANCH_THRESHOLD = int(
     os.environ.get("OMNISIGHT_ORPHAN_SALVAGE_BRANCH_THRESHOLD", "50").strip()
 )
@@ -159,6 +163,58 @@ class UnknownAreaLabelError(ValueError):
 def _bot_username() -> str:
     """Resolve the per-instance bot username for this runner process."""
     return jira_dispatch.resolve_bot_username(AGENT_CLASS, INSTANCE_ID)
+
+
+def _runner_instance_suffix() -> str:
+    """Map ``OMNISIGHT_RUNNER_INSTANCE_ID`` to an ADR-0008 instance_suffix.
+
+    "default" → ``alpha`` (index 0); numeric "N" → the Nth canonical
+    suffix (``beta`` for ``2``, ``gamma`` for ``3``, …). Off-pattern
+    instance IDs fall through unchanged — the character-card schema
+    treats ``instance_suffix`` as opaque, so this is durable rather
+    than dropping the row.
+    """
+    if INSTANCE_ID == "default":
+        return CANONICAL_INSTANCE_SUFFIXES[0]
+    if INSTANCE_ID.isdigit():
+        idx = int(INSTANCE_ID) - 1
+        if 0 <= idx < len(CANONICAL_INSTANCE_SUFFIXES):
+            return CANONICAL_INSTANCE_SUFFIXES[idx]
+    return INSTANCE_ID
+
+
+def _ensure_runner_character_card(ticket_key: str) -> None:
+    """Idempotent RPG.W1.2 first-task hook (OP-1459).
+
+    Composes the per-instance agent identity from the runner env
+    (``agent_id`` = bot_username so two instances of the same class
+    never collide on the row's primary key) and delegates to the
+    character-card store. Best-effort: the helper logs and swallows
+    every exception so dispatch keeps moving even when the
+    ``agent_character_card`` table is absent or unreachable.
+    """
+    try:
+        agent_id = _bot_username()
+    except Exception as exc:  # noqa: BLE001 — never block pickup on identity resolution
+        log.warning(
+            "OP-1459 first-task character-card hook: bot_username resolve "
+            "failed ticket=%s err=%s",
+            ticket_key, exc,
+        )
+        return
+    metric_meta = _LAST_TICKET_METADATA.get(ticket_key, {})
+    task_area = metric_meta.get("area") or None
+    card = character_card.ensure_card_for_first_task_sync(
+        agent_id=agent_id,
+        agent_class=AGENT_CLASS,
+        instance_suffix=_runner_instance_suffix(),
+        task_area=task_area,
+    )
+    if card is not None:
+        print(
+            f"[runner] character-card ensured agent_id={card.agent_id} "
+            f"guild={card.guild} level={card.level}"
+        )
 
 
 def _default_worktree_for(agent_class: str) -> str:
@@ -891,6 +947,62 @@ def _build_lesson_recall_block(key: str, summary: str, description: str) -> str:
     return "\n" + "\n".join(parts) + "\n"
 
 
+def _build_reflection_rag_block(key: str, summary: str, description: str) -> str:
+    """RPG.W6.2 (OP-1357) — inject top-K relevant prior reflection lessons.
+
+    The W6 reflection layer stores success/failure summaries in the shared
+    BP.Q vector store. Pickup prompt construction is sync, so this wrapper
+    constructs the env-configured embedder/store for one retrieval call and
+    closes the store client before returning. Any unavailable dependency
+    degrades to an empty block; runner pickup must remain usable when the
+    semantic lesson layer is offline.
+    """
+    if not agent_feature_flags.reflection_rag_prompt.enabled():
+        return ""
+
+    async def _load() -> str:
+        from backend.agents import reflection_rag
+        from backend.agents.rag_indexer import (
+            DEFAULT_TENANT_ID,
+            _build_embedder_from_env,
+            _build_store_from_env,
+        )
+
+        tenant_id = os.environ.get("OMNISIGHT_RAG_TENANT_ID", DEFAULT_TENANT_ID)
+        embedder = _build_embedder_from_env()
+        store, closeable = await _build_store_from_env()
+        try:
+            return await reflection_rag.build_reflection_lesson_injection(
+                tenant_id=tenant_id,
+                ticket_key=key,
+                ticket_summary=summary,
+                ticket_description=description,
+                embedder=embedder,
+                store=store,
+                top_k=REFLECTION_RAG_TOP_K,
+            )
+        finally:
+            if closeable is not None:
+                await closeable.close()
+
+    try:
+        block = asyncio.run(_load())
+    except Exception as exc:  # noqa: BLE001 — degrade on any retrieval error
+        print(
+            f"[runner] reflection_rag.unavailable key={key} err={exc}",
+            file=sys.stderr,
+        )
+        return ""
+    if not block:
+        print(f"[runner] reflection_rag.empty key={key}", file=sys.stderr)
+        return ""
+    print(
+        f"[runner] reflection_rag.surfaced key={key} top_k={REFLECTION_RAG_TOP_K}",
+        file=sys.stderr,
+    )
+    return "\n" + block.strip() + "\n"
+
+
 def _build_antipattern_block(
     key: str, summary: str, description: str, declared_areas: list[str],
 ) -> str:
@@ -1050,6 +1162,7 @@ def _build_prompt(
     # off) and degrade to an empty string when the KG / cookbook is offline.
     # They sit before the Documentation-rules / AC-verification sections so
     # the CLI reads the context before it is told what to satisfy.
+    reflection_block = _build_reflection_rag_block(key, summary, description)
     lessons_block = _build_lesson_recall_block(key, summary, description)
     antipattern_block = _build_antipattern_block(
         key, summary, description, declared_areas,
@@ -1069,7 +1182,7 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
 If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
-{capabilities_block}{fg_block}{ps_block}{ops_only_block}{lessons_block}{antipattern_block}
+{capabilities_block}{fg_block}{ps_block}{ops_only_block}{reflection_block}{lessons_block}{antipattern_block}
 # Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
 
 DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
@@ -2458,6 +2571,14 @@ def main() -> int:
         )
         return 0
     print(f"[runner] {snapshot.key} claim acquired (token: {claim.claim_token})")
+
+    # OP-1459 / RPG.W1.2 — first-task character-card upsert. Runs once
+    # per (agent_class × instance_id) on the first pickup that reaches
+    # this point; subsequent pickups return the existing row. The call
+    # is fail-open (logs warning + returns None on any DB/import error)
+    # so a missing migration, a Postgres outage, or the asyncpg
+    # dependency being absent never wedges ticket dispatch.
+    _ensure_runner_character_card(snapshot.key)
 
     # OP-836 sentinel — stamps worktree pre-launch so we can detect post-CLI
     # tamper (CLI deleted it, reset HEAD to non-descendant SHA, swapped

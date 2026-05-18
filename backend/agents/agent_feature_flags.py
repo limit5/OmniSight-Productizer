@@ -70,6 +70,11 @@ antipattern_inject = AgentFeatureFlag(
     env_name="OMNISIGHT_ANTIPATTERN_INJECT",
     default=False,
 )
+reflection_rag_prompt = AgentFeatureFlag(
+    name="reflection_rag_prompt",
+    env_name="OMNISIGHT_REFLECTION_RAG_PROMPT",
+    default=False,
+)
 
 ALL_FLAGS = (
     failure_graph,
@@ -78,6 +83,7 @@ ALL_FLAGS = (
     coord_skip,
     cognee_recall,
     antipattern_inject,
+    reflection_rag_prompt,
 )
 
 
@@ -96,4 +102,5 @@ __all__ = [
     "is_project_state_inject_enabled_sync",
     "ops_only",
     "project_state",
+    "reflection_rag_prompt",
 ]

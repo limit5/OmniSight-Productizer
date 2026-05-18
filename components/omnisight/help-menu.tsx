@@ -6,6 +6,7 @@
  * Lives in the top-right of the dashboard header. Exposes the things
  * operators ask for most:
  *   - Run the tour again (`?tour=1`)
+ *   - Replay the RPG agent roster tour (`/agents?tour=1`)
  *   - Jump to any reference doc in their current UI language
  *   - Open troubleshooting
  *   - Quick-link to Swagger (/docs) and the GitHub repo
@@ -122,6 +123,12 @@ const SECTIONS: Section[] = [
         key: "replay-multi-provider-tour",
         label: { en: "Replay multi-provider tour", "zh-TW": "重播多供應商導覽", "zh-CN": "重播多供应商导览", ja: "マルチプロバイダーツアーを再生" },
         href: "/?panel=orchestrator&mpTour=1",
+        icon: PlayCircle,
+      },
+      {
+        key: "replay-agent-tour",
+        label: { en: "Replay agent tour", "zh-TW": "重播 agent 導覽", "zh-CN": "重播 agent 导览", ja: "エージェントツアーを再生" },
+        href: "/agents?tour=1",
         icon: PlayCircle,
       },
       {
