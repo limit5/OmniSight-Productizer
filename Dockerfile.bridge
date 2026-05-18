@@ -65,6 +65,14 @@ RUN groupadd -g 65532 app && \
     mkdir -p /var/lib/omnisight/hardware-bridge/artifacts && \
     chown -R app:app /app /var/lib/omnisight/hardware-bridge
 
+# OP-1479 — bundle manifest baked into the image. CI overwrites the
+# repo-root bundle.json with the real values before invoking
+# `docker build`; local builds use the checked-in placeholder so the
+# COPY always succeeds.
+ARG BUNDLE_ID=unknown
+LABEL org.opencontainers.image.bundle.id="${BUNDLE_ID}"
+COPY --chown=app:app bundle.json /app/bundle.json
+
 USER app
 
 EXPOSE 8765

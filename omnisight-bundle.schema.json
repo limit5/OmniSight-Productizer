@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnisight.sora.services/schemas/omnisight-bundle.schema.json",
+  "title": "OmniSight Release Bundle Manifest",
+  "description": "Manifest describing a single deployable OmniSight release bundle. Emitted by scripts/build_image_bundle.py after CI builds the three runtime images (backend, frontend, bridge); read by /api/version at runtime so operators can prove what is actually running.",
+  "type": "object",
+  "required": [
+    "bundle_id",
+    "git_ref",
+    "git_sha",
+    "build_time",
+    "images",
+    "contracts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "bundle_id": {
+      "type": "string",
+      "description": "Stable identifier for this bundle. Convention: <git_ref_tail>-<short_sha> (e.g. 'v0.5.0-rc3-3f1c0a4e').",
+      "minLength": 1
+    },
+    "git_ref": {
+      "type": "string",
+      "description": "Full git ref that triggered the build (e.g. 'refs/tags/v0.5.0-rc3' or 'refs/heads/develop').",
+      "minLength": 1
+    },
+    "git_sha": {
+      "type": "string",
+      "description": "40-character commit SHA the images were built from.",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "build_time": {
+      "type": "string",
+      "description": "RFC 3339 / ISO-8601 UTC timestamp the bundle was sealed.",
+      "format": "date-time"
+    },
+    "images": {
+      "type": "object",
+      "description": "Per-image digests. Keys correspond to the three runtime planes.",
+      "required": ["backend", "frontend", "bridge"],
+      "additionalProperties": false,
+      "properties": {
+        "backend": { "$ref": "#/$defs/imageRef" },
+        "frontend": { "$ref": "#/$defs/imageRef" },
+        "bridge": { "$ref": "#/$defs/imageRef" }
+      }
+    },
+    "contracts": {
+      "type": "object",
+      "description": "Contract surface pinned at bake time. Lets the runtime claim 'I am compatible with frontend bundles built against api_supported, and I require at least api_required'.",
+      "required": [
+        "api_required",
+        "api_supported",
+        "openapi_hash",
+        "db_migration_head",
+        "frontend_built_against_api"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "api_required": {
+          "type": "string",
+          "description": "Minimum API version the backend will negotiate with."
+        },
+        "api_supported": {
+          "type": "array",
+          "description": "All API versions the backend mounts simultaneously.",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "openapi_hash": {
+          "type": "string",
+          "description": "Hex SHA-256 of the committed openapi.json at build time.",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "db_migration_head": {
+          "type": "string",
+          "description": "Single alembic head the backend image was baked against.",
+          "minLength": 1
+        },
+        "frontend_built_against_api": {
+          "type": "string",
+          "description": "API version the bundled frontend was built against (read from the frontend image's build metadata)."
+        }
+      }
+    },
+    "signatures": {
+      "type": "array",
+      "description": "Optional list of detached signatures over the bundle. Populated by the signing step in CI; empty when running locally.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scheme", "value"],
+        "properties": {
+          "scheme": {
+            "type": "string",
+            "description": "Signature scheme (e.g. 'cosign-keyless', 'gpg', 'minisign')."
+          },
+          "value": {
+            "type": "string",
+            "description": "Signature payload or pointer (e.g. cosign rekor index, detached signature bytes base64-encoded)."
+          },
+          "key_id": {
+            "type": "string",
+            "description": "Optional identifier for the key/identity that produced the signature."
+          }
+        }
+      },
+      "default": []
+    }
+  },
+  "$defs": {
+    "imageRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest"],
+      "properties": {
+        "digest": {
+          "type": "string",
+          "description": "OCI image digest in 'sha256:<hex>' form.",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "repository": {
+          "type": "string",
+          "description": "Optional registry/repository where the image is published (e.g. 'ghcr.io/sora-services/omnisight-backend')."
+        },
+        "tag": {
+          "type": "string",
+          "description": "Optional tag the digest was published under at build time. Tags are mutable; digest is authoritative."
+        }
+      }
+    }
+  }
+}

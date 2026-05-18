@@ -30,10 +30,15 @@ tooling (OpenAPI) that key off the path.
 """
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, FastAPI
+
+_log = logging.getLogger(__name__)
 
 
 API_V1_PREFIX = "/api/v1"
@@ -182,14 +187,112 @@ def install_deprecation_headers_middleware(app: FastAPI) -> None:
         return response
 
 
+# OP-1479 — bundle manifest baked into the runtime image at /app/bundle.json
+# by Dockerfile.backend. Read once at import time so /api/version is a
+# pure dict-return path (the endpoint is on the bootstrap-exempt
+# fast-path; we don't want to do disk I/O per request).
+BUNDLE_MANIFEST_PATH = Path("/app/bundle.json")
+_IMAGE_MANIFEST_PATH = Path("/app/MANIFEST.json")
+
+
+def _load_bundle_manifest(path: Path = BUNDLE_MANIFEST_PATH) -> dict:
+    """Read the bundle manifest baked into the image, or {} if missing.
+
+    The runtime image bakes this file from the bundle artifact emitted
+    by ``scripts/build_image_bundle.py``. Local dev builds and tests
+    will not have it; missing/malformed manifests resolve to an empty
+    dict so the endpoint still returns the version-routing fields.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError):
+        _log.warning("Failed to read bundle manifest at %s", path)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return raw
+
+
+def _load_image_manifest_db_head(path: Path = _IMAGE_MANIFEST_PATH) -> str | None:
+    """Return the alembic head baked into the backend image, or None.
+
+    ``MANIFEST.json`` is the v2-⑤-1a artifact already produced by
+    ``scripts/bake-image-manifest.sh``. The bundle manifest also carries
+    ``contracts.db_migration_head``; we fall back to MANIFEST.json so
+    that ``/api/version`` reports the field even on older images that
+    pre-date the bundle manifest.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("alembic_head_in_image")
+    return value if isinstance(value, str) else None
+
+
+def build_version_payload(
+    *,
+    bundle_path: Path | None = None,
+    image_manifest_path: Path | None = None,
+) -> dict:
+    """Assemble the JSON body returned by ``GET /api/version``.
+
+    Split out from the route handler so tests can drive it without
+    standing up a FastAPI app, and so callers can inject paths for
+    fixture-based testing. Defaults resolve against the module-level
+    constants at call time, so tests can monkeypatch ``av.BUNDLE_MANIFEST_PATH``
+    / ``av._IMAGE_MANIFEST_PATH`` and the route picks up the change.
+    """
+    if bundle_path is None:
+        bundle_path = BUNDLE_MANIFEST_PATH
+    if image_manifest_path is None:
+        image_manifest_path = _IMAGE_MANIFEST_PATH
+    bundle = _load_bundle_manifest(bundle_path)
+    contracts = bundle.get("contracts") if isinstance(bundle.get("contracts"), dict) else {}
+
+    api_supported = contracts.get("api_supported")
+    if not isinstance(api_supported, list) or not api_supported:
+        api_supported = list(SUPPORTED_API_VERSIONS)
+
+    api_required = contracts.get("api_required")
+    if not isinstance(api_required, str) or not api_required:
+        api_required = MIN_FRONTEND_API_VERSION
+
+    openapi_hash = contracts.get("openapi_hash")
+    if not isinstance(openapi_hash, str):
+        openapi_hash = None
+
+    db_migration_head = contracts.get("db_migration_head")
+    if not isinstance(db_migration_head, str) or not db_migration_head:
+        db_migration_head = _load_image_manifest_db_head(image_manifest_path)
+
+    bundle_id = bundle.get("bundle_id") if isinstance(bundle.get("bundle_id"), str) else None
+
+    return {
+        # Legacy fields preserved for backwards compatibility with the
+        # existing v1 frontend bootstrap check.
+        "supported_versions": list(SUPPORTED_API_VERSIONS),
+        "default_version": DEFAULT_API_VERSION,
+        "min_frontend_api_version": MIN_FRONTEND_API_VERSION,
+        "deprecated_versions": DEPRECATED_API_VERSIONS,
+        # OP-1479 bundle-aware additions. Keys match the contract shape
+        # documented in omnisight-bundle.schema.json so operators can
+        # diff /api/version against the bundle artifact directly.
+        "bundle_id": bundle_id,
+        "api_required": api_required,
+        "api_supported": list(api_supported),
+        "openapi_hash": openapi_hash,
+        "db_migration_head": db_migration_head,
+    }
+
+
 def install_version_metadata_endpoint(app: FastAPI) -> None:
     """Mount the version-agnostic ``/api/version`` metadata endpoint."""
 
     @app.get("/api/version", tags=["api-version"], include_in_schema=False)
     async def _api_version() -> dict:
-        return {
-            "supported_versions": list(SUPPORTED_API_VERSIONS),
-            "default_version": DEFAULT_API_VERSION,
-            "min_frontend_api_version": MIN_FRONTEND_API_VERSION,
-            "deprecated_versions": DEPRECATED_API_VERSIONS,
-        }
+        return build_version_payload()

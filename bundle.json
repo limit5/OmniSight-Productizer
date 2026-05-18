@@ -1,0 +1,19 @@
+{
+  "bundle_id": "local-dev",
+  "git_ref": "refs/heads/local",
+  "git_sha": "0000000000000000000000000000000000000000",
+  "build_time": "1970-01-01T00:00:00Z",
+  "images": {
+    "backend": {"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+    "frontend": {"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+    "bridge": {"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"}
+  },
+  "contracts": {
+    "api_required": "v1",
+    "api_supported": ["v1", "v2"],
+    "openapi_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "db_migration_head": "unknown",
+    "frontend_built_against_api": "v1"
+  },
+  "signatures": []
+}

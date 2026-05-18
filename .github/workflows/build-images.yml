@@ -138,6 +138,23 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "primary=${base}:sha-${short_sha}" >> "$GITHUB_OUTPUT"
 
+      - name: compute bundle id
+        id: bundle
+        # OP-1479 — derive a stable per-build bundle id from the git
+        # ref tail + short SHA. Passed as --build-arg BUNDLE_ID so each
+        # image's `org.opencontainers.image.bundle.id` label proves what
+        # bundle it was baked from, and re-used by the final
+        # build_image_bundle.py invocation in `bundle-manifest`.
+        run: |
+          set -euo pipefail
+          short_sha="$(echo '${{ github.sha }}' | cut -c1-8)"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tail="${GITHUB_REF#refs/tags/}"
+          else
+            tail="${GITHUB_REF##*/}"
+          fi
+          echo "value=${tail}-${short_sha}" >> "$GITHUB_OUTPUT"
+
       - name: set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -167,6 +184,9 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.bundle.id=${{ steps.bundle.outputs.value }}
+          build-args: |
+            BUNDLE_ID=${{ steps.bundle.outputs.value }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
@@ -265,6 +285,79 @@ jobs:
           short_sha="$(echo '${{ github.sha }}' | cut -c1-12)"
           ref='${{ env.REGISTRY }}/${{ steps.owner.outputs.value }}/${{ matrix.image }}:sha-'"${short_sha}"
           ./scripts/verify_image_signature.sh "${ref}"
+
+  # =========================================================================
+  # bundle-manifest — OP-1479 phase V1.
+  #
+  # Once all three images have been built + verified, collect their
+  # digests from the per-image audit artifacts and emit a single
+  # `bundle-<id>.json` describing the deployable unit. This is the
+  # central abstraction operators inspect on staging deploys: it lets
+  # them prove that the running image's `org.opencontainers.image.bundle.id`
+  # label matches the bundle artifact they meant to ship.
+  # =========================================================================
+  bundle-manifest:
+    if: github.event_name != 'schedule'
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: download per-image audit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-audit-*
+          path: .audit-downloaded
+
+      - name: compute bundle id
+        id: bundle
+        run: |
+          set -euo pipefail
+          short_sha="$(echo '${{ github.sha }}' | cut -c1-8)"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tail="${GITHUB_REF#refs/tags/}"
+          else
+            tail="${GITHUB_REF##*/}"
+          fi
+          echo "value=${tail}-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: assemble bundle manifest
+        run: |
+          set -euo pipefail
+          backend_digest="$(jq -r .digest .audit-downloaded/image-audit-backend/backend.json)"
+          frontend_digest="$(jq -r .digest .audit-downloaded/image-audit-frontend/frontend.json)"
+          bridge_digest="$(jq -r .digest .audit-downloaded/image-audit-bridge/bridge.json)"
+          mkdir -p artifacts
+          python3 scripts/build_image_bundle.py \
+            --git-ref "${GITHUB_REF}" \
+            --git-sha "${GITHUB_SHA}" \
+            --bundle-id "${{ steps.bundle.outputs.value }}" \
+            --backend-digest "${backend_digest}" \
+            --frontend-digest "${frontend_digest}" \
+            --bridge-digest "${bridge_digest}" \
+            --out "artifacts/bundle-${{ steps.bundle.outputs.value }}.json"
+
+      - name: validate bundle against schema
+        run: |
+          set -euo pipefail
+          pip install --quiet jsonschema==4.23.0
+          python3 -c "import json, jsonschema; \
+            jsonschema.validate( \
+              json.load(open('artifacts/bundle-${{ steps.bundle.outputs.value }}.json')), \
+              json.load(open('omnisight-bundle.schema.json')))"
+
+      - name: upload bundle manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-manifest
+          path: artifacts/bundle-${{ steps.bundle.outputs.value }}.json
+          retention-days: 90
 
   # =========================================================================
   # retention — cron-driven prune of untagged versions.

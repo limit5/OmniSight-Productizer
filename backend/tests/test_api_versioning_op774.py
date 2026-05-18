@@ -69,12 +69,17 @@ async def test_api_version_endpoint_returns_supported_versions(client) -> None:
     response = await client.get("/api/version")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "supported_versions": list(SUPPORTED_API_VERSIONS),
-        "default_version": DEFAULT_API_VERSION,
-        "min_frontend_api_version": MIN_FRONTEND_API_VERSION,
-        "deprecated_versions": {"v1": {"sunset": V1_SUNSET_HEADER}},
-    }
+    body = response.json()
+    # OP-774 legacy version-routing fields.
+    assert body["supported_versions"] == list(SUPPORTED_API_VERSIONS)
+    assert body["default_version"] == DEFAULT_API_VERSION
+    assert body["min_frontend_api_version"] == MIN_FRONTEND_API_VERSION
+    assert body["deprecated_versions"] == {"v1": {"sunset": V1_SUNSET_HEADER}}
+    # OP-1479 bundle-aware additions — the keys must always be present
+    # even when /app/bundle.json is missing (values may be None).
+    for key in ("bundle_id", "api_required", "api_supported",
+                "openapi_hash", "db_migration_head"):
+        assert key in body, f"/api/version missing {key}"
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,14 @@ RUN addgroup -g 65532 -S app && \
     adduser  -u 65532 -S -G app -H -h /app app && \
     chown -R app:app /app
 
+# OP-1479 — bundle manifest baked into the image. CI overwrites the
+# repo-root bundle.json with the real values (real bundle_id, real
+# digests) before invoking `docker build`; local builds use the
+# checked-in placeholder bundle.json so the COPY always succeeds.
+ARG BUNDLE_ID=unknown
+LABEL org.opencontainers.image.bundle.id="${BUNDLE_ID}"
+COPY --chown=app:app bundle.json /app/bundle.json
+
 USER app:app
 
 EXPOSE 3000
