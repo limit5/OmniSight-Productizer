@@ -43,8 +43,12 @@ describe("CommandPalette skill registry exposure", () => {
     const input = screen.getByPlaceholderText(/command|search/i)
     fireEvent.change(input, { target: { value: "flash" } })
 
-    await screen.findByText("Invoke skill: @flash-fw")
-    fireEvent.mouseDown(screen.getByText("Invoke skill: @flash-fw"))
+    // Label text is split across <span>/<mark> segments by the WP.11
+    // highlight renderer, so match on the option row's full textContent.
+    const row = await screen.findByRole("option", {
+      name: (_, el) => el?.textContent?.includes("Invoke skill: @flash-fw") ?? false,
+    })
+    fireEvent.mouseDown(row)
 
     await waitFor(() => expect(heard).toEqual(["@flash-fw "]))
   })

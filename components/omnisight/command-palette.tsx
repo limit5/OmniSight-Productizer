@@ -11,8 +11,15 @@
  *      headings, indexed once on mount via `/api/docs-index` route
  *      exposed alongside the docs landing page).
  *
- * Fuzzy matcher is a tiny subsequence scorer (no external dep); good
- * enough for the ~dozen actions + six docs in scope.
+ * Matcher is a self-contained scorer (WP.11, OP-1505):
+ *   - smart-case: all-lowercase query → case-insensitive,
+ *     any uppercase → case-sensitive
+ *   - wildcard: `*` becomes glob (`*.tsx`, `agent*config`)
+ *   - matched-indices: returned per-label for highlight rendering
+ *
+ * Multi-term queries (whitespace-separated) are AND-combined; each
+ * term is matched against label / hint / tags independently and
+ * scores are summed.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
@@ -47,6 +54,126 @@ type CommandItem = {
   run: () => void
   /** Optional extra keywords for fuzzy matching (tags). */
   tags?: string[]
+}
+
+type TermMatcher =
+  | { kind: "glob"; re: RegExp }
+  | { kind: "literal"; needle: string }
+
+type CompiledQuery = {
+  caseSensitive: boolean
+  terms: TermMatcher[]
+}
+
+type TermHit = { score: number; indices: number[] }
+
+const GLOB_ESCAPE_RE = /[.+?^${}()|[\]\\]/g
+
+/**
+ * Compile a query string into a smart-case, wildcard-aware matcher.
+ * Returns null for empty queries (caller should skip filtering).
+ *
+ * Exported for unit testing — see test/components/command-palette-matcher.test.ts.
+ */
+export function compileQuery(query: string): CompiledQuery | null {
+  const trimmed = query.trim()
+  if (!trimmed) return null
+  const caseSensitive = /[A-Z]/.test(trimmed)
+  const terms = trimmed.split(/\s+/).filter(Boolean).map((raw) => compileTerm(raw, caseSensitive))
+  if (terms.length === 0) return null
+  return { caseSensitive, terms }
+}
+
+function compileTerm(raw: string, caseSensitive: boolean): TermMatcher {
+  if (raw.includes("*")) {
+    const escaped = raw.replace(GLOB_ESCAPE_RE, "\\$&").replace(/\*/g, ".*")
+    const flags = caseSensitive ? "" : "i"
+    return { kind: "glob", re: new RegExp(escaped, flags) }
+  }
+  return { kind: "literal", needle: caseSensitive ? raw : raw.toLowerCase() }
+}
+
+function matchTerm(term: TermMatcher, haystack: string, caseSensitive: boolean): TermHit | null {
+  if (term.kind === "glob") {
+    const m = term.re.exec(haystack)
+    if (!m) return null
+    const start = m.index
+    const len = m[0].length
+    if (len === 0) return null
+    return {
+      score: len - start / 50,
+      indices: Array.from({ length: len }, (_, i) => start + i),
+    }
+  }
+  const h = caseSensitive ? haystack : haystack.toLowerCase()
+  const i = h.indexOf(term.needle)
+  if (i < 0) return null
+  return {
+    score: term.needle.length - i / 50,
+    indices: Array.from({ length: term.needle.length }, (_, k) => i + k),
+  }
+}
+
+/**
+ * Match a query against a `label` (highlightable) and an `aux` blob
+ * (hint + tags concatenated; not highlighted). Every term must match
+ * either the label or the aux blob; only label hits contribute to
+ * the returned `indices`.
+ *
+ * Exported for unit testing.
+ */
+export function matchItem(
+  compiled: CompiledQuery,
+  label: string,
+  aux: string,
+): { score: number; indices: number[] } | null {
+  let total = 0
+  const labelHits: number[] = []
+  for (const term of compiled.terms) {
+    const onLabel = matchTerm(term, label, compiled.caseSensitive)
+    if (onLabel) {
+      total += onLabel.score
+      labelHits.push(...onLabel.indices)
+      continue
+    }
+    const onAux = matchTerm(term, aux, compiled.caseSensitive)
+    if (!onAux) return null
+    total += onAux.score
+  }
+  // Dedupe indices (multiple terms can overlap on the same label chars).
+  const indices = labelHits.length === 0
+    ? []
+    : Array.from(new Set(labelHits)).sort((a, b) => a - b)
+  return { score: total, indices }
+}
+
+/**
+ * Split a label string into plain / highlighted segments so the row
+ * renderer can wrap matched chars in <mark>. Indices outside the
+ * label range are clamped silently.
+ *
+ * Exported for unit testing.
+ */
+export function highlightSegments(text: string, indices: number[]): { text: string; hit: boolean }[] {
+  if (indices.length === 0) return [{ text, hit: false }]
+  const sorted = [...indices].filter((i) => i >= 0 && i < text.length).sort((a, b) => a - b)
+  if (sorted.length === 0) return [{ text, hit: false }]
+  const segments: { text: string; hit: boolean }[] = []
+  let cursor = 0
+  let i = 0
+  while (i < sorted.length) {
+    const start = sorted[i]
+    let end = start
+    while (i + 1 < sorted.length && sorted[i + 1] === end + 1) {
+      end = sorted[++i]
+    }
+    if (cursor < start) segments.push({ text: text.slice(cursor, start), hit: false })
+    segments.push({ text: text.slice(start, end + 1), hit: true })
+    cursor = end + 1
+    i++
+  }
+  if (cursor < text.length) segments.push({ text: text.slice(cursor), hit: false })
+  return segments
 }
 
 interface Props {
@@ -159,24 +286,19 @@ export function CommandPalette({ onNavigatePanel }: Props) {
     ...skillCommands,
   ], [locale, navigatePanel, go, skillCommands])
 
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase()
-    if (!needle) return commands
-    const terms = needle.split(/\s+/).filter(Boolean)
+  const filtered = useMemo<{ c: CommandItem; indices: number[] }[]>(() => {
+    const compiled = compileQuery(q)
+    if (!compiled) return commands.map((c) => ({ c, indices: [] }))
     return commands
       .map((c) => {
-        const haystack = [c.label[locale], c.hint?.[locale] ?? "", ...(c.tags ?? [])].join(" ").toLowerCase()
-        let score = 0
-        for (const t of terms) {
-          const i = haystack.indexOf(t)
-          if (i < 0) return { c, score: 0 }
-          score += t.length - i / 50  // earlier match → higher score
-        }
-        return { c, score }
+        const label = c.label[locale]
+        const aux = [c.hint?.[locale] ?? "", ...(c.tags ?? [])].join(" ")
+        const hit = matchItem(compiled, label, aux)
+        return hit ? { c, indices: hit.indices, score: hit.score } : null
       })
-      .filter((x) => x.score > 0)
+      .filter((x): x is { c: CommandItem; indices: number[]; score: number } => x !== null)
       .sort((a, b) => b.score - a.score)
-      .map((x) => x.c)
+      .map(({ c, indices }) => ({ c, indices }))
   }, [commands, q, locale])
 
   // Hotkey: Cmd/Ctrl+K toggles; Cmd/Ctrl+/ also (common in editors).
@@ -219,8 +341,8 @@ export function CommandPalette({ onNavigatePanel }: Props) {
     if (e.key === "ArrowUp")   { e.preventDefault(); setCursor((c) => Math.max(c - 1, 0)); return }
     if (e.key === "Enter") {
       e.preventDefault()
-      const item = filtered[cursor]
-      if (item) { setOpen(false); item.run() }
+      const entry = filtered[cursor]
+      if (entry) { setOpen(false); entry.c.run() }
       return
     }
   }
@@ -267,9 +389,11 @@ export function CommandPalette({ onNavigatePanel }: Props) {
               {L.empty}
             </li>
           )}
-          {filtered.map((item, i) => {
+          {filtered.map(({ c: item, indices }, i) => {
             const active = i === cursor
             const Icon = item.icon
+            const label = item.label[locale]
+            const segments = highlightSegments(label, indices)
             return (
               <li
                 key={item.id}
@@ -287,7 +411,19 @@ export function CommandPalette({ onNavigatePanel }: Props) {
                   className={`w-3.5 h-3.5 shrink-0 ${active ? "text-[var(--neural-cyan,#67e8f9)]" : ""}`}
                   aria-hidden
                 />
-                <span className="flex-1 truncate">{item.label[locale]}</span>
+                <span className="flex-1 truncate">
+                  {segments.map((seg, k) => seg.hit ? (
+                    <mark
+                      key={k}
+                      data-testid="cp-hit"
+                      className="bg-transparent text-[var(--neural-cyan,#67e8f9)] font-semibold"
+                    >
+                      {seg.text}
+                    </mark>
+                  ) : (
+                    <span key={k}>{seg.text}</span>
+                  ))}
+                </span>
                 {active && (
                   <ArrowRight
                     className="w-3.5 h-3.5 text-[var(--neural-cyan,#67e8f9)]"
