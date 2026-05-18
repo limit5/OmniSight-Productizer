@@ -112,6 +112,26 @@ async def lifespan(app: FastAPI):
     _sl.configure()
     import logging
     _log = logging.getLogger(__name__)
+    # OP-1455: bump the asyncio default executor to 32 worker threads.
+    # CPython's default is ``min(32, cpu+4)`` which is often 4-8 on
+    # production hosts. The /api/v1/project-state aggregator launches
+    # 3 axes concurrently, each wrapping blocking SQL/Cognee work in
+    # ``asyncio.to_thread``. When the slow structural axis (Cognee, ~5 s
+    # when KG is degraded) holds a thread for its full duration, the
+    # causal axis ``to_thread`` queues behind it and inherits the wait —
+    # OP-214 measured at 6.7 s in HTTP context vs 214 ms direct, because
+    # ``asyncio.wait_for`` can't cancel an already-running ``to_thread``
+    # future and has to drain the slow axis before re-raising
+    # TimeoutError. A 32-worker pool absorbs the three-axes × concurrent-
+    # request fan-out without contention.
+    import asyncio as _asyncio_init
+    from concurrent.futures import ThreadPoolExecutor as _TPE
+    try:
+        _asyncio_init.get_running_loop().set_default_executor(
+            _TPE(max_workers=32, thread_name_prefix="omnisight-to-thread")
+        )
+    except Exception as exc:
+        _log.warning("[startup] set_default_executor failed: %s", exc)
     # L1-03: sanity-check critical env/config BEFORE opening the DB.
     # Catches deploy-day typos (wrong bearer, missing provider key)
     # at boot instead of the first 401 / first silent provider fail.
