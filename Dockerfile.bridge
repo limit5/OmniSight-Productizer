@@ -65,6 +65,14 @@ RUN groupadd -g 65532 app && \
     mkdir -p /var/lib/omnisight/hardware-bridge/artifacts && \
     chown -R app:app /app /var/lib/omnisight/hardware-bridge
 
+# OP-1492 — CI stamps the image with the bundle identity and the
+# sha256 of the pre-build bundle.json. The bridge does not serve
+# `/api/version`, so only labels are needed here.
+ARG BUNDLE_ID=
+ARG BUNDLE_SHA=
+LABEL org.opencontainers.image.bundle.id="${BUNDLE_ID}"
+LABEL org.opencontainers.image.bundle.sha="${BUNDLE_SHA}"
+
 USER app
 
 EXPOSE 8765

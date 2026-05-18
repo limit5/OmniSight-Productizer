@@ -1323,6 +1323,53 @@ async def _security_headers(request, call_next):
     return response
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-1483 — FE/BE runtime compatibility observer
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Codex's 2026-05-18 incident (prod ran backend=hotfix8 + frontend=hotfix5
+# for hours unnoticed) demanded a runtime detector. Every browser /
+# SSR-originated request emits two bookkeeping headers via
+# ``lib/api.ts``:
+#
+#   X-OmniSight-Frontend-Bundle       : bundle_id baked at FE build time
+#   X-OmniSight-Frontend-Api-Contract : API version the FE built against
+#
+# This middleware drops each observation into ``backend.frontend_compat``
+# so ``/readyz`` can surface ``frontend_compat_check`` and the
+# Prometheus counter ``omnisight_fe_be_bundle_mismatch_total`` can drive
+# the ``FEBEBundleMismatch`` alert defined in
+# ``prometheus/rules/image-compat.yml``.
+#
+# Strictly observational — we never mutate the request or reject it on
+# mismatch. The ticket non-goal explicitly bans degrading UX further on
+# a skew the request side cannot fix.
+from backend import frontend_compat as _frontend_compat
+
+
+@app.middleware("http")
+async def _frontend_compat_observer(request, call_next):
+    """Drop FE bundle/api-contract observations into the compat ring buffer.
+
+    Runs unconditionally on every request that carries either header —
+    static-asset requests and probes typically don't, so the buffer
+    only fills with browser-originated traffic that actually exercises
+    the API.
+    """
+    fe_bundle = request.headers.get("x-omnisight-frontend-bundle")
+    fe_contract = request.headers.get("x-omnisight-frontend-api-contract")
+    if fe_bundle or fe_contract:
+        try:
+            payload = _api_versioning.build_version_payload()
+            be_bundle = payload.get("bundle_id")
+        except Exception:
+            be_bundle = None
+        _frontend_compat.record_observation(
+            fe_bundle, fe_contract, be_bundle=be_bundle,
+        )
+    return await call_next(request)
+
+
 # OP-234: optional Sentry / DataDog error aggregation.  Installed after
 # the other HTTP middleware so uncaught failures from those gates are
 # reported too.  It is a no-op unless a Sentry DSN or DataDog API key is

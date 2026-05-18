@@ -35,6 +35,43 @@ All three are multi-arch (`linux/amd64` + `linux/arm64`) so a single
 pull resolves to the correct architecture on x86 cloud VMs and on
 ARM SBCs / Apple-silicon hosts.
 
+## Bundle manifest contract
+
+The image workflow derives one `bundle_id` per git ref + commit and
+passes it into all three Docker builds as `BUNDLE_ID`. It also writes a
+schema-valid pre-build `bundle.json` before `docker/build-push-action`
+runs, computes its sha256, and passes that value as `BUNDLE_SHA`.
+
+Every pushed image carries these OCI labels:
+
+| Label | Meaning |
+|-------|---------|
+| `org.opencontainers.image.bundle.id` | Bundle identity for the git ref + short SHA. |
+| `org.opencontainers.image.bundle.sha` | sha256 of the pre-build `bundle.json` bytes used for the image build. |
+
+Only the backend image bakes `bundle.json` into `/app/bundle.json`,
+because `/api/version` reads that file. The frontend and bridge images
+carry labels only; they do not serve `/api/version`.
+
+The pre-build bundle uses placeholder image digests because the real
+multi-arch digests do not exist until the images are pushed. After all
+three images build and verify, the `bundle-manifest` job downloads the
+per-image audit artifacts, re-runs `scripts/build_image_bundle.py` with
+the real digests, validates the result against
+`omnisight-bundle.schema.json`, and uploads
+`bundle-<bundle_id>.json` as a workflow artifact.
+
+Operator verification:
+
+```bash
+bundle_id=$(docker image inspect ghcr.io/<owner>/omnisight-backend:<tag> \
+  --format '{{ index .Config.Labels "org.opencontainers.image.bundle.id" }}')
+bundle_sha=$(docker image inspect ghcr.io/<owner>/omnisight-backend:<tag> \
+  --format '{{ index .Config.Labels "org.opencontainers.image.bundle.sha" }}')
+docker run --rm ghcr.io/<owner>/omnisight-backend:<tag> cat /app/bundle.json > /tmp/bundle.json
+test "$(sha256sum /tmp/bundle.json | awk '{print $1}')" = "${bundle_sha}"
+```
+
 ## Signing model — cosign keyless
 
 We sign every image **by digest** (not by tag) using cosign keyless,
@@ -176,6 +213,142 @@ Tweak `MIN_KEEP` / `MAX_AGE_DAYS` env vars in the workflow. `MIN_KEEP`
 is a hard floor — the script refuses to dip below it even if every
 remaining version is past the age cutoff.
 
+## Env lock files + preflight (OP-1482, V4)
+
+Until OP-1482, prod and staging compose files referenced images by
+tag (`ghcr.io/.../omnisight-backend:${OMNISIGHT_IMAGE_TAG}`) with
+`pull_policy: missing`. That combination is unsafe: if the alias
+(`:latest`, `:vX.Y.Z`, `:staging`) is retagged in the registry,
+`docker compose up` keeps using whatever happens to be in the local
+cache, silently no-op'ing a promotion. Codex flagged this as the #2
+priority gap in the image pipeline.
+
+The V4 fix is:
+
+1. **Per-env lock file**, JSON, checked into the repo. Each file
+   pins a `bundle_id`, the per-image `repository` + `sha256:` digest,
+   `last_promoted_at`, `promoted_from`, and an `attestation_ref` back
+   to a sigstore log entry:
+
+   - `staging.env.lock.json` — sealed when CI cuts a new bundle
+   - `canary.env.lock.json` — sealed by the canary cron when a bundle
+     graduates from staging (≥6 h burn-in + clean alerts)
+   - `prod.env.lock.json` — sealed when an operator approves the
+     canary→prod promotion
+
+   Schema (informal — `omnisight-bundle.schema.json` covers the
+   compatible bundle manifest):
+
+   ```json
+   {
+     "env": "prod",
+     "bundle_id": "v0.5.0-3f1c0a4e",
+     "last_promoted_at": "2026-05-18T14:22:00Z",
+     "promoted_from": "canary",
+     "attestation_ref": "sigstore://rekor.sigstore.dev/api/v1/log/entries/<uuid>",
+     "images": {
+       "backend":  { "repository": "ghcr.io/<owner>/omnisight-backend",
+                     "digest":     "sha256:…",
+                     "env_var":    "OMNISIGHT_BACKEND_DIGEST" },
+       "frontend": { "repository": "ghcr.io/<owner>/omnisight-frontend",
+                     "digest":     "sha256:…",
+                     "env_var":    "OMNISIGHT_FRONTEND_DIGEST" },
+       "bridge":   { "repository": "ghcr.io/<owner>/omnisight-bridge",
+                     "digest":     "sha256:…",
+                     "env_var":    "OMNISIGHT_BRIDGE_DIGEST" }
+     }
+   }
+   ```
+
+2. **`scripts/load_env_lock.sh`** translates the lock JSON into env
+   vars consumed by the compose `image:` interpolation. Two modes:
+
+   ```bash
+   # Source-mode — exports OMNISIGHT_*_DIGEST into the caller shell.
+   source scripts/load_env_lock.sh prod.env.lock.json
+
+   # File-mode — writes a `--env-file`-formatted chunk. Preferred for
+   # the deploy runbook so the digests live in a single artifact.
+   scripts/load_env_lock.sh prod.env.lock.json --out /tmp/prod-digests.env
+   ```
+
+3. **`scripts/verify_image_bundle.py`** is the preflight gate. It
+   refuses to exit 0 unless, for every image referenced in the lock:
+
+   - the compose file's `image:` line is pinned by `@sha256:<digest>`
+     (catches a future regression where someone re-introduces a
+     `:tag` reference),
+   - `docker manifest inspect` against the registry returns the same
+     digest (catches a retagged alias),
+   - the cosign signature on `<repo>@<digest>` verifies
+     (delegates to `scripts/verify_image_signature.sh` for keyless /
+     key-mode auto-detection consistency),
+   - `docker image inspect`'s RepoDigests on the local cache include
+     `<repo>@<digest>` (catches Codex's #15 failure mode where an
+     operator `docker tag`'d an old digest onto the alias).
+
+   ```bash
+   python3 scripts/verify_image_bundle.py \
+       --compose docker-compose.prod.yml \
+       --lock prod.env.lock.json
+   # exit 0 → safe to deploy
+   # exit 1 → at least one image diverges; output names which and why
+   # exit 2 → broken invocation (no docker, malformed lock); not a deploy
+   #          failure — the runner can distinguish the two.
+   ```
+
+   Skip flags exist for situations where part of the chain is
+   unreachable:
+
+   - `--skip-remote` — no registry network, but still want compose +
+     cosign + local-cache checks
+   - `--skip-signature` — sigstore (rekor) is degraded; degrade
+     gracefully and document in the deploy log
+   - `--skip-cache` — first-time deploy on a clean host; the cache
+     check would fail until `docker compose pull` lands
+
+4. **Compose changes** (`docker-compose.prod.yml`,
+   `docker-compose.staging.yml`): every `omnisight-{backend,frontend}`
+   reference is now `@${OMNISIGHT_*_DIGEST}` and `pull_policy:
+   always`. With digest pinning, `always` is safe — Docker
+   content-addresses the local cache and will dedupe the layer pull
+   when the digest is already present locally.
+
+### Full deploy procedure (prod)
+
+```bash
+# 1. Load digests from the lock file.
+scripts/load_env_lock.sh prod.env.lock.json --out /tmp/prod-digests.env
+
+# 2. Preflight gate. Refuses to pass on any digest mismatch.
+python3 scripts/verify_image_bundle.py \
+    --compose docker-compose.prod.yml \
+    --lock prod.env.lock.json
+
+# 3. Apply.
+docker compose \
+    --env-file .env \
+    --env-file /tmp/prod-digests.env \
+    -f docker-compose.prod.yml \
+    up -d --wait
+
+# 4. Smoke: every running container must report a digest, not a tag.
+docker ps --filter name=backend --format '{{.Image}}'
+# Expected: ghcr.io/<owner>/omnisight-backend@sha256:…
+```
+
+### Promoting a bundle (sealing a new lock)
+
+A bundle is "ready to promote" once CI's `image-audit-<image>.json`
+artifacts (see § Audit log integration) name the same `bundle_id` and
+cosign-verify clean. The promotion workflow rewrites
+`<env>.env.lock.json` with the new digests, bumps `bundle_id`,
+`last_promoted_at`, and `attestation_ref`, and commits the lock file
+behind a Gerrit Code-Review +2 like any other change. Until that
+commit is merged, deploy preflight refuses to run with the new
+digests because the lock file is still pinned to the old bundle —
+which is exactly the safety property we wanted.
+
 ## See also
 
 - `.github/workflows/docker-publish.yml` — older tag-only publish
@@ -186,3 +359,7 @@ remaining version is past the age cutoff.
   and SemVer conventions.
 - `docs/operations/key-management.md` — credential rotation, including
   any future cosign signing key.
+- `omnisight-bundle.schema.json` + `scripts/build_image_bundle.py`
+  (OP-1479) — bundle manifest schema and CI-side builder. The lock
+  files share the same digest-pinning shape so a bundle manifest can
+  be diffed against the live lock file at release time.

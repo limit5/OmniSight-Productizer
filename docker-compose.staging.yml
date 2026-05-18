@@ -1,11 +1,19 @@
 # Staging compose — mirrors production but on different ports.
 # Runs on WSL Ubuntu-22.04 for pre-release validation.
 #
+# OP-1482 (2026-05-18): images are digest-pinned via
+# `staging.env.lock.json`. Preflight + load flow mirrors prod — see
+# the header of docker-compose.prod.yml for the canonical procedure.
+#
 # Usage:
 #   cd ~/work/sora/OmniSight-Productizer
 #   cp .env.example .env.staging
 #   # Edit .env.staging: set API keys + OMNISIGHT_ENV=staging
-#   docker compose -f docker-compose.staging.yml --env-file .env.staging up -d
+#   scripts/load_env_lock.sh staging.env.lock.json --out /tmp/staging-digests.env
+#   python3 scripts/verify_image_bundle.py \
+#       --compose docker-compose.staging.yml --lock staging.env.lock.json
+#   docker compose --env-file .env.staging --env-file /tmp/staging-digests.env \
+#       -f docker-compose.staging.yml up -d --wait
 #
 # Port mapping (avoids conflict with production on Ubuntu-24.04):
 #   Frontend:  3010 (prod: 3000)
@@ -72,8 +80,9 @@ services:
       start_period: 5s
 
   backend-a:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    # OP-1482: digest-pinned. Sourced via `scripts/load_env_lock.sh staging.env.lock.json`.
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -112,8 +121,9 @@ services:
       start_period: 20s
 
   backend-b:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    # OP-1482: digest-pinned. Sourced via `scripts/load_env_lock.sh staging.env.lock.json`.
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -152,8 +162,9 @@ services:
       start_period: 20s
 
   frontend:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    # OP-1482: digest-pinned. Sourced via `scripts/load_env_lock.sh staging.env.lock.json`.
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-frontend@${OMNISIGHT_FRONTEND_DIGEST:?missing OMNISIGHT_FRONTEND_DIGEST — run scripts/load_env_lock.sh staging.env.lock.json}
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile.frontend

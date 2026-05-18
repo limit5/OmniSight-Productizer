@@ -7,6 +7,7 @@ import { NPITimeline } from "@/components/omnisight/npi-timeline"
 import { GlobalStatusHeader } from "@/components/omnisight/global-status-header"
 import { SpecNode } from "@/components/omnisight/spec-node"
 import { AgentMatrixWall, defaultAgents, type Agent, type AgentStatus } from "@/components/omnisight/agent-matrix-wall"
+import { AgentGuildHallCard } from "@/components/omnisight/agent-guild-hall-card"
 import { VitalsArtifactsPanel } from "@/components/omnisight/vitals-artifacts-panel"
 import { DecisionDashboard } from "@/components/omnisight/decision-dashboard"
 import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-panel"
@@ -470,14 +471,19 @@ export default function Home() {
         return <SpecNode spec={spec.length > 0 ? (spec as never) : undefined} onSpecChange={handleSpecChange} />
       case "agents":
         return (
-          <AgentMatrixWall
-            agents={agents}
-            onAddAgent={handleAddAgent}
-            onRemoveAgent={handleRemoveAgent}
-            onConfirmAgent={handleConfirmAgent}
-            onRejectAgent={handleRejectAgent}
-            onRetryAgent={handleRetryAgent}
-          />
+          <div className="flex flex-col gap-2 min-h-0 h-full">
+            <AgentGuildHallCard />
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <AgentMatrixWall
+                agents={agents}
+                onAddAgent={handleAddAgent}
+                onRemoveAgent={handleRemoveAgent}
+                onConfirmAgent={handleConfirmAgent}
+                onRejectAgent={handleRejectAgent}
+                onRetryAgent={handleRetryAgent}
+              />
+            </div>
+          </div>
         )
       case "orchestrator":
         return (
@@ -733,16 +739,19 @@ export default function Home() {
             <SpecNode spec={spec.length > 0 ? (spec as never) : undefined} onSpecChange={handleSpecChange} />
           </aside>
 
-          {/* Center: Agent Matrix Wall */}
-          <section className="min-h-0 overflow-hidden">
-            <AgentMatrixWall
-              agents={agents}
-              onAddAgent={handleAddAgent}
-              onRemoveAgent={handleRemoveAgent}
-              onConfirmAgent={handleConfirmAgent}
-              onRejectAgent={handleRejectAgent}
-              onRetryAgent={handleRetryAgent}
-            />
+          {/* Center: Agent Matrix Wall (+ OP-1476 Guild Hall entry card) */}
+          <section className="min-h-0 overflow-hidden flex flex-col gap-2">
+            <AgentGuildHallCard />
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <AgentMatrixWall
+                agents={agents}
+                onAddAgent={handleAddAgent}
+                onRemoveAgent={handleRemoveAgent}
+                onConfirmAgent={handleConfirmAgent}
+                onRejectAgent={handleRejectAgent}
+                onRetryAgent={handleRetryAgent}
+              />
+            </div>
           </section>
 
           {/* Orchestrator AI - Central Coordinator & Command Hub */}

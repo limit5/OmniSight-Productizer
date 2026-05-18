@@ -30,10 +30,15 @@ tooling (OpenAPI) that key off the path.
 """
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import APIRouter, FastAPI
+
+_log = logging.getLogger(__name__)
 
 
 API_V1_PREFIX = "/api/v1"
@@ -182,14 +187,159 @@ def install_deprecation_headers_middleware(app: FastAPI) -> None:
         return response
 
 
+# OP-1479 — bundle manifest baked into the runtime image at /app/bundle.json
+# by Dockerfile.backend. Read once at import time so /api/version is a
+# pure dict-return path (the endpoint is on the bootstrap-exempt
+# fast-path; we don't want to do disk I/O per request).
+BUNDLE_MANIFEST_PATH = Path("/app/bundle.json")
+_IMAGE_MANIFEST_PATH = Path("/app/MANIFEST.json")
+
+# OP-1491 — dev fallback when /app/bundle.json is absent or unreadable.
+# Surfaced as bundle_id + a "warning" field on /api/version so operators
+# can distinguish "real release running an uninstrumented image" from
+# "bake step ran but produced a different id". Picked over None so
+# downstream consumers (api-compat CI gate, client SDKs) can rely on
+# bundle_id being a non-null string.
+DEV_FALLBACK_BUNDLE_ID = "dev+unknown"
+_MISSING_BUNDLE_WARNING = (
+    "bundle manifest at /app/bundle.json is missing or unreadable; "
+    "served bundle_id is a dev placeholder"
+)
+_NO_BUNDLE_ID_WARNING = (
+    "bundle manifest is present but bundle_id is missing or invalid; "
+    "served bundle_id is a dev placeholder"
+)
+
+
+def _load_bundle_manifest(path: Path = BUNDLE_MANIFEST_PATH) -> dict | None:
+    """Read the bundle manifest baked into the image, or ``None`` if absent.
+
+    The runtime image bakes this file from the bundle artifact emitted
+    by ``scripts/build_image_bundle.py``. Local dev builds and tests
+    will not have it; missing or malformed manifests resolve to
+    ``None`` so the caller can distinguish "no bundle, serve dev
+    fallback" from "bundle present but field missing" (OP-1491).
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        _log.warning("Failed to read bundle manifest at %s", path)
+        return None
+    if not isinstance(raw, dict):
+        return None
+    return raw
+
+
+def _load_image_manifest_db_head(path: Path = _IMAGE_MANIFEST_PATH) -> str | None:
+    """Return the alembic head baked into the backend image, or None.
+
+    ``MANIFEST.json`` is the v2-⑤-1a artifact already produced by
+    ``scripts/bake-image-manifest.sh``. The bundle manifest also carries
+    ``contracts.db_migration_head``; we fall back to MANIFEST.json so
+    that ``/api/version`` reports the field even on older images that
+    pre-date the bundle manifest.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    value = raw.get("alembic_head_in_image")
+    return value if isinstance(value, str) else None
+
+
+def build_version_payload(
+    *,
+    bundle_path: Path | None = None,
+    image_manifest_path: Path | None = None,
+) -> dict:
+    """Assemble the JSON body returned by ``GET /api/version``.
+
+    Split out from the route handler so tests can drive it without
+    standing up a FastAPI app, and so callers can inject paths for
+    fixture-based testing. Defaults resolve against the module-level
+    constants at call time, so tests can monkeypatch ``av.BUNDLE_MANIFEST_PATH``
+    / ``av._IMAGE_MANIFEST_PATH`` and the route picks up the change.
+    """
+    if bundle_path is None:
+        bundle_path = BUNDLE_MANIFEST_PATH
+    if image_manifest_path is None:
+        image_manifest_path = _IMAGE_MANIFEST_PATH
+    bundle = _load_bundle_manifest(bundle_path)
+    warning: str | None = None
+    if bundle is None:
+        bundle = {}
+        warning = _MISSING_BUNDLE_WARNING
+    contracts_raw = bundle.get("contracts")
+    contracts = contracts_raw if isinstance(contracts_raw, dict) else {}
+
+    api_supported = contracts.get("api_supported")
+    if not isinstance(api_supported, list) or not api_supported:
+        api_supported = list(SUPPORTED_API_VERSIONS)
+
+    api_required = contracts.get("api_required")
+    if not isinstance(api_required, str) or not api_required:
+        api_required = MIN_FRONTEND_API_VERSION
+
+    openapi_hash = contracts.get("openapi_hash")
+    if not isinstance(openapi_hash, str):
+        openapi_hash = None
+
+    db_migration_head = contracts.get("db_migration_head")
+    if not isinstance(db_migration_head, str) or not db_migration_head:
+        db_migration_head = _load_image_manifest_db_head(image_manifest_path)
+
+    frontend_built_against_api = contracts.get("frontend_built_against_api")
+    if not isinstance(frontend_built_against_api, str) or not frontend_built_against_api:
+        frontend_built_against_api = None
+
+    raw_bundle_id = bundle.get("bundle_id")
+    if isinstance(raw_bundle_id, str) and raw_bundle_id:
+        bundle_id = raw_bundle_id
+    else:
+        bundle_id = DEV_FALLBACK_BUNDLE_ID
+        if warning is None:
+            warning = _NO_BUNDLE_ID_WARNING
+
+    payload: dict = {
+        # Legacy fields preserved for backwards compatibility with the
+        # existing v1 frontend bootstrap check.
+        "supported_versions": list(SUPPORTED_API_VERSIONS),
+        "default_version": DEFAULT_API_VERSION,
+        "min_frontend_api_version": MIN_FRONTEND_API_VERSION,
+        "deprecated_versions": DEPRECATED_API_VERSIONS,
+        # OP-1479 / OP-1491 bundle-aware additions. Keys match the
+        # contract shape documented in omnisight-bundle.schema.json so
+        # operators can diff /api/version against the bundle artifact
+        # directly.
+        "bundle_id": bundle_id,
+        "api_required": api_required,
+        "api_supported": list(api_supported),
+        "openapi_hash": openapi_hash,
+        "db_migration_head": db_migration_head,
+        "frontend_built_against_api": frontend_built_against_api,
+    }
+    if warning is not None:
+        payload["warning"] = warning
+    return payload
+
+
 def install_version_metadata_endpoint(app: FastAPI) -> None:
-    """Mount the version-agnostic ``/api/version`` metadata endpoint."""
+    """Mount the version-agnostic ``/api/version`` metadata endpoint.
+
+    OP-1491 — the bundle manifest is read once here at install/startup
+    time and cached in a closure (the "module-level state" the ticket
+    asks for: a single payload built once, served on every request).
+    /api/version sits on the bootstrap-exempt fast path, so we want to
+    avoid disk I/O per request. ``build_version_payload`` swallows
+    missing/malformed bundle files and resolves to the dev fallback so
+    startup never crashes on an image that wasn't built with V1c bake.
+    """
+    cached_payload = build_version_payload()
 
     @app.get("/api/version", tags=["api-version"], include_in_schema=False)
     async def _api_version() -> dict:
-        return {
-            "supported_versions": list(SUPPORTED_API_VERSIONS),
-            "default_version": DEFAULT_API_VERSION,
-            "min_frontend_api_version": MIN_FRONTEND_API_VERSION,
-            "deprecated_versions": DEPRECATED_API_VERSIONS,
-        }
+        return cached_payload

@@ -143,6 +143,11 @@
     "chineseTraditional": "繁体中文",
     "japanese": "日文"
   },
+  "agentGuildHall": {
+    "title": "代理公会大厅",
+    "subtitle": "查看所有代理 + 角色卡 + 队伍",
+    "ariaLabel": "打开代理公会大厅"
+  },
   "globalStatus": {
     "wsl2Ok": "已检测到 WSL2 环境",
     "wsl2Na": "主机并非 WSL2（Linux/macOS 原生）— 非错误",

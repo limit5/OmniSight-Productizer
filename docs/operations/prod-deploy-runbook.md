@@ -2,6 +2,13 @@
 
 **Ticket:** OP-881 (D9, META OP-761 Sprint D §Phase 3) • **Status:** active
 
+> **2026-05-18 image-pipeline cutover (OP-1474 / META OP-1468):** the
+> canonical container registry for production images is now
+> **GitLab Container Registry** (`registry.gitlab.com/omnisight/...`).
+> The legacy `ghcr.io/omnisight/...` namespace is frozen as of Phase 5
+> cutover and reads only — do not push or pull from it. Rationale and
+> tradeoffs in [ADR-0038](../adr/ADR-0038-image-pipeline-on-gitlab.md).
+
 This runbook covers the `POST /api/v1/prod/deploy` endpoint and its CLI
 twin `scripts/prod_deploy_runbook.py`. It is the only sanctioned path
 for promoting an image from staging to prod once D6/D7/D8 have produced
@@ -44,6 +51,57 @@ on `release_id` **before** any side effect, then rolls it forward to
 the terminal status. The hash-chained compliance log
 (`deploy_audit`, OP-779 D18) is also written: one `started` row on
 entry, one `succeeded` / `failed` row on exit.
+
+---
+
+## 1a. Required env keys (registry + signature)
+
+Updated for the OP-1474 GitLab CR cutover. The orchestrator host (and
+the CLI twin) must have all of the following set before invoking
+`POST /api/v1/prod/deploy` or `scripts/prod_deploy_runbook.py`. Missing
+keys fail the approval gate (`OperatorApprovalRefused`) before any
+side effect.
+
+| Env key                                  | Purpose                                                         | Source                                                          |
+| ---------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------- |
+| `OMNISIGHT_IMAGE_REGISTRY`               | Canonical registry host. **Pin to `registry.gitlab.com`.**       | operator host config; do not fall back to `ghcr.io`             |
+| `OMNISIGHT_IMAGE_NAMESPACE`              | `omnisight/productizer` (unchanged across the cutover)           | repo config                                                     |
+| `OMNISIGHT_REGISTRY`                     | Compose image prefix for `docker-compose.prod.yml` / staging. Defaults to `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}` until G5; set to `sora.services:49154/omnisight` for the GitLab CR mirror after G4 dual-publish. | `.env`, `.env.staging`, or operator shell                       |
+| `OMNISIGHT_GITLAB_CR_USER`               | GitLab CR pull/push principal (deploy-token user)                | 1Password → `omnisight/gitlab-cr/deploy-token`                  |
+| `OMNISIGHT_GITLAB_CR_TOKEN`              | GitLab CR deploy-token secret (read_registry + write_registry)   | same 1Password entry                                            |
+| `OMNISIGHT_PROD_DEPLOY_WEBHOOK_SECRET`   | HMAC-SHA256 key for the `X-Prod-Deploy-Signature` header         | rotated via `scripts/rotate_webhook_secret.sh`                  |
+| `OMNISIGHT_COSIGN_PUB`                   | Path to the cosign public key used to verify the pulled digest    | committed at `deploy/cosign/cosign.pub`                         |
+| `OMNISIGHT_SORA_SSH_KEY`                 | SSH key used by the release-cut step to push to GitLab over SSH  | `~/.ssh/id_ed25519_sora` (mode 600)                             |
+
+Validate before triggering:
+
+```bash
+: "${OMNISIGHT_IMAGE_REGISTRY:?}"
+: "${OMNISIGHT_IMAGE_NAMESPACE:?}"
+: "${OMNISIGHT_REGISTRY:=ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}"
+: "${OMNISIGHT_GITLAB_CR_USER:?}"
+: "${OMNISIGHT_GITLAB_CR_TOKEN:?}"
+: "${OMNISIGHT_PROD_DEPLOY_WEBHOOK_SECRET:?}"
+
+# Confirm registry reachability with the deploy-token (no docker pull yet).
+echo "$OMNISIGHT_GITLAB_CR_TOKEN" \
+  | docker login "$OMNISIGHT_IMAGE_REGISTRY" \
+      -u "$OMNISIGHT_GITLAB_CR_USER" --password-stdin
+docker manifest inspect \
+  "$OMNISIGHT_IMAGE_REGISTRY/$OMNISIGHT_IMAGE_NAMESPACE:$IMAGE_TAG" >/dev/null
+```
+
+`OMNISIGHT_IMAGE_REGISTRY` remains the orchestrator's canonical
+registry host. `OMNISIGHT_REGISTRY` is the compose-side image prefix
+introduced by OP-1487 so the same digest lock can render either
+`ghcr.io/your-org/omnisight-*` or
+`sora.services:49154/omnisight/omnisight-*` references during the G3-G5
+transition.
+
+If `OMNISIGHT_IMAGE_REGISTRY` is still set to `ghcr.io` on the deploy
+host, **stop** — that is a stale config from the pre-cutover era. Pull
+the latest config from the operator host bootstrap (see
+`docs/operations/release-runbook.md` §0 pre-flight) and retry.
 
 ---
 

@@ -18,10 +18,9 @@ name: Build Images
 # Signing model: cosign keyless via the GitHub OIDC token (sigstore /
 # fulcio / rekor). Verifier: `scripts/verify_image_signature.sh`.
 #
-# Retention: a separate scheduled `retention` job runs weekly. Tagged
-# images are kept forever; untagged images older than 30 days are
-# pruned, with a hard floor of "keep the last 20 untagged versions per
-# image" so a deletion bug can never wipe the build history mid-roll.
+# Retention: a separate scheduled `retention` job runs weekly. Immutable
+# release-line tags are kept forever; ephemeral develop/feature/RC/orphan
+# classes are pruned by `scripts/enforce_image_retention.py`.
 #
 # OUT OF SCOPE: this workflow does not run unit tests — that gate is
 # `ci.yml`. Image build presumes the merge to `main` already passed
@@ -84,10 +83,6 @@ jobs:
           - name: bridge
             image: omnisight-bridge
             dockerfile: Dockerfile.bridge
-    outputs:
-      backend_digest: ${{ steps.publish.outputs.backend_digest }}
-      frontend_digest: ${{ steps.publish.outputs.frontend_digest }}
-      bridge_digest: ${{ steps.publish.outputs.bridge_digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -138,6 +133,43 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "primary=${base}:sha-${short_sha}" >> "$GITHUB_OUTPUT"
 
+      - name: compute bundle id
+        id: bundle
+        # OP-1492 — derive a stable per-build bundle id from the git
+        # ref tail + short SHA. Passed as --build-arg BUNDLE_ID so each
+        # image's `org.opencontainers.image.bundle.id` label proves what
+        # bundle it was associated with, and re-used by the final
+        # build_image_bundle.py invocation in `bundle-manifest`.
+        run: |
+          set -euo pipefail
+          short_sha="$(echo '${{ github.sha }}' | cut -c1-8)"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tail="${GITHUB_REF#refs/tags/}"
+          else
+            tail="${GITHUB_REF##*/}"
+          fi
+          echo "value=${tail}-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: assemble pre-build bundle manifest
+        id: bundle_sha
+        # OP-1492 — the real image digests do not exist until after
+        # buildx pushes the multi-arch images. This pre-build manifest
+        # uses schema-valid placeholder digests so Dockerfile.backend can
+        # bake `/app/bundle.json`; the final `bundle-manifest` job emits
+        # `bundle-<id>.json` with the real pushed digests.
+        run: |
+          set -euo pipefail
+          placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+          python3 scripts/build_image_bundle.py \
+            --git-ref "${GITHUB_REF}" \
+            --git-sha "${GITHUB_SHA}" \
+            --bundle-id "${{ steps.bundle.outputs.value }}" \
+            --backend-digest "${placeholder_digest}" \
+            --frontend-digest "${placeholder_digest}" \
+            --bridge-digest "${placeholder_digest}" \
+            --out bundle.json
+          echo "value=$(sha256sum bundle.json | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
       - name: set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -167,6 +199,11 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ steps.tags.outputs.version }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.bundle.id=${{ steps.bundle.outputs.value }}
+            org.opencontainers.image.bundle.sha=${{ steps.bundle_sha.outputs.value }}
+          build-args: |
+            BUNDLE_ID=${{ steps.bundle.outputs.value }}
+            BUNDLE_SHA=${{ steps.bundle_sha.outputs.value }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
@@ -214,7 +251,9 @@ jobs:
             "run_id": "${{ github.run_id }}",
             "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}",
             "signed_with": "cosign-keyless",
-            "cosign_version": "${{ env.COSIGN_VERSION }}"
+            "cosign_version": "${{ env.COSIGN_VERSION }}",
+            "bundle_id": "${{ steps.bundle.outputs.value }}",
+            "bundle_sha": "${{ steps.bundle_sha.outputs.value }}"
           }
           JSON
 
@@ -267,16 +306,88 @@ jobs:
           ./scripts/verify_image_signature.sh "${ref}"
 
   # =========================================================================
-  # retention — cron-driven prune of untagged versions.
+  # bundle-manifest — OP-1492 phase V1c.
   #
-  # Policy (OP-763 spec):
-  #   1. Tagged versions (:v<X.Y.Z>, :latest, any non-empty tag list)
-  #      are kept FOREVER — never touched by this job.
-  #   2. Untagged versions younger than 30 days are kept.
-  #   3. Hard floor: the last 20 untagged versions per package are
-  #      always kept, regardless of age. This survives a clock skew
-  #      bug or a runaway-build window where >20 untagged versions
-  #      arrive in <30 days.
+  # Once all three images have been built + verified, collect their
+  # digests from the per-image audit artifacts and emit a single
+  # `bundle-<id>.json` describing the deployable unit. This is the
+  # central abstraction operators inspect on staging deploys. The
+  # Dockerfiles receive a pre-build bundle with placeholder digests; this
+  # artifact is the post-build contract with the real pushed digests.
+  # =========================================================================
+  bundle-manifest:
+    if: github.event_name != 'schedule'
+    needs: [build, verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: download per-image audit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: image-audit-*
+          path: .audit-downloaded
+
+      - name: compute bundle id
+        id: bundle
+        run: |
+          set -euo pipefail
+          short_sha="$(echo '${{ github.sha }}' | cut -c1-8)"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            tail="${GITHUB_REF#refs/tags/}"
+          else
+            tail="${GITHUB_REF##*/}"
+          fi
+          echo "value=${tail}-${short_sha}" >> "$GITHUB_OUTPUT"
+
+      - name: assemble bundle manifest
+        run: |
+          set -euo pipefail
+          backend_digest="$(jq -r .digest .audit-downloaded/image-audit-backend/backend.json)"
+          frontend_digest="$(jq -r .digest .audit-downloaded/image-audit-frontend/frontend.json)"
+          bridge_digest="$(jq -r .digest .audit-downloaded/image-audit-bridge/bridge.json)"
+          mkdir -p artifacts
+          python3 scripts/build_image_bundle.py \
+            --git-ref "${GITHUB_REF}" \
+            --git-sha "${GITHUB_SHA}" \
+            --bundle-id "${{ steps.bundle.outputs.value }}" \
+            --backend-digest "${backend_digest}" \
+            --frontend-digest "${frontend_digest}" \
+            --bridge-digest "${bridge_digest}" \
+            --out "artifacts/bundle-${{ steps.bundle.outputs.value }}.json"
+
+      - name: validate bundle against schema
+        run: |
+          set -euo pipefail
+          pip install --quiet jsonschema==4.23.0
+          python3 -c "import json, jsonschema; \
+            jsonschema.validate( \
+              json.load(open('artifacts/bundle-${{ steps.bundle.outputs.value }}.json')), \
+              json.load(open('omnisight-bundle.schema.json')))"
+
+      - name: upload bundle manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-${{ steps.bundle.outputs.value }}.json
+          path: artifacts/bundle-${{ steps.bundle.outputs.value }}.json
+          retention-days: 90
+
+  # =========================================================================
+  # retention — cron-driven prune of GHCR package versions.
+  #
+  # Policy (OP-1480):
+  #   - vX.Y.Z and vX.Y.Z-hotfix-N are immutable and kept forever.
+  #   - vX.Y.Z-rcN is kept until 90d after vX.Y.Z ships, or 30d if the
+  #     parent release has not shipped.
+  #   - develop-<12sha> keeps the newer of 14d or the newest 30 tags.
+  #   - feature-<12sha> and untagged orphan versions are kept 7d.
+  #   - mutable aliases are never deleted as standalone retention targets.
   #
   # `actions/delete-package-versions` does NOT support age filtering,
   # so we drive the GHCR REST API directly. `gh api` honors the
@@ -297,8 +408,17 @@ jobs:
       - name: enforce retention policy
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PACKAGE_NAME: ${{ matrix.package }}
-          OWNER: ${{ github.repository_owner }}
-          MIN_KEEP: "20"
-          MAX_AGE_DAYS: "30"
-        run: bash scripts/enforce_image_retention.sh
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/retention
+          python3 scripts/enforce_image_retention.py \
+            --package "${{ matrix.package }}" \
+            --owner "${{ github.repository_owner }}" \
+            --summary-file "artifacts/retention/${{ matrix.package }}.txt"
+
+      - name: upload retention summary
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-retention-${{ matrix.package }}
+          path: artifacts/retention/${{ matrix.package }}.txt
+          retention-days: 30

@@ -143,6 +143,11 @@
     "chineseTraditional": "Chinese (Traditional)",
     "japanese": "Japanese"
   },
+  "agentGuildHall": {
+    "title": "Agent Guild Hall",
+    "subtitle": "View all agents + character cards + parties",
+    "ariaLabel": "Open the Agent Guild Hall"
+  },
   "globalStatus": {
     "wsl2Ok": "WSL2 environment detected",
     "wsl2Na": "Host is not WSL2 (Linux/macOS native) — not an error",

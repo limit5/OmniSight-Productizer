@@ -6,23 +6,45 @@
 # the attribute `version` is obsolete` line on every invocation.
 # Removing it silences the warning without changing behaviour.
 #
-# Pre-built images live on GHCR (published by .github/workflows/docker-publish.yml).
-# `docker compose -f docker-compose.prod.yml up -d` will:
-#   1. Use the local image if already cached.
-#   2. Otherwise try to pull from `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}/omnisight-{backend,frontend}:${OMNISIGHT_IMAGE_TAG}`.
-#   3. Fall back to a local `docker build` from the Dockerfiles below
-#      (native Compose behavior when both `image:` and `build:` are set).
+# OP-1482 (2026-05-18) — V4 of the image-pipeline overhaul. Images are
+# now referenced by `@sha256:<digest>` (immutable) instead of
+# `:<tag>` (mutable alias). The digest values come from
+# `prod.env.lock.json`, which is the authoritative per-env promotion
+# record. The deploy procedure is now:
+#
+#   1. `scripts/load_env_lock.sh prod.env.lock.json --out /tmp/digests.env`
+#   2. `python3 scripts/verify_image_bundle.py \
+#         --compose docker-compose.prod.yml --lock prod.env.lock.json`
+#   3. `docker compose --env-file .env --env-file /tmp/digests.env \
+#         -f docker-compose.prod.yml up -d --wait`
+#
+# Step (2) is the preflight gate — it refuses to pass if the local
+# cache, remote registry, and lock file digests disagree, OR if the
+# cosign signature on the lock-pinned digest does not verify. That
+# closes Codex's #2 priority gap (mutable alias + `pull_policy: missing`
+# = silent no-op promotion) and the #15 stale-cache failure mode.
+#
+# Because each `image:` is now pinned by content digest, `pull_policy:
+# always` is safe (Docker content-addresses the local cache and
+# de-duplicates the layer pull when the digest is already present).
 #
 # Knobs (override via env / .env):
-#   OMNISIGHT_GHCR_NAMESPACE  — lowercase GitHub org/user handle that
-#                               owns the GHCR packages. Default
-#                               `your-org` is a placeholder — the pull
-#                               will fail and Compose will transparently
-#                               fall back to a local build, so first-run
-#                               works out of the box.
-#   OMNISIGHT_IMAGE_TAG       — image tag to pull. Default `latest`.
-#                               Pin to a `v*` release tag for
-#                               reproducible deploys.
+#   OMNISIGHT_REGISTRY         — registry/namespace prefix for OmniSight
+#                                images. Defaults to
+#                                `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}` for
+#                                backwards compatibility until G5 cutover.
+#   OMNISIGHT_GHCR_NAMESPACE   — lowercase GitHub org/user handle that
+#                                owns the GHCR packages. Default
+#                                `your-org` is a placeholder.
+#   OMNISIGHT_BACKEND_DIGEST   — `sha256:...` of the backend image.
+#                                Sourced from prod.env.lock.json via
+#                                scripts/load_env_lock.sh.
+#   OMNISIGHT_FRONTEND_DIGEST  — same, for the frontend image.
+#   OMNISIGHT_BRIDGE_DIGEST    — same, for the bridge image (referenced
+#                                by the standalone bridge compose; here
+#                                only the env contract is declared so
+#                                `docker compose config` validates the
+#                                three vars are present in one shot).
 #
 # To force a rebuild (e.g. after editing a Dockerfile locally):
 #   docker compose -f docker-compose.prod.yml build
@@ -136,8 +158,10 @@ services:
   # them unambiguously by service name + port, and host-port exposure (8000/8001)
   # remains operator-friendly for direct `curl` smoke of each replica.
   backend-a:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    # OP-1482: digest-pinned. OMNISIGHT_BACKEND_DIGEST is populated by
+    # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -246,8 +270,10 @@ services:
       start_period: 30s
 
   backend-b:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    # OP-1482: digest-pinned. OMNISIGHT_BACKEND_DIGEST is populated by
+    # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile.backend
@@ -391,8 +417,10 @@ services:
       start_period: 30s
 
   frontend:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    # OP-1482: digest-pinned. OMNISIGHT_FRONTEND_DIGEST is populated by
+    # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
+    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-frontend@${OMNISIGHT_FRONTEND_DIGEST:?missing OMNISIGHT_FRONTEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    pull_policy: always
     build:
       context: .
       dockerfile: Dockerfile.frontend
