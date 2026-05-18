@@ -24,6 +24,14 @@ from backend.agents.character_card import (
     PostgresCharacterCardStore,
     fetch_skill_entries,
 )
+from backend.agents.achievement_registry import (
+    AchievementMilestone,
+    list_achievement_milestones,
+)
+from backend.agents.achievement_unlock_store import (
+    AchievementUnlockRow,
+    PostgresAchievementUnlockStore,
+)
 from backend.agents.guild_hall import GuildHallGuild, build_guild_hall_view
 from backend.agents.skill_leveling import (
     PostgresSkillStateStore,
@@ -189,6 +197,13 @@ def get_character_card_registry(
     )
 
 
+def get_achievement_unlock_store(
+    conn: asyncpg.Connection = Depends(get_conn),
+) -> PostgresAchievementUnlockStore:
+    """DI seam for W16 achievement unlock reads."""
+    return PostgresAchievementUnlockStore(lambda: _borrowed_conn(conn))
+
+
 @router.get("/cards")
 async def list_agent_cards(
     guild: str | None = None,
@@ -251,6 +266,34 @@ async def get_agent_card(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     assert card is not None
     return _card_to_dict(card)
+
+
+@router.get("/{agent_id}/achievements")
+async def get_agent_achievements(
+    agent_id: str,
+    store: PostgresAchievementUnlockStore = Depends(get_achievement_unlock_store),
+) -> dict[str, Any]:
+    """RPG.W16.3: return unlocked and locked-visible badges for one agent."""
+    try:
+        unlocks = await store.list_unlocks(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    milestones = list_achievement_milestones()
+    unlock_by_id = {unlock.achievement_id: unlock for unlock in unlocks}
+    return {
+        "agent_id": agent_id,
+        "unlocked": [
+            _achievement_badge_to_dict(milestone, unlock_by_id[milestone.achievement_id])
+            for milestone in milestones
+            if milestone.achievement_id in unlock_by_id
+        ],
+        "locked_visible": [
+            _locked_achievement_badge_to_dict(milestone)
+            for milestone in milestones
+            if milestone.achievement_id not in unlock_by_id
+        ],
+    }
 
 
 @router.get("/{agent_id}/skills")
@@ -804,6 +847,45 @@ def _skill_entry_to_dict(entry: CharacterSkillEntry) -> dict:
         "last_active_at": entry.last_active_at,
         "branch_choice_required": entry.branch_choice_required,
     }
+
+
+def _achievement_badge_to_dict(
+    milestone: AchievementMilestone,
+    unlock: AchievementUnlockRow,
+) -> dict[str, Any]:
+    return {
+        "id": milestone.achievement_id,
+        "kind": _achievement_badge_kind(milestone.achievement_id),
+        "label": milestone.display_name,
+        "description": milestone.summary,
+        "earnedAt": unlock.earned_at,
+        "progressLabel": unlock.progress_label,
+        "rarity": unlock.rarity,
+        "locked": False,
+    }
+
+
+def _locked_achievement_badge_to_dict(
+    milestone: AchievementMilestone,
+) -> dict[str, Any]:
+    return {
+        "id": milestone.achievement_id,
+        "kind": _achievement_badge_kind(milestone.achievement_id),
+        "label": milestone.display_name,
+        "description": milestone.summary,
+        "earnedAt": None,
+        "progressLabel": None,
+        "rarity": None,
+        "locked": True,
+    }
+
+
+def _achievement_badge_kind(achievement_id: str) -> str:
+    return {
+        "merged_pr_100": "pr_merged_100",
+        "zero_regression_streak_30": "regression_streak_30",
+        "taught_agents_5": "taught_agents_5",
+    }.get(achievement_id, "custom")
 
 
 def _guild_hall_guild_to_dict(guild: GuildHallGuild) -> dict:
