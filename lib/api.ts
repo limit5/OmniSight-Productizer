@@ -1150,6 +1150,27 @@ export async function getAgentCard(id: string) {
   return request<AgentCardDetail>(`/agents/${encodeURIComponent(id)}/card`)
 }
 
+export interface AgentAchievementBadge {
+  id?: string
+  kind: string
+  label?: string | null
+  description?: string | null
+  earnedAt?: string | null
+  progressLabel?: string | null
+  rarity?: string | null
+  locked?: boolean | null
+}
+
+export interface AgentAchievementsResponse {
+  agent_id: string
+  unlocked: AgentAchievementBadge[]
+  locked_visible: AgentAchievementBadge[]
+}
+
+export async function getAgentAchievements(id: string) {
+  return request<AgentAchievementsResponse>(`/agents/${encodeURIComponent(id)}/achievements`)
+}
+
 // ── RPG.W17 — Party Hall feed (matches backend `_party_to_dict`) ────
 export interface AgentPartyMemberDto {
   member_agent_id: string

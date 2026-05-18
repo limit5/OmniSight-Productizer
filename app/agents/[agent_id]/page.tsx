@@ -22,12 +22,17 @@ import { ArrowLeft, ChevronRight, Loader2, RefreshCw, UserSquare2 } from "lucide
 import { useAuth } from "@/lib/auth-context"
 import {
   ApiError,
+  getAgentAchievements,
   getAgentCard,
+  type AgentAchievementBadge,
   type AgentCardDetail,
 } from "@/lib/api"
 import {
   CharacterCard,
   type AgentGuild,
+  type CharacterBadge,
+  type CharacterBadgeKind,
+  type CharacterBadgeRarity,
 } from "@/components/omnisight/agents/CharacterCard"
 
 const KNOWN_GUILDS: readonly AgentGuild[] = [
@@ -41,8 +46,43 @@ const KNOWN_GUILDS: readonly AgentGuild[] = [
   "generalist",
 ]
 
+const KNOWN_BADGE_KINDS: readonly CharacterBadgeKind[] = [
+  "pr_merged_100",
+  "regression_streak_30",
+  "taught_agents_5",
+  "campaign",
+  "custom",
+]
+
+const KNOWN_BADGE_RARITIES: readonly CharacterBadgeRarity[] = [
+  "bronze",
+  "silver",
+  "gold",
+  "legendary",
+]
+
 function isKnownGuild(value: string): value is AgentGuild {
   return (KNOWN_GUILDS as readonly string[]).includes(value)
+}
+
+function isKnownBadgeKind(value: string): value is CharacterBadgeKind {
+  return (KNOWN_BADGE_KINDS as readonly string[]).includes(value)
+}
+
+function normaliseBadgeKind(value: string | null | undefined): CharacterBadgeKind {
+  if (value && isKnownBadgeKind(value)) return value
+  return "custom"
+}
+
+function isKnownBadgeRarity(value: string): value is CharacterBadgeRarity {
+  return (KNOWN_BADGE_RARITIES as readonly string[]).includes(value)
+}
+
+function normaliseBadgeRarity(
+  value: string | null | undefined,
+): CharacterBadgeRarity | null {
+  if (value && isKnownBadgeRarity(value)) return value
+  return null
 }
 
 function normaliseGuild(value: string | null | undefined): AgentGuild {
@@ -65,6 +105,19 @@ function cardDisplayName(card: AgentCardDetail): string {
   return card.instance_suffix ? `${base} ${card.instance_suffix}` : base
 }
 
+function achievementBadgeToCharacterBadge(badge: AgentAchievementBadge): CharacterBadge {
+  return {
+    id: badge.id,
+    kind: normaliseBadgeKind(badge.kind),
+    label: badge.label ?? null,
+    description: badge.description ?? null,
+    earnedAt: badge.earnedAt ?? null,
+    progressLabel: badge.progressLabel ?? null,
+    rarity: normaliseBadgeRarity(badge.rarity),
+    locked: badge.locked ?? null,
+  }
+}
+
 export default function AgentCharacterCardPage() {
   const auth = useAuth()
   const router = useRouter()
@@ -75,6 +128,7 @@ export default function AgentCharacterCardPage() {
   const agentId = typeof rawAgentId === "string" ? rawAgentId : ""
 
   const [card, setCard] = useState<AgentCardDetail | null>(null)
+  const [badges, setBadges] = useState<CharacterBadge[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notFound, setNotFound] = useState(false)
@@ -96,16 +150,22 @@ export default function AgentCharacterCardPage() {
     setError(null)
     setNotFound(false)
     try {
-      const result = await getAgentCard(agentId)
+      const [result, achievements] = await Promise.all([
+        getAgentCard(agentId),
+        getAgentAchievements(agentId),
+      ])
       setCard(result)
+      setBadges(achievements.unlocked.map(achievementBadgeToCharacterBadge))
     } catch (exc) {
       if (exc instanceof ApiError && exc.status === 404) {
         setNotFound(true)
         setCard(null)
+        setBadges([])
       } else {
         const msg = exc instanceof Error ? exc.message : String(exc)
         setError(msg)
         setCard(null)
+        setBadges([])
       }
     } finally {
       setLoading(false)
@@ -225,6 +285,7 @@ export default function AgentCharacterCardPage() {
             specialization={card.specialization_label}
             instanceSuffix={card.instance_suffix}
             styleFingerprint={card.style_fingerprint}
+            badges={badges}
           />
         )}
       </div>
