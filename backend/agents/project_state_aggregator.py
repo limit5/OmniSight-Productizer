@@ -56,6 +56,18 @@ STRUCTURAL_BUDGET_SEC: float = 0.8
 TEMPORAL_BUDGET_SEC: float = 0.6
 CAUSAL_BUDGET_SEC: float = 0.6
 
+# OP-1454 — Cap the per-incident BFS loop in ``_causal_failure_neighbours``
+# to the N most-recent own-incidents. OP-1450/1452 fixed the SQL + driver
+# wiring so the input set stays small for typical tickets, but outlier
+# tickets (e.g. OP-214 with 208 own incidents in the 7-day window) still
+# blew the 0.6 s causal budget because the python loop ran
+# ``len(own)`` × depth-2 BFS serially and ``asyncio.to_thread`` can't
+# cancel the in-flight work after the axis timeout fires. The recent
+# slice preserves the "recent failure neighbourhood" signal the
+# prompt-builder actually consumes; the long tail of older incidents was
+# noise in the prompt budget anyway.
+CAUSAL_OWN_INCIDENT_CAP: int = 20
+
 AXIS_STRUCTURAL = "structural"
 AXIS_TEMPORAL = "temporal"
 AXIS_CAUSAL = "causal"
@@ -456,7 +468,10 @@ async def _causal_failure_neighbours(ticket_key: str) -> dict[str, Any]:
             )
         )
         graph = failure_graph.FailureGraph.build(incidents)
-        own = [n for n in graph.nodes.values() if n.ticket_key == ticket_key]
+        own_all = [n for n in graph.nodes.values() if n.ticket_key == ticket_key]
+        # OP-1454: keep only the most-recent N to bound the BFS loop below.
+        own_all.sort(key=lambda n: n.occurred_at, reverse=True)
+        own = own_all[:CAUSAL_OWN_INCIDENT_CAP]
         if not own:
             log.info(
                 "project_state.causal.no_own_incidents ticket=%s "
@@ -724,6 +739,7 @@ __all__ = [
     "AXIS_TEMPORAL",
     "AxisResult",
     "CAUSAL_BUDGET_SEC",
+    "CAUSAL_OWN_INCIDENT_CAP",
     "ProjectStateAllAxesFailed",
     "ProjectStateAxisFetchers",
     "ProjectStateAxisTimeout",
