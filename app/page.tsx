@@ -33,6 +33,7 @@ import { ToastCenter } from "@/components/omnisight/toast-center"
 import { BurnRateFreezeToastCenter } from "@/components/omnisight/burn-rate-freeze-toast-center"
 import { SecurityAlertsCenter } from "@/components/omnisight/security-alerts-center"
 import { FirstRunTour } from "@/components/omnisight/first-run-tour"
+import { IntentionPicker } from "@/components/omnisight/intention-picker"
 import { NewProjectWizard } from "@/components/omnisight/new-project-wizard"
 import { CommandPalette } from "@/components/omnisight/command-palette"
 import { ForecastPanel } from "@/components/omnisight/forecast-panel"
@@ -637,6 +638,10 @@ export default function Home() {
       <BurnRateFreezeToastCenter />
       {/* Q.2 (#296): overlay toast for new-device login alerts. */}
       <SecurityAlertsCenter />
+      {/* WP.4 (OP-1498): intention picker runs before FirstRunTour so a
+       * brand-new operator's journey is captured and the default tile is
+       * preset before the dashboard explainer runs. */}
+      <IntentionPicker />
       <FirstRunTour />
       <NewProjectWizard />
       <CommandPalette
