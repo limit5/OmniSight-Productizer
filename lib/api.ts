@@ -4603,6 +4603,83 @@ export async function setUserPreference(key: string, value: string): Promise<voi
   })
 }
 
+// WP.6 (OP-1500) — Settings sync-scope routing helpers. These take an
+// optional ``?platform=`` / ``?device_id=`` query so a per-platform or
+// device-local setting lands in the correctly partitioned J4 row.
+// Used by ``lib/settings-registry.ts``; SoT modules (motion / density /
+// future per-platform settings) should call those wrappers, not these
+// raw helpers, so the partition decision sits behind one boundary.
+export async function getUserPreferenceWithScope(
+  key: string,
+  scope?: { platform?: string; device_id?: string },
+): Promise<{ key: string; value: string } | null> {
+  const qs = _scopeQueryString(scope)
+  const path = qs
+    ? `/user-preferences/${encodeURIComponent(key)}?${qs}`
+    : `/user-preferences/${encodeURIComponent(key)}`
+  try {
+    return await request<{ key: string; value: string }>(path)
+  } catch {
+    return null
+  }
+}
+
+export async function setUserPreferenceWithScope(
+  key: string,
+  value: string,
+  scope?: { platform?: string; device_id?: string },
+): Promise<void> {
+  const qs = _scopeQueryString(scope)
+  const path = qs
+    ? `/user-preferences/${encodeURIComponent(key)}?${qs}`
+    : `/user-preferences/${encodeURIComponent(key)}`
+  await request<{ key: string; value: string }>(path, {
+    method: "PUT",
+    body: JSON.stringify({ value }),
+  })
+}
+
+function _scopeQueryString(
+  scope?: { platform?: string; device_id?: string },
+): string {
+  if (!scope) return ""
+  const parts: string[] = []
+  if (scope.platform) {
+    parts.push(`platform=${encodeURIComponent(scope.platform)}`)
+  }
+  if (scope.device_id) {
+    parts.push(`device_id=${encodeURIComponent(scope.device_id)}`)
+  }
+  return parts.join("&")
+}
+
+// WP.6 (OP-1500) — Settings registry metadata. The frontend reads this
+// once per tab via ``lib/settings-registry.ts::fetchSettingsRegistry``;
+// the response includes the server-derived ``platform`` so consumers
+// don't have to UA-sniff themselves. Schema mirrors
+// ``backend.settings_registry.to_public_view`` and the matching
+// ``test/lib/settings-registry.test.ts`` locks the contract.
+export interface SettingsRegistryEntry {
+  pref_key: string
+  scope: "tenant" | "user" | "device"
+  sync: "globally" | "per_platform" | "never"
+  supported_platforms: string[]
+  description: string
+  default_value: string
+}
+
+export interface SettingsRegistryPayload {
+  settings: SettingsRegistryEntry[]
+  derived_platform: string
+  scope_values: string[]
+  sync_mode_values: string[]
+  platform_values: string[]
+}
+
+export async function getSettingsRegistry(): Promise<SettingsRegistryPayload> {
+  return request<SettingsRegistryPayload>("/settings/registry")
+}
+
 // ─── Ops Summary (L1-04) ─────────────────────────────────────
 
 export interface OpsSummary {

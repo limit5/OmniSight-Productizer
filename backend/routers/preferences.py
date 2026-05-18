@@ -34,11 +34,12 @@ import logging
 import time
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from backend import auth
 from backend.db_context import tenant_insert_value, tenant_where_pg
+from backend import settings_registry as _settings_registry
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +232,20 @@ def _emit_preference_updated(key: str, value: str, user_id: str) -> None:
     # Q.3-SUB-4 (#297): cross-device sync push. Best-effort — a flaky
     # bus / Redis outage must not fail the mutation (PG is source of
     # truth, the emit is latency-optimisation only).
+    #
+    # WP.6 (OP-1500): consult the settings registry against the **base**
+    # pref_key (strip the ``@platform=`` / ``@device=`` suffix the
+    # WP.6 partitioner mints) so ``sync='never'`` settings skip the
+    # broadcast entirely. Other devices never even see the write —
+    # this is the whole point of the ``never`` sync mode (e.g.
+    # ``hardware_bench_target`` belongs to one physical machine).
+    base_key, _, _ = _settings_registry.parse_partitioned_key(key)
+    if not _settings_registry.should_broadcast(base_key):
+        logger.debug(
+            "wp.6: skip emit for sync=never key=%s base=%s user=%s",
+            key, base_key, user_id,
+        )
+        return
     try:
         from backend.events import emit_preferences_updated
         emit_preferences_updated(key, value, user_id)
@@ -239,6 +254,57 @@ def _emit_preference_updated(key: str, value: str, user_id: str) -> None:
             "emit_preferences_updated failed for key=%s user=%s: %s",
             key, user_id, exc,
         )
+
+
+def _resolve_wp6_effective_key(
+    pref_key: str,
+    *,
+    platform: str | None,
+    device_id: str | None,
+    request: Request | None,
+) -> str:
+    """WP.6 (OP-1500): mint the effective pref_key for a write/read.
+
+    For unregistered keys (legacy) returns the bare ``pref_key`` —
+    behaviour unchanged. For registered keys, partitions by
+    ``@platform=`` / ``@device=`` per the registry sync mode.
+
+    ``platform`` may be ``None`` for ``sync='per_platform'`` settings
+    in which case we sniff the request's User-Agent. ``device_id``
+    must be supplied explicitly for ``sync='never'`` settings — the
+    frontend owns a stable per-installation id; we never guess.
+    """
+    meta = _settings_registry.metadata_for(pref_key)
+    if meta is None:
+        return pref_key
+    if meta.sync == "globally":
+        return pref_key
+    if meta.sync == "per_platform":
+        if not platform:
+            ua = request.headers.get("user-agent", "") if request else ""
+            platform = _settings_registry.derive_platform_from_user_agent(ua)
+        try:
+            return _settings_registry.partition_key(
+                pref_key, platform=platform,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    if meta.sync == "never":
+        if not device_id:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"setting {pref_key!r} has sync=never; "
+                    "device_id query parameter required"
+                ),
+            )
+        try:
+            return _settings_registry.partition_key(
+                pref_key, device_id=device_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return pref_key
 
 
 async def _audit_multi_provider_onboarding_tour_decision(
@@ -442,12 +508,49 @@ async def list_preferences(
     return {"items": {r["pref_key"]: r["value"] for r in rows}}
 
 
+# WP.6 (OP-1500) — Sync-scope registry surface. Frontend consumer at
+# ``lib/settings-registry.ts`` reads this on mount so the settings UI
+# can render the "Globally / Per-platform / Never" badge against
+# every preference, and so the client can pre-derive whether a write
+# should go through ``?platform=`` / ``?device_id=`` partitioning.
+@router.get("/settings/registry")
+async def get_settings_registry(
+    request: Request,
+    user: auth.User = Depends(auth.current_user),
+) -> dict:
+    """Return the WP.6 settings sync-scope metadata.
+
+    Auth-required (mirrors the rest of user-preferences). The
+    response also includes the per-request derived ``platform`` so
+    the frontend doesn't have to UA-sniff itself — the backend is
+    already authoritative on User-Agent → platform mapping.
+    """
+    ua = request.headers.get("user-agent", "")
+    derived_platform = _settings_registry.derive_platform_from_user_agent(ua)
+    return {
+        "settings": _settings_registry.to_public_view(),
+        "derived_platform": derived_platform,
+        "scope_values": list(_settings_registry.SCOPE_VALUES),
+        "sync_mode_values": list(_settings_registry.SYNC_MODE_VALUES),
+        "platform_values": list(_settings_registry.PLATFORM_VALUES),
+    }
+
+
 @router.get("/user-preferences/{key}")
 async def get_preference(
     key: str,
+    request: Request,
     user: auth.User = Depends(auth.current_user),
+    platform: str | None = None,
+    device_id: str | None = None,
 ) -> dict:
-    value = await _get_preference_value(user.id, key)
+    # WP.6 (OP-1500): if `key` is registered, route through the
+    # partitioned form so per-platform / device-local rows resolve
+    # without the caller having to mint the suffix themselves.
+    effective_key = _resolve_wp6_effective_key(
+        key, platform=platform, device_id=device_id, request=request,
+    )
+    value = await _get_preference_value(user.id, effective_key)
     if value is None:
         raise HTTPException(status_code=404, detail="preference not found")
     return {"key": key, "value": value}
@@ -457,10 +560,16 @@ async def get_preference(
 async def set_preference(
     key: str,
     body: PrefBody,
+    request: Request,
     user: auth.User = Depends(auth.current_user),
+    platform: str | None = None,
+    device_id: str | None = None,
 ) -> PreferenceResponse:
-    await _upsert_preference(user.id, key, body.value)
-    _emit_preference_updated(key, body.value, user.id)
+    effective_key = _resolve_wp6_effective_key(
+        key, platform=platform, device_id=device_id, request=request,
+    )
+    await _upsert_preference(user.id, effective_key, body.value)
+    _emit_preference_updated(effective_key, body.value, user.id)
     return {"key": key, "value": body.value}
 
 
