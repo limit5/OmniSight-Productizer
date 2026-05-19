@@ -1,365 +1,444 @@
-# Release Image Pipeline (OP-763)
+# Release Image Pipeline (OP-1478)
 
-## Goal
+> **Status:** activated as of META OP-1478 (scope
+> `scope:op-1478-activation-2026-05-19`). Replaces the OP-763 GHCR-only
+> flow, which is preserved as an appendix at the bottom of this
+> document. The activation chain is: register self-hosted GitLab runner
+> (OP-1478 T1.2) → first green `v*` pipeline → bundle manifest sealed →
+> GitLab Container Registry populated → compose cutover to GitLab CR
+> (already done per OP-1473) → GHCR decommission window (OP-1478 T2.3).
+>
+> Governance: [`ADR-0038`](../adr/ADR-0038-image-pipeline-on-gitlab.md)
+> records the GHCR → GitLab CR decision; [`ADR-0002`](../adr/ADR-0002-gitlab-primary-github-mirror.md)
+> establishes GitLab as the single source of truth ("CI 全面走 GitLab Only").
 
-Every merge to `main` and every `v*` tag produces signed Docker images
-for the three runtime planes — backend, frontend, hardware bridge —
-pushed to GHCR, tagged immutably by git SHA, and signed with cosign
-keyless. A retention sweep prunes old untagged builds while keeping
-release tags forever.
+## 1. Architecture overview
 
-## Triggers
+The activated pipeline is a strict left-to-right pull chain. There is
+no GHCR push from this repository's GitLab project anymore — the only
+GHCR images consumers still see come from the legacy
+`.github/workflows/build-images.yml` workflow during the OP-1478 T2.3
+observation window (§10).
 
-The workflow `.github/workflows/build-images.yml` fires on:
-
-| Event              | Builds | Tags applied                                                |
-|--------------------|--------|-------------------------------------------------------------|
-| `push` to `main`   | yes    | `:sha-<short>`                                              |
-| `push` `v*` tag    | yes    | `:sha-<short>`, `:v<X.Y.Z>`, `:latest`                      |
-| `workflow_dispatch`| yes    | same as the underlying ref                                  |
-| `schedule` (weekly)| no     | retention-only                                              |
-
-`:latest` is **only** updated by tag pushes — main-branch merges never
-move `:latest`, so a deploy that pulls `:latest` always sees a real
-release.
-
-## Image inventory
-
-| Image                                           | Dockerfile             | Source                          |
-|-------------------------------------------------|------------------------|---------------------------------|
-| `ghcr.io/<owner>/omnisight-backend`             | `Dockerfile.backend`   | `backend/`                      |
-| `ghcr.io/<owner>/omnisight-frontend`            | `Dockerfile.frontend`  | Next.js app in repo root        |
-| `ghcr.io/<owner>/omnisight-bridge`              | `Dockerfile.bridge`    | `tools/hardware_daemon/`        |
-
-All three are multi-arch (`linux/amd64` + `linux/arm64`) so a single
-pull resolves to the correct architecture on x86 cloud VMs and on
-ARM SBCs / Apple-silicon hosts.
-
-## Bundle manifest contract
-
-The image workflow derives one `bundle_id` per git ref + commit and
-passes it into all three Docker builds as `BUNDLE_ID`. It also writes a
-schema-valid pre-build `bundle.json` before `docker/build-push-action`
-runs, computes its sha256, and passes that value as `BUNDLE_SHA`.
-
-Every pushed image carries these OCI labels:
-
-| Label | Meaning |
-|-------|---------|
-| `org.opencontainers.image.bundle.id` | Bundle identity for the git ref + short SHA. |
-| `org.opencontainers.image.bundle.sha` | sha256 of the pre-build `bundle.json` bytes used for the image build. |
-
-Only the backend image bakes `bundle.json` into `/app/bundle.json`,
-because `/api/version` reads that file. The frontend and bridge images
-carry labels only; they do not serve `/api/version`.
-
-The pre-build bundle uses placeholder image digests because the real
-multi-arch digests do not exist until the images are pushed. After all
-three images build and verify, the `bundle-manifest` job downloads the
-per-image audit artifacts, re-runs `scripts/build_image_bundle.py` with
-the real digests, validates the result against
-`omnisight-bundle.schema.json`, and uploads
-`bundle-<bundle_id>.json` as a workflow artifact.
-
-Operator verification:
-
-```bash
-bundle_id=$(docker image inspect ghcr.io/<owner>/omnisight-backend:<tag> \
-  --format '{{ index .Config.Labels "org.opencontainers.image.bundle.id" }}')
-bundle_sha=$(docker image inspect ghcr.io/<owner>/omnisight-backend:<tag> \
-  --format '{{ index .Config.Labels "org.opencontainers.image.bundle.sha" }}')
-docker run --rm ghcr.io/<owner>/omnisight-backend:<tag> cat /app/bundle.json > /tmp/bundle.json
-test "$(sha256sum /tmp/bundle.json | awk '{print $1}')" = "${bundle_sha}"
+```
+┌────────────┐  push to    ┌───────────────────┐  triggers   ┌─────────────────────┐
+│  Gerrit    │ refs/heads/ │   GitLab (sora.   │  v* tag     │  GitLab CI runner   │
+│  review    │────────────▶│   services:29420) │────────────▶│  (privileged dind   │
+│  (29418)   │             │                   │             │   executor, T1.2)   │
+└────────────┘             └───────────────────┘             └──────────┬──────────┘
+                                                                        │ push by digest
+                                                                        ▼
+                          ┌──────────────────────────────────┐  pull   ┌──────────────┐
+                          │  GitLab Container Registry       │────────▶│  prod host   │
+                          │  sora.services:49154/omnisight/  │ digest- │  docker      │
+                          │  OmniSight-Productizer/{...}     │ pinned  │  compose     │
+                          └──────────────────────────────────┘         └──────────────┘
 ```
 
-## Signing model — cosign keyless
+The runner that closes the diagram was missing on 2026-05-19 11:00 CST
+(GitLab API `/runners` returned `[]`, all 15 jobs in pipeline #28
+`skipped`), which is why every prior `v*` tag pipeline reported
+`failed` and the registry stayed empty. Runner registration is owned
+by OP-1478 T1.2; this document assumes it has landed.
 
-We sign every image **by digest** (not by tag) using cosign keyless,
-which exchanges the workflow's GitHub OIDC token for a short-lived
-sigstore certificate. No long-lived signing key is held in CI.
+Prod hosts pull from GitLab CR using the read-only deploy token
+provisioned per OP-1470 (§6 below). They do **not** call back to
+GitLab CI or to Gerrit at deploy time.
 
-The signature carries certificate claims that verifiers check:
+## 2. Triggers
 
-- **Identity:** `https://github.com/<owner>/<repo>/.github/workflows/build-images.yml@<ref>`
-- **Issuer:** `https://token.actions.githubusercontent.com`
+The pipeline lives in [`.gitlab-ci.yml`](../../.gitlab-ci.yml) at the
+repository root. Its top-level `workflow.rules` fires the pipeline
+**only** for tags matching `^v.*`:
 
-If you ever need offline / air-gapped verification, drop a real PEM
-key in `deploy/cosign/cosign.pub` (replacing the placeholder) and
-add `cosign sign --key …` to the workflow. The verifier auto-detects
-the key file and switches modes.
-
-## Verifying a pulled image
-
-```bash
-scripts/verify_image_signature.sh ghcr.io/<owner>/omnisight-backend:v0.4.0
-# → "OK" exit 0 on success, "FAIL" exit 1 on unsigned/tampered
+```yaml
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v.*/'
+    - when: never
 ```
 
-The script prefers keyless verification, falling back to the project
-public key if `deploy/cosign/cosign.pub` is populated with a real
-`-----BEGIN PUBLIC KEY-----` block.
+Concretely:
 
-To verify an image built by a fork or a different workflow, override
-the identity claims:
+| Event | Pipeline fires? | Notes |
+|---|---|---|
+| `git push origin develop` | no | `when: never` swallows branch pushes |
+| `git push origin feature/...` | no | same |
+| `git push origin vX.Y.Z` (annotated tag) | **yes** | every job runs under `.tag_rules` |
+| `git push origin vX.Y.Z-rcN` | **yes** | release candidates use the same rule |
+| GitLab UI "Run pipeline" on a branch | no | no `CI_COMMIT_TAG` set |
 
-```bash
-COSIGN_CERT_IDENTITY_REGEX='^https://github\.com/myfork/.*@refs/heads/main$' \
-  scripts/verify_image_signature.sh ghcr.io/myfork/omnisight-backend:sha-abc123
+Branch builds are out of scope on purpose. The retired GHCR workflow
+published `sha-<short>` images on every `main` push; the activated
+GitLab pipeline does not. If you need an out-of-band build, cut a
+throwaway `vX.Y.Z-rcN-canary` tag (see §8 of
+[`release-cut-runbook.md`](release-cut-runbook.md)).
+
+## 3. Pipeline stages
+
+`.gitlab-ci.yml` declares five sequential stages, each fanned out by
+`.image_matrix` across `backend`, `frontend`, and `bridge`:
+
+| Stage | Job | What it does |
+|---|---|---|
+| `build` | `build-image` | `docker buildx build --platform linux/amd64,linux/arm64 --push` for `Dockerfile.{backend,frontend,bridge}`. Pushes `:${CI_COMMIT_TAG}`, `:sha-${CI_COMMIT_SHORT_SHA}`, `:latest`. |
+| `sign` | `sign-image` | Resolves the just-pushed multi-arch digest, then `cosign sign --identity-token $SIGSTORE_ID_TOKEN <image>@<digest>`. Verifies the signature in-place before exiting the job — a broken signing step is caught inside the same pipeline run, not at deploy time. |
+| `sbom` | `sbom-image` | Installs `syft v1.17.0`, generates `sbom-<image>.cdx.json` (CycloneDX JSON), uploads as a 90-day artifact. |
+| `attest` | `attest-image` | Builds an in-toto predicate (`{image, image_ref, digest, git_sha, git_ref, pipeline_url, builder: "gitlab-ci"}`) and runs `cosign attest --predicate ... --type https://in-toto.io/Statement/v1`. |
+| `audit-emit` | `audit-emit` | Writes `image-audit-<image>.json` (shape compatible with the backend `audit.log()` payload, see [`backend/audit.py`](../../backend/audit.py)) as a 90-day artifact. The prod-side audit poller ingests these into the hash-chained audit log. |
+
+### Cosign keyless via GitLab OIDC
+
+The `sign` and `attest` stages exchange GitLab's job-scoped
+`id_tokens.SIGSTORE_ID_TOKEN` (audience `sigstore`) for a short-lived
+Fulcio certificate. No long-lived signing key sits in CI. The
+identity claims that verifiers must match are pinned in CI variables:
+
+| Variable | Value (defaults from `.gitlab-ci.yml`) |
+|---|---|
+| `COSIGN_CERT_IDENTITY_REGEXP` | `^https://sora\.services:49154/omnisight/OmniSight-Productizer//\.gitlab-ci\.yml@refs/tags/v.*$` |
+| `COSIGN_CERT_OIDC_ISSUER` | `https://sora.services:49154` |
+
+Operator verification uses the same regex via
+[`scripts/verify_image_signature.sh`](../../scripts/verify_image_signature.sh).
+For the full stage-by-stage variable contract and runner requirements
+(privileged dind, `id_tokens` support, network egress) see
+[`gitlab-ci-image-build.md`](gitlab-ci-image-build.md).
+
+## 4. Image naming
+
+Each pipeline pushes three images, each with three tags. Substitute
+the GitLab-CI variables in the table below — they are resolved
+automatically at build time:
+
+```
+sora.services:49154/omnisight/OmniSight-Productizer/{backend,frontend,bridge}:${CI_COMMIT_TAG}
+sora.services:49154/omnisight/OmniSight-Productizer/{backend,frontend,bridge}:sha-${CI_COMMIT_SHORT_SHA}
+sora.services:49154/omnisight/OmniSight-Productizer/{backend,frontend,bridge}:latest
 ```
 
-## Retention policy
+The base prefix is `${CI_REGISTRY_IMAGE}` (provided by GitLab when the
+project container registry is enabled). The `:latest` tag is updated
+on **every** `v*` pipeline; pre-release tags (`vX.Y.Z-rcN`) therefore
+move `:latest` — operators must pin by digest at deploy time
+(`@sha256:...`, see `docker-compose.prod.yml` line 163).
 
-Enforced by the `retention` job (weekly cron, also runs on
-`workflow_dispatch`). Implemented in `scripts/enforce_image_retention.sh`.
+### Cross-registry naming during the T2.3 observation window
 
-| Class                          | Policy                  |
-|--------------------------------|-------------------------|
-| Tagged (`v*`, `latest`, `sha-*`) | Kept forever            |
-| Untagged, ≥ 30 days old        | Deleted (subject to floor) |
-| Untagged, < 30 days old        | Kept                    |
-| Floor                          | Last **20** untagged versions per package always kept |
+While both pipelines run in parallel (until OP-1478 T2.3 decommissions
+ghcr.io), the same release exists under two names:
 
-The floor protects against runaway-build incidents and clock-skew
-bugs — a misconfiguration that would otherwise prune everything still
-leaves 20 versions per image.
+| Registry | Path | Tag set | Lifetime |
+|---|---|---|---|
+| GitLab CR (canonical) | `sora.services:49154/omnisight/OmniSight-Productizer/{backend,frontend,bridge}` | `${CI_COMMIT_TAG}`, `sha-${CI_COMMIT_SHORT_SHA}`, `latest` | indefinite (subject to §7) |
+| GHCR (legacy) | `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}/omnisight-{backend,frontend,bridge}` | `vX.Y.Z`, `sha-<short>`, `latest` | until T2.3 cutoff |
 
-Dry-run locally:
+Digest parity between the two is verified by `release-cut-runbook.md`
+§8 Action 2 on every cut; drift is a stop-the-line incident.
 
-```bash
-GH_TOKEN=$(gh auth token) \
-PACKAGE_NAME=omnisight-backend \
-OWNER=<your-org> \
-DRY_RUN=1 \
-  scripts/enforce_image_retention.sh
-```
+## 5. Bundle manifest
 
-## Audit log integration (D18)
-
-Each successful build emits `image-audit-<image>.json` as a workflow
-artifact (90-day retention on the artifact itself). The structure is
-deliberately compatible with the backend `audit.log()` payload shape
-(see `backend/audit.py`):
+The release bundle is the contract surface a deployed stack reads to
+prove what it is running. It is produced by
+[`scripts/build_image_bundle.py`](../../scripts/build_image_bundle.py),
+validated against
+[`omnisight-bundle.schema.json`](../../omnisight-bundle.schema.json),
+and baked into the backend image at `/app/bundle.json` (served by
+`/api/version`).
 
 ```json
 {
-  "event": "image.signed_pushed",
-  "image": "omnisight-backend",
-  "registry": "ghcr.io",
-  "digest": "sha256:…",
-  "git_sha": "…",
-  "git_ref": "refs/heads/main",
-  "is_release": "false",
-  "version": "",
-  "actor": "claude-bot",
-  "run_id": "1234567890",
-  "run_url": "https://github.com/…/actions/runs/1234567890",
-  "signed_with": "cosign-keyless",
-  "cosign_version": "v2.4.1"
+  "bundle_id":   "v0.5.0-3f1c0a4e",
+  "git_ref":     "refs/tags/v0.5.0",
+  "git_sha":     "3f1c0a4e...",
+  "build_time":  "2026-05-19T11:00:00Z",
+  "images": {
+    "backend":  { "digest": "sha256:..." },
+    "frontend": { "digest": "sha256:..." },
+    "bridge":   { "digest": "sha256:..." }
+  },
+  "contracts": {
+    "api_required": "v1",
+    "api_supported": ["v1", "v2"],
+    "openapi_hash": "<hex>",
+    "db_migration_head": "<alembic-rev>",
+    "frontend_built_against_api": "v1"
+  },
+  "signatures": [ ... ]
 }
 ```
 
-The prod-side audit poller (Phase-53 audit pipeline) is responsible
-for downloading these artifacts and appending them to the hash-chained
-audit log via `await audit.log(...)`. No long-lived backend credential
-is embedded in CI.
+### Tie-in to V5 `frontend_compat_check`
 
-## Synthetic pipeline test
+`/readyz` surfaces a `checks.frontend_compat_check` key (see
+[`fe-be-compat-monitoring.md`](fe-be-compat-monitoring.md) §3). The
+check compares the backend's bundled `contracts.api_supported` against
+the API version the running frontend was built against
+(`contracts.frontend_built_against_api`). A frontend whose declared
+API target is not in the backend's `api_supported` list flips the
+check to FAIL, which a prod operator catches via the `/readyz` gate
+before traffic reaches the new replicas. The bundle manifest is the
+authoritative source for both sides of that comparison — there is no
+runtime negotiation, only a baked-in claim.
 
-The workflow includes a `verify` job that runs immediately after each
-build matrix completes. It pulls the freshly-signed image by SHA tag
-and runs `scripts/verify_image_signature.sh` against it — so a broken
-signing step (e.g. revoked `id-token: write` permission) is caught
-inside the same workflow run, not by an operator at deploy time.
+## 6. Pull credentials
 
-To synthetically test the full pipeline outside CI:
+Prod hosts authenticate to `sora.services:49154` with a project-scoped
+deploy token that has only `read_registry` scope. The full procedure
+— enabling the registry, configuring the cleanup policy, provisioning
+the token, deploying the secret to prod hosts, and rotating it — is
+owned by [`gitlab-cr-pull-credentials.md`](gitlab-cr-pull-credentials.md)
+(shipped under OP-1470).
 
-1. Push a no-op commit to `main` (or open + merge a trivial PR).
-2. Watch `.github/workflows/build-images.yml` in the Actions tab.
-3. Once it goes green (target: < 10 min), run:
-   ```bash
-   short_sha=$(git rev-parse --short=12 HEAD)
-   scripts/verify_image_signature.sh \
-     ghcr.io/<owner>/omnisight-backend:sha-${short_sha}
-   ```
-   It should print `OK`.
-
-## Troubleshooting
-
-### "Error: failed to get tlog entries: ..."
-
-The rekor log query failed. Either rekor is degraded (check
-<https://status.sigstore.dev/>) or the runner has no egress to
-`rekor.sigstore.dev`. Keyless verification cannot proceed without
-rekor; fall back to key-based verification by populating
-`deploy/cosign/cosign.pub` once a long-lived key exists.
-
-### "FAIL: cosign keyless verification failed"
-
-Common causes:
-
-1. Image was pushed by a different workflow / fork — override
-   `COSIGN_CERT_IDENTITY_REGEX`.
-2. Image was pushed before signing was enabled — only images built
-   after this workflow's first run on `main` are signed.
-3. Tag has been overwritten since signing. Verify by digest instead:
-   ```bash
-   digest=$(docker buildx imagetools inspect ghcr.io/.../omnisight-backend:v0.4.0 --format '{{.Manifest.Digest}}')
-   scripts/verify_image_signature.sh ghcr.io/.../omnisight-backend@${digest}
-   ```
-
-### Retention deleted too much / too little
-
-Tweak `MIN_KEEP` / `MAX_AGE_DAYS` env vars in the workflow. `MIN_KEEP`
-is a hard floor — the script refuses to dip below it even if every
-remaining version is past the age cutoff.
-
-## Env lock files + preflight (OP-1482, V4)
-
-Until OP-1482, prod and staging compose files referenced images by
-tag (`ghcr.io/.../omnisight-backend:${OMNISIGHT_IMAGE_TAG}`) with
-`pull_policy: missing`. That combination is unsafe: if the alias
-(`:latest`, `:vX.Y.Z`, `:staging`) is retagged in the registry,
-`docker compose up` keeps using whatever happens to be in the local
-cache, silently no-op'ing a promotion. Codex flagged this as the #2
-priority gap in the image pipeline.
-
-The V4 fix is:
-
-1. **Per-env lock file**, JSON, checked into the repo. Each file
-   pins a `bundle_id`, the per-image `repository` + `sha256:` digest,
-   `last_promoted_at`, `promoted_from`, and an `attestation_ref` back
-   to a sigstore log entry:
-
-   - `staging.env.lock.json` — sealed when CI cuts a new bundle
-   - `canary.env.lock.json` — sealed by the canary cron when a bundle
-     graduates from staging (≥6 h burn-in + clean alerts)
-   - `prod.env.lock.json` — sealed when an operator approves the
-     canary→prod promotion
-
-   Schema (informal — `omnisight-bundle.schema.json` covers the
-   compatible bundle manifest):
-
-   ```json
-   {
-     "env": "prod",
-     "bundle_id": "v0.5.0-3f1c0a4e",
-     "last_promoted_at": "2026-05-18T14:22:00Z",
-     "promoted_from": "canary",
-     "attestation_ref": "sigstore://rekor.sigstore.dev/api/v1/log/entries/<uuid>",
-     "images": {
-       "backend":  { "repository": "ghcr.io/<owner>/omnisight-backend",
-                     "digest":     "sha256:…",
-                     "env_var":    "OMNISIGHT_BACKEND_DIGEST" },
-       "frontend": { "repository": "ghcr.io/<owner>/omnisight-frontend",
-                     "digest":     "sha256:…",
-                     "env_var":    "OMNISIGHT_FRONTEND_DIGEST" },
-       "bridge":   { "repository": "ghcr.io/<owner>/omnisight-bridge",
-                     "digest":     "sha256:…",
-                     "env_var":    "OMNISIGHT_BRIDGE_DIGEST" }
-     }
-   }
-   ```
-
-2. **`scripts/load_env_lock.sh`** translates the lock JSON into env
-   vars consumed by the compose `image:` interpolation. Two modes:
-
-   ```bash
-   # Source-mode — exports OMNISIGHT_*_DIGEST into the caller shell.
-   source scripts/load_env_lock.sh prod.env.lock.json
-
-   # File-mode — writes a `--env-file`-formatted chunk. Preferred for
-   # the deploy runbook so the digests live in a single artifact.
-   scripts/load_env_lock.sh prod.env.lock.json --out /tmp/prod-digests.env
-   ```
-
-3. **`scripts/verify_image_bundle.py`** is the preflight gate. It
-   refuses to exit 0 unless, for every image referenced in the lock:
-
-   - the compose file's `image:` line is pinned by `@sha256:<digest>`
-     (catches a future regression where someone re-introduces a
-     `:tag` reference),
-   - `docker manifest inspect` against the registry returns the same
-     digest (catches a retagged alias),
-   - the cosign signature on `<repo>@<digest>` verifies
-     (delegates to `scripts/verify_image_signature.sh` for keyless /
-     key-mode auto-detection consistency),
-   - `docker image inspect`'s RepoDigests on the local cache include
-     `<repo>@<digest>` (catches Codex's #15 failure mode where an
-     operator `docker tag`'d an old digest onto the alias).
-
-   ```bash
-   python3 scripts/verify_image_bundle.py \
-       --compose docker-compose.prod.yml \
-       --lock prod.env.lock.json
-   # exit 0 → safe to deploy
-   # exit 1 → at least one image diverges; output names which and why
-   # exit 2 → broken invocation (no docker, malformed lock); not a deploy
-   #          failure — the runner can distinguish the two.
-   ```
-
-   Skip flags exist for situations where part of the chain is
-   unreachable:
-
-   - `--skip-remote` — no registry network, but still want compose +
-     cosign + local-cache checks
-   - `--skip-signature` — sigstore (rekor) is degraded; degrade
-     gracefully and document in the deploy log
-   - `--skip-cache` — first-time deploy on a clean host; the cache
-     check would fail until `docker compose pull` lands
-
-4. **Compose changes** (`docker-compose.prod.yml`,
-   `docker-compose.staging.yml`): every `omnisight-{backend,frontend}`
-   reference is now `@${OMNISIGHT_*_DIGEST}` and `pull_policy:
-   always`. With digest pinning, `always` is safe — Docker
-   content-addresses the local cache and will dedupe the layer pull
-   when the digest is already present locally.
-
-### Full deploy procedure (prod)
+In short:
 
 ```bash
-# 1. Load digests from the lock file.
-scripts/load_env_lock.sh prod.env.lock.json --out /tmp/prod-digests.env
-
-# 2. Preflight gate. Refuses to pass on any digest mismatch.
-python3 scripts/verify_image_bundle.py \
-    --compose docker-compose.prod.yml \
-    --lock prod.env.lock.json
-
-# 3. Apply.
-docker compose \
-    --env-file .env \
-    --env-file /tmp/prod-digests.env \
-    -f docker-compose.prod.yml \
-    up -d --wait
-
-# 4. Smoke: every running container must report a digest, not a tag.
-docker ps --filter name=backend --format '{{.Image}}'
-# Expected: ghcr.io/<owner>/omnisight-backend@sha256:…
+TOKEN="$(cat ~/.config/omnisight/gitlab-cr-pull-token)"
+USER="omnisight-cr-puller"
+echo "$TOKEN" | docker login sora.services:49154 \
+    --username "$USER" --password-stdin
 ```
 
-### Promoting a bundle (sealing a new lock)
+The token is never written to source. The administrative GitLab
+actions (project setting toggle, deploy-token creation, prod-host
+secret deployment) are explicitly operator-driven per OP-1470 — this
+document does not automate them.
 
-A bundle is "ready to promote" once CI's `image-audit-<image>.json`
-artifacts (see § Audit log integration) name the same `bundle_id` and
-cosign-verify clean. The promotion workflow rewrites
-`<env>.env.lock.json` with the new digests, bumps `bundle_id`,
-`last_promoted_at`, and `attestation_ref`, and commits the lock file
-behind a Gerrit Code-Review +2 like any other change. Until that
-commit is merged, deploy preflight refuses to run with the new
-digests because the lock file is still pinned to the old bundle —
-which is exactly the safety property we wanted.
+## 7. Retention policy
+
+The retention policy is owned by
+[`image-retention-policy.md`](image-retention-policy.md) (OP-1480, the
+"V2" rewrite that replaced the original tagged-forever / untagged-30d
+rule with per-tag-class retention).
+
+Headline rules (canonical version in the linked doc):
+
+| Tag class | Retention |
+|---|---|
+| Immutable release `vX.Y.Z` | forever |
+| Hotfix `vX.Y.Z-hotfix-N` | forever |
+| Release candidate `vX.Y.Z-rcN` | 90 days post-ship, 30 days otherwise |
+| Develop build `develop-<12sha>` | 14 days OR newest 30, whichever is more |
+| Feature build `feature-<12sha>` | 7 days |
+| Untagged orphan | 7 days |
+| Mutable alias (`latest`, `staging`, `prod`, `canary`, `develop-latest`) | never deleted as a standalone target |
+| Unknown tagged version | kept for manual review (conservative — GHCR/GitLab CR deletions are irreversible) |
+
+### Manual run
+
+Dry-run a single package (substitute `omnisight-frontend` /
+`omnisight-bridge` as needed):
+
+```bash
+GH_TOKEN=...  python3 scripts/enforce_image_retention.py \
+  --dry-run \
+  --package omnisight-backend
+```
+
+Write the same decision table to a file (preferred when attaching to
+a JIRA comment):
+
+```bash
+GH_TOKEN=...  python3 scripts/enforce_image_retention.py \
+  --dry-run \
+  --package omnisight-backend \
+  --summary-file artifacts/retention/omnisight-backend.txt
+```
+
+Remove `--dry-run` to actually delete. The script honours the
+`MIN_KEEP` / `MAX_AGE_DAYS` floor described in
+`image-retention-policy.md`; a misconfiguration cannot prune below
+the floor.
+
+## 8. Monitoring
+
+The GitLab CR side is observed by `gitlab-cr-monitor.timer` (a
+systemd `.timer` + `.service` pair installed on the prod monitoring
+host) — provisioning is owned by **OP-1478 T1.4**. The timer fires
+on a 5-minute cadence and emits the following Prometheus series:
+
+| Metric | Labels | Meaning |
+|---|---|---|
+| `gitlab_cr_reachable` | `registry` | 1 if `GET /v2/` returns 401, 0 otherwise |
+| `gitlab_cr_pull_latency_seconds` | `image`, `registry` | wall-time of `docker pull <image>:latest` from a clean cache |
+| `gitlab_cr_last_digest_age_seconds` | `image` | seconds since the `:latest` digest was last updated |
+| `gitlab_cr_runner_count` | `project` | count of registered runners with `online: true` for the project |
+
+The `gitlab_cr_runner_count` series is the canary for the failure
+mode that caused the 2026-05-19 outage (zero registered runners,
+every `v*` pipeline failing silently). A value of `0` paged via
+`prometheus/rules/image-compat.yml`. Once T1.4 lands, that alert
+will route to the on-call image-pipeline owner.
+
+Until T1.4 deploys the timer, operators check runner health
+manually:
+
+```bash
+curl -fsSL --header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+  "https://sora.services:49154/api/v4/projects/omnisight%2FOmniSight-Productizer/runners" \
+  | jq 'map({id, description, online, status})'
+```
+
+An empty array or `online: false` on every runner means the next
+`v*` tag will fail.
+
+## 9. Operator runbooks index
+
+| Task | Runbook | Owner ticket |
+|---|---|---|
+| Stand up / re-register a self-hosted GitLab runner with privileged dind | `gitlab-runner-install.md` (in flight) | OP-1478 T1.2 |
+| Cut a release tag (the only event that triggers this pipeline) | [`release-cut-runbook.md`](release-cut-runbook.md) §2, §8 | OP-880 / OP-1488 |
+| Promote an already-built bundle between staging / canary / prod | [`image-promotion-runbook.md`](image-promotion-runbook.md) | OP-1481 |
+| Pre-flight a prod deploy (digest pinning, cosign verify, cache check) | [`prod-deploy-runbook.md`](prod-deploy-runbook.md) | OP-881 |
+| Flip the prod `.env` from ghcr.io to GitLab CR | [`gitlab-cr-cutover-checklist.md`](gitlab-cr-cutover-checklist.md) | OP-1473 |
+| Provision / rotate the read-only GitLab CR pull token | [`gitlab-cr-pull-credentials.md`](gitlab-cr-pull-credentials.md) | OP-1470 |
+| Enforce / dry-run image retention | [`image-retention-policy.md`](image-retention-policy.md) | OP-1480 |
+| Detailed CI variable contract, runner egress, canary procedure | [`gitlab-ci-image-build.md`](gitlab-ci-image-build.md) | OP-1488 / OP-1474 |
+
+`gitlab-runner-install.md` is not yet checked in — T1.2 owns its
+delivery. Until it lands, runner registration follows the standard
+GitLab Runner installation guide
+(`https://docs.gitlab.com/runner/install/`) plus the project-specific
+config required by [`gitlab-ci-image-build.md`](gitlab-ci-image-build.md)
+§"Runner Requirements" (Docker-in-Docker `--privileged`, `id_tokens`
+support, egress to `github.com` for cosign/syft installers).
+
+## 10. Decommissioning ghcr.io
+
+GHCR is retained as a fallback for the duration of the OP-1488 G4
+dual-publish observation window. The exit criteria are in
+[`release-cut-runbook.md`](release-cut-runbook.md) §11:
+
+> ≥ 3 successful release cuts via dual-publish over a ~2-week window
+> with zero divergence incidents.
+
+A digest-drift FAIL (§8 Action 2 of `release-cut-runbook.md`), a
+staging-smoke FAIL that triggers §10 rollback, or a `P0`/`P1` INCIDENT
+JIRA tagged `image-pipeline` resets the count to zero.
+
+**OP-1478 T2.3** owns the actual GHCR removal commit: stripping the
+`ghcr.io` default fallback from `${OMNISIGHT_REGISTRY:-ghcr.io/...}`
+in `docker-compose.{prod,staging}.yml`, retiring the
+`.github/workflows/build-images.yml` GHCR push workflow, and freezing
+the GHCR packages read-only. **Target cutover date is set on T2.3 once
+the §11 observation-window count clears**; this document will be
+updated with the concrete date when T2.3 transitions to In Progress.
+Until then, ghcr.io paths in compose files are load-bearing — do not
+remove them piecemeal.
+
+---
+
+## Historical (OP-763, deprecated)
+
+The text below describes the **retired** GHA-only image pipeline that
+shipped with OP-763. It is preserved for archaeological context only —
+do not follow it for new work. All operational reality has moved to
+the GitLab path documented in §§1–10 above, per ADR-0038. The GHA
+workflow file (`.github/workflows/build-images.yml`) remains in the
+repo solely to keep the dual-publish observation window alive
+(see §10 above) and will be removed by OP-1478 T2.3.
+
+### Original goal
+
+Every merge to `main` and every `v*` tag produced signed Docker
+images for the three runtime planes — backend, frontend, hardware
+bridge — pushed to GHCR, tagged immutably by git SHA, and signed with
+cosign keyless. A retention sweep pruned old untagged builds while
+keeping release tags forever.
+
+### Original triggers
+
+The workflow `.github/workflows/build-images.yml` fired on:
+
+| Event | Builds | Tags applied |
+|---|---|---|
+| `push` to `main` | yes | `:sha-<short>` |
+| `push` `v*` tag | yes | `:sha-<short>`, `:v<X.Y.Z>`, `:latest` |
+| `workflow_dispatch` | yes | same as the underlying ref |
+| `schedule` (weekly) | no | retention-only |
+
+`:latest` was only updated by tag pushes — main-branch merges never
+moved `:latest`. The activated GitLab pipeline moves `:latest` on
+every `v*` (including release candidates), which is why the V4 lock
+files (`prod.env.lock.json`, etc.) pin by digest rather than tag.
+
+### Original image inventory
+
+| Image | Dockerfile | Source |
+|---|---|---|
+| `ghcr.io/<owner>/omnisight-backend` | `Dockerfile.backend` | `backend/` |
+| `ghcr.io/<owner>/omnisight-frontend` | `Dockerfile.frontend` | Next.js app in repo root |
+| `ghcr.io/<owner>/omnisight-bridge` | `Dockerfile.bridge` | `tools/hardware_daemon/` |
+
+All three were multi-arch (`linux/amd64` + `linux/arm64`). The
+activated pipeline keeps multi-arch — see §4.
+
+### Original signing model
+
+Cosign keyless via GitHub OIDC. Identity:
+`https://github.com/<owner>/<repo>/.github/workflows/build-images.yml@<ref>`,
+issuer `https://token.actions.githubusercontent.com`. Replaced by the
+GitLab-OIDC identity claims in §3.
+
+### Original verification command
+
+```bash
+scripts/verify_image_signature.sh ghcr.io/<owner>/omnisight-backend:v0.4.0
+```
+
+The same script verifies GitLab CR images today — it auto-detects the
+issuer and identity-regex environment overrides (`COSIGN_CERT_OIDC_ISSUER`,
+`COSIGN_CERT_IDENTITY_REGEX`) and falls through to the GitLab values
+documented in §3.
+
+### Original retention policy
+
+| Class | Policy |
+|---|---|
+| Tagged (`v*`, `latest`, `sha-*`) | Kept forever |
+| Untagged, ≥ 30 days old | Deleted (subject to floor) |
+| Untagged, < 30 days old | Kept |
+| Floor | Last 20 untagged versions per package always kept |
+
+Replaced wholesale by the per-tag-class V2 policy in §7 /
+[`image-retention-policy.md`](image-retention-policy.md).
+
+### Original V4 env-lock + preflight (OP-1482)
+
+The V4 work introduced per-env JSON lock files
+(`staging.env.lock.json`, `canary.env.lock.json`, `prod.env.lock.json`),
+[`scripts/load_env_lock.sh`](../../scripts/load_env_lock.sh), and
+[`scripts/verify_image_bundle.py`](../../scripts/verify_image_bundle.py).
+That machinery is **not** retired — it is the deploy-side preflight
+gate the activated pipeline still relies on. See
+[`prod-deploy-runbook.md`](prod-deploy-runbook.md) for the
+load-lock → verify → `docker compose up -d --wait` procedure.
 
 ## See also
 
-- `.github/workflows/docker-publish.yml` — older tag-only publish
-  (kept for parity until OP-763 has been live for one release cycle;
-  the two workflows publish to the same GHCR namespace, so consumers
-  see the same `:vX.Y.Z` regardless of which one ran).
-- `docs/operations/release-discipline.md` — release-tagging policy
-  and SemVer conventions.
-- `docs/operations/key-management.md` — credential rotation, including
-  any future cosign signing key.
-- `omnisight-bundle.schema.json` + `scripts/build_image_bundle.py`
-  (OP-1479) — bundle manifest schema and CI-side builder. The lock
-  files share the same digest-pinning shape so a bundle manifest can
-  be diffed against the live lock file at release time.
+- [`gitlab-ci-image-build.md`](gitlab-ci-image-build.md) — full CI
+  variable contract, runner requirements, and canary procedure.
+- [`gitlab-cr-pull-credentials.md`](gitlab-cr-pull-credentials.md) —
+  registry enablement, cleanup policy, deploy-token provisioning and
+  rotation.
+- [`gitlab-cr-cutover-checklist.md`](gitlab-cr-cutover-checklist.md) —
+  the prod `.env` cutover that completed Phase 5 of OP-1468.
+- [`image-retention-policy.md`](image-retention-policy.md) — V2
+  per-tag-class retention rules.
+- [`image-promotion-runbook.md`](image-promotion-runbook.md) — bundle
+  promotion (retag by digest, attest the promotion event).
+- [`prod-deploy-runbook.md`](prod-deploy-runbook.md) — orchestrator,
+  preflight, /readyz gate.
+- [`release-cut-runbook.md`](release-cut-runbook.md) — the only event
+  that triggers this pipeline (`git push origin vX.Y.Z`) and the
+  dual-publish observation window (§§8–11).
+- [`fe-be-compat-monitoring.md`](fe-be-compat-monitoring.md) — the
+  `/readyz` `frontend_compat_check` that consumes the bundle's
+  `contracts.api_supported` claim.
+- [`ADR-0038`](../adr/ADR-0038-image-pipeline-on-gitlab.md) — Phase 5
+  cutover decision (GHCR → GitLab CR).
+- [`ADR-0002`](../adr/ADR-0002-gitlab-primary-github-mirror.md) — the
+  governing "GitLab Only" principle.
+- [`omnisight-bundle.schema.json`](../../omnisight-bundle.schema.json)
+  + [`scripts/build_image_bundle.py`](../../scripts/build_image_bundle.py)
+  — bundle manifest schema and CI-side builder (OP-1479).
