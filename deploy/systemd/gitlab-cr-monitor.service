@@ -1,0 +1,54 @@
+; OP-1514 — Daily GitLab Container Registry liveness + freshness check.
+;
+; Parent META: OP-1478 (Image artifact pipeline activation,
+; scope:op-1478-activation-2026-05-19). Companion to OP-1511's
+; gitlab-runner.service. Once the runner is registered and the
+; v*-tag pipeline starts publishing into GitLab CR, this oneshot fires
+; daily to confirm:
+;   1. The registry is reachable on the configured GitLab instance.
+;   2. At least one repo exists under omnisight/OmniSight-Productizer.
+;   3. The latest tag is younger than
+;      OMNISIGHT_GITLAB_CR_FRESHNESS_HOURS (default 48).
+; A failure on (3) routes through backend.agents.operator_notifier at
+; severity=DEGRADED so the daily timer surfaces silent CR drops in
+; addition to the journal line. Matches the existing pattern of
+; gerrit-jira-bridge-watchdog.timer / auto-promote-develop.timer.
+;
+; Why user-level (not system-level)
+; ---------------------------------
+; The token at ~/.config/omnisight/gitlab-claude-token is per-user,
+; the operator_notifier credentials live under the same XDG path, and
+; the script never needs root. Matching the watchdog placement keeps
+; the deploy story uniform.
+;
+; Install (operator step — NOT this ticket per AC 2 + the user-intent
+; note; performed once after the auto-sync drops the unit files into
+; %h/.config/systemd/user/ per OP-877's existing sync mechanism):
+;
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now gitlab-cr-monitor.timer
+;
+; The runbook in docs/operations/gitlab-cr-monitor.md is the source
+; of truth for the activation step. Do NOT enable from this ticket.
+
+[Unit]
+Description=OmniSight GitLab Container Registry daily liveness check (OP-1514)
+Documentation=https://soraapp.atlassian.net/browse/OP-1514
+Documentation=file:///home/user/work/sora/OmniSight-Productizer/docs/operations/gitlab-cr-monitor.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONPATH=/home/user/work/sora/OmniSight-Productizer
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_REPO_ROOT=/home/user/work/sora/OmniSight-Productizer
+ExecStart=/bin/bash /home/user/work/sora/OmniSight-Productizer/scripts/verify_gitlab_cr.sh
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gitlab-cr-monitor
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target
