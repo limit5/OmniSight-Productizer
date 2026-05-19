@@ -424,6 +424,97 @@ def test_release_no_op_when_no_matching_claim(monkeypatch) -> None:
     assert "claim:other:0000000000000000001-aaaaaaaa" in fake.labels
 
 
+def test_release_strips_own_only_with_multiple_foreign_instances(monkeypatch) -> None:
+    """OP-1524: when several runner instances have racing fenced claims
+    on the same ticket, ``release_ticket_claim`` MUST strip ONLY the
+    requested instance's labels. The other runners' labels are left
+    untouched so their own claim state is not corrupted.
+
+    This is the "strip own only" semantics that the bug summary calls
+    out — without it, a revert by runner-A would also clear runner-B
+    and runner-C, opening a separate lost-claim window.
+    """
+    fake = FakeJira(initial_labels=(
+        "claim:claude-A:0000000000000000010-aaaaaaaa",   # ours — strip
+        "claim:claude-A:0000000000000000011-aaaaaaab",   # ours, stale leftover — strip
+        "claim:claude-B:0000000000000000020-bbbbbbbb",   # foreign — KEEP
+        "claim:claude-C:0000000000000000030-cccccccc",   # foreign — KEEP
+        "claim:other-bot:0000000000000000040-dddddddd",  # foreign — KEEP
+        "tier:M",
+    ))
+    _install_fake(monkeypatch, fake)
+
+    jd.release_ticket_claim(_fake_client(), "OP-555", "claude-A",
+                            token="0000000000000000010-aaaaaaaa")
+
+    # Every claim:claude-A:* is gone, regardless of how many we had.
+    assert not any(l.startswith("claim:claude-A") for l in fake.labels)
+    # Every foreign claim is preserved.
+    assert "claim:claude-B:0000000000000000020-bbbbbbbb" in fake.labels
+    assert "claim:claude-C:0000000000000000030-cccccccc" in fake.labels
+    assert "claim:other-bot:0000000000000000040-dddddddd" in fake.labels
+    assert "tier:M" in fake.labels
+
+
+def test_release_then_reclaim_clean_no_mutex_lost(monkeypatch) -> None:
+    """OP-1524: end-to-end primitive for the bug. Runner A claims, hits
+    a revert gate that calls ``release_ticket_claim``, runner B (a
+    different instance, same bot account) re-claims on the next tick
+    cleanly — no ``[runner-mutex-lost]`` from a stale ``claim:A:*``.
+
+    Pins ``project_runner_pickup_mutex`` invariant: "GCs all
+    ``claim:{instance}:*`` for the winner" applied at the revert path.
+    """
+    fake = FakeJira()
+    _install_fake(monkeypatch, fake)
+    client_a = _fake_client(bot_account_id="acc-claude")
+
+    a = jd.claim_ticket_atomic(client_a, "OP-1524", "claude-A")
+    assert a.ok is True
+    assert a.claim_token is not None
+
+    # Simulate the runner's revert path: release_ticket_claim is invoked
+    # BEFORE the runner posts its revert comment (OP-1524 fix in
+    # ``auto-runner-jira.py``).
+    a_token = a.claim_token.split(":", 1)[1]
+    jd.release_ticket_claim(client_a, "OP-1524", "claude-A", token=a_token)
+    assert not any(l.startswith("claim:claude-A") for l in fake.labels)
+
+    # ``transition_back_to_todo`` would clear the assignee; emulate it
+    # so the next pickup's pre-GET sees an empty assignee.
+    fake.assignee = None
+
+    # Runner B picks up on the next cycle.
+    client_b = _fake_client(bot_account_id="acc-claude")
+    b = jd.claim_ticket_atomic(client_b, "OP-1524", "claude-B")
+    assert b.ok is True, (
+        f"Runner B should have claimed cleanly after A's release; got "
+        f"lost_to={b.lost_to!r} — this is the pre-OP-1524 wedge"
+    )
+    assert b.lost_to is None
+    assert any(l.startswith("claim:claude-B:") for l in fake.labels)
+
+
+def test_release_idempotent_when_called_twice(monkeypatch) -> None:
+    """OP-1524: calling release twice in the same revert path (a leading
+    OP-1524 release plus any defensive trailing release) is safe — the
+    second call observes no matching labels and is a single GET no-op.
+    """
+    fake = FakeJira(initial_labels=("claim:default:0000000000000000010-aaaaaaaa",))
+    _install_fake(monkeypatch, fake)
+
+    jd.release_ticket_claim(_fake_client(), "OP-555", "default",
+                            token="0000000000000000010-aaaaaaaa")
+    assert not any(l.startswith("claim:default") for l in fake.labels)
+
+    pre_calls = len(fake.calls)
+    jd.release_ticket_claim(_fake_client(), "OP-555", "default",
+                            token="0000000000000000010-aaaaaaaa")
+    # Second call: just one GET, no PUT (nothing matches).
+    new_calls = fake.calls[pre_calls:]
+    assert [c[0] for c in new_calls] == ["GET"]
+
+
 def test_release_falls_back_to_single_label_when_get_fails(monkeypatch) -> None:
     calls: list[str] = []
 

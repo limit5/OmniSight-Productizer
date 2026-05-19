@@ -23,7 +23,7 @@ exactly one winner regardless of how their GET/PUT calls interleave.
 - can lag the post-PUT GET (``lag_gets``) to exercise the
   ``JIRAPutEventualConsistencyDelay`` retry path.
 
-Test-plan coverage (7 cases):
+Test-plan coverage (8 cases):
   1. single-runner happy path
   2. two runners, same instance_id, sequential       → first won, second lost
   3. two runners, same instance_id, interleaved      → exactly one won,
@@ -32,6 +32,9 @@ Test-plan coverage (7 cases):
   5. runner crash mid-claim leaves a stale token     → next claim sweeps it
   6. backward compat with the OP-838 bare label      → recognised + cleaned
   7. eventual-consistency: PUT ok but GET lags 100ms → retry recovers
+  8. revert-then-recover (OP-1524): runner-A claims, hits a revert gate
+     that calls ``release_ticket_claim``, runner-B re-claims cleanly with
+     no ``[runner-mutex-lost]`` from stale ``claim:A:*`` label
 """
 from __future__ import annotations
 
@@ -358,6 +361,104 @@ def test_case7b_get_lag_beyond_retry_budget_is_a_clean_loss(monkeypatch) -> None
     r = jd.claim_ticket_atomic(_client(), "OP-555", "default")
     assert r.ok is False
     assert r.lost_to == "claim-label-missing-from-readback"
+
+
+# ── Case 8: revert-then-recover (OP-1524) ─────────────────────────
+
+
+def test_case8_revert_clears_own_claim_label(monkeypatch) -> None:
+    """OP-1524: a runner that reverts a ticket back to To Do MUST strip
+    its own ``claim:{INSTANCE_ID}:*`` label before the revert comment so
+    a sibling runner on the next pickup cycle is not blocked by a stale
+    claim.
+
+    The pre-fix bug (``feedback_stale_claim_labels``, observed OP-1052
+    then OP-1523):
+
+    1. Runner A: ``claim_ticket_atomic`` → label ``claim:A:t1-...`` added.
+    2. Runner A: hits capability mismatch / AC conflict, reverts to TODO
+       but leaves its claim label.
+    3. Runner B (next cycle): ``claim_ticket_atomic`` adds ``claim:B:t2-...``.
+    4. Lowest-token-wins → A's older t1 wins; B mutex-loses; A is no
+       longer working → ticket wedged forever.
+
+    The fix is for every revert path to call ``release_ticket_claim``
+    BEFORE the revert comment. This test pins that behaviour at the
+    primitive level — claim, release, re-claim, and asserts that B's
+    second claim succeeds with no stale-label loss.
+    """
+    fake = RaceJira()
+    _install(monkeypatch, fake)
+    c_a = _client(bot="acc-claude")
+
+    # 1. Runner A claims.
+    a = jd.claim_ticket_atomic(c_a, "OP-1524", "claude-A")
+    assert a.ok is True
+    assert any(l.startswith("claim:claude-A:") for l in fake.labels)
+
+    # 2. Runner A revert path: the OP-1524 fix calls release BEFORE
+    #    posting the revert comment. The revert comment itself is not
+    #    modelled here — what we pin is the ``release_ticket_claim``
+    #    primitive that the revert path now invokes first.
+    assert a.claim_token is not None
+    a_token = a.claim_token.split(":", 1)[1]
+    jd.release_ticket_claim(c_a, "OP-1524", "claude-A", token=a_token)
+
+    # The own-only-strip semantics: every ``claim:claude-A:*`` is gone.
+    assert not any(l.startswith("claim:claude-A:") for l in fake.labels)
+
+    # 3. Simulate Runner B on the next pickup cycle. Use a DIFFERENT
+    #    instance_id so we exercise the cross-instance pickup case the
+    #    bug actually produces (claude-A reverted, claude-B picks up).
+    #    Runner B's bot account *would* differ from the leftover assignee
+    #    in the pre-fix bug; here we keep the assignee in place to
+    #    confirm the fast-fail path is NOT triggered by leftover
+    #    assignee under the same-bot-different-instance shape.
+    fake.assignee = None  # transition_back_to_todo would clear it
+    c_b = _client(bot="acc-claude")
+    b = jd.claim_ticket_atomic(c_b, "OP-1524", "claude-B")
+
+    # 4. AC #3 case 4: no mutex-lost. Runner B wins clean.
+    assert b.ok is True, (
+        f"Runner B should have claimed cleanly after A's release; got "
+        f"lost_to={b.lost_to!r} (this is the pre-OP-1524 wedge)"
+    )
+    assert b.lost_to is None
+    assert any(l.startswith("claim:claude-B:") for l in fake.labels)
+    # Crucially: no leftover claim:claude-A:* labels survived.
+    assert not any(l.startswith("claim:claude-A:") for l in fake.labels)
+
+
+def test_case8b_revert_release_with_no_get_failure_still_strips(monkeypatch) -> None:
+    """OP-1524 corollary: ``release_ticket_claim`` is robust to a transient
+    GET fault during release — it falls back to a targeted single-label
+    remove using the cached token. This pins that fallback so a brief
+    Atlassian outage during the revert path does NOT leave a stale label.
+    """
+    fake = RaceJira()
+    _install(monkeypatch, fake)
+    c = _client(bot="acc-claude")
+
+    a = jd.claim_ticket_atomic(c, "OP-1524", "claude-A")
+    assert a.ok is True
+    assert a.claim_token is not None
+    a_token = a.claim_token.split(":", 1)[1]
+
+    # Flake the next GET on the release path; the PUT-remove should still fire.
+    real_request = fake.request
+    fail_once = {"left": 1}
+
+    def flaky(client, method, path, body=None):
+        if method == "GET" and fail_once["left"] > 0:
+            fail_once["left"] -= 1
+            raise RuntimeError("simulated GET fault")
+        return real_request(client, method, path, body)
+
+    monkeypatch.setattr(jd, "_request", flaky)
+    jd.release_ticket_claim(c, "OP-1524", "claude-A", token=a_token)
+
+    # The label this runner wrote is gone (single-target remove fallback).
+    assert f"claim:claude-A:{a_token}" not in fake.labels
 
 
 # ── Stress: many randomised interleavings still pick exactly one winner ──

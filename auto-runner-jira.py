@@ -717,8 +717,15 @@ def _require_runner_capability(
     snapshot: scheduler.TicketSnapshot,
     enabled: frozenset[str],
     capability: str,
+    claim: "jira_dispatch.ClaimResult | None" = None,
 ) -> bool:
-    """Enforce a capability before the runner performs a sensitive op."""
+    """Enforce a capability before the runner performs a sensitive op.
+
+    OP-1524: when ``claim`` is supplied (the post-pickup ``gerrit_push``
+    gate at line ~2700), the runner's own ``claim:{INSTANCE_ID}:*`` label
+    is stripped BEFORE the revert comment + transition fire, so the next
+    pickup is not blocked by a stale claim from this aborted run.
+    """
     try:
         capability_matrix.require_capability(enabled, capability)
         return True
@@ -729,6 +736,7 @@ def _require_runner_capability(
             file=sys.stderr,
         )
         if not DRY_RUN:
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             jira_dispatch.add_comment(
                 client, snapshot.key,
                 f"[runner-capability-blocked]\n\n{e}\n\n"
@@ -1473,14 +1481,19 @@ def _revert_cli_failure_to_todo(
     rc: int,
     claim: "jira_dispatch.ClaimResult | None",
 ) -> None:
-    """Revert a non-zero CLI run and release the runner's JIRA claim."""
+    """Revert a non-zero CLI run and release the runner's JIRA claim.
+
+    OP-1524: claim release MUST precede ``transition_back_to_todo`` so
+    the revert comment posted inside the transition does not race a
+    sibling runner's pickup. See ``feedback_stale_claim_labels``.
+    """
+    _release_ticket_claim_if_acquired(client, key, claim)
     jira_dispatch.transition_back_to_todo(
         client,
         key,
         f"CLI exited {rc}; needs operator review.",
     )
     _clear_assignee_after_revert(client, key)
-    _release_ticket_claim_if_acquired(client, key, claim)
 
 
 def _finalize_successful_push(
@@ -1821,6 +1834,7 @@ def _cli_detected_already_shipped(
 def _handle_runner_detected_shipped(
     client: "jira_dispatch.DispatchClient",
     key: str,
+    claim: "jira_dispatch.ClaimResult | None" = None,
 ) -> int:
     """Archive an already-shipped ticket forward instead of revert-looping.
 
@@ -1833,6 +1847,11 @@ def _handle_runner_detected_shipped(
     "shipped, no further action" state and only one transition is
     valid from Published to Archived; the ticket description licences
     "Archived (or whatever 'no-action-needed' state)".
+
+    OP-1524: in the degraded fallback-revert branch, this runner's own
+    ``claim:{INSTANCE_ID}:*`` label is stripped BEFORE the revert
+    comment + transition so the next pickup is not blocked by the
+    stale claim.
     """
     try:
         jira_dispatch.add_label(client, key, "runner-detected-shipped")
@@ -1871,6 +1890,7 @@ def _handle_runner_detected_shipped(
             f"silently wedge In Progress",
             file=sys.stderr,
         )
+        _release_ticket_claim_if_acquired(client, key, claim)
         try:
             jira_dispatch.transition_back_to_todo(
                 client,
@@ -1896,8 +1916,16 @@ def _handle_gerrit_push_failure(
     key: str,
     detail: str,
     agent_class: str = AGENT_CLASS,
+    claim: "jira_dispatch.ClaimResult | None" = None,
 ) -> tuple[str, str]:
-    """Classify a Gerrit push failure and apply the JIRA recovery action."""
+    """Classify a Gerrit push failure and apply the JIRA recovery action.
+
+    OP-1524: revert branches (``force-publish`` no-merged-non-missing-tree,
+    plain ``revert``) strip this runner's own ``claim:{INSTANCE_ID}:*``
+    label BEFORE the revert comment / transition. Forward-walk and
+    retry-leave branches do not touch the claim — the caller is
+    responsible for releasing it on its own non-revert exit paths.
+    """
 
     category, action = runner_failure_classifier.categorize_push_failure(detail)
 
@@ -1934,6 +1962,7 @@ def _handle_gerrit_push_failure(
                 ),
             )
         else:
+            _release_ticket_claim_if_acquired(client, key, claim)
             jira_dispatch.transition_back_to_todo(
                 client,
                 key,
@@ -1942,6 +1971,7 @@ def _handle_gerrit_push_failure(
         return category, action
 
     if action == "revert":
+        _release_ticket_claim_if_acquired(client, key, claim)
         jira_dispatch.transition_back_to_todo(
             client,
             key,
@@ -2026,6 +2056,15 @@ def _handle_toctou_abort(
 
     audit = f"[runner-toctou:{phase}:{recheck.action}] {recheck.reason}"
     print(f"[runner] {key} toctou abort: {audit}", file=sys.stderr)
+    # OP-1524: strip this runner's own ``claim:{INSTANCE_ID}:*`` label
+    # BEFORE the toctou audit comment + the back-to-To-Do transition.
+    # Without this, ``abort_assignee_changed`` / freshly-blocked reverts
+    # leave a stale claim that wedges the next pickup
+    # (``feedback_stale_claim_labels``). The ``abort_reverted`` /
+    # ``abort_already_advanced`` branches also release here because the
+    # claim is owned by this runner regardless of whether we transition
+    # the status — leaving the label behind would still block siblings.
+    _release_ticket_claim_if_acquired(client, key, claim)
     try:
         jira_dispatch.add_comment(client, key, audit)
     except Exception as exc:  # noqa: BLE001
@@ -2645,6 +2684,9 @@ def main() -> int:
         runner_workspace_safety.verify_workspace_sentinel(sentinel_path, worktree_path)
     except runner_workspace_safety.WorkspaceTamperedError as e:
         print(f"[runner] workspace tampered for {snapshot.key}: {e}", file=sys.stderr)
+        # OP-1524: strip our claim label BEFORE the revert comment so the
+        # next pickup is not blocked by a stale ``claim:{INSTANCE_ID}:*``.
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         jira_dispatch.add_comment(
             client, snapshot.key,
             f"[runner-workspace-tampered]\n\n{e}\n\n"
@@ -2674,14 +2716,10 @@ def main() -> int:
             failure_class="WORKTREE_DIRTY",
             area=metric_meta.get("area"),
         )
-        # OP-1109: ensure coordination lease is released on this terminal
-        # path. Without this, a workspace-tampered abort orphaned an
-        # active claim row that only the (currently still-missing) TTL
-        # sweeper could clean up. Symptom: post-incident `runner-rescue
-        # dump` showed stale `state=active` rows older than the original
-        # CLI run with no live owner process.
+        # OP-1524: claim was released ABOVE (before the revert comment).
+        # OP-1109: ``release_ticket_claim`` also releases the coordination
+        # lease, so the table row does not need its own teardown here.
         _clear_assignee_after_revert(client, snapshot.key)
-        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         return 1
     runner_metrics_recorder.record_completion_sync(
         metric_id=metric_id,
@@ -2696,13 +2734,13 @@ def main() -> int:
         # not in the matrix for this (ticket_type × area × tier). Operator
         # can re-enable per-pickup via `capability:enable=gerrit_push`.
         if not _require_runner_capability(
-            client, snapshot, enabled_caps, "gerrit_push",
+            client, snapshot, enabled_caps, "gerrit_push", claim=claim,
         ):
             # OP-1109: capability-gate refusal is one of the 6 terminal
-            # paths the spec calls out. Releasing the lease here lets
-            # the next runner instance pick the ticket up on the next
-            # tick without waiting for TTL expiry.
-            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+            # paths the spec calls out. The claim has already been
+            # released inside ``_require_runner_capability`` (OP-1524 —
+            # release MUST precede the revert comment so the next pickup
+            # is not blocked by a stale ``claim:{INSTANCE_ID}:*`` label).
             return 1
         # SP-B-X-004 / OP-1062 — TOCTOU reread #1: between `working` and
         # `submitting`. If the operator reverted the ticket, advanced it,
@@ -2772,6 +2810,10 @@ def main() -> int:
                     f"to To Do before Gerrit push.",
                     file=sys.stderr,
                 )
+                # OP-1524: strip our own claim label BEFORE the revert
+                # comment so the next pickup is not blocked by a stale
+                # ``claim:{INSTANCE_ID}:*``.
+                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 jira_dispatch.add_comment(client, snapshot.key, diag)
                 jira_dispatch.add_label(
                     client, snapshot.key, "outcomes-grader-strict:fail",
@@ -2798,7 +2840,6 @@ def main() -> int:
                     failure_class="AC_EVIDENCE_STRICT_FAIL",
                     area=metric_meta.get("area"),
                 )
-                _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 1
             push_result = jira_dispatch.push_to_gerrit_for_review(
                 worktree_path, AGENT_CLASS, target="develop", instance_id=INSTANCE_ID
@@ -2867,7 +2908,7 @@ def main() -> int:
                     f"(skipping OP-827 revert)"
                 )
                 rc_shipped = _handle_runner_detected_shipped(
-                    client, snapshot.key,
+                    client, snapshot.key, claim=claim,
                 )
                 _run_memory_writeback(
                     client,
@@ -2896,6 +2937,10 @@ def main() -> int:
             # the ticket as In Progress here was the OP-811/OP-813 wedge that
             # ran for 2.5 days.
             print(f"[runner] CLI produced no commits: {e}", file=sys.stderr)
+            # OP-1524: strip our own claim label BEFORE the revert
+            # comment so the next pickup is not blocked by a stale
+            # ``claim:{INSTANCE_ID}:*``.
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             jira_dispatch.add_comment(
                 client, snapshot.key,
                 f"[runner-no-commits-from-cli] CLI exited cleanly but produced "
@@ -2910,13 +2955,16 @@ def main() -> int:
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
             _clear_assignee_after_revert(client, snapshot.key)
-            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except jira_dispatch.WorktreeDirtyError as e:
             # OP-827 fix: CLI wrote files but never committed (or skipped
             # ``git add``). Same wedge class as NoCommitsOnBranchError; the
             # recovery path is identical (revert + re-pickup).
             print(f"[runner] CLI left worktree dirty: {e}", file=sys.stderr)
+            # OP-1524: strip our own claim label BEFORE the revert
+            # comment so the next pickup is not blocked by a stale
+            # ``claim:{INSTANCE_ID}:*``.
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             jira_dispatch.add_comment(
                 client, snapshot.key,
                 f"[runner-dirty-worktree] CLI exited with {len(e.dirty_files)} "
@@ -2932,7 +2980,6 @@ def main() -> int:
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
             _clear_assignee_after_revert(client, snapshot.key)
-            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
         except Exception as e:
             # Empty-tree / rebase --keep-empty failure path: the most common
@@ -2952,6 +2999,10 @@ def main() -> int:
             # NoCommitsOnBranchError / WorktreeDirtyError recovery: comment
             # + revert + release claim.
             print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
+            # OP-1524: strip our own claim label BEFORE the revert
+            # comment so the next pickup is not blocked by a stale
+            # ``claim:{INSTANCE_ID}:*``.
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             jira_dispatch.add_comment(
                 client, snapshot.key,
                 f"[runner-gerrit-setup-fail] Could not prepare Gerrit push:\n{type(e).__name__}: {e}\n\n"
@@ -2965,7 +3016,6 @@ def main() -> int:
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
             _clear_assignee_after_revert(client, snapshot.key)
-            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
 
         if push_result.success:
@@ -3033,16 +3083,27 @@ def main() -> int:
             )
         else:
             print(f"[runner] Gerrit push failed:\n{push_result.detail}", file=sys.stderr)
+            # OP-1524: ``claim`` is threaded into the failure handler so
+            # the revert branches strip our own claim label BEFORE the
+            # revert comment. The trailing release here covers the
+            # non-revert branches (force-publish-merged forward walk,
+            # missing-tree wait, retry/manual) and is an idempotent
+            # no-op for the revert branches that already released.
             _handle_gerrit_push_failure(
                 client,
                 snapshot.key,
                 push_result.detail,
                 agent_class=AGENT_CLASS,
+                claim=claim,
             )
             _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
     elif rc == 99:
         print(f"[runner] {snapshot.key} skipped (API agent_class not yet wired in MVP)")
+        # OP-1524: strip our own claim label BEFORE the revert comment
+        # posted inside ``transition_back_to_todo`` so the next pickup is
+        # not blocked by a stale ``claim:{INSTANCE_ID}:*``.
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         jira_dispatch.transition_back_to_todo(client, snapshot.key, "API agent_class not yet supported in auto-runner-jira.py MVP")
     else:
         print(f"[runner] {snapshot.key} CLI failed rc={rc}; reverting ticket")
