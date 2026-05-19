@@ -32,6 +32,8 @@ def _args(**overrides):
         "scope": None,
         "check": False,
         "force": False,
+        "no_push_capability": False,
+        "capability": [],
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -162,3 +164,67 @@ def test_valid_full_flow_posts_story(monkeypatch) -> None:
     assert "area:docs" in fields["labels"]
     assert "area:tests" in fields["labels"]
     assert fields["description"]["content"][0]["type"] == "codeBlock"
+
+
+def test_subscription_class_auto_adds_gerrit_push_capability() -> None:
+    """OP-1526 AC1: subscription-* tickets default to capability:enable=gerrit_push."""
+    mod = _load_script()
+    labels = mod._labels(_args(cls="subscription-claude"))
+    assert "capability:enable=gerrit_push" in labels
+
+
+def test_no_push_capability_flag_omits_default() -> None:
+    """OP-1526 AC1: --no-push-capability removes the gerrit_push default."""
+    mod = _load_script()
+    labels = mod._labels(_args(cls="subscription-codex", no_push_capability=True))
+    assert "capability:enable=gerrit_push" not in labels
+
+
+def test_api_class_does_not_auto_add_gerrit_push_capability() -> None:
+    """OP-1526 AC1: api-* classes never auto-add gerrit_push (they don't push)."""
+    mod = _load_script()
+    for api_cls in ("api-anthropic", "api-openai"):
+        labels = mod._labels(_args(cls=api_cls))
+        assert "capability:enable=gerrit_push" not in labels, (
+            f"{api_cls} should not auto-add gerrit_push capability"
+        )
+
+
+def test_area_db_rejected_with_runner_drift_hint() -> None:
+    """OP-1526 AC1: area:db is in the runner whitelist but rejected here."""
+    mod = _load_script()
+    with pytest.raises(SystemExit) as exc:
+        mod._labels(_args(areas=["db"]))
+    message = str(exc.value)
+    assert "invalid area: db" in message
+    assert "feedback_runner_recognized_areas" in message
+
+
+def test_capability_flag_layers_extra_capabilities() -> None:
+    """OP-1526 AC1: --capability adds extra capability:enable=<cap> labels."""
+    mod = _load_script()
+    labels = mod._labels(
+        _args(cls="subscription-claude", capability=["run_tests", "jira_update"])
+    )
+    assert "capability:enable=gerrit_push" in labels
+    assert "capability:enable=run_tests" in labels
+    assert "capability:enable=jira_update" in labels
+
+
+def test_capability_flag_parser_splits_comma_list() -> None:
+    """OP-1526 AC1: --capability parses a comma-separated list off the CLI."""
+    mod = _load_script()
+    parser = mod.build_parser()
+    args = parser.parse_args(
+        [
+            "--summary", "x",
+            "--description-file", "x.md",
+            "--priority", "Medium",
+            "--tier", "S",
+            "--class", "subscription-claude",
+            "--areas", "backend",
+            "--capability", "run_tests, jira_update ,mcp_search",
+        ]
+    )
+    assert args.capability == ["run_tests", "jira_update", "mcp_search"]
+    assert args.no_push_capability is False

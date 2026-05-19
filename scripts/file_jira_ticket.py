@@ -52,6 +52,19 @@ VALID_CLASSES = {
     "api-anthropic",
     "api-openai",
 }
+# Subscription classes push to Gerrit; api-* classes call the model API and
+# do not push. The capability:enable=gerrit_push label gates runner pickup
+# and is auto-added for subscription-* tickets unless --no-push-capability
+# is supplied (see feedback_capability_safe_default_leak memory).
+PUSH_CAPABLE_CLASSES = {"subscription-codex", "subscription-claude"}
+DEFAULT_PUSH_CAPABILITY = "gerrit_push"
+
+# Areas accepted by the runner (auto-runner-jira.RECOGNISED_AREAS) but
+# intentionally NOT accepted by this script. Operators sometimes confuse
+# the two whitelists; surfacing the drift explicitly avoids a generic
+# "invalid area" error that leaves them guessing.
+RUNNER_ONLY_AREAS = {"db"}
+RUNNER_RECOGNIZED_AREAS_MEMORY = "feedback_runner_recognized_areas"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CRED_DIR = Path("~/.config/omnisight").expanduser()
@@ -169,8 +182,24 @@ def _labels(args: argparse.Namespace) -> list[str]:
     ]
     for area in args.areas:
         if area not in VALID_AREAS:
+            if area in RUNNER_ONLY_AREAS:
+                raise SystemExit(
+                    f"invalid area: {area} — '{area}' is in the runner's "
+                    "RECOGNISED_AREAS whitelist (see auto-runner-jira.py) "
+                    "but intentionally not in file_jira_ticket VALID_AREAS. "
+                    f"See memory '{RUNNER_RECOGNIZED_AREAS_MEMORY}' for "
+                    f"context on this drift. Valid areas here: "
+                    f"{sorted(VALID_AREAS)}."
+                )
             raise SystemExit(f"invalid area: {area} (valid: {sorted(VALID_AREAS)})")
         labels.append(f"area:{area}")
+    no_push = bool(getattr(args, "no_push_capability", False))
+    if args.cls in PUSH_CAPABLE_CLASSES and not no_push:
+        labels.append(f"capability:enable={DEFAULT_PUSH_CAPABILITY}")
+    for cap in getattr(args, "capability", None) or []:
+        label = f"capability:enable={cap}"
+        if label not in labels:
+            labels.append(label)
     if args.scope:
         labels.append(f"scope:{args.scope}")
     return labels
@@ -258,6 +287,27 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scope", default=None)
     parser.add_argument("--check", action="store_true", help="dry-run, validate, no POST")
     parser.add_argument("--force", action="store_true", help="bypass area-mismatch warning")
+    parser.add_argument(
+        "--no-push-capability",
+        dest="no_push_capability",
+        action="store_true",
+        help=(
+            "opt out of the default capability:enable=gerrit_push label "
+            "(applies only to subscription-* classes; api-* classes never "
+            "auto-add it)."
+        ),
+    )
+    parser.add_argument(
+        "--capability",
+        dest="capability",
+        default=[],
+        type=lambda s: [p.strip() for p in s.split(",") if p.strip()],
+        help=(
+            "comma-separated extra capability names to enable on the ticket; "
+            "each is rendered as capability:enable=<name> on top of the "
+            "default set (e.g. --capability run_tests,jira_update)."
+        ),
+    )
     return parser
 
 
