@@ -1,0 +1,74 @@
+; systemd unit template for GitLab Runner on the OmniSight prod+dev host.
+;
+; OP-1511 (parent META OP-1478, scope:op-1478-activation-2026-05-19).
+;
+; Purpose
+; -------
+; First step in the activation chain that takes the project from manual
+; local-build + ghcr.io references to actual GitLab-CR-managed deploys
+; (per ADR-0001 "CI 全面走 GitLab Only"):
+;
+;   register runner → bundle.json populated by pipeline → CR populated
+;   → docker-compose.prod cutover → ghcr.io decommission.
+;
+; The .gitlab-ci.yml on develop tip is already firing on `v*` tags but
+; every pipeline `failed` with 15 jobs `skipped` because 0 runners are
+; registered for the project. This unit gives O1 a known-good template
+; to install once the runner is registered.
+;
+; Scope of THIS ticket
+; --------------------
+; OP-1511 only ships the template. Installation and `systemctl
+; enable --now` happen in O1 (a follow-up ticket); the operator runbook
+; lives in T1.2. DO NOT install, start, or enable this unit from
+; OP-1511 — see AC 2.
+;
+; Install (performed by O1, NOT this ticket)
+; ------------------------------------------
+;   sudo cp deploy/systemd/gitlab-runner.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now gitlab-runner.service
+;   systemctl status gitlab-runner.service   # AC 4 — expect active (running)
+;
+; Why system-level (not user-level)
+; ---------------------------------
+; gitlab-runner with the docker executor needs to manage docker
+; containers, which requires either (a) running as root or (b) being
+; in the docker group with sudoless docker. System-level systemd is
+; the official upstream convention and handles auto-restart natively;
+; user-level only works if the user has docker socket access without
+; sudo, which is fragile.
+;
+; Trade-off vs. the deb-installed unit
+; ------------------------------------
+; The upstream `gitlab-runner` deb drops a unit at
+; /etc/systemd/system/gitlab-runner.service automatically. This
+; template is designed to match-or-replace that file so the
+; on-disk unit is reproducible from git. T1.2's runbook documents
+; the overwrite step.
+;
+; Known debt
+; ----------
+; The prod+dev host gets a privileged docker executor surface area
+; bump from this rollout. Migration to a dedicated CI host is
+; tracked as accepted debt under the META and is out of scope here.
+
+[Unit]
+Description=GitLab Runner
+Documentation=https://docs.gitlab.com/runner/
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=gitlab-runner
+ExecStart=/usr/bin/gitlab-runner run --working-directory /var/lib/gitlab-runner --config /etc/gitlab-runner/config.toml
+Restart=on-failure
+RestartSec=10
+KillSignal=SIGQUIT
+TimeoutStopSec=60
+StandardOutput=append:/var/log/gitlab-runner/gitlab-runner.log
+StandardError=append:/var/log/gitlab-runner/gitlab-runner.log
+
+[Install]
+WantedBy=multi-user.target
