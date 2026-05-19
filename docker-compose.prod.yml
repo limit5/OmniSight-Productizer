@@ -8,7 +8,7 @@
 #
 # OP-1515 (2026-05-19) — OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
 # Backend (×2) and frontend `image:` lines now resolve to
-# `${OMNISIGHT_REGISTRY:?registry required}/omnisight-{backend,frontend}:${OMNISIGHT_IMAGE_TAG:-latest}`.
+# `${OMNISIGHT_REGISTRY:?registry required}/{backend,frontend}:${OMNISIGHT_IMAGE_TAG:-latest}`.
 # OMNISIGHT_REGISTRY is REQUIRED — the bash-style `:?` fail-fast
 # pattern aborts `docker compose` if unset so a missing registry never
 # silently falls back to ghcr.io and hides drift from the OP-1478
@@ -149,7 +149,7 @@ services:
     # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
     # `:?` fails loudly when OMNISIGHT_REGISTRY is unset rather than
     # silently falling back to ghcr.io. See the file-header comment.
-    image: ${OMNISIGHT_REGISTRY:?registry required}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
+    image: ${OMNISIGHT_REGISTRY:?registry required}/backend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: always
     build:
       context: .
@@ -261,7 +261,7 @@ services:
   backend-b:
     # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
     # Same shape as backend-a; see the file-header comment.
-    image: ${OMNISIGHT_REGISTRY:?registry required}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
+    image: ${OMNISIGHT_REGISTRY:?registry required}/backend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: always
     build:
       context: .
@@ -408,7 +408,7 @@ services:
   frontend:
     # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
     # Same shape as the backend replicas; see the file-header comment.
-    image: ${OMNISIGHT_REGISTRY:?registry required}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
+    image: ${OMNISIGHT_REGISTRY:?registry required}/frontend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: always
     build:
       context: .
