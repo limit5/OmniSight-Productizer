@@ -1,0 +1,25 @@
+; OP-1514 — Daily 11:00 trigger for gitlab-cr-monitor.service.
+;
+; Cadence matches the existing daily cluster (compliance-ledger-daily,
+; backup-daily, jira-stale-audit etc.). 11:00 local was the slot the
+; META description picked because the operator window for "did the CR
+; survive the night" lands shortly before the L2 daily standup.
+;
+; Persistent=true catches up missed firings — if the host slept through
+; the scheduled tick (laptop suspend / power cycle), the next boot
+; runs the verification immediately rather than skipping a day. That is
+; the same trade-off compliance-ledger-daily-export.timer made for the
+; same reason.
+
+[Unit]
+Description=Daily 11:00 trigger for gitlab-cr-monitor.service (OP-1514)
+Documentation=https://soraapp.atlassian.net/browse/OP-1514
+
+[Timer]
+Unit=gitlab-cr-monitor.service
+OnCalendar=*-*-* 11:00:00
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
