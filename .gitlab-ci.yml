@@ -106,7 +106,7 @@ build-image:
     - test -n "${BUNDLE_ID}" && test -n "${BUNDLE_SHA}"
     - |
       docker buildx build \
-        --platform linux/amd64,linux/arm64 \
+        --platform "${BUILD_PLATFORMS:-linux/amd64}" \
         --push \
         --file "${DOCKERFILE}" \
         --build-arg "BUNDLE_ID=${BUNDLE_ID}" \
