@@ -34,7 +34,7 @@ variables:
   before_script:
     - set -euo pipefail
     - apk add --no-cache bash ca-certificates coreutils curl jq
-    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+    - echo "$CI_JOB_TOKEN" | docker login "$CI_REGISTRY" --username "gitlab-ci-token" --password-stdin
 
 .image_matrix:
   parallel:
@@ -133,7 +133,7 @@ build-image:
   before_script:
     - set -euo pipefail
     - apk add --no-cache bash ca-certificates coreutils curl jq
-    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" --username "$CI_REGISTRY_USER" --password-stdin
+    - echo "$CI_JOB_TOKEN" | docker login "$CI_REGISTRY" --username "gitlab-ci-token" --password-stdin
     - curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
     - chmod +x /usr/local/bin/cosign
   variables:
