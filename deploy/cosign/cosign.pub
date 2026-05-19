@@ -1,31 +1,4 @@
------BEGIN COSIGN-PLACEHOLDER-----
-# OP-763 D2 — cosign verification material.
-#
-# OmniSight signs published images with **cosign keyless**
-# (sigstore / fulcio / rekor) — see `.github/workflows/build-images.yml`.
-# Keyless verification does NOT require a static public key; the
-# signature carries a short-lived certificate whose identity claims
-# (workflow ref + OIDC issuer) are what `verify_image_signature.sh`
-# checks by default.
-#
-# This file exists for two future cases:
-#
-#   1. Air-gapped / offline-mirror environments where the verifier
-#      cannot reach rekor.sigstore.dev or fulcio.sigstore.dev. Drop
-#      a long-lived ed25519 key generated with `cosign generate-key-pair`
-#      here, sign with `cosign sign --key cosign.key`, and the
-#      verifier picks up the key automatically when
-#      `--cosign-pub deploy/cosign/cosign.pub` is passed (or when
-#      this file's contents are non-placeholder).
-#
-#   2. Migration off sigstore. If sigstore is ever deprecated as the
-#      project's signing backbone, replace this file with the new
-#      project key and update the Spec section in
-#      `docs/operations/release-image-pipeline.md`.
-#
-# The placeholder header (`-----BEGIN COSIGN-PLACEHOLDER-----`) is
-# load-bearing: `verify_image_signature.sh` checks for it and falls
-# back to keyless verification when the file is still a placeholder.
-# Replace the entire file contents with a real
-# `-----BEGIN PUBLIC KEY-----` block to switch to key-based mode.
------END COSIGN-PLACEHOLDER-----
+-----BEGIN PUBLIC KEY-----
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAExIgSy6WGQ7F3mkiqY0xGmrVeACpl
+8EhVUnVV6veOouaGcEWTmpK07UMldfTF/20osgC/tOTcxMRWdXYdqxC8Fw==
+-----END PUBLIC KEY-----

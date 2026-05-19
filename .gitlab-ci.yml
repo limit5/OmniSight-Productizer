@@ -19,8 +19,6 @@ variables:
   COSIGN_VERSION: v2.4.1
   SYFT_VERSION: v1.17.0
   IMAGE_TAG_SHA: "sha-${CI_COMMIT_SHORT_SHA}"
-  COSIGN_CERT_IDENTITY_REGEXP: "^https://sora\\.services:49154/omnisight/OmniSight-Productizer//\\.gitlab-ci\\.yml@refs/tags/v.*$"
-  COSIGN_CERT_OIDC_ISSUER: "https://sora.services:49154"
 
 .tag_rules:
   rules:
@@ -127,9 +125,6 @@ build-image:
     - .docker_job
     - .image_matrix
     - .tag_rules
-  id_tokens:
-    SIGSTORE_ID_TOKEN:
-      aud: sigstore
   before_script:
     - set -euo pipefail
     - apk add --no-cache bash ca-certificates coreutils curl jq
@@ -137,7 +132,6 @@ build-image:
     - curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
     - chmod +x /usr/local/bin/cosign
   variables:
-    COSIGN_EXPERIMENTAL: "1"
     COSIGN_YES: "true"
 
 sign-image:
@@ -150,11 +144,10 @@ sign-image:
     - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${IMAGE_TAG_SHA}" --format '{{json .Manifest.Digest}}' | jq -r .)"
     - test -n "$DIGEST"
     - IMAGE_REF="${IMAGE_BASE}@${DIGEST}"
-    - cosign sign --yes --identity-token "$SIGSTORE_ID_TOKEN" "$IMAGE_REF"
+    - cosign sign --yes --key "$COSIGN_KEY" "$IMAGE_REF"
     - |
       cosign verify \
-        --certificate-identity-regexp "$COSIGN_CERT_IDENTITY_REGEXP" \
-        --certificate-oidc-issuer "$COSIGN_CERT_OIDC_ISSUER" \
+        --key deploy/cosign/cosign.pub \
         "$IMAGE_REF" >/dev/null
 
 sbom-image:
@@ -204,7 +197,7 @@ attest-image:
           pipeline_url: $pipeline_url,
           builder: "gitlab-ci"
         }' > "attestation-${IMAGE_NAME}.json"
-    - cosign attest --yes --identity-token "$SIGSTORE_ID_TOKEN" --predicate "attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
+    - cosign attest --yes --key "$COSIGN_KEY" --predicate "attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
   artifacts:
     name: "image-attestation-${IMAGE_NAME}"
     paths:
