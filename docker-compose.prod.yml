@@ -6,45 +6,33 @@
 # the attribute `version` is obsolete` line on every invocation.
 # Removing it silences the warning without changing behaviour.
 #
-# OP-1482 (2026-05-18) — V4 of the image-pipeline overhaul. Images are
-# now referenced by `@sha256:<digest>` (immutable) instead of
-# `:<tag>` (mutable alias). The digest values come from
-# `prod.env.lock.json`, which is the authoritative per-env promotion
-# record. The deploy procedure is now:
+# OP-1515 (2026-05-19) — OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
+# Backend (×2) and frontend `image:` lines now resolve to
+# `${OMNISIGHT_REGISTRY:?registry required}/omnisight-{backend,frontend}:${OMNISIGHT_IMAGE_TAG:-latest}`.
+# OMNISIGHT_REGISTRY is REQUIRED — the bash-style `:?` fail-fast
+# pattern aborts `docker compose` if unset so a missing registry never
+# silently falls back to ghcr.io and hides drift from the OP-1478
+# GitLab CR activation. The canonical default ships via `.env.example`
+# as `OMNISIGHT_REGISTRY=sora.services:5050/omnisight/omnisight-productizer`.
+# Emergency ghcr.io fallback during the cutover window: operator sets
+# `OMNISIGHT_REGISTRY=ghcr.io/<your-org>` in `.env` (see the T2.2
+# operator runbook for the one-line sed snippet).
 #
-#   1. `scripts/load_env_lock.sh prod.env.lock.json --out /tmp/digests.env`
-#   2. `python3 scripts/verify_image_bundle.py \
-#         --compose docker-compose.prod.yml --lock prod.env.lock.json`
-#   3. `docker compose --env-file .env --env-file /tmp/digests.env \
-#         -f docker-compose.prod.yml up -d --wait`
-#
-# Step (2) is the preflight gate — it refuses to pass if the local
-# cache, remote registry, and lock file digests disagree, OR if the
-# cosign signature on the lock-pinned digest does not verify. That
-# closes Codex's #2 priority gap (mutable alias + `pull_policy: missing`
-# = silent no-op promotion) and the #15 stale-cache failure mode.
-#
-# Because each `image:` is now pinned by content digest, `pull_policy:
-# always` is safe (Docker content-addresses the local cache and
-# de-duplicates the layer pull when the digest is already present).
+# This supersedes the OP-1482 V4 `@sha256:`-digest pin for the backend
+# and frontend lines while bundle.json + cosign signing are re-bootstrapped
+# on the GitLab pipeline. Re-pinning by digest is tracked as an OP-1478
+# follow-up; see `docs/operations/release-image-pipeline.md`.
 #
 # Knobs (override via env / .env):
-#   OMNISIGHT_REGISTRY         — registry/namespace prefix for OmniSight
-#                                images. Defaults to
-#                                `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}` for
-#                                backwards compatibility until G5 cutover.
-#   OMNISIGHT_GHCR_NAMESPACE   — lowercase GitHub org/user handle that
-#                                owns the GHCR packages. Default
-#                                `your-org` is a placeholder.
-#   OMNISIGHT_BACKEND_DIGEST   — `sha256:...` of the backend image.
-#                                Sourced from prod.env.lock.json via
-#                                scripts/load_env_lock.sh.
-#   OMNISIGHT_FRONTEND_DIGEST  — same, for the frontend image.
-#   OMNISIGHT_BRIDGE_DIGEST    — same, for the bridge image (referenced
-#                                by the standalone bridge compose; here
-#                                only the env contract is declared so
-#                                `docker compose config` validates the
-#                                three vars are present in one shot).
+#   OMNISIGHT_REGISTRY   — REQUIRED. Registry/namespace prefix for
+#                          OmniSight images. Default in .env.example
+#                          points at the GitLab CR owned by the
+#                          omnisight-productizer project. Set to
+#                          `ghcr.io/<your-org>` for the cutover-window
+#                          fallback.
+#   OMNISIGHT_IMAGE_TAG  — Image tag to deploy. Defaults to `latest`.
+#                          Set per-release (e.g. `v0.5.0-rc5`) in the
+#                          operator shell before `docker compose pull`.
 #
 # To force a rebuild (e.g. after editing a Dockerfile locally):
 #   docker compose -f docker-compose.prod.yml build
@@ -158,9 +146,10 @@ services:
   # them unambiguously by service name + port, and host-port exposure (8000/8001)
   # remains operator-friendly for direct `curl` smoke of each replica.
   backend-a:
-    # OP-1482: digest-pinned. OMNISIGHT_BACKEND_DIGEST is populated by
-    # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
-    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
+    # `:?` fails loudly when OMNISIGHT_REGISTRY is unset rather than
+    # silently falling back to ghcr.io. See the file-header comment.
+    image: ${OMNISIGHT_REGISTRY:?registry required}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: always
     build:
       context: .
@@ -270,9 +259,9 @@ services:
       start_period: 30s
 
   backend-b:
-    # OP-1482: digest-pinned. OMNISIGHT_BACKEND_DIGEST is populated by
-    # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
-    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-backend@${OMNISIGHT_BACKEND_DIGEST:?missing OMNISIGHT_BACKEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
+    # Same shape as backend-a; see the file-header comment.
+    image: ${OMNISIGHT_REGISTRY:?registry required}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: always
     build:
       context: .
@@ -417,9 +406,9 @@ services:
       start_period: 30s
 
   frontend:
-    # OP-1482: digest-pinned. OMNISIGHT_FRONTEND_DIGEST is populated by
-    # `scripts/load_env_lock.sh prod.env.lock.json` (see file header).
-    image: ${OMNISIGHT_REGISTRY:-ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}}/omnisight-frontend@${OMNISIGHT_FRONTEND_DIGEST:?missing OMNISIGHT_FRONTEND_DIGEST — run scripts/load_env_lock.sh prod.env.lock.json}
+    # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
+    # Same shape as the backend replicas; see the file-header comment.
+    image: ${OMNISIGHT_REGISTRY:?registry required}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
     pull_policy: always
     build:
       context: .
