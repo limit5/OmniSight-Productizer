@@ -75,3 +75,32 @@ def test_findings_flag_promote_requirement_not_applicable() -> None:
     findings = guard.release_cut_findings([cut])
     assert len(findings) == 1
     assert findings[0].kind == "promote_requirement_not_applicable"
+
+
+def test_query_uses_submit_records_not_invalid_flag(monkeypatch) -> None:
+    """OP-1544: Gerrit 3.13 has NO --submit-requirements flag (fatal: not a
+    valid option) — the guard must use the supported --submit-records, else
+    every guard run crashes. Regression guard for that exact mistake."""
+    from pathlib import Path
+
+    captured: dict[str, list[str]] = {}
+
+    class _Result:
+        stdout = '{"type":"stats","rowCount":0}\n'
+
+    def _fake_run(cmd, **kwargs):  # noqa: ANN001 — test stub
+        captured["cmd"] = cmd
+        return _Result()
+
+    monkeypatch.setattr(guard.subprocess, "run", _fake_run)
+    client = guard.SshGerritClient(
+        host="codex-bot@sora.services",
+        port=29418,
+        key_path=Path("/dev/null"),
+        project="omnisight/OmniSight-Productizer",
+    )
+    client.query("status:open project:x branch:main intopic:release-cut")
+
+    cmd = captured["cmd"]
+    assert "--submit-records" in cmd, cmd
+    assert "--submit-requirements" not in cmd, cmd
