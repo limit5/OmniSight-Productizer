@@ -1,0 +1,35 @@
+; OmniSight release-cut guard (OP-1540 impl + OP-1542 query-topic fix; wired by OP-1544).
+;
+; Queries Gerrit for open branch:main intopic:release-cut changes and alerts
+; (jira_dispatch.notify_operator) if any lacks the canonical R3-fastforward
+; hashtag or if release-cut-promote resolves NOT_APPLICABLE on a real cut.
+; Runs from ~/sora-bridge (the auto-synced develop checkout the other monitors
+; use; the main work tree is an operator feature-branch checkout and is stale).
+;
+; Install: ln -sf <repo>/deploy/systemd/omnisight-release-cut-guard.{service,timer}
+;          ~/.config/systemd/user/  (or copy) ; daemon-reload ; enable --now timer.
+
+[Unit]
+Description=OmniSight release-cut guard — alert on mis-tagged release cuts (OP-1540/OP-1544)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_GERRIT_SSH_HOST=codex-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
+ExecStart=/usr/bin/python3 -m backend.agents.release_cut_guard
+; exit 2 = findings (mis-tagged cut) — the guard already notifies the operator,
+; so treat it as a successful run, not a unit failure.
+SuccessExitStatus=2
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
