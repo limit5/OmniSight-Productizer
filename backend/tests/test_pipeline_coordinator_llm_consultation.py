@@ -499,12 +499,71 @@ def test_hybrid_no_match_consults_tier2() -> None:
     assert len(runner.prompts) == 1
 
 
-def test_hybrid_idle_tick_consults_then_noops() -> None:
-    """Empty work-graph: no Tier-1 match → Tier-2 consult returns no action."""
+class _CountingConsultant:
+    """Fake Tier2Consultant that counts consult() invocations (OP-1556 AC).
+
+    Mirrors the seam HybridDecisionEngine depends on — exposes a ``budget``
+    property and a ``consult`` that records every call — so a test can assert
+    the LLM was (or was not) consulted without spawning a subprocess.
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.budget = BudgetGuard(10.0, clock=lambda: NOW)
+
+    def consult(self, ctx, *, behavior=None, trigger="tier1_no_match"):
+        self.calls += 1
+        return llm.Tier2Outcome(actions=(), reason=llm.TIER2_CONSULTED_REASON, llm_consultation={})
+
+
+def test_hybrid_idle_tick_noops_without_consulting() -> None:
+    """OP-1556: empty work-graph (no focal ticket, no slice) → Tier-1 NoopAction.
+
+    The LLM must NOT be consulted on an idle tick — assert via a fake
+    consultant that counts invocations (Integration AC).
+    """
+    consultant = _CountingConsultant()
+    engine = HybridDecisionEngine(tier1=Tier1RuleEngine(), consultant=consultant)
+    result = engine.evaluate(_ctx(None))
+    assert result.tier == 1
+    assert result.tier != 2
+    assert result.is_noop
+    assert result.reason == llm.TIER1_IDLE_NOOP_REASON
+    assert consultant.calls == 0  # consultant.consult NOT called on an idle tick
+
+
+def test_hybrid_idle_tick_with_runner_never_invokes_cli() -> None:
+    """End-to-end via the real consultant seam: the CLI runner is never hit."""
     runner = _ok_runner({"actions": [], "confidence": "low", "escalate_if_wrong": False})
     result = _hybrid(runner).evaluate(_ctx(None))
-    assert result.tier == 2
+    assert result.tier == 1
     assert result.is_noop
+    assert runner.prompts == []  # no LLM invocation on an idle tick
+
+
+def test_hybrid_empty_tickets_map_also_short_circuits() -> None:
+    """A tick with neither a focal ticket nor a work-graph slice is idle."""
+    consultant = _CountingConsultant()
+    engine = HybridDecisionEngine(tier1=Tier1RuleEngine(), consultant=consultant)
+    result = engine.evaluate(_ctx(None, tickets={}))
+    assert result.tier == 1
+    assert consultant.calls == 0
+
+
+def test_hybrid_mode_always_with_situation_still_consults_when_idle() -> None:
+    """The documented exception: tier2_policy=always + a real situation consults.
+
+    A deliberate sprint-level/idle consult (Investigation mode carrying an
+    actual SituationProfile) is allowed past the idle short-circuit even with
+    no focal ticket — UNLESS clause of the Code AC.
+    """
+    consultant = _CountingConsultant()
+    engine = HybridDecisionEngine(tier1=Tier1RuleEngine(), consultant=consultant)
+    situation = SituationProfile(urgency=Level.LOW, novelty=Level.HIGH)  # → Investigation
+    result = engine.evaluate(_ctx(None, situation=situation, mode="skeleton"))
+    assert result.mode == "InvestigationMode"
+    assert result.tier == 2
+    assert consultant.calls == 1
 
 
 def test_hybrid_operator_keep_out_vetoes_both_tiers() -> None:
