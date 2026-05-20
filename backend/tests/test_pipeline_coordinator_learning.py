@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
 from backend.agents import learning_loop as ll
@@ -224,6 +226,125 @@ def test_write_back_fail_open_on_gateway_error(tmp_path: Path) -> None:
     rec = parse_decision_record(_tick_record(decision_id="d1", ts=NOW))
     assert loop.write_back_decision(rec).written is False  # swallowed
     assert _read_events(log.directory, ll.WRITEBACK_EVENT)[0]["written"] is False
+
+
+def test_build_default_learning_loop_uses_backend_api_gateway(tmp_path: Path) -> None:
+    log = DecisionLog(tmp_path / "decision-log", clock=lambda: NOW)
+    loop = ll.build_default_learning_loop(log)
+    assert isinstance(loop._writeback, ll.BackendApiWriteBackGateway)
+
+
+def test_backend_api_gateway_posts_decision_node() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"written": True})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    gateway = ll.BackendApiWriteBackGateway(
+        api_base="http://backend",
+        bearer_token="secret",
+        client=client,
+    )
+    rec = parse_decision_record(
+        _tick_record(decision_id="d-api", ts=NOW, target="OP-1557")
+    )
+    assert rec is not None
+    node = DecisionNode.from_record(rec)
+    try:
+        assert gateway.write_node(node) is True
+    finally:
+        client.close()
+    assert requests[0].url == httpx.URL(
+        f"http://backend{ll.LEARNING_WRITEBACK_PATH}"
+    )
+    assert requests[0].headers["authorization"] == "Bearer secret"
+    payload = json.loads(requests[0].content)
+    assert payload["kind"] == ll.SOURCE_KIND_COORD_DECISION
+    assert payload["identifier"] == "d-api"
+    assert payload["metadata"]["tickets"] == ["OP-1557"]
+
+
+def test_backend_api_gateway_unreachable_degrades_once(caplog: pytest.LogCaptureFixture) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="cognee down")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    gateway = ll.BackendApiWriteBackGateway(api_base="http://backend", client=client)
+    rec = parse_decision_record(_tick_record(decision_id="d-down", ts=NOW))
+    assert rec is not None
+    node = DecisionNode.from_record(rec)
+    try:
+        with caplog.at_level(logging.INFO, logger="backend.agents.learning_loop"):
+            assert gateway.write_node(node) is False
+            assert gateway.write_node(node) is False
+    finally:
+        client.close()
+    assert caplog.text.count("[coord-learn] write-back unavailable") == 1
+
+
+def test_write_back_records_dry_run_receipt_when_backend_api_unreachable(tmp_path: Path) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, text="cognee down")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    gateway = ll.BackendApiWriteBackGateway(api_base="http://backend", client=client)
+    loop, log, _ = _loop(tmp_path, writeback=gateway)
+    rec = parse_decision_record(_tick_record(decision_id="d-dry", ts=NOW))
+    assert rec is not None
+    try:
+        result = loop.write_back_decision(rec)
+    finally:
+        client.close()
+    assert result.written is False
+    receipt = _read_events(log.directory, ll.WRITEBACK_EVENT)[0]
+    assert receipt["decision_id"] == "d-dry"
+    assert receipt["written"] is False
+    assert receipt["dry_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_router_ingests_decision_node_via_cognee(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fastapi import FastAPI
+
+    from backend import auth
+    from backend.agents import cognee_integration as ci
+    from backend.routers import memory as memory_router
+
+    captured = []
+
+    class Report:
+        sources_ingested = 1
+
+    class FakeAdapter:
+        async def ingest(self, sources):
+            captured.extend(sources)
+            return Report()
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", classmethod(lambda cls: FakeAdapter()))
+    app = FastAPI()
+    app.dependency_overrides[auth.require_admin] = lambda: auth.User(
+        id="u", email="u@example.com", name="U", role="admin",
+    )
+    app.include_router(memory_router.router, prefix="/api/v1")
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.post(
+            "/api/v1/memory/cognee/decision-nodes",
+            json={
+                "kind": ll.SOURCE_KIND_COORD_DECISION,
+                "identifier": "d-router",
+                "content": "decision body",
+                "metadata": {"tickets": ["OP-1557"]},
+            },
+        )
+    assert response.status_code == 200
+    assert response.json() == {"written": True}
+    assert captured[0].kind == ll.SOURCE_KIND_COORD_DECISION
+    assert captured[0].identifier == "d-router"
 
 
 # ── daily handler: catch-up write-back + 24h outcome-check (§10.1) ──────────

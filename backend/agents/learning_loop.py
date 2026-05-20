@@ -18,7 +18,7 @@ What this module owns:
                             write-back / outcome-check / retro reasons over)
     DecisionLogReader     — read the append-only log over a UTC-day window
     DecisionNode          — a write-back node (edges = tickets / lessons / mode)
-    WriteBackGateway      — Cognee ingest seam (default → CogneeAdapter; the KG
+    WriteBackGateway      — Cognee ingest seam (default → backend API; the KG
                             falls back / no-ops when Neo4j is down)
     OutcomeObserver       — JIRA-state-change seam the 24h check reads (default
                             → jira_dispatch; injected stub in tests)
@@ -57,6 +57,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 # Bumped when learning-loop semantics change. 1.x = first write-back era.
@@ -79,6 +81,14 @@ GRADUATION_EVENT = "learning_rule_graduation"
 # kind, so this never has to be registered in ``ALL_SOURCE_KINDS`` (which would
 # change what a generic recall query sweeps).
 SOURCE_KIND_COORD_DECISION = "coord_decision"
+
+# The coordinator may run as a host user unit. Keep Cognee as a backend-image
+# dependency by calling the local container API instead of importing it here.
+DEFAULT_BACKEND_API_BASE = "http://localhost:8000"
+BACKEND_API_BASE_ENV = "OMNISIGHT_BACKEND_URL"
+BACKEND_API_BEARER_ENV = "OMNISIGHT_DECISION_BEARER"
+LEARNING_WRITEBACK_PATH = "/api/v1/memory/cognee/decision-nodes"
+DEFAULT_WRITEBACK_TIMEOUT_S = 5.0
 
 # ── Outcome verdicts (§10.1) ────────────────────────────────────────────
 OUTCOME_SUCCESS = "success"          # action produced the expected result
@@ -445,40 +455,72 @@ class WriteBackGateway(Protocol):
     def write_node(self, node: DecisionNode) -> bool: ...
 
 
-class CogneeWriteBackGateway:
-    """Default write-back: ingest the node into the ``coord_decision`` dataset.
+class BackendApiWriteBackGateway:
+    """Default write-back: post decision nodes to the backend memory API.
 
-    Lazy-imports ``cognee_integration`` so the heavy KG dependency stays off
-    the import path and the unit suite (which injects a stub) never touches it.
-    The Cognee adapter already degrades — it falls back / raises typed errors
-    when Neo4j is down — so ``write_node`` swallows every failure into ``False``
-    (fail-open): a learning write-back must never wedge a coordinator tick.
+    The deployed coordinator runs outside the backend container, so importing
+    ``cognee`` here would require a host-level heavy dependency. The backend
+    API runs in the container image that already carries the Cognee stack; this
+    gateway only speaks HTTP and degrades to ``False`` when that API is down.
     """
 
-    def write_node(self, node: DecisionNode) -> bool:
-        try:
-            from backend.agents.cognee_integration import (
-                CogneeAdapter,
-                IngestSource,
-                _run_async,
-            )
+    def __init__(
+        self,
+        *,
+        api_base: str | None = None,
+        bearer_token: str | None = None,
+        timeout_s: float = DEFAULT_WRITEBACK_TIMEOUT_S,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._api_base = (api_base or os.environ.get(BACKEND_API_BASE_ENV)
+                          or DEFAULT_BACKEND_API_BASE).rstrip("/")
+        self._bearer_token = bearer_token
+        self._timeout_s = timeout_s
+        self._client = client
+        self._logged_unavailable = False
 
-            adapter = CogneeAdapter.from_env()
-            source = IngestSource(
-                kind=SOURCE_KIND_COORD_DECISION,
-                identifier=node.decision_id,
-                content=node.render(),
-                metadata=node.metadata(),
-            )
-            # Reuse the cognee adapter's sync→async bridge: it drives the
-            # coroutine on a private loop when one is already running (the
-            # coordinator tick is sync, but this keeps the no-running-loop
-            # contract identical to the rest of the KG call sites).
-            report = _run_async(adapter.ingest([source]))
-            return report.sources_ingested >= 1
+    def write_node(self, node: DecisionNode) -> bool:
+        headers = {"Content-Type": "application/json"}
+        token = self._bearer_token
+        if token is None:
+            token = (os.environ.get(BACKEND_API_BEARER_ENV) or "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        payload = {
+            "kind": SOURCE_KIND_COORD_DECISION,
+            "identifier": node.decision_id,
+            "content": node.render(),
+            "metadata": node.metadata(),
+        }
+        try:
+            response = self._post(payload, headers)
+            if response.status_code >= 400:
+                self._log_unavailable(
+                    "HTTPStatusError",
+                    f"{response.status_code} {response.text[:200]}",
+                )
+                return False
+            data = response.json()
+            return bool(data.get("written"))
         except Exception as exc:  # noqa: BLE001 — write-back is best-effort
-            logger.info("[coord-learn] write-back unavailable (%s): %s", type(exc).__name__, exc)
+            self._log_unavailable(type(exc).__name__, str(exc))
             return False
+
+    def _post(self, payload: Mapping[str, Any], headers: Mapping[str, str]) -> httpx.Response:
+        url = f"{self._api_base}{LEARNING_WRITEBACK_PATH}"
+        if self._client is not None:
+            return self._client.post(url, json=dict(payload), headers=dict(headers))
+        with httpx.Client(timeout=self._timeout_s) as client:
+            return client.post(url, json=dict(payload), headers=dict(headers))
+
+    def _log_unavailable(self, reason: str, detail: str) -> None:
+        if self._logged_unavailable:
+            return
+        logger.info("[coord-learn] write-back unavailable (%s): %s", reason, detail)
+        self._logged_unavailable = True
+
+
+CogneeWriteBackGateway = BackendApiWriteBackGateway
 
 
 # ── Outcome observation (§10.1) ─────────────────────────────────────────
