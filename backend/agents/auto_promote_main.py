@@ -87,10 +87,19 @@ PROMOTE_OUTCOME_FORCE_PROMOTED = "force_promoted"
 FORCE_PROMOTE_WARNING_PREFIX = "OPERATOR FORCE-PROMOTE WARNING:"
 
 # Hashtags + topic attached to the develop -> main review change(s).
-# ``auto-promote`` marks the source; ``R3-fastforward`` is the
-# hook the future conditional submit-requirement keys on (AUDIT-13 ADR /
-# ``area:devops`` follow-up) so the merger-bot may cast a scoped +2 +
-# auto-submit. Until that rule lands an operator submits via the Gerrit UI.
+# ``auto-promote`` marks the source; ``R3-fastforward`` is the canonical
+# hook the release-cut-promote submit-requirement keys on.
+#
+# CAVEAT (OP-1542): auto_promote_main is NOT the live release-cut path — live
+# cuts are pushed by sora manually (owner:sora, topic vX.Y.Z-release-cut), and
+# auto_promote_main itself is unactivated/broken (AUDIT-26d). Its current
+# emitted shape (topic release-v{version}, bot author) does NOT match the
+# DEPLOYED release-cut-promote applicableIf, which requires intopic:release-cut
+# AND owner:sora. A bot-pushed auto-promotion would therefore fall through to
+# Human-Plus-2 (fail-safe). Aligning this emitted shape + realigning the
+# release-cut e2e test to the corrected SR model is deferred to AUDIT-26d (bot
+# auto-promotion vs the owner:sora gate is a design question, not a constant
+# tweak). The hashtag (R3-fastforward) IS already correct + SR-compatible.
 PROMOTE_HASHTAGS: tuple[str, ...] = RELEASE_CUT_HASHTAGS
 PROMOTE_TOPIC_PREFIX = "release-"
 PROMOTE_TOPIC = "release-vX.Y.Z"

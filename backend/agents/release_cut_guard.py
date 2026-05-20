@@ -27,7 +27,10 @@ DEFAULT_GERRIT_PROJECT = "omnisight/OmniSight-Productizer"
 DEFAULT_GERRIT_HOST = "codex-bot@sora.services"
 DEFAULT_GERRIT_PORT = 29418
 DEFAULT_GERRIT_KEY = Path("~/.config/omnisight/gerrit-codex-bot-ed25519").expanduser()
-DEFAULT_QUERY_TOPIC = "release-v"
+# OP-1542: real release-cut topics contain ``release-cut`` (e.g.
+# vX.Y.Z-release-cut), matched by intopic:. The old "release-v" never
+# matched a real cut, so the guard saw nothing.
+DEFAULT_QUERY_TOPIC = "release-cut"
 
 NotifyFn = Callable[[str, str, str], None]
 
