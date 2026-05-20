@@ -1,0 +1,16 @@
+; [OP-1016] Daily 07:00 deployment-audit trigger.
+;
+; OnCalendar is the systemd equivalent of the requested cron expression:
+;   0 7 * * *
+
+[Unit]
+Description=Daily 07:00 trigger for deployment-audit.service (OP-1016)
+
+[Timer]
+Unit=deployment-audit.service
+OnCalendar=*-*-* 07:00:00
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+; [OP-1016] OnFailure alert hook for deployment-audit.service.
+;
+; Emits a structured JSONL line in the same style as staging-gate-alert.service
+; so the existing T1 log/alert path can route fatal red rows to the operator.
+
+[Unit]
+Description=OnFailure alert hook for deployment-audit.service (OP-1016)
+
+[Service]
+Type=oneshot
+StandardOutput=append:/home/user/work/sora/logs/release-milestone/deployment-audit-alerts.jsonl
+StandardError=append:/home/user/work/sora/logs/release-milestone/deployment-audit-alerts.jsonl
+ExecStart=/bin/sh -c 'printf "{\\"timestamp\\":\\"%%s\\",\\"level\\":\\"DEGRADED\\",\\"event\\":\\"deployment_audit_alert\\",\\"source\\":\\"deployment-audit\\",\\"ticket\\":\\"OP-1016\\"}\\n" "$(date -u +%%Y-%%m-%%dT%%H:%%M:%%SZ)"'
