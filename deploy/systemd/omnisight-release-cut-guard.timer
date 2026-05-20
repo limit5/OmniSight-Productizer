@@ -1,0 +1,16 @@
+; Daily trigger for omnisight-release-cut-guard.service (OP-1544).
+; Release cuts are infrequent; daily is plenty. OnBootSec catches reboots;
+; Persistent=true catches up one missed fire after downtime.
+
+[Unit]
+Description=Daily trigger for omnisight-release-cut-guard.service
+
+[Timer]
+Unit=omnisight-release-cut-guard.service
+OnBootSec=12min
+OnCalendar=*-*-* 11:30:00
+Persistent=true
+AccuracySec=5min
+
+[Install]
+WantedBy=timers.target
