@@ -56,10 +56,13 @@ from backend.agents.pipeline_coordinator_modes import (
     SituationProfile,
 )
 from backend.agents.pipeline_coordinator_rules import (
+    Action,
     DecisionContext,
     DecisionEngine,
     DecisionResult,
     NoopAction,
+    Tier1RuleEngine,
+    WorkGraph,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,6 +234,41 @@ def record_ts(record: dict[str, Any]) -> datetime | None:
         return None
 
 
+# ── Action layer (ADR-0021 §6) — shadow stub for 29f-3 ────────────────
+
+
+class ShadowActionExecutor:
+    """Records actions instead of executing them (ADR §6 / shadow mode).
+
+    The real §6 action layer (JIRA mutate / @-operator) lands in a later
+    phase; until then — and during the 29f-14 7-day shadow canary — the
+    coordinator must *observe* what a rule would do without touching JIRA.
+    This executor returns a per-action result record (``executed=False``)
+    that the daemon folds into the decision-log line, so the integration AC
+    ("rule returns Action → action layer executes it (mock if not yet built)
+    → action recorded in decision log") is satisfied without any mutation.
+
+    A real executor is a drop-in: same ``execute`` signature, returning
+    ``executed=True`` plus the mutation outcome.
+    """
+
+    #: Stamped into each result so a decision-log reader can tell shadow
+    #: (observed-only) executions from real ones.
+    executed: bool = False
+
+    def execute(self, action: Action, ctx: DecisionContext) -> dict[str, Any]:
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": self.executed,
+            "shadow": True,
+        }
+
+
+# Action executor seam: anything with ``execute(action, ctx) -> dict``.
+ActionExecutor = Callable[[Action, DecisionContext], dict]
+
+
 # ── Daemon ────────────────────────────────────────────────────────────
 
 
@@ -253,6 +291,8 @@ class PipelineCoordinator:
         heartbeat: HeartbeatWriter | None = None,
         decision_log: DecisionLog | None = None,
         capacity_provider: Callable[[], CapacitySnapshot] | None = None,
+        work_graph_provider: Callable[[], WorkGraph] | None = None,
+        action_executor: ActionExecutor | None = None,
         sleep: SleepFn | None = None,
     ) -> None:
         self._config = config
@@ -262,12 +302,20 @@ class PipelineCoordinator:
         self._heartbeat = heartbeat or HeartbeatWriter(config.heartbeat_path, clock=clock)
         self._decision_log = decision_log or DecisionLog(config.decision_log_dir, clock=clock)
         self._capacity_provider = capacity_provider or self._default_capacity
+        # 29f-3: how the daemon learns the per-tick world. Default yields an
+        # empty WorkGraph (skeleton / idle); 29f-8 injects the JIRA-poll +
+        # bridge-tap builder. Every rule abstains on an empty graph.
+        self._work_graph_provider = work_graph_provider or self._default_work_graph
+        # 29f-3: action layer. Default is shadow (observe-only) so a rule that
+        # fires never mutates JIRA until the real §6 layer / acting mode lands.
+        executor = action_executor or ShadowActionExecutor().execute
+        self._action_executor: ActionExecutor = executor
         self._stop = threading.Event()
         # Interruptible sleep: default waits on the stop event so SIGTERM
         # breaks the loop within one poll instead of one tick.
         self._sleep: SleepFn = sleep or self._stop.wait
-        # Work-graph cache STUB — 29f-8 events / 29f-3 rules fill this.
-        self._work_graph_cache: dict[str, Any] = {}
+        # Current-tick world (rebuilt every tick — ADR §3.2 stateless).
+        self._work_graph: WorkGraph = WorkGraph()
         self._signals_installed = False
 
     @property
@@ -279,15 +327,20 @@ class PipelineCoordinator:
     def _default_capacity(self) -> CapacitySnapshot:
         return load_capacity_snapshot_from_jsonl(captured_at=self._clock())
 
-    def _refresh_work_graph(self) -> dict[str, Any]:
-        """STUB: rebuild the in-memory work-graph cache each tick.
+    def _default_work_graph(self) -> WorkGraph:
+        """Empty world — the skeleton / idle default (29f-8 supplies the real one)."""
+        return WorkGraph()
 
-        29f-8 wires JIRA poll + bridge-log tap here. The skeleton keeps the
-        cache empty but exercises the refresh seam so the daemon contract
-        (refresh → build context → evaluate) is fixed now.
+    def _refresh_work_graph(self) -> WorkGraph:
+        """Rebuild the per-tick world from the injected provider.
+
+        29f-8 wires JIRA poll + bridge-log tap into the provider. The
+        contract (refresh → build context → evaluate) is fixed here; the
+        default provider yields an empty graph so the daemon ticks safely
+        before any event source exists.
         """
-        self._work_graph_cache = {}
-        return self._work_graph_cache
+        self._work_graph = self._work_graph_provider()
+        return self._work_graph
 
     def _current_situation(self) -> tuple[SituationProfile | None, str | None]:
         """STUB: the (profile, operator-override) the current tick decides on.
@@ -305,21 +358,28 @@ class PipelineCoordinator:
 
         ``mode`` is the *idle* baseline (skeleton when there is no situation);
         the engine re-selects a real personality mode from ``situation`` +
-        ``mode_override`` before rule evaluation (ADR-0021 §7).
+        ``mode_override`` before rule evaluation (ADR-0021 §7). ``ticket`` /
+        ``tickets`` expose the WorkGraph slice the Tier-1 rules reason over.
         """
         situation, mode_override = self._current_situation()
+        wg = self._work_graph
         return DecisionContext(
             now=self._clock(),
             capacity=self._capacity_provider(),
             mode=self._mode_selector.select(),
             situation=situation,
             mode_override=mode_override,
-            work_graph=dict(self._work_graph_cache),
+            ticket=wg.focal,
+            tickets=dict(wg.tickets),
         )
 
     # ── decision-log record (ADR-0021 §3.2 example) ──
 
-    def _build_tick_record(self, result: DecisionResult) -> dict[str, Any]:
+    def _build_tick_record(
+        self,
+        result: DecisionResult,
+        action_results: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         # A no-op tick records ``actions:[]``; only real (non-noop) actions
         # are serialised into the array (skeleton emits none).
         actions = [a.to_record() for a in result.actions if not isinstance(a, NoopAction)]
@@ -345,6 +405,15 @@ class PipelineCoordinator:
                 "llm_context_hops": result.mode_behavior.llm_context_hops,
                 "llm_lessons_window": result.mode_behavior.llm_lessons_window,
             }
+        # 29f-3: name the firing rule + tier (ADR Appendix C) and the action
+        # layer's per-action outcomes — only when a rule actually fired, so a
+        # plain no-op tick keeps the skeleton's minimal record shape.
+        if result.rule_name is not None:
+            record["rule_name"] = result.rule_name
+        if result.tier is not None:
+            record["tier"] = result.tier
+        if action_results:
+            record["action_results"] = action_results
         return record
 
     # ── entrypoints ──
@@ -361,7 +430,15 @@ class PipelineCoordinator:
         if self._config.capacity_path is not None:
             write_capacity_snapshot(ctx.capacity, self._config.capacity_path)
         result = self._engine.evaluate(ctx)
-        self._decision_log.append(self._build_tick_record(result))
+        # Hand each real (non-noop) action to the action layer. In shadow
+        # mode it only records the would-be execution; the outcomes go into
+        # the decision-log line so a fired rule is observable end-to-end.
+        action_results = [
+            self._action_executor(a, ctx)
+            for a in result.actions
+            if not isinstance(a, NoopAction)
+        ]
+        self._decision_log.append(self._build_tick_record(result, action_results))
         return result
 
     def request_stop(self) -> None:
@@ -391,14 +468,21 @@ class PipelineCoordinator:
         """
         if install_signals:
             self._install_signal_handlers()
+        # Startup line names the loaded rule registry when the Tier-1 engine
+        # is wired (Deploy AC: registry visible at startup). The engine also
+        # logs its full rule list at construction.
+        rule_names = getattr(self._engine, "rule_names", None)
+        rules_desc = ",".join(rule_names()) if callable(rule_names) else "n/a"
         logger.info(
             "[pipeline_coordinator] entering steady state "
-            "(engine=%s mode=%s tick=%.0fs heartbeat=%.0fs capacity_tracking=active capacity_path=%s)",
+            "(engine=%s mode=%s tick=%.0fs heartbeat=%.0fs "
+            "capacity_tracking=active capacity_path=%s rules=[%s])",
             self._engine.engine_version,
-            SKELETON_MODE,
+            self._mode_selector.select(),
             self._config.tick_interval_seconds,
             self._config.heartbeat_interval_seconds,
             self._config.capacity_path,
+            rules_desc,
         )
         ticks = 0
         try:
@@ -469,9 +553,21 @@ class PipelineCoordinator:
         self._signals_installed = True
 
 
-def build_default_coordinator() -> PipelineCoordinator:
-    """Production wiring: config from env, skeleton engine + mode selector."""
-    return PipelineCoordinator(CoordinatorConfig.from_env())
+def build_default_coordinator(
+    config: CoordinatorConfig | None = None,
+) -> PipelineCoordinator:
+    """Production wiring: env config, Tier-1 rule engine + shadow action layer.
+
+    29f-3: the production default engine is now :class:`Tier1RuleEngine`
+    (constructing it logs the loaded rule registry — Deploy AC). The action
+    layer defaults to shadow (observe-only) so this stays safe for the
+    29f-14 7-day shadow canary; acting mode is enabled later by swapping the
+    executor, not by changing rules.
+    """
+    return PipelineCoordinator(
+        config or CoordinatorConfig.from_env(),
+        engine=Tier1RuleEngine(),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -494,7 +590,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO)
     config = CoordinatorConfig.from_env(config_dir=args.config_dir)
-    coordinator = PipelineCoordinator(config)
+    coordinator = build_default_coordinator(config)
     if args.once:
         coordinator.run_once()
         return 0
