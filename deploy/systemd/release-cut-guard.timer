@@ -1,0 +1,14 @@
+; [OP-1540] Five-minute trigger for release-cut-guard.service.
+
+[Unit]
+Description=Run OmniSight release-cut Gerrit guard every 5 min (OP-1540)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+Unit=release-cut-guard.service
+
+[Install]
+WantedBy=timers.target
