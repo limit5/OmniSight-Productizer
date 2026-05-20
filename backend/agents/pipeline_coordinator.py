@@ -50,7 +50,11 @@ from backend.agents.pipeline_coordinator_capacity import (
     load_capacity_snapshot_from_jsonl,
     write_capacity_snapshot,
 )
-from backend.agents.pipeline_coordinator_modes import ModeSelector, SKELETON_MODE
+from backend.agents.pipeline_coordinator_modes import (
+    ModeSelector,
+    SKELETON_MODE,
+    SituationProfile,
+)
 from backend.agents.pipeline_coordinator_rules import (
     DecisionContext,
     DecisionEngine,
@@ -285,12 +289,31 @@ class PipelineCoordinator:
         self._work_graph_cache = {}
         return self._work_graph_cache
 
+    def _current_situation(self) -> tuple[SituationProfile | None, str | None]:
+        """STUB: the (profile, operator-override) the current tick decides on.
+
+        29f-8 derives a :class:`SituationProfile` from the ticket/event under
+        decision (urgency / risk / novelty / reversibility signals — ADR
+        §7.1) and reads any ``coord-mode:*`` operator override label off the
+        ticket. The skeleton has no situation, so it returns ``(None, None)``
+        and the tick stays in the idle :data:`SKELETON_MODE`.
+        """
+        return None, None
+
     def build_context(self) -> DecisionContext:
-        """Assemble the per-tick :class:`DecisionContext`."""
+        """Assemble the per-tick :class:`DecisionContext`.
+
+        ``mode`` is the *idle* baseline (skeleton when there is no situation);
+        the engine re-selects a real personality mode from ``situation`` +
+        ``mode_override`` before rule evaluation (ADR-0021 §7).
+        """
+        situation, mode_override = self._current_situation()
         return DecisionContext(
             now=self._clock(),
             capacity=self._capacity_provider(),
             mode=self._mode_selector.select(),
+            situation=situation,
+            mode_override=mode_override,
             work_graph=dict(self._work_graph_cache),
         )
 
@@ -301,7 +324,7 @@ class PipelineCoordinator:
         # are serialised into the array (skeleton emits none).
         actions = [a.to_record() for a in result.actions if not isinstance(a, NoopAction)]
         dry_run = all(a.dry_run for a in result.actions) if result.actions else True
-        return {
+        record: dict[str, Any] = {
             "ts": self._clock().isoformat(),
             "event": "decision_tick",
             "engine_version": result.engine_version,
@@ -312,6 +335,17 @@ class PipelineCoordinator:
             "dry_run": dry_run,
             "pid": os.getpid(),
         }
+        # When a personality mode fired (non-idle tick), record the behavior
+        # knobs that steered Tier-1 / Tier-2 so the selected mode is auditable
+        # in the shadow/decision log (ADR-0021 §7.2 + Integration AC).
+        if result.mode_behavior is not None:
+            record["mode_behavior"] = {
+                "tier1_dominant": result.mode_behavior.tier1_dominant,
+                "tier2_policy": result.mode_behavior.tier2_policy,
+                "llm_context_hops": result.mode_behavior.llm_context_hops,
+                "llm_lessons_window": result.mode_behavior.llm_lessons_window,
+            }
+        return record
 
     # ── entrypoints ──
 

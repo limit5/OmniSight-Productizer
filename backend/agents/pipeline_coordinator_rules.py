@@ -32,6 +32,12 @@ from datetime import datetime
 from typing import Any, Mapping, Protocol, runtime_checkable
 
 from backend.agents.pipeline_coordinator_capacity import CapacitySnapshot
+from backend.agents.pipeline_coordinator_modes import (
+    ModeSelector,
+    PersonalityMode,
+    SituationProfile,
+    mode_behavior,
+)
 
 # Bumped when the engine's decision semantics change. 0.x = skeleton era.
 SKELETON_ENGINE_VERSION = "0.1.0-skeleton"
@@ -92,6 +98,12 @@ class DecisionContext:
     now: datetime
     capacity: CapacitySnapshot
     mode: str = "skeleton"
+    # Per-situation personality inputs (ADR-0021 §7). The daemon attaches a
+    # ``situation`` profile + any operator ``coord-mode:*`` override when a
+    # tick is actually deciding about a ticket/event; an idle tick leaves
+    # both ``None`` so the engine keeps the skeleton ``mode``.
+    situation: SituationProfile | None = None
+    mode_override: str | None = None
     # Open-ended bag for later phases (event payload, work-graph cache,
     # bridge-log tail). Skeleton leaves it empty.
     work_graph: Mapping[str, Any] = field(default_factory=dict)
@@ -116,6 +128,12 @@ class DecisionResult:
     reason: str
     mode: str
     engine_version: str
+    # The selected mode's behavior overlay (ADR-0021 §7.2), or ``None`` for
+    # an idle/skeleton tick. Tier-1 rules + Tier-2 LLM read this to know how
+    # hard to lean on rules vs. LLM, how wide to make the LLM context, and
+    # whether to file a follow-up — the Integration-AC "see + respect the
+    # selected mode" seam.
+    mode_behavior: PersonalityMode | None = None
 
     @property
     def is_noop(self) -> bool:
@@ -132,21 +150,45 @@ class DecisionEngineProtocol(Protocol):
 
 
 class DecisionEngine:
-    """Skeleton decision engine — logs one no-op per tick, decides nothing.
+    """Skeleton decision engine — selects a mode, then logs one no-op per tick.
 
-    Real Tier-1 rules + Tier-2 LLM consultation land in 29f-3. Keeping the
-    skeleton a concrete class (rather than only a Protocol) lets the daemon
-    default-construct an engine and run end-to-end today.
+    Real Tier-1 rules + Tier-2 LLM consultation land in 29f-3 / 29f-6. What
+    AUDIT-29f-5 wires here is the **mode-selection-before-rule-evaluation**
+    contract (ADR-0021 §7, Integration AC): when a tick carries a situation
+    profile, the engine asks its :class:`ModeSelector` for the personality
+    mode *before* any rule body would run, and threads the selected mode +
+    its behavior overlay through the result so the (future) Tier-1 rules and
+    Tier-2 LLM consultation can read + respect it. An idle tick (no
+    ``situation``) keeps the skeleton ``mode`` so a no-op still logs "skeleton".
+
+    Keeping the skeleton a concrete class (rather than only a Protocol) lets
+    the daemon default-construct an engine and run end-to-end today.
     """
 
     engine_version: str = SKELETON_ENGINE_VERSION
 
+    def __init__(self, *, mode_selector: ModeSelector | None = None) -> None:
+        self._mode_selector = mode_selector or ModeSelector()
+
     def evaluate(self, ctx: DecisionContext) -> DecisionResult:
-        """Return a single :class:`NoopAction`. Pure — reads nothing, no I/O."""
+        """Select the mode, then return a single :class:`NoopAction`.
+
+        Mode selection runs first (before any rule body) and is the only
+        thing this skeleton engine decides; the action set stays a no-op
+        until 29f-3 lands the Tier-1 rules. No I/O.
+        """
+        mode = ctx.mode
+        if ctx.situation is not None:
+            mode = self._mode_selector.select(ctx.situation, override=ctx.mode_override)
+        behavior = mode_behavior(mode)
+        # (29f-3 Tier-1 rules + 29f-6 Tier-2 LLM consultation read `behavior`
+        #  here to steer rule-vs-LLM weighting, LLM context width, follow-up
+        #  filing — then populate `actions`. The skeleton stays no-op.)
         return DecisionResult(
             decision_id=uuid.uuid4().hex,
             actions=(NoopAction(),),
             reason=SKELETON_NOOP_REASON,
-            mode=ctx.mode,
+            mode=mode,
             engine_version=self.engine_version,
+            mode_behavior=behavior,
         )
