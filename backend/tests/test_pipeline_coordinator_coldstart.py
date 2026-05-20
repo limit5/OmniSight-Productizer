@@ -41,6 +41,20 @@ AC mapping (OP-1551):
   Deploy AC      → standard pytest, tmp_path + fakes, no real infra.
   Integration AC → runs alongside the rest of the coordinator suite.
   Exercised AC   → direct pytest of this file exits 0.
+
+OP-1555 — shadow-gate the cold-start recovery (sibling of OP-1552). The
+acting=False (observe-only) path must RECORD would-be reconcile/sweep/infra
+actions but call NO live mutator:
+
+  - ShadowColdStartGateway forwards reads, no-ops mutators
+      → test_shadow_gateway_satisfies_protocol_and_forwards_reads
+  - shadow boot: zero mutator calls, began/complete + would-be records written
+      → test_shadow_boot_records_actions_but_fires_zero_mutators
+  - acting boot: mutators fire as today (contrast)
+      → test_acting_boot_fires_mutators_as_today
+  - build_default_coordinator threads acting → cold-start gateway
+      → test_default_cold_start_gateway_shadow_vs_acting,
+        test_build_default_coordinator_threads_acting_to_cold_start
 """
 
 from __future__ import annotations
@@ -65,9 +79,12 @@ from backend.agents.pipeline_coordinator import (
     InterruptedTicket,
     JiraDispatchColdStartGateway,
     PipelineCoordinator,
+    ShadowColdStartGateway,
     StaleSweepPlan,
     _build_stale_sweep_plan,
+    _default_cold_start_gateway,
     _last_json_line,
+    build_default_coordinator,
     run_deployment_audit,
 )
 from backend.agents.pipeline_coordinator_rules import (
@@ -795,3 +812,180 @@ def test_build_stale_sweep_plan_classifies_hygiene(monkeypatch, tmp_path: Path) 
     assert plan.stale_claims == {"OP-A": ("claim:default:OP-A",)}
     assert plan.orphan_assignees == ("OP-B",)
     assert plan.resolved_waiting == {"OP-C": ("runner-blocked:waiting-OP-50",)}
+
+
+# ── OP-1555: shadow-gate cold-start (observe-only canary) ─────────────
+#
+# Closes the cold-start observe-only gap (sibling of OP-1552): when
+# acting=False the ColdStartGateway must RECORD would-be reconcile/sweep/
+# infra actions to the decision log but call NO live mutator. Mirrors the
+# ShadowActionExecutor / sprint_replan(shadow=not acting) wiring.
+
+
+def _full_scenario_gateway() -> FakeColdStartGateway:
+    """A gateway whose world exercises every cold-start mutator at once:
+    a down unit (start_unit), the four §3.3 reconcile branches that mutate
+    (transition / mark_resumable / reset_to_todo / @-operator), and all three
+    Startup-3 sweep classes (remove_label / clear_assignee)."""
+    return FakeColdStartGateway(
+        audits=[_units(("coordinator.service", False))],
+        # start would *fail* if actually invoked — proves shadow never calls it.
+        start_results={"coordinator.service": False},
+        interrupted=[
+            InterruptedTicket(key="OP-MERGE", stale=True),
+            InterruptedTicket(key="OP-BRANCH", stale=True),
+            InterruptedTicket(key="OP-STALE", stale=True),
+            InterruptedTicket(key="OP-AMBIG", stale=False),
+        ],
+        mergeable=("OP-MERGE",),
+        with_commits=("OP-BRANCH",),
+        sweep_plan=StaleSweepPlan(
+            stale_claims={"OP-A": ("claim:default:OP-A",)},
+            orphan_assignees=("OP-B",),
+            resolved_waiting={"OP-C": ("runner-blocked:waiting-OP-50",)},
+        ),
+    )
+
+
+def test_shadow_gateway_satisfies_protocol_and_forwards_reads(tmp_path: Path) -> None:
+    """ShadowColdStartGateway structurally satisfies the Protocol, advertises
+    acting=False, forwards every read to its delegate, and routes every
+    mutator to a record-only no-op (the delegate sees zero mutator calls)."""
+    fake = _full_scenario_gateway()
+    gw = ShadowColdStartGateway(fake)
+
+    assert isinstance(gw, ColdStartGateway)
+    assert gw.acting is False
+
+    # Reads forwarded unchanged.
+    assert gw.audit_infra() == fake.audit_infra()  # delegate consulted
+    assert gw.interrupted_tickets() == fake.interrupted_tickets()
+    assert gw.stale_sweep_plan() == fake.stale_sweep_plan()
+    assert gw.gerrit_change_mergeable("OP-MERGE") is True
+    assert gw.branch_has_commits("OP-BRANCH") is True
+    assert gw.has_live_runner("OP-MERGE") is False
+
+    # Mutators record-only: delegate is never touched, start_unit reports
+    # success so an observe-only boot proceeds rather than halting.
+    assert gw.start_unit("coordinator.service") is True
+    gw.mark_resumable("OP-BRANCH")
+    gw.transition_under_review("OP-MERGE")
+    gw.reset_to_todo("OP-STALE")
+    gw.remove_label("OP-A", "claim:default:OP-A")
+    gw.clear_assignee("OP-B")
+    gw.mention_operator("OP-AMBIG", "ambiguous", urgency="medium")
+
+    assert fake.started == []
+    assert fake.marked_resumable == []
+    assert fake.transitioned == []
+    assert fake.reset_todo == []
+    assert fake.removed_labels == []
+    assert fake.cleared_assignees == []
+    assert fake.operator_mentions == []
+
+
+def test_shadow_boot_records_actions_but_fires_zero_mutators(tmp_path: Path) -> None:
+    """Integration AC: a shadow boot (acting=False) drives the full 4-phase
+    recovery to its loop, the wrapped gateway receives ZERO mutator calls, yet
+    cold_start_began/complete + the per-phase would-be-action records ARE
+    written to the decision log."""
+    fake = _full_scenario_gateway()
+    coord = _coordinator(tmp_path, ShadowColdStartGateway(fake))
+
+    report = coord.startup()
+
+    # Boot reached the loop (the down unit did NOT wedge Startup-1 — shadow
+    # start_unit reports success and records the would-be start).
+    assert report.entered_loop is True
+    assert report.phase1_halted is False
+    assert report.started_units == ["coordinator.service"]
+
+    # ZERO live mutator calls on the wrapped gateway.
+    assert fake.started == []
+    assert fake.marked_resumable == []
+    assert fake.transitioned == []
+    assert fake.reset_todo == []
+    assert fake.removed_labels == []
+    assert fake.cleared_assignees == []
+    assert fake.operator_mentions == []
+    # But the reads happened — observation is the point.
+    assert fake.audit_calls >= 1
+
+    # The would-be actions ARE recorded in the report + decision log.
+    recon = {r["ticket"]: (r["classification"], r["action"]) for r in report.reconciled}
+    assert recon["OP-MERGE"] == ("gerrit-mergeable", "under_review")
+    assert recon["OP-BRANCH"] == ("branch-has-commits", "resume")
+    assert recon["OP-STALE"] == ("no-commits-stale", "revert_todo")
+    assert recon["OP-AMBIG"] == ("ambiguous", "operator")
+    assert {r["ticket"] for r in report.swept} == {"OP-A", "OP-B", "OP-C"}
+
+    records = _read_log_records(coord.config.decision_log_dir)
+    events = [r["event"] for r in records]
+    assert events[0] == COLD_START_BEGAN_EVENT
+    assert events[-1] == COLD_START_COMPLETE_EVENT
+    # Phase-2 reconcile + phase-3 sweep would-be-action records are present.
+    phase2 = {r["ticket"] for r in records if r.get("phase") == 2}
+    phase3 = {r["ticket"] for r in records if r.get("phase") == 3}
+    assert {"OP-MERGE", "OP-BRANCH", "OP-STALE", "OP-AMBIG"} <= phase2
+    assert {"OP-A", "OP-B", "OP-C"} <= phase3
+
+
+def test_acting_boot_fires_mutators_as_today(tmp_path: Path) -> None:
+    """Integration AC (contrast): the SAME scenario driven by the live gateway
+    (acting=True, no shadow wrap) fires every mutator exactly as before."""
+    fake = _full_scenario_gateway()
+    # start succeeds for the acting path so it does not halt at Startup-1.
+    fake._start_results = {"coordinator.service": True}
+    coord = _coordinator(tmp_path, fake)
+
+    report = coord.startup()
+
+    assert report.entered_loop is True
+    assert fake.started == ["coordinator.service"]
+    assert fake.transitioned == ["OP-MERGE"]
+    assert fake.marked_resumable == ["OP-BRANCH"]
+    assert fake.reset_todo == ["OP-STALE"]
+    assert [m[0] for m in fake.operator_mentions] == ["OP-AMBIG"]
+    assert ("OP-A", "claim:default:OP-A") in fake.removed_labels
+    assert ("OP-C", "runner-blocked:waiting-OP-50") in fake.removed_labels
+    assert fake.cleared_assignees == ["OP-A", "OP-B"]
+
+
+def test_default_cold_start_gateway_shadow_vs_acting(tmp_path: Path) -> None:
+    """_default_cold_start_gateway returns the observe-only ShadowColdStartGateway
+    by default (acting=False) and the live JiraDispatchColdStartGateway only
+    when acting=True."""
+    cfg = _config(tmp_path)
+    shadow = _default_cold_start_gateway(cfg)
+    assert isinstance(shadow, ShadowColdStartGateway)
+    assert isinstance(shadow._delegate, JiraDispatchColdStartGateway)
+
+    live = _default_cold_start_gateway(cfg, acting=True)
+    assert isinstance(live, JiraDispatchColdStartGateway)
+
+
+def test_build_default_coordinator_threads_acting_to_cold_start(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """Code AC: build_default_coordinator threads the single acting switch to the
+    cold-start gateway — shadow when not acting, live gateway when acting — the
+    same switch that flips sprint_replan(shadow=not acting)."""
+    monkeypatch.setattr(
+        "backend.agents.pipeline_coordinator.build_hybrid_engine",
+        lambda *, decision_log_dir: object(),
+    )
+    monkeypatch.setattr(
+        "backend.agents.pipeline_coordinator.build_default_sprint_replan_handler",
+        lambda **kwargs: None,
+    )
+    cfg = _config(tmp_path)
+
+    shadow_coord = build_default_coordinator(cfg)  # acting=False default
+    assert isinstance(shadow_coord._cold_start_gateway, ShadowColdStartGateway)
+
+    acting_coord = build_default_coordinator(
+        cfg,
+        acting=True,
+        action_executor=lambda action, ctx: {"executed": True},
+    )
+    assert isinstance(acting_coord._cold_start_gateway, JiraDispatchColdStartGateway)

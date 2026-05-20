@@ -822,6 +822,92 @@ class JiraDispatchColdStartGateway:
             logger.warning("[pipeline_coordinator] add_label(%s, %s) failed: %s", key, label, exc)
 
 
+class ShadowColdStartGateway:
+    """Observe-only :class:`ColdStartGateway` for the 7-day shadow canary (OP-1555).
+
+    Wraps a real gateway and forwards every *read* (``audit_infra`` /
+    ``interrupted_tickets`` / ``stale_sweep_plan`` + the per-ticket probes) so
+    the 4-phase recovery still sees the true world — observation is the whole
+    point of shadow mode — but turns every *mutator* into a record-only no-op:
+    the would-be ``reset_to_todo`` / ``mark_resumable`` /
+    ``transition_under_review`` / ``remove_label`` / ``clear_assignee`` /
+    ``start_unit`` / ``mention_operator`` is logged (and lands in the decision
+    log via the orchestrator's per-phase ``startup_phase`` records) without
+    ever touching live JIRA / git / systemctl.
+
+    This is the cold-start sibling of :class:`ShadowActionExecutor` and of the
+    ``sprint_replan(shadow=not acting)`` wiring: the single ``acting`` switch in
+    :func:`build_default_coordinator` flips engine + sprint-replan + cold-start
+    together. Before OP-1555, ``build_default_coordinator`` wired the live
+    gateway unconditionally, so a coordinator deployed "in shadow mode"
+    (``acting=False``) still mutated live JIRA on every boot — the gap this
+    closes (sibling of OP-1552).
+    """
+
+    #: Marks this gateway observe-only (parallels ``ShadowActionExecutor.executed``).
+    acting: bool = False
+
+    def __init__(self, delegate: ColdStartGateway) -> None:
+        self._delegate = delegate
+
+    # ── reads: forwarded unchanged (observation is the point) ──
+    def audit_infra(self) -> InfraAuditResult:
+        return self._delegate.audit_infra()
+
+    def interrupted_tickets(self) -> list[InterruptedTicket]:
+        return self._delegate.interrupted_tickets()
+
+    def has_live_runner(self, key: str) -> bool:
+        return self._delegate.has_live_runner(key)
+
+    def gerrit_change_mergeable(self, key: str) -> bool:
+        return self._delegate.gerrit_change_mergeable(key)
+
+    def branch_has_commits(self, key: str) -> bool:
+        return self._delegate.branch_has_commits(key)
+
+    def stale_sweep_plan(self) -> StaleSweepPlan:
+        return self._delegate.stale_sweep_plan()
+
+    # ── mutators: record-only (never touch live JIRA / git / systemctl) ──
+    def start_unit(self, unit: str) -> bool:
+        # Record the would-be systemctl start and report success so the
+        # observe-only boot proceeds past Startup-1 to actually observe the
+        # reconcile + sweep phases, rather than halting on infra it was
+        # explicitly told not to touch.
+        self._record_shadow("start_unit", unit)
+        return True
+
+    def mark_resumable(self, key: str) -> None:
+        self._record_shadow("mark_resumable", key)
+
+    def transition_under_review(self, key: str) -> None:
+        self._record_shadow("transition_under_review", key)
+
+    def reset_to_todo(self, key: str) -> None:
+        self._record_shadow("reset_to_todo", key)
+
+    def remove_label(self, key: str, label: str) -> None:
+        self._record_shadow("remove_label", f"{key} {label}")
+
+    def clear_assignee(self, key: str) -> None:
+        self._record_shadow("clear_assignee", key)
+
+    def mention_operator(self, key: str, message: str, *, urgency: str = "high") -> None:
+        # An @-operator mention posts a JIRA comment + label — a live mutation,
+        # so it is gated too (the Deploy AC: no cold-start mutation path may
+        # fire while acting=False). The intent is still captured in the log.
+        self._record_shadow("mention_operator", f"{key} ({urgency})")
+
+    def _record_shadow(self, mutator: str, target: str) -> None:
+        logger.info(
+            "[pipeline_coordinator] cold-start SHADOW (acting=False): recording "
+            "would-be %s(%s); not mutating live state.",
+            mutator,
+            target,
+        )
+
+
 def _repo_root() -> Path:
     """Repo root holding ``scripts/`` + git worktree (this file is backend/agents/*)."""
     return Path(__file__).resolve().parents[2]
@@ -1048,9 +1134,20 @@ def _build_stale_sweep_plan(client: Any, *, repo_root: Path | None = None) -> St
     )
 
 
-def _default_cold_start_gateway(config: CoordinatorConfig) -> ColdStartGateway:
-    """Production gateway wiring (no I/O at construction — lazy + fail-open)."""
-    return JiraDispatchColdStartGateway()
+def _default_cold_start_gateway(
+    config: CoordinatorConfig, *, acting: bool = False
+) -> ColdStartGateway:
+    """Production gateway wiring (no I/O at construction — lazy + fail-open).
+
+    ``acting=False`` (the default — the 29f-14 7-day shadow canary, OP-1555)
+    wraps the live gateway in :class:`ShadowColdStartGateway` so cold-start
+    observes the world but performs zero JIRA/git/systemctl mutation;
+    ``acting=True`` returns the live gateway so the 4-phase recovery mutates as
+    designed. The same single ``acting`` switch gates the engine action layer
+    and the sprint re-plan handler (see :func:`build_default_coordinator`).
+    """
+    live = JiraDispatchColdStartGateway()
+    return live if acting else ShadowColdStartGateway(live)
 
 
 # ── Daemon ────────────────────────────────────────────────────────────
@@ -1117,9 +1214,12 @@ class PipelineCoordinator:
         )
         self._sprint_replan_handler = sprint_replan_handler
         self._last_sweep_at: datetime | None = self._clock()
-        # 29f-7: cold-start recovery seam. Default wires the production
-        # jira_dispatch / git / systemctl adapters (lazy + fail-open); tests
-        # inject a fake so the 4-phase decision tree is verified in isolation.
+        # 29f-7: cold-start recovery seam. Default wraps the production
+        # jira_dispatch / git / systemctl adapters (lazy + fail-open) in the
+        # observe-only ShadowColdStartGateway (acting=False default, OP-1555);
+        # build_default_coordinator(acting=True) injects the live gateway, and
+        # tests inject a fake so the 4-phase decision tree is verified in
+        # isolation.
         self._cold_start_gateway: ColdStartGateway = (
             cold_start_gateway or _default_cold_start_gateway(config)
         )
@@ -1774,8 +1874,10 @@ def build_default_coordinator(
     registry (Deploy AC). The budget guard rebuilds the day's spend from the
     decision log (ADR §3.2 stateless-across-restarts). The action layer
     defaults to shadow (observe-only) so this stays safe for the 29f-14 7-day
-    shadow canary. ``acting=True`` is the single switch that permits both the
-    main action executor and hourly sprint re-plan handler to mutate.
+    shadow canary. ``acting=True`` is the single switch that permits the main
+    action executor, the hourly sprint re-plan handler, AND the 4-phase
+    cold-start recovery to mutate; ``acting=False`` wires every one of them
+    observe-only (cold-start via :class:`ShadowColdStartGateway`, OP-1555).
     """
     config = config or CoordinatorConfig.from_env()
     if acting and action_executor is None:
@@ -1791,6 +1893,7 @@ def build_default_coordinator(
         config,
         engine=build_hybrid_engine(decision_log_dir=config.decision_log_dir),
         action_executor=action_executor,
+        cold_start_gateway=_default_cold_start_gateway(config, acting=acting),
         sprint_replan_handler=build_default_sprint_replan_handler(
             config_dir=config.config_dir,
             decision_log_dir=config.decision_log_dir,
