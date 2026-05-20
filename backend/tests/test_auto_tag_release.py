@@ -72,6 +72,96 @@ def _bare_git(repo: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def test_update_release_branch_cherry_picks_merge_main_sha_with_mainline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, gerrit, gitlab = _repo_with_remotes(tmp_path)
+    _git(repo, "checkout", "-b", "feature")
+    _commit_file(repo, "feature.txt", "merged\n")
+    _git(repo, "checkout", "main")
+    _git(repo, "merge", "--no-ff", "feature", "-m", "merge feature")
+    main_sha = _git(repo, "rev-parse", "HEAD")
+    cherry_picks: list[list[str]] = []
+    real_git = atr._git
+
+    def recording_git(repo_path: Path, *args: str, **kwargs):
+        if args[:1] == ("cherry-pick",):
+            cherry_picks.append(list(args))
+        return real_git(repo_path, *args, **kwargs)
+
+    monkeypatch.setattr(atr, "_git", recording_git)
+
+    branch_head = atr._update_release_branch(
+        repo,
+        branch="release/v9.99",
+        main_sha=main_sha,
+        remotes=("gerrit", "gitlab"),
+    )
+
+    assert cherry_picks == [["cherry-pick", "-m", "1", main_sha]]
+    assert _bare_git(gerrit, "show", "release/v9.99:feature.txt") == "merged"
+    assert _bare_git(gitlab, "show", "release/v9.99:feature.txt") == "merged"
+    assert _bare_git(gerrit, "rev-parse", "release/v9.99") == branch_head
+
+
+def test_update_release_branch_cherry_picks_non_merge_main_sha_plain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, gerrit, gitlab = _repo_with_remotes(tmp_path)
+    main_sha = _commit_file(repo, "release.txt", "ready\n")
+    cherry_picks: list[list[str]] = []
+    real_git = atr._git
+
+    def recording_git(repo_path: Path, *args: str, **kwargs):
+        if args[:1] == ("cherry-pick",):
+            cherry_picks.append(list(args))
+        return real_git(repo_path, *args, **kwargs)
+
+    monkeypatch.setattr(atr, "_git", recording_git)
+
+    branch_head = atr._update_release_branch(
+        repo,
+        branch="release/v9.99",
+        main_sha=main_sha,
+        remotes=("gerrit", "gitlab"),
+    )
+
+    assert cherry_picks == [["cherry-pick", main_sha]]
+    assert _bare_git(gerrit, "show", "release/v9.99:release.txt") == "ready"
+    assert _bare_git(gitlab, "show", "release/v9.99:release.txt") == "ready"
+    assert _bare_git(gerrit, "rev-parse", "release/v9.99") == branch_head
+
+
+def test_update_release_branch_skips_cherry_pick_when_main_sha_is_ancestor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, gerrit, _ = _repo_with_remotes(tmp_path)
+    main_sha = _git(repo, "rev-parse", "main")
+    cherry_picks: list[list[str]] = []
+    real_git = atr._git
+
+    def recording_git(repo_path: Path, *args: str, **kwargs):
+        if args[:1] == ("cherry-pick",):
+            cherry_picks.append(list(args))
+        return real_git(repo_path, *args, **kwargs)
+
+    monkeypatch.setattr(atr, "_git", recording_git)
+
+    branch_head = atr._update_release_branch(
+        repo,
+        branch="release/v9.99",
+        main_sha=main_sha,
+        remotes=("gerrit", "gitlab"),
+    )
+
+    assert cherry_picks == []
+    assert branch_head == main_sha
+    assert _bare_git(gerrit, "rev-parse", "release/v9.99") == main_sha
+
+
 def test_staging_passed_creates_tag_pushes_remotes_updates_release_branch(tmp_path: Path) -> None:
     repo, gerrit, gitlab = _repo_with_remotes(tmp_path)
     main_sha = _commit_file(repo, "release.txt", "ready\n")

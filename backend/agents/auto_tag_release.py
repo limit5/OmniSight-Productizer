@@ -87,6 +87,11 @@ def _git_ok(repo: Path, *args: str) -> bool:
     return _git(repo, *args, check=False).returncode == 0
 
 
+def _is_merge_commit(repo: Path, commit: str) -> bool:
+    parents_line = _git_one(repo, "rev-list", "--parents", "-n1", commit)
+    return len(parents_line.split()) > 2
+
+
 def _normalise_version(raw: object) -> str:
     version = str(raw or "").strip()
     if version and not version.startswith("v"):
@@ -173,7 +178,10 @@ def _update_release_branch(
                 remote=primary_remote,
             )
             if not _git_ok(worktree, "merge-base", "--is-ancestor", main_sha, "HEAD"):
-                _git(worktree, "cherry-pick", main_sha, timeout=120)
+                if _is_merge_commit(worktree, main_sha):
+                    _git(worktree, "cherry-pick", "-m", "1", main_sha, timeout=120)
+                else:
+                    _git(worktree, "cherry-pick", main_sha, timeout=120)
             branch_head = _git_one(worktree, "rev-parse", "HEAD")
             for remote in remotes:
                 _git(worktree, "push", remote, f"HEAD:refs/heads/{branch}", timeout=120)
