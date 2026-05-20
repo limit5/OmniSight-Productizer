@@ -188,11 +188,53 @@ def test_promote_writes_audit_row_via_lazy_init(monkeypatch, tmp_path: Path) -> 
     assert captured[0]["after"]["merge_sha"]
 
 
-def test_promote_refuses_when_main_not_ancestor_of_develop(tmp_path: Path) -> None:
-    repo, remote = _repo_with_remote(tmp_path)
+def test_promote_proceeds_on_clean_merge_over_nonempty_main_only(tmp_path: Path) -> None:
+    """OP-1554 — main carrying a commit absent from develop is no longer a
+    pre-check refusal. As long as the ``--no-ff`` merge is clean (here the two
+    sides touch different files) the promotion proceeds normally."""
+    repo, _remote = _repo_with_remote(tmp_path)
     develop_tip = _commit_file(repo, "feature.txt", "ready\n")
     _git(repo, "checkout", "main")
     main_tip = _commit_file(repo, "hotfix.txt", "hotfix\n")
+    _git(repo, "checkout", "develop")
+    pusher = _RecordingPusher(apm.PushOutcome(ok=True, change_number="4242"))
+    alerts: list[tuple[str, str, str]] = []
+    audits: list[tuple[str, dict]] = []
+
+    result = apm.promote_on_milestone_ready(
+        {"event": "milestone_ready", "fixVersion": "v9.99.0", "metaTicket": "OP-922"},
+        repo=repo,
+        remote="gerrit",
+        notify=lambda channel, severity, detail: alerts.append((channel, severity, detail)),
+        event_sink=lambda *_a: None,
+        audit_sink=lambda action, payload: audits.append((action, payload)),
+        push_for_review=pusher,
+    )
+
+    assert result.status == "change_created"
+    assert result.develop_tip == develop_tip
+    assert result.main_tip == main_tip
+    assert result.main_only  # observed + logged, but no longer gates
+    assert len(pusher.calls) == 1
+    # parents are [main, develop] — a real --no-ff merge over the diverged main.
+    assert _git(repo, "show", "-s", "--format=%P", pusher.calls[0]["commit_sha"]).split() == [
+        main_tip,
+        develop_tip,
+    ]
+    # success path alerts at warning, never the old "critical" non_ff refusal.
+    assert all(severity != "critical" for _c, severity, _d in alerts)
+    assert audits[0][1]["after"]["status"] == "change_created"
+
+
+def test_promote_conflicting_merge_raises_conflict_alert(tmp_path: Path) -> None:
+    """OP-1554 — a TRUE divergence (both sides edit the same file) can't be
+    merged cleanly, so it surfaces as a MergeCommitConflict -> critical conflict
+    alert, never silently. ``push_for_review`` is never reached."""
+    repo, _remote = _repo_with_remote(tmp_path)
+    develop_tip = _commit_file(repo, "base.txt", "develop edit\n")
+    _git(repo, "checkout", "main")
+    main_tip = _commit_file(repo, "base.txt", "main edit\n")
+    _git(repo, "checkout", "develop")
     alerts: list[tuple[str, str, str]] = []
     audits: list[tuple[str, dict]] = []
 
@@ -209,9 +251,54 @@ def test_promote_refuses_when_main_not_ancestor_of_develop(tmp_path: Path) -> No
     assert result.status == "blocked"
     assert result.develop_tip == develop_tip
     assert result.main_tip == main_tip
-    assert _git(remote, "rev-parse", "main") != develop_tip
     assert alerts[0][1] == "critical"
-    assert audits[0][1]["after"]["status"] == "non_ff"
+    assert "merge commit could not be created" in alerts[0][2]
+    assert audits[0][1]["after"]["status"] == "merge_conflict"
+
+
+def test_second_consecutive_cut_is_promotable_not_blocked(tmp_path: Path) -> None:
+    """OP-1554 core regression — under MERGE_ALWAYS the FIRST cut leaves a merge
+    commit on main, so on the SECOND cut ``develop..main`` (main_only) is
+    non-empty (that prior merge commit). The old code wedged here with
+    status="blocked"; the redesign returns promotable and the promote proceeds."""
+    repo, _remote = _repo_with_remote(tmp_path)
+
+    # ── first cut: develop adds feat1, build the merge commit and advance main
+    #    to it (MERGE_ALWAYS submit) ──
+    develop_tip1 = _commit_file(repo, "feat1.txt", "one\n")
+    main_base = _git(repo, "rev-parse", "main")
+    merge1 = apm._build_promote_merge_commit(repo, develop_tip1, main_base, "v1.0.0", "OP-1")
+    _git(repo, "update-ref", "refs/heads/main", merge1)  # main now carries the merge commit
+    _git(repo, "checkout", "develop")
+
+    # ── second cut: develop advances again. Now main_only == [merge1],
+    #    develop_only == [feat2]; both non-empty. ──
+    develop_tip2 = _commit_file(repo, "feat2.txt", "two\n")
+
+    check = apm.evaluate_fast_forward(repo=repo, source_branch="develop", target_branch="main")
+    assert check.status == "promotable"
+    assert check.develop_only  # feat2
+    assert check.main_only  # the prior cut's merge commit — EXPECTED, not blocking
+
+    pusher = _RecordingPusher(apm.PushOutcome(ok=True, change_number="4343"))
+    result = apm.promote_on_milestone_ready(
+        {"event": "milestone_ready", "fixVersion": "v1.1.0", "metaTicket": "OP-2"},
+        repo=repo,
+        remote="gerrit",
+        notify=lambda *_a: None,
+        event_sink=lambda *_a: None,
+        audit_sink=lambda *_a: None,
+        push_for_review=pusher,
+    )
+
+    assert result.status == "change_created"
+    assert result.develop_tip == develop_tip2
+    assert len(pusher.calls) == 1
+    # the second cut's merge commit's parents are [main(=merge1), develop_tip2].
+    assert _git(repo, "show", "-s", "--format=%P", pusher.calls[0]["commit_sha"]).split() == [
+        merge1,
+        develop_tip2,
+    ]
 
 
 def test_promote_noop_when_already_advanced(tmp_path: Path) -> None:

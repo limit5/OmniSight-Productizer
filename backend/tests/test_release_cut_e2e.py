@@ -560,6 +560,57 @@ def test_release_cut_end_to_end_success(tmp_path: Path) -> None:
     assert notif.release_meta_url == f"{_JIRA_BROWSE_BASE}/{META_TICKET}"
 
 
+def test_second_consecutive_cut_does_not_wedge(tmp_path: Path) -> None:
+    """OP-1554 (AUDIT-26d-followup) — the regression this ticket fixes.
+
+    Under ``MERGE_ALWAYS`` the FIRST cut submits a ``--no-ff`` merge commit
+    onto ``main``, so on the SECOND cut ``develop..main`` (``main_only``) is
+    non-empty — it carries that prior merge commit. The old FF pre-check read
+    that as a divergence and wedged (status ``blocked`` → critical alert, no
+    promote). The redesign treats a non-empty ``main_only`` as EXPECTED: the
+    second cut is ``change_created`` and submits cleanly, advancing ``main``
+    a second time."""
+    repo, remote = _repo_with_remote(tmp_path)
+    gerrit = MockGerrit(remote, owner=RELEASE_CUT_OWNER)  # genuine sora cuts
+
+    def _cut_and_submit() -> str:
+        """Drive one full cut → 2×+2 → submit; return the merge commit SHA and
+        mirror MERGE_ALWAYS by advancing the LOCAL main onto it (as a real
+        operator's repo would after fetching the submitted state)."""
+        result, *_ = _run_auto_promote(repo, gerrit, topic=SORA_RELEASE_CUT_TOPIC)
+        assert result.status == "change_created", result
+        number = max(gerrit.changes)
+        gerrit.review(number, value=2, group=HUMAN_GROUP)
+        assert gerrit.merger_bot_autovote(number) is True
+        assert gerrit.submittable(number) is True
+        gerrit.submit(number)
+        merge_sha = gerrit.changes[number].commit_sha
+        _git(repo, "update-ref", "refs/heads/main", merge_sha)
+        return merge_sha
+
+    # ── first cut ──
+    develop_tip1 = _commit_file(repo, "feat1.txt", "one\n")
+    merge1 = _cut_and_submit()
+    assert _git(remote, "rev-parse", "main") == merge1
+    assert _git(repo, "rev-parse", f"{merge1}^2") == develop_tip1
+
+    # ── second consecutive cut: develop advances again; main_only is now the
+    #    prior merge commit (merge1), which must NOT block. ──
+    _git(repo, "checkout", "develop")
+    develop_tip2 = _commit_file(repo, "feat2.txt", "two\n")
+    check = apm.evaluate_fast_forward(repo=repo, source_branch="develop", target_branch="main")
+    assert check.status == "promotable"
+    assert check.main_only  # carries the prior cut's merge commit — no longer blocks
+    assert check.develop_only  # feat2
+
+    merge2 = _cut_and_submit()
+    assert merge2 != merge1
+    assert _git(remote, "rev-parse", "main") == merge2
+    # the second merge commit chains onto the first (parents [merge1, develop2]).
+    assert _git(repo, "show", "-s", "--format=%P", merge2).split() == [merge1, develop_tip2]
+    assert len(gerrit.changes) == 2  # one change per cut, neither wedged
+
+
 def test_release_cut_handles_long_develop_chain_as_single_change(tmp_path: Path) -> None:
     """AUDIT-26d intent — a 40-commit develop lead still produces ONE merge
     change (not one change per intervening commit), and it submits cleanly.

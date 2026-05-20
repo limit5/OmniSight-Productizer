@@ -298,15 +298,20 @@ def test_no_milestone_record_noops_exit_zero(tmp_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 4. main has commits absent from develop → non-FF refused, exit 3
+# 4. TRUE divergence (merge conflict) → refused, exit 3.
+#    OP-1554 (AUDIT-26d-followup): a non-empty main_only alone is no longer
+#    a refusal — under MERGE_ALWAYS it is just the prior cut's merge commit.
+#    Only a develop/main edit that cannot be merged cleanly (both touch the
+#    same file) surfaces as MergeCommitConflict -> status="blocked" ->
+#    non_ff_refused -> exit 3.
 # ─────────────────────────────────────────────────────────────────────
 
 
 def test_diverged_main_refused_exit_3(tmp_path: Path) -> None:
     repo, remote = _init_repo_with_remote(tmp_path)
-    _commit_file(repo, "feature.txt", "feature\n")  # develop-only commit
+    _commit_file(repo, "base.txt", "develop edit\n")  # develop edits base.txt
     _git(repo, "checkout", "main")
-    _commit_file(repo, "hotfix.txt", "hotfix\n")  # main-only commit → diverged
+    _commit_file(repo, "base.txt", "main edit\n")  # main edits base.txt → conflict
     _git(repo, "checkout", "develop")
     before = _remote_refs(remote)
     event_log = _write_event_log(
