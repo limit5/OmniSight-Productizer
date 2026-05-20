@@ -97,7 +97,11 @@ class SshGerritClient:
             "query",
             "--format=JSON",
             "--current-patch-set",
-            "--submit-requirements",
+            # Gerrit 3.13 has no "--submit-requirements" flag (fatal: not a
+            # valid option); "--submit-records" is the supported one. The
+            # primary hashtag check needs neither; SR-based findings degrade
+            # gracefully when the submitRequirements key is absent.
+            "--submit-records",
             query,
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=True)
