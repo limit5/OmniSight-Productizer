@@ -184,7 +184,6 @@ def test_milestone_ready_creates_refs_for_main_review_change(tmp_path: Path) -> 
     refs = _remote_refs(remote)
     # main advanced through review, not a direct push.
     assert refs["refs/heads/main"] == main_before
-    assert refs.get("refs/for/main") == develop_tip
     # The module's telemetry event records the hashtags + topic.
     events = [
         json.loads(line[line.index("{"):])
@@ -192,8 +191,16 @@ def test_milestone_ready_creates_refs_for_main_review_change(tmp_path: Path) -> 
         if '"event": "main_promote_change_created"' in line
     ]
     assert events, result.stdout
-    assert events[0]["hashtags"] == ["auto-promote", "milestone:R3-fastforward"]
-    assert events[0]["topic"] == "develop-to-main"
+    # OP-983: refs/for/main carries the ONE merge commit (not the develop
+    # tip directly); the develop tip is that merge commit's second parent.
+    merge_sha = events[0]["merge_sha"]
+    assert refs.get("refs/for/main") == merge_sha
+    assert _git(repo, "rev-parse", f"{merge_sha}^2") == develop_tip
+    # OP-1533: canonical bare ``R3-fastforward`` hashtag; OP-983: per-release
+    # ``release-v…`` topic (the merge subject — not the topic — carries the
+    # ``[release-cut …]`` marker the bridge keys on).
+    assert events[0]["hashtags"] == ["auto-promote", "R3-fastforward"]
+    assert events[0]["topic"] == "release-v9.99.0"
     assert "review change(s) created" in result.stdout
 
 
@@ -221,7 +228,11 @@ def test_milestone_force_promoted_treated_as_green(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr + result.stdout
     refs = _remote_refs(remote)
     assert refs["refs/heads/main"] == main_before
-    assert refs.get("refs/for/main") == develop_tip
+    # OP-983: refs/for/main is the single merge commit; develop tip is its
+    # second parent.
+    merge_sha = refs.get("refs/for/main")
+    assert merge_sha is not None
+    assert _git(repo, "rev-parse", f"{merge_sha}^2") == develop_tip
     assert "review change(s) created" in result.stdout
     assert "OPERATOR FORCE-PROMOTE" in result.stdout
     decision = [
@@ -331,25 +342,36 @@ def test_push_rejected_exit_2(tmp_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 6. develop too far ahead of main → batch_too_large, exit 4
+# 6. OP-983 superseded the OP-960 batch guard: a develop lead of ANY size
+#    is promoted as ONE merge commit, so OP877_MAX_PROMOTE_BATCH no longer
+#    blocks. (The wrapper keeps the exit-4 BatchTooLarge mapping for
+#    forward-compat, but the module never returns that status anymore — see
+#    the `_ = max_promote_batch` no-op in auto_promote_main.)
 # ─────────────────────────────────────────────────────────────────────
 
 
-def test_batch_too_large_exit_4(tmp_path: Path) -> None:
+def test_large_batch_collapses_to_single_merge_change_exit_zero(tmp_path: Path) -> None:
     repo, remote = _init_repo_with_remote(tmp_path)
-    _commit_file(repo, "feature.txt", "ready\n")
-    before = _remote_refs(remote)
+    develop_tip = _commit_file(repo, "feature.txt", "ready\n")
+    main_before = _remote_refs(remote)["refs/heads/main"]
     event_log = _write_event_log(
         tmp_path, '{"event": "milestone_ready", "fixVersion": "v9.99.0"}'
     )
 
+    # Even with the batch guard pinned to 0, OP-983 collapses the lead into
+    # one merge change and the wrapper exits 0 (not the old exit-4).
     result = _run_script(
         repo=repo, event_log=event_log, extra_env={"OP877_MAX_PROMOTE_BATCH": "0"}
     )
 
-    assert result.returncode == 4, result.stderr + result.stdout
-    assert _remote_refs(remote) == before  # nothing pushed
-    assert "BatchTooLarge" in result.stdout
+    assert result.returncode == 0, result.stderr + result.stdout
+    refs = _remote_refs(remote)
+    assert refs["refs/heads/main"] == main_before  # still through review
+    merge_sha = refs.get("refs/for/main")
+    assert merge_sha is not None
+    assert _git(repo, "rev-parse", f"{merge_sha}^2") == develop_tip
+    assert "review change(s) created" in result.stdout
+    assert "BatchTooLarge" not in result.stdout
 
 
 # ─────────────────────────────────────────────────────────────────────
