@@ -107,6 +107,17 @@ lock-in"). The project-global `[project] submitType` stays
 
 ### 3. Conditional submit-requirement `release-cut-promote`
 
+> **Superseded-in-part by [ADR-0039](ADR-0039-release-cut-canonical-hashtag-and-corrected-applicableif.md) (OP-1532, 2026-05-20).** The
+> `applicableIf` shown in this section is **buggy in three layers** —
+> `author:` is the wrong (and forgeable) identity predicate keyed on the wrong
+> value (real cuts are owned by `sora`, not the bot list; cf. Change #711), the
+> version-anchored `topic:` regex de-gates on SemVer variants, and the
+> bare-vs-namespaced hashtag form was never made canonical. The corrected key is
+> `branch:main AND (hashtag:"milestone:R3-fastforward" OR hashtag:R3-fastforward) AND intopic:release-cut AND owner:sora`.
+> See ADR-0039 for the multi-layer bug analysis, the canonical-hashtag decision,
+> and the corrected `applicableIf`. The rest of this ADR (one-merge-commit model,
+> `MERGE_ALWAYS`, the co-exist `submittableIf`, the operator workflow) stands.
+
 `.gerrit/project.config` gains a fourth submit-requirement block (after
 `Human-Plus-2`, `Merger-Plus-2`, `MainFastForwardMergerPlus2`, `No-Veto`,
 `Verified`):
