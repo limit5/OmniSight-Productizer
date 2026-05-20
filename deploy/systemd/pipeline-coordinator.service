@@ -30,6 +30,11 @@ Environment=PYTHONPATH=/home/user/sora-bridge
 Environment=PYTHONUNBUFFERED=1
 Environment=OMNISIGHT_COORDINATOR_CONFIG_DIR=/home/user/.config/omnisight/coordinator
 Environment=OMNISIGHT_COORDINATOR_DECISION_LOG_DIR=/home/user/.config/omnisight/coordinator/decision-log
+; OP-1005 / 29f-7: the no-arg entrypoint runs the 4-phase cold-start
+; recovery (ADR-0021 §3.3 + §9 L6 crash-replay) BEFORE entering the
+; steady-state loop — so every real boot reconciles infra + interrupted
+; JIRA work. The decision-log dir (OMNISIGHT_COORDINATOR_DECISION_LOG_DIR,
+; below) is auto-created 0700 on first write and is what L6 replays.
 ExecStart=/usr/bin/python3 -m backend.agents.pipeline_coordinator
 Restart=on-failure
 RestartSec=15
