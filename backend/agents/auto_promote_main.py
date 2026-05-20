@@ -26,10 +26,16 @@ What submits the change is, by design, *not* this bot's job:
   ``Code-Review: +2`` + auto-submit (an ``area:devops`` Gerrit-config
   follow-up, tracked in the AUDIT-13 ADR).
 
-A non-fast-forward shape (``main`` has commits absent from ``develop``)
-is still treated as an operator alert, not as a merge. Long develop chains
-are intentionally accepted because the review push now contains one merge
-commit instead of one Gerrit change per intervening commit.
+OP-1554 (AUDIT-26d-followup) removed the old non-fast-forward refusal.
+Under ``MERGE_ALWAYS`` (AUDIT-26e) every prior develop -> main promote
+leaves a merge commit on ``main``, so on the second+ cut ``main`` legitimately
+carries commits absent from ``develop`` (the prior cut's merge commit). That
+is EXPECTED, not a divergence, so a non-empty ``main_only`` no longer gates:
+the ``--no-ff`` merge-commit build is the single promote path. A TRUE
+divergence surfaces only when that merge cannot be created cleanly
+(:class:`MergeCommitConflict` -> conflict alert), never as a silent block.
+Long develop chains are intentionally accepted because the review push now
+contains one merge commit instead of one Gerrit change per intervening commit.
 
 OP-968 (AUDIT-18c) wires the ``release:force-promote`` operator override
 (ADR-0019): the milestone checker may emit ``milestone_force_promoted``
@@ -316,14 +322,27 @@ def evaluate_fast_forward(
     source_branch: str,
     target_branch: str,
 ) -> PromotionResult:
-    """Return the FF pre-check shape for ``target <- source``."""
+    """Return the promote pre-check shape for ``target <- source``.
+
+    OP-1554 (AUDIT-26d-followup): under ``MERGE_ALWAYS`` every prior
+    develop -> main promote leaves a merge commit on ``main``, so on the
+    second+ cut ``source_branch..target_branch`` (``main_only``) is
+    non-empty — the prior cut's merge commit(s). That is EXPECTED, not a
+    divergence, so it no longer gates. The only states are:
+
+    * ``noop`` — ``develop_only`` empty, nothing to promote;
+    * ``promotable`` — ``develop_only`` non-empty, REGARDLESS of
+      ``main_only``. The single promote path then builds one ``--no-ff``
+      merge commit; a TRUE divergence surfaces as a merge conflict
+      (:class:`MergeCommitConflict`), not as a pre-check refusal.
+
+    ``main_only`` stays on the result for observability/logging only.
+    """
     develop_only = _git_lines(repo, "log", "--oneline", f"{target_branch}..{source_branch}")
     main_only = _git_lines(repo, "log", "--oneline", f"{source_branch}..{target_branch}")
     develop_tip = _git_one(repo, "rev-parse", source_branch)
     main_tip = _git_one(repo, "rev-parse", target_branch)
-    status = "ff_possible" if develop_only and not main_only else "blocked"
-    if not develop_only:
-        status = "noop"
+    status = "promotable" if develop_only else "noop"
     return PromotionResult(
         status=status,
         version="",
@@ -405,8 +424,10 @@ def promote_on_milestone_ready(
     Only authorized records (``milestone_ready`` or the ADR-0019 operator
     override ``milestone_force_promoted``) trigger git writes, and the
     write is never a direct push to ``refs/heads/<target>`` (Gerrit ACL
-    refuses bot direct push to ``main`` — by design). When the develop tip
-    is a clean fast-forward over ``main`` we build one merge commit and
+    refuses bot direct push to ``main`` — by design). Whenever ``develop``
+    is ahead of ``main`` (``develop_only`` non-empty) we build one merge
+    commit — REGARDLESS of whether ``main`` carries prior-cut merge commits
+    absent from ``develop`` (OP-1554; expected under MERGE_ALWAYS) — and
     push that commit to ``refs/for/<target>`` so ``main`` advances through
     Gerrit Code Review; submitting the resulting change stays an operator / future
     merger-bot action (see module docstring). A force-promoted event
@@ -469,23 +490,12 @@ def promote_on_milestone_ready(
             check.develop_only, check.main_only, detail,
         )
 
-    if check.status != "ff_possible":
-        diff = "\n".join(check.main_only[:50])
-        detail = (
-            f"develop -> main promotion blocked for {version or 'unknown version'}: "
-            f"{target_branch} has {len(check.main_only)} commit(s) absent from {source_branch}.\n"
-            f"{target_branch}-only commits:\n{diff}"
-        )
-        notify("release-auto-promote", "critical", detail)
-        audit_sink(AUDIT_ACTION_MAIN_PROMOTE_BLOCKED, {
-            **base_payload,
-            "before": {"main_tip": check.main_tip},
-            "after": {"status": "non_ff", "main_only": list(check.main_only[:50])},
-        })
-        return PromotionResult(
-            "blocked", version, check.develop_tip, check.main_tip,
-            check.develop_only, check.main_only, detail,
-        )
+    # OP-1554: under MERGE_ALWAYS a non-empty ``main_only`` is the prior
+    # cut's merge commit(s) — EXPECTED, not a divergence — so there is no
+    # FF/non_ff pre-check refusal anymore. The single promote path is the
+    # ``--no-ff`` merge-commit build below; a TRUE divergence surfaces only
+    # when that merge cannot be created cleanly (MergeCommitConflict ->
+    # conflict alert), never as a silent block.
 
     # Kept to avoid churn in wrappers/tests that still pass the historical
     # OP-960 batch guard. OP-983 always pushes one merge commit.
