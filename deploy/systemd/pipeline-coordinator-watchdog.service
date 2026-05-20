@@ -1,0 +1,37 @@
+; OP-1547 / ADR-0021 section 9 L2 - Release Pipeline Coordinator watchdog.
+;
+; Polls the coordinator heartbeat every 30s. If the heartbeat file is
+; absent or older than 90s, the watchdog restarts pipeline-coordinator.
+; This is a simple loop rather than a timer pair so the deploy artifact
+; remains the two units named by ADR-0021 section 3.1 and OP-1547.
+;
+; Install with pipeline-coordinator.service, then keep linger enabled:
+;   loginctl enable-linger $USER
+
+[Unit]
+Description=OmniSight release pipeline coordinator watchdog (OP-1547 / ADR-0021)
+Documentation=https://soraapp.atlassian.net/browse/OP-1547
+Documentation=file:///home/user/sora-bridge/docs/adr/ADR-0021-release-pipeline-coordinator.md
+After=network-online.target pipeline-coordinator.service
+Wants=network-online.target pipeline-coordinator.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_COORDINATOR_HEARTBEAT=/home/user/.config/omnisight/coordinator/heartbeat
+Environment=OMNISIGHT_COORDINATOR_WATCHDOG_POLL_SECONDS=30
+Environment=OMNISIGHT_COORDINATOR_WATCHDOG_STALE_SECONDS=90
+ExecStart=/usr/bin/bash -lc 'set -euo pipefail; heartbeat="$${OMNISIGHT_COORDINATOR_HEARTBEAT}"; poll="$${OMNISIGHT_COORDINATOR_WATCHDOG_POLL_SECONDS}"; stale="$${OMNISIGHT_COORDINATOR_WATCHDOG_STALE_SECONDS}"; while true; do now="$$(date +%%s)"; if [ -e "$$heartbeat" ]; then mtime="$$(stat -c %%Y "$$heartbeat" 2>/dev/null || echo 0)"; age="$$((now - mtime))"; else age="$$stale"; fi; if [ "$$age" -ge "$$stale" ]; then echo "coordinator heartbeat stale: path=$$heartbeat age=$$age stale=$$stale; restarting pipeline-coordinator.service"; systemctl --user restart pipeline-coordinator.service; fi; sleep "$$poll"; done'
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pipeline-coordinator-watchdog
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,44 @@
+; OP-1547 / AUDIT-29f - Release Pipeline Coordinator daemon.
+;
+; User-level service for backend.agents.pipeline_coordinator (OP-1546
+; skeleton). This unit intentionally runs from /home/user/sora-bridge:
+; that checkout is auto-synced to develop and is the tree used by the
+; working monitors. Do not point this at the operator's main work tree.
+;
+; Install (user-level - no sudo):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/pipeline-coordinator.service ~/.config/systemd/user/
+;   cp deploy/systemd/pipeline-coordinator-watchdog.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now pipeline-coordinator.service
+;   systemctl --user enable --now pipeline-coordinator-watchdog.service
+;   loginctl enable-linger $USER
+
+[Unit]
+Description=OmniSight release pipeline coordinator (OP-1547 / ADR-0021)
+Documentation=https://soraapp.atlassian.net/browse/OP-1547
+Documentation=file:///home/user/sora-bridge/docs/adr/ADR-0021-release-pipeline-coordinator.md
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_COORDINATOR_CONFIG_DIR=/home/user/.config/omnisight/coordinator
+Environment=OMNISIGHT_COORDINATOR_DECISION_LOG_DIR=/home/user/.config/omnisight/coordinator/decision-log
+ExecStart=/usr/bin/python3 -m backend.agents.pipeline_coordinator
+Restart=on-failure
+RestartSec=15
+; OP-1547: SIGTERM is the L5 drain signal handled by the coordinator.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+StandardOutput=append:/home/user/work/sora/logs/coordinator/systemd.log
+StandardError=append:/home/user/work/sora/logs/coordinator/systemd.log
+SyslogIdentifier=pipeline-coordinator
+
+[Install]
+WantedBy=default.target
