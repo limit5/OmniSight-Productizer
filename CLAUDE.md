@@ -27,7 +27,7 @@ These rules are injected into EVERY agent prompt. They cannot be overridden.
 - After 2 identical errors, escalate to human instead of retrying.
 - When completing a task:
   - Update the JIRA ticket: Resolution field + final comment with what was done / why
-  - If a generalisable lesson emerged: create a per-file source lesson under `docs/sop/lessons/` and run `scripts/build_lessons_index.py` to regenerate the generated lesson index; read canonical rendered lessons at `https://docs.sora.services/lessons/` (vague entries like "be more careful" are auto-rejected per `docs/sop/jira-ticket-conventions.md` §14)
+  - If a generalisable lesson emerged: create a per-file source lesson under `docs/sop/lessons/` and run `scripts/build_lessons_index.py` to regenerate the generated lesson index; read canonical rendered lessons at `https://docs.sora-dev.app/lessons/` (vague entries like "be more careful" are auto-rejected per `docs/sop/jira-ticket-conventions.md` §14)
   - Before filing or completing architecture/process tickets, scan `docs/sop/architecture-anti-patterns.md` for matching symptoms and reference the matching Cure in the ticket DoD when applicable.
   - If a cross-ticket / cross-Phase retrospective is warranted: open `docs/retrospectives/YYYY-MM-DD-<slug>.md` and link from a META ticket (label `meta:retrospective`)
   - **`HANDOFF.md` is FROZEN as of 2026-05-06. Do not append.** Existing references in commit history remain valid; the file is preserved as historical archive.

@@ -29,5 +29,14 @@ ingress:
   # - hostname: api-staging.omnisight.yourdomain.com
   #   service: http://localhost:8001
 
+  # Docs site (MkDocs Material static output) served by Caddy's :8081 block.
+  # See ADR-0022 + docs/operations/docs-site-hosting-cf-tunnel.md. NOTE: the
+  # PROD tunnel runs in Zero Trust dashboard (token) mode, not this config
+  # file — the authoritative ingress is the dashboard Public Hostname
+  # (docs.<zone> -> HTTP -> caddy:8081). This entry is the config-file-mode
+  # equivalent for reference.
+  # - hostname: docs.yourdomain.com
+  #   service: http://caddy:8081
+
   # Catch-all.
   - service: http_status:404

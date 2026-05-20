@@ -133,7 +133,7 @@ def test_migration_faq_answers_where_is_lessons_learned(runbook_text: str) -> No
         "migration FAQ must cite OP-790 so a reader can find the "
         "deletion commit and the final snapshot"
     )
-    assert "docs.sora.services" in runbook_text, (
+    assert "docs.sora-dev.app" in runbook_text, (
         "migration FAQ must redirect operators to the live docs site"
     )
 

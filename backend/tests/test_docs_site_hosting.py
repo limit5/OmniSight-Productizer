@@ -1,16 +1,19 @@
-"""OP-793 contract tests for docs-site hosting + DNS + TLS.
+"""Contract tests for docs-site hosting (ADR-0022 — Cloudflare Tunnel).
 
-These tests pin the cross-file invariants of the hosting decision in
-ADR-0013 so a future edit cannot silently break the public URL contract:
+These pin the cross-file invariants of the LIVE hosting decision in ADR-0022
+so a future edit cannot silently break the public URL contract:
 
-- The CNAME source-of-truth file (the GitHub Pages custom-domain marker)
-  exists with exactly the canonical hostname.
-- The publish workflow stages that CNAME into `docs-site-dist/` before
-  upload-pages-artifact.
-- The MkDocs `site_url` matches the canonical hostname (so generated
-  links and sitemaps point at the right place).
-- ADR-0013 and the operations runbook reference each other (so a reader
-  finding either one can navigate to the other).
+- The MkDocs `site_url` matches the canonical hostname (so generated links
+  and sitemaps point at the right place).
+- ADR-0022 exists, supersedes ADR-0013's host decision, and documents the
+  Cloudflare Tunnel + Caddy serving path.
+- The Caddy reverse proxy has the docs `:8081` file_server block, and the
+  compose file mounts docs-site-dist read-only into it.
+- The CF Tunnel hosting runbook documents the required operator surfaces.
+
+The GitHub Pages path (ADR-0013 + .github/workflows/docs-site-publish.yml +
+test_docs_site_publish_pipeline.py) is retained as a dormant fallback and is
+NOT asserted here — see ADR-0022 "Retained dormant fallback".
 """
 
 from __future__ import annotations
@@ -20,55 +23,13 @@ from pathlib import Path
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-CANONICAL_HOSTNAME = "docs.sora.services"
+CANONICAL_HOSTNAME = "docs.sora-dev.app"
 
-CNAME_SOURCE = REPO_ROOT / "docs-site" / "docs" / "CNAME"
 MKDOCS_YAML = REPO_ROOT / "docs-site" / "mkdocs.yml"
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "docs-site-publish.yml"
-ADR = REPO_ROOT / "docs" / "adr" / "ADR-0013-docs-site-hosting-dns-tls.md"
-RUNBOOK = REPO_ROOT / "docs" / "operations" / "docs-site-hosting.md"
-PIPELINE_RUNBOOK = REPO_ROOT / "docs" / "operations" / "docs-site-pipeline.md"
-
-
-def test_cname_source_of_truth_holds_canonical_hostname() -> None:
-    assert CNAME_SOURCE.exists(), f"CNAME source missing: {CNAME_SOURCE}"
-    body = CNAME_SOURCE.read_text(encoding="utf-8").strip()
-
-    assert body == CANONICAL_HOSTNAME, (
-        f"CNAME must hold exactly {CANONICAL_HOSTNAME!r}, got {body!r}"
-    )
-
-
-def test_workflow_stages_cname_before_upload() -> None:
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"]["build"]["steps"]
-
-    step_names = [step.get("name", "") for step in steps if isinstance(step, dict)]
-    cname_idx = next(
-        (i for i, n in enumerate(step_names) if "CNAME" in n),
-        None,
-    )
-    upload_idx = next(
-        (
-            i
-            for i, step in enumerate(steps)
-            if isinstance(step, dict)
-            and step.get("uses", "").startswith("actions/upload-pages-artifact")
-        ),
-        None,
-    )
-
-    assert cname_idx is not None, "workflow must have a step that stages CNAME"
-    assert upload_idx is not None, "workflow must upload the pages artifact"
-    assert cname_idx < upload_idx, (
-        "CNAME-stage step must run before upload-pages-artifact, otherwise the"
-        " custom-domain marker is missing from the deployed site"
-    )
-
-    cname_step = steps[cname_idx]
-    run_block = cname_step.get("run", "")
-    assert "docs-site/docs/CNAME" in run_block
-    assert "docs-site-dist/CNAME" in run_block
+CADDYFILE = REPO_ROOT / "deploy" / "reverse-proxy" / "Caddyfile"
+COMPOSE = REPO_ROOT / "docker-compose.prod.yml"
+ADR = REPO_ROOT / "docs" / "adr" / "ADR-0022-docs-site-hosting-cf-tunnel.md"
+RUNBOOK = REPO_ROOT / "docs" / "operations" / "docs-site-hosting-cf-tunnel.md"
 
 
 def test_mkdocs_site_url_matches_canonical_hostname() -> None:
@@ -81,18 +42,37 @@ def test_mkdocs_site_url_matches_canonical_hostname() -> None:
     assert site_url.startswith("https://"), "site_url must be HTTPS"
 
 
-def test_adr_0013_present_and_references_runbook() -> None:
-    assert ADR.exists(), f"ADR-0013 missing: {ADR}"
+def test_adr_0022_present_and_documents_cf_tunnel_path() -> None:
+    assert ADR.exists(), f"ADR-0022 missing: {ADR}"
     body = ADR.read_text(encoding="utf-8")
 
-    assert "docs.sora.services" in body
-    assert "GitHub Pages" in body
-    assert "Let's Encrypt" in body
-    assert "docs-site-hosting.md" in body, "ADR must link to its operations runbook"
+    assert CANONICAL_HOSTNAME in body
+    assert "Cloudflare Tunnel" in body
+    assert "caddy:8081" in body
+    assert "ADR-0013" in body, "ADR-0022 must reference the ADR it supersedes"
+    assert "docs-site-hosting-cf-tunnel.md" in body, (
+        "ADR-0022 must link to its operations runbook"
+    )
 
 
-def test_hosting_runbook_present_and_documents_required_surfaces() -> None:
-    assert RUNBOOK.exists(), f"hosting runbook missing: {RUNBOOK}"
+def test_caddy_serves_docs_on_dedicated_port() -> None:
+    body = CADDYFILE.read_text(encoding="utf-8")
+
+    assert ":8081" in body, "Caddyfile must declare the docs :8081 site block"
+    assert "/srv/docs" in body, "the :8081 block must serve root /srv/docs"
+    assert "file_server" in body, "the :8081 block must use file_server"
+
+
+def test_compose_mounts_docs_dist_into_caddy() -> None:
+    body = COMPOSE.read_text(encoding="utf-8")
+
+    assert "./docs-site-dist:/srv/docs:ro" in body, (
+        "caddy service must mount docs-site-dist read-only at /srv/docs"
+    )
+
+
+def test_cf_tunnel_runbook_present_and_documents_required_surfaces() -> None:
+    assert RUNBOOK.exists(), f"CF tunnel hosting runbook missing: {RUNBOOK}"
     body = RUNBOOK.read_text(encoding="utf-8")
 
     for required in (
@@ -101,31 +81,33 @@ def test_hosting_runbook_present_and_documents_required_surfaces() -> None:
         "Access control",
         "Rotation",
         "One-time operator setup",
-        "Migration redirects",
         "Disaster recovery",
+        "Verification",
         CANONICAL_HOSTNAME,
-        "ADR-0013",
+        "ADR-0022",
     ):
         assert required in body, (
-            f"hosting runbook must cover {required!r}; missing from {RUNBOOK}"
+            f"CF tunnel hosting runbook must cover {required!r}; missing from {RUNBOOK}"
         )
 
 
-def test_pipeline_runbook_links_hosting_runbook() -> None:
-    body = PIPELINE_RUNBOOK.read_text(encoding="utf-8")
+def test_cname_artifact_removed() -> None:
+    """The GitHub-Pages CNAME marker is deleted under the CF Tunnel path.
 
-    assert "docs-site-hosting.md" in body, (
-        "OP-792 pipeline runbook must cross-link OP-793 hosting runbook so"
-        " a reader following the build flow finds the public-URL surface"
+    Serving a public /CNAME would leak the hostname for no functional gain
+    (Cloudflare Tunnel does not use a CNAME file). ADR-0022 deletes it.
+    """
+    cname = REPO_ROOT / "docs-site" / "docs" / "CNAME"
+    assert not cname.exists(), (
+        f"CNAME should be deleted under ADR-0022 (CF Tunnel), still present: {cname}"
     )
 
 
 def test_no_legacy_wiki_redirects_required() -> None:
-    """OP-793 spec asks: redirect old wiki / readme links to new host (if any).
+    """Audit pin: no stale third-party doc-host references in the corpus.
 
-    This audit ran 2026-05-08: zero legacy hosts found in our docs corpus.
-    The test pins the audit so a future commit cannot reintroduce a stale
-    legacy URL silently.
+    Re-confirmed during the ADR-0022 migration (2026-05-20). A future commit
+    cannot reintroduce a legacy doc host silently.
     """
     docs_dir = REPO_ROOT / "docs"
     legacy_hosts = ("readthedocs.io", "gitbook.io", "readme.io")
@@ -138,7 +120,7 @@ def test_no_legacy_wiki_redirects_required() -> None:
                 hits.append(f"{path.relative_to(REPO_ROOT)}: {host}")
 
     assert not hits, (
-        "OP-793 audit found new legacy-host references that need redirect"
-        " planning; either remove them or update ADR-0013 §Migration"
-        f" redirects:\n  " + "\n  ".join(hits)
+        "found new legacy-host references that need redirect planning;"
+        " either remove them or document the redirect in ADR-0022:\n  "
+        + "\n  ".join(hits)
     )

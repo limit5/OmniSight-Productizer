@@ -6,7 +6,7 @@ ticket: OP-794
 # Docs-site operator workflow (OP-794)
 
 This is the operator-facing runbook for the OmniSight docs site
-(<https://docs.sora.services/>). It covers the day-to-day loop an editor
+(<https://docs.sora-dev.app/>). It covers the day-to-day loop an editor
 runs to add or fix content: preview locally, search across the corpus,
 look up history, commit, and verify the live site picks the change up
 within the 5-minute CI envelope.
@@ -169,7 +169,7 @@ Step by step:
 
 6. **Verify within 5 min.** The build job has a 5-minute timeout
     (pinned by `test_build_installs_framework_deps_and_builds_static_site`).
-    Reload <https://docs.sora.services/> and search for the sentinel.
+    Reload <https://docs.sora-dev.app/> and search for the sentinel.
     If it does not appear:
 
     - Open the `Docs Site Publish` workflow run for the merge commit
@@ -209,12 +209,12 @@ performed during this dry-run; the contract pin is the standing proof.
 
 It was deleted from the working tree in OP-790. The per-file lessons
 under `docs/sop/lessons/L-*.md` are the source of truth, and the
-*rendered* index lives at <https://docs.sora.services/docs/sop/lessons/>
+*rendered* index lives at <https://docs.sora-dev.app/docs/sop/lessons/>
 (produced at build time from the per-file frontmatter).
 
 If you have a bookmark or local reference to the aggregate file:
 
-- **For browsing:** open <https://docs.sora.services/docs/sop/lessons/>.
+- **For browsing:** open <https://docs.sora-dev.app/docs/sop/lessons/>.
 - **For grepping:** run `grep -rn 'pattern' docs/sop/lessons/`.
 - **For history of a specific lesson:** see §5.
 - **For the final pre-deletion snapshot:**

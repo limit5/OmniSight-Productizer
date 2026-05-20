@@ -1,5 +1,13 @@
 # Docs-Site Hosting + DNS + TLS (OP-793)
 
+> **DORMANT FALLBACK (2026-05-20).** This GitHub Pages hosting path is no
+> longer the live serving path — superseded by
+> [ADR-0022](../adr/ADR-0022-docs-site-hosting-cf-tunnel.md) (Cloudflare
+> Tunnel at `docs.sora-dev.app`). It is retained unchanged as the fallback
+> that reactivates if the GitHub mirror (broken since 2026-05-07) is repaired.
+> For the LIVE runbook, see
+> [docs-site-hosting-cf-tunnel.md](docs-site-hosting-cf-tunnel.md).
+
 Operator-facing runbook for the public docs site at
 **`https://docs.sora.services/`**.
 

@@ -1,0 +1,34 @@
+; OmniSight docs-site build (MkDocs Material -> docs-site-dist/).
+;
+; Builds the static docs site that the prod Caddy container serves at its
+; :8081 block (CF Tunnel ingress docs.sora-dev.app). Build env is the
+; squidfunk/mkdocs-material docker image (no host mkdocs install). See
+; ADR-0014 and scripts/build_docs_site.sh.
+;
+; Install (user systemd):
+;   ln -sf /home/user/work/sora/OmniSight-Productizer/deploy/systemd/omnisight-docs-build.service \
+;          ~/.config/systemd/user/omnisight-docs-build.service
+;   ln -sf /home/user/work/sora/OmniSight-Productizer/deploy/systemd/omnisight-docs-build.timer \
+;          ~/.config/systemd/user/omnisight-docs-build.timer
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now omnisight-docs-build.timer
+;
+; First fire pulls the mkdocs-material image (network dependency).
+
+[Unit]
+Description=OmniSight docs site build (MkDocs -> docs-site-dist, served by Caddy :8081)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
+ExecStartPre=/bin/mkdir -p /home/user/work/sora/logs/docs-build
+ExecStart=/bin/bash /home/user/work/sora/OmniSight-Productizer/scripts/build_docs_site.sh
+StandardOutput=append:/home/user/work/sora/logs/docs-build/build.log
+StandardError=append:/home/user/work/sora/logs/docs-build/build.log
+; Build itself is ~0.4s; 300s covers a cold image pull on first fire.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
