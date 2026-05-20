@@ -21,6 +21,7 @@ Environment=OMNISIGHT_RUNNER_INSTANCE_ID=default
 Environment=OMNISIGHT_MEMORY_TOOL_ROOT=/var/omnisight/memory
 Environment=OMNISIGHT_MEMORY_TOOL_CAP_MB=100
 Environment=OMNISIGHT_IDEMPOTENCY_DB_PATH=%h/.config/omnisight/idem-keys-claude-bot-default.db
+Environment=OMNISIGHT_RUNNER_QUOTA_STATE_DIR=%h/.cache/omnisight/runner-quota-state
 ExecStart=%h/work/sora/OmniSight-Productizer/deploy/runner-wrappers/runner-claude.sh default
 Restart=on-failure
 RestartSec=90
