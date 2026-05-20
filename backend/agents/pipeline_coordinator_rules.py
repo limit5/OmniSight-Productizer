@@ -284,6 +284,11 @@ class DecisionResult:
     # the skeleton engine's construction (which names neither) valid.
     rule_name: str | None = None
     tier: int | None = None
+    # 29f-6: the Tier-2 LLM-consultation metadata block (ADR Appendix C
+    # ``llm_consultation`` — context/response token counts, cost, confidence,
+    # decision rationale, cited lessons, or a budget-degrade marker). ``None``
+    # for a Tier-1 / skeleton tick that never consulted the LLM.
+    llm_consultation: Mapping[str, Any] | None = None
 
     @property
     def is_noop(self) -> bool:

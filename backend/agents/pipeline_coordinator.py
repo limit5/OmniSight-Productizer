@@ -55,6 +55,7 @@ from backend.agents.pipeline_coordinator_modes import (
     ModeSelector,
     SituationProfile,
 )
+from backend.agents.pipeline_coordinator_llm_consultation import build_hybrid_engine
 from backend.agents.pipeline_coordinator_rules import (
     ACTION_FILE_TICKET,
     ACTION_RELABEL,
@@ -1255,6 +1256,12 @@ class PipelineCoordinator:
             record["rule_name"] = result.rule_name
         if result.tier is not None:
             record["tier"] = result.tier
+        # 29f-6: the Tier-2 LLM-consultation block (ADR Appendix C) — only on a
+        # tick that actually consulted (or degraded) the LLM, so a Tier-1 / no-op
+        # tick keeps its minimal record shape and ``budget_cap`` events stay
+        # grep-able + replayable for the daily-spend rebuild.
+        if result.llm_consultation is not None:
+            record["llm_consultation"] = dict(result.llm_consultation)
         if action_results:
             record["action_results"] = action_results
         return record
@@ -1702,17 +1709,21 @@ class PipelineCoordinator:
 def build_default_coordinator(
     config: CoordinatorConfig | None = None,
 ) -> PipelineCoordinator:
-    """Production wiring: env config, Tier-1 rule engine + shadow action layer.
+    """Production wiring: env config, hybrid Tier-1+Tier-2 engine, shadow layer.
 
-    29f-3: the production default engine is now :class:`Tier1RuleEngine`
-    (constructing it logs the loaded rule registry — Deploy AC). The action
-    layer defaults to shadow (observe-only) so this stays safe for the
-    29f-14 7-day shadow canary; acting mode is enabled later by swapping the
-    executor, not by changing rules.
+    29f-3 shipped the Tier-1 rule engine; 29f-6 fronts it with the Tier-2 LLM
+    consultant (:class:`HybridDecisionEngine`) so a tick that no Tier-1 rule
+    matches (or that the personality mode escalates) consults the claude CLI
+    under a daily budget cap. Constructing the engine logs the loaded rule
+    registry (Deploy AC). The budget guard rebuilds the day's spend from the
+    decision log (ADR §3.2 stateless-across-restarts). The action layer
+    defaults to shadow (observe-only) so this stays safe for the 29f-14 7-day
+    shadow canary; acting mode is enabled later by swapping the executor.
     """
+    config = config or CoordinatorConfig.from_env()
     return PipelineCoordinator(
-        config or CoordinatorConfig.from_env(),
-        engine=Tier1RuleEngine(),
+        config,
+        engine=build_hybrid_engine(decision_log_dir=config.decision_log_dir),
     )
 
 
