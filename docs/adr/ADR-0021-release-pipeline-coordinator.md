@@ -107,6 +107,11 @@ deploy/systemd/pipeline-coordinator-watchdog.service  ← separate watchdog (L2)
 ~/.config/omnisight/coordinator/state/           ← optional in-flight LLM consultation persistence
 ```
 
+> **Operator runbook (AUDIT-29f-13):** day-to-day monitoring, override,
+> pause, decision-log inspection, and troubleshooting for these
+> artifacts live in
+> [`docs/operations/coordinator-runbook.md`](../operations/coordinator-runbook.md).
+
 ### 3.2 Process model
 
 Single long-running Python daemon. Subscribes to events from multiple sources;
