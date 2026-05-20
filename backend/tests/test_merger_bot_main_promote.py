@@ -49,6 +49,30 @@ _MERGER_DESCRIPTION = (
     "milestone:R3-fastforward auto-promote changes on main"
 )
 
+# OP-1536 / rcsr C3a — the corrected ``applicableIf`` for the three keyed
+# submit-requirements, pinned verbatim.  These tests DEFINE the desired
+# config: C3a satisfies these strings statically (a file parse), so the
+# suite is green ahead of — and is NOT blocked by — the C3b
+# refs/meta/config deploy.  Notes on the exact form (per ADR-0020):
+#   * AND binds tighter than OR (Gerrit precedence), so the doubly-keyed
+#     carve-out negation is written with De Morgan: NOT (hashtag AND
+#     branch:main) ⇔ -hashtag OR -branch:main.
+#   * the release-cut author predicate uses *top-level* alternation
+#     (^a$|^b$|^c$ — no grouping parens) and the topic regex uses
+#     [0-9]/[.] rather than \d/\. so JGit's project.config value parser
+#     has no backslash / paren to misread.
+C3A_APPLICABLE_IF: dict[str, str] = {
+    "Human-Plus-2": '-hashtag:"milestone:R3-fastforward" OR -branch:main',
+    "MainFastForwardMergerPlus2": (
+        'hashtag:"milestone:R3-fastforward" AND branch:main'
+    ),
+    "release-cut-promote": (
+        'branch:main AND topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ '
+        'AND hashtag:"milestone:R3-fastforward" '
+        'AND author:^auto-promote-bot$|^claude-bot$|^codex-bot$'
+    ),
+}
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Minimal model of a Gerrit change + a Code-Review vote
@@ -239,6 +263,17 @@ def _parse_submit_requirements(text: str) -> dict[str, dict[str, str]]:
 @pytest.fixture(scope="module")
 def submit_requirements() -> dict[str, dict[str, str]]:
     return _parse_submit_requirements(_PROJECT_CONFIG.read_text(encoding="utf-8"))
+
+
+@pytest.fixture(scope="module")
+def example_submit_requirements() -> dict[str, dict[str, str]]:
+    """The refs/meta/config mirror (.example).  Code AC (OP-1536) requires
+    the corrected applicableIf to be asserted in BOTH config files, so the
+    keyed-SR tests parse this one too rather than relying solely on the
+    project.config↔.example byte-sync check."""
+    return _parse_submit_requirements(
+        _PROJECT_CONFIG_EXAMPLE.read_text(encoding="utf-8")
+    )
 
 
 def _is_submittable(change: Change, srs: dict[str, dict[str, str]]) -> bool:
@@ -516,11 +551,11 @@ def test_release_cut_promote_present_and_wellformed(submit_requirements):
     sr = submit_requirements["release-cut-promote"]
     assert sr["description"] == _RELEASE_CUT_DESCRIPTION
 
+    # C3a (OP-1536): pin the EXACT corrected applicableIf, not loose
+    # substrings — this string is the spec C3a must satisfy and C3b
+    # deploys to refs/meta/config.
     applicable = sr["applicableIf"]
-    assert "branch:main" in applicable
-    assert "topic:" in applicable and "release-v" in applicable
-    assert 'hashtag:"milestone:R3-fastforward"' in applicable
-    assert "author:" in applicable
+    assert applicable == C3A_APPLICABLE_IF["release-cut-promote"], applicable
     # Quadruply-keyed = three ANDs joining the four predicates.
     assert applicable.count(" AND ") == 3, applicable
 
@@ -533,6 +568,26 @@ def test_release_cut_promote_present_and_wellformed(submit_requirements):
     assert " OR " not in submittable
 
     assert sr.get("canOverrideInChildProjects") == "false"
+
+
+def test_release_cut_promote_applicable_if_corrected_in_both_files(
+    submit_requirements, example_submit_requirements
+):
+    """Code AC (OP-1536) — the C3a corrected ``applicableIf`` for ALL THREE
+    keyed submit-requirements (Human-Plus-2, MainFastForwardMergerPlus2,
+    release-cut-promote) is pinned byte-for-byte in BOTH
+    .gerrit/project.config AND .gerrit/project.config.example.
+
+    These tests DEFINE the desired config: they assert the strings the C3a
+    patch produces, statically (a file parse), so the suite stays green
+    ahead of — and is never blocked by — the C3b refs/meta/config deploy."""
+    for name, expected in C3A_APPLICABLE_IF.items():
+        assert submit_requirements[name]["applicableIf"] == expected, (
+            f"{name}: project.config applicableIf is not the C3a-corrected form"
+        )
+        assert example_submit_requirements[name]["applicableIf"] == expected, (
+            f"{name}: project.config.example applicableIf is not the C3a-corrected form"
+        )
 
 
 def test_release_cut_needs_both_merger_and_human_plus_two(submit_requirements):

@@ -65,6 +65,40 @@ _RELEASE_CUT_SUBJECT_RE = re.compile(
 )
 _JIRA_BROWSE_BASE = "https://soraapp.atlassian.net/browse"
 
+# OP-1536 / rcsr C3a — the static config the behavioural model above must
+# stay in lock-step with.  RELEASE_TOPIC_RE / R3_FASTFORWARD_HASHTAG /
+# PROMOTE_AUTHORS are this file's *in-process* encoding of the four
+# release-cut-promote keys; the assertions below cross-check them against
+# the corrected ``applicableIf`` actually written in BOTH .gerrit config
+# files, so the e2e DEFINES the desired config (green ahead of, and not
+# blocked by, the C3b refs/meta/config deploy).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_PROJECT_CONFIG = _REPO_ROOT / ".gerrit" / "project.config"
+_PROJECT_CONFIG_EXAMPLE = _REPO_ROOT / ".gerrit" / "project.config.example"
+RELEASE_CUT_AUTHORS_ORDERED = ("auto-promote-bot", "claude-bot", "codex-bot")
+RELEASE_CUT_PROMOTE_APPLICABLE_IF = (
+    'branch:main AND topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ '
+    'AND hashtag:"milestone:R3-fastforward" '
+    'AND author:^auto-promote-bot$|^claude-bot$|^codex-bot$'
+)
+
+
+def _applicable_if(config_text: str, sr_name: str) -> str | None:
+    """Pull the ``applicableIf`` value of one ``[submit-requirement "<name>"]``
+    block out of a project.config file (no live Gerrit needed)."""
+    in_block = False
+    for line in config_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("[submit-requirement "):
+            in_block = stripped == f'[submit-requirement "{sr_name}"]'
+            continue
+        if stripped.startswith("["):
+            in_block = False
+            continue
+        if in_block and stripped.startswith("applicableIf"):
+            return stripped.partition("=")[2].strip()
+    return None
+
 
 # ── git scaffolding ──────────────────────────────────────────────────────────
 
@@ -585,3 +619,34 @@ def test_bridge_skips_non_release_cut_main_merge(tmp_path: Path) -> None:
     assert bridge.audit_rows == []
     assert bridge.notifications == []
     assert bridge.log_lines[-1]["event"] == "change_merged_not_release_cut"
+
+
+# ── C3a corrected-config contract (OP-1536) ───────────────────────────────────
+
+
+def test_release_cut_promote_applicable_if_matches_e2e_model_in_both_files() -> None:
+    """Code AC (OP-1536) — the C3a corrected ``applicableIf`` for
+    release-cut-promote is pinned byte-for-byte in BOTH .gerrit/project.config
+    and .gerrit/project.config.example, AND it is the *same* four-key rule the
+    behavioural model in this file exercises.
+
+    The four keys parsed straight out of the config — ``branch:main`` / the
+    release-topic regex / the ``milestone:R3-fastforward`` hashtag / the
+    author alternation — are exactly the keys :meth:`MockGerrit._sr_applicable`
+    enforces (``RELEASE_TOPIC_RE`` / ``R3_FASTFORWARD_HASHTAG`` /
+    ``PROMOTE_AUTHORS``).  Pinning the desired config here keeps the e2e
+    honest against the C3a patch ahead of the C3b refs/meta/config deploy."""
+    for path in (_PROJECT_CONFIG, _PROJECT_CONFIG_EXAMPLE):
+        applicable = _applicable_if(path.read_text(encoding="utf-8"), "release-cut-promote")
+        assert applicable == RELEASE_CUT_PROMOTE_APPLICABLE_IF, (
+            f"{path.name}: release-cut-promote applicableIf is not the C3a-corrected form"
+        )
+
+        # The parsed keys are the same ones the in-process model enforces.
+        assert "branch:main" in applicable
+        topic_re = applicable.split("topic:", 1)[1].split(" AND ", 1)[0]
+        assert topic_re == RELEASE_TOPIC_RE.pattern
+        assert f'hashtag:"{R3_FASTFORWARD_HASHTAG}"' in applicable
+        author_alt = applicable.split("author:", 1)[1]
+        assert author_alt == "|".join(f"^{a}$" for a in RELEASE_CUT_AUTHORS_ORDERED)
+        assert PROMOTE_AUTHORS == frozenset(RELEASE_CUT_AUTHORS_ORDERED)
