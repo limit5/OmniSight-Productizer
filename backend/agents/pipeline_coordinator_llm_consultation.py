@@ -840,6 +840,9 @@ class Tier2Consultant:
             "estimate_usd": round(self._config.per_decision_estimate_usd, 6),
             "confidence": parsed.confidence,
             "decision_rationale": parsed.decision_rationale,
+            # 29f-11: the one-line lesson the learning loop writes back to
+            # Cognee when this decision's 24h outcome-check succeeds (§10.1).
+            "learning": parsed.learning,
             "lessons_cited": lesson_ids,
             "model": self._config.model,
             "budget_remaining_usd": round(self._budget.remaining_usd(), 6),

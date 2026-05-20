@@ -1083,6 +1083,7 @@ class PipelineCoordinator:
         jira_poller: JiraEventPoller | None = None,
         deduper: EventDeduper | None = None,
         sprint_replan_handler: SprintReplanHandler | None = None,
+        learning_loop: "Any | None" = None,
     ) -> None:
         self._config = config
         self._engine = engine or DecisionEngine()
@@ -1122,6 +1123,13 @@ class PipelineCoordinator:
         self._cold_start_gateway: ColdStartGateway = (
             cold_start_gateway or _default_cold_start_gateway(config)
         )
+        # 29f-11: learning loop (ADR §10). Default ``None`` keeps the skeleton /
+        # test daemon inert; build_default_coordinator wires the Cognee
+        # write-back + 24h outcome-check + weekly graduation handlers. When
+        # present, every Tier-2 tick is written back within the tick ("within
+        # 60s", Integration AC) and the daily/weekly schedules are gated here.
+        self._learning_loop = learning_loop
+        self._learning_seeded = False
         self._stop = threading.Event()
         # Interruptible sleep: default waits on the stop event so SIGTERM
         # breaks the loop within one poll instead of one tick.
@@ -1597,8 +1605,32 @@ class PipelineCoordinator:
             for a in result.actions
             if not isinstance(a, NoopAction)
         ]
-        self._decision_log.append(self._build_tick_record(result, action_results))
+        record = self._build_tick_record(result, action_results)
+        self._decision_log.append(record)
+        self._run_learning_loop(record, result)
         return result
+
+    def _run_learning_loop(self, record: dict[str, Any], result: DecisionResult) -> None:
+        """Write back a Tier-2 decision + fire any due daily/weekly handler.
+
+        Gated on a wired learning loop (29f-11) so the skeleton / test daemon is
+        unaffected. Write-back happens in-tick so a Tier-2 decision reaches
+        Cognee well within the 60s Integration-AC budget; the daily + weekly
+        schedules are gated by the loop's own cadence (mirrors the hourly
+        sweep). Fail-open: a learning-loop error never breaks a decision tick.
+        """
+        loop = self._learning_loop
+        if loop is None:
+            return
+        try:
+            if not self._learning_seeded:
+                loop.seed_schedule(self._clock())
+                self._learning_seeded = True
+            if result.tier == 2:
+                loop.write_back_decision(record)
+            loop.maybe_run(self._clock())
+        except Exception as exc:  # noqa: BLE001 — learning loop is best-effort
+            logger.warning("[pipeline_coordinator] learning loop error: %s", exc)
 
     def _append_source_event_records(self) -> None:
         for event in self._pending_events:
@@ -1742,6 +1774,11 @@ def build_default_coordinator(
     shadow canary; acting mode is enabled later by swapping the executor.
     """
     config = config or CoordinatorConfig.from_env()
+    decision_log = DecisionLog(config.decision_log_dir)
+    # 29f-11: the learning loop reads + appends to the same decision log; build
+    # it from the log so its daily/weekly schedule survives a restart (§3.2).
+    from backend.agents.learning_loop import build_default_learning_loop
+
     return PipelineCoordinator(
         config,
         engine=build_hybrid_engine(decision_log_dir=config.decision_log_dir),
@@ -1751,6 +1788,8 @@ def build_default_coordinator(
             capacity_path=config.capacity_path,
             agent_class=config.jira_agent_class,
         ),
+        decision_log=decision_log,
+        learning_loop=build_default_learning_loop(decision_log),
     )
 
 
