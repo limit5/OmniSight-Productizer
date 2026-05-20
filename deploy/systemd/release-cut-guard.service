@@ -1,0 +1,24 @@
+; [OP-1540] Alert on mis-tagged release-cut Gerrit changes.
+
+[Unit]
+Description=OmniSight release-cut Gerrit guard (OP-1540)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
+Environment=PYTHONUNBUFFERED=1
+Environment=OMNISIGHT_GERRIT_SSH_HOST=codex-bot@sora.services
+Environment=OMNISIGHT_GERRIT_SSH_PORT=29418
+Environment=OMNISIGHT_GERRIT_PROJECT=omnisight/OmniSight-Productizer
+Environment=OMNISIGHT_GIT_SSH_KEY_PATH=/home/user/.config/omnisight/gerrit-codex-bot-ed25519
+ExecStartPre=/usr/bin/mkdir -p /home/user/work/sora/logs/release-cut-guard
+ExecStart=/usr/bin/python3 -m backend.agents.release_cut_guard
+StandardOutput=append:/home/user/work/sora/logs/release-cut-guard/run.log
+StandardError=append:/home/user/work/sora/logs/release-cut-guard/run.log
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target
