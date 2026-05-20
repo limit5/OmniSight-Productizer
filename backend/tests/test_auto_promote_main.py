@@ -153,7 +153,10 @@ def test_promote_includes_hashtag_for_submit_rule(tmp_path: Path) -> None:
         push_for_review=pusher,
     )
 
-    assert apm.PROMOTE_HASHTAGS == ("auto-promote", "milestone:R3-fastforward")
+    # OP-1533 canonicalised the release-cut hashtag to the bare
+    # ``R3-fastforward`` spelling; the corrected release-cut SR accepts it
+    # (hashtag:R3-fastforward OR hashtag:"milestone:R3-fastforward").
+    assert apm.PROMOTE_HASHTAGS == ("auto-promote", "R3-fastforward")
     assert pusher.calls[0]["hashtags"] == apm.PROMOTE_HASHTAGS
 
 
