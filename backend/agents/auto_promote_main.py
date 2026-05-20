@@ -22,7 +22,7 @@ What submits the change is, by design, *not* this bot's job:
   humans-in-the-loop pattern; Sprint H H4 / OP-949 adds a one-click
   "advance main now" affordance);
 * longer term — a conditional submit-requirement keyed on the
-  ``milestone:R3-fastforward`` hashtag lets the merger-bot cast a scoped
+  ``R3-fastforward`` hashtag lets the merger-bot cast a scoped
   ``Code-Review: +2`` + auto-submit (an ``area:devops`` Gerrit-config
   follow-up, tracked in the AUDIT-13 ADR).
 
@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from backend.agents import jira_dispatch
+from backend.release_cut_metadata import RELEASE_CUT_HASHTAGS
 
 log = logging.getLogger(__name__)
 
@@ -86,11 +87,11 @@ PROMOTE_OUTCOME_FORCE_PROMOTED = "force_promoted"
 FORCE_PROMOTE_WARNING_PREFIX = "OPERATOR FORCE-PROMOTE WARNING:"
 
 # Hashtags + topic attached to the develop -> main review change(s).
-# ``auto-promote`` marks the source; ``milestone:R3-fastforward`` is the
+# ``auto-promote`` marks the source; ``R3-fastforward`` is the
 # hook the future conditional submit-requirement keys on (AUDIT-13 ADR /
 # ``area:devops`` follow-up) so the merger-bot may cast a scoped +2 +
 # auto-submit. Until that rule lands an operator submits via the Gerrit UI.
-PROMOTE_HASHTAGS: tuple[str, ...] = ("auto-promote", "milestone:R3-fastforward")
+PROMOTE_HASHTAGS: tuple[str, ...] = RELEASE_CUT_HASHTAGS
 PROMOTE_TOPIC_PREFIX = "release-"
 PROMOTE_TOPIC = "release-vX.Y.Z"
 
@@ -201,7 +202,7 @@ def _push_for_review(
     """Push ``commit_sha`` to ``target_ref`` as one review change.
 
     Hashtags + topic go via ``git push -o`` push options (robust for
-    values containing ``:`` like ``milestone:R3-fastforward``, which the
+    values containing punctuation, which the
     ``%``-refspec form can't carry). ``change_description``, when set, is
     forwarded as the Gerrit ``message`` push option so it lands on the
     created change(s); the force-promote override (ADR-0019) uses it to
@@ -543,7 +544,7 @@ def promote_on_milestone_ready(
         + (f": {', '.join(created)}" if created else " (see Gerrit)")
         + f"; hashtags={list(hashtags)}, topic={promote_topic!r}. main advances through Gerrit "
         f"Code Review — operator submits via the Gerrit UI (or merger-bot once the "
-        f"milestone:R3-fastforward submit-requirement lands)."
+        f"R3-fastforward submit-requirement lands)."
     )
     payload = {
         **base_payload,

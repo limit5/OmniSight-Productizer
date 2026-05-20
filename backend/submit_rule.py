@@ -73,6 +73,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable
 
+from backend.release_cut_metadata import CANONICAL_RELEASE_CUT_HASHTAG
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +86,7 @@ GROUP_HUMAN = "non-ai-reviewer"          # HUMAN hard gate
 GROUP_AI_BOTS = "ai-reviewer-bots"       # umbrella for all AI reviewers
 GROUP_MERGER = "merger-agent-bot"        # Merger sub-group (must also be in AI bots)
 
-RELEASE_CUT_HASHTAG = "milestone:R3-fastforward"
+RELEASE_CUT_HASHTAG = CANONICAL_RELEASE_CUT_HASHTAG
 RELEASE_CUT_TOPIC_RE = re.compile(r"^release-v[0-9]+[.][0-9]+[.][0-9]+.*$")
 RELEASE_CUT_AUTHORS = frozenset({"auto-promote-bot", "claude-bot", "codex-bot"})
 

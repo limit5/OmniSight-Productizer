@@ -15,12 +15,19 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from backend.release_cut_metadata import CANONICAL_RELEASE_CUT_HASHTAG  # noqa: E402
 
 
 GERRIT_HOST = "sora.services"
@@ -76,7 +83,7 @@ class ReleaseCut:
             missing.append("topic")
         if not self.hashtags:
             missing.append("hashtags")
-        elif not any(tag in {"R3-fastforward", "milestone:R3-fastforward"} for tag in self.hashtags):
+        elif CANONICAL_RELEASE_CUT_HASHTAG not in self.hashtags:
             missing.append("R3-fastforward hashtag")
         return missing
 
@@ -312,7 +319,7 @@ def render_markdown(cuts: Iterable[ReleaseCut]) -> str:
             "FINDING-4 is supported by the live sample across all recent submitted cuts:",
             "",
             "- The fail-safe side is visible in metadata drift: older/manual cuts lack the",
-            "  newer `R3-fastforward` hashtag or release-cut topic, and the current Gerrit",
+            f"  newer `{CANONICAL_RELEASE_CUT_HASHTAG}` hashtag or release-cut topic, and the current Gerrit",
             "  submit-requirement set often marks `release-cut-promote` or",
             "  `MainFastForwardMergerPlus2` as `NOT_APPLICABLE` for these already-merged",
             "  changes.",

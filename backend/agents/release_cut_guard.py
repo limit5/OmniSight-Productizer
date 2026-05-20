@@ -1,6 +1,6 @@
 """OP-1540 release-cut Gerrit monitoring guard.
 
-Queries Gerrit for open ``branch:main intopic:release-cut`` changes and
+Queries Gerrit for open ``branch:main intopic:release-v`` changes and
 alerts when a real release cut has drifted away from the canonical
 promotion tag or when the ``release-cut-promote`` submit requirement is
 ``NOT_APPLICABLE`` on that cut.
@@ -18,14 +18,16 @@ from typing import Any, Callable, Iterable, Sequence
 
 from backend.agents import jira_dispatch
 from backend.agents.auto_promote_main import PROMOTE_HASHTAGS, utc_now_iso
+from backend.release_cut_metadata import (
+    CANONICAL_RELEASE_CUT_HASHTAG,
+    RELEASE_CUT_PROMOTE_REQUIREMENT,
+)
 
 DEFAULT_GERRIT_PROJECT = "omnisight/OmniSight-Productizer"
 DEFAULT_GERRIT_HOST = "codex-bot@sora.services"
 DEFAULT_GERRIT_PORT = 29418
 DEFAULT_GERRIT_KEY = Path("~/.config/omnisight/gerrit-codex-bot-ed25519").expanduser()
-DEFAULT_QUERY_TOPIC = "release-cut"
-CANONICAL_RELEASE_CUT_HASHTAG = "milestone:R3-fastforward"
-RELEASE_CUT_PROMOTE_REQUIREMENT = "release-cut-promote"
+DEFAULT_QUERY_TOPIC = "release-v"
 
 NotifyFn = Callable[[str, str, str], None]
 
@@ -177,7 +179,7 @@ def release_cut_findings(
                     change=label,
                     subject=subject,
                     detail=(
-                        f"branch:main intopic:release-cut change lacks "
+                        f"branch:main release-cut change lacks "
                         f"{canonical_hashtag!r}; observed hashtags={sorted(tags)!r}"
                     ),
                 )

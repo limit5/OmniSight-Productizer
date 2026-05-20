@@ -22,7 +22,7 @@
 #         submit-requirement is default-OFF until C2 ships real CI.
 #
 #     (E) OP-962 / ADR-0016 path C — the develop→main auto-promote
-#         fast-forward change (it carries the `milestone:R3-fastforward`
+#         fast-forward change (it carries the `R3-fastforward`
 #         hashtag AND targets `refs/heads/main`) is exempt from (A) and
 #         instead gated by `MainFastForwardMergerPlus2`: a Code-Review
 #         +2 from `merger-agent-bot` OR `non-ai-reviewer`.  This lets
@@ -31,8 +31,8 @@
 #         merger-bot's own pre-vote validation — non-fast-forward,
 #         author ≠ auto-promote-bot — or from an operator still blocks).
 #         The carve-out is keyed on the FULL release-cut signature
-#         (branch:main + canonical R3-fastforward hashtag + intopic:
-#         release-cut + owner:sora) on purpose (OP-1534, tightened from
+#         (branch:main + canonical R3-fastforward hashtag + release
+#         topic + release bot author) on purpose (OP-1534, tightened from
 #         the original two keys); a change matching only some keys falls
 #         through to the full (A) human gate.  ai-reviewer-bots cannot
 #         forge the hashtag (no `editHashtags` on refs/for/*), so the
@@ -84,7 +84,7 @@
     # refs/for/main label grant is needed (a narrower main-only ACL
     # could only reduce coverage, never expand it).  ai-reviewer-bots
     # are NOT granted `editHashtags` on refs/for/* (see that section),
-    # so a bot cannot forge the `milestone:R3-fastforward` hashtag onto
+    # so a bot cannot forge the `R3-fastforward` hashtag onto
     # an arbitrary change to trip the carve-out — only the auto-promote
     # push (which uses a push option, like an operator push) sets it.
     label-Code-Review = -2..+2 group ai-reviewer-bots
@@ -180,8 +180,8 @@
 # ADR-0016 path-C carve-out, and the ADR-0020 release-cut promotion.
 
 [submit-requirement "Human-Plus-2"]
-    description = Requires +2 from non-ai-reviewer group (CLAUDE.md L1 human hard gate). Conditional carve-out (OP-1534 / OP-982 / ADR-0020), re-keyed from the OP-962 doubly-keyed form: NOT applicable ONLY to a genuine release-cut change to main — one that (1) targets branch:main, (2) carries the canonical R3-fastforward hashtag in either spelling (`milestone:R3-fastforward` OR the bare `R3-fastforward` transition form), (3) has a topic CONTAINING `release-cut` (intopic:, because topic: is exact-match), AND (4) is owned by sora. That single change shape is gated by release-cut-promote (merger +2 AND human +2) instead. EVERY other change on EVERY other branch — including a branch:main change that carries the hashtag but lacks the release-cut topic/owner — still requires the human +2. The carve-out is keyed on the FULL release-cut signature on purpose, identical to MainFastForwardMergerPlus2 and release-cut-promote (the `SubmitRuleOverScopes` regression invariant in OP-962, tightened from two keys to four in OP-1534 to close the hashtag-only over-scope window).
-    applicableIf = -branch:main OR (-hashtag:"milestone:R3-fastforward" AND -hashtag:R3-fastforward) OR -intopic:release-cut OR -owner:sora
+    description = Requires +2 from non-ai-reviewer group (CLAUDE.md L1 human hard gate). Conditional carve-out (OP-1534 / OP-982 / ADR-0020), re-keyed from the OP-962 doubly-keyed form: NOT applicable ONLY to a genuine release-cut change to main — one that (1) targets branch:main, (2) carries the canonical R3-fastforward hashtag, (3) has a release-vX.Y.Z topic, AND (4) is authored by an approved release bot. That single change shape is gated by release-cut-promote (merger +2 AND human +2) instead. EVERY other change on EVERY other branch — including a branch:main change that carries the hashtag but lacks the release topic/author — still requires the human +2. The carve-out is keyed on the FULL release-cut signature on purpose, identical to MainFastForwardMergerPlus2 and release-cut-promote.
+    applicableIf = -branch:main OR -hashtag:R3-fastforward OR -topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ OR -author:^auto-promote-bot$|^claude-bot$|^codex-bot$
     submittableIf = label:Code-Review=+2,group=non-ai-reviewer
     canOverrideInChildProjects = false
 
@@ -198,15 +198,13 @@
     # OP-1534 re-key: applicability now matches the FULL release-cut
     # signature (identical to release-cut-promote below), not the old
     # doubly-keyed (hashtag AND branch) form. The change MUST (1) target
-    # refs/heads/main, (2) carry the canonical R3-fastforward hashtag in
-    # either spelling — `milestone:R3-fastforward` OR the bare
-    # `R3-fastforward` transition form (emitted by
-    # backend/agents/auto_promote_main.py — never settable by an
+    # refs/heads/main, (2) carry the canonical R3-fastforward hashtag
+    # emitted by backend/agents/auto_promote_main.py — never settable by an
     # ai-reviewer-bot, which lacks editHashtags on refs/for/*), (3) have
-    # a topic CONTAINING `release-cut` (intopic:, since topic: is
-    # exact-match), AND (4) be owned by sora. A change matching only some
-    # keys (e.g. a branch:main change with the hashtag but no release-cut
-    # topic/owner) does NOT match here and falls through to the
+    # a `release-v...` topic, AND (4) be authored by an approved release
+    # bot. A change matching only some
+    # keys (e.g. a branch:main change with the hashtag but no release
+    # topic/bot author) does NOT match here and falls through to the
     # unconditional Human-Plus-2 gate above — the mandatory
     # `SubmitRuleOverScopes` regression invariant (now four keys, closing
     # the hashtag-only over-scope window OP-1534 was filed for). Because
@@ -227,8 +225,8 @@
     # before voting); the submit-requirement deliberately does not
     # duplicate them because Gerrit's query language cannot express
     # "this change is a fast-forward of main".
-    description = auto-promote-bot or merger-bot +2 allowed only for milestone:R3-fastforward auto-promote changes on main
-    applicableIf = branch:main AND (hashtag:"milestone:R3-fastforward" OR hashtag:R3-fastforward) AND intopic:release-cut AND owner:sora
+    description = auto-promote-bot or merger-bot +2 allowed only for R3-fastforward auto-promote changes on main
+    applicableIf = branch:main AND topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ AND hashtag:R3-fastforward AND author:^auto-promote-bot$|^claude-bot$|^codex-bot$
     submittableIf = (label:Code-Review=+2,group=merger-agent-bot) OR (label:Code-Review=+2,group=non-ai-reviewer)
     canOverrideInChildProjects = false
 
@@ -247,16 +245,11 @@
     # authorisation. Both are needed.
     #
     # Applicability is QUADRUPLY keyed — a change must (1) target
-    # branch:main, (2) carry the canonical R3-fastforward hashtag in
-    # either spelling — `milestone:R3-fastforward` OR the bare
-    # `R3-fastforward` transition form (auto_promote_main emits it; an
+    # branch:main, (2) carry the canonical R3-fastforward hashtag
+    # (auto_promote_main emits it; an
     # ai-reviewer-bot cannot forge it — no editHashtags on refs/for/* —
-    # see [access "refs/for/refs/heads/*"]), (3) have a topic CONTAINING
-    # `release-cut` — matched with intopic: rather than topic:, because
-    # topic: is EXACT-match and would never fire on a release-cut-vX.Y.Z
-    # topic (OP-1534 re-key; the old ^release-v...$ topic: regex is gone),
-    # and (4) be owned by sora (owner:sora; replaces the old
-    # author:^auto-promote-bot$|^claude-bot$|^codex-bot$ author regex). A
+    # see [access "refs/for/refs/heads/*"]), (3) have a `release-v...`
+    # topic, and (4) be authored by an approved release bot. A
     # change missing ANY key falls through to the unconditional
     # Human-Plus-2 gate — the SubmitRuleOverScopes regression invariant
     # (four keys; OP-1534 keeps Human-Plus-2 and MainFastForwardMergerPlus2
@@ -270,8 +263,8 @@
     # (AUDIT-26d) to push the topic'd merge change; AUDIT-26f removes /
     # re-keys them. They co-exist consistently in the interim (the
     # stricter AND gate here wins for genuine release cuts). See ADR-0020.
-    description = Release-cut promotion to main; conditional merger-bot +2 acceptable when branch + canonical R3-fastforward hashtag + release-cut topic + owner match the release-cut pattern.
-    applicableIf = branch:main AND (hashtag:"milestone:R3-fastforward" OR hashtag:R3-fastforward) AND intopic:release-cut AND owner:sora
+    description = Release-cut promotion to main; conditional merger-bot +2 acceptable when branch + canonical R3-fastforward hashtag + release topic + release bot author match the release-cut pattern.
+    applicableIf = branch:main AND topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ AND hashtag:R3-fastforward AND author:^auto-promote-bot$|^claude-bot$|^codex-bot$
     submittableIf = (label:Code-Review=+2,group=merger-agent-bot) AND (label:Code-Review=+2,group=non-ai-reviewer)
     canOverrideInChildProjects = false
 

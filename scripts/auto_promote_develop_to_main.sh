@@ -6,7 +6,7 @@
 # ``git push`` or its own ``release_audit`` write — both now live in the
 # Python module, which advances ``main`` *through Gerrit Code Review*
 # (``develop`` -> ``refs/for/main`` with the ``auto-promote`` +
-# ``milestone:R3-fastforward`` hashtags and ``develop-to-main`` topic),
+# ``R3-fastforward`` hashtags and ``develop-to-main`` topic),
 # never a direct push to ``refs/heads/main``.
 #
 # Behaviour:
