@@ -44,7 +44,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from backend.agents.pipeline_coordinator_capacity import CapacitySnapshot
+from backend.agents.pipeline_coordinator_capacity import (
+    CapacitySnapshot,
+    capacity_path_from_env,
+    load_capacity_snapshot_from_jsonl,
+    write_capacity_snapshot,
+)
 from backend.agents.pipeline_coordinator_modes import ModeSelector, SKELETON_MODE
 from backend.agents.pipeline_coordinator_rules import (
     DecisionContext,
@@ -100,8 +105,17 @@ class CoordinatorConfig:
     config_dir: Path
     heartbeat_path: Path
     decision_log_dir: Path
+    capacity_path: Path | None = None
     heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     tick_interval_seconds: float = DEFAULT_TICK_INTERVAL_SECONDS
+
+    def __post_init__(self) -> None:
+        if self.capacity_path is None:
+            object.__setattr__(
+                self,
+                "capacity_path",
+                capacity_path_from_env(self.config_dir),
+            )
 
     @classmethod
     def from_env(
@@ -123,6 +137,7 @@ class CoordinatorConfig:
             config_dir=base,
             heartbeat_path=base / "heartbeat",
             decision_log_dir=decision_log_dir,
+            capacity_path=capacity_path_from_env(base, env),
         )
 
 
@@ -258,7 +273,7 @@ class PipelineCoordinator:
     # ── world-building (stateless per tick) ──
 
     def _default_capacity(self) -> CapacitySnapshot:
-        return CapacitySnapshot.empty(captured_at=self._clock())
+        return load_capacity_snapshot_from_jsonl(captured_at=self._clock())
 
     def _refresh_work_graph(self) -> dict[str, Any]:
         """STUB: rebuild the in-memory work-graph cache each tick.
@@ -309,6 +324,8 @@ class PipelineCoordinator:
         self._heartbeat.touch()
         self._refresh_work_graph()
         ctx = self.build_context()
+        if self._config.capacity_path is not None:
+            write_capacity_snapshot(ctx.capacity, self._config.capacity_path)
         result = self._engine.evaluate(ctx)
         self._decision_log.append(self._build_tick_record(result))
         return result
@@ -342,11 +359,12 @@ class PipelineCoordinator:
             self._install_signal_handlers()
         logger.info(
             "[pipeline_coordinator] entering steady state "
-            "(engine=%s mode=%s tick=%.0fs heartbeat=%.0fs)",
+            "(engine=%s mode=%s tick=%.0fs heartbeat=%.0fs capacity_tracking=active capacity_path=%s)",
             self._engine.engine_version,
             SKELETON_MODE,
             self._config.tick_interval_seconds,
             self._config.heartbeat_interval_seconds,
+            self._config.capacity_path,
         )
         ticks = 0
         try:

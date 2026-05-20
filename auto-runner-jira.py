@@ -72,6 +72,12 @@ from backend.agents import (
     runner_workspace_safety,
     scheduler,
 )
+from backend.agents.pipeline_coordinator_capacity import (
+    append_runner_quota_emit,
+    load_capacity_snapshot_from_jsonl,
+    quota_emit_from_provider,
+    runner_id as capacity_runner_id,
+)
 from backend.agents.instance_suffix import CANONICAL_INSTANCE_SUFFIXES
 from backend.agents.operator_notifier import Severity, notify as operator_notify
 from backend.agents.loop_detector import (
@@ -86,6 +92,7 @@ INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "def
 TARGET_OVERRIDE = os.environ.get("OMNISIGHT_RUNNER_TARGET", "").strip()
 DRY_RUN = os.environ.get("OMNISIGHT_RUNNER_DRY_RUN", "0") == "1"
 _RUNNER_ACTIVE_ITERATION = 0
+_RUNNER_TICK_COMPLETED_DELTA = 0
 
 # OP-858 (C8): pickup-time failure-graph context injection. Until C2's
 # runner_incidents Postgres table ships, the runner reads a JSON fixture
@@ -1249,6 +1256,43 @@ CLAUDE_WORKTREE = os.environ.get(
 )
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
 
+
+def _quota_provider_for_runner(agent_class: str) -> str:
+    override = os.environ.get("OMNISIGHT_RUNNER_QUOTA_PROVIDER", "").strip()
+    if override:
+        return override
+    if agent_class in {"subscription-claude", "api-anthropic"}:
+        return "anthropic-subscription"
+    return "openai-subscription"
+
+
+def _previous_tickets_completed() -> int:
+    snapshot = load_capacity_snapshot_from_jsonl()
+    runner_key = capacity_runner_id(AGENT_CLASS, INSTANCE_ID)
+    row = snapshot.runners.get(runner_key)
+    return row.tickets_completed if row is not None else 0
+
+
+def _emit_runner_quota_tick() -> None:
+    """Emit one per-runner quota JSONL line for the completed poll cycle."""
+    provider = _quota_provider_for_runner(AGENT_CLASS)
+    tickets_completed = _previous_tickets_completed() + _RUNNER_TICK_COMPLETED_DELTA
+    emit = quota_emit_from_provider(
+        agent_class=AGENT_CLASS,
+        instance_id=INSTANCE_ID,
+        provider=provider,
+        tickets_completed=tickets_completed,
+    )
+    try:
+        path = append_runner_quota_emit(emit)
+    except Exception as exc:  # noqa: BLE001 - capacity telemetry must fail open
+        print(
+            f"[runner] quota-state emit skipped: {type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return
+    print(f"[runner] quota-state emitted path={path}")
+
 # OP-1138 / Sprint Boreas-C3 — Ephemeral-mode invariant.
 #
 # Sprint Boreas-C reframes the runner so each cycle gets a fresh git
@@ -2356,7 +2400,7 @@ def _grade_and_consume_outcomes(
     return verdict.verdict
 
 
-def main() -> int:
+def _main_impl() -> int:
     print(
         f"[runner] agent_class={AGENT_CLASS}, instance_id={INSTANCE_ID}, "
         f"bot={_bot_username()}, dry_run={DRY_RUN}"
@@ -3133,6 +3177,8 @@ def main() -> int:
                 _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 0
             _finalize_successful_push(client, snapshot.key, push_result, claim)
+            global _RUNNER_TICK_COMPLETED_DELTA
+            _RUNNER_TICK_COMPLETED_DELTA = 1
             # OP-956: OpsLabelButCommitsProduced — CLI was tagged ops-only
             # but produced commits anyway. AC error catalog says "Log
             # warning + still push the commits (don't lose work) +
@@ -3186,6 +3232,13 @@ def main() -> int:
             area=metric_meta.get("area"),
         )
     return rc
+
+
+def main() -> int:
+    try:
+        return _main_impl()
+    finally:
+        _emit_runner_quota_tick()
 
 
 if __name__ == "__main__":
