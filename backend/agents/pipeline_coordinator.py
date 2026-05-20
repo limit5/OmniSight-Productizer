@@ -1761,6 +1761,9 @@ class PipelineCoordinator:
 
 def build_default_coordinator(
     config: CoordinatorConfig | None = None,
+    *,
+    acting: bool = False,
+    action_executor: ActionExecutor | None = None,
 ) -> PipelineCoordinator:
     """Production wiring: env config, hybrid Tier-1+Tier-2 engine, shadow layer.
 
@@ -1771,9 +1774,14 @@ def build_default_coordinator(
     registry (Deploy AC). The budget guard rebuilds the day's spend from the
     decision log (ADR §3.2 stateless-across-restarts). The action layer
     defaults to shadow (observe-only) so this stays safe for the 29f-14 7-day
-    shadow canary; acting mode is enabled later by swapping the executor.
+    shadow canary. ``acting=True`` is the single switch that permits both the
+    main action executor and hourly sprint re-plan handler to mutate.
     """
     config = config or CoordinatorConfig.from_env()
+    if acting and action_executor is None:
+        raise ValueError("acting=True requires an explicit action_executor")
+    if not acting and action_executor is not None:
+        raise ValueError("action_executor requires acting=True")
     decision_log = DecisionLog(config.decision_log_dir)
     # 29f-11: the learning loop reads + appends to the same decision log; build
     # it from the log so its daily/weekly schedule survives a restart (§3.2).
@@ -1782,11 +1790,13 @@ def build_default_coordinator(
     return PipelineCoordinator(
         config,
         engine=build_hybrid_engine(decision_log_dir=config.decision_log_dir),
+        action_executor=action_executor,
         sprint_replan_handler=build_default_sprint_replan_handler(
             config_dir=config.config_dir,
             decision_log_dir=config.decision_log_dir,
             capacity_path=config.capacity_path,
             agent_class=config.jira_agent_class,
+            shadow=not acting,
         ),
         decision_log=decision_log,
         learning_loop=build_default_learning_loop(decision_log),

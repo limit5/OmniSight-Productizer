@@ -134,8 +134,9 @@ class SprintReplanGateway(Protocol):
 class SprintReplanActionLayer:
     """Execute only validated ADR §6.1 actions for sprint re-planning."""
 
-    def __init__(self, gateway: SprintReplanGateway) -> None:
+    def __init__(self, gateway: SprintReplanGateway, *, shadow: bool = True) -> None:
         self._gateway = gateway
+        self._shadow = shadow
 
     def execute(self, action: Action) -> dict[str, Any]:
         if action.kind == ACTION_RELABEL:
@@ -154,6 +155,15 @@ class SprintReplanActionLayer:
     def _execute_relabel(self, action: Action) -> dict[str, Any]:
         add = tuple(str(x) for x in action.params.get("add", ()))
         remove = tuple(str(x) for x in action.params.get("remove", ()))
+        if self._shadow:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "shadow": True,
+                "add": list(add),
+                "remove": list(remove),
+            }
         for label in add:
             self._gateway.add_label(action.target, label)
         for label in remove:
@@ -167,10 +177,23 @@ class SprintReplanActionLayer:
         }
 
     def _execute_file_ticket(self, action: Action) -> dict[str, Any]:
+        source_key = str(action.params.get("blocking") or action.target)
+        target_area = str(action.params.get("target_area") or "backend")
+        description = str(action.params.get("description") or "")
+        if self._shadow:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "shadow": True,
+                "source_key": source_key,
+                "target_area": target_area,
+                "description": description,
+            }
         key = self._gateway.file_scope_review_ticket(
-            source_key=str(action.params.get("blocking") or action.target),
-            target_area=str(action.params.get("target_area") or "backend"),
-            description=str(action.params.get("description") or ""),
+            source_key=source_key,
+            target_area=target_area,
+            description=description,
         )
         return {
             "kind": action.kind,
@@ -180,14 +203,26 @@ class SprintReplanActionLayer:
         }
 
     def _execute_mention(self, action: Action) -> dict[str, Any]:
+        target = action.target or DEFAULT_OPERATOR_TICKET
+        message = str(action.params.get("message") or "")
+        urgency = str(action.params.get("urgency") or "medium")
+        if self._shadow:
+            return {
+                "kind": action.kind,
+                "target": target,
+                "executed": False,
+                "shadow": True,
+                "message": message,
+                "urgency": urgency,
+            }
         self._gateway.mention_operator(
-            action.target or DEFAULT_OPERATOR_TICKET,
-            str(action.params.get("message") or ""),
-            urgency=str(action.params.get("urgency") or "medium"),
+            target,
+            message,
+            urgency=urgency,
         )
         return {
             "kind": action.kind,
-            "target": action.target or DEFAULT_OPERATOR_TICKET,
+            "target": target,
             "executed": True,
         }
 
@@ -201,6 +236,7 @@ class SprintReplanHandler:
     capacity_provider: CapacityProvider
     clock: Clock = field(default=lambda: datetime.now(timezone.utc))
     max_pickable: int = DEFAULT_MAX_PICKABLE
+    shadow: bool = True
 
     def run(self) -> SprintReplanResult:
         """Run one re-plan pass and return an observable result."""
@@ -217,7 +253,7 @@ class SprintReplanHandler:
             capacity=capacity,
             llm_actions=outcome.actions,
         )
-        action_layer = SprintReplanActionLayer(self.gateway)
+        action_layer = SprintReplanActionLayer(self.gateway, shadow=self.shadow)
         action_results = tuple(action_layer.execute(action) for action in actions)
         created = tuple(
             str(row["created_key"])
@@ -343,6 +379,7 @@ def build_default_handler(
     capacity_path: Path | None = None,
     agent_class: str = "subscription-claude",
     clock: Clock | None = None,
+    shadow: bool = True,
 ) -> SprintReplanHandler:
     """Production wiring for the coordinator daemon."""
     from backend.agents.pipeline_coordinator_llm_consultation import (
@@ -370,6 +407,7 @@ def build_default_handler(
             captured_at=clock(),
         ),
         clock=clock,
+        shadow=shadow,
     )
 
 
@@ -420,13 +458,29 @@ def _normalise_actions(
     for action in llm_actions:
         if action.kind not in {ACTION_RELABEL, ACTION_FILE_TICKET, ACTION_MENTION_OPERATOR}:
             continue
-        if action.target and action.target not in pickable_keys and action.target != DEFAULT_OPERATOR_TICKET:
+        normalised = action
+        if action.kind == ACTION_MENTION_OPERATOR and action.target == SPRINT_REPLAN_FOCAL_KEY:
+            normalised = Action.mention_operator(
+                DEFAULT_OPERATOR_TICKET,
+                message=str(action.params.get("message") or ""),
+                urgency=str(action.params.get("urgency") or "medium"),
+                dry_run=action.dry_run,
+            )
+        if (
+            normalised.target
+            and normalised.target not in pickable_keys
+            and normalised.target != DEFAULT_OPERATOR_TICKET
+        ):
             continue
-        marker = (action.kind, action.target, repr(sorted(dict(action.params).items())))
+        marker = (
+            normalised.kind,
+            normalised.target,
+            repr(sorted(dict(normalised.params).items())),
+        )
         if marker in seen:
             continue
         seen.add(marker)
-        actions.append(action)
+        actions.append(normalised)
 
     if capacity.total_free_slots < len(pickable):
         actions.append(
