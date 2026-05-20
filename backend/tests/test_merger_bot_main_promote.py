@@ -1,30 +1,40 @@
-"""OP-962 (AUDIT-13b) — Gerrit conditional submit-requirement for the
-develop→main auto-promote fast-forward change (ADR-0016 path C).
+"""OP-962 (AUDIT-13b) + OP-1534 — Gerrit conditional submit-requirements
+for the release-cut promotion to main (ADR-0016 path C / ADR-0020).
 
 These tests pin the *policy contract* encoded in
 ``.gerrit/project.config``:
 
-  * a new ``MainFastForwardMergerPlus2`` submit-requirement that lets a
-    ``merger-agent-bot`` (path C, zero operator click) **or** a
-    ``non-ai-reviewer`` (path A, operator fallback) Code-Review +2
-    satisfy the gate for the develop→main auto-promote change, and
-  * a narrowed ``Human-Plus-2`` requirement that carves that single
-    change out of the human hard gate — and **only** that change.
+  * a ``MainFastForwardMergerPlus2`` submit-requirement that lets a
+    ``merger-agent-bot`` **or** a ``non-ai-reviewer`` Code-Review +2
+    satisfy the gate, and
+  * a narrowed ``Human-Plus-2`` requirement that carves the release-cut
+    change shape out of the human hard gate — and **only** that shape, and
+  * the co-exist ``release-cut-promote`` requirement (merger +2 AND human
+    +2) that re-imposes the dual sign-off for a genuine cut.
+
+OP-1534 re-keys all three onto a SINGLE consistent four-key release-cut
+signature so the carve-out cannot over-scope::
+
+    branch:main
+    AND (hashtag:"milestone:R3-fastforward" OR hashtag:R3-fastforward)
+    AND intopic:release-cut          # substring — topic: is exact-match
+    AND owner:sora
 
 The most dangerous failure mode (``SubmitRuleOverScopes`` in the OP-962
 error catalog) is the carve-out leaking to arbitrary ``refs/for/main``
-changes.  ``test_regression_arbitrary_main_change_still_needs_human`` and
-friends are the mandatory negative checks against it.
+changes — e.g. a branch:main change that has the hashtag but lacks the
+release-cut topic/owner.  ``test_op1534_bare_hashtag_on_main_no_longer_
+carved_out``, ``test_regression_arbitrary_main_change_still_needs_human``
+and the quad-key knockouts are the mandatory negative checks against it.
 
 Like ``test_gerrit_verified_gate.py`` these tests stay static: there is
 no live Gerrit in CI, so they parse the declarative config and exercise a
 small evaluator for the (deliberately tiny) subset of the Gerrit
 submit-requirement expression language that this project's config uses.
-The merger-bot's *decision to cast* the +2 (author == auto-promote-bot?
-fast-forward? hashtag present?) lives in the merger-bot poller
-(``area:backend`` — out of scope for this ``area:devops``/``area:tests``
-ticket); here we only pin what the Gerrit-side rule does once a vote
-exists.
+The merger-bot's *decision to cast* the +2 (owner == sora? fast-forward?
+hashtag present?) lives in the merger-bot poller (``area:backend`` — out
+of scope for this ``area:devops``/``area:tests`` ticket); here we only pin
+what the Gerrit-side rule does once a vote exists.
 """
 
 from __future__ import annotations
@@ -54,22 +64,28 @@ _MERGER_DESCRIPTION = (
 # config: C3a satisfies these strings statically (a file parse), so the
 # suite is green ahead of — and is NOT blocked by — the C3b
 # refs/meta/config deploy.  Notes on the exact form (per ADR-0020):
-#   * AND binds tighter than OR (Gerrit precedence), so the doubly-keyed
-#     carve-out negation is written with De Morgan: NOT (hashtag AND
-#     branch:main) ⇔ -hashtag OR -branch:main.
-#   * the release-cut author predicate uses *top-level* alternation
-#     (^a$|^b$|^c$ — no grouping parens) and the topic regex uses
-#     [0-9]/[.] rather than \d/\. so JGit's project.config value parser
-#     has no backslash / paren to misread.
+#   * The original topic:^release-v...$ regex + author:^...bot$ keys were
+#     dropped (2026-05-20, OP-1531): the Gerrit lexer rejects `[`, real
+#     release-cut topics are vX.Y.Z-release-cut (matched by intopic:, since
+#     topic: is exact-match), and real cuts are owner:sora (O10 lockdown
+#     forces sora to push; bots can't pushMerge). Corrected 4-key =
+#     branch:main + (canonical hashtag OR transition form) + intopic:
+#     release-cut + owner:sora. See project_release_cut_sr_gating memory.
+#   * Human-Plus-2's carve-out negates the same four keys (De Morgan), so a
+#     real cut is NOT_APPLICABLE to the generic human gate and is governed by
+#     release-cut-promote's co-exist (merger +2 AND human +2) instead.
 C3A_APPLICABLE_IF: dict[str, str] = {
-    "Human-Plus-2": '-hashtag:"milestone:R3-fastforward" OR -branch:main',
+    "Human-Plus-2": (
+        '-branch:main OR (-hashtag:"milestone:R3-fastforward" AND '
+        '-hashtag:R3-fastforward) OR -intopic:release-cut OR -owner:sora'
+    ),
     "MainFastForwardMergerPlus2": (
-        'hashtag:"milestone:R3-fastforward" AND branch:main'
+        'branch:main AND (hashtag:"milestone:R3-fastforward" OR '
+        'hashtag:R3-fastforward) AND intopic:release-cut AND owner:sora'
     ),
     "release-cut-promote": (
-        'branch:main AND topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ '
-        'AND hashtag:"milestone:R3-fastforward" '
-        'AND author:^auto-promote-bot$|^claude-bot$|^codex-bot$'
+        'branch:main AND (hashtag:"milestone:R3-fastforward" OR '
+        'hashtag:R3-fastforward) AND intopic:release-cut AND owner:sora'
     ),
 }
 
@@ -108,12 +124,19 @@ class Change:
     branch: str
     hashtags: frozenset[str] = field(default_factory=frozenset)
     votes: tuple[Vote, ...] = ()
-    # OP-982 (AUDIT-26c / ADR-0020): the release-cut-promote requirement
-    # is keyed on topic + author too, so the model carries them.  Empty
-    # by default — the pre-OP-982 changes in this file have no release
-    # topic / no recorded author, so release-cut-promote is NOT_APPLICABLE
-    # to them, exactly as in production.
+    # OP-982 (AUDIT-26c / ADR-0020) + OP-1534: the release-cut SRs are
+    # keyed on topic + owner too, so the model carries them.  Empty by
+    # default — a change with no release-cut topic / no recorded owner is
+    # NOT a release cut, so the carve-out SRs are NOT_APPLICABLE to it
+    # (and Human-Plus-2 still applies), exactly as in production.
+    #
+    # OP-1534 re-key: applicability matches a topic CONTAINING
+    # "release-cut" (intopic:, since topic: is exact-match) and owner ==
+    # sora — NOT the old ^release-v...$ topic regex / author-identity
+    # regex.  ``author`` is retained only so older fixtures still
+    # construct; the live SRs no longer read it.
     topic: str = ""
+    owner: str = ""
     author: str = ""
 
     def has_vote(self, *, group: str, min_score: int) -> bool:
@@ -121,6 +144,38 @@ class Change:
 
     def has_score(self, score: int) -> bool:
         return any(v.score == score for v in self.votes)
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  OP-1534 — the single canonical release-cut signature that all three
+#  carve-out SRs (Human-Plus-2 / MainFastForwardMergerPlus2 /
+#  release-cut-promote) now key on, consistently:
+#
+#     branch:main
+#     AND (hashtag:"milestone:R3-fastforward" OR hashtag:R3-fastforward)
+#     AND intopic:release-cut          # substring — topic: is exact-match
+#     AND owner:sora
+# ──────────────────────────────────────────────────────────────────────
+
+# A real release-cut topic CONTAINS "release-cut" (intopic: substring).
+RELEASE_CUT_TOPIC = "release-cut-v0.5.0-rc1"
+RELEASE_CUT_OWNER = "sora"
+# The bare transition spelling accepted alongside milestone:R3-fastforward.
+R3_FASTFORWARD_HASHTAG_BARE = "R3-fastforward"
+
+
+def _real_cut_change(*, votes: tuple[Vote, ...] = (), **overrides) -> "Change":
+    """A change matching all four release-cut keys, unless an override
+    knocks one out."""
+    kwargs: dict = dict(
+        branch="main",
+        hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
+        topic=RELEASE_CUT_TOPIC,
+        owner=RELEASE_CUT_OWNER,
+        votes=votes,
+    )
+    kwargs.update(overrides)
+    return Change(**kwargs)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -156,14 +211,23 @@ def _eval_predicate(pred: str, change: Change) -> bool:
         return value in change.hashtags
     if op == "branch":
         return change.branch == raw.strip('"')
+    if op == "intopic":
+        # OP-1534: intopic:release-cut — SUBSTRING match on the change
+        # topic (Gerrit `intopic:` is the substring operator; plain
+        # `topic:` is exact-match and would never fire on a
+        # release-cut-vX.Y.Z topic).
+        return raw.strip('"') in change.topic
+    if op == "owner":
+        # OP-1534: owner:sora — the change owner (account) identity.
+        return change.owner == raw.strip('"')
     if op == "topic":
-        # OP-982: topic:^release-v[0-9]+[.][0-9]+[.][0-9]+.*$ — a regex
-        # predicate (Gerrit honours `^...$`-anchored regex values here).
+        # Legacy (pre-OP-1534) exact/regex topic predicate. No live SR
+        # uses it after the OP-1534 re-key; retained so the evaluator
+        # stays a faithful superset of the query language.
         return re.search(raw.strip('"'), change.topic) is not None
     if op == "author":
-        # OP-982: author:^auto-promote-bot$|^claude-bot$|^codex-bot$ — a
-        # regex predicate, top-level alternation (no `(...)` group so the
-        # whitespace-splitting tokenizer above stays valid).
+        # Legacy (pre-OP-1534) author-identity regex predicate, replaced
+        # by owner:sora. Retained for the same reason as topic: above.
         return re.search(raw.strip('"'), change.author) is not None
     if op == "label":
         # raw looks like 'Code-Review=+2,group=merger-agent-bot' or
@@ -315,10 +379,16 @@ def test_main_fastforward_submit_requirement_present_and_wellformed(submit_requi
     # description verbatim per AC #1.
     assert sr["description"] == _MERGER_DESCRIPTION
 
-    # applicableIf is doubly-keyed: hashtag AND branch:main.  Compare with
-    # quoting stripped so the contract is robust to "..."-vs-bare tuning.
+    # OP-1534: applicableIf is now keyed on the FULL release-cut signature
+    # (identical to release-cut-promote), not the old doubly-keyed form.
+    # Compare with quoting stripped so the contract is robust to
+    # "..."-vs-bare tuning.
     applicable = sr["applicableIf"].replace('"', "")
-    assert applicable == f"hashtag:{AUTO_PROMOTE_HASHTAG} AND branch:main", applicable
+    assert applicable == (
+        f"branch:main AND (hashtag:{AUTO_PROMOTE_HASHTAG} OR "
+        f"hashtag:{R3_FASTFORWARD_HASHTAG_BARE}) "
+        f"AND intopic:release-cut AND owner:{RELEASE_CUT_OWNER}"
+    ), applicable
 
     # submittableIf includes a clause counting merger-bot +2 toward the
     # submit gate (analogous to O6 OP-269), and keeps an operator (path A)
@@ -332,58 +402,129 @@ def test_main_fastforward_submit_requirement_present_and_wellformed(submit_requi
 
 
 def test_human_plus_two_is_carved_out_only_for_autopromote(submit_requirements):
-    """AC #1 mechanism: Human-Plus-2 stays unconditional everywhere
-    except the doubly-keyed develop→main auto-promote change."""
+    """AC #1 mechanism (OP-1534): Human-Plus-2 stays unconditional
+    everywhere except a genuine release cut — its applicableIf is the
+    exact De Morgan negation of the four-key release-cut signature, so
+    the carve-out and release-cut-promote cover the SAME set of changes."""
     sr = submit_requirements["Human-Plus-2"]
     applicable = sr["applicableIf"].replace('"', "")
-    # NOT (hashtag AND branch:main)  ⇔  (-hashtag) OR (-branch:main)
-    assert applicable == f"-hashtag:{AUTO_PROMOTE_HASHTAG} OR -branch:main", applicable
+    # NOT (branch:main AND (h_milestone OR h_bare) AND intopic AND owner)
+    #   ⇔ -branch:main OR (-h_milestone AND -h_bare) OR -intopic OR -owner
+    assert applicable == (
+        f"-branch:main OR (-hashtag:{AUTO_PROMOTE_HASHTAG} AND "
+        f"-hashtag:{R3_FASTFORWARD_HASHTAG_BARE}) "
+        f"OR -intopic:release-cut OR -owner:{RELEASE_CUT_OWNER}"
+    ), applicable
     # The actual approval clause is untouched — still a non-ai-reviewer +2.
     assert sr["submittableIf"] == "label:Code-Review=+2,group=non-ai-reviewer"
 
 
 # ──────────────────────────────────────────────────────────────────────
-#  Test plan (OP-962) — exercised through the parsed config
+#  Whole-SR-set consistency (OP-1534) — exercised through the parsed
+#  config.  After the re-key, the carve-out region of Human-Plus-2, the
+#  applicable region of MainFastForwardMergerPlus2, and the applicable
+#  region of release-cut-promote are the SAME set of changes (the four-
+#  key release-cut signature).  release-cut-promote (merger +2 AND human
+#  +2) is the strictest of the co-applying rules, so for a real cut a
+#  human +2 is STILL required — CLAUDE.md L1 stays intact.
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_happy_path_merger_bot_plus_two_submits_autopromote(submit_requirements):
-    """Test plan #1 — auto-promote change (hashtag + branch:main) with a
-    merger-agent-bot +2 → submittable, no human click."""
-    change = Change(
+def test_carveout_applicability_set_is_consistent(submit_requirements):
+    """OP-1534 core invariant — the three SRs partition changes
+    consistently: on a full real cut, Human-Plus-2 is NOT applicable
+    while MainFastForwardMergerPlus2 AND release-cut-promote ARE; on the
+    old bare-hashtag-on-main shape, that flips."""
+    real = _real_cut_change(votes=(merger_plus2(), human_plus2()))
+    applicable = _applicable_requirements(real, submit_requirements)
+    assert "Human-Plus-2" not in applicable
+    assert "MainFastForwardMergerPlus2" in applicable
+    assert "release-cut-promote" in applicable
+
+    bare_hashtag = Change(
         branch="main",
-        hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
-        votes=(merger_plus2(),),
+        hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),  # hashtag but no topic/owner
+        votes=(merger_plus2(), human_plus2()),
     )
-    assert _is_submittable(change, submit_requirements) is True
+    applicable_bare = _applicable_requirements(bare_hashtag, submit_requirements)
+    assert "Human-Plus-2" in applicable_bare
+    assert "MainFastForwardMergerPlus2" not in applicable_bare
+    assert "release-cut-promote" not in applicable_bare
 
 
-def test_path_a_operator_plus_two_still_submits_autopromote(submit_requirements):
-    """ADR-0016 path A stays available: an operator (non-ai-reviewer) +2
-    on the auto-promote change is also sufficient — removing the rule is
-    not the only way back to manual submit."""
-    change = Change(
+def test_real_release_cut_still_needs_human_plus_two(submit_requirements):
+    """A genuine release cut is carved out of Human-Plus-2, but
+    release-cut-promote co-applies and demands BOTH a merger +2 AND a
+    human +2 — so a merger-bot +2 alone can NOT auto-submit it (this is
+    the consistency fix: the old MainFastForwardMergerPlus2 merger-only
+    path is subsumed by the stricter dual gate)."""
+    assert _is_submittable(
+        _real_cut_change(votes=(merger_plus2(),)), submit_requirements
+    ) is False
+    assert _is_submittable(
+        _real_cut_change(votes=(human_plus2(),)), submit_requirements
+    ) is False
+    assert _is_submittable(
+        _real_cut_change(votes=(merger_plus2(), human_plus2())), submit_requirements
+    ) is True
+
+
+def test_op1534_bare_hashtag_on_main_no_longer_carved_out(submit_requirements):
+    """OP-1534 over-scope closure — THE reason for this ticket.  A
+    branch:main change carrying the R3-fastforward hashtag but LACKING the
+    release-cut topic/owner used to fall into the doubly-keyed carve-out
+    (merger-bot +2 alone could submit).  After the re-key it is no longer
+    carved out: Human-Plus-2 applies and a human +2 is required; a merger
+    (or any pile of AI) +2 alone does NOT submit it."""
+    over_scope = Change(
         branch="main",
         hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
-        votes=(human_plus2(),),
+        votes=(merger_plus2(), lint_bot_plus2()),
     )
-    assert _is_submittable(change, submit_requirements) is True
+    assert _is_submittable(over_scope, submit_requirements) is False
+    # …and it becomes submittable only once a human signs off.
+    assert _is_submittable(
+        Change(
+            branch="main",
+            hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
+            votes=(merger_plus2(), human_plus2()),
+        ),
+        submit_requirements,
+    ) is True
+
+
+def test_bare_r3_fastforward_hashtag_spelling_is_accepted(submit_requirements):
+    """OP-1534 OR transition form — a real cut that carries the bare
+    `R3-fastforward` hashtag spelling (instead of the
+    `milestone:R3-fastforward` form) still matches the carve-out set and
+    still needs both a merger +2 and a human +2."""
+    cut_bare = _real_cut_change(
+        hashtags=frozenset({R3_FASTFORWARD_HASHTAG_BARE}),
+        votes=(merger_plus2(), human_plus2()),
+    )
+    assert "release-cut-promote" in _applicable_requirements(cut_bare, submit_requirements)
+    assert "Human-Plus-2" not in _applicable_requirements(cut_bare, submit_requirements)
+    assert _is_submittable(cut_bare, submit_requirements) is True
+    # merger alone is still not enough even with the bare spelling.
+    assert _is_submittable(
+        _real_cut_change(
+            hashtags=frozenset({R3_FASTFORWARD_HASHTAG_BARE}),
+            votes=(merger_plus2(),),
+        ),
+        submit_requirements,
+    ) is False
 
 
 def test_regression_arbitrary_main_change_still_needs_human(submit_requirements):
-    """Test plan #2 / AC #4 — THE CRITICAL `SubmitRuleOverScopes` guard.
-
-    A change pushed to refs/for/main WITHOUT the milestone:R3-fastforward
-    hashtag must still require a human +2 — a merger-bot (or any pile of
-    AI) +2 must NOT submit it."""
+    """`SubmitRuleOverScopes` guard — a change pushed to refs/for/main
+    WITHOUT the R3-fastforward hashtag must still require a human +2; a
+    merger-bot (or any pile of AI) +2 must NOT submit it."""
     only_ai = Change(
         branch="main",
         hashtags=frozenset(),
         votes=(merger_plus2(), lint_bot_plus2()),
     )
     assert _is_submittable(only_ai, submit_requirements) is False
-
-    # …and it becomes submittable only once a human signs off.
     with_human = Change(
         branch="main",
         hashtags=frozenset(),
@@ -393,8 +534,8 @@ def test_regression_arbitrary_main_change_still_needs_human(submit_requirements)
 
 
 def test_wrong_hashtag_on_main_still_needs_human(submit_requirements):
-    """Test plan #3 — a change carrying a *different* milestone:* hashtag
-    does not match the carve-out; the human gate still applies."""
+    """A change carrying a *different* milestone:* hashtag does not match
+    the carve-out; the human gate still applies."""
     change = Change(
         branch="main",
         hashtags=frozenset({"milestone:something-else"}),
@@ -411,54 +552,37 @@ def test_wrong_hashtag_on_main_still_needs_human(submit_requirements):
     ) is True
 
 
-def test_non_merger_ai_plus_two_does_not_submit_autopromote(submit_requirements):
-    """Test plan #4 (config half) — even on a correctly-hashtagged main
-    change, the carve-out only honours a *merger-agent-bot* (or human)
-    +2.  A generic ai-reviewer-bot +2 (e.g. lint-bot) does not submit
-    it.  The author-identity check (auto-promote-bot vs. anyone else)
-    lives in the merger-bot poller, which is what actually decides
-    whether to cast the merger +2 in the first place — out of scope for
-    this devops/tests ticket."""
-    change = Change(
-        branch="main",
-        hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
-        votes=(lint_bot_plus2(),),
-    )
+def test_non_merger_ai_plus_two_does_not_submit_real_cut(submit_requirements):
+    """Even on a fully-keyed real cut, the merger half of
+    release-cut-promote only honours a *merger-agent-bot* +2.  A generic
+    ai-reviewer-bot +2 (e.g. lint-bot) plus a human +2 does not satisfy
+    the merger half, so the cut is not submittable."""
+    change = _real_cut_change(votes=(lint_bot_plus2(), human_plus2()))
     assert _is_submittable(change, submit_requirements) is False
 
 
-def test_negative_vote_blocks_even_autopromote(submit_requirements):
-    """Test plan #5 (config half) — No-Veto is unconditional, so a -1
-    (which the merger-bot itself casts when its pre-vote validation
-    fails — non-fast-forward, or author ≠ auto-promote-bot — and which
-    an operator can always cast) blocks submission even with a merger
-    +2 and the hashtag present.  Fast-forward-ness is enforced upstream
-    (auto_promote_main never creates a non-FF change); this is the
-    in-config backstop."""
-    change = Change(
-        branch="main",
-        hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
-        votes=(merger_plus2(), minus1()),
-    )
+def test_negative_vote_blocks_even_real_cut(submit_requirements):
+    """No-Veto is unconditional, so a -1 (which the merger-bot itself
+    casts when its pre-vote validation fails, and which an operator can
+    always cast) blocks submission even on a fully-keyed, fully-+2'd real
+    cut."""
+    change = _real_cut_change(votes=(merger_plus2(), human_plus2(), minus1()))
     assert _is_submittable(change, submit_requirements) is False
 
 
 def test_carveout_does_not_leak_to_develop(submit_requirements):
-    """Sanity: the carve-out is keyed on branch:main, so changes on
-    develop (even the absurd hypothetical of one carrying the
-    milestone:R3-fastforward hashtag) still need a human +2."""
-    only_merger = Change(
-        branch="develop",
-        hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
-        votes=(merger_plus2(),),
-    )
-    assert _is_submittable(only_merger, submit_requirements) is False
+    """Sanity: the carve-out is keyed on branch:main, so an otherwise
+    release-cut-shaped change on develop (topic/hashtag/owner all present)
+    still needs a human +2 and is governed by Human-Plus-2, not the
+    carve-out SRs."""
+    on_develop = _real_cut_change(branch="develop", votes=(merger_plus2(),))
+    applicable = _applicable_requirements(on_develop, submit_requirements)
+    assert "Human-Plus-2" in applicable
+    assert "release-cut-promote" not in applicable
+    assert "MainFastForwardMergerPlus2" not in applicable
+    assert _is_submittable(on_develop, submit_requirements) is False
     assert _is_submittable(
-        Change(
-            branch="develop",
-            hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
-            votes=(merger_plus2(), human_plus2()),
-        ),
+        _real_cut_change(branch="develop", votes=(merger_plus2(), human_plus2())),
         submit_requirements,
     ) is True
 
@@ -510,40 +634,26 @@ def test_project_config_example_keeps_op962_block_in_sync():
 # ──────────────────────────────────────────────────────────────────────
 #  OP-982 / AUDIT-26c — the `release-cut-promote` submit-requirement and
 #  the MERGE_ALWAYS submit-type on refs/heads/main (ADR-0020): a release
-#  cut is ONE merge change on main, quadruply-keyed (branch + topic +
-#  hashtag + author), co-exist with the human +2 (merger-bot +2 is
-#  ADDITIVE, not substitutive — so CLAUDE.md L1 stays un-amended).
+#  cut is ONE merge change on main, quadruply-keyed.  OP-1534 re-keyed it
+#  to (branch:main + canonical R3-fastforward hashtag [OR transition form]
+#  + intopic:release-cut + owner:sora); it co-exists with the human +2
+#  (merger-bot +2 is ADDITIVE, not substitutive — CLAUDE.md L1 stays
+#  un-amended).  The shared four-key signature + helper now live at the
+#  top of this module (``_real_cut_change``).
 # ──────────────────────────────────────────────────────────────────────
-
-# auto_promote_main (AUDIT-26d) sets topic=release-vX.Y.Z; the cut is
-# pushed by one of the release-cut identities.
-RELEASE_CUT_TOPIC = "release-v0.5.0-rc1"
-RELEASE_CUT_AUTHOR = "auto-promote-bot"
 
 _RELEASE_CUT_DESCRIPTION = (
     "Release-cut promotion to main; conditional merger-bot +2 acceptable "
-    "when topic + hashtag + author match the auto-promote pattern."
+    "when branch + canonical R3-fastforward hashtag + release-cut topic + "
+    "owner match the release-cut pattern."
 )
 
 
-def _release_cut_change(*, votes: tuple[Vote, ...] = (), **overrides) -> Change:
-    """A change that matches all four release-cut-promote keys, unless an
-    override knocks one out."""
-    kwargs: dict = dict(
-        branch="main",
-        topic=RELEASE_CUT_TOPIC,
-        hashtags=frozenset({AUTO_PROMOTE_HASHTAG}),
-        author=RELEASE_CUT_AUTHOR,
-        votes=votes,
-    )
-    kwargs.update(overrides)
-    return Change(**kwargs)
-
-
 def test_release_cut_promote_present_and_wellformed(submit_requirements):
-    """AC #2 (OP-982) — the release-cut-promote block exists, is keyed on
-    all four of {branch:main, topic, hashtag, author}, and is co-exist
-    (BOTH merger-agent-bot +2 AND non-ai-reviewer +2)."""
+    """AC #2 (OP-982 + OP-1534) — the release-cut-promote block exists, is
+    keyed on all four of {branch:main, R3-fastforward hashtag (OR form),
+    intopic:release-cut, owner:sora}, and is co-exist (BOTH
+    merger-agent-bot +2 AND non-ai-reviewer +2)."""
     assert "release-cut-promote" in submit_requirements, (
         "OP-982: .gerrit/project.config must define the release-cut-promote "
         "submit-requirement"
@@ -556,7 +666,9 @@ def test_release_cut_promote_present_and_wellformed(submit_requirements):
     # deploys to refs/meta/config.
     applicable = sr["applicableIf"]
     assert applicable == C3A_APPLICABLE_IF["release-cut-promote"], applicable
-    # Quadruply-keyed = three ANDs joining the four predicates.
+    # Quadruply-keyed = three top-level ANDs joining the four predicates
+    # (branch:main + the parenthesised hashtag-OR + intopic:release-cut +
+    # owner:sora). The OR inside the hashtag group is not a top-level join.
     assert applicable.count(" AND ") == 3, applicable
 
     submittable = sr["submittableIf"]
@@ -594,40 +706,50 @@ def test_release_cut_needs_both_merger_and_human_plus_two(submit_requirements):
     """The co-exist contract: a real release cut needs a merger-agent-bot
     +2 AND a non-ai-reviewer +2 — neither alone submits it."""
     assert _is_submittable(
-        _release_cut_change(votes=(merger_plus2(),)), submit_requirements
+        _real_cut_change(votes=(merger_plus2(),)), submit_requirements
     ) is False
     assert _is_submittable(
-        _release_cut_change(votes=(human_plus2(),)), submit_requirements
+        _real_cut_change(votes=(human_plus2(),)), submit_requirements
     ) is False
     assert _is_submittable(
-        _release_cut_change(votes=(merger_plus2(), human_plus2())), submit_requirements
+        _real_cut_change(votes=(merger_plus2(), human_plus2())), submit_requirements
     ) is True
 
 
 def test_release_cut_promote_quad_key_negatives(submit_requirements):
     """`SubmitRuleOverScopes` guard, tightened from OP-962's two keys to
-    four: knock out ANY one of {topic, author, hashtag, branch:main} and
-    release-cut-promote stops being applicable — the change then falls
-    through to the standard gates, never to a merger-only path."""
-    real = _release_cut_change(votes=(merger_plus2(), human_plus2()))
+    four: knock out ANY one of {intopic:release-cut, owner, hashtag,
+    branch:main} and release-cut-promote stops being applicable — the
+    change then falls through to the standard gates, never to a
+    merger-only path."""
+    real = _real_cut_change(votes=(merger_plus2(), human_plus2()))
     assert "release-cut-promote" in _applicable_requirements(real, submit_requirements)
 
     knockouts = {
-        "no topic": _release_cut_change(topic="", votes=(merger_plus2(), human_plus2())),
-        "wrong topic": _release_cut_change(
+        # topic no longer CONTAINS "release-cut" → intopic: stops matching.
+        "no topic": _real_cut_change(topic="", votes=(merger_plus2(), human_plus2())),
+        "wrong topic": _real_cut_change(
             topic="develop-to-main", votes=(merger_plus2(), human_plus2())
         ),
-        "wrong author": _release_cut_change(
-            author="lint-bot", votes=(merger_plus2(), human_plus2())
+        # a release-vX.Y.Z topic (the OLD shape) lacks the "release-cut"
+        # substring, so the re-keyed intopic: predicate correctly rejects it.
+        "old release-v topic": _real_cut_change(
+            topic="release-v0.5.0-rc1", votes=(merger_plus2(), human_plus2())
         ),
-        "no hashtag": _release_cut_change(
+        "wrong owner": _real_cut_change(
+            owner="lint-bot", votes=(merger_plus2(), human_plus2())
+        ),
+        "no owner": _real_cut_change(
+            owner="", votes=(merger_plus2(), human_plus2())
+        ),
+        "no hashtag": _real_cut_change(
             hashtags=frozenset(), votes=(merger_plus2(), human_plus2())
         ),
-        "wrong hashtag": _release_cut_change(
+        "wrong hashtag": _real_cut_change(
             hashtags=frozenset({"milestone:something-else"}),
             votes=(merger_plus2(), human_plus2()),
         ),
-        "on develop": _release_cut_change(
+        "on develop": _real_cut_change(
             branch="develop", votes=(merger_plus2(), human_plus2())
         ),
     }
@@ -641,7 +763,7 @@ def test_release_cut_promote_negative_vote_still_blocks(submit_requirements):
     """No-Veto is unconditional, so a -1 (incl. the one merger-bot casts
     when its pre-vote validation fails) blocks even a fully-keyed,
     fully-+2'd release cut."""
-    change = _release_cut_change(votes=(merger_plus2(), human_plus2(), minus1()))
+    change = _real_cut_change(votes=(merger_plus2(), human_plus2(), minus1()))
     assert _is_submittable(change, submit_requirements) is False
 
 
@@ -649,7 +771,7 @@ def test_non_merger_ai_plus_two_does_not_satisfy_release_cut(submit_requirements
     """Even on a fully-keyed release cut, only a *merger-agent-bot* +2
     (not a generic ai-reviewer-bot like lint-bot) counts toward the
     merger half of release-cut-promote."""
-    change = _release_cut_change(votes=(lint_bot_plus2(), human_plus2()))
+    change = _real_cut_change(votes=(lint_bot_plus2(), human_plus2()))
     assert _is_submittable(change, submit_requirements) is False
 
 
