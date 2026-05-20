@@ -65,8 +65,11 @@ from backend.agents.pipeline_coordinator_rules import (
     DecisionEngine,
     DecisionResult,
     NoopAction,
-    Tier1RuleEngine,
     WorkGraph,
+)
+from backend.agents.sprint_replan import (
+    SprintReplanHandler,
+    build_default_handler as build_default_sprint_replan_handler,
 )
 
 logger = logging.getLogger(__name__)
@@ -1079,6 +1082,7 @@ class PipelineCoordinator:
         bridge_tailer: BridgeEventTailer | None = None,
         jira_poller: JiraEventPoller | None = None,
         deduper: EventDeduper | None = None,
+        sprint_replan_handler: SprintReplanHandler | None = None,
     ) -> None:
         self._config = config
         self._engine = engine or DecisionEngine()
@@ -1110,6 +1114,7 @@ class PipelineCoordinator:
             window_seconds=config.event_dedupe_seconds,
             clock=clock,
         )
+        self._sprint_replan_handler = sprint_replan_handler
         self._last_sweep_at: datetime | None = self._clock()
         # 29f-7: cold-start recovery seam. Default wires the production
         # jira_dispatch / git / systemctl adapters (lazy + fail-open); tests
@@ -1188,6 +1193,22 @@ class PipelineCoordinator:
         if elapsed < self._config.sweep_interval_seconds:
             return None
         self._last_sweep_at = now
+        if self._sprint_replan_handler is not None:
+            try:
+                return self._sprint_replan_handler.run().to_event()
+            except Exception as exc:  # noqa: BLE001 - hourly handler must not kill daemon
+                logger.warning("[pipeline_coordinator] sprint re-plan failed: %s", exc)
+                return {
+                    "source": "timer",
+                    "trigger": "hourly-sprint-replan",
+                    "payload": {
+                        "error": str(exc),
+                        "pickable_count": 0,
+                        "total_free_slots": 0,
+                        "actions": [],
+                        "action_results": [],
+                    },
+                }
         return {
             "source": "timer",
             "trigger": "hourly-sweep",
@@ -1724,6 +1745,12 @@ def build_default_coordinator(
     return PipelineCoordinator(
         config,
         engine=build_hybrid_engine(decision_log_dir=config.decision_log_dir),
+        sprint_replan_handler=build_default_sprint_replan_handler(
+            config_dir=config.config_dir,
+            decision_log_dir=config.decision_log_dir,
+            capacity_path=config.capacity_path,
+            agent_class=config.jira_agent_class,
+        ),
     )
 
 

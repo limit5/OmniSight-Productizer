@@ -273,6 +273,44 @@ def write_capacity_snapshot(snapshot: CapacitySnapshot, path: Path) -> Path:
     return path
 
 
+def load_capacity_snapshot_from_json(
+    path: Path,
+    *,
+    captured_at: datetime | None = None,
+) -> CapacitySnapshot:
+    """Read the coordinator's ``runner_capacity.json`` snapshot.
+
+    29f-4 writes this file via :func:`write_capacity_snapshot`; sprint-level
+    re-planning reads it back rather than re-tailing runner JSONL so the
+    coordinator has one capacity artifact.
+    """
+    captured_at = _normalise_dt(captured_at or datetime.now(timezone.utc))
+    try:
+        record = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return CapacitySnapshot(captured_at=captured_at, runners={})
+    if not isinstance(record, Mapping):
+        return CapacitySnapshot(captured_at=captured_at, runners={})
+    snap_at = captured_at
+    raw_captured = record.get("captured_at")
+    if isinstance(raw_captured, str):
+        try:
+            snap_at = _normalise_dt(datetime.fromisoformat(raw_captured))
+        except ValueError:
+            snap_at = captured_at
+    runners: dict[str, RunnerCapacity] = {}
+    raw_runners = record.get("runners")
+    if isinstance(raw_runners, Mapping):
+        for key, raw in raw_runners.items():
+            if not isinstance(raw, Mapping):
+                continue
+            try:
+                runners[str(key)] = _runner_capacity_from_snapshot_record(raw)
+            except (TypeError, ValueError):
+                continue
+    return CapacitySnapshot(captured_at=snap_at, runners=runners)
+
+
 def _weekly_cap_for(provider: str) -> int:
     env_name = "OMNISIGHT_PROVIDER_CAP_{}_WEEKLY".format(
         "".join(ch if ch.isalnum() else "_" for ch in provider.upper())
@@ -313,6 +351,30 @@ def _runner_capacity_from_record(record: Mapping[str, Any]) -> RunnerCapacity:
         tickets_completed=max(0, int(record["tickets_completed"])),
         runner_id=str(record.get("runner_id") or ""),
         updated_at=_normalise_dt(datetime.fromisoformat(str(record["ts"]))),
+    )
+
+
+def _runner_capacity_from_snapshot_record(record: Mapping[str, Any]) -> RunnerCapacity:
+    reset_at = record.get("reset_at")
+    updated_at = record.get("updated_at")
+    return RunnerCapacity(
+        runner_class=str(record["runner_class"]),
+        free_slots=max(0, int(record.get("free_slots", 0) or 0)),
+        budget_remaining=float(record.get("budget_remaining", 0.0) or 0.0),
+        tokens_in_current_week=max(0, int(record.get("tokens_in_current_week", 0) or 0)),
+        weekly_cap=max(0, int(record.get("weekly_cap", 0) or 0)),
+        reset_at=(
+            _normalise_dt(datetime.fromisoformat(str(reset_at)))
+            if reset_at
+            else None
+        ),
+        tickets_completed=max(0, int(record.get("tickets_completed", 0) or 0)),
+        runner_id=str(record.get("runner_id") or ""),
+        updated_at=(
+            _normalise_dt(datetime.fromisoformat(str(updated_at)))
+            if updated_at
+            else None
+        ),
     )
 
 
