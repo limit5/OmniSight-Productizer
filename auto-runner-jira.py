@@ -1442,6 +1442,54 @@ def _finalize_under_review(
               f"comment posted, transition skipped")
 
 
+def _claim_token_suffix(
+    claim: "jira_dispatch.ClaimResult | None",
+) -> str | None:
+    """Bare fencing token from a won ``ClaimResult``.
+
+    ``ClaimResult.claim_token`` is ``{INSTANCE_ID}:{token}``; this strips the
+    ``{INSTANCE_ID}:`` prefix to yield the bare token used to build the fenced
+    label ``claim:{INSTANCE_ID}:{token}``. Returns ``None`` when there is no
+    won claim or the token does not carry our instance prefix (legacy /
+    unfenced path) so callers fall back to strict OP-1062 behaviour.
+    """
+    if claim is None or not claim.ok or not claim.claim_token:
+        return None
+    prefix = f"{INSTANCE_ID}:"
+    if claim.claim_token.startswith(prefix):
+        return claim.claim_token[len(prefix):]
+    return None
+
+
+def _runner_still_owns_claim(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    claim: "jira_dispatch.ClaimResult | None",
+) -> bool:
+    """OP-1541: True iff this runner's fencing-token claim is still the live
+    winner on ``key``.
+
+    Gates destructive recovery so ONLY the current winning claim holder may
+    clear assignee / revert (the OP-1541 invariant). Returns ``True`` when we
+    hold no fenced token to disprove ownership (legacy path) or when the live
+    label fetch fails — both fall back to the pre-OP-1541 OP-1062 behaviour
+    rather than silently skipping a legitimate revert on a transient fault.
+    """
+    token = _claim_token_suffix(claim)
+    if token is None:
+        return True
+    try:
+        labels = jira_dispatch.fetch_labels(client, key)
+    except Exception as exc:  # noqa: BLE001 — fail toward the OP-1062 revert
+        print(
+            f"[runner] claim-ownership label fetch failed for {key}: "
+            f"{type(exc).__name__}: {exc}; assuming still-owner.",
+            file=sys.stderr,
+        )
+        return True
+    return jira_dispatch.is_winning_claim_owner(labels, INSTANCE_ID, token)
+
+
 def _release_ticket_claim_if_acquired(
     client: "jira_dispatch.DispatchClient",
     key: str,
@@ -1450,15 +1498,11 @@ def _release_ticket_claim_if_acquired(
     """Best-effort claim release after a successful runner claim."""
     if claim is None or not claim.ok:
         return
-    token = None
-    prefix = f"{INSTANCE_ID}:"
-    if claim.claim_token and claim.claim_token.startswith(prefix):
-        token = claim.claim_token[len(prefix):]
     jira_dispatch.release_ticket_claim(
         client,
         key,
         INSTANCE_ID,
-        token,
+        _claim_token_suffix(claim),
         coordination_lease_id=claim.coordination_lease_id,
         coordination_fencing_token=claim.coordination_fencing_token,
     )
@@ -2053,6 +2097,27 @@ def _handle_toctou_abort(
                 )
             _release_ticket_claim_if_acquired(client, key, claim)
             return 0
+
+    # OP-1541: ownership-gate the destructive revert. Only the current winning
+    # fencing-token claim holder may clear assignee / revert. Under a
+    # shared-account burst a sibling instance's revert clears the assignee to
+    # None on a ticket WE may or may not still own; OP-1062 used to read that
+    # None as a lost claim and unconditionally revert, cascading into the
+    # OP-1533 stoploss trip. If our claim is no longer the live winner the
+    # assignee divergence is genuinely not ours to act on — log and step away
+    # WITHOUT clearing assignee or reverting. (The true owner never reaches
+    # here: its recheck returns ok while its claim still wins.)
+    if recheck.action == "abort_assignee_changed" and not _runner_still_owns_claim(
+        client, key, claim,
+    ):
+        claim_token = claim.claim_token if claim is not None else None
+        print(
+            f"[runner-claim-lost-not-reverting] {key}: fencing-token claim "
+            f"{claim_token!r} no longer the live winner; assignee divergence "
+            f"is not ours to revert. {recheck.reason}",
+            file=sys.stderr,
+        )
+        return 1
 
     audit = f"[runner-toctou:{phase}:{recheck.action}] {recheck.reason}"
     print(f"[runner] {key} toctou abort: {audit}", file=sys.stderr)
@@ -2649,8 +2714,13 @@ def main() -> int:
     # phase-boundary rechecks below can diff against it and bail out
     # on mid-flight operator mutations.
     try:
+        # OP-1541: thread the exact winning fencing-token claim identity into
+        # the snapshot so the phase-boundary rechecks can prove continued
+        # ownership when the shared-account assignee drifts to None.
         toctou_snapshot = live_state_check.capture_transition_boundary_snapshot(
             client, snapshot.key,
+            claim_instance_id=INSTANCE_ID,
+            claim_token=_claim_token_suffix(claim),
         )
     except Exception as exc:  # noqa: BLE001 — degrade rather than wedge pickup
         print(
