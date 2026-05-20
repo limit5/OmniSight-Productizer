@@ -23,6 +23,7 @@ from backend.submit_rule import (
     GROUP_AI_BOTS,
     GROUP_HUMAN,
     GROUP_MERGER,
+    RELEASE_CUT_HASHTAG,
     ReviewerVote,
     SubmitReason,
     ai_bot_vote,
@@ -353,3 +354,74 @@ def test_op694_no_conflict_with_merger_vote_is_still_allowed():
     )
     assert decision.allow is True
     assert decision.merger_plus_twos == 1  # tracked but not required
+
+
+# ──────────────────────────────────────────────────────────────
+#  OP-1537 — release-cut-promote mirror
+#
+#  A fully-keyed release cut is gated by Gerrit's release-cut-promote
+#  submit-requirement: branch:main + release-v* topic +
+#  milestone:R3-fastforward hashtag + release-cut author.  When that
+#  requirement is applicable, BOTH merger-agent-bot +2 and
+#  non-ai-reviewer +2 must coexist even if the change has no conflict.
+# ──────────────────────────────────────────────────────────────
+
+
+def _release_cut_kwargs(**overrides):
+    kwargs = {
+        "had_conflict": False,
+        "change_branch": "main",
+        "change_topic": "release-v0.5.0-rc1",
+        "change_hashtags": {RELEASE_CUT_HASHTAG, "auto-promote"},
+        "change_author": "auto-promote-bot",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def test_op1537_release_cut_needs_both_merger_and_human_plus_two():
+    decision = evaluate_submit_rule(
+        [human_vote("alice@x")],
+        **_release_cut_kwargs(),
+    )
+    assert decision.allow is False
+    assert decision.reason is SubmitReason.reject_missing_merger_plus_two
+    assert "merger_plus_two" in decision.missing
+
+    decision = evaluate_submit_rule(
+        [merger_vote()],
+        **_release_cut_kwargs(),
+    )
+    assert decision.allow is False
+    assert decision.reason is SubmitReason.reject_missing_human_plus_two
+    assert "human_plus_two" in decision.missing
+
+    decision = evaluate_submit_rule(
+        [merger_vote(), human_vote("alice@x")],
+        **_release_cut_kwargs(),
+    )
+    assert decision.allow is True
+    assert decision.reason is SubmitReason.allow
+
+
+def test_op1537_release_cut_applicableif_quad_key_gating():
+    real = evaluate_submit_rule(
+        [human_vote("alice@x")],
+        **_release_cut_kwargs(),
+    )
+    assert real.allow is False
+    assert "merger_plus_two" in real.missing
+
+    knockouts = {
+        "wrong branch": {"change_branch": "develop"},
+        "wrong topic": {"change_topic": "develop-to-main"},
+        "missing hashtag": {"change_hashtags": {"auto-promote"}},
+        "wrong author": {"change_author": "operator@example.com"},
+    }
+    for label, override in knockouts.items():
+        decision = evaluate_submit_rule(
+            [human_vote("alice@x")],
+            **_release_cut_kwargs(**override),
+        )
+        assert decision.allow is True, label
+        assert "merger_plus_two" not in decision.missing, label

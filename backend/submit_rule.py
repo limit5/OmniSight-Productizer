@@ -68,6 +68,7 @@ The shape is stable; downstream systems pin it in tests.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Iterable
@@ -82,6 +83,10 @@ logger = logging.getLogger(__name__)
 GROUP_HUMAN = "non-ai-reviewer"          # HUMAN hard gate
 GROUP_AI_BOTS = "ai-reviewer-bots"       # umbrella for all AI reviewers
 GROUP_MERGER = "merger-agent-bot"        # Merger sub-group (must also be in AI bots)
+
+RELEASE_CUT_HASHTAG = "milestone:R3-fastforward"
+RELEASE_CUT_TOPIC_RE = re.compile(r"^release-v[0-9]+[.][0-9]+[.][0-9]+.*$")
+RELEASE_CUT_AUTHORS = frozenset({"auto-promote-bot", "claude-bot", "codex-bot"})
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -172,6 +177,10 @@ def evaluate_submit_rule(
     *,
     had_conflict: bool = True,
     depends_on_blockers: Iterable[str | dict[str, Any]] | None = None,
+    change_branch: str | None = None,
+    change_topic: str | None = None,
+    change_hashtags: Iterable[str] | None = None,
+    change_author: str | None = None,
 ) -> SubmitDecision:
     """Evaluate the dual-+2 rule over ``votes`` and return a
     :class:`SubmitDecision`.
@@ -186,6 +195,12 @@ def evaluate_submit_rule(
     dependency list.  Any entry present here blocks submit before
     positive votes can allow the change; callers should pass only
     dependencies that have not already merged.
+
+    ``change_branch`` / ``change_topic`` / ``change_hashtags`` /
+    ``change_author`` mirror the Gerrit ``release-cut-promote``
+    ``applicableIf`` gate.  When all four match the release-cut shape,
+    the evaluator requires BOTH a merger-agent-bot +2 and a
+    non-ai-reviewer +2 even if ``had_conflict=False``.
 
     Accepts either :class:`ReviewerVote` instances or plain dicts (for
     JSON callers).  Never raises.
@@ -216,6 +231,12 @@ def evaluate_submit_rule(
     negative_votes = len(negative)
     negative_voters = [v.voter for v in negative]
     depends_on_blocker_ids = _normalize_depends_on_blockers(depends_on_blockers)
+    release_cut_promote_applies = _release_cut_promote_applies(
+        branch=change_branch,
+        topic=change_topic,
+        hashtags=change_hashtags,
+        author=change_author,
+    )
 
     # ── (3) Negative vote kill-switch ────────────────────────────
     if negative_votes > 0:
@@ -260,7 +281,8 @@ def evaluate_submit_rule(
     missing: list[str] = []
     if human_plus_twos < 1:
         missing.append("human_plus_two")
-    if had_conflict and merger_plus_twos < 1:
+    merger_plus_two_required = had_conflict or release_cut_promote_applies
+    if merger_plus_two_required and merger_plus_twos < 1:
         missing.append("merger_plus_two")
 
     if missing:
@@ -285,8 +307,9 @@ def evaluate_submit_rule(
             reason = SubmitReason.reject_missing_merger_plus_two
             detail = (
                 "Submission blocked: the Merger Agent must co-sign the "
-                "conflict block. Trigger the merger agent or assign an "
-                "alternate member of `merger-agent-bot` to re-evaluate."
+                "conflict or release-cut block. Trigger the merger agent "
+                "or assign an alternate member of `merger-agent-bot` to "
+                "re-evaluate."
             )
         return SubmitDecision(
             allow=False,
@@ -342,6 +365,23 @@ def _normalize_depends_on_blockers(
     return normalized
 
 
+def _release_cut_promote_applies(
+    *,
+    branch: str | None,
+    topic: str | None,
+    hashtags: Iterable[str] | None,
+    author: str | None,
+) -> bool:
+    """Mirror Gerrit's ``release-cut-promote`` ``applicableIf`` gate."""
+    return (
+        branch == "main"
+        and topic is not None
+        and RELEASE_CUT_TOPIC_RE.match(topic) is not None
+        and RELEASE_CUT_HASHTAG in set(hashtags or ())
+        and author in RELEASE_CUT_AUTHORS
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Helpers for constructing vote fixtures
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -376,6 +416,9 @@ __all__ = [
     "GROUP_AI_BOTS",
     "GROUP_HUMAN",
     "GROUP_MERGER",
+    "RELEASE_CUT_AUTHORS",
+    "RELEASE_CUT_HASHTAG",
+    "RELEASE_CUT_TOPIC_RE",
     "ReviewerVote",
     "SubmitDecision",
     "SubmitReason",
