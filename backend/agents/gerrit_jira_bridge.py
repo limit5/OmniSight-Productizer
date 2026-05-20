@@ -57,6 +57,9 @@ CURSOR_FILE = Path(
 DEFAULT_HEARTBEAT_FILE = "/var/run/omnisight-bridge/heartbeat"
 DEFAULT_HEARTBEAT_FILE_SECONDS = 30.0
 DEFAULT_BRIDGE_STALE_AFTER_SEC = 300
+DEFAULT_COORDINATOR_BRIDGE_EVENTS_FILE = (
+    "~/.config/omnisight/coordinator/bridge-events.jsonl"
+)
 MERGER_VERIFY_SCRATCH_ROOT = Path("/tmp")
 MERGER_VERIFY_SCRATCH_GLOB = "merger-verify-*"
 MERGER_VERIFY_REAP_AGE_SECONDS = 30 * 60
@@ -216,6 +219,42 @@ def touch_heartbeat_file(path: Path | None = None, now: float | None = None) -> 
     return target
 
 
+def coordinator_bridge_events_path_from_env(
+    env: dict[str, str] | None = None,
+) -> Path:
+    """Resolve the JSONL event tap consumed by ``pipeline_coordinator``."""
+
+    e = env if env is not None else os.environ
+    return Path(
+        e.get(
+            "OMNISIGHT_COORDINATOR_BRIDGE_EVENTS_FILE",
+            DEFAULT_COORDINATOR_BRIDGE_EVENTS_FILE,
+        )
+    ).expanduser()
+
+
+def append_coordinator_bridge_event(
+    event: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> Path:
+    """Append one Gerrit stream event for the coordinator's bridge tap."""
+
+    target = path if path is not None else coordinator_bridge_events_path_from_env()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existed = target.exists()
+    record = {
+        "ts": utc_now_iso(),
+        "source": "gerrit-jira-bridge",
+        "event": event,
+    }
+    with target.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(record, sort_keys=True) + "\n")
+    if not existed:
+        target.chmod(0o600)
+    return target
+
+
 def check_bridge_heartbeat(
     path: Path | None = None,
     stale_after_seconds: int | None = None,
@@ -303,6 +342,7 @@ class BridgeConfig:
     # the log heartbeat to keep the runner-side stale-threshold tight.
     heartbeat_file_seconds: float = DEFAULT_HEARTBEAT_FILE_SECONDS
     heartbeat_file_path: Path | None = None
+    coordinator_bridge_events_path: Path | None = None
     silent_warn_seconds: float = 600.0
     periodic_catchup_seconds: float = 900.0
     max_backoff_seconds: float = 60.0
@@ -910,6 +950,7 @@ class GerritJiraBridge:
     def process_stream_event(self, event: dict[str, Any]) -> None:
         self.counters.events_received += 1
         self.counters.last_event_at_ts = utc_now_iso()
+        self._append_coordinator_bridge_event(event)
         event_type = event.get("type")
         if event_type == "change-merged":
             change = extract_gerrit_change(event)
@@ -935,6 +976,21 @@ class GerritJiraBridge:
             return
         # Other event types are ignored — extend here if/when the daemon
         # gains additional duties (e.g. comment-added → coder-fix flow).
+
+    def _append_coordinator_bridge_event(self, event: dict[str, Any]) -> None:
+        """Best-effort event tap for the release-pipeline coordinator."""
+
+        try:
+            append_coordinator_bridge_event(
+                event,
+                path=self.config.coordinator_bridge_events_path,
+            )
+        except OSError as exc:
+            self.log(
+                "WARN",
+                "coordinator_bridge_event_write_failed",
+                err=f"{type(exc).__name__}: {exc}",
+            )
 
     # ─── change-merged → ps_merged_metrics (OP-746) ─────────────────
 

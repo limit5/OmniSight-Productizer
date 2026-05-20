@@ -40,7 +40,7 @@ import signal
 import threading
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -87,13 +87,17 @@ def _utc_now() -> datetime:
 DEFAULT_CONFIG_DIR = Path("~/.config/omnisight/coordinator")
 DECISION_LOG_DIR_ENV = "OMNISIGHT_COORDINATOR_DECISION_LOG_DIR"
 CONFIG_DIR_ENV = "OMNISIGHT_COORDINATOR_CONFIG_DIR"
+BRIDGE_EVENTS_FILE_ENV = "OMNISIGHT_COORDINATOR_BRIDGE_EVENTS_FILE"
+JIRA_AGENT_CLASS_ENV = "OMNISIGHT_COORDINATOR_JIRA_AGENT_CLASS"
 
 # ADR-0021 §9 L1: heartbeat every 60s.
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
-# Tick cadence of the steady-state loop (JIRA poll is 60s per §4; the
-# skeleton just no-ops, so the tick cadence only governs heartbeat + log
-# volume here).
-DEFAULT_TICK_INTERVAL_SECONDS = 60.0
+# Tick cadence of the steady-state loop. Bridge tap latency is <1s per
+# ADR-0021 §4, while JIRA polling remains independently gated at 60s.
+DEFAULT_TICK_INTERVAL_SECONDS = 1.0
+DEFAULT_JIRA_POLL_INTERVAL_SECONDS = 60.0
+DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0 * 60.0
+DEFAULT_EVENT_DEDUPE_SECONDS = 5.0 * 60.0
 
 # Directory / file permission bits (ADR-0021 §3.1: dir 0700, files 0600).
 _DIR_MODE = 0o700
@@ -113,8 +117,13 @@ class CoordinatorConfig:
     heartbeat_path: Path
     decision_log_dir: Path
     capacity_path: Path | None = None
+    bridge_events_path: Path | None = None
+    jira_agent_class: str = "subscription-claude"
     heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
     tick_interval_seconds: float = DEFAULT_TICK_INTERVAL_SECONDS
+    jira_poll_interval_seconds: float = DEFAULT_JIRA_POLL_INTERVAL_SECONDS
+    sweep_interval_seconds: float = DEFAULT_SWEEP_INTERVAL_SECONDS
+    event_dedupe_seconds: float = DEFAULT_EVENT_DEDUPE_SECONDS
 
     def __post_init__(self) -> None:
         if self.capacity_path is None:
@@ -122,6 +131,12 @@ class CoordinatorConfig:
                 self,
                 "capacity_path",
                 capacity_path_from_env(self.config_dir),
+            )
+        if self.bridge_events_path is None:
+            object.__setattr__(
+                self,
+                "bridge_events_path",
+                self.config_dir / "bridge-events.jsonl",
             )
 
     @classmethod
@@ -145,6 +160,10 @@ class CoordinatorConfig:
             heartbeat_path=base / "heartbeat",
             decision_log_dir=decision_log_dir,
             capacity_path=capacity_path_from_env(base, env),
+            bridge_events_path=Path(
+                env.get(BRIDGE_EVENTS_FILE_ENV, str(base / "bridge-events.jsonl"))
+            ).expanduser(),
+            jira_agent_class=env.get(JIRA_AGENT_CLASS_ENV, "subscription-claude"),
         )
 
 
@@ -269,6 +288,185 @@ class ShadowActionExecutor:
 ActionExecutor = Callable[[Action, DecisionContext], dict]
 
 
+# ── Event sources (ADR-0021 §4) ──────────────────────────────────────
+
+
+class EventDeduper:
+    """Five-minute coalescing window for identical source events."""
+
+    def __init__(
+        self,
+        *,
+        window_seconds: float = DEFAULT_EVENT_DEDUPE_SECONDS,
+        clock: Clock = _utc_now,
+    ) -> None:
+        self._window = timedelta(seconds=window_seconds)
+        self._clock = clock
+        self._seen: dict[str, datetime] = {}
+
+    def fresh(self, event: dict[str, Any]) -> bool:
+        key = self._key(event)
+        now = self._clock()
+        last = self._seen.get(key)
+        if last is not None and now - last < self._window:
+            return False
+        self._seen[key] = now
+        return True
+
+    def _key(self, event: dict[str, Any]) -> str:
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            change = payload.get("change")
+            change = change if isinstance(change, dict) else {}
+            parts = [
+                str(event.get("source") or ""),
+                str(payload.get("type") or payload.get("webhookEvent") or ""),
+                str(payload.get("id") or ""),
+                str(change.get("id") or ""),
+                str(change.get("number") or ""),
+                str(payload.get("key") or ""),
+            ]
+            if any(parts[1:]):
+                return "\x1f".join(parts)
+        return json.dumps(event, sort_keys=True, default=str)
+
+
+class BridgeEventTailer:
+    """Tail the bridge JSONL event tap without blocking the coordinator."""
+
+    def __init__(self, path: Path) -> None:
+        self._path = Path(path)
+        self._offset = 0
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def poll(self) -> list[dict[str, Any]]:
+        if not self._path.exists():
+            return []
+        size = self._path.stat().st_size
+        if size < self._offset:
+            self._offset = 0
+        events: list[dict[str, Any]] = []
+        with self._path.open("r", encoding="utf-8") as fh:
+            fh.seek(self._offset)
+            for line in fh:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                payload = record.get("event") if isinstance(record, dict) else record
+                if isinstance(payload, dict):
+                    events.append(
+                        {
+                            "source": "bridge",
+                            "trigger": f"bridge-event:{payload.get('type', 'unknown')}",
+                            "payload": payload,
+                            "bridge_record_ts": record.get("ts")
+                            if isinstance(record, dict)
+                            else None,
+                        }
+                    )
+            self._offset = fh.tell()
+        return events
+
+
+class JiraEventPoller:
+    """60s JIRA poll for coordinator-triggering ticket states."""
+
+    def __init__(
+        self,
+        *,
+        agent_class: str,
+        clock: Clock = _utc_now,
+        interval_seconds: float = DEFAULT_JIRA_POLL_INTERVAL_SECONDS,
+        client_factory: Callable[[str], Any] | None = None,
+        search: Callable[[Any, str], list[dict[str, Any]]] | None = None,
+    ) -> None:
+        self._agent_class = agent_class
+        self._clock = clock
+        self._interval = timedelta(seconds=interval_seconds)
+        self._client_factory = client_factory
+        self._search = search
+        self._client: Any | None = None
+        self._last_poll: datetime | None = None
+
+    def due(self) -> bool:
+        return (
+            self._last_poll is None
+            or self._clock() - self._last_poll >= self._interval
+        )
+
+    def poll(self) -> list[dict[str, Any]]:
+        if not self.due():
+            return []
+        self._last_poll = self._clock()
+        try:
+            client = self._client or self._make_client()
+            self._client = client
+            issues = self._search_issues(client, coordinator_jql(client.project_key))
+        except Exception as exc:  # noqa: BLE001 — source failure is non-fatal
+            logger.warning("[pipeline_coordinator] jira poll failed: %s", exc)
+            return []
+        events: list[dict[str, Any]] = []
+        for issue in issues:
+            key = str(issue.get("key") or "")
+            if not key:
+                continue
+            events.append(
+                {
+                    "source": "jira",
+                    "trigger": "jira-poll",
+                    "ticket_key": key,
+                    "payload": issue,
+                }
+            )
+        return events
+
+    def _make_client(self) -> Any:
+        if self._client_factory is not None:
+            return self._client_factory(self._agent_class)
+        from backend.agents import jira_dispatch
+
+        return jira_dispatch.make_client(self._agent_class)
+
+    def _search_issues(self, client: Any, jql: str) -> list[dict[str, Any]]:
+        if self._search is not None:
+            return self._search(client, jql)
+        from backend.agents import jira_dispatch
+
+        resp = jira_dispatch._request(
+            client,
+            "POST",
+            "/search/jql",
+            {
+                "jql": jql,
+                "fields": ["summary", "labels", "status", "assignee", "updated"],
+                "maxResults": 100,
+            },
+        )
+        return list(resp.get("issues", []))
+
+
+def coordinator_jql(project_key: str) -> str:
+    """ADR-0021 §4 JQL for the 60s coordinator poll."""
+
+    return (
+        f'project = "{project_key}" '
+        'AND (labels is EMPTY OR labels not in ("coord-skip")) '
+        "AND ("
+        'labels = "needs-coordinator" '
+        'OR (status in ("Done", "Closed", "Won\'t Do", "却下") '
+        "AND statusCategoryChangedDate >= -1d) "
+        'OR (status = "進行中" AND assignee is EMPTY)'
+        ") "
+        "ORDER BY updated ASC"
+    )
+
+
 # ── Daemon ────────────────────────────────────────────────────────────
 
 
@@ -294,6 +492,9 @@ class PipelineCoordinator:
         work_graph_provider: Callable[[], WorkGraph] | None = None,
         action_executor: ActionExecutor | None = None,
         sleep: SleepFn | None = None,
+        bridge_tailer: BridgeEventTailer | None = None,
+        jira_poller: JiraEventPoller | None = None,
+        deduper: EventDeduper | None = None,
     ) -> None:
         self._config = config
         self._engine = engine or DecisionEngine()
@@ -310,12 +511,31 @@ class PipelineCoordinator:
         # fires never mutates JIRA until the real §6 layer / acting mode lands.
         executor = action_executor or ShadowActionExecutor().execute
         self._action_executor: ActionExecutor = executor
+        # 29f-6: event sources (ADR §4) — bridge JSONL tail + 60s JIRA poll +
+        # hourly sweep, coalesced through a 5-min deduper. They feed the
+        # per-tick raw events staged for the work-graph builder.
+        self._bridge_tailer = bridge_tailer or BridgeEventTailer(
+            config.bridge_events_path or (config.config_dir / "bridge-events.jsonl")
+        )
+        self._jira_poller = jira_poller or JiraEventPoller(
+            agent_class=config.jira_agent_class,
+            clock=clock,
+            interval_seconds=config.jira_poll_interval_seconds,
+        )
+        self._deduper = deduper or EventDeduper(
+            window_seconds=config.event_dedupe_seconds,
+            clock=clock,
+        )
+        self._last_sweep_at: datetime | None = self._clock()
         self._stop = threading.Event()
         # Interruptible sleep: default waits on the stop event so SIGTERM
         # breaks the loop within one poll instead of one tick.
         self._sleep: SleepFn = sleep or self._stop.wait
         # Current-tick world (rebuilt every tick — ADR §3.2 stateless).
         self._work_graph: WorkGraph = WorkGraph()
+        # 29f-6: raw source events collected this tick, staged for the
+        # events→WorkGraph builder (29f-8). Empty until the first refresh.
+        self._pending_events: list[dict[str, Any]] = []
         self._signals_installed = False
 
     @property
@@ -332,13 +552,16 @@ class PipelineCoordinator:
         return WorkGraph()
 
     def _refresh_work_graph(self) -> WorkGraph:
-        """Rebuild the per-tick world from the injected provider.
+        """Rebuild the per-tick world.
 
-        29f-8 wires JIRA poll + bridge-log tap into the provider. The
-        contract (refresh → build context → evaluate) is fixed here; the
-        default provider yields an empty graph so the daemon ticks safely
-        before any event source exists.
+        29f-6 collects raw source events (bridge tail + 60s JIRA poll +
+        hourly sweep, coalesced) and stages them in ``_pending_events``;
+        29f-8 turns those into the WorkGraph the rules reason over via the
+        injected provider. Until that builder lands, the default provider
+        yields an empty graph so the daemon ticks safely while events are
+        already being collected.
         """
+        self._pending_events = self._collect_source_events()
         self._work_graph = self._work_graph_provider()
         return self._work_graph
 
@@ -352,6 +575,37 @@ class PipelineCoordinator:
         and the tick stays in the idle :data:`SKELETON_MODE`.
         """
         return None, None
+
+    def _collect_source_events(self) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = []
+        events.extend(self._bridge_tailer.poll())
+        events.extend(self._jira_poller.poll())
+        sweep = self._hourly_sweep_event()
+        if sweep is not None:
+            events.append(sweep)
+        fresh: list[dict[str, Any]] = []
+        for event in events:
+            if self._deduper.fresh(event):
+                fresh.append(event)
+        return fresh
+
+    def _hourly_sweep_event(self) -> dict[str, Any] | None:
+        now = self._clock()
+        if self._last_sweep_at is None:
+            self._last_sweep_at = now
+            return None
+        elapsed = (now - self._last_sweep_at).total_seconds()
+        if elapsed < self._config.sweep_interval_seconds:
+            return None
+        self._last_sweep_at = now
+        return {
+            "source": "timer",
+            "trigger": "hourly-sweep",
+            "payload": {
+                "scan": "full-work-graph-anomaly",
+                "elapsed_seconds": elapsed,
+            },
+        }
 
     def build_context(self) -> DecisionContext:
         """Assemble the per-tick :class:`DecisionContext`.
@@ -426,6 +680,7 @@ class PipelineCoordinator:
         """
         self._heartbeat.touch()
         self._refresh_work_graph()
+        self._append_source_event_records()
         ctx = self.build_context()
         if self._config.capacity_path is not None:
             write_capacity_snapshot(ctx.capacity, self._config.capacity_path)
@@ -440,6 +695,21 @@ class PipelineCoordinator:
         ]
         self._decision_log.append(self._build_tick_record(result, action_results))
         return result
+
+    def _append_source_event_records(self) -> None:
+        for event in self._pending_events:
+            self._decision_log.append(
+                {
+                    "ts": self._clock().isoformat(),
+                    "event": "coordinator_source_event",
+                    "trigger": event.get("trigger"),
+                    "source": event.get("source"),
+                    "ticket_key": event.get("ticket_key"),
+                    "payload": event.get("payload"),
+                    "dry_run": True,
+                    "pid": os.getpid(),
+                }
+            )
 
     def request_stop(self) -> None:
         """Ask the steady-state loop to stop after the current tick."""
