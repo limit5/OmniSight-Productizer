@@ -1944,6 +1944,16 @@ def transition_back_to_todo(
 ) -> None:
     """In Progress → TODO with reason comment + clear assignee.
 
+    OP-1541 invariant: this is a destructive recovery — it clears the
+    assignee. Under a shared JIRA account ONLY the current winning
+    fencing-token claim holder may revert. Callers on the TOCTOU /
+    assignee-divergence path MUST first prove claim ownership (see
+    :func:`is_winning_claim_owner` and ``auto-runner-jira._handle_toctou_abort``)
+    so a sibling instance's assignee clear does not cascade into a false
+    revert (OP-1533 burst → stoploss). The non-recovery callers (CLI
+    failure, capability gate, discovered dependency, pre-claim cwd-unsafe)
+    are unaffected — they own or predate the claim.
+
     OP-854 (C2): when ``failure_class`` is supplied, an incident row
     lands in ``runner_incidents`` before the transition fires so the
     C8 failure-graph and the C2 recall path can pick it up next time
@@ -3062,6 +3072,65 @@ def _lowest_uuid_claim_winner(
         if best is None or token < best:
             best = token
     return best
+
+
+def is_winning_claim_owner(
+    labels: Iterable[str],
+    instance_id: str,
+    token: str | None,
+    *,
+    now_us: int | None = None,
+) -> bool:
+    """True iff ``claim:{instance_id}:{token}`` is the live winning claim
+    among ``labels`` — i.e. this runner still holds the fencing-token claim
+    it acquired at pickup.
+
+    OP-1541: the TOCTOU recheck and the destructive-recovery gate use this to
+    tell a shared-account false-abort from a genuine ownership loss. All
+    ``codex-*`` (resp. ``claude-*``) instances authenticate as ONE JIRA
+    account, so the assignee cannot distinguish instances of a class. When a
+    sibling instance clears the assignee (its own revert → ``clear_assignee``
+    → ``None``) while OUR per-instance fenced claim is still the live winner,
+    the bot→None drift is benign and the run continues. When our token is
+    gone / stale / no longer the lowest live token, we have genuinely lost the
+    claim and must NOT clear assignee or revert a ticket we no longer own.
+
+    Ownership requires (a) a non-empty ``token``, (b) our exact fenced label
+    ``claim:{instance_id}:{token}`` present in ``labels``, (c) that token not
+    stale, and (d) that token being the lowest live token across **all**
+    instances' fenced claims. Unlike :func:`_lowest_uuid_claim_winner` (which
+    is per-instance because the claim path rejects foreign claims outright),
+    this is a *global* total order: under one shared JIRA account two
+    instances each hold a per-instance-lowest token, so only a cross-instance
+    fencing-token comparison decides the single rightful owner. The earliest
+    minted token (lowest ``{epoch_us}-{uuid}``) wins — so the non-owner's
+    leftover/loser label can never make it (wrongly) believe it owns the
+    ticket, which is what stops it from clobbering the owner's run.
+
+    A ``None``/empty token (legacy or unfenced pickup) returns ``False``; the
+    caller then falls back to the strict OP-1062 behaviour.
+    """
+    if not token:
+        return False
+    if now_us is None:
+        now_us = time.time_ns() // 1000
+    our_label = _fenced_claim_label(instance_id, token)
+    have_ours = False
+    lowest_live: str | None = None
+    for label in labels:
+        parsed = _parse_claim_label(label)
+        if parsed is None:
+            continue
+        _inst, tok = parsed
+        if tok is None:  # pre-AUDIT-24 bare claim — not a live fenced claim
+            continue
+        if _claim_token_is_stale(tok, now_us, _STALE_CLAIM_MAX_AGE_S):
+            continue
+        if label == our_label:
+            have_ours = True
+        if lowest_live is None or tok < lowest_live:
+            lowest_live = tok
+    return have_ours and lowest_live == token
 
 
 def claim_ticket_atomic(

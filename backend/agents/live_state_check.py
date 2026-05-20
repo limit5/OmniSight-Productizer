@@ -293,6 +293,15 @@ class TransitionBoundarySnapshot:
     status_name: str
     labels: frozenset[str]
     blocker_keys: frozenset[str]
+    # OP-1541: the exact winning fencing-token claim identity captured at
+    # pickup (``instance_id`` + bare token of ``claim:{instance}:{token}``).
+    # Sourced from the ``ClaimResult`` the runner already holds — NOT from a
+    # JIRA field — so the recheck can tell shared-account assignee drift
+    # (sibling cleared assignee while OUR claim still wins → continue) from a
+    # genuine ownership loss. ``None`` on a legacy/unfenced pickup, in which
+    # case the recheck falls back to strict OP-1062 assignee-divergence abort.
+    claim_instance_id: str | None = None
+    claim_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,7 +351,13 @@ def _toctou_cached_live(
     return fields
 
 
-def _snapshot_from_fields(key: str, fields: dict) -> TransitionBoundarySnapshot:
+def _snapshot_from_fields(
+    key: str,
+    fields: dict,
+    *,
+    claim_instance_id: str | None = None,
+    claim_token: str | None = None,
+) -> TransitionBoundarySnapshot:
     assignee = fields.get("assignee") or {}
     acc = assignee.get("accountId") if isinstance(assignee, dict) else None
     status = (fields.get("status") or {}).get("name") or ""
@@ -361,20 +376,61 @@ def _snapshot_from_fields(key: str, fields: dict) -> TransitionBoundarySnapshot:
         status_name=status,
         labels=labels,
         blocker_keys=frozenset(blockers),
+        claim_instance_id=claim_instance_id,
+        claim_token=claim_token,
     )
 
 
 def capture_transition_boundary_snapshot(
-    client: Any, key: str, *, now: float | None = None,
+    client: Any,
+    key: str,
+    *,
+    now: float | None = None,
+    claim_instance_id: str | None = None,
+    claim_token: str | None = None,
 ) -> TransitionBoundarySnapshot:
     """Snapshot mutable fields at pickup so later rechecks can diff.
 
     Populates the TTL cache as a side effect — the first in-flight
     :func:`recheck_transition_boundary_state` after capture reuses the
     same payload instead of re-hitting JIRA.
+
+    OP-1541: ``claim_instance_id`` / ``claim_token`` record the exact winning
+    fencing-token claim the runner holds (from the ``ClaimResult``). They are
+    not JIRA fields — they are threaded in by the runner so the recheck can
+    prove continued ownership when the shared-account assignee drifts to
+    ``None`` mid-flight.
     """
     fields = _toctou_cached_live(client, key, now=now)
-    return _snapshot_from_fields(key, fields)
+    return _snapshot_from_fields(
+        key, fields,
+        claim_instance_id=claim_instance_id,
+        claim_token=claim_token,
+    )
+
+
+def _claim_still_winning(
+    snap: TransitionBoundarySnapshot, fields: dict,
+) -> bool:
+    """OP-1541: True iff the runner's pickup-time fencing-token claim is still
+    the live winner among the ticket's current labels.
+
+    Returns ``False`` when the snapshot carries no claim identity (legacy /
+    unfenced pickup) or on any lookup error — the caller then treats assignee
+    divergence strictly (OP-1062), which is the safe side.
+    """
+    if not snap.claim_token or not snap.claim_instance_id:
+        return False
+    try:
+        from backend.agents import jira_dispatch as jd
+
+        return jd.is_winning_claim_owner(
+            fields.get("labels") or (),
+            snap.claim_instance_id,
+            snap.claim_token,
+        )
+    except Exception:  # noqa: BLE001 — never let an ownership probe crash the recheck
+        return False
 
 
 def _evaluate_recheck(
@@ -383,11 +439,21 @@ def _evaluate_recheck(
     assignee = fields.get("assignee") or {}
     live_acc = assignee.get("accountId") if isinstance(assignee, dict) else None
     if live_acc != snap.assignee_account_id:
-        return BoundaryRecheckResult(
-            False, "abort_assignee_changed",
-            f"assignee diverged from pickup: snapshot={snap.assignee_account_id!r} "
-            f"live={live_acc!r}",
-        )
+        # OP-1541 shared-account false-abort guard. codex-1/2/3 (and the
+        # claude instances) authenticate as ONE JIRA account, so the assignee
+        # alone cannot distinguish instances of a class. When a sibling
+        # instance clears the assignee to ``None`` (its own revert →
+        # ``clear_assignee``) while OUR per-instance fencing-token claim is
+        # still the live winner, the bot→None drift is benign and we MUST
+        # continue. A change to a *different non-null* account (a human /
+        # operator, or a cross-class bot) is still an operator-authority abort
+        # signal — that path preserves OP-1062 / OP-1069 unchanged.
+        if not (live_acc is None and _claim_still_winning(snap, fields)):
+            return BoundaryRecheckResult(
+                False, "abort_assignee_changed",
+                f"assignee diverged from pickup: snapshot={snap.assignee_account_id!r} "
+                f"live={live_acc!r}",
+            )
     live_status = (fields.get("status") or {}).get("name") or ""
     if live_status and live_status != snap.status_name:
         if live_status in _REVERT_STATUS_NAMES:
