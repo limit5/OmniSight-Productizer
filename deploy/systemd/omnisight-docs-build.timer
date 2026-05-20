@@ -1,0 +1,18 @@
+; Daily trigger for omnisight-docs-build.service.
+;
+; Cadence: daily. The docs site is a near-static render of curated markdown;
+; daily is plenty (a 0.4s build every 6h would be wasteful). OnBootSec
+; catches reboots; Persistent=true catches up one missed fire after downtime.
+
+[Unit]
+Description=Daily trigger for omnisight-docs-build.service
+
+[Timer]
+Unit=omnisight-docs-build.service
+OnBootSec=10min
+OnUnitActiveSec=1d
+AccuracySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

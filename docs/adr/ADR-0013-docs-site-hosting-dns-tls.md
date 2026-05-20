@@ -1,13 +1,20 @@
 ---
 id: ADR-0013
 title: Docs-site hosting + DNS + TLS — GitHub Pages with custom domain docs.sora.services
-status: Accepted
+status: Superseded by ADR-0022 (live path) — retained as dormant GitHub Pages fallback
 date: 2026-05-08
 ---
 
 # ADR 0013 — Docs-site hosting + DNS + TLS: GitHub Pages w/ `docs.sora.services`
 
-**Status**: Accepted (2026-05-08, Sprint E — META OP-793)
+> **Superseded (2026-05-20) for the LIVE path by [ADR-0022](ADR-0022-docs-site-hosting-cf-tunnel.md).**
+> The GitHub mirror has been broken since 2026-05-07 (PAT lacks `workflow`
+> scope), so this GitHub Pages path no longer fires. The live docs site is
+> now served via Cloudflare Tunnel at `docs.sora-dev.app` (ADR-0022). This
+> ADR + its workflow + contract tests are **retained, unchanged, as a dormant
+> fallback** that reactivates if the GitHub mirror is ever repaired.
+
+**Status**: Accepted (2026-05-08, Sprint E — META OP-793); superseded as live path by ADR-0022 (2026-05-20)
 
 **Decider**: sora (operator) + AI fleet
 

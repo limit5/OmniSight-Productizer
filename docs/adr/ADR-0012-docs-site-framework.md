@@ -62,9 +62,11 @@ formalises the answer that OP-792 deferred. It does **not** rip out
 
 Adopt **MkDocs 1.6 with the Material for MkDocs theme**. Plugins authored
 in-repo as Python packages under `docs-site/plugins/`. Source tree at
-`docs-site/`; build output continues to land in `docs-site-dist/` so the
-existing `actions/upload-pages-artifact` step from OP-792 keeps working
-unchanged.
+`docs-site/`; build output continues to land in `docs-site-dist/`. (The
+`actions/upload-pages-artifact` step from OP-792 referenced here is the
+GitHub Pages publish path, dormant since 2026-05-07 — the live serving path
+is now Cloudflare Tunnel + Caddy per ADR-0022. `docs-site-dist/` remains the
+build output regardless of which serving path consumes it.)
 
 Rationale:
 

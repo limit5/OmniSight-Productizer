@@ -354,6 +354,11 @@ services:
       - "80:80"
     volumes:
       - ./deploy/reverse-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Docs static site (MkDocs output) served by the :8081 block.
+      # Read-only: Caddy file_server never writes here. Built by
+      # scripts/build_docs_site.sh BEFORE `compose up` (else docker
+      # auto-creates an empty root-owned dir → blank docs site).
+      - ./docs-site-dist:/srv/docs:ro
       - omnisight-caddy-data:/data
       - omnisight-caddy-config:/config
     # Caddyfile site block expands `{$OMNISIGHT_PUBLIC_HOSTNAME:localhost}`

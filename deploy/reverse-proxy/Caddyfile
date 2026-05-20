@@ -345,3 +345,29 @@
 		flush_interval -1
 	}
 }
+
+# Docs static site — MkDocs Material HTML output served as plain files.
+#
+# CF Tunnel ingress (operator dashboard, Networks → Tunnels → Public
+# Hostnames): docs.sora-dev.app → Service Type HTTP → URL caddy:8081.
+# CF edge terminates TLS; this block is plain internal HTTP only — same
+# pattern as :8080 (edge router) and :8000 (backend SSR proxy). A
+# dedicated port keeps the static fileserver fully isolated from the
+# load-bearing app blocks, so a docs config slip can never affect :443.
+#
+# Source artifact: docs-site-dist/ (mounted read-only at /srv/docs), built
+# by scripts/build_docs_site.sh via the squidfunk/mkdocs-material image and
+# refreshed by the omnisight-docs-build.timer systemd unit. The build MUST
+# run before `compose up`, otherwise docker auto-creates an empty
+# /srv/docs host dir and this block serves blank 404s.
+:8081 {
+	root * /srv/docs
+	file_server
+	encode gzip zstd
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+}
