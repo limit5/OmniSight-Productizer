@@ -34,17 +34,23 @@
 [Unit]
 Description=OmniSight GitLab Container Registry daily liveness check (OP-1514)
 Documentation=https://soraapp.atlassian.net/browse/OP-1514
-Documentation=file:///home/user/work/sora/OmniSight-Productizer/docs/operations/gitlab-cr-monitor.md
+Documentation=file:///home/user/sora-bridge/docs/operations/gitlab-cr-monitor.md
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/home/user/work/sora/OmniSight-Productizer
-Environment=PYTHONPATH=/home/user/work/sora/OmniSight-Productizer
+; OP-1545 — runs from ~/sora-bridge (the auto-synced develop checkout the
+; other monitors use). The main work tree is an operator feature-branch
+; checkout that lacks scripts/verify_gitlab_cr.sh (ExecStart -> exit 127).
+WorkingDirectory=/home/user/sora-bridge
+Environment=PYTHONPATH=/home/user/sora-bridge
 Environment=PYTHONUNBUFFERED=1
-Environment=OMNISIGHT_REPO_ROOT=/home/user/work/sora/OmniSight-Productizer
-ExecStart=/bin/bash /home/user/work/sora/OmniSight-Productizer/scripts/verify_gitlab_cr.sh
+Environment=OMNISIGHT_REPO_ROOT=/home/user/sora-bridge
+; OP-1545 — :49154 is the HTTP port; the script's old https default makes
+; curl fail with 'wrong version number'. Pin the scheme here explicitly.
+Environment=OMNISIGHT_GITLAB_API_URL=http://sora.services:49154
+ExecStart=/bin/bash /home/user/sora-bridge/scripts/verify_gitlab_cr.sh
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=gitlab-cr-monitor

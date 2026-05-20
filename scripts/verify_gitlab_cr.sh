@@ -59,7 +59,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT_DEFAULT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 REPO_ROOT="${OMNISIGHT_REPO_ROOT:-$REPO_ROOT_DEFAULT}"
 
-GITLAB_API_URL="${OMNISIGHT_GITLAB_API_URL:-https://sora.services:49154}"
+# OP-1545 — :49154 serves plain HTTP; an https:// default makes curl fail
+# with 'SSL routines::wrong version number'. The systemd unit also pins this
+# explicitly, but fixing the default keeps the documented manual run
+# (docs/operations/gitlab-cr-monitor.md §4, "uses production-shaped defaults")
+# working without an env override.
+GITLAB_API_URL="${OMNISIGHT_GITLAB_API_URL:-http://sora.services:49154}"
 PROJECT_PATH="${OMNISIGHT_GITLAB_PROJECT_PATH:-omnisight%2FOmniSight-Productizer}"
 TOKEN_FILE="${OMNISIGHT_GITLAB_TOKEN_FILE:-${HOME}/.config/omnisight/gitlab-claude-token}"
 FRESHNESS_HOURS="${OMNISIGHT_GITLAB_CR_FRESHNESS_HOURS:-48}"
@@ -144,6 +149,86 @@ notify(
     },
 )
 PY
+}
+
+# ── Registry v2 timestamp resolution ──────────────────────────────
+#
+# OP-1545: the freshness timestamp does NOT come from the GitLab REST
+# API. On this instance (GitLab CE 18.6.2) the per-tag detail endpoint
+# `/registry/repositories/:id/tags/:name` returns 404 outright, and the
+# metadata-DB fields (GraphQL `createdAt`/`publishedAt`) are null /
+# unpopulated — so the old `.created_at // .updated_at` jq path against
+# the tag-detail body never had anything to parse ("no tag had a
+# parseable created_at/updated_at"). The authoritative build timestamp
+# lives in the image-config blob, reachable only via the Docker
+# Registry v2 API on the host the repository advertises in its
+# `location` field. We therefore:
+#   1. mint a short-lived registry pull token (Bearer) via the realm
+#      the registry names in its WWW-Authenticate challenge, and
+#   2. for each tag, fetch the manifest, descend a multi-arch OCI index
+#      to a concrete child, read the config-blob digest, and pull
+#      `.created` from that blob.
+
+# registry_bearer <image-path>
+# Echoes a Bearer token scoped to `repository:<image-path>:pull`, using
+# the GitLab PAT as basic-auth credentials against the registry's
+# advertised auth realm (falls back to <api>/jwt/auth).
+registry_bearer() {
+    local image="$1"
+    local challenge realm service
+    challenge="$(curl -sS -i --max-time 30 "${REGISTRY_BASE}/v2/" 2>/dev/null \
+        | tr -d '\r')"
+    realm="$(printf '%s' "$challenge" \
+        | sed -n 's/.*[Ww]ww-[Aa]uthenticate:.*realm="\([^"]*\)".*/\1/p' \
+        | head -n1)"
+    service="$(printf '%s' "$challenge" \
+        | sed -n 's/.*[Ww]ww-[Aa]uthenticate:.*service="\([^"]*\)".*/\1/p' \
+        | head -n1)"
+    [ -z "$realm" ] && realm="${GITLAB_API_URL%/}/jwt/auth"
+    [ -z "$service" ] && service="container_registry"
+    curl -sS --max-time 30 -u "x:${TOKEN}" --get \
+        --data-urlencode "service=${service}" \
+        --data-urlencode "scope=repository:${image}:pull" \
+        "$realm" 2>/dev/null \
+        | jq -r '.token // .access_token // empty' 2>/dev/null
+}
+
+# Manifest media types we accept (single-image + multi-arch index, both
+# the docker and OCI spellings).
+MANIFEST_ACCEPT=(
+    -H 'Accept: application/vnd.docker.distribution.manifest.v2+json'
+    -H 'Accept: application/vnd.oci.image.manifest.v1+json'
+    -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json'
+    -H 'Accept: application/vnd.oci.image.index.v1+json'
+)
+
+# tag_created <image-path> <ref> <bearer>
+# Echoes the image-config `.created` ISO timestamp for <ref>, or nothing
+# (return 1) if it cannot be resolved. Cosign `.sig`/`.att` artifacts
+# carry a zero-value (year 0001) `.created`, which the caller's epoch
+# comparison naturally discards.
+tag_created() {
+    local image="$1" ref="$2" bearer="$3"
+    local manifest cfg child
+    manifest="$(curl -sS --max-time 30 -H "Authorization: Bearer ${bearer}" \
+        "${MANIFEST_ACCEPT[@]}" \
+        "${REGISTRY_BASE}/v2/${image}/manifests/${ref}" 2>/dev/null)" || return 1
+    cfg="$(printf '%s' "$manifest" | jq -r '.config.digest // empty' 2>/dev/null)"
+    if [ -z "$cfg" ]; then
+        # Multi-arch index — descend to a concrete (non-attestation) child.
+        child="$(printf '%s' "$manifest" | jq -r '
+            ( [ .manifests[]? | select((.platform.architecture // "") != "unknown") ][0].digest )
+            // ( .manifests[0]?.digest ) // empty' 2>/dev/null)"
+        [ -z "$child" ] && return 1
+        manifest="$(curl -sS --max-time 30 -H "Authorization: Bearer ${bearer}" \
+            "${MANIFEST_ACCEPT[@]}" \
+            "${REGISTRY_BASE}/v2/${image}/manifests/${child}" 2>/dev/null)" || return 1
+        cfg="$(printf '%s' "$manifest" | jq -r '.config.digest // empty' 2>/dev/null)"
+        [ -z "$cfg" ] && return 1
+    fi
+    curl -sS --max-time 30 -H "Authorization: Bearer ${bearer}" \
+        "${REGISTRY_BASE}/v2/${image}/blobs/${cfg}" 2>/dev/null \
+        | jq -r '.created // empty' 2>/dev/null
 }
 
 # ── Dependency / token preflight ──────────────────────────────────
@@ -243,15 +328,39 @@ case "$TAGS_HTTP" in
         ;;
 esac
 
-# The tags-list endpoint does NOT return `updated_at` per-tag; only the
-# per-tag detail endpoint does. Walk each tag, fetch its detail, and
-# keep the freshest. This is O(N) requests but the per_page=20 cap keeps
-# N small and the daily cadence makes the API cost a non-issue.
+# The GitLab REST tag-list/tag-detail endpoints carry no usable
+# timestamp on this instance (see the "Registry v2 timestamp
+# resolution" header above). Walk each tag against the Docker Registry
+# v2 API instead and keep the freshest config-blob `.created`. This is
+# O(N) registry round-trips but the per_page=20 cap keeps N small and
+# the daily cadence makes the cost a non-issue.
 
 TAG_NAMES="$(jq -r '.[].name' < "$TAGS_BODY")"
 if [ -z "$TAG_NAMES" ]; then
     emit_status "cr_empty" "repository present but no tags published" \
         repo_id "$REPO_ID" repo_name "$REPO_NAME"
+    exit 1
+fi
+
+# Resolve the registry endpoint + image path from the repository's own
+# `location` (host:port/image) so we follow whatever registry the GitLab
+# instance advertises rather than hardcoding it. The scheme tracks the
+# configured API URL.
+REPO_LOCATION="$(jq -r '.[0].location // empty' < "$REPOS_BODY")"
+if [ -z "$REPO_LOCATION" ]; then
+    emit_status "api_error" "repository missing location field; cannot reach registry" \
+        repo_id "$REPO_ID" repo_name "$REPO_NAME"
+    exit 1
+fi
+REGISTRY_HOSTPORT="${REPO_LOCATION%%/*}"
+IMAGE_PATH="${REPO_LOCATION#*/}"
+SCHEME="${GITLAB_API_URL%%://*}"
+REGISTRY_BASE="${SCHEME}://${REGISTRY_HOSTPORT}"
+
+REG_BEARER="$(registry_bearer "$IMAGE_PATH")"
+if [ -z "$REG_BEARER" ]; then
+    emit_status "api_error" "could not obtain registry pull token" \
+        registry "$REGISTRY_BASE" image "$IMAGE_PATH"
     exit 1
 fi
 
@@ -261,16 +370,11 @@ LATEST_EPOCH=0
 
 while IFS= read -r tag; do
     [ -z "$tag" ] && continue
-    # URL-encode the tag (versions like "v0.5.0-rc5" are already safe;
-    # branch-style tags like "develop-latest" likewise. Skip the heavy
-    # encoder and trust GitLab tag-name rules.)
-    DETAIL_URL="${GITLAB_API_URL}/api/v4/projects/${PROJECT_PATH}/registry/repositories/${REPO_ID}/tags/${tag}"
-    DETAIL="$(curl -sS --max-time 20 \
-        --header "PRIVATE-TOKEN: ${TOKEN}" \
-        "$DETAIL_URL")" || continue
-    ts="$(printf '%s' "$DETAIL" | jq -r '.created_at // .updated_at // empty' 2>/dev/null)"
+    ts="$(tag_created "$IMAGE_PATH" "$tag" "$REG_BEARER")"
     [ -z "$ts" ] && continue
-    # GNU date understands ISO 8601 directly.
+    # GNU date understands ISO 8601 directly. Zero-value (year 0001)
+    # timestamps from cosign artifacts resolve to a negative epoch and
+    # are discarded by the > comparison below.
     epoch="$(date -u -d "$ts" +%s 2>/dev/null || echo 0)"
     if [ "$epoch" -gt "$LATEST_EPOCH" ]; then
         LATEST_EPOCH="$epoch"
@@ -279,9 +383,9 @@ while IFS= read -r tag; do
     fi
 done <<< "$TAG_NAMES"
 
-if [ "$LATEST_EPOCH" -eq 0 ]; then
-    emit_status "api_error" "no tag had a parseable created_at/updated_at" \
-        repo_id "$REPO_ID" repo_name "$REPO_NAME"
+if [ "$LATEST_EPOCH" -le 0 ]; then
+    emit_status "api_error" "no tag had a parseable image-config created timestamp" \
+        repo_id "$REPO_ID" repo_name "$REPO_NAME" registry "$REGISTRY_BASE"
     exit 1
 fi
 
