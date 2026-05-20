@@ -16,6 +16,7 @@
 #   scripts/deployment-audit.sh                 # built-in expected-live list
 #   scripts/deployment-audit.sh MANIFEST.tsv    # host-specific manifest file
 #   DEPLOYMENT_AUDIT_USER_SYSTEMD=0 scripts/deployment-audit.sh   # use system bus
+#   DEPLOYMENT_AUDIT_JSONL_LOG=/path/audit.jsonl scripts/deployment-audit.sh
 #
 # Manifest format — tab-separated, `#` comments and blank lines ignored:
 #   <kind>  <name>  <expected>  <ticket>  [note]
@@ -44,6 +45,11 @@ SYSTEMCTL=(systemctl)
 
 err()  { echo "❌ deployment-audit: $*" >&2; exit 2; }
 have() { command -v "$1" >/dev/null 2>&1; }
+
+looks_prod_value() {
+  local val="$1"
+  [ -n "$val" ] && ! echo "$val" | grep -qiE 'sqlite|localhost|127\.0\.0\.1|placeholder|changeme'
+}
 
 # ── results accumulator ───────────────────────────────────────────────────────
 FAIL=0          # number of red rows with expected=yes
@@ -136,6 +142,30 @@ check_env_var() {  # name(VAR@unit-or-pgrep) expected ticket
   [ "$spec" != "$var" ] || { record "WARN" "env-var" "$spec" "$exp" "$ticket" "spec must be VAR@unit-or-pgrep"; return; }
   local pid=""
   if [[ "$src" == *.service ]] && have systemctl; then
+    local env_line env_files file_path file_val
+    env_line="$("${SYSTEMCTL[@]}" show "$src" -p Environment --value 2>/dev/null || true)"
+    file_val="$(printf '%s\n' "$env_line" | tr ' ' '\n' | grep -E "^${var}=" | head -1 | cut -d= -f2- || true)"
+    if [ -n "$file_val" ]; then
+      if looks_prod_value "$file_val"; then
+        record "OK" "env-var" "$spec" "$exp" "$ticket" "$var configured in systemd Environment"
+      else
+        record "RED" "env-var" "$spec" "$exp" "$ticket" "$var configured in systemd Environment but looks like a dev/default value"
+      fi
+      return
+    fi
+    env_files="$("${SYSTEMCTL[@]}" show "$src" -p EnvironmentFiles --value 2>/dev/null || true)"
+    while IFS= read -r file_line; do
+      file_path="${file_line%% *}"
+      [ -r "$file_path" ] || continue
+      file_val="$(grep -E "^${var}=" "$file_path" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+      [ -n "$file_val" ] || continue
+      if looks_prod_value "$file_val"; then
+        record "OK" "env-var" "$spec" "$exp" "$ticket" "$var configured via ${file_path}"
+      else
+        record "RED" "env-var" "$spec" "$exp" "$ticket" "$var configured via ${file_path} but looks like a dev/default value"
+      fi
+      return
+    done <<<"$env_files"
     pid="$("${SYSTEMCTL[@]}" show "$src" -p MainPID --value 2>/dev/null || true)"
     [ "$pid" = "0" ] && pid=""
   fi
@@ -151,7 +181,7 @@ check_env_var() {  # name(VAR@unit-or-pgrep) expected ticket
   local val; val="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -E "^${var}=" | head -1 | cut -d= -f2-)"
   if [ -z "$val" ]; then
     record "RED" "env-var" "$spec" "$exp" "$ticket" "$var not set in PID $pid env (silent fallback / default in effect)"
-  elif echo "$val" | grep -qiE 'sqlite|localhost|127\.0\.0\.1|placeholder|changeme'; then
+  elif ! looks_prod_value "$val"; then
     record "RED" "env-var" "$spec" "$exp" "$ticket" "$var=$val (PID $pid) — looks like a dev/default value, not the prod target"
   else
     record "OK" "env-var" "$spec" "$exp" "$ticket" "$var set in PID $pid (=${val%%:*}...)"
@@ -160,17 +190,66 @@ check_env_var() {  # name(VAR@unit-or-pgrep) expected ticket
 
 check_alembic_head() {  # name(expected-rev|"auto") expected ticket
   local want="$1" exp="$2" ticket="$3"
-  have alembic || { record "WARN" "alembic-head" "$want" "$exp" "$ticket" "alembic absent — run from the backend venv on prod"; return; }
-  local cur; cur="$( (cd "$REPO" && alembic current 2>/dev/null) | grep -oE '^[0-9a-f]{8,}' | head -1 || true)"
+  local alembic_cmd="alembic"
+  [ -x "$REPO/backend/.venv/bin/alembic" ] && alembic_cmd="$REPO/backend/.venv/bin/alembic"
+  [ "$alembic_cmd" = "alembic" ] && [ -x "$HOME/.local/bin/alembic" ] && alembic_cmd="$HOME/.local/bin/alembic"
+  have "$alembic_cmd" || { record "WARN" "alembic-head" "$want" "$exp" "$ticket" "alembic absent — run from the backend venv on prod"; return; }
+  [ -r "$REPO/backend/alembic.ini" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "backend/alembic.ini missing"; return; }
+  local cur; cur="$( (cd "$REPO/backend" && "$alembic_cmd" current 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
   [ -n "$cur" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "\`alembic current\` returned nothing — DB unreachable or alembic_version empty"; return; }
   if [ "$want" = "auto" ]; then
-    local head; head="$( (cd "$REPO" && alembic heads 2>/dev/null) | grep -oE '^[0-9a-f]{8,}' | head -1 || true)"
+    local head; head="$( (cd "$REPO/backend" && "$alembic_cmd" heads 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
     if [ "$cur" = "$head" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "current=$cur == repo head"
     else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "current=$cur != repo head=$head — un-applied migration; run \`alembic upgrade head\` on prod"; fi
   else
     if [ "$cur" = "$want" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "current=$cur"
     else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "current=$cur != expected=$want"; fi
   fi
+}
+
+append_jsonl() {
+  local result="$1" ok="$2" red="$3" warn="$4" log="${DEPLOYMENT_AUDIT_JSONL_LOG:-}"
+  [ -n "$log" ] || return 0
+  mkdir -p "$(dirname "$log")" || return 0
+  {
+    printf '%s|%s|%s|%s|%s\n' "$result" "$ok" "$red" "$warn" "$FAIL"
+    printf '%s\n' "${ROWS[@]}"
+  } | python3 -c '
+import json
+import os
+import socket
+import sys
+from datetime import datetime, timezone
+
+log = os.environ["DEPLOYMENT_AUDIT_JSONL_LOG"]
+summary = sys.stdin.readline().rstrip("\n").split("|")
+result, ok, red, warn, fatal = summary
+rows = []
+for line in sys.stdin:
+    status, kind, name, expected, ticket, detail = line.rstrip("\n").split("|", 5)
+    rows.append({
+        "status": status,
+        "kind": kind,
+        "name": name,
+        "expected": expected,
+        "ticket": ticket,
+        "detail": detail,
+    })
+record = {
+    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    "event": "deployment_audit",
+    "source": "scripts/deployment-audit.sh",
+    "host": socket.gethostname(),
+    "result": result,
+    "green": int(ok),
+    "red": int(red),
+    "warn": int(warn),
+    "fatal_red": int(fatal),
+    "rows": rows,
+}
+with open(log, "a", encoding="utf-8") as fh:
+    fh.write(json.dumps(record, sort_keys=True) + "\n")
+'
 }
 
 # ── built-in expected-live manifest (AUDIT-23 §3 rows that should be live) ────
@@ -245,9 +324,11 @@ main() {
   warn=$(printf '%s\n' "${ROWS[@]}" | grep -c '^WARN|' || true)
   echo "summary: ${ok} green · ${red} red · ${warn} warn · ${FAIL} red-with-expected=yes (fatal)"
   if [ "$FAIL" -gt 0 ]; then
+    append_jsonl "FAIL" "$ok" "$red" "$warn"
     echo "RESULT: FAIL — $FAIL expected-live artefact(s) not deployed. See DETAIL column; remediation in docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md §5."
     exit 1
   fi
+  append_jsonl "PASS" "$ok" "$red" "$warn"
   echo "RESULT: PASS — all expected-live artefacts confirmed (gated/warn rows are informational)."
   exit 0
 }

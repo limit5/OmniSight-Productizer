@@ -1,0 +1,34 @@
+; [OP-1016] Daily deployment-audit baseline.
+;
+; Runs scripts/deployment-audit.sh at the canonical repo path and appends a
+; machine-readable JSONL row to the existing release-conductor audit surface.
+; Any fatal red row makes the script exit non-zero, which triggers
+; deployment-audit-alert.service through OnFailure.
+;
+; Install (user-level):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/deployment-audit.{service,timer} ~/.config/systemd/user/
+;   cp deploy/systemd/deployment-audit-alert.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now deployment-audit.timer
+
+[Unit]
+Description=OmniSight deployment audit baseline (OP-1016)
+After=network-online.target
+Wants=network-online.target
+OnFailure=deployment-audit-alert.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+EnvironmentFile=-/home/user/sora-bridge/.env
+EnvironmentFile=-/home/user/.config/omnisight/audit-db.env
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
+Environment=DEPLOYMENT_AUDIT_JSONL_LOG=/home/user/work/sora/logs/release-conductor/audit.jsonl
+ExecStart=/usr/bin/bash /home/user/sora-bridge/scripts/deployment-audit.sh
+StandardOutput=append:/home/user/work/sora/logs/deployment-audit/run.log
+StandardError=append:/home/user/work/sora/logs/deployment-audit/run.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
