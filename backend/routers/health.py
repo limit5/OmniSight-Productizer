@@ -453,6 +453,43 @@ def _check_provider_chain() -> tuple[bool, str]:
     return True, f"ready={','.join(ready)}{suffix}"
 
 
+def _check_deploy_overlay() -> tuple[bool, str]:
+    """OP-1582 (RT-08) — deployment overlay readiness gate.
+
+    The deploy/promote step writes an env lock carrying this deployment's
+    identity (build git sha/ref, the promoted image tag, the backend+frontend
+    digest pair, the promotion audit id). The lock is read ONCE AT STARTUP
+    (``backend.api_versioning.init_deploy_overlay``, wired into
+    ``install_version_metadata_endpoint``) and cached; this check reads the
+    cached snapshot rather than re-reading the file per probe.
+
+    Fail-closed semantics (ADR-0040 RT-08-pre): when the runtime is meant to
+    be a real deployment — signalled by ``OMNISIGHT_REQUIRE_DEPLOY_OVERLAY``,
+    which the prod/staging compose sets — a missing or incomplete lock makes
+    ``/readyz`` fail so the deploy gate catches a container that started
+    without its identity lock. In dev/CI the flag is unset and the check is
+    observational: it never blocks readiness, mirroring the deep-check /
+    JIRA-ping knobs already in this module.
+    """
+    import os as _os
+    from backend import api_versioning as _av
+
+    overlay = _av.get_deploy_overlay()
+    required = _os.environ.get(
+        "OMNISIGHT_REQUIRE_DEPLOY_OVERLAY", ""
+    ).strip().lower() in {"1", "true", "yes"}
+
+    if overlay is not None:
+        return True, (
+            f"tag={overlay.get('deployed_tag')} "
+            f"sha={overlay.get('build_git_sha')} "
+            f"audit={overlay.get('promotion_audit_id')}"
+        )
+    if required:
+        return False, "deploy_overlay_lock_missing"
+    return True, "deploy_overlay_not_required (dev/ci)"
+
+
 def _check_frontend_compat() -> dict:
     """OP-1483 — surface the FE/BE bundle compatibility summary.
 
@@ -652,6 +689,16 @@ async def _readyz_handler(verbose: bool = False) -> JSONResponse:
     # this check is here for the operator who curls /readyz at 03:00.
     checks["frontend_compat_check"] = _check_frontend_compat()
 
+    # ── 8. Deploy overlay (RT-08 / OP-1582, fail-closed when required) ──
+    # Reads the startup-cached deploy env lock. Observational in dev/CI;
+    # gates `ready` only when OMNISIGHT_REQUIRE_DEPLOY_OVERLAY is set (the
+    # prod/staging compose sets it), so a deployed container that started
+    # without its identity lock fails the readiness gate and the deploy
+    # rollout catches it. See _check_deploy_overlay docstring + ADR-0040
+    # RT-08-pre.
+    overlay_ok, overlay_detail = _check_deploy_overlay()
+    checks["deploy_overlay"] = {"ok": overlay_ok, "detail": overlay_detail}
+
     # OP-1126 AC#3: ?verbose=1 surfaces spec-named aliases for the
     # checks the ticket calls out by name. Historical keys remain so
     # existing consumers keep working; this is purely additive.
@@ -660,7 +707,7 @@ async def _readyz_handler(verbose: bool = False) -> JSONResponse:
             if source in checks:
                 checks[alias] = checks[source]
 
-    ready = db_ok and mig_ok and prov_ok
+    ready = db_ok and mig_ok and prov_ok and overlay_ok
     payload = _build_readyz_payload(checks, ready=ready)
     if verbose:
         payload["verbose"] = True
