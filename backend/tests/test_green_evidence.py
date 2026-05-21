@@ -24,6 +24,7 @@ T0 = datetime(2026, 5, 22, 1, 2, 3, tzinfo=timezone.utc)
 SHA_A = "a" * 40
 SHA_B = "0123456789abcdef0123456789abcdef01234567"
 SHA_B_PREFIX = SHA_B[:12]
+SHA_C = "c" * 40
 
 
 class _FakeRow(dict[str, Any]):
@@ -85,6 +86,15 @@ async def test_green_status_absent_sha_is_fail_closed() -> None:
     # The lookup was actually attempted (no short-circuit) and matched nothing.
     assert conn.fetchrow_calls
     assert conn.fetchrow_calls[-1][1] == (SHA_A,)
+
+
+async def test_candidate_gate_rejects_unknown_full_sha_when_other_sha_is_green() -> None:
+    conn = _FakeConn()
+    await record_evidence(SHA_A, "pass", T0, conn_factory=lambda: _factory(conn))
+
+    assert await green_status(SHA_C, conn_factory=lambda: _factory(conn)) is False
+    assert conn.fetchrow_calls[-1][1] == (SHA_C,)
+    assert await green_status(SHA_A, conn_factory=lambda: _factory(conn)) is True
 
 
 async def test_green_status_malformed_sha_is_fail_closed_without_db() -> None:
