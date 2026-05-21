@@ -829,8 +829,12 @@ class TestGerritChangeMergedReplicationTargetsBoundary:
     ):
         """Positive control: with two real-looking targets, we expect
         two pairs of ``_run`` invocations — ``git remote get-url
-        <target>`` followed by ``git push <target> main
-        --force-with-lease``. Also asserts that no invocation carries
+        <target>`` followed by ``git push <target> develop``.
+
+        RT-23 / ADR-0040 (single-trunk release train): replication mirrors
+        the ``develop`` trunk, NOT the retired release branch, and does so
+        with a *plain* push — the old ``main --force-with-lease``
+        force-align loop is gone. Also asserts that no invocation carries
         an empty ``""`` target argument (the specific failure mode the
         skip-boundary guards against)."""
         mock_run = self._install_common_mocks(monkeypatch)
@@ -861,14 +865,19 @@ class TestGerritChangeMergedReplicationTargetsBoundary:
         # (no leading space) appears in the push command.
         assert mock_run.call_count == 4
         all_cmds = [call.args[0] for call in mock_run.call_args_list]
-        assert any('git push "origin-mirror"' in c for c in all_cmds)
-        assert any('git push "github-backup"' in c for c in all_cmds)
-        # The critical negative assertion — the boundary's raison d'être.
-        # An empty-quoted target would look like ``git push ""`` in the
-        # shell arg; it must never appear.
+        # RT-23: push targets the develop trunk (payload carries no branch,
+        # so the handler falls back to the single-trunk default).
+        assert any('git push "origin-mirror" develop' in c for c in all_cmds)
+        assert any('git push "github-backup" develop' in c for c in all_cmds)
+        # The critical negative assertions.
         for cmd in all_cmds:
             assert 'git push ""' not in cmd
             assert "git push ''" not in cmd
+            # ADR-0040: main is retired and the force-align loop is killed.
+            if cmd.startswith("git push"):
+                assert " main" not in cmd
+                assert "--force-with-lease" not in cmd
+                assert "--force" not in cmd
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1575,3 +1584,197 @@ class TestAiReviewerCheckBridgePath:
         # Sanity: the +1 actually landed on the change.
         assert len(stub.posted_reviews) == 1
         assert stub.posted_reviews[0]["labels"] == {"Code-Review": 1}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# OP-1565 / RT-23 — merge webhook decoupled from release CI (ADR-0040)
+# ──────────────────────────────────────────────────────────────────────
+#
+# ADR-0040 (single-trunk release train) retires `main` and makes releases
+# tag-driven and branch-agnostic — the GitLab image pipeline builds on
+# `^v` tags only (ADR-0038). Two `main`-hardcoded landmines lived in the
+# post-merge path of webhooks.py:
+#
+#   1. `_on_change_merged` force-pushed the retired `main` branch to the
+#      replication mirrors (`git push <t> main --force-with-lease`).
+#   2. `_trigger_ci_pipelines` kicked *release* CI on `main` via a GitHub
+#      Actions workflow dispatch (`gh workflow run ci.yml -r main`) and a
+#      GitLab branch-ref pipeline (`-d ref=main`).
+#
+# RT-23 removed both. These tests lock the contract so a future refactor
+# can't silently re-introduce a merge→release-CI-on-main coupling.
+
+
+class TestMergeDoesNotTriggerReleaseCI:
+    """RT-23 / ADR-0040 landmine #4 — a Gerrit merge MUST NOT trigger
+    release CI on the retired ``main`` ref.
+
+    The legacy merge-time GitHub Actions workflow dispatch and GitLab
+    branch-ref pipeline triggers were removed from
+    ``_trigger_ci_pipelines``. These tests prove the merge path no longer
+    spawns either, even with both CI integrations explicitly enabled.
+    """
+
+    @staticmethod
+    @contextmanager
+    def _ci_flags(*, github: bool, gitlab: bool, jenkins: bool):
+        """Pin the three CI integration switches for the test body and
+        restore them on exit (Settings is a module-global Pydantic model)."""
+        from backend.config import settings
+        saved = {
+            "ci_github_actions_enabled": settings.ci_github_actions_enabled,
+            "ci_gitlab_enabled": settings.ci_gitlab_enabled,
+            "ci_jenkins_enabled": settings.ci_jenkins_enabled,
+        }
+        try:
+            settings.ci_github_actions_enabled = github
+            settings.ci_gitlab_enabled = gitlab
+            settings.ci_jenkins_enabled = jenkins
+            yield
+        finally:
+            for key, value in saved.items():
+                setattr(settings, key, value)
+
+    @pytest.mark.asyncio
+    async def test_trigger_ci_pipelines_spawns_no_github_or_gitlab_subprocess(
+        self, monkeypatch,
+    ):
+        """With BOTH GitHub Actions and GitLab CI enabled (and Jenkins
+        off), ``_trigger_ci_pipelines`` spawns NO subprocess at all — the
+        ``gh workflow run`` dispatch and the GitLab ``/pipeline`` POST are
+        gone. Any spawn here is a regression that re-couples merge to
+        release CI."""
+        import asyncio as _asyncio
+        from backend.routers import webhooks
+
+        spawned: list[tuple] = []
+
+        async def _record_exec(*args, **kwargs):
+            spawned.append(args)
+            return AsyncMock()  # never reached on the github/gitlab paths
+
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", _record_exec)
+
+        with self._ci_flags(github=True, gitlab=True, jenkins=False):
+            await webhooks._trigger_ci_pipelines()
+
+        # No `gh`, no GitLab `/pipeline` POST — in fact nothing spawned.
+        assert spawned == [], (
+            f"merge path must not spawn release CI subprocesses, got: {spawned!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_change_merged_does_not_trigger_release_ci(
+        self, monkeypatch,
+    ):
+        """Drive the REAL ``_on_change_merged`` → ``_trigger_ci_pipelines``
+        path (no replication targets) and assert it spawns no release-CI
+        subprocess, even with GitHub + GitLab CI enabled. Calls the
+        handler directly (the dispatcher routing is locked by
+        ``TestGerritEventRouting``) so the contract is observable without
+        the HTTP/DB layer."""
+        import asyncio as _asyncio
+        from backend.routers import webhooks
+        from backend import notifications as _notifs
+        from backend import intent_bridge as _bridge
+
+        spawned: list[tuple] = []
+
+        async def _record_exec(*args, **kwargs):
+            spawned.append(args)
+            return AsyncMock()
+
+        monkeypatch.setattr(_asyncio, "create_subprocess_exec", _record_exec)
+        monkeypatch.setattr(_notifs, "notify", AsyncMock())
+        monkeypatch.setattr(
+            _bridge, "on_gerrit_change_merged", AsyncMock(return_value=None),
+        )
+        # Keep the OTHER post-merge background fan-out inert, but leave the
+        # real ``_trigger_ci_pipelines`` in place — it is the unit under
+        # test here.
+        monkeypatch.setattr(webhooks, "_package_merged_artifacts", AsyncMock())
+        monkeypatch.setattr(webhooks, "_save_merged_solution_to_l3", AsyncMock())
+
+        from backend.config import settings
+        orig_targets = settings.gerrit_replication_targets
+        body = {
+            "type": "change-merged",
+            "change": {
+                "id": "Irt23-merged",
+                "branch": "develop",
+                "subject": "Release 9.9.9",
+                "commitMessage": "Release 9.9.9\n",
+            },
+        }
+
+        try:
+            settings.gerrit_replication_targets = ""  # skip mirror fan-out
+            with self._ci_flags(github=True, gitlab=True, jenkins=False):
+                await webhooks._on_change_merged(body)
+                # ``_trigger_ci_pipelines`` runs in an asyncio.create_task'd
+                # coroutine; yield a couple of times so it executes fully.
+                await _asyncio.sleep(0)
+                await _asyncio.sleep(0)
+        finally:
+            settings.gerrit_replication_targets = orig_targets
+
+        assert spawned == [], (
+            f"change-merged must not trigger release CI, spawned: {spawned!r}"
+        )
+
+
+class TestMergeReplicationBranchContract:
+    """RT-23 / ADR-0040 — replication mirrors the merged trunk branch
+    (``develop``), never the retired ``main``, with a plain (non-force)
+    push."""
+
+    @pytest.mark.asyncio
+    async def test_push_honours_event_branch_and_never_force_pushes_main(
+        self, monkeypatch,
+    ):
+        """The push command targets the branch carried on the merge event
+        (``change.branch``) and never emits ``main``, ``--force`` or
+        ``--force-with-lease``. Calls ``_on_change_merged`` directly to
+        observe the shell-out without the HTTP/DB layer."""
+        from backend import workspace as _ws
+        from backend import notifications as _notifs
+        from backend import intent_bridge as _bridge
+        from backend.routers import webhooks as _webhooks
+
+        mock_run = AsyncMock(return_value=(0, "mirror-url\n", ""))
+        monkeypatch.setattr(_ws, "_run", mock_run)
+        monkeypatch.setattr(_notifs, "notify", AsyncMock())
+        monkeypatch.setattr(
+            _bridge, "on_gerrit_change_merged", AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(_webhooks, "_package_merged_artifacts", AsyncMock())
+        monkeypatch.setattr(_webhooks, "_save_merged_solution_to_l3", AsyncMock())
+        monkeypatch.setattr(_webhooks, "_trigger_ci_pipelines", AsyncMock())
+
+        from backend.config import settings
+        original = settings.gerrit_replication_targets
+        body = {
+            "type": "change-merged",
+            "change": {
+                "id": "Irt23-branch",
+                "branch": "develop",
+                "subject": "feat: trunk merge",
+                "commitMessage": "feat\n",
+            },
+        }
+
+        try:
+            settings.gerrit_replication_targets = "origin-mirror"
+            await _webhooks._on_change_merged(body)
+        finally:
+            settings.gerrit_replication_targets = original
+
+        push_cmds = [
+            c.args[0] for c in mock_run.call_args_list
+            if c.args and c.args[0].startswith("git push")
+        ]
+        assert push_cmds, "expected at least one git push invocation"
+        for cmd in push_cmds:
+            assert cmd == 'git push "origin-mirror" develop'
+            assert " main" not in cmd
+            assert "--force" not in cmd

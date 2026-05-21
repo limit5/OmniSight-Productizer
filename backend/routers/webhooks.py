@@ -1456,6 +1456,19 @@ async def _on_change_merged(event: dict) -> None:
     if not targets:
         return
 
+    # ADR-0040 (single-trunk release train): `main` is retired — `develop`
+    # is the only long-lived trunk. Mirror the branch the change actually
+    # merged to (always `develop` under single-trunk) to the GitHub mirror
+    # (ADR-0002) with a *plain* push. The old `main --force-with-lease`
+    # force-align loop is exactly what ADR-0040 kills: `develop` only ever
+    # fast-forwards via Gerrit submit, so a non-force push that fails to
+    # ff signals a real divergence worth surfacing rather than silently
+    # overwriting. Branch comes from the (HMAC-verified) event but is
+    # still validated against a safe ref charset before shelling out.
+    import re as _re
+    raw_branch = (change.get("branch") or "").strip()
+    branch = raw_branch if _re.fullmatch(r"[A-Za-z0-9._/-]+", raw_branch) else "develop"
+
     from backend.git_auth import get_auth_env
     from backend.workspace import _run, _MAIN_REPO
 
@@ -1465,7 +1478,7 @@ async def _on_change_merged(event: dict) -> None:
             rc, url, _ = await _run(f'git remote get-url "{target}"', cwd=_MAIN_REPO)
             auth_env = get_auth_env(url.strip()) if rc == 0 else {}
             rc, out, err = await _run(
-                f'git push "{target}" main --force-with-lease',
+                f'git push "{target}" {branch}',
                 cwd=_MAIN_REPO,
                 extra_env=auth_env,
             )
@@ -1636,32 +1649,19 @@ async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
 async def _trigger_ci_pipelines() -> None:
     """Trigger configured CI/CD pipelines after a Gerrit merge.
 
-    Phase 5-6 (#multi-account-forge): GitHub + GitLab token + URL reads
-    run through :func:`backend.git_credentials.pick_default` so operator-
-    added ``git_accounts`` rows are honoured. Resolver falls back to the
-    legacy shim (``settings.github_token`` / ``settings.gitlab_token`` /
-    ``settings.gitlab_url``) when the table is empty.
-    """
-    from backend.git_credentials import pick_default
-    gh_account = await pick_default("github") if settings.ci_github_actions_enabled else None
-    gh_token = (gh_account or {}).get("token") or ""
-    if settings.ci_github_actions_enabled and gh_token:
-        try:
-            import os as _os
-            gh_env = {**_os.environ, "GH_TOKEN": gh_token}
-            proc = await asyncio.create_subprocess_exec(
-                "gh", "workflow", "run", "ci.yml", "-r", "main",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                env=gh_env,
-            )
-            await asyncio.wait_for(proc.communicate(), timeout=15)
-            if proc.returncode == 0:
-                emit_invoke("ci_triggered", "GitHub Actions workflow triggered")
-            else:
-                logger.warning("GitHub Actions trigger failed (rc=%d)", proc.returncode)
-        except Exception as exc:
-            logger.warning("GitHub Actions trigger error: %s", exc)
+    ADR-0040 (single-trunk release train) retires the legacy release
+    branch and makes *releases* tag-driven and branch-agnostic — the
+    GitLab image pipeline builds on ``^v`` tags only (ADR-0038). The old
+    merge-time release triggers (a GitHub Actions workflow dispatch and a
+    GitLab branch-ref pipeline, both hardcoded to the retired release
+    branch) are therefore removed: a merge to the ``develop`` trunk MUST
+    NOT kick a release pipeline (RT-23 / ADR-0040 landmine #4). Release CI
+    is owned by the release-train promote machinery, not this webhook.
 
+    The Jenkins trigger below is generic post-merge CI with no release
+    coupling; it is left intact, still gated behind
+    ``settings.ci_jenkins_enabled``.
+    """
     if settings.ci_jenkins_enabled and settings.ci_jenkins_url:
         # Auth via stdin -K config to keep token out of argv (visible in `ps`).
         proc = None
@@ -1699,45 +1699,6 @@ async def _trigger_ci_pipelines() -> None:
                     )
                     from backend import metrics as _m
                     _m.subprocess_orphan_total.labels(target="jenkins").inc()
-
-    gl_account = await pick_default("gitlab") if settings.ci_gitlab_enabled else None
-    gl_token = (gl_account or {}).get("token") or ""
-    gl_base = (gl_account or {}).get("instance_url") or settings.gitlab_url or "https://gitlab.com"
-    if settings.ci_gitlab_enabled and gl_token:
-        proc = None
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "curl", "-s", "-X", "POST",
-                f"{gl_base}/api/v4/projects/{settings.gerrit_project.replace('/', '%2F')}/pipeline",
-                "-K", "-",
-                "-d", "ref=main",
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            tok = gl_token.replace('"', '\\"')
-            cfg = f'header = "PRIVATE-TOKEN: {tok}"\n'.encode()
-            try:
-                await asyncio.wait_for(proc.communicate(input=cfg), timeout=15)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                raise
-            if proc.returncode == 0:
-                emit_invoke("ci_triggered", "GitLab CI pipeline triggered")
-            else:
-                logger.warning("GitLab CI trigger failed (rc=%d)", proc.returncode)
-        except Exception as exc:
-            logger.warning("GitLab CI trigger error: %s", exc)
-            if proc and proc.returncode is None:
-                try:
-                    proc.kill()
-                except Exception as kill_exc:
-                    logger.warning(
-                        "orphaned CI subprocess pid=%s kill failed: %s",
-                        proc.pid, kill_exc,
-                    )
-                    from backend import metrics as _m
-                    _m.subprocess_orphan_total.labels(target="gitlab").inc()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
