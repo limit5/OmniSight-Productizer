@@ -44,7 +44,7 @@ const mockedPatch = patchFeatureFlag as unknown as ReturnType<typeof vi.fn>
 const sampleRows: FeatureFlagRow[] = [
   {
     flag_name: "wp.diff_validation.enabled",
-    tier: "release",
+    tier: "ga",
     state: "enabled",
     expires_at: null,
     owner: "wp",
@@ -52,7 +52,7 @@ const sampleRows: FeatureFlagRow[] = [
   },
   {
     flag_name: "ks.cmek.enabled",
-    tier: "preview",
+    tier: "early_access",
     state: "disabled",
     expires_at: "2026-06-01T00:00:00Z",
     owner: "ks",

@@ -46,9 +46,9 @@ import { useAuth } from "@/lib/auth-context"
 const TIER_LABELS: Record<FeatureFlagTier, string> = {
   debug: "DEBUG",
   dogfood: "DOGFOOD",
-  preview: "PREVIEW",
-  release: "RELEASE",
-  runtime: "RUNTIME",
+  early_access: "EARLY ACCESS",
+  staged: "STAGED",
+  ga: "GA",
 }
 
 const ROLE_ORDER = ["viewer", "operator", "admin", "super_admin"]
@@ -97,7 +97,7 @@ export default function AdminFeatureFlagsPage() {
 
   useEffect(() => {
     if (authLoading) return
-    void refresh()
+    void refresh() // eslint-disable-line react-hooks/set-state-in-effect -- fetch-on-mount populates state from network
   }, [authLoading, refresh])
 
   const onToggle = useCallback(
