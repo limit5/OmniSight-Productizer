@@ -1,7 +1,7 @@
 ---
 id: ADR-0039
 title: Release-cut submit-requirement — canonical hashtag + corrected applicableIf (owner / topic / hashtag multi-layer bug)
-status: Accepted
+status: Accepted  # ⚠ conflicts with proposed ADR-0040 (single-trunk release train); the release-cut SR this corrects is removed entirely under ADR-0040 — to be superseded on its acceptance
 date: 2026-05-20
 supersedes_in_part:
   - ADR-0020 §3 "Conditional submit-requirement release-cut-promote" (the applicableIf only)

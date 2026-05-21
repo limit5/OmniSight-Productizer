@@ -1,0 +1,526 @@
+Retire main / tag-driven release train audit
+Date: 2026-05-21
+Reviewer: Codex / GPT-5.5
+Scope: docs/codex-review-prompts/2026-05-21-retire-main-release-train-audit-prompt.md
+
+Executive stance
+
+The proposed direction is coherent only if it is implemented as a true model change, not as a search-and-replace from main to develop. The current tree still has multiple independently active definitions of “release”: Gerrit main fast-forward, release/vX.Y branch maintenance, deploy-by-branch, staging-by-develop-SHA, and v* tag image publication. Those can coexist only because the present system is transitional. Once main is retired, they become correctness hazards.
+
+Highest-risk net-new findings:
+
+1. Staging currently deploys the raw develop commit SHA, but the GitLab image pipeline only runs for v* tags and publishes sha-${CI_COMMIT_SHORT_SHA}, not a raw full-SHA image. A tag-only train must resolve this build/staging circular dependency before auto-cutting tags.
+2. The production deploy allowlist still permits main, release/*, and hotfix/* branch deploys; this is separate from deploy-prod.sh’s main default and must be changed atomically with deploy script changes.
+3. The GitLab release pipeline claims keyless/OIDC attestation in emitted audit JSON and docs, but the job signs with COSIGN_KEY and no id_tokens are present. That weakens the supply-chain story for “every tag is prod-usable.”
+4. The baked bundle.json in images is generated before image digests exist, so /api/version cannot prove the final image digest closure without a post-build re-seal or separate trusted bundle artifact.
+5. A pure “tag only from develop” hotfix cannot isolate a production fix if develop already contains unshippable changes. The plan needs an explicit stop-the-line/revert policy or a tightly defined exception, otherwise “v0.6.1 hotfix from develop” silently means “ship every later develop commit too.”
+
+A. Additional main/release/* couplings and obsolete components
+
+A1. NET-NEW, HIGH, MODIFY: staging-sync expects raw develop-SHA images that the tag-only GitLab pipeline does not build.
+
+Evidence:
+- scripts/sync_staging_to_develop.sh documents that staging should deploy “the image tagged with that commit SHA” from develop: scripts/sync_staging_to_develop.sh:16-scripts/sync_staging_to_develop.sh:23.
+- It resolves the develop tip via Gerrit fetch and rev-parse: scripts/sync_staging_to_develop.sh:178-scripts/sync_staging_to_develop.sh:193.
+- It deploys OMNISIGHT_IMAGE_TAG=${develop_tip}: scripts/sync_staging_to_develop.sh:255-scripts/sync_staging_to_develop.sh:270.
+- The GitLab pipeline runs only for v* tags: .gitlab-ci.yml:1-.gitlab-ci.yml:4.
+- The release pipeline pushes ${CI_COMMIT_TAG}, sha-${CI_COMMIT_SHORT_SHA}, and latest, not the raw full develop SHA used by staging-sync: .gitlab-ci.yml:118-.gitlab-ci.yml:120.
+
+Impact:
+Under the new model, the scheduler needs staging to prove develop is green before creating the v* tag, but the current staging-sync path expects an image tag that the tag pipeline will not create until after a v* tag exists. That is a release-train circular dependency.
+
+Required action:
+Decide the candidate artifact model before retiring main. Either build immutable candidate images for every accepted develop commit, change staging-sync to deploy sha-${short_sha} from a branch pipeline, or auto-create a pre-release candidate tag and stage that exact tag before promoting to a final v* tag. Do not rely on raw develop SHA image tags unless the build pipeline actually publishes them.
+
+A2. NET-NEW, HIGH, MODIFY: staging compose still points at GHCR/latest and describes main-driven auto-deploy.
+
+Evidence:
+- deploy/staging/docker-compose.yml says the stack is consumed by change-merged main auto-deploy: deploy/staging/docker-compose.yml:7-deploy/staging/docker-compose.yml:10.
+- Backend image defaults to ghcr.io/...:latest: deploy/staging/docker-compose.yml:80.
+- A second backend worker image also defaults to latest: deploy/staging/docker-compose.yml:129.
+- Frontend defaults to latest: deploy/staging/docker-compose.yml:221.
+- The bridge image defaults to latest: deploy/staging/docker-compose.yml:263.
+
+Impact:
+The new release contract says GitLab Container Registry plus immutable tag artifacts are the release source. Staging still has both old wording and mutable GHCR/latest defaults. This can make a staging green signal refer to the wrong registry or wrong image.
+
+Required action:
+Convert staging compose defaults and docs to the same registry/tag model as production, and make an unset image tag fail closed rather than falling back to latest.
+
+A3. NET-NEW, HIGH, MODIFY: production deploy allowlist still permits branch deployment, independently of deploy-prod.sh defaults.
+
+Evidence:
+- deploy/prod-deploy-allowlist.txt permits branch:main, branch:hotfix/*, and branch:release/*: deploy/prod-deploy-allowlist.txt:21-deploy/prod-deploy-allowlist.txt:26.
+- scripts/check_deploy_ref.sh verifies either a tag or an origin branch ref, so branch deploys are still a supported path: scripts/check_deploy_ref.sh:143-scripts/check_deploy_ref.sh:150.
+- scripts/deploy-prod.sh still advertises branch deploys and defaults to main: scripts/deploy-prod.sh:8-scripts/deploy-prod.sh:12, scripts/deploy-prod.sh:27.
+
+Impact:
+Even if deploy-prod.sh’s default is changed, operators can still deploy main/release/hotfix branches if the allowlist and checker remain unchanged. That violates “release = push v* tag on develop commit.”
+
+Required action:
+In the same change set, make production deploy validation tag-only, remove branch:main/release/hotfix allowlist entries, update usage text, and require an explicit v* tag or immutable digest.
+
+A4. PRIOR-KNOWN PLUS NET-NEW DETAIL, MEDIUM, MODIFY: deploy-prod.sh still encodes “master head” metadata and can write misleading release provenance.
+
+Evidence:
+- The script’s deployment metadata records MASTER_HEAD_COMMIT and OMNISIGHT_MASTER_HEAD_COMMIT: scripts/deploy-prod.sh:265-scripts/deploy-prod.sh:280.
+- It accepts a tag or branch checkout: scripts/deploy-prod.sh:251-scripts/deploy-prod.sh:259.
+- It derives the current image tag from the release tag or short SHA: scripts/deploy-prod.sh:285-scripts/deploy-prod.sh:286.
+
+Impact:
+Under tag-only releases, “master head” is no longer a meaningful concept. Leaving this metadata in place will make logs, audit rows, and rollback diagnostics ambiguous during incident response.
+
+Required action:
+Rename the metadata to release/tag commit semantics and make it impossible to deploy a branch accidentally.
+
+A5. PRIOR-KNOWN, HIGH, DELETE: auto-promote and release-cut services/scripts become dead or actively dangerous.
+
+Evidence:
+- backend/agents/auto_promote_main.py is explicitly a develop-to-main promoter: backend/agents/auto_promote_main.py:1-backend/agents/auto_promote_main.py:7.
+- It pushes refs/for/main: backend/agents/auto_promote_main.py:206-backend/agents/auto_promote_main.py:236.
+- It evaluates develop/main and promotes develop to main: backend/agents/auto_promote_main.py:319-backend/agents/auto_promote_main.py:437.
+- deploy/systemd/auto-promote-develop.service targets main: deploy/systemd/auto-promote-develop.service:50-deploy/systemd/auto-promote-develop.service:55.
+- deploy/systemd/auto-promote-main.service runs auto_promote_main against target branch main: deploy/systemd/auto-promote-main.service:10-deploy/systemd/auto-promote-main.service:26.
+- scripts/auto_promote_develop_to_main.sh exists solely to create refs/for/main release-cut changes: scripts/auto_promote_develop_to_main.sh:2-scripts/auto_promote_develop_to_main.sh:10, scripts/auto_promote_develop_to_main.sh:55-scripts/auto_promote_develop_to_main.sh:59.
+- deploy/systemd/omnisight-release-cut-guard.service watches open branch:main release-cut changes: deploy/systemd/omnisight-release-cut-guard.service:1-deploy/systemd/omnisight-release-cut-guard.service:5.
+
+Impact:
+If any of these timers/services remain installed, they can recreate old behavior after the repo has moved to tag releases.
+
+Required action:
+Disable first, then delete or archive. Replacement should be an auto-cut/tag scheduler that never writes refs/for/main or release/v*.
+
+A6. PRIOR-KNOWN, HIGH, MODIFY: webhook merge handling still force-pushes main and triggers CI on main.
+
+Evidence:
+- backend/routers/webhooks.py force-pushes main to configured replication targets after Gerrit merge: backend/routers/webhooks.py:1454-backend/routers/webhooks.py:1471.
+- It describes packaging artifacts from the “main repo”: backend/routers/webhooks.py:1500-backend/routers/webhooks.py:1505.
+- It triggers GitHub Actions with -r main: backend/routers/webhooks.py:1648-backend/routers/webhooks.py:1654.
+- It triggers GitLab pipelines with ref=main: backend/routers/webhooks.py:1703-backend/routers/webhooks.py:1714.
+
+Impact:
+After main retirement, change-merged webhooks must no longer mirror main or start CI on main. If left unchanged, they will either fail noisily or create a misleading “main is still current” side channel.
+
+Required action:
+Change replication/CI triggers to develop or remove them if tag pipelines become the sole release-build mechanism. Make the artifact naming explicitly change/build oriented, not release oriented, unless it is tied to a v* tag.
+
+A7. PRIOR-KNOWN, HIGH, DELETE/MODIFY: Gerrit project config has main-only special rules and release/* CI assumptions.
+
+Evidence:
+- Project submitType is REBASE_IF_NECESSARY: .gerrit/project.config:71-.gerrit/project.config:75.
+- Verified label applicability covers develop and release/* but not tags: .gerrit/project.config:107-.gerrit/project.config:115.
+- refs/heads/main is MERGE_ALWAYS: .gerrit/project.config:187-.gerrit/project.config:204.
+- Human-Plus-2 has a main/release-cut carve-out: .gerrit/project.config:211-.gerrit/project.config:215.
+- MainFastForwardMergerPlus2 and release-cut-promote are main-specific submit requirements: .gerrit/project.config:223-.gerrit/project.config:305.
+- Verified is effectively disabled via applicableIf = is:false: .gerrit/project.config:312-.gerrit/project.config:315.
+
+Impact:
+The old release-cut protection model lives in Gerrit. Removing main without updating this config leaves obsolete submit rules and also does not create a replacement “develop tip is green” enforcement mechanism.
+
+Required action:
+Remove main/release-cut submit requirements and release/* assumptions. Separately decide whether Gerrit Verified must become active on develop before auto-cut tags are allowed.
+
+A8. MODIFY/SUPERSEDE: ADRs still describe main and release/v* as load-bearing release infrastructure.
+
+Evidence:
+- ADR-0001 defines five long-lived/controlled branch classes, including main, release/*, and hotfix/*: docs/adr/ADR-0001-five-branch-gitflow.md:37-docs/adr/ADR-0001-five-branch-gitflow.md:45.
+- ADR-0001 says main is production and release/* is cut from develop: docs/adr/ADR-0001-five-branch-gitflow.md:49-docs/adr/ADR-0001-five-branch-gitflow.md:54.
+- ADR-0020 says release cut advances main via a single merge change: docs/adr/ADR-0020-release-cut-as-single-merge-change.md:18-docs/adr/ADR-0020-release-cut-as-single-merge-change.md:22.
+- ADR-0020 explicitly rejected tag-only releases because main was load-bearing: docs/adr/ADR-0020-release-cut-as-single-merge-change.md:249-docs/adr/ADR-0020-release-cut-as-single-merge-change.md:255.
+- ADR-0021 defines coordinator cold-start tasks around release infrastructure rather than a tag-only train: docs/adr/ADR-0021-release-pipeline-coordinator.md:156-docs/adr/ADR-0021-release-pipeline-coordinator.md:170.
+
+Impact:
+The documentation currently says the opposite of the new decision in normative ADR language. Operators and future agents will keep reintroducing main unless these are superseded or modified.
+
+Required action:
+Supersede ADR-0001 and ADR-0020 with a new trunk/tag ADR. Modify ADR-0021 and any release conductor ADRs to make tag train supervision, not main promotion, the coordinator’s responsibility.
+
+B. Hidden costs of “pure tag on develop” releases
+
+B1. NET-NEW, HIGH, NEW-WORK: hotfixes cannot isolate a production fix if develop already contains unshippable commits.
+
+Evidence:
+- ADR-0001’s problem statement explicitly calls out emergency hotfixes conflicting with in-progress development: docs/adr/ADR-0001-five-branch-gitflow.md:25-docs/adr/ADR-0001-five-branch-gitflow.md:33.
+- The old model solved this by making hotfix/* branch from main and merge back: docs/adr/ADR-0001-five-branch-gitflow.md:53-docs/adr/ADR-0001-five-branch-gitflow.md:54.
+- The new plan removes hotfix branches and says hotfix tags are also from develop.
+
+Impact:
+If develop has commits after the last production tag that are not prod-ready, a hotfix tag from develop necessarily ships them. This is the largest semantic cost of the new model.
+
+Required action:
+Define a stop-the-line rule: either revert or disable unready develop changes before tagging, or explicitly permit a temporary detached/tag-only hotfix process from the last production tag. If the latter is rejected, the revert policy and owner approval need to be written down before retiring hotfix branches.
+
+B2. NET-NEW, HIGH, NEW-WORK: “every tag is prod-usable” is not currently backed by required tests.
+
+Evidence:
+- .gitlab-ci.yml has only build/sign/sbom/attest/audit-emit stages, not test/lint: .gitlab-ci.yml:6-.gitlab-ci.yml:11.
+- GitLab pipeline is tag-only: .gitlab-ci.yml:1-.gitlab-ci.yml:4.
+- Gerrit Verified is disabled: .gerrit/project.config:312-.gerrit/project.config:315.
+- staging-gate-smoke defaults to a narrow dag1 smoke id: deploy/systemd/staging-gate-smoke.service:30-deploy/systemd/staging-gate-smoke.service:39.
+- release_milestone_checker gates canary and smoke status, but the status source is JSONL staging gate output, not a comprehensive CI test suite: scripts/release_milestone_checker.py:517-scripts/release_milestone_checker.py:531.
+
+Impact:
+A v* tag can currently build, sign, and emit attestations without proving the backend/frontend test suite passed at that commit. Tag immutability makes this more serious than branch releases because a bad tag becomes a permanent release object.
+
+Required action:
+Before unattended tag creation, require a fresh green signal for the exact develop commit. Minimum should include backend pytest via backend/.venv/bin/pytest for relevant suites, frontend build/typecheck/tests, migration check, smoke/canary, and supply-chain verification.
+
+B3. NET-NEW, HIGH, NEW-WORK: rollback cannot assume tag-only deploy is enough when database migrations have already run.
+
+Evidence:
+- deploy-prod.sh runs Alembic migration upgrade during deployment: scripts/deploy-prod.sh:330-scripts/deploy-prod.sh:378.
+- Its rollback guidance is “checkout previous tag, rerun deploy-prod.sh --skip-build”: scripts/deploy-prod.sh:469-scripts/deploy-prod.sh:471.
+- release state machine supports rollback only from canary stages, not from done: backend/release_conductor/state_machine.py:24-backend/release_conductor/state_machine.py:37, backend/release_conductor/state_machine.py:100-backend/release_conductor/state_machine.py:130.
+
+Impact:
+Pure tag rollback does not undo schema changes. A production-usable-tag policy must include backward-compatible migrations or explicit downgrade/restore procedures.
+
+Required action:
+Add a release gate that classifies migrations as backward-compatible, requires expand/contract sequencing, or blocks tag cut. Rollback docs should say exactly when previous-tag deploy is valid and when DB intervention is required.
+
+B4. NET-NEW, MEDIUM, MODIFY: “force promote” semantics become unsafe in a no-branch tag model.
+
+Evidence:
+- release_milestone_checker has FORCE_PROMOTE handling that can bypass milestone readiness blockers: scripts/release_milestone_checker.py:540-scripts/release_milestone_checker.py:549.
+- The old auto-promote script treats milestone ready as permission to push refs/for/main: scripts/auto_promote_develop_to_main.sh:16-scripts/auto_promote_develop_to_main.sh:21.
+
+Impact:
+In the old model, force-promote still created a Gerrit main change for review. In the tag model, a force path could create a production release tag directly if copied naively.
+
+Required action:
+Remove force from unattended auto-cut. If an emergency override remains, require explicit human invocation, immutable audit reason, exact commit SHA, and post-tag verification.
+
+C. Frontend feature-flag implementation needed for safe trunk releases
+
+C1. NET-NEW, HIGH, NEW-WORK: the existing feature flag router is an operator/admin registry API, not a frontend runtime evaluation API.
+
+Evidence:
+- backend/routers/feature_flags.py describes itself as an operator API for registering and editing flags: backend/routers/feature_flags.py:1-backend/routers/feature_flags.py:4.
+- GET /feature-flags returns registry rows to viewers: backend/routers/feature_flags.py:181-backend/routers/feature_flags.py:200.
+- PATCH /feature-flags/{name} is admin mutation: backend/routers/feature_flags.py:203-backend/routers/feature_flags.py:292.
+
+Impact:
+Frontend code should not fetch the full registry with owner, rollout, and tenant details just to decide whether to show UI. That leaks implementation details and is not per-user evaluated.
+
+Required action:
+Add a frontend-safe endpoint, e.g. GET /api/frontend/feature-flags or /api/feature-flags/effective, that returns only allowed public flag booleans for the authenticated user/tenant/session.
+
+C2. NET-NEW, HIGH, NEW-WORK: define the server-side evaluation contract and fail-closed behavior for frontend flags.
+
+Evidence:
+- backend/agents/feature_flags.py documents fail-closed semantics: backend/agents/feature_flags.py:35-backend/agents/feature_flags.py:38.
+- Its is_enabled(name, tenant_id) evaluates active rows, allowed tenants, and rollout percent: backend/agents/feature_flags.py:207-backend/agents/feature_flags.py:259.
+- backend/feature_flag_sdk.py has a cache TTL and fail-closed paths: backend/feature_flag_sdk.py:24-backend/feature_flag_sdk.py:33, backend/feature_flag_sdk.py:245-backend/feature_flag_sdk.py:303.
+
+Impact:
+Frontend trunk safety depends on flags failing closed and being evaluated by trusted server context. The client must not send arbitrary tenant/user targeting inputs that the backend trusts.
+
+Required action:
+Centralize frontend-visible flag evaluation on the backend. Use authenticated tenant/user context, return false on DB/IO errors, and optionally apply a short server-side cache with tenant/user in the cache key.
+
+C3. NET-NEW, HIGH, NEW-WORK: frontend has no runtime flag consumer or bootstrap path.
+
+Evidence:
+- lib/api.ts centralizes API requests and adds bundle compatibility headers: lib/api.ts:925-lib/api.ts:953.
+- lib/api.ts only exposes feature flag list/patch functions for operator flows: lib/api.ts:3219-lib/api.ts:3274.
+- next.config.mjs exposes build-time NEXT_PUBLIC bundle metadata, not runtime flags: next.config.mjs:86-next.config.mjs:94.
+
+Impact:
+Build-time NEXT_PUBLIC variables cannot support operator flips after deploy. Without a React provider/hook or SSR bootstrap, frontend feature flags exist only in the backend and cannot hide incomplete UI shipped on develop.
+
+Required action:
+Add a typed API client for effective flags, a small frontend provider/hook, and an SSR/client bootstrap policy. Default unknown/loading flags to false for risky features.
+
+C4. NET-NEW, MEDIUM, MODIFY: frontend and backend feature flag tier types already disagree.
+
+Evidence:
+- Backend tiers are debug, dogfood, early_access, staged, ga: backend/feature_flags.py:47-backend/feature_flags.py:60.
+- Frontend API type still says debug, dogfood, preview, release, runtime: lib/api.ts:3221.
+
+Impact:
+Any frontend operator UI or generated client code can misrepresent backend state. This is not just cosmetic if tier drives rollout expectations.
+
+Required action:
+Align frontend types with backend enums in the same work as the runtime flag consumer.
+
+C5. NET-NEW, MEDIUM, NEW-WORK: public/private flag separation is required before exposing flags to the browser.
+
+Evidence:
+- Feature flag response rows include owner, allowed_tenants, rollout percentage, and notes fields: backend/routers/feature_flags.py:166-backend/routers/feature_flags.py:177.
+- The backend evaluator supports tenant targeting and percentage rollout: backend/agents/feature_flags.py:226-backend/agents/feature_flags.py:251.
+
+Impact:
+A direct frontend consumer of the existing registry would expose rollout strategy and tenant allowlists. That is unnecessary and may reveal internal deployment plans.
+
+Required action:
+Add a public/exposable flag allowlist or schema field. The browser response should be a map of public flag names to booleans plus optional version/ttl metadata, not the registry rows.
+
+D. Migration ordering, rollback, and atomic change groups
+
+Recommended order:
+
+1. Freeze old release automation before any behavior migration.
+Disable auto-promote-main, auto-promote-develop, auto-tag-release, release-cut guards, and any release-cut cron paths. Evidence: deploy/systemd/auto-promote-main.service:10-deploy/systemd/auto-promote-main.service:26, deploy/systemd/auto-tag-release.service:10-deploy/systemd/auto-tag-release.service:26, deploy/systemd/omnisight-release-cut-guard.service:1-deploy/systemd/omnisight-release-cut-guard.service:5.
+
+2. Land the new ADR/runbook contract.
+Supersede ADR-0001 and ADR-0020 before changing code. ADR-0020 currently says main is load-bearing and tag-only was rejected: docs/adr/ADR-0020-release-cut-as-single-merge-change.md:249-docs/adr/ADR-0020-release-cut-as-single-merge-change.md:255.
+
+3. Convert deploy validation atomically.
+Change deploy-prod.sh, check_deploy_ref.sh, and deploy/prod-deploy-allowlist.txt together. The allowlist still permits branch deploys: deploy/prod-deploy-allowlist.txt:21-deploy/prod-deploy-allowlist.txt:26, and deploy-prod.sh still defaults to main: scripts/deploy-prod.sh:27.
+
+4. Convert staging/build before enabling auto-cut.
+Resolve the staging raw-SHA image gap first. Current staging-sync deploys develop_tip: scripts/sync_staging_to_develop.sh:255-scripts/sync_staging_to_develop.sh:270, while GitLab builds only v* tags: .gitlab-ci.yml:1-.gitlab-ci.yml:4.
+
+5. Add frontend runtime flags before the first trunk release that contains incomplete UI.
+The backend has flags, but the frontend only has operator registry calls: lib/api.ts:3219-lib/api.ts:3274.
+
+6. Replace Gerrit main/release rules with develop/tag gates.
+Remove main submit requirements and decide whether Verified becomes active on develop. Current config disables Verified: .gerrit/project.config:312-.gerrit/project.config:315.
+
+7. Update release conductor/coordinator semantics.
+The state machine can remain as a deployment/canary state machine, but its release_id/version creation should be keyed to immutable tag/build provenance. Current graph is generic enough for tags: backend/release_conductor/state_machine.py:20-backend/release_conductor/state_machine.py:37.
+
+8. Dry-run a single v* tag end to end.
+Verify: tag points at develop, images exist by immutable tag and digest, signatures/attestations match the actual signing mode, bundle.json provenance matches the deployed images, /api/version and /readyz return expected values, staging and prod deploys reject branch refs.
+
+Rollback plan:
+
+- Pre-cut rollback: re-enable old systemd units and restore old deploy allowlist only if no production tag has been created under the new model.
+- Post-cut rollback: do not delete or move immutable tags. Roll production back by deploying the previous approved v* tag/digest, subject to migration compatibility.
+- If a tag was cut but not deployed, mark it bad in release/audit metadata rather than retagging.
+- If old automation accidentally creates a main/release-cut change after migration starts, abandon the change and verify no branch deploy path is still allowed.
+
+Atomic change groups:
+
+- deploy-prod.sh + check_deploy_ref.sh + prod-deploy-allowlist + production runbook.
+- staging-sync + GitLab image publication + staging compose registry/tag defaults.
+- Gerrit project.config + auto-promote/release-cut systemd disablement.
+- frontend effective-flags endpoint + lib/api.ts client + React provider/hook + type enum alignment.
+- ADR supersession + operator release runbook + rollback/migration policy.
+
+E. Supply-chain and image-release considerations
+
+E1. NET-NEW, HIGH, MODIFY: signing/attestation mode is internally inconsistent.
+
+Evidence:
+- sign-images uses cosign sign --key "$COSIGN_KEY": .gitlab-ci.yml:137-.gitlab-ci.yml:151.
+- attest-images also uses --key "$COSIGN_KEY": .gitlab-ci.yml:173-.gitlab-ci.yml:200.
+- audit-emit records signed_with as cosign-keyless-gitlab-oidc: .gitlab-ci.yml:246-.gitlab-ci.yml:287.
+- The release image pipeline doc claims keyless OIDC/id_tokens: docs/operations/release-image-pipeline.md:84-docs/operations/release-image-pipeline.md:106.
+
+Impact:
+Audit output can claim keyless identity guarantees that the pipeline did not actually use. For tag-only releases, that undermines the “immutable tag = prod-usable artifact” contract.
+
+Required action:
+Either implement GitLab OIDC keyless signing with id_tokens and Fulcio identity checks, or change docs/audit JSON to accurately say key-based signing and document key custody.
+
+E2. NET-NEW, HIGH, MODIFY: image-baked bundle.json is generated before final image digests exist.
+
+Evidence:
+- prepare-bundle emits placeholder zero digests before build: .gitlab-ci.yml:63-.gitlab-ci.yml:75.
+- Dockerfile.backend copies bundle.json into the runtime image: Dockerfile.backend:174-Dockerfile.backend:182.
+- /api/version reads the bundled metadata exposed by backend/api_versioning.py: backend/api_versioning.py:254-backend/api_versioning.py:327.
+- emit_bundle_json.sh supports real git_ref/git_sha/images/contracts fields: scripts/emit_bundle_json.sh:109-scripts/emit_bundle_json.sh:127.
+
+Impact:
+The running backend’s /api/version cannot, by itself, prove that it is serving the final image digests created later in the pipeline. A separate post-build bundle can be correct, but then operators must know the in-image bundle is not the final attestation source.
+
+Required action:
+Either re-seal/publish a final bundle after image build and teach deploy/health/audit to trust that external bundle, or restructure the build so final digest provenance is available to the runtime metadata path.
+
+E3. NET-NEW, MEDIUM, MODIFY: mutable latest remains a deployment foot-gun.
+
+Evidence:
+- The GitLab pipeline pushes latest on every v* tag: .gitlab-ci.yml:118-.gitlab-ci.yml:120.
+- docker-compose.prod.yml defaults OMNISIGHT_IMAGE_TAG to latest: docker-compose.prod.yml:33-docker-compose.prod.yml:35.
+- The release image pipeline doc says latest is updated on every v* tag and production should pin digest for zero drift: docs/operations/release-image-pipeline.md:121-docs/operations/release-image-pipeline.md:124.
+
+Impact:
+If OMNISIGHT_IMAGE_TAG is unset in production, the stack can deploy the newest tag regardless of approval state. Under a tag train, latest should be convenience-only and never a default in prod/staging compose.
+
+Required action:
+Make production and staging fail if OMNISIGHT_IMAGE_TAG is unset. Keep latest only for local/manual inspection, or remove it from release publication.
+
+E4. NET-NEW, MEDIUM, MODIFY: /api/version exposes bundle-level identity but not enough direct release-tag provenance for tag-first ops.
+
+Evidence:
+- build_version_payload returns bundle_id, API compatibility, OpenAPI hash, DB schema version, and provider chain metadata: backend/api_versioning.py:254-backend/api_versioning.py:327.
+- bundle.json generation includes git_ref and git_sha: scripts/emit_bundle_json.sh:109-scripts/emit_bundle_json.sh:127.
+
+Impact:
+Operators debugging a tag-driven rollout should be able to ask a running service “which v* tag and commit are you?” without separately decoding bundle_id or looking up an external artifact.
+
+Required action:
+Expose git_ref/git_sha from bundle.json in /api/version, or document why bundle_id is the canonical lookup key and provide a deterministic lookup path.
+
+E5. NET-NEW, MEDIUM, MODIFY: frontend/backend compatibility check is observational, not a release gate.
+
+Evidence:
+- docs/operations/release-image-pipeline.md says /readyz compares API support and catches incompatibility before traffic: docs/operations/release-image-pipeline.md:171-docs/operations/release-image-pipeline.md:182.
+- backend/frontend_compat.py says its current policy is observational and never blocks readiness: backend/frontend_compat.py:24-backend/frontend_compat.py:31.
+- health readyz computes ready from db, migrations, and provider chain only: backend/routers/health.py:577-backend/routers/health.py:674, especially backend/routers/health.py:663.
+
+Impact:
+The docs overstate the safety gate. Tag-only releases with frontend flags need a real compatibility gate or an honest doc that compatibility is telemetry only.
+
+Required action:
+Either make frontend compatibility part of readiness/release gating, or update docs and add another deploy-time compatibility check.
+
+F. Auto-cut scheduler safety requirements
+
+F1. NET-NEW, HIGH, NEW-WORK: the existing green signal is not sufficient for unattended tag creation.
+
+Evidence:
+- GitLab release pipeline is tag-only and has no test stage: .gitlab-ci.yml:1-.gitlab-ci.yml:11.
+- Gerrit Verified is disabled: .gerrit/project.config:312-.gerrit/project.config:315.
+- release_milestone_checker checks develop tip and staging gate statuses: scripts/release_milestone_checker.py:321-scripts/release_milestone_checker.py:374, scripts/release_milestone_checker.py:493-scripts/release_milestone_checker.py:531.
+
+Impact:
+A scheduler that creates v* tags when “develop is green” needs a stronger definition than currently exists. The present system can say staging smoke/canary is current, but it does not prove full CI passed for the exact commit.
+
+Required action:
+Minimum auto-cut gate should require:
+- exact develop commit SHA resolved from Gerrit;
+- all Gerrit changes included in the release ticket are merged on develop;
+- no open blockers;
+- fresh CI test/lint/build success for that exact SHA;
+- staging deployed the exact candidate artifact for that SHA/tag;
+- canary and smoke records are fresh and match that SHA;
+- release bundle/signature/SBOM generation succeeds in dry-run or candidate mode.
+
+F2. NET-NEW, HIGH, NEW-WORK: scheduler must not create a tag until artifact identity is unambiguous.
+
+Evidence:
+- staging-sync currently stages raw develop SHA: scripts/sync_staging_to_develop.sh:255-scripts/sync_staging_to_develop.sh:270.
+- GitLab publishes only tag/sha-short/latest on v* pipelines: .gitlab-ci.yml:118-.gitlab-ci.yml:120.
+
+Impact:
+If auto-cut tags before staging, staging did not validate the exact release tag artifact. If it waits for staging first, current artifacts may not exist. This must be designed explicitly.
+
+Required action:
+Use a candidate artifact flow. Examples: build branch SHA images for develop, create rc tags for staging then promote via final tags only after validation, or make the final v* tag trigger build and then stage/prod gates before deployment while accepting that the tag exists before validation completes. Each has different operator semantics.
+
+F3. NET-NEW, MEDIUM, MODIFY: release_milestone_checker can be reused, but its output vocabulary is still old release-cut readiness.
+
+Evidence:
+- The checker publishes statuses such as blocked, canary_pending, smoke_pending, ready_for_promote: scripts/release_milestone_checker.py:37-scripts/release_milestone_checker.py:57.
+- It asks whether tickets are merged on develop and gates on canary/smoke: scripts/release_milestone_checker.py:443-scripts/release_milestone_checker.py:550.
+
+Impact:
+The logic is close to useful, but “ready_for_promote” used to mean ready to create a main promotion change. Under the new model it would mean ready to cut an immutable release tag, a stronger action.
+
+Required action:
+Rename statuses or add explicit tag_cut_ready/tag_cut_blocked states, and make the audit payload include exact candidate SHA, candidate artifact identity, and gate freshness windows.
+
+F4. NET-NEW, MEDIUM, NEW-WORK: unattended auto-cut should require a monotonic version allocator.
+
+Evidence:
+- backend/agents/auto_tag_release.py currently derives a release branch from the tag and updates release/vX.Y: backend/agents/auto_tag_release.py:104-backend/agents/auto_tag_release.py:108, backend/agents/auto_tag_release.py:193-backend/agents/auto_tag_release.py:241.
+- Its CLI takes an explicit --tag and defaults --main-branch main: backend/agents/auto_tag_release.py:295-backend/agents/auto_tag_release.py:303.
+
+Impact:
+The old tool is not an auto-cut scheduler. It assumes someone provides the tag and then mutates release branches/main-derived state. A new scheduler must allocate vX.Y.Z safely, avoid duplicates, and refuse to move existing tags.
+
+Required action:
+Build a new tag allocator or make version selection explicitly human-provided. Never reuse auto_tag_release.py without deleting release branch updates and main defaults.
+
+G. Other blockers and stale assumptions
+
+G1. PRIOR-KNOWN, HIGH, SUPERSEDE: ADR-0020’s rejected tag-only alternative is now the chosen model.
+
+Evidence:
+- ADR-0020 says “Rejected: release = tag only” because main remained load-bearing: docs/adr/ADR-0020-release-cut-as-single-merge-change.md:249-docs/adr/ADR-0020-release-cut-as-single-merge-change.md:255.
+
+Impact:
+This is the clearest documentation contradiction. Leaving it as-is will cause future work to defend main as intentional.
+
+Required action:
+Write a new ADR that explicitly supersedes ADR-0020 and states why the previous rejection no longer holds.
+
+G2. NET-NEW, MEDIUM, MODIFY: release conductor state machine can stay, but release identity needs to move from branch/release-cut to tag/build provenance.
+
+Evidence:
+- State rows are keyed by release_id and version: backend/release_conductor/state_machine.py:186-backend/release_conductor/state_machine.py:223.
+- The state graph already covers building, staging, canary, done, failed, and rolled_back: backend/release_conductor/state_machine.py:20-backend/release_conductor/state_machine.py:37.
+
+Impact:
+The state machine is not inherently main-specific, so deleting it would be overreach. But release_id/version creation and audit fields should bind to immutable tag, commit SHA, image digests, and bundle id.
+
+Required action:
+Modify conductor creation/ledger paths to record tag provenance. Keep the state graph unless another audit finds branch-specific assumptions in dispatchers.
+
+G3. NET-NEW, LOW, KEEP/MODIFY: omnisight-main-sync is named “main” but already tracks gerrit/develop.
+
+Evidence:
+- deploy/systemd/omnisight-main-sync.service description says it syncs the project with gerrit/develop: deploy/systemd/omnisight-main-sync.service:23-deploy/systemd/omnisight-main-sync.service:36.
+
+Impact:
+This is a naming/documentation wart, not a release blocker. It can confuse audit grep results, but it is not actually syncing branch main.
+
+Required action:
+Rename later if desired. Do not mix it into the release-train migration unless operator docs require clarity.
+
+G4. NET-NEW, MEDIUM, MODIFY: GitLab Container Registry is canonical in docs, but staging and some scripts still assume GHCR or generic registry behavior.
+
+Evidence:
+- docs/operations/release-image-pipeline.md says v* tag pipelines publish to GitLab Container Registry: docs/operations/release-image-pipeline.md:48-docs/operations/release-image-pipeline.md:75.
+- staging compose defaults to GHCR images: deploy/staging/docker-compose.yml:80, deploy/staging/docker-compose.yml:221, deploy/staging/docker-compose.yml:263.
+- production compose is registry-abstracted but defaults image tag to latest: docker-compose.prod.yml:9-docker-compose.prod.yml:16, docker-compose.prod.yml:33-docker-compose.prod.yml:35.
+
+Impact:
+Release artifact verification can pass for one registry while staging/prod pull another registry/tag. This is a classic “green but not the deployed thing” failure mode.
+
+Required action:
+Make registry, tag, and digest resolution a single shared contract across GitLab CI, staging, prod deploy, and health/audit output.
+
+G5. PRIOR-KNOWN, HIGH, DELETE: auto_tag_release.py still creates release/vX.Y branches and depends on auto_promote_main.
+
+Evidence:
+- The module docstring says it tags main HEAD and updates release/vX.Y: backend/agents/auto_tag_release.py:1-backend/agents/auto_tag_release.py:6.
+- It imports iter_new_records from auto_promote_main: backend/agents/auto_tag_release.py:22.
+- It updates release_branch and records main_branch/main_sha in audit payload: backend/agents/auto_tag_release.py:193-backend/agents/auto_tag_release.py:241.
+
+Impact:
+This cannot be salvaged by changing one default. Its core behavior is branch maintenance that the new plan rejects.
+
+Required action:
+Delete or replace with a tag-only implementation that does not import auto_promote_main, does not update release/v*, and refuses to operate except on develop commits.
+
+Net-new findings list
+
+NET-NEW-1: Staging-sync raw develop-SHA image expectation conflicts with tag-only GitLab image publication. See A1/F2.
+NET-NEW-2: Staging compose still uses GHCR/latest and main auto-deploy wording. See A2/G4.
+NET-NEW-3: Production deploy allowlist independently permits branch deploys. See A3.
+NET-NEW-4: deploy-prod.sh writes “master head” metadata that will be misleading under tag-only releases. See A4.
+NET-NEW-5: Pure hotfix tags from develop cannot isolate fixes when develop contains unshippable commits. See B1.
+NET-NEW-6: “Every tag prod-usable” lacks a required full-test green signal today. See B2/F1.
+NET-NEW-7: Rollback by previous tag is insufficient when migrations have already run. See B3.
+NET-NEW-8: Existing feature flag router is operator/admin, not frontend runtime evaluation. See C1.
+NET-NEW-9: Frontend has no runtime flag provider/hook/bootstrap and build-time env cannot solve live flag flips. See C3.
+NET-NEW-10: Frontend/backend feature flag tier enums disagree. See C4.
+NET-NEW-11: GitLab release pipeline claims keyless/OIDC in audit/docs but uses COSIGN_KEY signing. See E1.
+NET-NEW-12: In-image bundle.json is generated before final image digests exist. See E2.
+NET-NEW-13: mutable latest remains the default deployment tag in compose. See E3.
+NET-NEW-14: /api/version should expose direct git_ref/git_sha or document bundle_id as the canonical lookup key. See E4.
+NET-NEW-15: frontend compatibility is documented as a readiness gate but implemented as observational telemetry. See E5.
+NET-NEW-16: auto-cut scheduler needs a candidate artifact/version allocation design; auto_tag_release.py is not that scheduler. See F2/F4.
+
+Prior-known findings confirmed
+
+- scripts/deploy-prod.sh defaults to main and supports branch deploys: scripts/deploy-prod.sh:8-scripts/deploy-prod.sh:12, scripts/deploy-prod.sh:27.
+- backend/agents/auto_tag_release.py imports auto_promote_main and updates release branches: backend/agents/auto_tag_release.py:22, backend/agents/auto_tag_release.py:193-backend/agents/auto_tag_release.py:241.
+- scripts/staging_deploy.sh accepts only main/master webhook branches: scripts/staging_deploy.sh:139-scripts/staging_deploy.sh:141.
+- backend/routers/webhooks.py mirrors/pushes main and triggers CI on main: backend/routers/webhooks.py:1468, backend/routers/webhooks.py:1653, backend/routers/webhooks.py:1713.
+- .gerrit/project.config has main/release-cut submit requirements and release/* Verified applicability: .gerrit/project.config:107-.gerrit/project.config:115, .gerrit/project.config:187-.gerrit/project.config:305.
+- auto_promote_main.py and auto_promote_develop_to_main.sh are obsolete under tag-only releases: backend/agents/auto_promote_main.py:1-backend/agents/auto_promote_main.py:7, scripts/auto_promote_develop_to_main.sh:2-scripts/auto_promote_develop_to_main.sh:10.
+- ADR-0001/ADR-0020 conflict with the new branch model: docs/adr/ADR-0001-five-branch-gitflow.md:37-docs/adr/ADR-0001-five-branch-gitflow.md:54, docs/adr/ADR-0020-release-cut-as-single-merge-change.md:18-docs/adr/ADR-0020-release-cut-as-single-merge-change.md:33.
+
+Minimum acceptance checklist for the migration
+
+- No service/timer/script can push refs/for/main or update release/v*.
+- Production deploy refuses main, release/*, hotfix/*, and any non-v* branch ref.
+- Staging and production pull the same registry namespace and immutable tag/digest scheme.
+- An exact develop commit can be proven green before any final production tag is created, or the process explicitly treats final tags as post-build candidates until gates pass.
+- Feature flags have a frontend-safe runtime API, client provider, fail-closed semantics, and type alignment.
+- Supply-chain audit truthfully reflects the actual signing mode and final image digests.
+- ADRs and operator docs make the new trunk/tag model normative and mark old main/release-cut decisions superseded.

@@ -7,7 +7,7 @@ date: 2026-05-12
 
 # ADR-0020 — Release cut to `main` as a single merge change
 
-- **Status**: Accepted (2026-05-12, AUDIT-26c / OP-982) — Gerrit-side deployment is AUDIT-26e; `auto_promote_main` rewrite is AUDIT-26d.
+- **Status**: Accepted (2026-05-12, AUDIT-26c / OP-982) — Gerrit-side deployment is AUDIT-26e; `auto_promote_main` rewrite is AUDIT-26d. ⚠ **CONFLICTS with proposed [ADR-0040](ADR-0040-single-trunk-release-train.md)** — which RETIRES the develop→main merge cut entirely (release = `v*` tag). ADR-0040 §G1 directly reverses this ADR's "Rejected: tag-only" alternative. Flips to Superseded on ADR-0040 acceptance.
 - **Deciders**: operator (`nanakusa sora`) + AI fleet; pre-flight evidence: AUDIT-26a / OP-980 (Phase 0 verification)
 - **Tickets**: OP-982 (AUDIT-26c — this ADR + the `project.config` change), OP-980 (AUDIT-26a — Phase 0 verification), OP-925 (the R3 cascade that motivated it), OP-960 / ADR-0016 (the mechanism this supersedes), AUDIT-26d / AUDIT-26e / AUDIT-26f (downstream)
 - **Supersedes**: ADR-0016 (D5 develop→main promotion via Gerrit review change). ADR-0016 stays in the record as the prior decision; its "path C" forward-compat hook (`milestone:R3-fastforward` hashtag) is the seam this ADR builds on. The formal status flip on ADR-0016 — `Accepted → Superseded by ADR-0020` — is AUDIT-26f's job (it owns the AUDIT-13/13a/13b cleanup pass), not this ticket's.

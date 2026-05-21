@@ -7,7 +7,7 @@ date: 2026-05-04
 
 # ADR 0001 — Five-branch Git Flow
 
-**Status**: Accepted (2026-05-04)
+**Status**: Accepted (2026-05-04) — ⚠ **CONFLICTS with proposed [ADR-0040](ADR-0040-single-trunk-release-train.md)** (single-trunk Release Train: retire `main`, no `release/*`/`hotfix/*`, release = `v*` tag). Flips to Superseded only when ADR-0040 is Accepted + migrated.
 
 **Context**
 

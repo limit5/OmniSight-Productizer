@@ -1,0 +1,204 @@
+# Codex audit — Model B rc-tag -> promote-by-digest release train
+
+Scope: reviewed docs/design/2026-05-21-model-b-rc-promote-release-train.md, docs/adr/ADR-0040-single-trunk-release-train.md, and the listed implementation files. Findings are grouped A-H per prompt.
+
+## A. Promote-by-digest correctness
+
+A1. HIGH — Final `v*` git tag semantics conflict with “no rebuild”.
+- Evidence: ADR-0040 says “A release = a `v*` git tag on a develop commit” and that the tag triggers GitLab CI build/sign/SBOM/attest/bundle (docs/adr/ADR-0040-single-trunk-release-train.md:34). The GitLab workflow runs for any `$CI_COMMIT_TAG =~ /^v.*/` (.gitlab-ci.yml:1-4). Model B says promotion re-tags digest D to `:v0.6.0` with no rebuild (docs/design/2026-05-21-model-b-rc-promote-release-train.md:26-28).
+- Flaw: If promotion creates a final git tag `v0.6.0`, the current CI will build new images for that final tag. If promotion only creates image tags, ADR-0040’s “release = v* git tag” invariant is false.
+- Why it bites: Operators and audit tooling will not know whether `v0.6.0` means a git tag, an image tag, or both. The first implementation can silently rebuild a different image for the final tag, defeating staging validation.
+- Fix: Decide one model. Either (1) final git tags are metadata only and GitLab workflow must explicitly not rebuild final tags, routing them to a promote-by-digest job with a recorded rc source digest; or (2) no final git tag exists and ADR-0040 must be revised to say release identity is image digest plus promoted image tag, not git tag.
+
+A2. HIGH — Current pipeline signs and attests by digest, but the verification/audit story is inconsistent and no final-target verification exists.
+- Evidence: `sign-image` resolves the digest from the sha tag and signs `${IMAGE_BASE}@${DIGEST}` with `cosign sign --key "$COSIGN_KEY"` (.gitlab-ci.yml:143-151). `attest-image` also attests `${IMAGE_BASE}@${DIGEST}` with `--key "$COSIGN_KEY"` (.gitlab-ci.yml:179-200). But audit JSON claims `signed_with: "cosign-keyless-gitlab-oidc"` (.gitlab-ci.yml:259-287), and `scripts/verify_image_signature.sh` falls back to GitHub Actions keyless identity if no PEM key is found (scripts/verify_image_signature.sh:16-24, scripts/verify_image_signature.sh:108-118).
+- Flaw: Digest signing itself survives a retag, but the declared verifier mode does not match the signer mode. A final promote can pass “signed by digest” in principle while every downstream verifier expecting keyless GitHub/GitLab OIDC fails.
+- Why it bites: Supply-chain evidence becomes non-actionable: the signature may exist but the documented admission path will reject it or verify the wrong trust root.
+- Fix: Pick one trust mode. For current code, update all audit/verification docs and scripts to key-based GitLab CR signing, or implement true GitLab OIDC keyless signing and set verifier issuer/identity accordingly. Promotion must verify both source digest and final tag resolution to the same digest.
+
+A3. MED — Existing digest promotion helper is close but not sufficient for final release promotion.
+- Evidence: `scripts/promote_image_bundle.py` retags by digest using `docker buildx imagetools create -t <target> <repository>@<digest>` (scripts/promote_image_bundle.py:126-139). It verifies only `promotion.source_ref` after retag (scripts/promote_image_bundle.py:142-147, scripts/promote_image_bundle.py:279-285). It signs one promotion attestation for `promotions[0]` only (scripts/promote_image_bundle.py:288-299). Its default registry namespace is GHCR (`ghcr.io/omnisight`) and image names default to `omnisight-{name}` (scripts/promote_image_bundle.py:23-27, scripts/promote_image_bundle.py:81-85), while GitLab CI publishes `${CI_REGISTRY_IMAGE}/{backend,frontend,bridge}` (.gitlab-ci.yml:102-120).
+- Flaw: The helper proves digest retagging is technically achievable, but it is not wired to GitLab CR naming, does not verify final tag -> digest equality, and does not attest all three final promoted refs.
+- Why it bites: A promote could retag only part of the bundle, produce partial audit evidence, or validate the source digest while the final tag is wrong or overwritten by another job.
+- Fix: Build a dedicated release promote job that takes `{backend,frontend,bridge}` source digests, retags all three to final tags, then verifies each final tag resolves to the exact expected digest and emits per-image promotion attestations plus one bundle-level audit row.
+
+A4. MED — Current build still pushes mutable `latest` on every rc build.
+- Evidence: build-image publishes `${CI_COMMIT_TAG}`, `sha-${CI_COMMIT_SHORT_SHA}`, and `latest` (.gitlab-ci.yml:106-121). Model B explicitly says to stop pushing mutable `:latest` on rc builds (docs/design/2026-05-21-model-b-rc-promote-release-train.md:38).
+- Flaw: Any rc build mutates `latest` before staging/prod approval.
+- Why it bites: Existing compose defaults can accidentally deploy `latest`; an rc that fails staging can still become the default image for an unset tag path.
+- Fix: Remove `:latest` publication from release candidate builds. If a mutable alias is still needed, update it only after final promotion and only for an explicitly named channel.
+
+## B. bundle.json / `/api/version` identity wrinkle
+
+B1. HIGH — `/api/version` currently hides `git_ref` and `git_sha`, so the design’s provenance premise is not implemented.
+- Evidence: CI writes `GIT_REF=refs/tags/${CI_COMMIT_TAG}` and emits bundle.json before image build (.gitlab-ci.yml:63-75). `emit_bundle_json.sh` stores `git_ref` and `git_sha` in the bundle (scripts/emit_bundle_json.sh:109-113). `build_version_payload()` returns `bundle_id`, API contract fields, OpenAPI hash, DB migration head, and frontend contract, but not `git_ref` or `git_sha` (backend/api_versioning.py:307-324).
+- Flaw: The design says to record `git_ref` + `git_sha` and expose them in `/api/version` (docs/design/2026-05-21-model-b-rc-promote-release-train.md:44), but the endpoint does not expose them today.
+- Why it bites: After promotion, operators cannot see the rc source ref or commit from the standard runtime endpoint. That makes the rc/final identity wrinkle worse, not better.
+- Fix: Add `git_ref`, `git_sha`, and image digest fields to `/api/version`. Then explicitly document that `git_ref` is the build ref and `release_tag`/`deployed_ref` is the promoted final tag supplied externally by deploy metadata.
+
+B2. MED — A promoted final image will report an rc-flavoured bundle id forever.
+- Evidence: bundle id is derived from the ref tail, e.g. `<git_ref_short>+<date>.sha<short_sha>` (scripts/emit_bundle_json.sh:25-27, scripts/emit_bundle_json.sh:97-104). Dockerfile.backend copies the pre-build bundle into `/app/bundle.json` (Dockerfile.backend:174-182). `/api/version` caches that payload at startup (backend/api_versioning.py:330-345).
+- Flaw: If `v0.6.0-rc1` is promoted to `v0.6.0` without rebuild, `/api/version` will still report a bundle id containing `v0.6.0-rc1`.
+- Why it bites: This is defensible only if the system treats digest as the release truth and presents rc-as-build-ref clearly. Today the endpoint does not expose final deploy tag/digest, so operators will see “rc1” in prod and have no machine-readable final identity.
+- Least-bad resolution: Do not mutate baked bundle.json during promote. Keep it as immutable build provenance. Add a separate deployment overlay/lock record exposed by `/api/version` or `/readyz` with `promoted_tag`, `deployed_digest`, `source_rc_tag`, and `promotion_audit_id`. Avoid “resealing” the image because that would rebuild/change the digest and break the core Model B property.
+
+B3. MED — FE/BE compatibility is observational, not a gate, contrary to the Model B flow.
+- Evidence: Model B lists “FE/BE compat” as a staging gate (docs/design/2026-05-21-model-b-rc-promote-release-train.md:21-23). `frontend_compat.py` states it is “Observation, not gating” and `/readyz` is intentionally not downgraded on mismatch (backend/frontend_compat.py:24-27). `_check_frontend_compat()` only returns a summary (backend/routers/health.py:456-475).
+- Flaw: A release can pass readiness while serving mismatched FE/BE bundles.
+- Why it bites: Promote-by-digest only helps if the exact bundle is validated. Current compatibility telemetry can alert after the fact but cannot block promotion.
+- Fix: Add an explicit staging gate that queries FE headers and backend `/api/version`, fails on bundle/API mismatch, and records evidence against the rc digest before promote.
+
+## C. Version allocator + concurrency
+
+C1. HIGH — There is no existing monotonic rc/final allocator; current tag automation is old main/release-branch machinery.
+- Evidence: `auto_tag_release.py` consumes `staging_passed`, creates an annotated tag on `main` HEAD, and updates `release/vX.Y` (backend/agents/auto_tag_release.py:1-7, backend/agents/auto_tag_release.py:193-241). It still imports `iter_new_records` from `auto_promote_main` (backend/agents/auto_tag_release.py:22). CLI still has `--main-branch` (backend/agents/auto_tag_release.py:295-303).
+- Flaw: Model B’s monotonic, atomic rc allocator is net-new. Existing code can only create final semver tags and release branches around main.
+- Why it bites: Two schedulers can allocate the same `v0.6.0-rc1` unless an external lock/ref transaction is designed. Retrying after a partial push can also leave git tag, image tag, and release_state out of sync.
+- Fix: Implement allocator as a single transactional source of truth, preferably DB row or Gerrit/git ref lock, with compare-and-swap semantics. It must reserve version+rc before pushing the git tag, mark states `reserved`, `tag_pushed`, `pipeline_digest_seen`, `staging_passed`, `promoted`, and never reuse failed rc numbers.
+
+C2. HIGH — Final promote races are not protected by the existing release state machine.
+- Evidence: release_state has one row per version and optimistic `row_version` for transitions (backend/release_conductor/state_machine.py:1-16, backend/release_conductor/state_machine.py:236-345), but its states are generic `pending -> building -> staging -> canary_* -> done` (backend/release_conductor/state_machine.py:62-124). It stores only `version`, not rc source tag, per-image digests, or final tag claim (backend/release_conductor/state_machine.py:186-224, backend/release_conductor/state_machine.py:377-396).
+- Flaw: The state machine can protect state transitions but cannot currently assert “final v0.6.0 is being promoted from rc1 digest set X and no other rc can claim it.”
+- Why it bites: rc2 can race rc1 to the same final tag, or a retried promote can overwrite/fight a tag if the registry permits tag mutation.
+- Fix: Extend release_state or create a release_train table keyed by final version with immutable source rc tag, git SHA, per-image digests, promotion actor, and final tag digest equality checks. Promote must acquire that row lock before any registry writes.
+
+C3. MED — Existing immutable tag guard is local-only and not enough for concurrent tag creation.
+- Evidence: `_ensure_immutable_tag()` checks local `refs/tags/{tag}`, then creates a local annotated tag if absent (backend/agents/auto_tag_release.py:119-133). Remote pushes happen later (backend/agents/auto_tag_release.py:221-223).
+- Flaw: Two processes can both see the tag absent locally and race remote push. One will fail, but the code is not an allocator and does not record a durable reservation.
+- Why it bites: A failed loser may still have a local tag, partial branch update attempts, or emitted stale state depending on where it fails.
+- Fix: Use remote atomic creation (`git push origin <sha>:refs/tags/<tag>` without force and handle rejection as idempotency only if remote points to the same SHA) plus a DB reservation lock before local tag creation.
+
+## D. Green-gate sufficiency
+
+D1. HIGH — Current GitLab tag pipeline has no test/lint stage, so “built/signed” is not “green”.
+- Evidence: GitLab stages are build, sign, sbom, attest, audit-emit only (.gitlab-ci.yml:6-11). ADR-0040 explicitly says no test/lint stage exists and a develop-green signal is required before auto-cut (docs/adr/ADR-0040-single-trunk-release-train.md:44-47). Gerrit Verified submit requirement is disabled with `applicableIf = is:false` (.gerrit/project.config:312-315).
+- Flaw: Model B can create an rc and signed final image from a SHA that never passed the full backend/frontend test suites.
+- Why it bites: “Every final v* tag is prod-usable” becomes a registry/audit label, not an engineering fact.
+- Fix: Minimum honest gate before promote: exact SHA has passed backend pytest, frontend build/typecheck/lint/tests, migration compatibility check, Docker build for all images, SBOM/sign/attest, staging smoke, canary/readyz, and FE/BE compat. If rc is cut before full CI, it must be called a candidate and final promotion must be blocked until the full signal exists for that SHA.
+
+D2. MED — Staging gate JSONL is only smoke/canary and tied to develop SHA, not rc digest.
+- Evidence: `release_milestone_checker` reads latest canary and smoke for branch `develop` and `revision=develop_tip` (scripts/release_milestone_checker.py:517-531). The staging gate record shape is suite/status/branch/revision/run_id/timestamp/detail (backend/agents/staging_gate.py:22-31, backend/agents/staging_gate.py:147-156). Smoke default subset is `dag1`, not the full DAG (backend/agents/staging_gate.py:100-104, backend/agents/staging_gate.py:299-326).
+- Flaw: The gate does not include image digest(s), source rc tag, or bundle id. A green record proves a URL responded for a SHA label, not that the exact rc digest set was exercised.
+- Why it bites: Staging may pass on a locally built/fallback/old image while promotion blesses a different registry digest.
+- Fix: Staging gate records must include `source_rc_tag`, per-image digests, bundle id, and observed `/api/version` payload. The release checker must match those fields to the candidate digest set, not only `develop_tip`.
+
+## E. Staging fidelity
+
+E1. HIGH — Staging currently pulls GHCR/latest by default, not the GitLab rc artifact.
+- Evidence: staging backend-a/backend-b use `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}` (deploy/staging/docker-compose.yml:79-81, deploy/staging/docker-compose.yml:128-130). Frontend and bridge use the same GHCR/latest pattern (deploy/staging/docker-compose.yml:220-229, deploy/staging/docker-compose.yml:262-268). GitLab CI publishes to `${CI_REGISTRY_IMAGE}/${IMAGE_NAME}` (.gitlab-ci.yml:102-120).
+- Flaw: Model B assumes staging deploys exactly `v0.6.0-rc1` digest D, but staging compose is wired to a different registry namespace and defaults to `latest`.
+- Why it bites: A green staging result can validate GHCR latest while the final promote retags GitLab CR digest D.
+- Fix: Move staging compose to `${OMNISIGHT_REGISTRY:?registry required}/{backend,frontend,bridge}:${OMNISIGHT_IMAGE_TAG:?image tag required}` or digest refs. Reject unset tag and verify pulled image IDs/digests against the rc manifest before running gates.
+
+E2. HIGH — Staging `pull_policy: missing` can reuse a stale local image for a reused tag/default.
+- Evidence: staging backend-a/backend-b/frontend/bridge use `pull_policy: missing` (deploy/staging/docker-compose.yml:80-81, deploy/staging/docker-compose.yml:128-130, deploy/staging/docker-compose.yml:220-222, deploy/staging/docker-compose.yml:262-265).
+- Flaw: Even if `OMNISIGHT_IMAGE_TAG` is set to an rc, Docker may not pull a newer manifest if the tag exists locally.
+- Why it bites: The validation artifact may differ from the promoted digest. This is especially bad for mutable `latest` and any accidental rc-tag overwrite.
+- Fix: Use digest-pinned image refs or `pull_policy: always` plus post-pull digest verification. The best contract is an env lock file with `backend@sha256`, `frontend@sha256`, `bridge@sha256` and compose using those exact refs.
+
+E3. MED — `sync_staging_to_develop.sh` deploys a raw develop SHA, but CI does not build raw SHA tags.
+- Evidence: sync resolves develop tip SHA and calls `staging_deploy.sh --image-tag $tip` (scripts/sync_staging_to_develop.sh:178-200, scripts/sync_staging_to_develop.sh:236-256). GitLab builds only on `v*` tags and publishes `${CI_COMMIT_TAG}`, `sha-${CI_COMMIT_SHORT_SHA}`, and `latest` (.gitlab-ci.yml:1-4, .gitlab-ci.yml:118-120).
+- Flaw: The current staging sync is incompatible with tag-built rc artifacts unless changed as Model B proposes.
+- Why it bites: Without the change, staging either fails to pull or falls back to a locally built/missing/latest image path.
+- Fix: Replace develop-SHA sync with rc-tag/digest sync and fail closed if all three rc images are not present and digest-matching.
+
+E4. MED — Prod also defaults to `latest`, so final-tag deploy can be bypassed by environment omission.
+- Evidence: prod compose image refs use `${OMNISIGHT_IMAGE_TAG:-latest}` for backend and frontend (docker-compose.prod.yml:9-16, docker-compose.prod.yml:152-153, docker-compose.prod.yml:264-265, docker-compose.prod.yml:413-417). Header comments explicitly say tag defaults to `latest` (docker-compose.prod.yml:33-35).
+- Flaw: An operator or script that misses `OMNISIGHT_IMAGE_TAG` will deploy latest, not the promoted final tag/digest.
+- Why it bites: One unset variable can ship an unapproved rc because current GitLab CI pushes latest on rc builds.
+- Fix: Change to `${OMNISIGHT_IMAGE_TAG:?image tag required}` or digest lock refs, and make deploy-prod set it only from an approved final tag/digest.
+
+## F. Migration / rollback under tag promote
+
+F1. HIGH — Rollback to previous final tag is not generally safe because deploy-prod runs migrations before replica restart.
+- Evidence: deploy-prod runs `python -m alembic upgrade heads` before backend-a/backend-b rolling restart (scripts/deploy-prod.sh:330-372). It explicitly notes DB may be left partially upgraded across a multi-migration batch (scripts/deploy-prod.sh:357-362). ADR-0040 already identifies rollback != tag rollback once migrations ran (docs/adr/ADR-0040-single-trunk-release-train.md:57-59).
+- Flaw: Model B says rollback is redeploying previous final digest subject to migration compatibility, but there is no promote-time blocker for non-backward-compatible migrations.
+- Why it bites: A final tag can be promoted and deployed, migrate the DB, then the previous image may fail drift gates or misbehave against the new schema.
+- Fix: The expand/contract classifier must run before final promotion, not during deploy. It must block promotion unless migrations are backward-compatible with the previous final image or an operator explicitly accepts “no previous-image rollback; DB intervention required”.
+
+F2. HIGH — Backend image drift gate protects startup but does not replace a release migration policy.
+- Evidence: Dockerfile.backend runs `python -m backend.alembic_drift_gate` before uvicorn (Dockerfile.backend:220-226), and backend-b restates the same gate in compose (docker-compose.prod.yml:277-285). `/readyz` checks DB current head against on-disk heads (backend/routers/health.py:120-185, backend/routers/health.py:613-615).
+- Flaw: These checks detect image-vs-DB drift at runtime; they do not decide whether the candidate migration is safe to roll back across final tags.
+- Why it bites: The gate may correctly refuse the previous image after rollback, leaving prod down with no clean rollback path.
+- Fix: Add a CI/promote gate around `scripts/check_migration_compat.py` or equivalent that compares previous final tag image/migration head to rc image/migration head and classifies expand/contract compatibility before allowing final tag creation.
+
+F3. MED — Staging runs migrations after switching ingress, so a migration failure is not an ideal promote gate.
+- Evidence: `staging_deploy.sh` switches active color and records active tag after health passes (scripts/staging_deploy.sh:290-314). `sync_staging_to_develop.sh` then runs migrations against the freshly deployed active color (scripts/sync_staging_to_develop.sh:261-270).
+- Flaw: Staging can expose the new app before migration validation completes, and rollback may occur after partial DB mutation.
+- Why it bites: A red migration can corrupt the “staging validated exact artifact” claim and makes staging gate evidence ambiguous.
+- Fix: For rc validation, run migration dry-run/compatibility first against a clone, then apply staging migration before switching external ingress, then run smoke/canary.
+
+## G. rc storm / cost / GC
+
+G1. MED — The design hand-waves GC, and current retention tooling is GHCR-oriented and tag-format-mismatched.
+- Evidence: Model B says registry GC is needed because rc tags proliferate (docs/design/2026-05-21-model-b-rc-promote-release-train.md:47, docs/design/2026-05-21-model-b-rc-promote-release-train.md:65-66). Existing retention enforcer is for GHCR package versions (scripts/enforce_image_retention.py:1-2), uses rc regex `^(v\d+\.\d+\.\d+)-rc\d+$` (scripts/enforce_image_retention.py:17-18), and classifies mutable aliases including latest (scripts/enforce_image_retention.py:22, scripts/enforce_image_retention.py:156-181). GitLab CI publishes GitLab registry images, not GHCR (.gitlab-ci.yml:102-120).
+- Flaw: Existing GC does not clearly apply to GitLab CR and does not match current allowlist style `-rc.N` vs Model B tag examples `-rc1`.
+- Why it bites: Daily rc builds generate at least 3 runtime manifests plus signatures, attestations, SBOM artifacts, and `sha-*` tags. Per-green-commit cuts can queue many 90-minute build jobs (.gitlab-ci.yml:89-99) and retain each artifact for 90 days (.gitlab-ci.yml:81-87, .gitlab-ci.yml:167-171, .gitlab-ci.yml:201-205, .gitlab-ci.yml:288-292).
+- Fix: Define GitLab CR retention before enabling auto-cut: keep final releases indefinitely, keep rc digests for N days after parent final, delete failed rc tags after N days, and protect any digest referenced by release audit. Also cap auto-cut cadence and set pipeline `resource_group`/concurrency to prevent overlapping rc pipelines for one final version.
+
+G2. MED — `sha-<short>` tags add collision and retention pressure.
+- Evidence: CI sets `IMAGE_TAG_SHA=sha-${CI_COMMIT_SHORT_SHA}` (.gitlab-ci.yml:21) and publishes it for every image (.gitlab-ci.yml:118-120).
+- Flaw: Short SHA tags are useful aliases but are not unique forever and are not tied to final version allocation.
+- Why it bites: Registry grows by both rc and sha tags; a promotion job that resolves digest through sha-short rather than rc tag can be ambiguous over long project history.
+- Fix: Use full commit SHA labels/metadata for audit and resolve promotion from the rc tag or recorded digest, not sha-short. Retain sha aliases only if they are full SHA or have a clear GC policy.
+
+## H. Other security / operational hazards
+
+H1. HIGH — Prod deploy still allows branch refs, rc/hotfix prerelease tags, and an emergency full verifier bypass.
+- Evidence: deploy-prod defaults to branch `main` (scripts/deploy-prod.sh:26-28), supports `--branch` and `--tag` (scripts/deploy-prod.sh:44-59), and checks branch or tag accordingly (scripts/deploy-prod.sh:251-259). Allowlist permits `branch main`, hotfix branches, release branches, and `vX.Y.Z-rc.N`/hotfix tags (deploy/prod-deploy-allowlist.txt:21-29). `check_deploy_ref.sh` has `--insecure-skip-verify`/env bypass that skips both allowlist and GPG verification (scripts/check_deploy_ref.sh:24-29, scripts/check_deploy_ref.sh:62-70).
+- Flaw: This contradicts Model B’s required final-tag/digest-only deploy rule (docs/design/2026-05-21-model-b-rc-promote-release-train.md:41).
+- Why it bites: An operator can deploy `main`, `release/*`, `hotfix/*`, or an rc directly to prod, bypassing final promote semantics.
+- Fix: Remove branch deploy from prod, reject `-rc` tags, accept only final semver tags or exact digests that are present in release audit, and make any emergency bypass require a separate break-glass audit record with human approval.
+
+H2. HIGH — Existing Gerrit rules still encode main/release-cut workflow and Verified is disabled.
+- Evidence: `.gerrit/project.config` contains main-specific submit type and release-cut submit requirements (.gerrit/project.config:190-205, .gerrit/project.config:211-305). Verified exists but is disabled (`applicableIf = is:false`) (.gerrit/project.config:312-315). Release-branch Verified ACL still exists (.gerrit/project.config:112-114).
+- Flaw: Model B depends on a real develop green gate and retiring main/release-cut logic, but the deployed config still supports the old path.
+- Why it bites: Auto-cut can run without per-SHA CI proof, and old release-cut assumptions can keep triggering or confusing operators.
+- Fix: Atomically replace Gerrit submit requirements with develop submit CI gates and remove main/release-cut carve-outs once the trunk/tag model is accepted.
+
+H3. HIGH — Who can create final tags/promote images is not specified strongly enough.
+- Evidence: Gerrit denies `createTag` only to `ai-reviewer-bots` (.gerrit/project.config:135-142), while non-ai-reviewer permissions are broad on refs/heads and refs/for (.gerrit/project.config:76-92, .gerrit/project.config:124-128). CI runs for any pushed `v*` tag (.gitlab-ci.yml:1-4). Model B proposes a manual/API promote job but does not define actor constraints (docs/design/2026-05-21-model-b-rc-promote-release-train.md:38).
+- Flaw: A human or bot with tag push rights in GitLab/Gerrit could create a final `v*` tag and trigger the wrong pipeline unless protected tags and promote API permissions are designed.
+- Why it bites: The final tag becomes the release authority; if uncontrolled, the release train is bypassable.
+- Fix: Protect `v*` tags in GitLab/Gerrit, allow rc tag creation only to the release-train service after green checks, allow final promotion only to a small release-manager group or signed operator approval, and require immutable audit rows for every tag creation/promotion.
+
+H4. MED — Release coordinator is currently shadow/skeleton and not a promote driver.
+- Evidence: `pipeline_coordinator.py` describes itself as a skeleton/no-op foundation (backend/agents/pipeline_coordinator.py:1-19). Production wiring defaults to observe-only unless `acting=True` and requires an explicit action executor (backend/agents/pipeline_coordinator.py:1862-1886). The per-tick work graph provider defaults empty (backend/agents/pipeline_coordinator.py:1192-1199, backend/agents/pipeline_coordinator.py:1253-1269).
+- Flaw: Model B references a coordinator/“列車長” style scheduler, but no current coordinator code can safely allocate rc tags, observe GitLab pipeline digests, and drive promotion.
+- Why it bites: Treating the existing coordinator as the release train owner will create a false sense of implementation coverage.
+- Fix: Either build a small purpose-specific release_train service or add explicit, tested acting-mode actions and state recovery to the coordinator before it owns rc/promotion decisions.
+
+H5. MED — Existing bundle manifest pipeline bakes placeholder image digests into runtime images.
+- Evidence: prepare-bundle uses zero placeholder digests because real per-image digests do not exist until build pushes ( .gitlab-ci.yml:47-53, .gitlab-ci.yml:70-74). Dockerfile.backend copies that bundle into `/app/bundle.json` (Dockerfile.backend:174-182). The later `build_image_bundle.py` can produce a manifest with real digests (scripts/build_image_bundle.py:1-13, scripts/build_image_bundle.py:166-184), but CI shown here does not reseal the baked file.
+- Flaw: Runtime `/api/version` can expose a bundle whose image digest fields are placeholders unless downstream code avoids exposing them. Model B wants digest-as-truth, but the baked truth is incomplete.
+- Why it bites: If `/api/version` is expanded to expose image digests without fixing bake order, it may report zeros, undermining digest audit.
+- Fix: Keep baked bundle for build identity only and put real image digests in an external promoted bundle/lock exposed separately, or change build flow to build images first, generate real bundle, and rebuild once with sealed digest metadata (but that changes the digest and must be carefully designed).
+
+H6. LOW — Semver suffix conventions are inconsistent.
+- Evidence: allowlist accepts `-rc.N` and `-hotfix.N` (deploy/prod-deploy-allowlist.txt:28-29). Model B examples use `-rc<N>` with no dot (docs/design/2026-05-21-model-b-rc-promote-release-train.md:49-50). Retention regex also expects `-rc\d+` (scripts/enforce_image_retention.py:17-18).
+- Flaw: A syntactically valid rc in one component can be rejected or unclassified in another.
+- Why it bites: Early implementation will fail in deploy or GC paths for purely naming reasons.
+- Fix: Standardize one pre-release grammar across CI, deploy allowlist, retention, docs, and version allocator. Prefer SemVer `vX.Y.Z-rc.N` if external tooling matters.
+
+## Verdict
+
+NO-GO for Model B as designed.
+
+The core promote-by-digest idea is viable, and the repository already has pieces that prove digest retagging can work. But the design is not implementable safely until it resolves the final git-tag vs no-rebuild contradiction, hardens artifact identity across staging/prod, and adds a real per-SHA green gate plus migration compatibility gate.
+
+## Must-fix before implementation
+
+1. Decide final release identity: final git tag, final image tag, or both. If both, final git tags must not trigger rebuilds; they must trigger/promote a recorded rc digest.
+2. Implement a real release_train allocator/lock with immutable source rc tag, final version, git SHA, and per-image digests. Existing auto_tag_release/auto_promote_main are not reusable as-is.
+3. Add exact-SHA CI green signal: backend pytest, frontend build/typecheck/lint/tests, migration compatibility, image build/sign/SBOM/attest.
+4. Rewire staging and prod to the same GitLab registry namespace and fail closed on missing tag/digest. Remove `latest` from rc publication and compose defaults.
+5. Make staging gate prove digest equality and bundle identity, not just develop SHA smoke/canary.
+6. Resolve cosign trust mode: key-based or OIDC keyless, consistently in signing, verification, and audit JSON.
+7. Add promote-time expand/contract migration gate that blocks final promotion for rollback-unsafe migrations unless explicitly break-glassed.
+8. Tighten deploy-prod/check_deploy_ref/allowlist to final tag or digest only; reject branch refs and rc tags.
+9. Update `/api/version` to expose build provenance plus deployment overlay, or clearly document rc bundle id as build provenance and final digest as deployment truth elsewhere.
+10. Define GitLab CR retention and pipeline concurrency/resource locking for rc storms.
+
+## Simpler alternative
+
+If Model B is too much for this codebase now, use a simpler Model C: build final `vX.Y.Z` tags only after a full per-SHA green gate and staging validation of a prebuilt immutable `sha-<fullsha>` artifact. That requires branch/commit image builds for develop SHAs, but it avoids rc/final identity split, final-git-tag no-rebuild special-casing, and rc allocator races. If branch pipelines are too expensive, keep manual final tag cuts and explicitly state final tags are deploy-gated candidates until staging passes, rather than claiming every tag is immediately prod-usable.
