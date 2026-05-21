@@ -1,29 +1,52 @@
 #!/usr/bin/env bash
-# scripts/check_deploy_ref.sh — gate which git refs may be deployed
-# to production (FX.7.9). Two-layer check:
+# scripts/check_deploy_ref.sh — gate which release identities may be
+# deployed to production.
 #
-#   Layer 1 — Allowlist match: ref must satisfy at least one rule in
-#             deploy/prod-deploy-allowlist.txt
-#   Layer 2 — GPG signature:   the tag's signature (annotated tags) or
-#             the branch-tip commit's signature must be made by a key
-#             whose fingerprint is in deploy/prod-deploy-signers.txt
+# Release-train contract (RT-07a, ADR-0040): a production deploy
+# identity is ONLY one of:
+#   • a FINAL semver git tag  vX.Y.Z   (no -rc / -hotfix / pre-release
+#     suffix — every final tag is a promoted, prod-usable build)
+#   • an image DIGEST         sha256:<64 lowercase hex>
+# Branch deploys (main / develop / release/* / hotfix/* / any) are
+# REJECTED outright — there is no long-lived release branch under the
+# single-trunk release train.
+#
+# Layers (evaluated in order):
+#   Layer 0 — Final-ref shape gate (RT-07a): reject branch kinds, reject
+#             non-final tags, reject malformed digests. A digest is
+#             content-addressed and its trust is established by cosign
+#             verification at pull time (RT-06), so a well-formed digest
+#             needs no git allowlist / GPG check and accepts here.
+#   Layer 1 — Allowlist match (tags only): the tag must satisfy a rule
+#             in deploy/prod-deploy-allowlist.txt — the audit trail for
+#             "who said this ref may ship". (Allowlist file content is
+#             tightened separately in RT-07b.)
+#   Layer 2 — GPG signature (tags only): the annotated tag's signature
+#             must be made by a fingerprint in
+#             deploy/prod-deploy-signers.txt.
 #
 # Exit 0 on accept, non-zero on reject (stderr explains why).
 #
+# There is NO --insecure-skip-verify bypass (removed in RT-07a — it
+# bypassed both layers with no durable audit). The audited way to
+# authorise a new ref is a reviewed PR to the allowlist plus a signed
+# final tag, or deploying a cosign-verified image digest.
+#
 # Usage:
 #   scripts/check_deploy_ref.sh --kind tag    --ref v1.2.3
-#   scripts/check_deploy_ref.sh --kind branch --ref main
+#   scripts/check_deploy_ref.sh --kind digest --ref sha256:<64hex>
 #
 # Flags:
-#   --kind {branch,tag}       (required)
-#   --ref  <name>             (required) for branch this is the branch
-#                             name without `origin/` — verifier resolves
-#                             `origin/<name>` for the GPG check
-#   --allowlist-only          run Layer 1 only (used by --dry-run path
-#                             and by drift-guard tests; the ref does not
-#                             need to exist locally)
-#   --insecure-skip-verify    skip BOTH layers; LOUD warning printed.
-#                             Equivalent env: OMNISIGHT_DEPLOY_INSECURE_SKIP_VERIFY=1
+#   --kind {tag,digest,branch}  (required) 'branch' is always rejected;
+#                               it is still accepted as an argument so
+#                               an accidental branch deploy gets a clear
+#                               release-train rejection rather than an
+#                               opaque arg error.
+#   --ref  <name>             (required)
+#   --allowlist-only          run Layer 0 (+ Layer 1 for tags) only;
+#                             used by the deploy --dry-run path and by
+#                             drift-guard tests. The ref does not need
+#                             to exist locally.
 #   --allowlist <path>        override allowlist file path
 #   --signers   <path>        override signers file path
 
@@ -35,7 +58,13 @@ SIGNERS="$REPO/deploy/prod-deploy-signers.txt"
 KIND=""
 REF=""
 ALLOWLIST_ONLY=false
-SKIP_VERIFY="${OMNISIGHT_DEPLOY_INSECURE_SKIP_VERIFY:-}"
+
+# Final release tag: vMAJOR.MINOR.PATCH only — no pre-release / build
+# suffix. A non-final tag (vX.Y.Z-rc.N, vX.Y.Z-hotfix.N, …) is NOT a
+# production deploy identity under the release train.
+FINAL_TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+$'
+# OCI image digest: sha256 + exactly 64 lowercase hex chars.
+DIGEST_RE='^sha256:[0-9a-f]{64}$'
 
 err() { echo "❌ check_deploy_ref: $*" >&2; exit 1; }
 warn() { echo "⚠️  check_deploy_ref: $*" >&2; }
@@ -46,29 +75,43 @@ while [[ $# -gt 0 ]]; do
         --kind) KIND="${2:-}"; shift 2;;
         --ref) REF="${2:-}"; shift 2;;
         --allowlist-only) ALLOWLIST_ONLY=true; shift;;
-        --insecure-skip-verify) SKIP_VERIFY=1; shift;;
         --allowlist) ALLOWLIST="${2:-}"; shift 2;;
         --signers) SIGNERS="${2:-}"; shift 2;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0;;
+        -h|--help) sed -n '2,49p' "$0"; exit 0;;
         *) err "unknown arg: $1";;
     esac
 done
 
-[[ -n "$KIND" ]] || err "--kind is required (branch | tag)"
+[[ -n "$KIND" ]] || err "--kind is required (tag | digest | branch)"
 [[ -n "$REF" ]] || err "--ref is required"
-[[ "$KIND" == "branch" || "$KIND" == "tag" ]] \
-    || err "--kind must be 'branch' or 'tag', got '$KIND'"
+[[ "$KIND" == "branch" || "$KIND" == "tag" || "$KIND" == "digest" ]] \
+    || err "--kind must be 'tag', 'digest', or 'branch', got '$KIND'"
 
-if [[ "${SKIP_VERIFY:-}" == "1" ]]; then
-    warn "──────────────────────────────────────────────────────────────"
-    warn "OMNISIGHT_DEPLOY_INSECURE_SKIP_VERIFY=1 (or --insecure-skip-verify)"
-    warn "Skipping BOTH ref allowlist + GPG signature verification."
-    warn "This is the FX.7.9 emergency escape hatch. Every use is"
-    warn "logged to shell history and SHOULD be raised in the post-"
-    warn "deploy review. Do not leave this set as a default."
-    warn "──────────────────────────────────────────────────────────────"
-    exit 0
-fi
+# ── Layer 0: release-train final-ref shape gate (RT-07a) ─────────────
+# Decide acceptance purely on the shape of the requested identity. This
+# is the primary contract: branch → reject; non-final tag → reject;
+# malformed digest → reject; well-formed digest → accept (cosign owns
+# content-trust); final tag → continue to allowlist + GPG.
+case "$KIND" in
+    branch)
+        err "branch deploys are not permitted under the single-trunk release train (RT-07a). A production deploy identity is a FINAL tag (vX.Y.Z) or an image digest (sha256:<64hex>). Requested 'branch:$REF' rejected."
+        ;;
+    digest)
+        if [[ ! "$REF" =~ $DIGEST_RE ]]; then
+            err "digest '$REF' is malformed (expected sha256:<64 lowercase hex>)."
+        fi
+        ok "Layer 0: '$REF' is a well-formed image digest; content-trust is established by cosign verification at pull time (RT-06)"
+        exit 0
+        ;;
+    tag)
+        if [[ ! "$REF" =~ $FINAL_TAG_RE ]]; then
+            err "tag '$REF' is not a FINAL release tag (expected vX.Y.Z, with no -rc/-hotfix/pre-release suffix). Only promoted final tags may reach prod (RT-07a)."
+        fi
+        ok "Layer 0: '$REF' is a final release tag"
+        ;;
+esac
+
+# Below here KIND is always 'tag' (branch errored, digest exited).
 
 # ── Layer 1: allowlist ──────────────────────────────────────────────
 [[ -f "$ALLOWLIST" ]] || err "allowlist file missing: $ALLOWLIST"
@@ -110,9 +153,9 @@ _match_allowlist() {
 }
 
 if ! _match_allowlist "$KIND" "$REF" "$ALLOWLIST"; then
-    err "ref '$KIND:$REF' is NOT permitted by $ALLOWLIST. Add an explicit rule via PR (audit trail) or use --insecure-skip-verify for an emergency one-off."
+    err "ref 'tag:$REF' is NOT permitted by $ALLOWLIST. Add an explicit tag-regex rule via PR (audit trail)."
 fi
-ok "Layer 1: ref '$KIND:$REF' matched allowlist"
+ok "Layer 1: ref 'tag:$REF' matched allowlist"
 
 if [[ "$ALLOWLIST_ONLY" == "true" ]]; then
     exit 0
@@ -137,17 +180,12 @@ while IFS= read -r raw_line || [[ -n "$raw_line" ]]; do
 done < "$SIGNERS"
 
 if [[ "${#ALLOWED_FPRS[@]}" -eq 0 ]]; then
-    err "$SIGNERS contains zero trusted fingerprints. Add a real release-signer fingerprint via PR, or use --insecure-skip-verify to bypass for an audited one-off deploy."
+    err "$SIGNERS contains zero trusted fingerprints. Add a real release-signer fingerprint via PR, or deploy a cosign-verified image digest instead."
 fi
 
-# Resolve the ref the GPG check will verify.
-if [[ "$KIND" == "tag" ]]; then
-    target="$REF"
-    verify_cmd=(git verify-tag --raw "$target")
-else
-    target="origin/$REF"
-    verify_cmd=(git verify-commit --raw "$target")
-fi
+# Final tags are annotated + signed; verify the tag object's signature.
+target="$REF"
+verify_cmd=(git verify-tag --raw "$target")
 
 # `git verify-*` writes GPG status to stderr; --raw emits machine-
 # readable "[GNUPG:] ..." lines. Capture both streams.
@@ -172,14 +210,14 @@ set -o pipefail
 
 if [[ -z "$signer_fpr" ]]; then
     printf '%s\n' "$verify_out" >&2
-    err "ref '$KIND:$target' is not GPG-signed (or the signature could not be verified — git verify-* exit=$verify_rc, no [GNUPG:] VALIDSIG line). Sign with a key listed in $SIGNERS, or use --insecure-skip-verify."
+    err "tag '$target' is not GPG-signed (or the signature could not be verified — git verify-tag exit=$verify_rc, no [GNUPG:] VALIDSIG line). Sign the final tag with a key listed in $SIGNERS."
 fi
 
 for fpr in "${ALLOWED_FPRS[@]}"; do
     if [[ "$fpr" == "$signer_fpr" ]]; then
-        ok "Layer 2: '$KIND:$target' signed by trusted fingerprint $signer_fpr"
+        ok "Layer 2: tag '$target' signed by trusted fingerprint $signer_fpr"
         exit 0
     fi
 done
 
-err "ref '$KIND:$target' is signed by $signer_fpr — that fingerprint is NOT in $SIGNERS. Add it via PR (audit trail) or use --insecure-skip-verify."
+err "tag '$target' is signed by $signer_fpr — that fingerprint is NOT in $SIGNERS. Add it via PR (audit trail)."
