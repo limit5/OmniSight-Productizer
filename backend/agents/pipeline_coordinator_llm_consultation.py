@@ -87,6 +87,12 @@ TIER2_PARSE_FAILED_REASON = "tier2_llm_parse_failed"
 TIER2_INVOCATION_FAILED_REASON = "tier2_llm_invocation_failed"
 # Daily budget cap hit → degrade to Tier-1-only + operator alert (§5.3).
 TIER2_DEGRADED_BUDGET_REASON = "tier2_degraded_budget_cap"
+# OP-1556: an idle / empty-work-graph tick (no focal ticket AND no work-graph
+# slice) has nothing to decide → Tier-1 NoopAction, never a Tier-2 consult.
+# Distinguishes "nothing to decide" from "something to decide, no rule matched"
+# (which still consults). Grep-able so the audit can confirm idle ticks no
+# longer show up as tier=2 / tier1_no_match in the decision log.
+TIER1_IDLE_NOOP_REASON = "tier1_idle_noop_short_circuit"
 
 # ── Budget / CLI config (ADR §5.3) ─────────────────────────────────────
 DAILY_BUDGET_ENV = "OMNISIGHT_COORDINATOR_DAILY_BUDGET_USD"
@@ -1018,6 +1024,30 @@ class HybridDecisionEngine:
         if ctx.situation is not None:
             mode = self._mode_selector.select(ctx.situation, override=ctx.mode_override)
         behavior = mode_behavior(mode)
+        always = behavior is not None and behavior.tier2_policy == "always"
+
+        # OP-1556: idle / empty-work-graph tick short-circuit. With no focal
+        # ticket AND no work-graph slice there is nothing to decide — every
+        # Tier-1 rule abstains (each early-returns on ctx.ticket is None), but
+        # that abstention means "nothing to decide", NOT "a decision the rules
+        # couldn't make". Falling through to Tier-2 here invokes the LLM on
+        # every idle tick (AUDIT-29f: 1254/1254 idle ticks were tier=2,
+        # 0 rules fired) — in acting mode that burns the daily budget cap in
+        # minutes. So return a Tier-1 NoopAction without consulting. The sole
+        # exception: a mode whose tier2_policy == "always" *with* an actual
+        # situation attached is a deliberate sprint-level/idle consult and is
+        # allowed to proceed to Tier-2.
+        if ctx.ticket is None and not ctx.tickets and not (always and ctx.situation is not None):
+            return DecisionResult(
+                decision_id=uuid.uuid4().hex,
+                actions=(NoopAction(),),
+                reason=TIER1_IDLE_NOOP_REASON,
+                mode=mode,
+                engine_version=self.engine_version,
+                mode_behavior=behavior,
+                rule_name=None,
+                tier=1,
+            )
 
         fired = self._fired_rules(ctx)
 
@@ -1037,7 +1067,6 @@ class HybridDecisionEngine:
 
         tier1_match = fired[0] if fired else None
         conflict = _is_conflict(fired)
-        always = behavior is not None and behavior.tier2_policy == "always"
 
         if tier1_match is not None and not conflict and not always:
             rule, action = tier1_match
