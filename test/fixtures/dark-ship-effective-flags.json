@@ -1,0 +1,75 @@
+{
+  "_comment": "RT-15c (OP-1595) golden wire contract for GET /api/feature-flags/effective. SINGLE SOURCE OF TRUTH shared across the stack: backend/tests/test_feature_flags_dark_ship_e2e.py asserts the REAL endpoint emits these exact payloads, and test/lib/feature-flags-dark-ship-e2e.test.tsx asserts the REAL frontend normalizer/provider/SSR-bootstrap consumes them into the documented UI visibility. If the backend wire shape OR the frontend consumption drifts from these payloads, one side's test goes red. No production/API/provider code is exercised beyond what RT-15a/RT-15b already shipped.",
+  "flag_under_test": "ui.release_train.enabled",
+  "public_flags": [
+    "ui.new_navigation.enabled",
+    "ui.release_train.enabled"
+  ],
+  "phases": {
+    "dark": {
+      "description": "Pre-ship dark-ship: no feature_flags row exists for the release-train UI, so the (incomplete) feature ships dark. Every public flag fails closed to false; the UI is invisible to all tenants.",
+      "tenant": "t-anyone",
+      "endpoint_payload": {
+        "flags": {
+          "ui.new_navigation.enabled": false,
+          "ui.release_train.enabled": false
+        }
+      },
+      "release_train_ui_visible": false
+    },
+    "canary": {
+      "description": "Canary reveal: the release-train flag is enabled but scoped to the t-canary allowed_tenants cohort. The dark-shipped UI lights up for the cohort tenant only; every other tenant still sees it dark.",
+      "canary_tenant": "t-canary",
+      "other_tenant": "t-control",
+      "endpoint_payload_for_canary_tenant": {
+        "flags": {
+          "ui.new_navigation.enabled": false,
+          "ui.release_train.enabled": true
+        }
+      },
+      "endpoint_payload_for_other_tenant": {
+        "flags": {
+          "ui.new_navigation.enabled": false,
+          "ui.release_train.enabled": false
+        }
+      }
+    },
+    "ga": {
+      "description": "General availability: the release-train flag is enabled at rollout_pct=100. The previously dark-shipped UI is now visible to every tenant.",
+      "tenant": "t-anyone",
+      "endpoint_payload": {
+        "flags": {
+          "ui.new_navigation.enabled": false,
+          "ui.release_train.enabled": true
+        }
+      },
+      "release_train_ui_visible": true
+    },
+    "outage": {
+      "description": "Dark-ship safety net: if the flag service / DB is unavailable during GA, the endpoint still returns 200 with every flag false, so the feature safely re-darkens rather than 5xx-ing the page.",
+      "tenant": "t-anyone",
+      "endpoint_payload": {
+        "flags": {
+          "ui.new_navigation.enabled": false,
+          "ui.release_train.enabled": false
+        }
+      },
+      "release_train_ui_visible": false
+    }
+  },
+  "leak_guard": {
+    "description": "A hostile/legacy backend response carrying a non-allow-listed key (and a non-boolean value) must be normalized down to the public allow-list as strict booleans before it can reach the UI.",
+    "raw_endpoint_payload": {
+      "flags": {
+        "ui.release_train.enabled": true,
+        "ui.new_navigation.enabled": "true",
+        "internal.owner.leak": true,
+        "ks.cmek.enabled": true
+      }
+    },
+    "normalized": {
+      "ui.new_navigation.enabled": false,
+      "ui.release_train.enabled": true
+    }
+  }
+}
