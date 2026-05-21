@@ -116,10 +116,18 @@ gh jira-cli list --jql \
 | `omnisight_fe_be_bundle_mismatch_total` | Cumulative count across the fleet | Prometheus / Grafana / alerting |
 | `omnisight_fe_be_bundle_mismatch_total{fe_bundle,be_bundle}` series | Which pairs are skewed | Building the JIRA ticket annotations |
 
-`/readyz` returns 200 even on mismatch — by design (OP-1483 NON-GOALS:
-"Do NOT block requests on mismatch — alert only, don't degrade UX
-further"). The page-out source is the Prometheus alert; readyz is the
-operator-curl surface.
+In **prod/dev** `/readyz` returns 200 even on mismatch — by design
+(OP-1483 NON-GOALS: "Do NOT block requests on mismatch — alert only,
+don't degrade UX further"). The page-out source is the Prometheus
+alert; readyz is the operator-curl surface.
+
+In **staging** the same check is a HARD gate (RT-05c / OP-1575). The
+staging compose sets `OMNISIGHT_REQUIRE_FRONTEND_COMPAT`, which flips
+`frontend_compat_check.gate_enforced` to `true`; an observed skew
+(`ok: false`) then makes `/readyz` return **503**. The staging canary
+suite (`backend/agents/staging_gate.py`, which GETs `/readyz`) goes red
+on that 503, so a skewed bundle is never promoted out of staging. See
+the section below.
 
 ## Reverse-test (incident replay)
 
@@ -159,9 +167,21 @@ OP-1483 AC#4 without staging a real cross-image deploy.
   `subscription-merger` — see `backend/agents/fe_be_mismatch_bridge.py`
   for the rationale.
 
-## Why mismatch is observation-only, not a request gate
+## Why mismatch is observation-only in prod, a hard gate in staging
 
-The ticket's NON-GOALS bullet is explicit: blocking requests on a
-mismatch is a UX regression on top of the already-broken deploy. The
-operator's job is to fix the deploy, not the user's job to retry past
-a 503. The alert + JIRA bridge are the only feedback loop.
+In **prod** the ticket's NON-GOALS bullet is explicit: blocking
+requests on a mismatch is a UX regression on top of the already-broken
+deploy. The operator's job is to fix the deploy, not the user's job to
+retry past a 503. So in prod (and dev/CI) the alert + JIRA bridge are
+the only feedback loop and `/readyz` stays 200.
+
+In **staging** the calculus is the opposite: there are no real users to
+protect, and the entire point of staging is to catch a skew *before* it
+reaches prod. RT-05c (OP-1575) therefore makes the check a hard gate
+there. The toggle is the `OMNISIGHT_REQUIRE_FRONTEND_COMPAT` env flag
+(same shape as RT-08's `OMNISIGHT_REQUIRE_DEPLOY_OVERLAY`): the staging
+compose sets it, prod/dev/CI leave it unset. When set, an observed FE/BE
+bundle skew flips `/readyz` to 503, which reds the staging canary gate
+and blocks promote. The gate fires only on an *observed* skew — a
+freshly-booted staging replica that has not yet seen the injected probe
+still reports `ok: true` and stays ready.

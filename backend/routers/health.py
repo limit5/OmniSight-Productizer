@@ -490,14 +490,36 @@ def _check_deploy_overlay() -> tuple[bool, str]:
     return True, "deploy_overlay_not_required (dev/ci)"
 
 
-def _check_frontend_compat() -> dict:
-    """OP-1483 — surface the FE/BE bundle compatibility summary.
+#: RT-05c (OP-1575) — env flag that promotes the FE/BE bundle compat
+#: check from observational telemetry to a HARD readiness gate. The
+#: staging compose sets it (same shape as ``OMNISIGHT_REQUIRE_DEPLOY_OVERLAY``
+#: from RT-08); prod/dev/CI leave it unset so OP-1483's observational
+#: contract is preserved there — a skew the request side cannot fix must
+#: not eject a prod replica from rotation.
+def _frontend_compat_required() -> bool:
+    import os as _os
 
-    Returns the dict shape pinned by OP-1483 AC#1:
-    ``{ok, detail, observed_fe_bundles, mismatch_count, ...}``. Always
-    observational — never feeds the readyz ``ready`` gate, so a skewed
-    deploy stays in rotation while the FEBEBundleMismatch alert handles
-    the page-out.
+    return _os.environ.get(
+        "OMNISIGHT_REQUIRE_FRONTEND_COMPAT", ""
+    ).strip().lower() in {"1", "true", "yes"}
+
+
+def _check_frontend_compat() -> dict:
+    """OP-1483 / RT-05c — surface the FE/BE bundle compatibility summary.
+
+    Returns the dict shape pinned by OP-1483 AC#1
+    (``{ok, detail, observed_fe_bundles, mismatch_count, ...}``) plus an
+    additive ``gate_enforced`` flag (RT-05c):
+
+    * ``gate_enforced=False`` (prod/dev/CI default): observational only —
+      a skew is reported but never feeds the readyz ``ready`` gate, so a
+      skewed prod deploy stays in rotation while the FEBEBundleMismatch
+      alert handles the page-out (the OP-1483 NON-GOAL).
+    * ``gate_enforced=True`` (``OMNISIGHT_REQUIRE_FRONTEND_COMPAT`` set by
+      the staging compose): the check becomes a HARD gate — ``ok=False``
+      (an observed FE/BE bundle skew) flips ``/readyz`` to 503 so the
+      staging canary gate goes red and a skewed bundle is never promoted
+      (RT-05c AC).
     """
     from backend import frontend_compat
     from backend import api_versioning as _av
@@ -509,7 +531,9 @@ def _check_frontend_compat() -> dict:
     except Exception:
         be_bundle = None
         be_api_required = None
-    return frontend_compat.summary(be_bundle, be_api_required)
+    summary = frontend_compat.summary(be_bundle, be_api_required)
+    summary["gate_enforced"] = _frontend_compat_required()
+    return summary
 
 
 def _build_readyz_payload(checks: dict, ready: bool) -> dict:
@@ -679,15 +703,21 @@ async def _readyz_handler(verbose: bool = False) -> JSONResponse:
     jira_ok, jira_detail = _check_jira()
     checks["jira_ping"] = {"ok": jira_ok, "detail": jira_detail}
 
-    # ── 7. Frontend compat (OP-1483, observational) ──────────────────
+    # ── 7. Frontend compat (OP-1483 observational / RT-05c staging gate) ──
     # Surfaces the ring-buffer summary fed by ``backend.main._frontend_compat_observer``
     # so operators can spot a FE/BE bundle skew the moment /readyz is
-    # scraped. Strictly observational — the ticket explicitly bans
-    # degrading UX further on a mismatch the request side cannot fix
-    # (see OP-1483 NON-GOALS). The Prometheus counter
-    # ``omnisight_fe_be_bundle_mismatch_total`` is the alert source;
-    # this check is here for the operator who curls /readyz at 03:00.
-    checks["frontend_compat_check"] = _check_frontend_compat()
+    # scraped. By default (prod/dev/CI) it is observational — the OP-1483
+    # NON-GOAL bans degrading prod UX on a mismatch the request side
+    # cannot fix, and the FEBEBundleMismatch alert handles the page-out.
+    # RT-05c (OP-1575): when the staging compose sets
+    # OMNISIGHT_REQUIRE_FRONTEND_COMPAT the same check becomes a HARD gate
+    # — ``gate_enforced`` is True and an observed skew (ok=False) flips
+    # ``ready`` to False so the staging canary probe (which GETs /readyz,
+    # see backend/agents/staging_gate.py) goes red and a skewed bundle is
+    # never promoted.
+    fe_compat = _check_frontend_compat()
+    checks["frontend_compat_check"] = fe_compat
+    compat_gate_ok = (not fe_compat["gate_enforced"]) or fe_compat["ok"]
 
     # ── 8. Deploy overlay (RT-08 / OP-1582, fail-closed when required) ──
     # Reads the startup-cached deploy env lock. Observational in dev/CI;
@@ -707,7 +737,7 @@ async def _readyz_handler(verbose: bool = False) -> JSONResponse:
             if source in checks:
                 checks[alias] = checks[source]
 
-    ready = db_ok and mig_ok and prov_ok and overlay_ok
+    ready = db_ok and mig_ok and prov_ok and overlay_ok and compat_gate_ok
     payload = _build_readyz_payload(checks, ready=ready)
     if verbose:
         payload["verbose"] = True

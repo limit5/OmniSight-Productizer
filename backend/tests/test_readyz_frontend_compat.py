@@ -19,7 +19,6 @@ counter bumps when the FE bundle differs from the BE one.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -264,24 +263,185 @@ async def test_readyz_mismatched_fe_observation_is_ok_false(
     assert check["mismatch_count"] >= 1
 
 
-def test_ready_gate_ignores_frontend_compat_check():
-    """NON-GOAL guard: the ticket explicitly bans degrading UX on
-    mismatch. The /readyz ``ready`` verdict is computed purely from
-    db + migrations + provider_chain — the frontend_compat_check
-    must NOT participate in the gate even when ok=False.
+def test_ready_gate_observational_in_prod_dev(monkeypatch):
+    """OP-1483 NON-GOAL preserved when the staging flag is UNSET.
 
-    We assert this by inspecting the handler logic: in
-    ``_readyz_handler`` the ``ready`` boolean is ``db_ok and mig_ok
-    and prov_ok``. The frontend_compat_check is added to ``checks``
-    after that assignment so a regression that ANDs it into the gate
-    would have to edit that exact line.
+    In prod/dev/CI (``OMNISIGHT_REQUIRE_FRONTEND_COMPAT`` unset) the
+    frontend_compat_check is observational: ``gate_enforced`` is False
+    and a skew must NOT participate in the ``ready`` gate — a skew the
+    request side cannot fix must never eject a prod replica from
+    rotation. We assert the gate boolean is short-circuited to True
+    regardless of the (False) ``ok`` verdict.
     """
-    import inspect
-    from backend.routers import health as health_mod
+    monkeypatch.delenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", raising=False)
+    check = {"ok": False, "gate_enforced": health_mod._frontend_compat_required()}
+    compat_gate_ok = (not check["gate_enforced"]) or check["ok"]
+    assert check["gate_enforced"] is False
+    assert compat_gate_ok is True
 
-    source = inspect.getsource(health_mod._readyz_handler)
-    # The gate line must remain three-factor only.
-    assert "ready = db_ok and mig_ok and prov_ok" in source, (
-        "OP-1483 NON-GOAL guard: _readyz_handler ready-gate must not "
-        "include frontend_compat_check — mismatch is observational only"
+
+# ───── RT-05c (OP-1575): FE/BE compat = hard staging gate ─────────────
+
+
+def test_frontend_compat_required_reads_env(monkeypatch):
+    """The staging-gate opt-in honours the same truthy set as the
+    deep-check / deploy-overlay knobs (1/true/yes, case-insensitive)."""
+    monkeypatch.delenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", raising=False)
+    assert health_mod._frontend_compat_required() is False
+    for truthy in ("1", "true", "TRUE", "yes", "Yes"):
+        monkeypatch.setenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", truthy)
+        assert health_mod._frontend_compat_required() is True
+    for falsy in ("", "0", "false", "no"):
+        monkeypatch.setenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", falsy)
+        assert health_mod._frontend_compat_required() is False
+
+
+def test_check_frontend_compat_gate_enforced_flag(baked_bundle, monkeypatch):
+    """``_check_frontend_compat`` surfaces ``gate_enforced`` mirroring the
+    env flag, additive to the OP-1483 contract fields."""
+    monkeypatch.delenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", raising=False)
+    out = health_mod._check_frontend_compat()
+    assert out["gate_enforced"] is False
+    # OP-1483 contract fields remain present (additive change only).
+    for field in ("ok", "detail", "observed_fe_bundles", "mismatch_count"):
+        assert field in out
+
+    monkeypatch.setenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", "1")
+    out = health_mod._check_frontend_compat()
+    assert out["gate_enforced"] is True
+
+
+@pytest.mark.asyncio
+async def test_readyz_skew_blocks_gate_when_required(
+    tmp_path, monkeypatch, baked_bundle,
+):
+    """RT-05c AC: an injected FE/BE bundle skew BLOCKS the staging gate.
+
+    With ``OMNISIGHT_REQUIRE_FRONTEND_COMPAT`` set (staging compose) a
+    recorded skew flips ``/readyz`` to 503 — the signal the staging
+    canary probe (``backend/agents/staging_gate.py`` GETs /readyz) turns
+    into a red gate, blocking promote. All other gates are pinned green
+    so the skew is the only thing flipping ``ready`` to False.
+    """
+    monkeypatch.setenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", "1")
+
+    async def _ok():
+        return True, "ok"
+
+    monkeypatch.setattr(health_mod, "_check_db", _ok)
+    monkeypatch.setattr(health_mod, "_check_migrations", _ok)
+    monkeypatch.setattr(health_mod, "_check_provider_chain", lambda: (True, "ok"))
+    monkeypatch.setattr(health_mod, "_check_deploy_overlay", lambda: (True, "ok"))
+
+    # Inject the skew the Codex 2026-05-18 incident produced.
+    frontend_compat.record_observation(
+        "v0.5.0-rc2-3hotfixesbehind", "v1",
+        be_bundle="v0.5.0-rc3-3f1c0a4e",
     )
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 503
+    assert body["ready"] is False
+    check = body["checks"]["frontend_compat_check"]
+    assert check["gate_enforced"] is True
+    assert check["ok"] is False
+    assert "v0.5.0-rc2-3hotfixesbehind" in check["observed_fe_bundles"]
+
+
+@pytest.mark.asyncio
+async def test_readyz_skew_observational_when_not_required(
+    tmp_path, monkeypatch, baked_bundle,
+):
+    """Same skew, flag UNSET (prod/dev): /readyz stays 200 ready.
+
+    Proves RT-05c does not regress the OP-1483 prod NON-GOAL — a skew is
+    reported (ok=False) but does NOT eject the replica from rotation.
+    """
+    monkeypatch.delenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", raising=False)
+
+    async def _ok():
+        return True, "ok"
+
+    monkeypatch.setattr(health_mod, "_check_db", _ok)
+    monkeypatch.setattr(health_mod, "_check_migrations", _ok)
+    monkeypatch.setattr(health_mod, "_check_provider_chain", lambda: (True, "ok"))
+    monkeypatch.setattr(health_mod, "_check_deploy_overlay", lambda: (True, "ok"))
+
+    frontend_compat.record_observation(
+        "v0.5.0-rc2-3hotfixesbehind", "v1",
+        be_bundle="v0.5.0-rc3-3f1c0a4e",
+    )
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 200
+    assert body["ready"] is True
+    check = body["checks"]["frontend_compat_check"]
+    assert check["gate_enforced"] is False
+    assert check["ok"] is False  # still reported — observational
+
+
+@pytest.mark.asyncio
+async def test_readyz_match_passes_gate_when_required(
+    tmp_path, monkeypatch, baked_bundle,
+):
+    """Flag set + matching FE observation → /readyz stays 200.
+
+    A non-skewed staging deploy must not be blocked by the hard gate.
+    """
+    monkeypatch.setenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", "1")
+
+    async def _ok():
+        return True, "ok"
+
+    monkeypatch.setattr(health_mod, "_check_db", _ok)
+    monkeypatch.setattr(health_mod, "_check_migrations", _ok)
+    monkeypatch.setattr(health_mod, "_check_provider_chain", lambda: (True, "ok"))
+    monkeypatch.setattr(health_mod, "_check_deploy_overlay", lambda: (True, "ok"))
+
+    frontend_compat.record_observation(
+        "v0.5.0-rc3-3f1c0a4e", "v1",
+        be_bundle="v0.5.0-rc3-3f1c0a4e",
+    )
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 200
+    assert body["ready"] is True
+    assert body["checks"]["frontend_compat_check"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_readyz_no_fe_traffic_passes_gate_when_required(
+    tmp_path, monkeypatch, baked_bundle,
+):
+    """Flag set but no FE traffic yet → /readyz stays 200 ready.
+
+    A freshly-booted staging replica that has not received the injected
+    probe must not fail closed before any observation exists — the gate
+    fires on an *observed* skew, not on silence (OP-1483 case (a)).
+    """
+    monkeypatch.setenv("OMNISIGHT_REQUIRE_FRONTEND_COMPAT", "1")
+
+    async def _ok():
+        return True, "ok"
+
+    monkeypatch.setattr(health_mod, "_check_db", _ok)
+    monkeypatch.setattr(health_mod, "_check_migrations", _ok)
+    monkeypatch.setattr(health_mod, "_check_provider_chain", lambda: (True, "ok"))
+    monkeypatch.setattr(health_mod, "_check_deploy_overlay", lambda: (True, "ok"))
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 200
+    assert body["ready"] is True
+    assert body["checks"]["frontend_compat_check"]["ok"] is True
