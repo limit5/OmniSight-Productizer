@@ -16,11 +16,20 @@
 #   2. Compare against the tag currently active on staging
 #      ($OMNISIGHT_STAGING_STATE_DIR/active_tag, written by OP-878's
 #      scripts/staging_deploy.sh). Unchanged => idempotent no-op, exit 0.
-#   3. Deploy: scripts/staging_deploy.sh --image-tag <develop-tip>. That
-#      script does the blue-green dance (start standby, wait /health,
-#      switch Caddy, drain old) and reverts to the previous color on its
-#      own health failure. If it exits non-zero, staging is back on the
-#      previous tag — we record `staging_sync_failed_revert` + alert.
+#   3. Deploy: scripts/staging_deploy.sh --image-tag <develop-tip>
+#      [--bundle <candidate-bundle>]. That script does the blue-green dance
+#      (start standby, wait /health, switch Caddy, drain old) and reverts to
+#      the previous color on its own health failure. If it exits non-zero,
+#      staging is back on the previous tag — we record
+#      `staging_sync_failed_revert` + alert.
+#      [OP-1574] RT-05b deploy-by-digest: when $SYNC_CANDIDATE_BUNDLE points
+#      at the develop-tip's candidate bundle (OP-1513 bundle.json), it is
+#      passed through as --bundle so staging_deploy.sh verifies the digest it
+#      pulls for backend+frontend equals the bundle's. If the bundle records a
+#      git_sha it must equal the develop tip (the bundle must be FOR this
+#      candidate) — otherwise we refuse the deploy. The rollback re-deploy of
+#      the previous tag is intentionally NOT digest-checked: $prev is an
+#      already-good tag, not the candidate, and may predate bundle capture.
 #   4. Alembic migrations against the freshly-deployed staging stack
 #      (`docker compose run --rm backend-a python -m alembic upgrade heads`
 #      in the new active color's compose project — same step OP-767's
@@ -72,6 +81,9 @@
 #   SYNC_REMOTE             remote to fetch                     (origin)
 #   SYNC_BRANCH             branch to track                     (develop)
 #   SYNC_DEVELOP_TIP        explicit tip SHA override (CI/tests; skips git fetch)
+#   SYNC_CANDIDATE_BUNDLE   candidate bundle.json for the develop tip; passed to
+#                           staging_deploy.sh --bundle for post-pull digest
+#                           equality (RT-05b). Unset => deploy by tag, no check.
 #   STAGING_DEPLOY_SH       path to OP-878 deployer  ($ROOT/scripts/staging_deploy.sh)
 #   OMNISIGHT_STAGING_STATE_DIR   blue-green state dir          (/var/lib/omnisight/staging)
 #   OMNISIGHT_STAGING_URL   public staging base URL             (https://staging.sora.services)
@@ -196,8 +208,25 @@ active_tag() { cat "$ACTIVE_TAG_FILE" 2>/dev/null | tr -d '[:space:]' || true; }
 active_color() { cat "$ACTIVE_COLOR_FILE" 2>/dev/null | tr -d '[:space:]' || echo "blue"; }
 
 # ── deploy + migrate + health helpers ───────────────────────────────────────
-deploy_tag() {  # $1 = image tag
-	"$STAGING_DEPLOY_SH" --image-tag "$1"
+deploy_tag() {  # $1 = image tag ; $2 = optional candidate bundle (deploy-by-digest)
+	local -a args=(--image-tag "$1")
+	[[ -n "${2:-}" ]] && args+=(--bundle "$2")
+	"$STAGING_DEPLOY_SH" "${args[@]}"
+}
+
+# candidate_bundle_sha <bundle.json> -> prints the recorded git_sha (empty if
+# absent). Exits 3 if the file can't be read/parsed.
+candidate_bundle_sha() {
+	python3 - "$1" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        doc = json.load(fh)
+except Exception as exc:  # noqa: BLE001
+    sys.stderr.write(f"candidate bundle unreadable ({sys.argv[1]}): {exc}\n")
+    raise SystemExit(3)
+print(str((doc or {}).get("git_sha") or "").strip())
+PY
 }
 
 run_migrations() {  # against the freshly-deployed staging stack
@@ -249,10 +278,37 @@ main() {
 	fi
 	log "staging needs sync: active=${prev:-<none>} -> develop=$tip"
 
+	# 0. Resolve the candidate bundle (deploy-by-digest, RT-05b). When set it
+	#    must exist and — if it records a git_sha — be FOR this develop tip,
+	#    otherwise we'd verify pulled digests against the wrong candidate.
+	local bundle="${SYNC_CANDIDATE_BUNDLE:-}"
+	if [[ -n "$bundle" ]]; then
+		if [[ ! -f "$bundle" ]]; then
+			alert StagingDeployFailed "candidate bundle not found: $bundle; refusing to deploy $tip by digest"
+			write_audit_row "staging_sync_failed_revert" "$tip" "$prev" "deploy"
+			exit 1
+		fi
+		local bundle_sha
+		if ! bundle_sha="$(candidate_bundle_sha "$bundle")"; then
+			alert StagingDeployFailed "candidate bundle $bundle is unreadable; refusing to deploy $tip by digest"
+			write_audit_row "staging_sync_failed_revert" "$tip" "$prev" "deploy"
+			exit 1
+		fi
+		if [[ -n "$bundle_sha" && "$bundle_sha" != "$tip" ]]; then
+			alert StagingDeployFailed "candidate bundle $bundle is for git_sha $bundle_sha, not develop tip $tip; refusing deploy"
+			write_audit_row "staging_sync_failed_revert" "$tip" "$prev" "deploy"
+			exit 1
+		fi
+		log "deploy-by-digest: candidate bundle $bundle (git_sha=${bundle_sha:-<unset>})"
+	else
+		log "deploy-by-digest: SYNC_CANDIDATE_BUNDLE unset — deploying $tip by tag without post-pull digest verification"
+	fi
+
 	# 1. Deploy the develop-tip image. staging_deploy.sh reverts to the
 	#    previous color/tag on its own /health failure, so a non-zero exit
-	#    here means staging is back on $prev.
-	if ! deploy_tag "$tip"; then
+	#    here means staging is back on $prev. The candidate bundle (when set)
+	#    triggers the post-pull digest-equality gate inside staging_deploy.sh.
+	if ! deploy_tag "$tip" "$bundle"; then
 		alert StagingDeployFailed "staging_deploy.sh --image-tag $tip failed; staging remains on ${prev:-unknown}"
 		write_audit_row "staging_sync_failed_revert" "$tip" "$prev" "deploy"
 		exit 1
