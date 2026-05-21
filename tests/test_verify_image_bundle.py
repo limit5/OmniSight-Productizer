@@ -498,12 +498,12 @@ class TestVerifyImageBundle:
             fake_docker["sig"][ref] = ("ok", "ok")
         # Replace one signature with a failure.
         fake_docker["sig"][f"ghcr.io/test/omnisight-backend@{GOOD_DIGEST_A}"] = (
-            "mismatch", "cosign keyless verification failed",
+            "mismatch", "cosign key-based verification failed",
         )
         rc = vib.main(["--compose", str(compose), "--lock", str(lock)])
         assert rc == vib.EXIT_MISMATCH
         out = capsys.readouterr().out
-        assert "cosign keyless verification failed" in out
+        assert "cosign key-based verification failed" in out
 
     def test_compose_not_pinned_by_digest_fails(self, tmp_path, fake_docker, capsys):
         """The verifier guards against future regressions where someone

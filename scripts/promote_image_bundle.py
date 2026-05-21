@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_AUDIT_LOG = REPO_ROOT / "audit" / "image_promotion_audit.jsonl"
 DEFAULT_REGISTRY_PREFIX = "ghcr.io/omnisight"
 SIGN_SCRIPT = REPO_ROOT / "scripts" / "sign_promotion_attestation.py"
+VERIFY_SIGNATURE_SH = REPO_ROOT / "scripts" / "verify_image_signature.sh"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -141,7 +142,7 @@ def retag_image(promotion: ImagePromotion, *, dry_run: bool, runner: Runner) -> 
 
 def verify_signature(promotion: ImagePromotion, *, dry_run: bool, runner: Runner) -> None:
     _run(
-        ["cosign", "verify", promotion.source_ref],
+        ["bash", str(VERIFY_SIGNATURE_SH), promotion.source_ref],
         dry_run=dry_run,
         runner=runner,
     )

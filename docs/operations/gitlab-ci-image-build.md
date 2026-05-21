@@ -27,7 +27,7 @@ Branch pushes do not run this pipeline and do not move `latest`.
 | Stage | Purpose |
 |-------|---------|
 | `build` | Build and push backend, frontend, and bridge multi-arch images. |
-| `sign` | Sign the pushed image digest with cosign keyless using GitLab OIDC. |
+| `sign` | Sign the pushed image digest with the cosign key configured in `COSIGN_KEY`. |
 | `sbom` | Generate a CycloneDX SBOM with syft for each image digest. |
 | `attest` | Attach an in-toto predicate with `cosign attest`. |
 | `audit-emit` | Emit `image-audit-${name}.json` as a 90-day artifact. |
@@ -49,18 +49,17 @@ registry is enabled:
 | `CI_PIPELINE_ID` | Audit run identifier. |
 | `CI_PIPELINE_URL` | Audit run URL and attestation predicate metadata. |
 
-The pipeline defines these defaults:
+The pipeline relies on these signing inputs:
 
-| Variable | Default |
-|----------|---------|
+| Input | Value |
+|-------|-------|
 | `COSIGN_VERSION` | `v2.4.1` |
 | `SYFT_VERSION` | `v1.17.0` |
-| `COSIGN_CERT_IDENTITY_REGEXP` | `^https://sora\.services:49154/omnisight/OmniSight-Productizer//\.gitlab-ci\.yml@refs/tags/v.*$` |
-| `COSIGN_CERT_OIDC_ISSUER` | `https://sora.services:49154` |
+| `COSIGN_KEY` | Path to the CI-mounted cosign private key. |
+| verifier public key | `deploy/cosign/cosign.pub` |
 
-Override `COSIGN_CERT_IDENTITY_REGEXP` or `COSIGN_CERT_OIDC_ISSUER` in
-GitLab CI/CD variables if the self-managed GitLab instance advertises a
-different OIDC issuer URL or project identity claim.
+Rotate the signing key by updating the CI-mounted private key and
+committing the matching public key at `deploy/cosign/cosign.pub`.
 
 ## Runner Requirements
 
@@ -69,8 +68,7 @@ The runner that executes this pipeline needs:
 - Docker-in-Docker support with privileged mode enabled.
 - Network egress to the GitLab Container Registry.
 - Network egress to `github.com` for cosign and syft installer downloads.
-- GitLab OIDC `id_tokens` support for the `SIGSTORE_ID_TOKEN` token with
-  audience `sigstore`.
+- Read access to the mounted cosign private key referenced by `COSIGN_KEY`.
 
 ## Canary Procedure
 
@@ -90,8 +88,7 @@ The runner that executes this pipeline needs:
    docker login sora.services:49154
    docker pull sora.services:49154/omnisight/OmniSight-Productizer/backend:v0.5.0-rc3-canary
    cosign verify \
-     --certificate-identity-regexp '^https://sora\.services:49154/omnisight/OmniSight-Productizer//\.gitlab-ci\.yml@refs/tags/v.*$' \
-     --certificate-oidc-issuer 'https://sora.services:49154' \
+     --key deploy/cosign/cosign.pub \
      sora.services:49154/omnisight/OmniSight-Productizer/backend:v0.5.0-rc3-canary
    ```
 

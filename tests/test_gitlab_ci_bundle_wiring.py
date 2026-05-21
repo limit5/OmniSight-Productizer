@@ -100,3 +100,20 @@ def test_bundle_assert_runs_in_audit_emit_and_rejects_stub_shapes() -> None:
     assert "local-dev" in flat
     assert "0000000000000000000000000000000000000000" in flat  # 40-zero SHA
     assert "1970-01-01T00:00:00Z" in flat                       # epoch build_time
+
+
+def test_cosign_release_jobs_are_key_based_and_audit_claim_matches() -> None:
+    ci = _load()
+
+    sign_flat = _flatten_script(ci["sign-image"])
+    assert 'cosign sign --yes --key "$COSIGN_KEY" "$IMAGE_REF"' in sign_flat
+    assert "--key deploy/cosign/cosign.pub" in sign_flat
+    assert "--identity-token" not in sign_flat
+
+    attest_flat = _flatten_script(ci["attest-image"])
+    assert 'cosign attest --yes --key "$COSIGN_KEY"' in attest_flat
+    assert "--identity-token" not in attest_flat
+
+    audit_flat = _flatten_script(ci["audit-emit"])
+    assert 'signed_with: "cosign-key-based"' in audit_flat
+    assert "cosign-keyless-gitlab-oidc" not in audit_flat

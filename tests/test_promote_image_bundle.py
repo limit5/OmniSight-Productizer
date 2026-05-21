@@ -84,7 +84,7 @@ def test_dry_run_prints_plan_without_executing(promote, tmp_path, capsys):
     assert len(promotions) == 2
     assert "Promoting bundle test-bundle: staging -> canary" in out
     assert "docker buildx imagetools create -t ghcr.io/example/omnisight-backend:canary" in out
-    assert "cosign verify ghcr.io/example/omnisight-backend@" in out
+    assert "verify_image_signature.sh ghcr.io/example/omnisight-backend@" in out
     assert out.count("sign_promotion_attestation.py") == 1
     assert calls == []
     assert not (tmp_path / "audit.jsonl").exists()
@@ -120,7 +120,11 @@ def test_no_dry_run_retags_verifies_attests_audits_and_locks(promote, tmp_path):
         "ghcr.io/example/omnisight-backend:canary",
         f"ghcr.io/example/omnisight-backend@{DIGEST_A}",
     ]
-    assert calls[1] == ["cosign", "verify", f"ghcr.io/example/omnisight-backend@{DIGEST_A}"]
+    assert calls[1] == [
+        "bash",
+        str(promote.VERIFY_SIGNATURE_SH),
+        f"ghcr.io/example/omnisight-backend@{DIGEST_A}",
+    ]
     assert calls[2] == [
         "docker",
         "buildx",
@@ -130,7 +134,11 @@ def test_no_dry_run_retags_verifies_attests_audits_and_locks(promote, tmp_path):
         "ghcr.io/example/omnisight-bridge:canary",
         f"ghcr.io/example/omnisight-bridge@{DIGEST_B}",
     ]
-    assert calls[3] == ["cosign", "verify", f"ghcr.io/example/omnisight-bridge@{DIGEST_B}"]
+    assert calls[3] == [
+        "bash",
+        str(promote.VERIFY_SIGNATURE_SH),
+        f"ghcr.io/example/omnisight-bridge@{DIGEST_B}",
+    ]
     assert calls[4][:2] == [sys.executable, str(SIGN_SCRIPT)]
     assert "--approval-refs" in calls[4]
 
