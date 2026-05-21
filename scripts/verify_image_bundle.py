@@ -318,10 +318,8 @@ def _verify_cosign_signature(image_with_digest: str) -> tuple[str, str]:
     """Shell out to ``scripts/verify_image_signature.sh``.
 
     Re-implementing the cosign logic here would mean keeping two
-    keyless-fallback paths in sync forever. The bash script already
-    handles the auto-detect (real PEM in ``deploy/cosign/cosign.pub``
-    → key-based; otherwise → keyless with the GitHub-Actions OIDC
-    identity regex). We just propagate its exit code.
+    verifier paths in sync forever. The bash script owns the key-based
+    cosign policy; we just propagate its exit code.
     """
     if not VERIFY_SIGNATURE_SH.exists():
         return "error", f"verify_image_signature.sh not found at {VERIFY_SIGNATURE_SH}"

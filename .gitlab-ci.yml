@@ -372,7 +372,7 @@ audit-emit:
           actor: $actor,
           run_id: $run_id,
           run_url: $run_url,
-          signed_with: "cosign-keyless-gitlab-oidc",
+          signed_with: "cosign-key-based",
           cosign_version: $cosign_version
         }' > "image-audit-${IMAGE_NAME}.json"
   artifacts:

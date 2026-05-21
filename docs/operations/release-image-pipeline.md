@@ -82,27 +82,27 @@ throwaway `vX.Y.Z-rcN-canary` tag (see §8 of
 | Stage | Job | What it does |
 |---|---|---|
 | `build` | `build-image` | `docker buildx build --platform linux/amd64,linux/arm64 --push` for `Dockerfile.{backend,frontend,bridge}`. Pushes `:${CI_COMMIT_TAG}`, `:sha-${CI_COMMIT_SHORT_SHA}`, `:latest`. |
-| `sign` | `sign-image` | Resolves the just-pushed multi-arch digest, then `cosign sign --identity-token $SIGSTORE_ID_TOKEN <image>@<digest>`. Verifies the signature in-place before exiting the job — a broken signing step is caught inside the same pipeline run, not at deploy time. |
+| `sign` | `sign-image` | Resolves the just-pushed multi-arch digest, then `cosign sign --key "$COSIGN_KEY" <image>@<digest>`. Verifies the signature with `deploy/cosign/cosign.pub` before exiting the job — a broken signing step is caught inside the same pipeline run, not at deploy time. |
 | `sbom` | `sbom-image` | Installs `syft v1.17.0`, generates `sbom-<image>.cdx.json` (CycloneDX JSON), uploads as a 90-day artifact. |
 | `attest` | `attest-image` | Builds an in-toto predicate (`{image, image_ref, digest, git_sha, git_ref, pipeline_url, builder: "gitlab-ci"}`) and runs `cosign attest --predicate ... --type https://in-toto.io/Statement/v1`. |
 | `audit-emit` | `audit-emit` | Writes `image-audit-<image>.json` (shape compatible with the backend `audit.log()` payload, see [`backend/audit.py`](../../backend/audit.py)) as a 90-day artifact. The prod-side audit poller ingests these into the hash-chained audit log. |
 
-### Cosign keyless via GitLab OIDC
+### Cosign key-based signing
 
-The `sign` and `attest` stages exchange GitLab's job-scoped
-`id_tokens.SIGSTORE_ID_TOKEN` (audience `sigstore`) for a short-lived
-Fulcio certificate. No long-lived signing key sits in CI. The
-identity claims that verifiers must match are pinned in CI variables:
+The `sign` and `attest` stages use the encrypted cosign private key
+provided through `COSIGN_KEY`. The public verifier key is committed at
+`deploy/cosign/cosign.pub`, and every promote/deploy gate must call the
+same key-based verifier script.
 
 | Variable | Value (defaults from `.gitlab-ci.yml`) |
 |---|---|
-| `COSIGN_CERT_IDENTITY_REGEXP` | `^https://sora\.services:49154/omnisight/OmniSight-Productizer//\.gitlab-ci\.yml@refs/tags/v.*$` |
-| `COSIGN_CERT_OIDC_ISSUER` | `https://sora.services:49154` |
+| `COSIGN_KEY` | Path to the CI-mounted cosign private key |
+| verifier public key | `deploy/cosign/cosign.pub` |
 
-Operator verification uses the same regex via
+Operator verification uses the committed public key via
 [`scripts/verify_image_signature.sh`](../../scripts/verify_image_signature.sh).
 For the full stage-by-stage variable contract and runner requirements
-(privileged dind, `id_tokens` support, network egress) see
+(privileged dind, mounted signing key, network egress) see
 [`gitlab-ci-image-build.md`](gitlab-ci-image-build.md).
 
 ## 4. Image naming
@@ -300,8 +300,8 @@ delivery. Until it lands, runner registration follows the standard
 GitLab Runner installation guide
 (`https://docs.gitlab.com/runner/install/`) plus the project-specific
 config required by [`gitlab-ci-image-build.md`](gitlab-ci-image-build.md)
-§"Runner Requirements" (Docker-in-Docker `--privileged`, `id_tokens`
-support, egress to `github.com` for cosign/syft installers).
+§"Runner Requirements" (Docker-in-Docker `--privileged`, mounted cosign
+signing key, egress to `github.com` for cosign/syft installers).
 
 ## 10. Decommissioning ghcr.io
 
@@ -378,7 +378,7 @@ activated pipeline keeps multi-arch — see §4.
 Cosign keyless via GitHub OIDC. Identity:
 `https://github.com/<owner>/<repo>/.github/workflows/build-images.yml@<ref>`,
 issuer `https://token.actions.githubusercontent.com`. Replaced by the
-GitLab-OIDC identity claims in §3.
+key-based GitLab CR signing model in §3.
 
 ### Original verification command
 
@@ -386,10 +386,8 @@ GitLab-OIDC identity claims in §3.
 scripts/verify_image_signature.sh ghcr.io/<owner>/omnisight-backend:v0.4.0
 ```
 
-The same script verifies GitLab CR images today — it auto-detects the
-issuer and identity-regex environment overrides (`COSIGN_CERT_OIDC_ISSUER`,
-`COSIGN_CERT_IDENTITY_REGEX`) and falls through to the GitLab values
-documented in §3.
+The same script verifies GitLab CR images today with the key-based
+public key documented in §3.
 
 ### Original retention policy
 
