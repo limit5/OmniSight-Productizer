@@ -5,30 +5,31 @@
 # 在 Ubuntu-24.04 (Production WSL) 上執行
 # 實現 G2 rolling restart：一次只重啟一個 backend replica
 #
-# 使用方式：
-#   ./scripts/deploy-prod.sh                    # 從 main branch 部署 (Phase 1, 2026-05-05)
-#   ./scripts/deploy-prod.sh --branch=develop   # 部署指定 branch (僅供 staging-style 驗證)
-#   ./scripts/deploy-prod.sh --tag v1.2.0       # 部署特定 tag
-#   ./scripts/deploy-prod.sh --skip-build       # 跳過 build（已有 GHCR image）
-#   ./scripts/deploy-prod.sh --dry-run          # 只印步驟不執行
-#   ./scripts/deploy-prod.sh --gerrit-source=gerrit
-#                                               # 從 Gerrit remote fetch（預設自動偵測）
-#   ./scripts/deploy-prod.sh --alembic-mode=pg-clone
-#                                               # 在 PG clone 上 dry-validate migrations
-#   ./scripts/deploy-prod.sh --insecure-skip-verify
-#                                               # FX.7.9 emergency escape
-#                                               # hatch — bypass ref allow-
-#                                               # list + GPG signature check
+# 使用方式（RT-07a — 單一主幹 release train）：
+# 一次部署只接受「最終發行身分」：final tag (vX.Y.Z) 或 image digest。
+# 不再有 branch 部署、不再 default 到 main。
+#   ./scripts/deploy-prod.sh --tag=v1.2.0            # 部署 final release tag
+#   ./scripts/deploy-prod.sh --digest=sha256:<64hex> # 依 image digest 部署
+#   ./scripts/deploy-prod.sh --tag=v1.2.0 --skip-build
+#                                                    # 跳過 build（image 已存在）
+#   ./scripts/deploy-prod.sh --tag=v1.2.0 --dry-run  # 只印步驟不執行
+#   ./scripts/deploy-prod.sh --tag=v1.2.0 --gerrit-source=gerrit
+#                                                    # 從 Gerrit remote fetch（預設自動偵測）
+#   ./scripts/deploy-prod.sh --tag=v1.2.0 --alembic-mode=pg-clone
+#                                                    # 在 PG clone 上 dry-validate migrations
+#
+# 沒有 --insecure-skip-verify escape hatch（RT-07a 移除）：授權新 ref 的
+# 唯一稽核途徑是 PR 修改 allowlist + 簽署 final tag，或部署 cosign 驗證過
+# 的 image digest。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 set -euo pipefail
 
 COMPOSE_FILE="docker-compose.prod.yml"
-BRANCH="${OMNISIGHT_DEPLOY_BRANCH:-main}"
 TAG=""
+DIGEST=""
 SKIP_BUILD=false
 DRY_RUN=false
-INSECURE_SKIP_VERIFY=false
 GERRIT_SOURCE="${OMNISIGHT_GERRIT_SOURCE:-}"
 ALEMBIC_MODE="${OMNISIGHT_ALEMBIC_MODE:-apply}"
 HEALTH_RETRIES=30
@@ -45,19 +46,28 @@ step() { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}\n"; }
 for arg in "$@"; do
     case "$arg" in
         --tag=*) TAG="${arg#*=}" ;;
-        --branch=*) BRANCH="${arg#*=}" ;;
+        --digest=*) DIGEST="${arg#*=}" ;;
         --skip-build) SKIP_BUILD=true ;;
         --dry-run) DRY_RUN=true ;;
         --gerrit-source=*) GERRIT_SOURCE="${arg#*=}" ;;
         --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
         --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
-        --insecure-skip-verify) INSECURE_SKIP_VERIFY=true ;;
         --help|-h)
-            echo "Usage: $0 [--branch=main] [--tag=v1.2.0] [--skip-build] [--dry-run] [--gerrit-source=REMOTE] [--alembic-mode=apply|pg-clone] [--insecure-skip-verify]"
+            echo "Usage: $0 (--tag=vX.Y.Z | --digest=sha256:<64hex>) [--skip-build] [--dry-run] [--gerrit-source=REMOTE] [--alembic-mode=apply|pg-clone]"
             exit 0 ;;
         *) err "Unknown argument: $arg" ;;
     esac
 done
+
+# RT-07a: a production deploy identity is a FINAL tag (vX.Y.Z) or an
+# image digest — never a branch, and never an implicit default. Require
+# exactly one. The shape of each value is enforced by check_deploy_ref.sh.
+if [ -n "$TAG" ] && [ -n "$DIGEST" ]; then
+    err "--tag and --digest are mutually exclusive — a deploy has exactly one final identity"
+fi
+if [ -z "$TAG" ] && [ -z "$DIGEST" ]; then
+    err "release-train: a final deploy identity is required — pass --tag=vX.Y.Z or --digest=sha256:<64hex>. Branch deploys (and the implicit main default) were removed in RT-07a."
+fi
 
 case "$ALEMBIC_MODE" in
     apply|pg-clone) ;;
@@ -225,64 +235,47 @@ _run_alembic_pg_clone() {
 
 step "OmniSight Production 零停機部署"
 echo "Compose: $COMPOSE_FILE"
-echo "Branch:  ${TAG:-$BRANCH}"
+echo "Deploy:  ${TAG:-$DIGEST}"
 echo "Alembic: $ALEMBIC_MODE"
 echo ""
 
 # ── Step 1: Pull latest code ──
 step "Step 1: 拉取最新程式碼"
 
-# FX.7.9: ref allowlist + GPG signature verification.
-# Strict by default — the verifier aborts the deploy unless:
-#   (1) the requested ref matches a rule in deploy/prod-deploy-allowlist.txt
-#   (2) the tag (annotated) or branch-tip commit is GPG-signed by a
-#       fingerprint listed in deploy/prod-deploy-signers.txt
-# `--dry-run` runs only Layer 1 (ref doesn't need to be locally fetched).
-# `--insecure-skip-verify` is an audit-trailed emergency escape hatch.
+# RT-07a: gate the deploy identity via check_deploy_ref.sh before
+# touching the working tree or any replica. The verifier enforces the
+# release-train contract — final tag (vX.Y.Z) or image digest only,
+# never a branch. `--dry-run` runs the shape gate (+ allowlist for tags)
+# without needing the ref fetched locally. There is no insecure bypass.
 verify_args=()
 if [ "$DRY_RUN" = true ]; then
     verify_args+=("--allowlist-only")
-elif [ "$INSECURE_SKIP_VERIFY" = true ]; then
-    verify_args+=("--insecure-skip-verify")
 fi
-GERRIT_SOURCE="$(_detect_gerrit_source)"
-echo "Git source: $GERRIT_SOURCE"
 
-if [ -n "$TAG" ]; then
+if [ -n "$DIGEST" ]; then
+    # Digest deploy: the image is already built and cosign-verified at
+    # this digest (RT-06), so there is no git ref to fetch or check out.
+    # Force --skip-build — the image carries the code + Alembic
+    # migrations (the alembic step below runs inside that image, not the
+    # working tree). Compose pull-by-digest via OMNISIGHT_IMAGE_DIGEST is
+    # wired in RT-07b; here we record the digest as the deploy identity.
+    scripts/check_deploy_ref.sh --kind digest --ref "$DIGEST" "${verify_args[@]}"
+    SKIP_BUILD=true
+    _upsert_env "OMNISIGHT_IMAGE_DIGEST" "$DIGEST"
+    log "Digest deploy: $DIGEST (skip-build；不做 git checkout)"
+else
+    GERRIT_SOURCE="$(_detect_gerrit_source)"
+    echo "Git source: $GERRIT_SOURCE"
     _run_cmd git fetch "$GERRIT_SOURCE" --tags
     scripts/check_deploy_ref.sh --kind tag --ref "$TAG" "${verify_args[@]}"
     _run_cmd git checkout "$TAG"
-else
-    _run_cmd git fetch "$GERRIT_SOURCE" "$BRANCH"
-    scripts/check_deploy_ref.sh --kind branch --ref "$BRANCH" "${verify_args[@]}"
-    _run_cmd git merge "$GERRIT_SOURCE/$BRANCH" --ff-only
+    log "Code 更新完成：$(git log --oneline -1)"
 fi
-log "Code 更新完成：$(git log --oneline -1)"
-
-# BP.W3.14: persist frontend build freshness metadata for the backend
-# /metrics gauge + Bootstrap wizard L7 freshness panel. No shared
-# module state: every worker reads the same .env values after recreate.
-MASTER_HEAD_COMMIT="$(git rev-parse HEAD)"
-if [ "$SKIP_BUILD" = false ]; then
-    FRONTEND_BUILD_COMMIT="$MASTER_HEAD_COMMIT"
-else
-    FRONTEND_BUILD_COMMIT="$(grep -E '^OMNISIGHT_FRONTEND_BUILD_COMMIT=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-fi
-FRONTEND_BUILD_LAG_COMMITS=0
-if [ -n "${FRONTEND_BUILD_COMMIT:-}" ]; then
-    FRONTEND_BUILD_LAG_COMMITS="$(git rev-list --count "${FRONTEND_BUILD_COMMIT}..${MASTER_HEAD_COMMIT}" 2>/dev/null || echo 0)"
-fi
-_upsert_env "OMNISIGHT_MASTER_HEAD_COMMIT" "$MASTER_HEAD_COMMIT"
-if [ -n "${FRONTEND_BUILD_COMMIT:-}" ]; then
-    _upsert_env "OMNISIGHT_FRONTEND_BUILD_COMMIT" "$FRONTEND_BUILD_COMMIT"
-fi
-_upsert_env "OMNISIGHT_FRONTEND_BUILD_LAG_COMMITS" "$FRONTEND_BUILD_LAG_COMMITS"
-log "Frontend freshness metadata: build=${FRONTEND_BUILD_COMMIT:-unknown} head=$MASTER_HEAD_COMMIT lag=$FRONTEND_BUILD_LAG_COMMITS"
 
 # OP-772: expose current/previous image tags to the persistent SLO monitor
 # before any replica is restarted. The monitor uses the previous tag as
 # its rollback target if three consecutive 30 s SLO windows breach.
-CURRENT_IMAGE_TAG="${OMNISIGHT_IMAGE_TAG:-${TAG:-$(git rev-parse --short=12 HEAD)}}"
+CURRENT_IMAGE_TAG="${OMNISIGHT_IMAGE_TAG:-${TAG:-$DIGEST}}"
 PREVIOUS_IMAGE_TAG="$(grep -E '^OMNISIGHT_IMAGE_TAG=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
 if [ -n "${PREVIOUS_IMAGE_TAG:-}" ] && [ "$PREVIOUS_IMAGE_TAG" != "$CURRENT_IMAGE_TAG" ]; then
     _upsert_env "OMNISIGHT_PREVIOUS_IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"
@@ -460,12 +453,12 @@ fi
 step "🎉 零停機部署完成！"
 echo ""
 echo -e "${BOLD}部署摘要：${NC}"
-echo "  Version:  $(git describe --tags --always 2>/dev/null || git log --oneline -1)"
+echo "  Version:  ${TAG:-${DIGEST:-$(git describe --tags --always 2>/dev/null || git log --oneline -1)}}"
 echo "  Backend:  backend-a :8000 + backend-b :8001"
 echo "  Frontend: :3000"
 echo "  Caddy:    :443 → round-robin"
 echo "  Status:   $(curl -sf http://localhost:8000/api/v1/health 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo 'checking...')"
 echo ""
-echo -e "${BOLD}Rollback：${NC}"
-echo "  git checkout <previous-tag>"
-echo "  $0 --skip-build"
+echo -e "${BOLD}Rollback（release-train — redeploy the previous final identity）：${NC}"
+echo "  $0 --tag=<previous-vX.Y.Z> --skip-build"
+echo "  $0 --digest=<previous-sha256:...>"
