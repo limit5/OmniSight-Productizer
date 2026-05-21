@@ -55,7 +55,7 @@ namespaces:
     required: true
     multi: true
     value:
-      enum: [backend, frontend, devops, tests, db, docs, security, embedded, tooling]
+      enum: [backend, frontend, devops, tests, db, docs, security, embedded, tooling, ci, gerrit]
     side_effects:
       - "Prompt injection (jira-ticket-conventions §5): runner injects 'Areas: ...' plus the negation list (full area taxonomy minus declared areas); the agent is told to stay inside declared areas and to surrender the ticket (jira-ticket-conventions §11) if the work needs an out-of-area domain."
     docs: [jira-ticket-conventions.md#5]

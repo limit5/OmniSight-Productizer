@@ -147,6 +147,7 @@ ORPHAN_SALVAGE_BRANCH_THRESHOLD = int(
 RECOGNISED_AREAS: frozenset[str] = frozenset({
     "backend", "frontend", "devops", "tests", "db",
     "docs", "security", "embedded", "tooling",
+    "ci", "gerrit",
 })
 
 

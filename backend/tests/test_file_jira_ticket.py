@@ -106,7 +106,7 @@ def test_check_mode_validates_without_network(tmp_path, monkeypatch, capsys) -> 
             "--class",
             "subscription-codex",
             "--type",
-            "meta",
+            "feature",
             "--areas",
             "backend",
             "--check",
@@ -146,7 +146,7 @@ def test_valid_full_flow_posts_story(monkeypatch) -> None:
     monkeypatch.setattr(mod.urllib.request, "urlopen", fake_urlopen)
 
     key = mod.file_ticket(
-        _args(areas=["backend", "docs", "tests"]),
+        _args(type="feature", areas=["backend", "docs", "tests"]),
         "## Acceptance Criteria\n- [ ] Update docs/sop/lessons/L-OP-737-example.md\n"
         "## Files / Paths\n- backend/tests/test_file_jira_ticket.py\n",
     )
@@ -190,14 +190,13 @@ def test_api_class_does_not_auto_add_gerrit_push_capability() -> None:
         )
 
 
-def test_area_db_rejected_with_runner_drift_hint() -> None:
-    """OP-1526 AC1: area:db is in the runner whitelist but rejected here."""
+def test_runner_vocab_areas_are_accepted() -> None:
+    """OP-1559: filing CLI accepts the runner vocabulary additions."""
     mod = _load_script()
-    with pytest.raises(SystemExit) as exc:
-        mod._labels(_args(areas=["db"]))
-    message = str(exc.value)
-    assert "invalid area: db" in message
-    assert "feedback_runner_recognized_areas" in message
+    labels = mod._labels(_args(areas=["db", "ci", "gerrit"]))
+    assert "area:db" in labels
+    assert "area:ci" in labels
+    assert "area:gerrit" in labels
 
 
 def test_capability_flag_layers_extra_capabilities() -> None:

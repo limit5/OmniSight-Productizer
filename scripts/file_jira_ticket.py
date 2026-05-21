@@ -43,7 +43,9 @@ VALID_AREAS = {
     "security",
     "embedded",
     "tooling",
+    "ci",
     "gerrit",
+    "db",
 }
 VALID_TIERS = {"S", "M", "L", "X"}
 VALID_CLASSES = {
@@ -60,10 +62,10 @@ PUSH_CAPABLE_CLASSES = {"subscription-codex", "subscription-claude"}
 DEFAULT_PUSH_CAPABILITY = "gerrit_push"
 
 # Areas accepted by the runner (auto-runner-jira.RECOGNISED_AREAS) but
-# intentionally NOT accepted by this script. Operators sometimes confuse
-# the two whitelists; surfacing the drift explicitly avoids a generic
-# "invalid area" error that leaves them guessing.
-RUNNER_ONLY_AREAS = {"db"}
+# intentionally NOT accepted by this script. Keep this empty unless the
+# filing CLI deliberately lags the runner whitelist for an operator-facing
+# reason.
+RUNNER_ONLY_AREAS: set[str] = set()
 RUNNER_RECOGNIZED_AREAS_MEMORY = "feedback_runner_recognized_areas"
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

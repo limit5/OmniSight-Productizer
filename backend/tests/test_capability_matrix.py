@@ -93,6 +93,7 @@ def test_shipped_yaml_loads_and_covers_recognised_areas(
     recognised_areas = {
         "backend", "frontend", "devops", "tests", "db",
         "docs", "security", "embedded", "tooling",
+        "ci", "gerrit",
     }
     story_areas = set(shipped_matrix.known_areas("Story"))
     missing = recognised_areas - story_areas

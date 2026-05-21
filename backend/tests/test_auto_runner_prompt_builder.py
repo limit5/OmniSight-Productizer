@@ -82,6 +82,7 @@ def test_recognised_areas_constant_matches_legacy_all_areas(runner):
     legacy_all_areas = {
         "backend", "frontend", "devops", "tests", "db",
         "docs", "security", "embedded", "tooling",
+        "ci", "gerrit",
     }
     assert runner.RECOGNISED_AREAS == frozenset(legacy_all_areas)
     assert isinstance(runner.RECOGNISED_AREAS, frozenset)
@@ -96,11 +97,26 @@ def test_recognised_area_builds_prompt_without_raising(runner, fake_client, monk
     assert "OP-1000" in prompt
     assert "Areas: backend" in prompt
     assert "stub description body" in prompt
-    # Forbidden block must list the eight other recognised areas — never
+    # Forbidden block must list the other recognised areas — never
     # the declared one, never the unknown literal.
-    for forbidden in ("frontend", "devops", "tests", "db", "docs", "security", "embedded", "tooling"):
+    for forbidden in (
+        "frontend", "devops", "tests", "db", "docs", "security",
+        "embedded", "tooling", "ci", "gerrit",
+    ):
         assert f"- {forbidden}" in prompt
     assert "- backend" not in prompt.split("Stay strictly within")[1].split("If you find")[0]
+
+
+def test_ci_db_ticket_builds_runner_prompt(runner, fake_client, monkeypatch):
+    """OP-1559: area:ci + area:db labels are runner-recognised together."""
+    _patch_issue(monkeypatch, labels=["area:ci", "area:db", "tier:M"])
+
+    prompt = runner._build_prompt(fake_client, "OP-1559-repro", "test ticket body")
+
+    assert "OP-1559-repro" in prompt
+    assert "Areas: ci, db" in prompt
+    assert "- ci" not in prompt.split("Stay strictly within")[1].split("If you find")[0]
+    assert "- db" not in prompt.split("Stay strictly within")[1].split("If you find")[0]
 
 
 # ── OP-986: localized JIRA issuetype name still resolves the full matrix ──

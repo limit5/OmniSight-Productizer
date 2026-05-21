@@ -77,6 +77,26 @@ matrix:
       S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
       M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
       L: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+    ci:
+      S:
+        expected: false
+        capabilities: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M:
+        expected: false
+        capabilities: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L:
+        expected: false
+        capabilities: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+    gerrit:
+      S:
+        expected: false
+        capabilities: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall]
+      M:
+        expected: false
+        capabilities: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
+      L:
+        expected: false
+        capabilities: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall]
     db:
       S: [code_edit, run_tests, run_lint, jira_update, mcp_search, memory_recall, run_migration]
       M: [code_edit, run_tests, run_lint, gerrit_push, jira_update, mcp_search, memory_recall, run_migration]
