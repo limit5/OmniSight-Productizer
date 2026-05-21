@@ -2,6 +2,7 @@ workflow:
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v.*/'
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
+    - if: '$CANDIDATE_SHA =~ /^[0-9a-f]{40}$/ && ($CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web")'
     - when: never
 
 stages:
@@ -30,6 +31,10 @@ variables:
 .fast_gate_rules:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
+
+.candidate_rules:
+  rules:
+    - if: '$CANDIDATE_SHA =~ /^[0-9a-f]{40}$/ && ($CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web")'
 
 fast-gate:
   extends:
@@ -121,7 +126,7 @@ fast-gate:
       command: ["--tls=false"]
   before_script:
     - set -euo pipefail
-    - apk add --no-cache bash ca-certificates coreutils curl jq
+    - apk add --no-cache bash ca-certificates coreutils curl git jq
     - echo "$CI_JOB_TOKEN" | docker login "$CI_REGISTRY" --username "gitlab-ci-token" --password-stdin
 
 .image_matrix:
@@ -133,6 +138,14 @@ fast-gate:
         DOCKERFILE: Dockerfile.frontend
       - IMAGE_NAME: bridge
         DOCKERFILE: Dockerfile.bridge
+
+.candidate_image_matrix:
+  parallel:
+    matrix:
+      - IMAGE_NAME: backend
+        DOCKERFILE: Dockerfile.backend
+      - IMAGE_NAME: frontend
+        DOCKERFILE: Dockerfile.frontend
 
 # OP-1513 / OP-1478-act-T1.3 — populate bundle.json before image builds
 # so Dockerfile.{backend,frontend,bridge} can COPY it into /app and stamp
@@ -209,6 +222,177 @@ build-image:
         --tag "${IMAGE_BASE}:${IMAGE_TAG_SHA}" \
         --tag "${IMAGE_BASE}:latest" \
         .
+
+candidate-prepare-bundle:
+  extends:
+    - .candidate_rules
+  stage: build
+  image: docker:27.3.1
+  resource_group: candidate-image-pipeline
+  before_script:
+    - set -euo pipefail
+    - apk add --no-cache bash python3 jq git coreutils
+  script:
+    - test -n "${CANDIDATE_SHA:-}"
+    - test "${#CANDIDATE_SHA}" = "40"
+    - git fetch --no-tags --unshallow origin develop || git fetch --no-tags origin develop
+    - git cat-file -e "${CANDIDATE_SHA}^{commit}"
+    - git merge-base --is-ancestor "$CANDIDATE_SHA" origin/develop
+    - git checkout --detach "$CANDIDATE_SHA"
+    - export GIT_SHA="${CANDIDATE_SHA}"
+    - export GIT_REF="refs/heads/develop"
+    - export OPENAPI_HASH="$(sha256sum openapi.json | awk '{print $1}')"
+    - export API_REQUIRED="${API_REQUIRED:-v1}"
+    - export API_SUPPORTED="${API_SUPPORTED:-v1,v2}"
+    - export FRONTEND_BUILT_AGAINST_API="${FRONTEND_BUILT_AGAINST_API:-v1}"
+    - export DB_MIGRATION_HEAD="${DB_MIGRATION_HEAD:-unknown}"
+    - placeholder_digest="sha256:$(python3 -c 'print("0"*64)')"
+    - export IMAGE_DIGEST_BACKEND="$placeholder_digest"
+    - export IMAGE_DIGEST_FRONTEND="$placeholder_digest"
+    - export IMAGE_DIGEST_BRIDGE="$placeholder_digest"
+    - bash scripts/emit_bundle_json.sh > bundle.json
+    - BUNDLE_ID="$(jq -r '.bundle_id' bundle.json)"
+    - BUNDLE_SHA="$(sha256sum bundle.json | awk '{print $1}')"
+    - test -n "$BUNDLE_ID" && test "$BUNDLE_ID" != "null"
+    - test -n "$BUNDLE_SHA"
+    - printf 'BUNDLE_ID=%s\nBUNDLE_SHA=%s\nCANDIDATE_IMAGE_TAG=sha-%s\n' "$BUNDLE_ID" "$BUNDLE_SHA" "$CANDIDATE_SHA" > candidate-bundle.env
+    - echo "prepared candidate bundle_id=$BUNDLE_ID bundle_sha=$BUNDLE_SHA candidate_sha=$CANDIDATE_SHA"
+  artifacts:
+    name: "candidate-bundle-${CANDIDATE_SHA}"
+    paths:
+      - bundle.json
+    reports:
+      dotenv: candidate-bundle.env
+    expire_in: 90 days
+
+candidate-build-image:
+  extends:
+    - .docker_job
+    - .candidate_image_matrix
+    - .candidate_rules
+  stage: build
+  resource_group: candidate-image-pipeline
+  needs:
+    - job: candidate-prepare-bundle
+      artifacts: true
+  timeout: 90m
+  script:
+    - test -n "${CANDIDATE_SHA:-}"
+    - test "${#CANDIDATE_SHA}" = "40"
+    - test "${CANDIDATE_IMAGE_TAG}" = "sha-${CANDIDATE_SHA}"
+    - test -f bundle.json
+    - cp bundle.json /tmp/candidate-bundle.json
+    - git fetch --no-tags --unshallow origin develop || git fetch --no-tags origin develop
+    - git cat-file -e "${CANDIDATE_SHA}^{commit}"
+    - git merge-base --is-ancestor "$CANDIDATE_SHA" origin/develop
+    - git checkout --detach "$CANDIDATE_SHA"
+    - cp /tmp/candidate-bundle.json bundle.json
+    - docker buildx create --use --name "omnisight-candidate-${CI_PIPELINE_ID}-${IMAGE_NAME}"
+    - docker buildx inspect --bootstrap
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - test -f bundle.json
+    - test -n "${BUNDLE_ID}" && test -n "${BUNDLE_SHA}"
+    - |
+      docker buildx build \
+        --platform "${BUILD_PLATFORMS:-linux/amd64}" \
+        --push \
+        --file "${DOCKERFILE}" \
+        --build-arg "BUNDLE_ID=${BUNDLE_ID}" \
+        --build-arg "BUNDLE_SHA=${BUNDLE_SHA}" \
+        --label "org.opencontainers.image.source=${CI_PROJECT_URL}" \
+        --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
+        --label "org.opencontainers.image.version=${CANDIDATE_IMAGE_TAG}" \
+        --label "org.opencontainers.image.created=${CI_PIPELINE_CREATED_AT}" \
+        --label "org.opencontainers.image.bundle.id=${BUNDLE_ID}" \
+        --label "org.opencontainers.image.bundle.sha=${BUNDLE_SHA}" \
+        --tag "${IMAGE_BASE}:${CANDIDATE_IMAGE_TAG}" \
+        .
+
+candidate-sign-image:
+  extends:
+    - .docker_job
+    - .candidate_image_matrix
+    - .candidate_rules
+  stage: sign
+  resource_group: candidate-image-pipeline
+  needs:
+    - candidate-build-image
+  script:
+    - curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
+    - chmod +x /usr/local/bin/cosign
+    - CANDIDATE_IMAGE_TAG="sha-${CANDIDATE_SHA}"
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${CANDIDATE_IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - test -n "$DIGEST"
+    - IMAGE_REF="${IMAGE_BASE}@${DIGEST}"
+    - cosign sign --yes --key "$COSIGN_KEY" "$IMAGE_REF"
+    - |
+      cosign verify \
+        --key deploy/cosign/cosign.pub \
+        "$IMAGE_REF" >/dev/null
+
+candidate-sbom-image:
+  extends:
+    - .docker_job
+    - .candidate_image_matrix
+    - .candidate_rules
+  stage: sbom
+  resource_group: candidate-image-pipeline
+  needs:
+    - candidate-sign-image
+  script:
+    - curl -sSfL "https://raw.githubusercontent.com/anchore/syft/main/install.sh" | sh -s -- -b /usr/local/bin "${SYFT_VERSION}"
+    - CANDIDATE_IMAGE_TAG="sha-${CANDIDATE_SHA}"
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${CANDIDATE_IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - test -n "$DIGEST"
+    - syft "${IMAGE_BASE}@${DIGEST}" -o cyclonedx-json="candidate-sbom-${IMAGE_NAME}.cdx.json"
+  artifacts:
+    name: "candidate-image-sbom-${IMAGE_NAME}"
+    paths:
+      - "candidate-sbom-${IMAGE_NAME}.cdx.json"
+    expire_in: 90 days
+
+candidate-attest-image:
+  extends:
+    - .docker_job
+    - .candidate_image_matrix
+    - .candidate_rules
+  stage: attest
+  resource_group: candidate-image-pipeline
+  needs:
+    - candidate-sbom-image
+  script:
+    - curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /usr/local/bin/cosign
+    - chmod +x /usr/local/bin/cosign
+    - CANDIDATE_IMAGE_TAG="sha-${CANDIDATE_SHA}"
+    - IMAGE_BASE="${CI_REGISTRY_IMAGE}/${IMAGE_NAME}"
+    - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${CANDIDATE_IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - test -n "$DIGEST"
+    - IMAGE_REF="${IMAGE_BASE}@${DIGEST}"
+    - |
+      jq -n \
+        --arg image "$IMAGE_NAME" \
+        --arg image_ref "$IMAGE_REF" \
+        --arg digest "$DIGEST" \
+        --arg git_sha "$CANDIDATE_SHA" \
+        --arg git_ref "refs/heads/develop" \
+        --arg pipeline_url "$CI_PIPELINE_URL" \
+        '{
+          image: $image,
+          image_ref: $image_ref,
+          digest: $digest,
+          git_sha: $git_sha,
+          git_ref: $git_ref,
+          pipeline_url: $pipeline_url,
+          builder: "gitlab-ci"
+        }' > "candidate-attestation-${IMAGE_NAME}.json"
+    - cosign attest --yes --key "$COSIGN_KEY" --predicate "candidate-attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
+  artifacts:
+    name: "candidate-image-attestation-${IMAGE_NAME}"
+    paths:
+      - "candidate-attestation-${IMAGE_NAME}.json"
+    expire_in: 90 days
 
 .cosign_job:
   extends:
