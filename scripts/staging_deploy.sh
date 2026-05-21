@@ -9,12 +9,33 @@
 # standby color under a separate Compose project, waits for /health, then
 # atomically switches the host Caddy ingress snippet and drains the old
 # stack.
+#
+# [OP-1574] RT-05b — deploy candidate BY DIGEST. The staging compose stays
+# tag-based with pull_policy: always (RT-05a owns the compose). After
+# `docker compose pull`, this script verifies that the digest actually
+# pulled for backend + frontend equals the digest recorded in the candidate
+# bundle (`--bundle path | $OMNISIGHT_CANDIDATE_BUNDLE`, the OP-1513
+# bundle.json shape: `images.{backend,frontend}.digest`). A mismatch — the
+# alias was retagged under us between candidate certification and this
+# deploy — is REJECTED before the standby stack is brought up, so staging
+# never serves an image that diverges from the certified candidate. When no
+# bundle is supplied (e.g. the legacy change-merged webhook path) the check
+# is skipped with a log line and behaviour is unchanged. Per RT-21 the
+# release train tracks the backend+frontend pair only; bridge reuses the
+# backend image and is not a separate runtime digest.
 
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 COMPOSE_FILE="${OMNISIGHT_STAGING_COMPOSE_FILE:-$ROOT/deploy/staging/docker-compose.yml}"
 ENV_FILE="${OMNISIGHT_STAGING_ENV_FILE:-$ROOT/deploy/staging/.env}"
+# Registry default mirrors deploy/staging/docker-compose.yml's image refs so
+# the digest verification inspects exactly what compose pulled.
+REGISTRY="${OMNISIGHT_REGISTRY:-sora.services:49154/omnisight/OmniSight-Productizer}"
+DOCKER_BIN="${DOCKER_BIN:-docker}"
+# Candidate bundle (OP-1513 bundle.json) used for post-pull digest equality;
+# overridable via --bundle. Empty => digest verification skipped (legacy path).
+CANDIDATE_BUNDLE="${OMNISIGHT_CANDIDATE_BUNDLE:-}"
 STATE_DIR="${OMNISIGHT_STAGING_STATE_DIR:-/var/lib/omnisight/staging}"
 ACTIVE_COLOR_FILE="$STATE_DIR/active_color"
 ACTIVE_TAG_FILE="$STATE_DIR/active_tag"
@@ -28,11 +49,17 @@ CADDY_RELOAD_CMD="${OMNISIGHT_STAGING_CADDY_RELOAD_CMD:-caddy reload --config /e
 
 usage() {
 	cat >&2 <<EOF
-usage: $0 [--event-file path | --image-tag tag]
+usage: $0 [--event-file path | --image-tag tag] [--bundle path]
 
 Consumes a Gerrit change-merged webhook payload for main, pulls the D2
 image tag, starts the standby staging stack, switches Caddy ingress, and
 drains the old stack.
+
+  --bundle path   candidate bundle.json (images.{backend,frontend}.digest).
+                  After pulling, the digest actually pulled for backend +
+                  frontend must equal the bundle's; a mismatch is rejected
+                  before the standby stack starts (RT-05b deploy-by-digest).
+                  Defaults to \$OMNISIGHT_CANDIDATE_BUNDLE; empty => skipped.
 EOF
 	exit 1
 }
@@ -93,7 +120,7 @@ compose_project() {
 
 compose_cmd() {
 	local color="$1"
-	local cmd=(docker compose -p "$(compose_project "$color")" -f "$COMPOSE_FILE")
+	local cmd=("$DOCKER_BIN" compose -p "$(compose_project "$color")" -f "$COMPOSE_FILE")
 	if [[ -f "$ENV_FILE" ]]; then
 		cmd+=(--env-file "$ENV_FILE")
 	fi
@@ -235,6 +262,94 @@ switch_ingress() {
 	fi
 }
 
+# ── post-pull digest equality (RT-05b) ──────────────────────────────────────
+# bundle_image_digest <bundle.json> <backend|frontend> -> prints sha256:<...>
+# (empty if the key is absent). Exits 3 only when the file can't be read/parsed,
+# so the caller can tell "no digest recorded" from "bundle unreadable".
+bundle_image_digest() {
+	python3 - "$1" "$2" <<'PY'
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+except Exception as exc:  # noqa: BLE001 — surface any read/parse error as exit 3
+    sys.stderr.write(f"candidate bundle unreadable ({path}): {exc}\n")
+    raise SystemExit(3)
+images = (doc or {}).get("images") or {}
+entry = images.get(key) or {}
+print(str(entry.get("digest") or "").strip())
+PY
+}
+
+# verify_image_digest <name> <image_ref> <expected_digest>
+# Inspects the locally-pulled image's RepoDigests and asserts the candidate
+# bundle's digest is among them. Returns non-zero on any mismatch / failure.
+verify_image_digest() {
+	local name="$1" ref="$2" expected="$3"
+	local repo_digests
+	if ! repo_digests="$("$DOCKER_BIN" image inspect "$ref" --format '{{json .RepoDigests}}' 2>&1)"; then
+		alert StagingDigestInspectFailed "cannot inspect pulled image $ref for $name: ${repo_digests:-<no output>}"
+		return 1
+	fi
+	if python3 - "$name" "$ref" "$expected" "$repo_digests" <<'PY'
+import json, re, sys
+name, ref, expected, raw = sys.argv[1:5]
+DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
+if not DIGEST.match(expected):
+    sys.stderr.write(f"{name}: candidate bundle digest malformed: {expected!r}\n")
+    raise SystemExit(2)
+raw = (raw or "").strip()
+try:
+    repo_digests = json.loads(raw) if raw and raw != "null" else []
+except json.JSONDecodeError as exc:
+    sys.stderr.write(f"{name}: RepoDigests not JSON ({exc}): {raw!r}\n")
+    raise SystemExit(2)
+observed = {str(rd).split("@", 1)[1] for rd in (repo_digests or []) if "@" in str(rd)}
+if expected in observed:
+    print(f"{name}: pulled digest matches candidate bundle ({expected})")
+    raise SystemExit(0)
+sys.stderr.write(
+    f"{name}: pulled image {ref} resolves to "
+    f"{sorted(observed) or '<no repo digests>'} but candidate bundle pins "
+    f"{expected}\n"
+)
+raise SystemExit(1)
+PY
+	then
+		return 0
+	fi
+	return 1
+}
+
+# verify_pulled_digests <image_tag> — checks backend + frontend pulled digests
+# against $CANDIDATE_BUNDLE. No bundle => skipped (legacy path). Any mismatch,
+# missing/incomplete bundle, or inspect failure => non-zero (deploy rejected).
+verify_pulled_digests() {
+	local image_tag="$1"
+	if [[ -z "$CANDIDATE_BUNDLE" ]]; then
+		log "digest equality: no candidate bundle supplied — skipping post-pull digest verification for $image_tag"
+		return 0
+	fi
+	if [[ ! -f "$CANDIDATE_BUNDLE" ]]; then
+		alert StagingDigestBundleMissing "candidate bundle not found: $CANDIDATE_BUNDLE"
+		return 1
+	fi
+	local backend_digest frontend_digest
+	backend_digest="$(bundle_image_digest "$CANDIDATE_BUNDLE" backend)" \
+		|| { alert StagingDigestBundleUnreadable "could not read candidate bundle $CANDIDATE_BUNDLE"; return 1; }
+	frontend_digest="$(bundle_image_digest "$CANDIDATE_BUNDLE" frontend)" \
+		|| { alert StagingDigestBundleUnreadable "could not read candidate bundle $CANDIDATE_BUNDLE"; return 1; }
+	if [[ -z "$backend_digest" || -z "$frontend_digest" ]]; then
+		alert StagingDigestBundleIncomplete "candidate bundle $CANDIDATE_BUNDLE missing a digest (backend='${backend_digest:-}' frontend='${frontend_digest:-}')"
+		return 1
+	fi
+	log "digest equality: verifying backend+frontend pulled digests against candidate bundle $CANDIDATE_BUNDLE"
+	verify_image_digest backend  "$REGISTRY/backend:$image_tag"  "$backend_digest"  || return 1
+	verify_image_digest frontend "$REGISTRY/frontend:$image_tag" "$frontend_digest" || return 1
+	log "digest equality: backend+frontend pulled digests == candidate bundle"
+}
+
 deploy_color() {
 	local color="$1"
 	local image_tag="$2"
@@ -245,6 +360,12 @@ deploy_color() {
 	compose=$(compose_cmd "$color")
 	if ! eval "$compose pull"; then
 		alert StagingImagePullFailed "image tag $image_tag could not be pulled for $color"
+		return 1
+	fi
+	# Deploy candidate BY DIGEST: refuse to bring up $color unless what we
+	# just pulled matches the certified candidate bundle (RT-05b).
+	if ! verify_pulled_digests "$image_tag"; then
+		alert StagingDigestMismatch "post-pull digest != candidate bundle for tag $image_tag; refusing to start $color"
 		return 1
 	fi
 	eval "$compose up -d"
@@ -265,6 +386,7 @@ main() {
 		case "$1" in
 			--event-file) event_file="${2:-}"; shift 2 ;;
 			--image-tag) image_tag="${2:-}"; shift 2 ;;
+			--bundle) CANDIDATE_BUNDLE="${2:-}"; shift 2 ;;
 			-h|--help) usage ;;
 			*) usage ;;
 		esac
@@ -314,4 +436,8 @@ main() {
 	log "staging active color=$standby_color tag=$image_tag url=$STAGING_URL"
 }
 
-main "$@"
+# Allow `source`ing the script (tests exercise the digest helpers directly)
+# without running the deploy. Direct execution still runs main.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+	main "$@"
+fi
