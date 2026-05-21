@@ -35,6 +35,14 @@ SCRIPT_SHIM = REPO_ROOT / "scripts" / "staging_gate.py"
 CHECKER_SCRIPT = REPO_ROOT / "scripts" / "release_milestone_checker.py"
 
 FAKE_SHA = "0123456789abcdef0123456789abcdef01234567"
+BACKEND_DIGEST = "sha256:" + "a" * 64
+FRONTEND_DIGEST = "sha256:" + "b" * 64
+API_VERSION_BODY = {
+    "bundle_id": "develop-01234567",
+    "backend_image_digest": BACKEND_DIGEST,
+    "frontend_image_digest": FRONTEND_DIGEST,
+    "api_required": "v1",
+}
 
 
 def _load_checker() -> Any:
@@ -86,6 +94,55 @@ def test_green_record_satisfies_milestone_checker(tmp_path: Path, suite: str) ->
     assert len(audited) == 1
     assert audited[0][0] == sg.AUDIT_ACTION[suite]
     assert audited[0][1] == rec
+
+
+def test_jsonl_record_includes_staging_evidence_from_api_version(tmp_path: Path) -> None:
+    out = tmp_path / "canary-status.jsonl"
+    now = datetime(2026, 5, 22, 9, 0, tzinfo=timezone.utc)
+
+    result = sg.run_gate(
+        suite=sg.SUITE_CANARY,
+        revision=FAKE_SHA,
+        probe=lambda: (True, "all good"),
+        out_path=out,
+        audit_sink=lambda *_a, **_k: None,
+        clock=lambda: now,
+        evidence_probe=lambda: {
+            "bundle_id": "develop-01234567",
+            "backend_digest": BACKEND_DIGEST,
+            "frontend_digest": FRONTEND_DIGEST,
+            "observed_api_version": dict(API_VERSION_BODY),
+        },
+    )
+
+    assert result.exit_code == 0
+    rec = json.loads(out.read_text(encoding="utf-8"))
+    assert rec["bundle_id"] == "develop-01234567"
+    assert rec["backend_digest"] == BACKEND_DIGEST
+    assert rec["frontend_digest"] == FRONTEND_DIGEST
+    assert rec["observed_api_version"] == API_VERSION_BODY
+    assert rec["status"] == "green"
+
+
+def test_missing_staging_evidence_marks_gate_red(tmp_path: Path) -> None:
+    out = tmp_path / "canary-status.jsonl"
+
+    def no_evidence() -> dict[str, Any]:
+        raise RuntimeError("/api/version missing backend_image_digest")
+
+    result = sg.run_gate(
+        suite=sg.SUITE_CANARY,
+        revision=FAKE_SHA,
+        probe=lambda: (True, "all good"),
+        out_path=out,
+        audit_sink=lambda *_a, **_k: None,
+        evidence_probe=no_evidence,
+    )
+
+    assert result.exit_code == 2
+    rec = json.loads(out.read_text(encoding="utf-8"))
+    assert rec["status"] == "red"
+    assert "staging evidence failed" in rec["detail"]
 
 
 def test_red_record_blocks_the_gate(tmp_path: Path) -> None:
@@ -159,6 +216,33 @@ def test_build_record_shape_and_truncation() -> None:
     assert obj["status"] in checker.GREEN_STATUSES
     # not-ok flips only `status`.
     assert sg.build_record(suite=sg.SUITE_SMOKE, ok=False, detail="bad", revision=FAKE_SHA, run_id="r", now=now).status == "red"
+
+
+def test_api_version_evidence_extracts_digest_pair_and_observed_body() -> None:
+    evidence = sg.api_version_evidence(
+        base_url="https://staging.x/",
+        timeout=1.0,
+        opener=lambda url, _timeout: (
+            200,
+            json.dumps(API_VERSION_BODY | {"url_seen": url}),
+        ),
+    )
+
+    assert evidence["bundle_id"] == "develop-01234567"
+    assert evidence["backend_digest"] == BACKEND_DIGEST
+    assert evidence["frontend_digest"] == FRONTEND_DIGEST
+    assert evidence["observed_api_version"]["url_seen"] == "https://staging.x/api/version"
+
+
+def test_api_version_evidence_rejects_missing_digest() -> None:
+    body = dict(API_VERSION_BODY)
+    body.pop("backend_image_digest")
+    with pytest.raises(RuntimeError, match="backend_image_digest"):
+        sg.api_version_evidence(
+            base_url="https://staging.x",
+            timeout=1.0,
+            opener=lambda _url, _timeout: (200, json.dumps(body)),
+        )
 
 
 def test_iso_z_is_parseable_by_checker() -> None:
@@ -334,7 +418,14 @@ def test_write_audit_swallows_db_errors(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_main_green_with_explicit_revision(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     out = tmp_path / "canary-status.jsonl"
-    monkeypatch.setattr(sg, "_default_http_opener", lambda _u, _t: (200, "{}"))
+    monkeypatch.setattr(
+        sg,
+        "_default_http_opener",
+        lambda url, _t: (
+            200,
+            json.dumps(API_VERSION_BODY) if url.endswith("/api/version") else "{}",
+        ),
+    )
     rc = sg.main([
         "--suite", "canary", "--revision", FAKE_SHA, "--out", str(out),
         "--base-url", "https://staging.x", "--no-audit", "--canary-attempts", "1",
@@ -343,11 +434,22 @@ def test_main_green_with_explicit_revision(tmp_path: Path, monkeypatch: pytest.M
     assert rc == 0
     rec = checker.JsonlStatusReader([out]).latest("canary", branch="develop", revision=FAKE_SHA)
     assert rec is not None and rec["status"] == "green"
+    assert rec["bundle_id"] == "develop-01234567"
+    assert rec["backend_digest"] == BACKEND_DIGEST
+    assert rec["frontend_digest"] == FRONTEND_DIGEST
 
 
 def test_main_red_returns_2_and_still_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     out = tmp_path / "canary-status.jsonl"
-    monkeypatch.setattr(sg, "_default_http_opener", lambda _u, _t: (503, ""))
+    monkeypatch.setattr(
+        sg,
+        "_default_http_opener",
+        lambda url, _t: (
+            (200, json.dumps(API_VERSION_BODY))
+            if url.endswith("/api/version")
+            else (503, "")
+        ),
+    )
     rc = sg.main([
         "--suite", "canary", "--revision", FAKE_SHA, "--out", str(out),
         "--no-audit", "--canary-attempts", "1", "--canary-interval", "0",
@@ -378,6 +480,11 @@ def test_main_smoke_invokes_prod_smoke_test(tmp_path: Path, monkeypatch: pytest.
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
 
     monkeypatch.setattr(sg.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sg,
+        "_default_http_opener",
+        lambda _url, _t: (200, json.dumps(API_VERSION_BODY)),
+    )
     rc = sg.main([
         "--suite", "smoke", "--revision", FAKE_SHA, "--out", str(out),
         "--base-url", "https://staging.x", "--no-audit", "--smoke-subset", "dag1",
