@@ -75,6 +75,8 @@ def test_build_version_payload_includes_all_bundle_fields(tmp_path):
     assert payload["openapi_hash"] == "d" * 64
     assert payload["db_migration_head"] == "0237_runner_audit_events"
     assert payload["frontend_built_against_api"] == "v1"
+    assert payload["backend_image_digest"] == "sha256:" + "a" * 64
+    assert payload["frontend_image_digest"] == "sha256:" + "b" * 64
     # Bundle is well-formed and carries a bundle_id, so no warning.
     assert "warning" not in payload
 
@@ -122,6 +124,8 @@ def test_build_version_payload_handles_missing_bundle_and_manifest(tmp_path):
     assert payload["openapi_hash"] is None
     assert payload["db_migration_head"] is None
     assert payload["frontend_built_against_api"] is None
+    assert payload["backend_image_digest"] is None
+    assert payload["frontend_image_digest"] is None
     # Fallbacks to module-level defaults so the negotiation contract
     # still works when the runtime image predates OP-1479.
     assert payload["api_required"] == av.MIN_FRONTEND_API_VERSION
@@ -186,6 +190,8 @@ def test_install_version_metadata_endpoint_returns_bundle_fields(tmp_path, monke
         "openapi_hash",
         "db_migration_head",
         "frontend_built_against_api",
+        "backend_image_digest",
+        "frontend_image_digest",
     ):
         assert key in body, f"/api/version response missing {key}"
 
@@ -194,6 +200,8 @@ def test_install_version_metadata_endpoint_returns_bundle_fields(tmp_path, monke
     assert body["openapi_hash"] == "d" * 64
     assert body["db_migration_head"] == "0237_runner_audit_events"
     assert body["frontend_built_against_api"] == "v1"
+    assert body["backend_image_digest"] == "sha256:" + "a" * 64
+    assert body["frontend_image_digest"] == "sha256:" + "b" * 64
     # Healthy bundle → no operator-facing warning.
     assert "warning" not in body
 

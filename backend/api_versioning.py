@@ -252,6 +252,18 @@ def _load_image_manifest_db_head(path: Path = _IMAGE_MANIFEST_PATH) -> str | Non
     return value if isinstance(value, str) else None
 
 
+def _bundle_image_digest(bundle: dict, image_name: str) -> str | None:
+    """Return one baked image digest from ``bundle.json`` if present."""
+    images = bundle.get("images")
+    if not isinstance(images, dict):
+        return None
+    image = images.get(image_name)
+    if not isinstance(image, dict):
+        return None
+    digest = image.get("digest")
+    return digest if isinstance(digest, str) and digest else None
+
+
 # ─────────────────────────────────────────────────────────────────────
 #  OP-1582 (RT-08) — deployment overlay env lock
 # ─────────────────────────────────────────────────────────────────────
@@ -464,6 +476,8 @@ def build_version_payload(
         "openapi_hash": openapi_hash,
         "db_migration_head": db_migration_head,
         "frontend_built_against_api": frontend_built_against_api,
+        "backend_image_digest": _bundle_image_digest(bundle, "backend"),
+        "frontend_image_digest": _bundle_image_digest(bundle, "frontend"),
     }
 
     # OP-1582 (RT-08) — deployment overlay. The six identity fields are

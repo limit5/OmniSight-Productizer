@@ -24,7 +24,9 @@ Record shape — must satisfy ``JsonlStatusReader.latest``
 
   {"suite": "canary"|"smoke", "status": "green"|"red", "branch": "develop",
    "revision": "<develop tip sha>", "run_id": "...", "timestamp": "...Z",
-   "detail": "..."}
+   "detail": "...", "bundle_id": "...",
+   "backend_digest": "sha256:...", "frontend_digest": "sha256:...",
+   "observed_api_version": {...}}
 
 ``status`` is ``green`` only when the suite fully passed. ``release_milestone
 _checker`` treats anything outside {green, ok, pass, passed, success} as a
@@ -116,6 +118,7 @@ Sleeper = Callable[[float], None]
 Clock = Callable[[], datetime]
 AuditSink = Callable[[str, dict[str, Any]], None]
 SuiteProbe = Callable[[], tuple[bool, str]]
+EvidenceProbe = Callable[[], dict[str, Any]]
 
 
 def utc_now() -> datetime:
@@ -143,9 +146,10 @@ class GateRecord:
     run_id: str
     timestamp: str
     detail: str
+    evidence: dict[str, Any] | None = None
 
     def to_jsonl_obj(self) -> dict[str, Any]:
-        return {
+        obj = {
             "suite": self.suite,
             "status": self.status,
             "branch": BRANCH,
@@ -154,6 +158,9 @@ class GateRecord:
             "timestamp": self.timestamp,
             "detail": self.detail,
         }
+        if self.evidence:
+            obj.update(self.evidence)
+        return obj
 
 
 def build_record(
@@ -164,6 +171,7 @@ def build_record(
     revision: str,
     run_id: str,
     now: datetime,
+    evidence: dict[str, Any] | None = None,
 ) -> GateRecord:
     return GateRecord(
         suite=suite,
@@ -172,6 +180,7 @@ def build_record(
         run_id=run_id,
         timestamp=iso_z(now),
         detail=detail[:2000],
+        evidence=evidence,
     )
 
 
@@ -296,6 +305,47 @@ def http_probe(
     return True, f"{len(paths)} probe(s) OK on {base}"
 
 
+def api_version_evidence(
+    *,
+    base_url: str,
+    timeout: float,
+    opener: HttpOpener,
+) -> dict[str, Any]:
+    """Observe staging ``/api/version`` and extract RT-05d JSONL evidence."""
+    url = base_url.rstrip("/") + "/api/version"
+    status, body = opener(url, timeout)
+    if not (200 <= status < 300):
+        raise RuntimeError(f"/api/version: HTTP {status}")
+    try:
+        observed = json.loads(body)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"/api/version returned invalid JSON: {exc}") from exc
+    if not isinstance(observed, dict):
+        raise RuntimeError("/api/version returned non-object JSON")
+
+    bundle_id = observed.get("bundle_id")
+    backend_digest = observed.get("backend_image_digest")
+    frontend_digest = observed.get("frontend_image_digest")
+    missing = [
+        name for name, value in (
+            ("bundle_id", bundle_id),
+            ("backend_image_digest", backend_digest),
+            ("frontend_image_digest", frontend_digest),
+        )
+        if not isinstance(value, str) or not value
+    ]
+    if missing:
+        raise RuntimeError(
+            "/api/version missing staging evidence field(s): " + ",".join(missing)
+        )
+    return {
+        "bundle_id": bundle_id,
+        "backend_digest": backend_digest,
+        "frontend_digest": frontend_digest,
+        "observed_api_version": observed,
+    }
+
+
 def smoke_probe(
     *,
     base_url: str,
@@ -379,6 +429,7 @@ def run_gate(
     audit_sink: AuditSink = _write_audit,
     clock: Clock = utc_now,
     run_id: str | None = None,
+    evidence_probe: EvidenceProbe | None = None,
 ) -> GateRunResult:
     """Exercise one suite, append the JSONL gate line, write the audit row.
 
@@ -394,8 +445,22 @@ def run_gate(
         ok, detail = probe()
     except Exception as exc:  # noqa: BLE001 — a probe crash is just "red"
         ok, detail = False, f"probe raised {type(exc).__name__}: {exc}"
+    evidence: dict[str, Any] | None = None
+    if evidence_probe is not None:
+        try:
+            evidence = evidence_probe()
+        except Exception as exc:  # noqa: BLE001 — required evidence missing = red
+            ok = False
+            suffix = f"staging evidence failed: {type(exc).__name__}: {exc}"
+            detail = f"{detail}; {suffix}" if detail else suffix
     record = build_record(
-        suite=suite, ok=ok, detail=detail, revision=revision, run_id=rid, now=now,
+        suite=suite,
+        ok=ok,
+        detail=detail,
+        revision=revision,
+        run_id=rid,
+        now=now,
+        evidence=evidence,
     )
     append_jsonl(out_path, record.to_jsonl_obj())
     # §6 — best-effort, after the JSONL write so a DB hiccup never costs the gate.
@@ -434,6 +499,14 @@ def _build_smoke_probe(args: argparse.Namespace) -> SuiteProbe:
         subset=args.smoke_subset,
         timeout=args.smoke_timeout,
         runner=subprocess.run,
+    )
+
+
+def _build_evidence_probe(args: argparse.Namespace) -> EvidenceProbe:
+    return lambda: api_version_evidence(
+        base_url=args.base_url,
+        timeout=args.http_timeout,
+        opener=_default_http_opener,
     )
 
 
@@ -526,6 +599,7 @@ def main(argv: list[str] | None = None) -> int:
         probe=probe,
         out_path=out_path,
         audit_sink=audit_sink,
+        evidence_probe=_build_evidence_probe(args),
     )
     if result.record is not None:
         _emit_status_line(result.record)
