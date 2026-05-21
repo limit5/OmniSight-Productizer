@@ -3218,7 +3218,18 @@ export async function adminPatchTenant(
 
 // ─── Feature flag registry (WP.7.8 operator UI) ───────────────
 
-export type FeatureFlagTier = "debug" | "dogfood" | "preview" | "release" | "runtime"
+export const FEATURE_FLAG_RELEASE_TIERS = [
+  "early_access",
+  "staged",
+  "ga",
+] as const
+export const FEATURE_FLAG_TIERS = [
+  "debug",
+  "dogfood",
+  ...FEATURE_FLAG_RELEASE_TIERS,
+] as const
+export type FeatureFlagReleaseTier = typeof FEATURE_FLAG_RELEASE_TIERS[number]
+export type FeatureFlagTier = typeof FEATURE_FLAG_TIERS[number]
 export type FeatureFlagState = "disabled" | "enabled"
 
 export interface FeatureFlagRow {
@@ -3271,6 +3282,53 @@ export async function patchFeatureFlag(
       body: JSON.stringify(body),
     },
   )
+}
+
+// ─── Effective feature flags (RT-15a public frontend contract) ───
+
+export const PUBLIC_EFFECTIVE_FEATURE_FLAGS = [
+  "ui.release_train.enabled",
+  "ui.new_navigation.enabled",
+] as const
+export type PublicEffectiveFeatureFlag =
+  typeof PUBLIC_EFFECTIVE_FEATURE_FLAGS[number]
+export type EffectiveFeatureFlags = Record<PublicEffectiveFeatureFlag, boolean>
+
+export const DEFAULT_EFFECTIVE_FEATURE_FLAGS: EffectiveFeatureFlags =
+  Object.freeze(
+    PUBLIC_EFFECTIVE_FEATURE_FLAGS.reduce((acc, name) => {
+      acc[name] = false
+      return acc
+    }, {} as EffectiveFeatureFlags),
+  )
+
+export interface EffectiveFeatureFlagsResponse {
+  flags?: Record<string, unknown>
+}
+
+export function normalizeEffectiveFeatureFlags(
+  payload: EffectiveFeatureFlagsResponse | null | undefined,
+): EffectiveFeatureFlags {
+  const flags = payload?.flags
+  const out: EffectiveFeatureFlags = { ...DEFAULT_EFFECTIVE_FEATURE_FLAGS }
+  if (!flags || typeof flags !== "object") return out
+  for (const name of PUBLIC_EFFECTIVE_FEATURE_FLAGS) {
+    out[name] = flags[name] === true
+  }
+  return out
+}
+
+export async function fetchEffectiveFeatureFlags(): Promise<EffectiveFeatureFlags> {
+  try {
+    const res = await request<EffectiveFeatureFlagsResponse>(
+      "/feature-flags/effective",
+      { cache: "no-store" },
+    )
+    return normalizeEffectiveFeatureFlags(res)
+  } catch (exc) {
+    console.warn("[api] effective feature flags failed closed", exc)
+    return { ...DEFAULT_EFFECTIVE_FEATURE_FLAGS }
+  }
 }
 
 // ─── Batch-merge candidate dashboard (OP-735 R5) ─────────────────

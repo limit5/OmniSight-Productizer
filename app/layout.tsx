@@ -3,6 +3,7 @@ import { headers } from 'next/headers'
 import { Orbitron, Fira_Code } from 'next/font/google'
 import { Analytics } from '@vercel/analytics/next'
 import { Providers } from '@/components/providers'
+import { loadInitialEffectiveFeatureFlags } from '@/lib/feature-flags-ssr'
 import './globals.css'
 
 const orbitron = Orbitron({ 
@@ -47,11 +48,12 @@ export default async function RootLayout({
 }>) {
   const hdrs = await headers()
   const nonce = hdrs.get("x-nonce") ?? ""
+  const initialFeatureFlags = await loadInitialEffectiveFeatureFlags(hdrs)
 
   return (
     <html lang="en" className="dark">
       <body className={`${orbitron.variable} ${firaCode.variable} font-sans antialiased`}>
-        <Providers>
+        <Providers initialFeatureFlags={initialFeatureFlags}>
           {children}
         </Providers>
         {/* @ts-expect-error Vercel Analytics nonce prop types lag behind runtime */}

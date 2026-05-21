@@ -38,14 +38,15 @@ import {
   listFeatureFlags,
   patchFeatureFlag,
   type FeatureFlagRow,
+  type FeatureFlagTier,
 } from "@/lib/api"
 
-const TIER_LABELS: Record<string, string> = {
+const TIER_LABELS: Record<FeatureFlagTier, string> = {
   debug: "DEBUG",
   dogfood: "DOGFOOD",
-  preview: "PREVIEW",
-  release: "RELEASE",
-  runtime: "RUNTIME",
+  early_access: "EARLY ACCESS",
+  staged: "STAGED",
+  ga: "GA",
 }
 
 function clampPct(value: number): number {
@@ -120,7 +121,7 @@ export function FeatureFlagsPanel({
   }, [])
 
   useEffect(() => {
-    void refresh()
+    void refresh() // eslint-disable-line react-hooks/set-state-in-effect -- fetch-on-mount populates state from network
   }, [refresh])
 
   const applyPatch = useCallback(

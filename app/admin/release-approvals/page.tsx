@@ -12,6 +12,7 @@ import Link from "next/link"
 import { ArrowLeft, ChevronRight, ShieldCheck } from "lucide-react"
 
 import { ReleaseApprovalsPanel } from "@/components/omnisight/admin/ReleaseApprovalsPanel"
+import { FeatureGate } from "@/lib/feature-flags-context"
 
 export default function AdminReleaseApprovalsPage() {
   return (
@@ -43,7 +44,9 @@ export default function AdminReleaseApprovalsPage() {
             non-ai-reviewer human group may approve or abort.
           </p>
         </header>
-        <ReleaseApprovalsPanel />
+        <FeatureGate flag="ui.release_train.enabled">
+          <ReleaseApprovalsPanel />
+        </FeatureGate>
       </div>
     </main>
   )

@@ -6,16 +6,18 @@ import { I18nProvider } from "@/lib/i18n/context"
 import { AuthProvider } from "@/lib/auth-context"
 import { TenantProvider } from "@/lib/tenant-context"
 import { ProjectProvider } from "@/lib/project-context"
+import { FeatureFlagsProvider } from "@/lib/feature-flags-context"
 import { StorageBridge } from "@/components/storage-bridge"
 import { ApiErrorToastCenter } from "@/components/omnisight/api-error-toast-center"
 import { Conflict409ToastCenter } from "@/components/omnisight/conflict-409-toast-center"
 import { DraftSyncToastCenter } from "@/components/omnisight/draft-sync-toast-center"
 import { InstallProgressDrawer } from "@/components/omnisight/install-progress-drawer"
 import { useInstallJobs } from "@/hooks/use-install-jobs"
-import { cancelInstallJob } from "@/lib/api"
+import { cancelInstallJob, type EffectiveFeatureFlags } from "@/lib/api"
 
 interface ProvidersProps {
   children: React.ReactNode
+  initialFeatureFlags?: EffectiveFeatureFlags | null
 }
 
 // BS.7.4: thin wrapper that calls ``useInstallJobs()`` — keeps the
@@ -61,23 +63,25 @@ function InstallProgressDrawerLive() {
   return <InstallProgressDrawer jobs={jobs} onCancel={handleCancel} />
 }
 
-export function Providers({ children }: ProvidersProps) {
+export function Providers({ children, initialFeatureFlags }: ProvidersProps) {
   return (
     <I18nProvider>
       <AuthProvider>
         <TenantProvider>
           <ProjectProvider>
-            <StorageBridge />
-            {children}
-            <ApiErrorToastCenter />
-            <Conflict409ToastCenter />
-            <DraftSyncToastCenter />
-            {/* BS.7.4: bottom-right install-progress drawer wired to
-             *  the live ``installer_progress`` SSE channel via
-             *  ``useInstallJobs()``. The drawer filters in-flight
-             *  states internally so terminal jobs drop off without
-             *  this provider having to GC them. */}
-            <InstallProgressDrawerLive />
+            <FeatureFlagsProvider initialFlags={initialFeatureFlags}>
+              <StorageBridge />
+              {children}
+              <ApiErrorToastCenter />
+              <Conflict409ToastCenter />
+              <DraftSyncToastCenter />
+              {/* BS.7.4: bottom-right install-progress drawer wired to
+               *  the live ``installer_progress`` SSE channel via
+               *  ``useInstallJobs()``. The drawer filters in-flight
+               *  states internally so terminal jobs drop off without
+               *  this provider having to GC them. */}
+              <InstallProgressDrawerLive />
+            </FeatureFlagsProvider>
           </ProjectProvider>
         </TenantProvider>
       </AuthProvider>
