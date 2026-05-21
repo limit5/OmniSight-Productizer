@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Iterable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -251,10 +252,146 @@ def _load_image_manifest_db_head(path: Path = _IMAGE_MANIFEST_PATH) -> str | Non
     return value if isinstance(value, str) else None
 
 
+# ─────────────────────────────────────────────────────────────────────
+#  OP-1582 (RT-08) — deployment overlay env lock
+# ─────────────────────────────────────────────────────────────────────
+# The deploy/promote step writes a lock file (env-file format) carrying the
+# running deployment's identity: the build git sha/ref, the promoted image
+# tag, the backend+frontend digest PAIR (RT-21), and the promotion audit id.
+# Per ADR-0040 RT-08-pre the container reads this lock ONCE AT STARTUP; the
+# cached snapshot is served on ``/api/version`` and gates ``/readyz``. Read-
+# before-start is deliberate: deploys always rolling-restart, so "needs a
+# restart to update" is not a limitation, and it avoids per-request disk I/O
+# and cache-invalidation failure modes. Fail-closed — a deployed runtime that
+# starts without (or with an incomplete) lock must not advertise readiness, so
+# the deploy gate catches it (see ``backend.routers.health._check_deploy_overlay``).
+DEPLOY_OVERLAY_LOCK_PATH = Path(
+    os.environ.get("OMNISIGHT_DEPLOY_OVERLAY_LOCK", "/etc/omnisight/deploy-overlay.lock")
+)
+
+# Env-lock variable name → ``/api/version`` overlay field name. The deploy
+# writer emits these as ``KEY=value`` lines (the same file the prod/staging
+# compose ``env_file:`` sources, hence "env lock"). Every field is required:
+# a partial lock means the writer is broken and we must not advertise a
+# half-known identity, so a missing/empty value fails the overlay closed.
+_OVERLAY_LOCK_FIELDS: dict[str, str] = {
+    "OMNISIGHT_BUILD_GIT_SHA": "build_git_sha",
+    "OMNISIGHT_BUILD_GIT_REF": "build_git_ref",
+    "OMNISIGHT_DEPLOYED_TAG": "deployed_tag",
+    "OMNISIGHT_DEPLOYED_DIGEST_BACKEND": "deployed_digest_backend",
+    "OMNISIGHT_DEPLOYED_DIGEST_FRONTEND": "deployed_digest_frontend",
+    "OMNISIGHT_PROMOTION_AUDIT_ID": "promotion_audit_id",
+}
+
+#: The overlay payload fields, in serve order. Always present on
+#: ``/api/version`` (as ``None`` when no valid lock was read) so the contract
+#: shape is stable across dev and deployed images.
+OVERLAY_FIELDS: tuple[str, ...] = tuple(_OVERLAY_LOCK_FIELDS.values())
+
+# Sentinel for "not yet loaded" so the cache can distinguish that from
+# "loaded, but no valid lock present" (``None``).
+_OVERLAY_UNSET = object()
+_deploy_overlay_cache: object = _OVERLAY_UNSET
+
+
+def _parse_env_lock(text: str) -> dict[str, str]:
+    """Parse an env-file (``KEY=value``) lock into a plain dict.
+
+    Tolerant of blank lines, ``#`` comments, an optional ``export`` prefix,
+    and single/double-quoted values — the shapes a shell-written deploy lock
+    or a compose ``env_file:`` can take. Unknown keys are kept; the caller
+    selects the ones it cares about.
+    """
+    out: dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        if key:
+            out[key] = value
+    return out
+
+
+def load_deploy_overlay(path: Path | None = None) -> dict | None:
+    """Read the deploy-written env lock and return the overlay, or ``None``.
+
+    Returns ``None`` (the fail-closed marker) when the lock is absent,
+    unreadable, or incomplete — i.e. any of the six required identity fields
+    is missing or empty. Otherwise returns a dict keyed by the
+    :data:`OVERLAY_FIELDS` names. Does NOT cache — :func:`init_deploy_overlay`
+    owns the read-once-at-startup cache.
+    """
+    if path is None:
+        path = DEPLOY_OVERLAY_LOCK_PATH
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _log.warning("Failed to read deploy overlay lock at %s", path)
+        return None
+
+    env = _parse_env_lock(text)
+    overlay: dict = {}
+    for env_key, field in _OVERLAY_LOCK_FIELDS.items():
+        value = env.get(env_key, "").strip()
+        overlay[field] = value or None
+
+    if any(overlay.get(field) is None for field in OVERLAY_FIELDS):
+        missing = [f for f in OVERLAY_FIELDS if overlay.get(f) is None]
+        _log.warning(
+            "deploy overlay lock at %s is incomplete; missing %s",
+            path,
+            ",".join(missing),
+        )
+        return None
+    return overlay
+
+
+def init_deploy_overlay(path: Path | None = None) -> dict | None:
+    """Read the env lock ONCE and cache the snapshot (called at startup).
+
+    Subsequent reads go through :func:`get_deploy_overlay`, which returns the
+    cached snapshot rather than re-reading the file. Calling this again
+    refreshes the cache (used by tests via :func:`reset_deploy_overlay_cache`
+    + this function with an injected ``path``).
+    """
+    global _deploy_overlay_cache
+    _deploy_overlay_cache = load_deploy_overlay(path)
+    return _deploy_overlay_cache  # type: ignore[return-value]
+
+
+def get_deploy_overlay() -> dict | None:
+    """Return the cached deploy overlay, loading it on first access.
+
+    ``None`` means no valid lock was found at startup — the fail-closed
+    marker the ``/readyz`` overlay gate keys on.
+    """
+    if _deploy_overlay_cache is _OVERLAY_UNSET:
+        return init_deploy_overlay()
+    return _deploy_overlay_cache  # type: ignore[return-value]
+
+
+def reset_deploy_overlay_cache() -> None:
+    """Test helper — drop the cached overlay so the next access re-reads."""
+    global _deploy_overlay_cache
+    _deploy_overlay_cache = _OVERLAY_UNSET
+
+
 def build_version_payload(
     *,
     bundle_path: Path | None = None,
     image_manifest_path: Path | None = None,
+    overlay: dict | None | object = _OVERLAY_UNSET,
 ) -> dict:
     """Assemble the JSON body returned by ``GET /api/version``.
 
@@ -263,11 +400,17 @@ def build_version_payload(
     fixture-based testing. Defaults resolve against the module-level
     constants at call time, so tests can monkeypatch ``av.BUNDLE_MANIFEST_PATH``
     / ``av._IMAGE_MANIFEST_PATH`` and the route picks up the change.
+
+    ``overlay`` defaults to the cached deploy overlay snapshot
+    (:func:`get_deploy_overlay`); tests pass an explicit dict / ``None`` to
+    drive the RT-08 overlay fields without touching the cache.
     """
     if bundle_path is None:
         bundle_path = BUNDLE_MANIFEST_PATH
     if image_manifest_path is None:
         image_manifest_path = _IMAGE_MANIFEST_PATH
+    if overlay is _OVERLAY_UNSET:
+        overlay = get_deploy_overlay()
     bundle = _load_bundle_manifest(bundle_path)
     warning: str | None = None
     if bundle is None:
@@ -322,6 +465,17 @@ def build_version_payload(
         "db_migration_head": db_migration_head,
         "frontend_built_against_api": frontend_built_against_api,
     }
+
+    # OP-1582 (RT-08) — deployment overlay. The six identity fields are
+    # always present (None when no valid lock was read at startup) so the
+    # contract shape is stable across dev images and promoted deployments.
+    # ``deploy_overlay_present`` lets a consumer distinguish "dev image, no
+    # lock" from "lock read" without inspecting every field.
+    overlay_fields = overlay if isinstance(overlay, dict) else {}
+    for field in OVERLAY_FIELDS:
+        payload[field] = overlay_fields.get(field)
+    payload["deploy_overlay_present"] = isinstance(overlay, dict)
+
     if warning is not None:
         payload["warning"] = warning
     return payload
@@ -337,7 +491,13 @@ def install_version_metadata_endpoint(app: FastAPI) -> None:
     avoid disk I/O per request. ``build_version_payload`` swallows
     missing/malformed bundle files and resolves to the dev fallback so
     startup never crashes on an image that wasn't built with V1c bake.
+
+    OP-1582 (RT-08) — the deploy overlay env lock is also read here, once,
+    at install/startup time (``init_deploy_overlay``). The cached snapshot
+    feeds both the ``/api/version`` payload below and the ``/readyz`` overlay
+    gate, so both surfaces serve the identical read-before-start identity.
     """
+    init_deploy_overlay()
     cached_payload = build_version_payload()
 
     @app.get("/api/version", tags=["api-version"], include_in_schema=False)
