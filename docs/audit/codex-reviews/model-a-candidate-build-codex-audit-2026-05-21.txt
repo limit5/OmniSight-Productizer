@@ -1,0 +1,445 @@
+# Codex audit — Model A candidate-build -> validate -> promote-by-retag
+
+Date: 2026-05-21
+Reviewer: Codex / GPT-5.5
+Scope: docs/codex-review-prompts/2026-05-21-model-a-candidate-build-audit-prompt.md
+
+Executive stance
+
+Model A is directionally cleaner than Model B because it removes the rc/final version split and makes the validated unit a commit digest/image digest set. But Model A as drafted is not yet simpler to implement in this repository. The current system is still tag-triggered, version-keyed, main/release-cut shaped, and operator-runbook shaped around JIRA fixVersion + RELEASE-vX.Y.Z META. A-ondemand only stays simpler if it uses a real API-triggered candidate pipeline that builds an explicit full develop SHA without creating any git tag. If it uses disposable cand/<sha> tags, it converges to Model B's tag-triggered candidate system with a different spelling and keeps the CI rebuild-on-tag hazard.
+
+The largest day-to-day operational risk is not whether digest retagging can work. It can. The risk is that operators will be asked to reason across three identities at once: build commit sha, final image tag, and compose-pinned digest, while /api/version currently exposes only bundle_id/contract fields and not git_sha, deployed_tag, or deployed_digest. In a 3am incident, Model A is survivable only with a mandatory release-audit/overlay tool that answers: "prod vX.Y.Z == git_sha S == backend/frontend/bridge digests D*" from one command and one runtime endpoint.
+
+## A. Candidate-build trigger reality
+
+A1. HIGH — Current GitLab CI cannot build a non-tag develop SHA at all.
+
+Evidence:
+- The workflow only admits tags matching `^v.*`; everything else is `when: never`: .gitlab-ci.yml:1, .gitlab-ci.yml:3, .gitlab-ci.yml:4.
+- The shared job rule repeats the same `CI_COMMIT_TAG =~ /^v.*/` condition: .gitlab-ci.yml:23, .gitlab-ci.yml:25.
+- The build uses `CI_COMMIT_TAG` as the version label and image tag: .gitlab-ci.yml:114, .gitlab-ci.yml:118.
+- The only SHA tag produced today is short-SHA, derived from `CI_COMMIT_SHORT_SHA`: .gitlab-ci.yml:21, .gitlab-ci.yml:119.
+- Staging currently deploys the full develop tip SHA as an image tag: scripts/sync_staging_to_develop.sh:178, scripts/sync_staging_to_develop.sh:190, scripts/sync_staging_to_develop.sh:199, scripts/sync_staging_to_develop.sh:255.
+
+Problem:
+Model A's required `backend/frontend/bridge:sha-<fullsha>` artifacts do not exist today. GitLab does not run for develop branches or arbitrary SHAs, and the image tag emitted by CI is `sha-${CI_COMMIT_SHORT_SHA}`, not `sha-<fullsha>`. The existing staging sync asks for a raw full SHA tag that the pipeline never builds.
+
+Why it bites:
+The first attempted candidate validation either fails to pull, silently validates GHCR/latest via staging defaults, or forces an operator to cut some tag just to materialize images. That is exactly the circular dependency ADR-0040 identified: staging needs an image before the final release identity exists, but current CI only builds after a version tag exists.
+
+Fix / decision needed:
+Before Model A implementation, choose one candidate trigger contract and make CI, staging, and audit all speak it. The least chaotic option is an API-triggered/manual candidate pipeline with explicit variables such as `CANDIDATE_SHA=<40hex>` and `CANDIDATE_BUILD=1`, whose first step verifies the SHA is reachable from `origin/develop`, checks out that exact SHA into the Docker build context, and pushes only `sha-<fullsha>` plus digest signatures. Do not use `CI_COMMIT_TAG` for candidate identity.
+
+A2. HIGH — Branch pipelines build tips, not arbitrary historical SHAs, unless the job explicitly checks out the requested SHA.
+
+Evidence:
+- The design wants the scheduler to pick a green develop SHA that may not be tip: docs/design/2026-05-21-model-a-candidate-build-release-train.md:13, docs/design/2026-05-21-model-a-candidate-build-release-train.md:15.
+- Current CI build context is whatever GitLab checked out for the pipeline; jobs use `CI_COMMIT_SHA`/`CI_COMMIT_TAG` directly: .gitlab-ci.yml:63, .gitlab-ci.yml:64, .gitlab-ci.yml:113, .gitlab-ci.yml:114.
+- `prepare-bundle` bakes `refs/tags/${CI_COMMIT_TAG}` into bundle.json: .gitlab-ci.yml:63, .gitlab-ci.yml:64, .gitlab-ci.yml:74.
+
+Problem:
+Adding a branch rule for develop solves only A-every or "build current tip". It does not solve "build a specific older green SHA" unless the build job treats `CANDIDATE_SHA` as the source of truth and rewrites checkout/build metadata accordingly. A branch pipeline triggered with `ref=develop` will naturally build the branch's current commit, not a previously selected SHA, if the branch advances between selection and pipeline creation.
+
+Why it bites:
+The scheduler can pick SHA S, but the pipeline can build S+N. If staging later records only "develop" or a short sha, the mistake is hard to notice until prod and audit disagree.
+
+Fix / decision needed:
+If using branch/API trigger, add fail-closed checks: `git fetch origin develop`, `git merge-base --is-ancestor $CANDIDATE_SHA origin/develop`, `git checkout --detach $CANDIDATE_SHA`, set `GIT_SHA=$CANDIDATE_SHA`, set `GIT_REF=refs/heads/develop@${CANDIDATE_SHA}`, and tag images `sha-${CANDIDATE_SHA}`. Also set a GitLab `resource_group`/concurrency guard so two candidate builds for adjacent SHAs do not overwrite shared artifacts or mutable aliases.
+
+A3. HIGH — Disposable `cand/<sha>` tags recreate Model B's tag-triggered candidate hazard.
+
+Evidence:
+- Current workflow admits tags by regex and runs all build/sign/sbom/attest/audit jobs for matching tags: .gitlab-ci.yml:1, .gitlab-ci.yml:3, .gitlab-ci.yml:6.
+- Build labels and image tags are tied to the tag name: .gitlab-ci.yml:114, .gitlab-ci.yml:118.
+- ADR-0040's baseline says a `v*` git tag triggers build/sign/SBOM/attest/bundle: docs/adr/ADR-0040-single-trunk-release-train.md:34.
+- The prior Model B audit found final git-tag semantics conflict with no-rebuild when tags trigger CI: docs/audit/codex-reviews/model-b-rc-promote-codex-audit-2026-05-21.txt:7.
+
+Problem:
+A `cand/<sha>` git tag would be "not a release identity" in prose, but operationally it is still a registry-build identity that triggers CI from a git ref. It creates another durable/movable object with permissions, retention, and rebuild semantics. If the implementation broadens workflow rules to include `cand/*`, the pipeline must carefully avoid treating it as a release and avoid pushing `latest`.
+
+Why it bites:
+Operators and automation now need to distinguish final git tags, candidate git tags, candidate image tags, and final image tags. A tag move or duplicate candidate tag can rebuild a different artifact for the same candidate name unless protected and immutable. That is Model B's rc-tag hazard with `cand/` substituted for `-rc`.
+
+Fix / decision needed:
+Do not use `cand/<sha>` unless GitLab cannot provide the API-triggered candidate pipeline. If it is used, make it explicitly build-only, protected, immutable, non-semver, blocked from prod deploy, and excluded from final release semantics. The design should then admit that A-ondemand has become a Model-B-like candidate tag flow, just without early semver allocation.
+
+A4. MED — A-every is conceptually simplest but expensive and noisy with current build shape.
+
+Evidence:
+- The build matrix builds backend, frontend, and bridge: .gitlab-ci.yml:37, .gitlab-ci.yml:40, .gitlab-ci.yml:42, .gitlab-ci.yml:44.
+- Each image build has a 90 minute timeout: .gitlab-ci.yml:89, .gitlab-ci.yml:98.
+- Build/sign/SBOM/attestation/audit artifacts retain for 90 days: .gitlab-ci.yml:81, .gitlab-ci.yml:87, .gitlab-ci.yml:167, .gitlab-ci.yml:171, .gitlab-ci.yml:201, .gitlab-ci.yml:205, .gitlab-ci.yml:288, .gitlab-ci.yml:292.
+- Current CI also pushes `latest` for every admitted build: .gitlab-ci.yml:120.
+
+Problem:
+Building every develop commit would give clean `sha-<fullsha>` artifacts but creates three image manifests plus signature/SBOM/attestation artifacts per commit. In this codebase with AI runners and frequent merges, that is likely high registry/CI churn.
+
+Why it bites:
+After six months, the registry becomes a landfill of unpromoted SHAs unless GitLab CR retention is implemented first. Worse, current `latest` publication means every candidate build can mutate a default deploy target.
+
+Fix / decision needed:
+If A-every is chosen, remove `latest`, use full-SHA tags, add GitLab CR retention before enabling it, and make staging/prod fail closed on explicit digest refs. Otherwise choose API-triggered A-ondemand.
+
+## B. Two-namespace operator confusion
+
+B1. HIGH — `/api/version` does not expose the fields Model A needs operators to reconcile sha, final tag, and digest.
+
+Evidence:
+- `emit_bundle_json.sh` does create `git_ref` and `git_sha` in bundle.json: scripts/emit_bundle_json.sh:109, scripts/emit_bundle_json.sh:111, scripts/emit_bundle_json.sh:112.
+- `build_version_payload()` returns `bundle_id`, API fields, OpenAPI hash, DB migration head, and frontend contract, but not `git_ref` or `git_sha`: backend/api_versioning.py:307, backend/api_versioning.py:318, backend/api_versioning.py:319, backend/api_versioning.py:324.
+- `/api/version` caches that payload at startup: backend/api_versioning.py:330, backend/api_versioning.py:341, backend/api_versioning.py:343, backend/api_versioning.py:345.
+- The design explicitly needs `git_sha` plus deployment overlay (`deployed_tag`/`deployed_digest`) in `/api/version`: docs/design/2026-05-21-model-a-candidate-build-release-train.md:56.
+
+Problem:
+Model A says the baked bundle reports the sha and final version is overlay metadata. The runtime endpoint currently exposes neither the build sha nor the overlay. In a real incident, an operator seeing digest D in compose cannot query the app and learn "this is v0.6.0 built from sha S".
+
+Why it bites in practice:
+At 3am, prod compose may be pinned to `backend@sha256:D`, `/api/version` may show only `bundle_id=develop+date.shaabcdef0` or a future sha-flavored id, and release notes are named `v0.6.0`. Without a single source of truth, the operator must cross-check GitLab registry, local env lock files, JIRA META, and logs. Model A's two namespaces are manageable only if the toolchain makes the mapping obvious.
+
+Fix / decision needed:
+Add a deployment overlay read path to `/api/version` and `/readyz`: `build_git_sha`, `build_git_ref`, `deployed_tag`, `deployed_digest_backend`, `deployed_digest_frontend`, `deployed_digest_bridge`, `promotion_audit_id`. Keep baked bundle immutable; write overlay from a signed/digest-verified lock file or release_audit row at deploy time.
+
+B2. HIGH — Compose defaults and staging registry mismatch can make the two-namespace story actively misleading.
+
+Evidence:
+- Prod compose requires `OMNISIGHT_REGISTRY` but defaults `OMNISIGHT_IMAGE_TAG` to `latest`: docker-compose.prod.yml:9, docker-compose.prod.yml:11, docker-compose.prod.yml:33, docker-compose.prod.yml:35, docker-compose.prod.yml:152, docker-compose.prod.yml:264, docker-compose.prod.yml:416.
+- Staging compose still uses GHCR and `latest`: deploy/staging/docker-compose.yml:79, deploy/staging/docker-compose.yml:80, deploy/staging/docker-compose.yml:128, deploy/staging/docker-compose.yml:129, deploy/staging/docker-compose.yml:220, deploy/staging/docker-compose.yml:221.
+- Staging uses `pull_policy: missing`, not always/digest-pinned: deploy/staging/docker-compose.yml:80, deploy/staging/docker-compose.yml:81, deploy/staging/docker-compose.yml:129, deploy/staging/docker-compose.yml:130, deploy/staging/docker-compose.yml:221, deploy/staging/docker-compose.yml:222.
+- CI publishes to GitLab CR `${CI_REGISTRY_IMAGE}/${IMAGE_NAME}`: .gitlab-ci.yml:102, .gitlab-ci.yml:118, .gitlab-ci.yml:119.
+
+Problem:
+Model A assumes staging validates GitLab CR digest set `{Db,Df,Dbr}` and prod deploys those same digests via final tag/digest. Existing staging defaults validate GHCR/latest; prod defaults still allow latest. This is not just a correctness issue; it destroys operator trust in the identity model.
+
+Why it bites:
+An operator can see "candidate sha passed staging" while staging actually ran a cached GHCR image. Later prod runs a GitLab CR digest. The release audit then says the system validated one thing and shipped another.
+
+Fix / decision needed:
+Make staging and prod use the same GitLab CR namespace and fail closed on missing image ref. Prefer lock-file/digest refs (`backend@sha256:...`) over tag env vars. If tags remain in compose, require `OMNISIGHT_IMAGE_TAG:?image tag required` and `pull_policy: always`, followed by digest equality verification.
+
+B3. MED — Model A is less confusing than Model B only after tooling; without tooling, it is more confusing during incidents.
+
+Evidence:
+- Model A creates `sha-<fullsha>` candidate images and final `vX.Y.Z` tags for the same digest set: docs/design/2026-05-21-model-a-candidate-build-release-train.md:15, docs/design/2026-05-21-model-a-candidate-build-release-train.md:24, docs/design/2026-05-21-model-a-candidate-build-release-train.md:25.
+- The prior Model B issue was that promoted images would forever report rc-flavored build identity: docs/audit/codex-reviews/model-b-rc-promote-codex-audit-2026-05-21.txt:39, docs/audit/codex-reviews/model-b-rc-promote-codex-audit-2026-05-21.txt:41.
+- Model A avoids rc names but still has build identity distinct from final deployment identity: docs/design/2026-05-21-model-a-candidate-build-release-train.md:56.
+
+Problem:
+Model A avoids seeing `v0.6.0-rc1` in prod, which is genuinely better than Model B. But it replaces that with "prod v0.6.0 reports sha S". That is acceptable for engineers, not for on-call unless the overlay is first-class.
+
+Why it bites:
+Rollback and incident questions are naturally version-shaped: "are we on v0.6.0 or v0.5.9?" Runtime evidence under Model A will be sha-shaped and digest-shaped. Without a mapping command, every incident starts with identity archaeology.
+
+Fix / decision needed:
+Ship an operator command/runbook before enabling Model A, for example `scripts/release_train_status.py --env prod`, that reads runtime `/api/version`, compose refs, registry tag resolution, and release_audit, then prints one joined record. Treat this as mandatory, not nice-to-have.
+
+## C. Version-assigned-at-promote consequences
+
+C1. HIGH — The existing release-planning workflow requires the version before promote.
+
+Evidence:
+- The release conductor state machine is explicitly per-version and one row per `RELEASE-vX.Y.Z`: backend/release_conductor/state_machine.py:1, backend/release_conductor/state_machine.py:3, backend/release_conductor/state_machine.py:11, backend/release_conductor/state_machine.py:12.
+- `create()` refuses empty version and inserts `release_id` plus `version`: backend/release_conductor/state_machine.py:186, backend/release_conductor/state_machine.py:197, backend/release_conductor/state_machine.py:211, backend/release_conductor/state_machine.py:219.
+- The runbook says a production release is one `RELEASE-vX.Y.Z` META plus children, and the pre-flight first identifies the release version: docs/operations/release-conductor-runbook.md:15, docs/operations/release-conductor-runbook.md:27, docs/operations/release-conductor-runbook.md:35, docs/operations/release-conductor-runbook.md:36.
+- The cron enumerates SemVer JIRA fixVersions before creating META: scripts/release_conductor_cron.sh:6, scripts/release_conductor_cron.sh:17, scripts/release_conductor_cron.sh:94, scripts/release_conductor_cron.sh:121.
+
+Problem:
+Model A says the candidate has no version and final version is allocated only after staging passes. The existing planning system says the release exists as `RELEASE-vX.Y.Z` before it enters the 13-stage process. Those assumptions conflict.
+
+Why it bites:
+Before promote, operators need to know "what are we shipping", which blockers apply, which release notes are being prepared, and which JIRA META owns exceptions. In Model A, the candidate is `sha-S` and there is no `vX.Y.Z` yet, so the current scripts either cannot create the release row/META or must create a temporary sha-keyed planning object that does not match the final version.
+
+Fix / decision needed:
+Either revise Model A to reserve the final version before candidate validation while still not using a versioned git/image build tag, or add a new candidate-planning identity (`CANDIDATE-<sha>` or `TRAIN-YYYYMMDD`) and implement a first-class rename/link to final `RELEASE-vX.Y.Z` at promote. The latter is more work and adds day-to-day confusion.
+
+C2. HIGH — Changelog and release notes are fixVersion-keyed, so "no version until promote" breaks pre-promotion release review.
+
+Evidence:
+- Release notes fail if the requested JIRA fixVersion does not exist: scripts/release_notes_from_milestone.py:26, scripts/release_notes_from_milestone.py:92, scripts/release_notes_from_milestone.py:100, scripts/release_notes_from_milestone.py:325, scripts/release_notes_from_milestone.py:327.
+- Release notes query tickets by exact fixVersion: scripts/release_notes_from_milestone.py:115, scripts/release_notes_from_milestone.py:116, scripts/release_notes_from_milestone.py:118.
+- Changelog generation defaults milestone to version and queries exact fixVersion: scripts/auto_changelog.py:7, scripts/auto_changelog.py:59, scripts/auto_changelog.py:63, scripts/auto_changelog.py:65, scripts/auto_changelog.py:157, scripts/auto_changelog.py:159.
+
+Problem:
+The planning artifacts are not just labels after the fact; they are used to decide readiness and produce release notes before shipping. If the final version is unknown until promote, operators cannot run the existing release-notes/changelog path honestly.
+
+Why it bites:
+A candidate can pass staging, then at promote time the allocator picks v0.6.0 and only then discovers JIRA fixVersion v0.6.0 is missing, tickets are unassigned, release notes fail, or blockers exist under a different milestone. That is too late.
+
+Fix / decision needed:
+Reserve the version before release planning begins, or decouple planning from final semver with an explicit candidate milestone and implement tooling to atomically move/alias all tickets and notes at promote. For a small operator team, early version reservation is far less chaotic.
+
+C3. MED — Model A removes rc allocator races but still needs an atomic final allocator.
+
+Evidence:
+- Model A says the allocator assigns final version only at promote and must be monotonic/atomic/never move existing tags: docs/design/2026-05-21-model-a-candidate-build-release-train.md:62, docs/design/2026-05-21-model-a-candidate-build-release-train.md:63.
+- Existing `auto_tag_release.py` is main-head/final-tag/release-branch automation, not a final-image allocator: backend/agents/auto_tag_release.py:1, backend/agents/auto_tag_release.py:5, backend/agents/auto_tag_release.py:206, backend/agents/auto_tag_release.py:207, backend/agents/auto_tag_release.py:224.
+- The state machine has optimistic transitions but no fields for candidate SHA, digest set, or final tag claim: backend/release_conductor/state_machine.py:211, backend/release_conductor/state_machine.py:212, backend/release_conductor/state_machine.py:236, backend/release_conductor/state_machine.py:317.
+
+Problem:
+Model A correctly avoids rc numbering. It does not avoid the need to serialize final version allocation and promotion. Existing code has no table/ref lock that says "candidate sha S owns final vX.Y.Z and digest set D".
+
+Why it bites:
+Two scheduler runs can both observe staging-passed candidates and allocate the same next version unless one durable source of truth exists. Retries can also partially retag one or two images and leave the final version half-created.
+
+Fix / decision needed:
+Implement a small release_train table or git ref lock before registry writes. It should track candidate_sha, candidate_build_id, per-image source digests, reserved final version, actor, state, row_version, and final digest equality checks. Do not try to retrofit this into `auto_tag_release.py`.
+
+## D. Promote-by-retag mechanics + provenance
+
+D1. MED — Digest retagging is technically present, but the helper is not production-ready for Model A.
+
+Evidence:
+- `promote_image_bundle.py` retags by digest with `docker buildx imagetools create -t target source@digest`: scripts/promote_image_bundle.py:126, scripts/promote_image_bundle.py:132, scripts/promote_image_bundle.py:134, scripts/promote_image_bundle.py:135.
+- Its default registry prefix is GHCR and default repository names are `omnisight-{name}`: scripts/promote_image_bundle.py:25, scripts/promote_image_bundle.py:81, scripts/promote_image_bundle.py:85.
+- GitLab CI publishes `{backend,frontend,bridge}` under `${CI_REGISTRY_IMAGE}`: .gitlab-ci.yml:102, .gitlab-ci.yml:118, .gitlab-ci.yml:119.
+- It verifies cosign only on `promotion.source_ref`, not the final target tag resolving to the same digest: scripts/promote_image_bundle.py:142, scripts/promote_image_bundle.py:144, scripts/promote_image_bundle.py:279, scripts/promote_image_bundle.py:284.
+- It signs an attestation for only `promotions[0]`: scripts/promote_image_bundle.py:288, scripts/promote_image_bundle.py:289.
+
+Problem:
+The current helper demonstrates the primitive, not the release mechanism. It needs GitLab CR naming, all-three-image target verification, target digest equality checks, and per-image attestations.
+
+Why it bites:
+A promotion can retag backend, fail on frontend, still write a partial audit/lock, or verify only that the source digest was signed while the final tag points elsewhere. In a multi-image app, partial promotion is operationally worse than no promotion.
+
+Fix / decision needed:
+Build a dedicated promote job that is idempotent and transactional at the bundle level: resolve expected source digests, retag backend/frontend/bridge, re-resolve each final tag, compare to expected digest, verify existing digest signatures, emit per-image promotion attestations, then write one bundle audit row. If any step fails, mark the release_train row failed and do not deploy prod.
+
+D2. HIGH — Signing/trust-mode claims are inconsistent; retagging preserves digest signatures but the verifier story is not coherent.
+
+Evidence:
+- CI signs by digest with `cosign sign --key "$COSIGN_KEY"`: .gitlab-ci.yml:143, .gitlab-ci.yml:146, .gitlab-ci.yml:147.
+- CI verifies with `deploy/cosign/cosign.pub`: .gitlab-ci.yml:149, .gitlab-ci.yml:150.
+- Audit JSON claims `signed_with: "cosign-keyless-gitlab-oidc"`: .gitlab-ci.yml:272, .gitlab-ci.yml:285.
+- The standalone verifier falls back to GitHub Actions keyless identity when no PEM key is present: scripts/verify_image_signature.sh:16, scripts/verify_image_signature.sh:21, scripts/verify_image_signature.sh:22, scripts/verify_image_signature.sh:108, scripts/verify_image_signature.sh:112.
+
+Problem:
+Retagging a digest should preserve the source image signature because cosign signs the digest, not the tag. But the repo currently mixes key-based GitLab signing, a keyless GitLab OIDC claim, and a GitHub Actions keyless verifier default.
+
+Why it bites:
+An operator can have a valid digest signature and still fail admission/verification because the verifier expects the wrong identity. Or worse, audit can claim keyless provenance that never happened.
+
+Fix / decision needed:
+Pick exactly one trust mode before Model A. Current easiest path is key-based GitLab CR signing: update audit JSON, verify script defaults, docs, and promotion job accordingly. If keyless is desired, implement actual GitLab OIDC id_tokens and matching issuer/identity policy.
+
+D3. MED — Bundle provenance is split between baked placeholders and post-build real digest manifests.
+
+Evidence:
+- `prepare-bundle` intentionally writes placeholder zero digests before image build: .gitlab-ci.yml:47, .gitlab-ci.yml:49, .gitlab-ci.yml:50, .gitlab-ci.yml:70, .gitlab-ci.yml:73.
+- Dockerfile.backend copies that bundle into `/app/bundle.json`: Dockerfile.backend:174, Dockerfile.backend:178, Dockerfile.backend:182.
+- `emit_bundle_json.sh` includes image digest fields: scripts/emit_bundle_json.sh:114, scripts/emit_bundle_json.sh:115, scripts/emit_bundle_json.sh:117.
+- `build_image_bundle.py` can build a post-build manifest with real digests: scripts/build_image_bundle.py:2, scripts/build_image_bundle.py:20, scripts/build_image_bundle.py:23, scripts/build_image_bundle.py:166, scripts/build_image_bundle.py:174.
+
+Problem:
+The immutable image contains bundle.json with real identity fields but placeholder image digests. A separate post-build bundle can contain real digests, but it is not the same file baked into the image. Model A's "digest is truth" requires operators to know which manifest is authoritative for which question.
+
+Why it bites:
+If `/api/version` is expanded naively to expose `images.*.digest` from baked bundle.json, it may report zeros. If it hides digests, operators still need external overlay. This is maintainable only if documented and tooled.
+
+Fix / decision needed:
+Do not re-seal images after promote; that changes the digest and defeats Model A. Keep baked bundle as build provenance, and make post-build/promotion bundle plus deployment overlay the source of image digest truth. The runtime endpoint should label fields clearly: `build_*` vs `deployed_*`.
+
+## E. Maintenance burden over a year
+
+E1. HIGH — GitLab CR `sha-*` retention is not implemented; existing retention is GHCR and rc/develop-pattern oriented.
+
+Evidence:
+- Retention script is explicitly for GHCR package versions: scripts/enforce_image_retention.py:1, scripts/enforce_image_retention.py:2.
+- It classifies final releases, rc tags, hotfix tags, develop/feature tags, but not `sha-<40hex>`: scripts/enforce_image_retention.py:17, scripts/enforce_image_retention.py:18, scripts/enforce_image_retention.py:20, scripts/enforce_image_retention.py:21, scripts/enforce_image_retention.py:96, scripts/enforce_image_retention.py:112.
+- Mutable aliases include latest: scripts/enforce_image_retention.py:22.
+- GitLab CI publishes to GitLab CR: .gitlab-ci.yml:102.
+
+Problem:
+Model A shifts candidate churn from rc tags to sha tags. Existing GC does not manage GitLab CR and does not classify full-SHA candidates. The design says GC is needed, but no current code can enforce it.
+
+Why it bites:
+After six months of daily or per-green-SHA builds, unpromoted candidate images, signatures, SBOMs, and attestations accumulate. Operators will be afraid to delete because some sha digest may be the source of a promoted final tag unless release_audit protection exists.
+
+Fix / decision needed:
+Implement GitLab CR retention before automated candidate builds. Policy: keep final vX.Y.Z tags/digests indefinitely; keep promoted source sha digests as long as the final audit references them; delete unpromoted sha candidates after N days; never delete any digest referenced by release_train/release_audit.
+
+E2. HIGH — Digest-pinned compose files are safe but operationally easy to drift unless generated from a lock file.
+
+Evidence:
+- Prod currently uses tag env interpolation, not digest-pinned refs: docker-compose.prod.yml:152, docker-compose.prod.yml:264, docker-compose.prod.yml:416.
+- `promote_image_bundle.py` can write a lock file with environment, bundle, git_ref/git_sha, image digests, and target refs: scripts/promote_image_bundle.py:226, scripts/promote_image_bundle.py:237, scripts/promote_image_bundle.py:241, scripts/promote_image_bundle.py:244, scripts/promote_image_bundle.py:255.
+- Deploy-prod computes `CURRENT_IMAGE_TAG` from env/tag/short SHA and writes it to `.env`: scripts/deploy-prod.sh:285, scripts/deploy-prod.sh:286, scripts/deploy-prod.sh:290.
+
+Problem:
+Digest pinning is the right prod contract, but the current deploy path is tag-oriented `.env` mutation. Manually updating three digest refs in compose/env is a drift trap.
+
+Why it bites:
+Backend may be updated to digest Db while frontend remains at old digest Df. `/readyz` frontend compatibility is observational, so this can ship. Rollback then means finding and restoring three old digests, not just one version variable.
+
+Fix / decision needed:
+Generate an env lock from release_train promotion and have compose consume it. Deploy should refuse if backend/frontend/bridge digests are missing or do not match the promotion audit row. Never ask operators to hand-edit digest triplets.
+
+E3. MED — The new release_train service cannot be treated as an extension of the current shadow coordinator without significant new acting-mode code.
+
+Evidence:
+- `pipeline_coordinator.py` describes itself as a skeleton/foundation and no-op decision engine: backend/agents/pipeline_coordinator.py:1, backend/agents/pipeline_coordinator.py:5, backend/agents/pipeline_coordinator.py:17, backend/agents/pipeline_coordinator.py:18.
+- Default work graph is empty: backend/agents/pipeline_coordinator.py:1192, backend/agents/pipeline_coordinator.py:1195, backend/agents/pipeline_coordinator.py:1253, backend/agents/pipeline_coordinator.py:1255.
+- Production wiring is observe-only unless `acting=True`, and acting requires explicit action_executor: backend/agents/pipeline_coordinator.py:1862, backend/agents/pipeline_coordinator.py:1865, backend/agents/pipeline_coordinator.py:1876, backend/agents/pipeline_coordinator.py:1883, backend/agents/pipeline_coordinator.py:1884.
+
+Problem:
+Model A lists a new `release_train.py` or coordinator extension. The current coordinator is not a release train driver. It has no GitLab pipeline trigger, digest observer, final allocator, staging gate join, promotion lock, or rollback state recovery.
+
+Why it bites:
+A team under time pressure may wire release decisions into an observe-only AI coordinator and assume it owns the lifecycle. Six months later, nobody knows whether the scheduler, old auto_tag_release, release_conductor cron, or human runbook is authoritative.
+
+Fix / decision needed:
+Build a small, boring `release_train` service with explicit state and tests. Keep AI/coordinator advisory until the deterministic train is stable. Delete/disable old main/release-cut services before enabling the new one.
+
+E4. MED — Old main/release-cut automation will rot beside Model A unless retired atomically.
+
+Evidence:
+- `auto_promote_main.py` consumes milestone events and advances main: backend/agents/auto_promote_main.py:1, backend/agents/auto_promote_main.py:5, backend/agents/auto_promote_main.py:6.
+- It pushes review changes to `refs/for/main`: backend/agents/auto_promote_main.py:206, backend/agents/auto_promote_main.py:211, backend/agents/auto_promote_main.py:236.
+- `auto_tag_release.py` tags `main` HEAD and updates `release/vX.Y`: backend/agents/auto_tag_release.py:1, backend/agents/auto_tag_release.py:5, backend/agents/auto_tag_release.py:104, backend/agents/auto_tag_release.py:193, backend/agents/auto_tag_release.py:224.
+- Gerrit config still has main/release-cut submit requirements: .gerrit/project.config:190, .gerrit/project.config:203, .gerrit/project.config:211, .gerrit/project.config:223, .gerrit/project.config:264.
+
+Problem:
+Model A would introduce a new release train while old release train pieces remain present. That is a maintenance hazard: every future agent sees multiple plausible ways to cut or promote a release.
+
+Why it bites:
+Unattended timers, stale runbooks, or a human muscle-memory command can recreate main/release branch behavior. The result is not a clean failure; it is split-brain release state.
+
+Fix / decision needed:
+Implementation must include a retirement phase: disable/delete auto_promote_main, auto_tag_release, main/release-cut systemd units and submit requirements, and replace operator docs in the same migration window.
+
+## F. Migration / rollback + green gate
+
+F1. HIGH — Model A inherits the missing exact-SHA green gate.
+
+Evidence:
+- GitLab stages are build/sign/sbom/attest/audit only: .gitlab-ci.yml:6, .gitlab-ci.yml:11.
+- ADR-0040 states there is no test/lint stage and develop-green is a prerequisite: docs/adr/ADR-0040-single-trunk-release-train.md:44, docs/adr/ADR-0040-single-trunk-release-train.md:46.
+- Gerrit Verified is installed but disabled by `applicableIf = is:false`: .gerrit/project.config:312, .gerrit/project.config:314, .gerrit/project.config:315.
+
+Problem:
+Model A's lifecycle starts with "scheduler picks a GREEN develop SHA". The repository has no durable exact-SHA green signal today.
+
+Why it bites:
+The candidate image can be built, signed, and promoted from a SHA that never passed backend pytest, frontend build/typecheck, migration compatibility, or full smoke. The design's strongest property, staging and prod digest equality, does not matter if the selected SHA was never a valid release candidate.
+
+Fix / decision needed:
+Implement exact-SHA green status before candidate automation: backend tests through `backend/.venv/bin/pytest`, frontend build/typecheck/tests, migration compatibility, Docker build, signature/SBOM/attestation, staging smoke, FE/BE compat gate, and canary evidence. Store the result keyed by full git SHA and require the candidate build job to verify it.
+
+F2. HIGH — Migration compatibility exists as a patchset gate, not a promote-time release rollback gate.
+
+Evidence:
+- `check_migration_compat.py` discovers changed migration files in a patchset diff: scripts/check_migration_compat.py:1, scripts/check_migration_compat.py:5, scripts/check_migration_compat.py:169, scripts/check_migration_compat.py:172.
+- It classifies old-code/new-schema hazards statically: scripts/check_migration_compat.py:192, scripts/check_migration_compat.py:201, scripts/check_migration_compat.py:221.
+- Prod deploy can run live Alembic upgrade before rolling replicas: scripts/deploy-prod.sh:330, scripts/deploy-prod.sh:357, scripts/deploy-prod.sh:363, scripts/deploy-prod.sh:370.
+- Rollback instructions are `git checkout <previous-tag>` and rerun deploy: scripts/deploy-prod.sh:469, scripts/deploy-prod.sh:470, scripts/deploy-prod.sh:471.
+
+Problem:
+Model A needs to know whether previous final image can run against post-candidate schema before final promotion. Existing migration checks are patchset-shaped and deploy-time-shaped, not release-to-release rollback-shaped.
+
+Why it bites:
+Prod can promote/deploy a candidate, run migrations, then discover previous `vX.Y.Z` digest cannot start. Model A's late version assignment does not make rollback clearer; rollback target is still previous final digest plus DB compatibility.
+
+Fix / decision needed:
+Add a promote-time migration gate comparing previous final release digest/migration head to candidate digest/migration head. It must classify expand/contract safety and record whether previous-image rollback is allowed. Block promotion or require explicit break-glass if not rollback-safe.
+
+F3. MED — Staging migration order makes candidate evidence noisy.
+
+Evidence:
+- `staging_deploy.sh` switches ingress and records the active tag after health passes: scripts/staging_deploy.sh:290, scripts/staging_deploy.sh:299, scripts/staging_deploy.sh:309, scripts/staging_deploy.sh:314.
+- `sync_staging_to_develop.sh` then runs migrations against the freshly deployed active color: scripts/sync_staging_to_develop.sh:261, scripts/sync_staging_to_develop.sh:262.
+
+Problem:
+For release validation, migrations should be validated before external ingress switches to the new candidate. Current flow deploys/switches first, then migrates.
+
+Why it bites:
+A migration failure can leave staging externally on an app whose DB migration failed or partially applied. The rollback then validates recovery behavior, not the clean candidate.
+
+Fix / decision needed:
+For Model A staging gates: verify candidate digests, run migration dry-run/compat against clone, apply staging migrations, switch ingress, then run smoke/canary/FEBE gates. Record all evidence against the candidate digest set.
+
+F4. MED — FE/BE compatibility is not a promotion gate.
+
+Evidence:
+- `frontend_compat.py` says observation, not gating: backend/frontend_compat.py:24, backend/frontend_compat.py:25, backend/frontend_compat.py:26.
+- `/readyz` summary is explicitly observational and not part of readiness: backend/routers/health.py:456, backend/routers/health.py:461, backend/routers/health.py:645, backend/routers/health.py:648.
+
+Problem:
+Model A lists FE/BE compat as a staging gate, but current code only observes mismatch after traffic.
+
+Why it bites:
+The candidate can pass `/readyz` and be promoted while frontend and backend bundles are incompatible. Digest equality only proves the same bad pair shipped.
+
+Fix / decision needed:
+Add a staging promotion gate that actively queries frontend headers and backend `/api/version`/overlay, fails on mismatch, and records bundle IDs/digests in release_train evidence.
+
+F5. MED — Model A rollback identity is slightly clearer than Model B, but only with overlay.
+
+Evidence:
+- Model A final version is assigned to the same digests after staging: docs/design/2026-05-21-model-a-candidate-build-release-train.md:24, docs/design/2026-05-21-model-a-candidate-build-release-train.md:25, docs/design/2026-05-21-model-a-candidate-build-release-train.md:29.
+- Model B's runtime identity problem was rc-flavored bundles in prod: docs/audit/codex-reviews/model-b-rc-promote-codex-audit-2026-05-21.txt:39, docs/audit/codex-reviews/model-b-rc-promote-codex-audit-2026-05-21.txt:41.
+
+Problem:
+Model A rollback to previous `vX.Y.Z` digest is semantically cleaner than Model B rollback from final tag whose runtime bundle says rc. But if `/api/version` reports only sha/bundle and compose pins digest, the operator still needs the release audit to know which previous final version/digest is safe.
+
+Fix / decision needed:
+Rollback command should take `--to vX.Y.Z` and resolve the digest triplet from immutable release_audit, not require an operator to paste sha/digest values.
+
+## G. A-vs-B honest verdict
+
+G1. Is Model A genuinely simpler?
+
+Yes, but only if A-ondemand is implemented as a true API-triggered SHA build with no candidate git tag and if the project accepts one of these two release-planning changes:
+
+1. Reserve the final semver version before candidate validation, but do not use it as a build tag until promote.
+2. Add a new candidate-planning identity and tooling to link/rename it to final semver at promote.
+
+Option 1 is the pragmatic choice for this codebase. It preserves the existing JIRA fixVersion, release notes, changelog, and `RELEASE-vX.Y.Z` META workflow while still getting Model A's main benefit: the candidate artifact is `sha-<fullsha>` and final promotion is an image retag of the same digest, not a rebuild.
+
+If the team insists that the version truly does not exist until promote, Model A becomes less maintainable than it looks. It forces a second planning identity across release_conductor, changelog, release notes, blockers, dashboards, and runbooks. That is a lot of new surface for a small operator team and AI runners.
+
+G2. Does A-ondemand converge to B with extra steps?
+
+If A-ondemand uses `cand/<sha>` git tags, yes. It converges to Model B's rc-tag mechanics while losing Model B's operator-friendly preassigned semver. You still have a tag-triggered candidate, a registry retention problem, protected-tag questions, rebuild-on-tag hazards, and promote-by-retag complexity. The only thing removed is rc numbering, and that benefit is not worth adding a non-version candidate git tag namespace.
+
+If A-ondemand uses a pipeline/API candidate build that checks out a full SHA and pushes `sha-<fullsha>` images without any git tag, then no. That is genuinely simpler than Model B: no rc allocator, no rc/final bundle name in prod, fewer semver suffix grammar issues, and a cleaner "build provenance sha; deploy identity final version" split.
+
+G3. Which has smaller long-term maintenance surface for this codebase?
+
+Model A with an API-triggered SHA candidate build and early semver reservation has the smallest long-term surface. It matches the codebase's existing JIRA/fixVersion planning while avoiding Model B's rc/final identity confusion. Model B is easier to graft onto current tag-only CI, but it leaves operators with rc artifacts in prod, rc retention, rc allocator races, and final git-tag/no-rebuild contradictions.
+
+Model A as drafted, with final version assignment only at promote and unspecified A-ondemand mechanics, is not ready. It is a better destination than Model B, but the draft underestimates how much current release planning is version-keyed.
+
+## Verdict
+
+GO-WITH-FIXES on Model A as the preferred direction; NO-GO on the draft as an implementation-ready plan.
+
+Model A should be built instead of Model B only after the must-fixes below are accepted. The required revision is: "candidate images are built by explicit full SHA, final semver is reserved before planning but not used as a build tag until promote, promotion retags validated digests, and runtime exposes build+deployment overlay."
+
+## Must-fix before implementation
+
+1. Choose API/manual `CANDIDATE_SHA` pipeline for A-ondemand. Do not use `cand/<sha>` tags unless explicitly accepting Model-B-like tag hazards.
+2. Add GitLab CI candidate workflow that checks out and verifies the exact full develop SHA, builds `sha-<fullsha>` images, signs/attests by digest, and never pushes `latest`.
+3. Decide version-planning semantics. Recommended: reserve `vX.Y.Z` before candidate validation for JIRA META/fixVersion/release notes, but do not create final image/git tag until promote.
+4. Implement release_train state/lock with candidate_sha, green evidence, per-image source digests, reserved final version, promotion state, actor, and final tag digest equality.
+5. Rewire staging/prod to the same GitLab CR namespace, fail closed on unset refs, use digest lock files or required tags, and verify pulled digest equality.
+6. Add runtime deployment overlay to `/api/version`/`/readyz`: build git_sha/ref plus deployed final tag/digest triplet and promotion audit id.
+7. Rewrite `promote_image_bundle.py` or add a dedicated promote job for GitLab CR, all three images, target-tag digest verification, per-image attestations, and idempotent failure handling.
+8. Resolve cosign trust mode consistently across CI signing, verification script, audit JSON, docs, and promotion.
+9. Implement exact-SHA green gate and promote-time migration expand/contract gate. Current GitLab pipeline and Gerrit Verified do not provide this.
+10. Implement GitLab CR retention for unpromoted `sha-*` candidates, preserving any digest referenced by release_audit/final versions.
+11. Disable/delete old main/release-cut automation and Gerrit submit requirements in the same migration window.
+12. Ship an operator status/rollback tool that resolves `vX.Y.Z <-> git_sha <-> digest triplet` from one source of truth.
+
+## Direct A-vs-B recommendation
+
+Build Model A, not Model B, but revise it first.
+
+The deciding reason is operational identity. Model B leaves production running images whose baked identity can say `v0.6.0-rc1` while operators talk about `v0.6.0`; that is intrinsically confusing. Model A's sha-built candidate can be cleaner because sha is honest build provenance and final semver is deployment metadata. However, that only works if the overlay is mandatory and the candidate build is not a hidden git-tag workflow.
+
+For this repository and a small operator team, the best concrete model is:
+
+- Keep JIRA/fixVersion/RELEASE-vX.Y.Z planning before validation.
+- Build candidate images from exact full develop SHA as `sha-<fullsha>` by API-triggered pipeline.
+- Validate staging by digest.
+- Promote by retagging the same digests to final `vX.Y.Z` image tags.
+- Deploy by digest lock resolved from release_audit.
+
+That is simpler than Model B over a year. Model A without those fixes is just another parallel release system and will become chaotic.

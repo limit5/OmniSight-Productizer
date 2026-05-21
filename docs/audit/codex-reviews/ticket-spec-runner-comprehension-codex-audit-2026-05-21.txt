@@ -1,0 +1,311 @@
+# Ticket Spec Runner-Comprehension Audit — 2026-05-21
+
+Reviewer stance: cold AI runner pickup. I assume the runner sees the filed JIRA Story summary (`[TAG][RT-NN] ...`), labels, `blockedBy`, and the expanded description/4-AC generated from this blueprint. I judge whether the runner forms the intended task, stays within scope, and avoids sibling/decision drift.
+
+Primary sources read:
+- `docs/design/2026-05-21-release-train-ticket-spec.md` v2 blueprint and tag convention.
+- `docs/design/2026-05-21-release-train-workplan.md` intent and sequencing.
+- `docs/design/2026-05-21-model-a-candidate-build-release-train.md` Model A intent.
+- `docs/adr/ADR-0040-single-trunk-release-train.md` ADR context and remaining proposed/open decisions.
+- Runner machinery: `auto-runner-jira.py`, `backend/agents/jira_dispatch.py`, `backend/agents/scope_to_paths.py`, `scripts/file_jira_ticket.py`, `config/capability_matrix.yaml`, `scripts/runner-wrapper/run-ephemeral.sh`.
+- SOPs: runner filing checklist, JIRA label conventions/schema, decomposition rules, capability safe-default policy, architecture anti-patterns.
+
+## A. Title comprehension and tag correctness
+
+### Global title/tag finding
+
+A cold runner will not receive enough scope from many titles as currently written. The spec explicitly says each row must expand into a full Story with Prerequisites YAML, 4 AC sections, Go-Live, and executable `verify:` blocks before POST (`docs/design/2026-05-21-release-train-ticket-spec.md:15-16`), but the current table mostly provides only compact titles, broad areas, and one key AC phrase (`docs/design/2026-05-21-release-train-ticket-spec.md:32-94`). That is not inherently wrong for a blueprint, but it means the table itself is not runner-comprehensible enough without the filing expansion.
+
+The action-tag convention is coherent: `[BOT]` means Story + `class:subscription-*` + `agent:auto`, `[OP]` is fallback/operator work, `[GATE]` is narrow approval-only, `[HOLD]` means blocked, and integration/test Stories are explicitly corrected to `[BOT]` (`docs/design/2026-05-21-release-train-ticket-spec.md:23-25`). However, the table's `labels` column for BOT rows only shows `capability:enable=gerrit_push`, while line 25 says all `[BOT]` rows also carry `agent:auto` + `class:subscription-*`; filing must materialize those labels, because title-only tags are not runner routing metadata.
+
+Runtime reality: runner pickup JQL filters `issuetype = Story`, `status = To Do`, empty assignee, exact `class:<runner_class>`, and excludes `tier:X`; it does not require `agent:auto` (`backend/agents/jira_dispatch.py:357-365`). `scripts/file_jira_ticket.py` has the same pickup JQL shape (`scripts/file_jira_ticket.py:112-122`). So `[BOT]` correctness matters to humans, but the real pickup gate is labels/type/tier. A misfiled `[OP]` with `class:subscription-*` and non-X tier could still be picked unless `tier:X`/operator refusal labels prevent it.
+
+### Per-ticket title findings
+
+- RT-00: `[OP] Accept ADR-0040 + supersede flips + cross-refs + ADR-0023 reconcile` is understandable as operator doc governance, and `[OP]` is correct because ADR-0040 is still Proposed (`docs/adr/ADR-0040-single-trunk-release-train.md:1-10`) and acceptance is a human decision. Drift risk: title bundles acceptance plus several ADR edits; as operator work this is acceptable, but it must not be runner-pickable. Guardrail: `tier:X`, `runner:no-commits-expected`, no `class:subscription-*`. Evidence: row is `Story·X·docs·operator` (`docs/design/2026-05-21-release-train-ticket-spec.md:35`).
+
+- RT-03: `[BOT] Filing-vocab + tool drift fix: add area:ci+area:gerrit, fix db rejection` is specific enough and `[BOT]` is correct. It maps directly to a current tool mismatch: runner recognizes `db` but not `ci/gerrit` (`auto-runner-jira.py:143-150`), while the filing script accepts `gerrit` but not `ci`, and explicitly marks `db` as runner-only/rejected (`scripts/file_jira_ticket.py:37-47`, `scripts/file_jira_ticket.py:62-67`). Guardrail: pin exact files from the row; no unrelated label taxonomy rewrite.
+
+- RT-01: `[OP] Freeze old release writers (timers + webhook runtime triggers)` is comprehensible and `[OP]` is correct: it involves disabling runtime timers/webhook triggers, not just code. The workplan says freeze old writers first and disable, not delete (`docs/design/2026-05-21-release-train-workplan.md:24-26`). Guardrail: description must say “runtime disable only; no repository deletion; no code cleanup except RT-23.”
+
+- RT-23: `[BOT] Webhooks CODE cleanup — remove/retarget main force-push + gh -r main/GitLab ref=main` is mostly clear and `[BOT]` is correct because this is code cleanup after RT-01. It should explicitly name `backend/routers/webhooks.py`; the workplan calls it a missing landmine (`docs/design/2026-05-21-release-train-workplan.md:10-11`), and the spec AC says `webhooks.py` no longer references main (`docs/design/2026-05-21-release-train-ticket-spec.md:38`). Guardrail: “Do not touch timers/systemd; that is RT-01.”
+
+- RT-18: `[OP] Hotfix stop-the-line / no-fix-isolation policy` is clear and `[OP]` is correct. ADR-0040 states no fix isolation is a cost requiring a written policy (`docs/adr/ADR-0040-single-trunk-release-train.md:44-47`, `docs/adr/ADR-0040-single-trunk-release-train.md:87-91`). Guardrail: doc-only decision/policy; no code.
+
+- RT-19: `[OP] Final-tag + promote actor protection` is clear and `[OP]` is correct because GitLab protected tags/Gerrit ACL/release-manager group are protected ops/security settings. Guardrail: include audit-row requirement but no runner code.
+
+- RT-20: `[OP] DECISION: final git-tag semantics` is excellent: the title exposes the decision and blocks implementation. It correctly blocks RT-09/RT-12 (`docs/design/2026-05-21-release-train-ticket-spec.md:41`, `docs/design/2026-05-21-release-train-ticket-spec.md:74`, `docs/design/2026-05-21-release-train-ticket-spec.md:81`).
+
+- RT-21: `[OP] Bridge runtime inventory` is understandable to operators but too vague for a cold runner/operator unless the description says which bridge components count. It is `[OP]` correctly because it inventories deployed runtime shape and decides image/profile/host-sync semantics. Guardrail: explicitly list candidate runtime artifacts and say “inventory/decision only; no code.” It blocks RT-12/RT-13b (`docs/design/2026-05-21-release-train-ticket-spec.md:42`, `docs/design/2026-05-21-release-train-ticket-spec.md:81-83`).
+
+- RT-04a: `[BOT][RT-04a] Fast per-change submit gate CI job` is comprehensible but under-anchored. “CI job” could mean GitLab, Gerrit Verified, or both. Intent says this is the fast per-change gate on develop, distinct from candidate-SHA certification (`docs/design/2026-05-21-release-train-workplan.md:29-30`). Guardrail: title should include “develop submit gate only; not candidate certification.”
+
+- RT-04b: `[BOT] Green-evidence store+query by full SHA` is understandable but does not say where the store lives. `[BOT]` is correct. Guardrail: Files must identify backend module, DB migration/table, and tests; otherwise the runner may invent a new store shape.
+
+- RT-04c: `[OP] Enable Gerrit Verified on develop...` is correct operator-only Gerrit config activation. It should not be `[GATE]` because it is real protected-setting work, not approval-only (`docs/design/2026-05-21-release-train-ticket-spec.md:50`).
+
+- RT-04d: `[BOT] Bad-SHA negative test` is too terse. A runner could test RT-04a CI input validation, RT-04b green-store query rejection, or RT-09 candidate selection. Guardrail: title should say “Bad full-SHA rejected by green-evidence/candidate gate; tests only.”
+
+- RT-04e: `[BOT][RT-04e] Green-signal integration verifier` is correct and `[BOT]` is correct per spec correction (`docs/design/2026-05-21-release-train-ticket-spec.md:25`, `docs/design/2026-05-21-release-train-ticket-spec.md:52`). Guardrail: “verify 04a+04b+04c+04d together; no new feature code except test harness.” This matches decomposition rule that sibling groups need explicit integration tickets at filing time (`docs/sop/sprint-s12-ticket-decomposition-rules.md:113-121`).
+
+- RT-05a: `[BOT] staging compose→GitLab CR, fail-closed, pull_policy (+activation)` is overloaded. It combines registry switch, fail-closed defaults, pull policy, and activation. `[BOT]` is plausible for code/config, but “+activation” conflicts with workplan’s rule that devops feature rows need an activation child or name a `[GATE]` as activation (`docs/design/2026-05-21-release-train-ticket-spec.md:54`). Guardrail: split activation evidence into RT-05e or state that RT-05a only changes repo config and unit tests.
+
+- RT-05b: `[BOT] sync_staging deploy-by-digest + digest equality` is clear enough if Files name `scripts/sync_staging_to_develop.sh` and staging tests. `[BOT]` correct.
+
+- RT-05c: `[BOT] FE/BE compat = hard staging gate` is understandable but dangerously broad. Workplan says current `frontend_compat` is telemetry only and skew must block promote (`docs/design/2026-05-21-release-train-workplan.md:32-33`). Guardrail: Files must include the exact compat checker/gate path; do not rewrite FE or BE version APIs beyond the gate.
+
+- RT-05d: `[BOT] staging-gate JSONL digest triplet + /api/version` is understandable but crosses backend, devops, tests; runner could drift into RT-08 overlay work. Guardrail: title/description must say “staging evidence only; do not implement prod overlay semantics from RT-08.”
+
+- RT-05e: `[BOT][RT-05e] Staging-fidelity integration (=activation evidence)` is correct as an integration test/activation ticket. Guardrail: no feature implementation; only end-to-end verification across 05a-05d.
+
+- RT-06: `[BOT] cosign trust-mode consistency (+negative test +activation)` is understandable but has activation ambiguity. Workplan says choose current key-based mode, fix audit JSON, verifier, docs, and negative tests (`docs/design/2026-05-21-release-train-workplan.md:34`). Guardrail: name exact files (`.gitlab-ci.yml`, signature verifier, audit JSON, docs) and say “do not implement OIDC unless operator changes decision.”
+
+- RT-07a: `[BOT] deploy-prod.sh+check_deploy_ref.sh tag/digest-only (+activation)` is mostly clear. Guardrail: no allowlist/compose changes; those are RT-07b. Evidence: RT-07b separately owns allowlist + prod compose (`docs/design/2026-05-21-release-train-ticket-spec.md:65-67`).
+
+- RT-07b: `[BOT] allowlist + prod compose ${IMAGE_TAG:?required}` is clear but should name `OMNISIGHT_IMAGE_TAG` to match current prod compose, which defaults to latest (`docker-compose.prod.yml:33`, `docker-compose.prod.yml:152`, `docker-compose.prod.yml:416`). Guardrail: no script logic; that is RT-07a.
+
+- RT-07c: `[BOT][RT-07c] Prod-deploy rejection test harness (=activation)` is correct integration/test work. Guardrail: no production deploy; test harness only.
+
+- RT-08: `[BOT] /api/version+/readyz overlay (code)` is comprehensible but under-specified because overlay load semantics are explicitly a design choice in the workplan (`docs/design/2026-05-21-release-train-workplan.md:36`). If the ticket does not choose read-before-start vs per-request/cache invalidation, the runner will decide. Guardrail: description must include the chosen overlay load semantics or block on an OP decision.
+
+- RT-08b: `[OP] Overlay activation evidence (prod restart exposes triplet)` is clear and `[OP]` correct because prod restart/evidence is runtime ops (`docs/design/2026-05-21-release-train-ticket-spec.md:69`).
+
+- RT-09: `[BOT] CANDIDATE_SHA candidate pipeline` is specific, but it hides a major “do not do” boundary: Model A forbids `cand/<sha>` tags and requires API/manual `CANDIDATE_SHA=<40hex>` (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:9-10`, `docs/design/2026-05-21-release-train-workplan.md:38-39`). Guardrail: put “API/manual pipeline; no cand/* tag; no final git tag” in title or first AC. `[BOT]` is correct but must be blocked by RT-20, as it is (`docs/design/2026-05-21-release-train-ticket-spec.md:74`).
+
+- RT-10a: `[BOT] release_train table + alembic + CAS + audit hard-gate` is clear and `[BOT]` correct. Guardrail: no version reservation/business flow; that is RT-10b.
+
+- RT-10b: `[BOT] Early version reservation (fixVersion/META)` is understandable but may drift into creating image/git tags. Model A correction says reserve semver early for planning but do not use it as build/git tag until promote (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:7-8`). Guardrail: title should add “planning-only; no image/git tag.”
+
+- RT-10c: `[BOT][RT-10c] Concurrent-promote race test` is correct as integration/test against RT-10a. Guardrail: no CAS implementation changes except tests/fixtures; implementation belongs RT-10a.
+
+- RT-11: `[BOT] Release-to-release migration rollback gate` is understandable but could drift into deploy-prod rollback tooling. Workplan says previous final digest migration head vs candidate; block rollback-unsafe promote unless break-glass (`docs/design/2026-05-21-release-train-workplan.md:41`). Guardrail: Files must anchor to release_train/provenance/migration gate; no production rollback command implementation.
+
+- RT-22: `[BOT] Force/break-glass policy impl...` is too broad and likely to drift. It mentions `release_milestone_checker` but not exact functions or call paths. Intent is no unattended force-promote; human command + exact SHA + immutable audit reason; must not move final tags or bypass digest equality (`docs/design/2026-05-21-release-train-workplan.md:51-52`). Guardrail: title should say “remove unattended force-promote; require audited human override; do not bypass digest equality.”
+
+- RT-12: `[BOT] Promote job (GitLab CR, 3 images, digest-verify, attest, idempotent) + final-tag-no-rebuild test` is specific but large. `[BOT]` is plausible only because it is `sub-claude` and blocked by many decisions. It must not start before RT-19/20/21/22; spec correctly blocks it (`docs/design/2026-05-21-release-train-ticket-spec.md:81`). Guardrail: no decisions about final git-tag semantics or bridge runtime; consume RT-20/RT-21 outputs only.
+
+- RT-13a: `[BOT] release_train_status.py tool (status+rollback resolve)` is clear but should say “tool only; no exercise against prod-like,” because RT-13b owns exercise. `[BOT]` correct.
+
+- RT-13b: `[OP] Operator status+rollback EXERCISE against staging/prod-like` is clear and `[OP]` correct. It is blocked by RT-21 (`docs/design/2026-05-21-release-train-ticket-spec.md:83`), which is right because bridge inventory affects digest status.
+
+- RT-14: `[BOT] GitLab CR retention + release_train protection` is clear enough; `[BOT]` correct. Guardrail: final digests forever, source SHA digests referenced by finals retained, unpromoted `sha-*` deleted after N days, never delete referenced digest (`docs/design/2026-05-21-release-train-workplan.md:44`).
+
+- RT-15a: `[BOT] /api/feature-flags/effective (public, server-eval, fail-closed) + allowlist` is clear and `[BOT]` correct. Guardrail: no FE provider/hook; that is RT-15b. ADR says FE feature flags need public booleans only, server-evaluated, fail-closed, and tier enum drift fix (`docs/adr/ADR-0040-single-trunk-release-train.md:58-61`).
+
+- RT-15b: `[BOT] FE provider/hook/SSR bootstrap + tier-enum align` is clear but can collide with RT-15a on tier enum. Guardrail: RT-15a owns backend public API/allowlist; RT-15b owns frontend consumption and cross-language enum alignment tests only.
+
+- RT-15c: `[BOT][RT-15c] FE-flag integration` is correct integration/test work. Guardrail: no new API/provider implementation.
+
+- RT-16: `[OP][RT-16] End-to-end dry-run` is correct and `[OP]` essential. It should remain non-runner because it spans live staging/prod-like evidence and blocked siblings (`docs/design/2026-05-21-release-train-ticket-spec.md:93`).
+
+- RT-17: `[OP] Cutover cleanup: DELETE old automation + Gerrit cutover + main retirement` is clear but very broad. `[OP]` is correct because it is after dry-run and contains protected ops/Gerrit plus deletion. Guardrail: no code runner pickup; require step checklist and rollback.
+
+## B. Goal-drift risk per ticket
+
+Highest per-ticket drift hazards and needed guardrails:
+
+- RT-03: The runner may “normalize all labels” or rewrite broader JIRA taxonomy instead of only adding `ci/gerrit` and fixing `db` rejection. Current mismatch is narrow: runner recognized areas omit `ci/gerrit` but include `db` (`auto-runner-jira.py:147-150`); filing script accepts `gerrit` and rejects `db` (`scripts/file_jira_ticket.py:37-47`, `scripts/file_jira_ticket.py:62-67`); schema accepts `db` but not `ci/gerrit` (`docs/sop/jira-label-schema.yaml:53-61`). Guardrail: explicit Files list and “do not alter unrelated namespaces.”
+
+- RT-01 vs RT-23: RT-01 freezes runtime writers; RT-23 edits webhook code. A runner/operator could delete automation in RT-01 even though workplan says freeze first and cleanup later (`docs/design/2026-05-21-release-train-workplan.md:24-26`, `docs/design/2026-05-21-release-train-workplan.md:47-49`). Guardrail: RT-01 “disable only, no delete/code”; RT-23 “code only, no runtime unit changes.”
+
+- RT-04a/04b/04d/04e: “green signal” can drift from per-change submit gate into full candidate certification. Workplan explicitly splits fast per-change gate from candidate-SHA certification (`docs/design/2026-05-21-release-train-workplan.md:29-30`). Guardrail: RT-04a title/AC says “fast develop submit gate only”; RT-04e verifies siblings only.
+
+- RT-05a/05b/05c/05d/05e: Staging fidelity is an atomic group (`docs/design/2026-05-21-release-train-workplan.md:32-33`), so individual runners may over-implement sibling pieces. Guardrail: every RT-05 child needs exact Files and “do not touch sibling files” statements; RT-05e must be pure integration/activation evidence.
+
+- RT-06: Runner may implement OIDC keyless because audit JSON currently claims `cosign-keyless-gitlab-oidc` while pipeline signs with `COSIGN_KEY` (`.gitlab-ci.yml:147-150`, `.gitlab-ci.yml:285-286`). Workplan says pick key-based current mode (`docs/design/2026-05-21-release-train-workplan.md:34`). Guardrail: “keep key-based; correct claims/docs/verifier; no OIDC implementation.”
+
+- RT-07a/07b/07c: Current prod compose defaults `OMNISIGHT_IMAGE_TAG` to latest (`docker-compose.prod.yml:33`, `docker-compose.prod.yml:152`, `docker-compose.prod.yml:416`) and allowlist still permits branch main (`deploy/prod-deploy-allowlist.txt:21-22`). The hazard is touching all prod deploy surfaces in RT-07a. Guardrail: 07a scripts only; 07b allowlist+compose only; 07c rejection tests only.
+
+- RT-08/08b: Overlay semantics are under-decided in the workplan: read-before-start vs per-request/cache invalidation (`docs/design/2026-05-21-release-train-workplan.md:36`). Guardrail: RT-08 must embed the chosen semantics; otherwise it is a hidden decision and should be blocked.
+
+- RT-09: Runner may implement a `cand/<sha>` tag path because Model A draft still contains older prose/options around `cand/*` (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:61-71`, `docs/design/2026-05-21-model-a-candidate-build-release-train.md:73-84`), while the corrected top section forbids it (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:9-10`). Guardrail: description must quote the corrected rule and say “ignore older cand/* option text.”
+
+- RT-10b: Runner may create version tags too early. Guardrail: reserve JIRA fixVersion/META only; no image/git tag until RT-12 promote (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:7-8`).
+
+- RT-11/RT-22/RT-12: Break-glass and migration rollback can drift into bypassing digest equality or moving final tags. Workplan explicitly forbids unattended force-promote and says emergency override must not move final tags or bypass digest equality (`docs/design/2026-05-21-release-train-workplan.md:51-52`). Guardrail: AC must include negative tests proving bypasses fail.
+
+- RT-12: Runner may decide final git-tag semantics or bridge runtime shape. Spec correctly blocks on RT-19/20/21/22 (`docs/design/2026-05-21-release-train-ticket-spec.md:81`), and RT-20/RT-21 are decision/inventory rows (`docs/design/2026-05-21-release-train-ticket-spec.md:41-42`). Guardrail: “consume decisions from RT-20/RT-21; if absent, stop.”
+
+- RT-13a/13b: Status tool could try to exercise prod-like rollback. Guardrail: RT-13a code/tool only; RT-13b operator exercise only.
+
+- RT-15a/15b/15c: Backend API and FE provider can collide on tier enum alignment. Guardrail: RT-15a owns public server-evaluated endpoint and allowlist; RT-15b owns FE consumption and enum align tests; RT-15c integration only.
+
+- RT-17: Deleting old automation can drift into changing ADRs or feature code. Guardrail: post-RT-16 only, operator checklist, exact deletion list, no runner.
+
+## C. Scope-anchor sufficiency
+
+### Global insufficiency
+
+The spec claims “Scope-anchor (Goal + Files + Spec-ref to this doc) is present” (`docs/design/2026-05-21-release-train-ticket-spec.md:15-16`), but the table does not actually contain per-ticket `Goal`, concrete `Files / Paths`, or precise section-level `Spec-ref` fields. The runner machinery depends on the description’s explicit `Files / Paths` section for file-level mutex prediction (`backend/agents/jira_dispatch.py:2137-2158`), and the parser only extracts concrete file tokens under a `Files / Paths` heading (`backend/agents/scope_to_paths.py:60-85`). If filing expansion does not add those sections, the runner falls back to always-touched/per-scope defaults, which are too coarse or empty (`backend/agents/jira_dispatch.py:2143-2165`).
+
+Runner prompt boundaries are area-based. `_build_prompt` injects declared areas, a forbidden area list, and tells the agent to halt on out-of-area work (`auto-runner-jira.py:1106-1118`, `auto-runner-jira.py:1186-1200`). The SOP says area labels become goal anchors through that negation list (`docs/sop/jira-ticket-conventions.md:170-195`), and the filing checklist says areas must span every 4-AC directory (`docs/sop/runner-ticket-filing-checklist.md:63-69`). Therefore each expanded Story must include concrete files and correct area union, or the runner will either stop mid-ticket or over-edit.
+
+### Tickets with adequate anchor candidates in the row
+
+- RT-03: Row lists exact files: `auto-runner-jira.py`, `scripts/file_jira_ticket.py`, schema/conventions docs, capability matrix, tests (`docs/design/2026-05-21-release-train-ticket-spec.md:36`). This is the strongest current scope anchor.
+- RT-23: Row names `webhooks.py` in AC, but should expand to `backend/routers/webhooks.py` plus tests (`docs/design/2026-05-21-release-train-ticket-spec.md:38`).
+- RT-07a/RT-07b: Titles name `deploy-prod.sh`, `check_deploy_ref.sh`, allowlist, prod compose (`docs/design/2026-05-21-release-train-ticket-spec.md:65-67`). These should expand to exact paths.
+- RT-12: Title and intent point to `scripts/promote_image_bundle.py` / GitLab CR / three-image digest verify; but it still needs exact file list from Model A change points (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:73-84`).
+- RT-15a/15b: Titles imply backend router + FE provider/hook; exact files not present.
+
+### Tickets where a runner will not know which files to edit
+
+- RT-04a/04b/04d/04e: No exact CI config/test/store files. RT-04a likely `.gitlab-ci.yml`/Gerrit integration; RT-04b likely DB/backend; RT-04d/04e tests. The spec does not say.
+- RT-05a/05b/05c/05d/05e: Some titles imply files (`deploy/staging/docker-compose.yml`, `scripts/sync_staging_to_develop.sh`, `backend/frontend_compat.py`, `scripts/staging_gate.py`, `backend/api_versioning.py`), but none are in the spec row.
+- RT-06: No exact verifier/doc/audit files; could touch `.gitlab-ci.yml`, `scripts/verify_image_signature.sh` if present, audit JSON generation, docs.
+- RT-08: No exact API version/readyz files. Existing candidates include `backend/api_versioning.py` and readyz tests, but spec does not anchor.
+- RT-09: No exact CI/API files; hidden choice risk around pipeline API vs GitLab YAML.
+- RT-10a/10b/10c: No exact model/migration/service/test files for new `release_train` table.
+- RT-11/RT-22/RT-14: No exact modules; title names concepts, not paths.
+- RT-13a: New tool path is clear (`release_train_status.py`) but module location is not specified (`scripts/` vs `backend/agents/` vs package entrypoint).
+- RT-16/17: Operator runbooks need explicit command checklist/files; title alone is insufficient.
+
+Recommended filing format: every RT Story description must include:
+
+```
+## Goal
+One sentence, imperative, explicitly excluding sibling work.
+
+## Files / Paths
+- exact/path.ext
+- exact/test_path.ext
+
+## Spec references
+- docs/design/2026-05-21-release-train-ticket-spec.md:RT-NN row
+- docs/design/2026-05-21-release-train-workplan.md:<specific phase lines>
+- docs/design/2026-05-21-model-a-candidate-build-release-train.md:<specific corrected rule lines>
+
+## Out of scope
+- RT-XX sibling owns ...
+```
+
+This matches the filing checklist’s `Files / Paths` and spec references template (`docs/sop/runner-ticket-filing-checklist.md:130-145`) and the decomposition template that each child must have scope, 4-AC, decision points, verify blocks, dependencies (`docs/sop/sprint-s12-ticket-decomposition-rules.md:460-483`).
+
+## D. Cross-ticket confusion, collisions, and mutex needs
+
+### Collision classes
+
+- Filing/tooling collision: RT-03 touches runner/file-ticket/schema/capability files. It must land before filing ci/gerrit/db tickets per hard filing order (`docs/design/2026-05-21-release-train-ticket-spec.md:18-19`). Mutex: `mutex:rt-filing-vocab` for RT-03 only; hold all ci/gerrit/db rows until merged.
+
+- Webhook/runtime freeze collision: RT-01 runtime disables old writers; RT-23 edits `backend/routers/webhooks.py`. RT-23 is correctly blocked by RT-01 (`docs/design/2026-05-21-release-train-ticket-spec.md:38`, `docs/design/2026-05-21-release-train-ticket-spec.md:99`). Add out-of-scope guards rather than mutex if blockedBy is enforced.
+
+- RT-04 green-signal group: RT-04a/04b/04d can collide on CI/test fixtures and green evidence API; RT-04e verifies all. Existing dependency graph serializes 04a before 04b/04d and all before 04e (`docs/design/2026-05-21-release-train-ticket-spec.md:100`). Add mutex if 04b/04d share the same test files.
+
+- RT-05 staging group: RT-05a likely edits staging compose, RT-05b edits sync script, RT-05d edits staging gate and `/api/version`, RT-05e integration. 05a blocks 05b/05c/05d; all block 05e (`docs/design/2026-05-21-release-train-ticket-spec.md:58-62`, `docs/design/2026-05-21-release-train-ticket-spec.md:101`). Add mutexes for `deploy/staging/docker-compose.yml`, `scripts/sync_staging_to_develop.sh`, `scripts/staging_gate.py`, `backend/api_versioning.py`, and `backend/frontend_compat.py` as needed.
+
+- RT-07 prod deploy group: RT-07a scripts, RT-07b allowlist/compose, RT-07c harness. Dependency chain is correct (`docs/design/2026-05-21-release-train-ticket-spec.md:65-67`, `docs/design/2026-05-21-release-train-ticket-spec.md:101`). Add mutex labels for `scripts/deploy-prod.sh`, `scripts/check_deploy_ref.sh`, `deploy/prod-deploy-allowlist.txt`, `docker-compose.prod.yml`.
+
+- RT-08 vs RT-05d: Both mention `/api/version`. RT-05d wants staging-gate JSONL digest triplet + `/api/version`; RT-08 wants `/api/version` + `/readyz` overlay. This is the largest same-file collision. Add explicit division: RT-05d records/consumes staging evidence and may add only fields needed by staging; RT-08 owns general deployment overlay semantics. If both touch `backend/api_versioning.py`, add a mutex or strict blockedBy.
+
+- RT-09/RT-12/RT-10b: Candidate pipeline, early version reservation, and promote job all touch release identity semantics. RT-09 is blocked by RT-20; RT-12 is blocked by RT-19/20/21/22 (`docs/design/2026-05-21-release-train-ticket-spec.md:74`, `docs/design/2026-05-21-release-train-ticket-spec.md:81`). RT-10b is only blocked by RT-10a, but should also soft-prereq RT-20 if its description discusses final git-tag semantics.
+
+- RT-10a/RT-10b/RT-10c/RT-11/RT-22/RT-14: All may touch release_train model/service/audit rows. The graph serializes RT-10a first, then siblings (`docs/design/2026-05-21-release-train-ticket-spec.md:102`). Add `schema_locks` for the `release_train` table on RT-10a and downstream schema contract locks on RT-10b/10c/11/22/14.
+
+- RT-12/RT-13a/RT-13b/RT-14: Promote/status/retention all consume release audit/digest semantics. Use blockedBy and schema_locks rather than free parallelism.
+
+- RT-15a/15b/15c: Backend flags, frontend flags, integration. RT-15b blocked by RT-15a, RT-15c blocked by both (`docs/design/2026-05-21-release-train-ticket-spec.md:86-88`). Add schema/API contract lock for `/api/feature-flags/effective` response and tier enum values.
+
+Runner machinery supports Prerequisites YAML `mutex_with` and blocks pickup when siblings hold the same mutex (`backend/agents/jira_dispatch.py:3604-3624`, `backend/agents/jira_dispatch.py:3985-4002`). It also has file-overlap prediction from `Files / Paths` (`backend/agents/jira_dispatch.py:2137-2158`). Use both: explicit mutex labels for shared non-obvious resources, and concrete Files for automatic overlap.
+
+## E. Ambiguous decisions embedded in BOT tickets
+
+- RT-09 depends on final git-tag semantics because candidate pipeline must not accidentally introduce a candidate tag or final rebuild trigger. The spec correctly blocks RT-09 by RT-20 (`docs/design/2026-05-21-release-train-ticket-spec.md:74`). Guardrail: description must say “blocked until RT-20 decision is recorded; do not choose semantics.”
+
+- RT-12 contains final-tag-no-rebuild test and promote job semantics. The workplan explicitly says final git-tag semantics must be decided (`docs/design/2026-05-21-release-train-workplan.md:42`), and the spec correctly blocks RT-12 by RT-20 and RT-19/21/22 (`docs/design/2026-05-21-release-train-ticket-spec.md:81`). Guardrail: no final git tag/image-tag interpretation in the RT-12 AC; reference RT-20 decision output.
+
+- RT-12 also depends on bridge runtime inventory. RT-21 is a decision/inventory ticket whose AC says digest set in RT-12/13 matches actual deployed components (`docs/design/2026-05-21-release-train-ticket-spec.md:42`). Spec correctly blocks RT-12 and RT-13b on RT-21 (`docs/design/2026-05-21-release-train-ticket-spec.md:81-83`).
+
+- RT-08 has unresolved overlay load semantics in the workplan (`docs/design/2026-05-21-release-train-workplan.md:36`). It is not currently blocked by a decision ticket. This is a hidden decision in a `[BOT]` ticket. Fix: either add an OP decision prerequisite or write the chosen semantics in the RT-08 description before filing.
+
+- RT-06 contains a hidden trust-mode decision if the description does not state key-based. ADR identifies signing inconsistency as a blocking design hole (`docs/adr/ADR-0040-single-trunk-release-train.md:58-60`); workplan resolves by “pick key-based (current)” (`docs/design/2026-05-21-release-train-workplan.md:34`). Fix: embed “key-based current mode” in RT-06 AC.
+
+- RT-18 is correctly `[OP]` because hotfix stop-the-line policy is an open operator decision in ADR-0040 (`docs/adr/ADR-0040-single-trunk-release-train.md:87-91`).
+
+- RT-17 includes “main retirement,” while ADR-0040 still lists `main` vestigial pointer vs delete outright as an open item (`docs/adr/ADR-0040-single-trunk-release-train.md:87-91`). RT-17 is `[OP]`, so this is acceptable only if RT-17 description requires the operator to choose or references the accepted ADR outcome.
+
+## F. Tag/label classifier correctness
+
+### Correct
+
+- Integration/test tickets RT-04e, RT-05e, RT-07c, RT-10c, RT-15c are correctly `[BOT]`, not `[GATE]`, because they do work and should be runner Stories (`docs/design/2026-05-21-release-train-ticket-spec.md:25`, `docs/sop/sprint-s12-ticket-decomposition-rules.md:113-121`).
+- RT-16 dry-run is correctly `[OP]` because it is operator ops/runtime evidence, not a bot implementation row (`docs/design/2026-05-21-release-train-ticket-spec.md:25`, `docs/design/2026-05-21-release-train-ticket-spec.md:93`).
+- RT-04a is correctly `[BOT]`; ordering is a blockedBy/dependency concern, not `[HOLD]` (`docs/design/2026-05-21-release-train-ticket-spec.md:25`, `docs/design/2026-05-21-release-train-ticket-spec.md:48`).
+- OP rows use tier:X/operator/no-commits in the table, which keeps them out of runner pickup JQL because JQL excludes `tier:X` (`backend/agents/jira_dispatch.py:357-365`).
+
+### Needs fix before filing
+
+- `area:ci` is not currently canonical in the label schema or runner recognized areas. The schema enum is `backend, frontend, devops, tests, db, docs, security, embedded, tooling` (`docs/sop/jira-label-schema.yaml:53-61`), and runner recognized areas match that set minus `ci/gerrit` (`auto-runner-jira.py:147-150`). RT-04a/RT-09 currently list area `ci` in the spec (`docs/design/2026-05-21-release-train-ticket-spec.md:48`, `docs/design/2026-05-21-release-train-ticket-spec.md:74`). They must remain unfiled until RT-03 lands, as the spec filing order says (`docs/design/2026-05-21-release-train-ticket-spec.md:18-19`).
+
+- `area:gerrit` is accepted by `scripts/file_jira_ticket.py` today but not runner recognized or schema canonical (`scripts/file_jira_ticket.py:37-47`, `auto-runner-jira.py:147-150`, `docs/sop/jira-label-schema.yaml:53-61`). RT-04c/RT-17 include gerrit area, both OP/tier:X, so runner pickup is not the immediate risk; but filing schema drift still needs RT-03.
+
+- `area:db` is accepted by runner/schema/capability matrix but explicitly rejected by filing script as `RUNNER_ONLY_AREAS` (`auto-runner-jira.py:147-150`, `docs/sop/jira-label-schema.yaml:53-61`, `config/capability_matrix.yaml:80-83`, `scripts/file_jira_ticket.py:62-67`). RT-04b/RT-10a/RT-11 use db (`docs/design/2026-05-21-release-train-ticket-spec.md:49`, `docs/design/2026-05-21-release-train-ticket-spec.md:76`, `docs/design/2026-05-21-release-train-ticket-spec.md:79`), so RT-03 must fix before those are filed.
+
+- BOT rows in the table must include real `type:feature`/`type:tests` labels as accepted by filing tooling. The title convention says `[BOT]` requires `class:subscription-*` + `agent:auto` (`docs/design/2026-05-21-release-train-ticket-spec.md:23-25`), but actual runner capability gate infers code_edit/gerrit_push from `type:feature|bug|docs` and absence of `runner:no-commits-expected` (`auto-runner-jira.py:619-627`). If filed as missing/odd `type`, capability safe-default failures are likely.
+
+- `type:tests` is shown in table shorthand (`Story·M·tests·sub-claude`), but `scripts/file_jira_ticket.py --type` only accepts bug|feature|docs|meta per spec note (`docs/design/2026-05-21-release-train-ticket-spec.md:8-9`). The expansion must use a supported `--type` value and `area:tests`, not a literal `type:tests`, unless RT-03 extends tooling. The spec’s note says unsupported `type:meta-doc`/`ops` were normalized; ensure `tests` in the shorthand is an area/category, not a type.
+
+## Top goal-drift hazards ranked
+
+1. Missing real per-ticket scope anchors. The table claims Goal+Files+Spec-ref, but they are not present in the blueprint rows (`docs/design/2026-05-21-release-train-ticket-spec.md:15-16`, `docs/design/2026-05-21-release-train-ticket-spec.md:32-94`). Runner file mutex and prompt boundaries depend on exact Files/Paths and areas (`backend/agents/jira_dispatch.py:2137-2158`, `auto-runner-jira.py:1186-1200`).
+
+2. RT-08 hidden overlay-load decision. Workplan leaves semantics open (`docs/design/2026-05-21-release-train-workplan.md:36`), but RT-08 is `[BOT]` with no decision blocker (`docs/design/2026-05-21-release-train-ticket-spec.md:68`).
+
+3. RT-09 cand-tag regression. Corrected Model A forbids `cand/<sha>` (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:9-10`), but older Model A sections still discuss `cand/*` as an option (`docs/design/2026-05-21-model-a-candidate-build-release-train.md:61-71`). A cold runner needs the corrected rule in the ticket itself.
+
+4. RT-05/RT-07 atomic groups split into siblings without explicit file locks. The workplan calls staging fidelity and prod deploy lockdown atomic groups (`docs/design/2026-05-21-release-train-workplan.md:32-35`), while the spec decomposes them into multiple BOT rows (`docs/design/2026-05-21-release-train-ticket-spec.md:57-67`). Use blockedBy + mutex.
+
+5. Label/classifier drift around `ci/gerrit/db`. RT-03 must land before filing any affected ticket; current tool/schema/runtime sets disagree (`auto-runner-jira.py:147-150`, `scripts/file_jira_ticket.py:37-47`, `scripts/file_jira_ticket.py:62-67`, `docs/sop/jira-label-schema.yaml:53-61`).
+
+6. RT-12 mega-ticket scope. Promote job, three images, digest verification, attestation, idempotency, final-tag-no-rebuild test are all in one BOT row (`docs/design/2026-05-21-release-train-ticket-spec.md:81`). It is acceptable only with exact decisions and file anchors.
+
+7. OP tickets accidentally runner-pickable if filed with wrong labels. Runner JQL excludes tier:X but does not require `[OP]` title or `agent:auto` (`backend/agents/jira_dispatch.py:357-365`). OP rows must be tier:X and no subscription class.
+
+## Per-ticket rewrites needed
+
+Only listing tickets that need title or scope-anchor rewrites beyond routine 4-AC expansion.
+
+- RT-04a title rewrite: `[BOT][RT-04a] Fast develop submit-gate CI job (per-change only; not candidate certification)`.
+  Scope anchor: Files `.gitlab-ci.yml` or exact CI/Gerrit config, tests; Spec-ref workplan P0.1b lines 29-30.
+
+- RT-04d title rewrite: `[BOT][RT-04d] Bad full-SHA rejection tests for green-evidence/candidate gate`.
+  Scope anchor: tests only unless tiny fixture helpers; out of scope CI/store implementation.
+
+- RT-05a title rewrite: `[BOT][RT-05a] Staging compose: GitLab CR + fail-closed ref + pull_policy; no digest deploy logic`.
+  Scope anchor: `deploy/staging/docker-compose.yml`, compose tests; no RT-05b/05d files.
+
+- RT-05d title rewrite: `[BOT][RT-05d] Staging-gate evidence: JSONL digest triplet + observed /api/version fields`.
+  Scope anchor: staging gate evidence files only; explicitly not RT-08 prod overlay semantics.
+
+- RT-06 title rewrite: `[BOT][RT-06] Cosign key-based trust consistency + unsigned/tampered negative tests`.
+  Scope anchor: exact verifier/audit/docs files; no OIDC/keyless implementation.
+
+- RT-07a title rewrite: `[BOT][RT-07a] deploy-prod/check_deploy_ref accept final tag or digest only; no allowlist/compose edits`.
+
+- RT-07b title rewrite: `[BOT][RT-07b] Prod allowlist + compose fail-closed OMNISIGHT_IMAGE_TAG required`.
+
+- RT-08 title rewrite or block: `[BOT][RT-08] /api/version + /readyz deployment overlay using <chosen load semantics>`.
+  If semantics not chosen, add `[OP] DECISION` blocker before RT-08.
+
+- RT-09 title rewrite: `[BOT][RT-09] API/manual CANDIDATE_SHA=<40hex> pipeline; build sha-<fullsha>; no cand/* tag`.
+
+- RT-10b title rewrite: `[BOT][RT-10b] Early version reservation for planning only (fixVersion/META); no image/git tag`.
+
+- RT-11 title rewrite: `[BOT][RT-11] Promote-time release-to-release migration compatibility gate; no prod rollback command`.
+
+- RT-22 title rewrite: `[BOT][RT-22] Remove unattended force-promote; audited human break-glass only; never bypass digest equality`.
+
+- RT-12 title rewrite: `[BOT][RT-12] Promote by retagging validated GitLab CR digests to reserved version; consume RT-20/RT-21 decisions`.
+
+- RT-13a title rewrite: `[BOT][RT-13a] release_train_status.py status + rollback digest resolver tool only`.
+
+- RT-15b title rewrite: `[BOT][RT-15b] FE feature-flag provider/hook/SSR bootstrap; consume RT-15a API contract`.
+
+- RT-17 title rewrite: `[OP][RT-17] Post-dry-run cutover cleanup: delete old automation, apply Gerrit cutover, retire main per accepted ADR decision`.
+
+## GO / GO-WITH-FIXES / NO-GO
+
+Verdict: GO-WITH-FIXES before filing.
+
+The decomposition and tag corrections are directionally sound. The `[BOT]` vs `[OP]` split is mostly correct, the integration tickets are correctly `[BOT]`, and major decision tickets RT-20/RT-21 are correctly operator-owned and wired into RT-09/RT-12. However, the current document is still a blueprint, not runner-comprehensible filed tickets. The filing pass must add per-ticket Goal + exact Files / Paths + precise Spec-ref + out-of-scope sibling boundaries + executable verify blocks. It must also land RT-03 before any `ci/gerrit/db`-affected ticket, add mutex/schema locks for shared release_train/staging/prod-deploy/API-version resources, and resolve or block the hidden RT-08 overlay semantics decision.
+
+Do not file as-is. File after the above rewrites are incorporated into the full Story descriptions.

@@ -652,7 +652,7 @@ Ticket count estimate: **~250 children** across 11 sub-METAs. Ticket decompositi
 
 ADR-0023 does not supersede ADR-0001 or ADR-0002. It amends them in the sense that:
 
-- ADR-0001 (Five-Branch Git Flow) — design **stays**. AUDIT-31 phase 31.B adds the multi-agent runner pattern that ADR-0001 omitted. Phase 31.K updates ADR-0001 Status to "Accepted + Implemented (via AUDIT-31)".
+- ADR-0001 (Five-Branch Git Flow) — ⚠ **REVERSED by proposed [ADR-0040](ADR-0040-single-trunk-release-train.md) (2026-05-21).** This clause originally said the five-branch design "stays" and would be marked "Accepted + Implemented". ADR-0040 instead **retires `main` + `release/*` + `hotfix/*`** in favour of a single-trunk tag-driven release train. If ADR-0040 is accepted, ADR-0023's "ADR-0001 stays / 31.K marks it Implemented" premise no longer holds and must be re-reconciled. (Original text: "design stays. AUDIT-31 phase 31.B adds the multi-agent runner pattern that ADR-0001 omitted. Phase 31.K updates ADR-0001 Status to Accepted + Implemented.")
 - ADR-0002 (GitLab self-hosted primary, GitHub one-way mirror, Gerrit review layer) — design **stays**. AUDIT-31 phase 31.D + 31.E executes the implementation. Phase 31.K updates ADR-0002 Status to "Accepted + Implemented (via AUDIT-31)".
 
 A pattern is captured for future drift prevention: **a new lesson** (L-OP-NNN, Phase 31.K) documents the "aspirational ADR" anti-pattern — when an ADR is Accepted but no implementation contract closes the loop, the doc state diverges from runtime state silently. The remediation pattern: every ADR with operational claims must spawn a META ticket with 4-AC discipline + Go-Live target before being signed off as "Implemented."

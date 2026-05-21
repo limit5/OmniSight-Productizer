@@ -1,0 +1,238 @@
+# Release-train ticket spec audit — Codex / GPT-5.5
+
+Date: 2026-05-21
+Target: docs/design/2026-05-21-release-train-ticket-spec.md
+Prompt: docs/codex-review-prompts/2026-05-21-release-train-ticket-spec-audit-prompt.md
+
+Verdict: GO-WITH-FIXES, not clean GO. The spec is directionally much better than the v1 work plan: the P1.4-before-P1.5 ordering bug is gone, the v1 P0.6/P1.3 cycle is gone, and most of the prior must-fixes are represented as RT tickets. However, it is not yet safe to file as-is. The biggest blockers are filing-correctness problems, not release-model problems: the spec is a summary table, but the filing SOP requires per-Story descriptions with Prerequisites YAML, exact labels, four AC sections, machine-executable verify blocks, and area labels spanning all touched paths. Several RT rows also use unresolved labels such as `ci(or devops)` / `gerrit(or devops)`, missing exact `runner:no-commits-expected` labels, unsupported/ambiguous `type` values, and areas that today's filing script or runner cannot accept.
+
+## A. Coverage Completeness
+
+A1. Covered: the main Model A must-fixes are mapped to RT tickets.
+
+- Candidate SHA pipeline: RT-09 covers API/manual `CANDIDATE_SHA`, exact full-SHA checkout, `sha-<fullsha>` images, digest signing, no latest, and resource_group (docs/design/2026-05-21-release-train-ticket-spec.md:51). This maps Model A must-fixes 1-2 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:418-420).
+- Early version reservation and `release_train` state/lock: RT-10a/10b/10c cover the table, CAS, reserved version, audit hard-gate, and race test (docs/design/2026-05-21-release-train-ticket-spec.md:52-55), mapping Model A must-fixes 3-4 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:420-422).
+- Staging/prod GitLab CR and fail-closed refs: RT-05a/b/e plus RT-07a/b/c cover staging/prod registry/ref lockdown (docs/design/2026-05-21-release-train-ticket-spec.md:35-45), mapping Model A must-fix 5 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:422).
+- Runtime overlay and operator status/rollback: RT-08 and RT-13 cover `/api/version`/`/readyz` overlay plus `release_train_status.py` (docs/design/2026-05-21-release-train-ticket-spec.md:46,58), mapping Model A must-fixes 6 and 12 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:423,429).
+- Promote job: RT-12 covers GitLab CR, all three images, digest verification, per-image attestations, idempotency, and final-git-tag-no-rebuild test (docs/design/2026-05-21-release-train-ticket-spec.md:57), mapping Model A must-fix 7 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:424).
+- Cosign trust mode: RT-06 covers tampered/unsigned negative verification and truthful audit JSON (docs/design/2026-05-21-release-train-ticket-spec.md:41), mapping Model A must-fix 8 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:425).
+- Exact-SHA green and migration gate: RT-04a-e plus RT-11 cover green signal and rollback-unsafe migration block (docs/design/2026-05-21-release-train-ticket-spec.md:25-30,56), mapping Model A must-fix 9 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:426).
+- GitLab CR retention: RT-14 covers unpromoted SHA GC and protection of promoted/audit-referenced digests (docs/design/2026-05-21-release-train-ticket-spec.md:59), mapping Model A must-fix 10 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:427).
+- Old automation freeze/delete: RT-01 freezes old writers and webhooks, RT-17 deletes/cleans up after dry-run (docs/design/2026-05-21-release-train-ticket-spec.md:18,69), mapping Model A must-fix 11 (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:428).
+
+A2. Covered: work-plan v2's corrected sequence items are mostly represented.
+
+The 15-step corrected sequence in the work-plan audit is represented by RT-01 through RT-17: freeze, runner vocab, green signal, staging fidelity, cosign, prod lockdown, overlay, candidate pipeline, version reservation/release_train, migration rollback gate, promote, status/rollback, retention, FE flags, dry-run, cleanup (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:560-575; docs/design/2026-05-21-release-train-ticket-spec.md:17-69). This is a substantial coverage improvement over the v1 work plan.
+
+A3. GAP — hotfix stop-the-line / no-fix-isolation policy has no ticket.
+
+ADR-0040 states that without stabilization branches, hotfixes cannot isolate only a fix if develop has moved ahead; mitigation requires frequent trains, green-cut, and feature flags (docs/adr/ADR-0040-single-trunk-release-train.md:45). The retire-main audit made this a high-priority required action: define a stop-the-line rule to revert/disable unready develop changes before tagging, or define a tag-from-last-release exception (docs/audit/codex-reviews/retire-main-release-train-codex-audit-2026-05-21.txt:140-151). The ticket spec covers FE flags in RT-15 (docs/design/2026-05-21-release-train-ticket-spec.md:60-63) and green-cut in RT-04, but no RT ticket owns the hotfix policy itself. Add an OP/docs ticket, probably blockedBy RT-00 and before RT-16, with explicit rollback/hotfix decision rules.
+
+A4. GAP — final release actor/tag protection is not ticketed.
+
+The Model B audit found that final tags/promote images need actor constraints: protect `v*` tags in GitLab/Gerrit, allow only release-train service / release-manager group, and require immutable audit rows for every tag/promotion (docs/audit/codex-reviews/model-b-rc-promote-codex-audit-2026-05-21.txt:159-163). ADR-0040 makes tags/promoted digests release authority (docs/adr/ADR-0040-single-trunk-release-train.md:34-36). RT-12 owns promote mechanics (docs/design/2026-05-21-release-train-ticket-spec.md:57), but no ticket explicitly owns GitLab protected tag settings, Gerrit tag ACLs, or release-manager actor policy. This should be a separate tier:X ops/security/devops ticket or a split code+ops pair blocked before RT-12 can exercise final promotion.
+
+A5. GAP / open decision — final git-tag semantics are still an open decision, not a filed decision ticket.
+
+The spec acknowledges RT-12 still has an open decision: final git tags are either excluded from CI or there is no final git tag (docs/design/2026-05-21-release-train-ticket-spec.md:94). The work-plan audit called this out as a required pre-P1.4 semantics decision because current GitLab workflow builds for every `v*` tag (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:406-421). RT-12 includes a final-git-tag-no-rebuild test (docs/design/2026-05-21-release-train-ticket-spec.md:57), but filing an implementation ticket with an unresolved core semantic is risky. Add an RT-12-pre decision/spec ticket or make RT-12 blockedBy RT-00 plus a specific ADR/CI semantics ticket.
+
+A6. GAP / open decision — bridge runtime inventory is not ticketed.
+
+The work-plan audit found the bridge digest triplet may not match real deployed components and requires inventory before P1.4/P1.6 (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:423-438). The ticket spec leaves this as an open decision (docs/design/2026-05-21-release-train-ticket-spec.md:95) while RT-12/RT-13 already assume backend/frontend/bridge digest triplets (docs/design/2026-05-21-release-train-ticket-spec.md:57-58). This needs a real ticket blocked before RT-12 and RT-13: inventory actual prod/staging runtime components and decide bridge = first-class image vs backend profile vs host-sync.
+
+A7. PARTIAL GAP — force/break-glass policy is present in work plan prose but not explicitly ticketed.
+
+The work plan defines no unattended force-promote and requires human command, exact SHA, immutable audit reason, and no bypass of digest equality (docs/design/2026-05-21-release-train-workplan.md:51-52). Prior audits required force/break-glass rewrite/removal (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:493-507; docs/audit/codex-reviews/retire-main-release-train-codex-audit-2026-05-21.txt:181-191). RT-11 mentions break-glass only for rollback-unsafe migrations (docs/design/2026-05-21-release-train-ticket-spec.md:56), and RT-07a kills insecure skip without audit (docs/design/2026-05-21-release-train-ticket-spec.md:43), but no ticket owns rewriting/removing `release:force-promote` / `release_milestone_checker` semantics across the release train. Add it as a child of prod-deploy/release_train, probably blocked before RT-12.
+
+A8. PARTIAL GAP — `backend/routers/webhooks.py` is included only in RT-01 freeze, not as a code cleanup/retarget ticket.
+
+ADR-0040 lists `backend/routers/webhooks.py` as a live main-hardcoded landmine (docs/adr/ADR-0040-single-trunk-release-train.md:49). The work-plan v2 says P0.0 freeze covers webhooks (docs/design/2026-05-21-release-train-workplan.md:25), and RT-01 says webhooks main-push and main-triggered CI are OFF (docs/design/2026-05-21-release-train-ticket-spec.md:18). But prior audit required remove/retarget webhook main replication and CI triggers to the new contract (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:371-387). If RT-01 is ops-only/no-commits, it cannot safely modify `backend/routers/webhooks.py`; if it only disables runtime triggers, the stale code remains. Add a BOT backend/test ticket for webhook code removal/retargeting, with RT-01 as freeze and RT-17 as final deletion cleanup.
+
+## B. Dependency-Graph Correctness
+
+B1. PASS — graph is acyclic on the listed RT dependencies.
+
+I found no cycle in the graph as written. The old v1 P0.6/P1.3 cycle is gone: retention is RT-14 and depends only on RT-10a (docs/design/2026-05-21-release-train-ticket-spec.md:59,86,90). The main chain is RT-00 -> RT-03 -> RT-04e -> RT-10a and RT-05e/RT-06/RT-11 -> RT-12 -> RT-16 -> RT-17 (docs/design/2026-05-21-release-train-ticket-spec.md:73-88).
+
+B2. PASS — RT-12 cannot precede staging and migration gates in the graph.
+
+RT-12 is blockedBy RT-05e (staging-fidelity integration), RT-06 (cosign), RT-10a (release_train), and RT-11 (migration rollback gate) (docs/design/2026-05-21-release-train-ticket-spec.md:57,84). RT-11 itself is blockedBy RT-10a and RT-08 (docs/design/2026-05-21-release-train-ticket-spec.md:56,83). This fixes the work-plan v1 inversion where promote preceded staging gate (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:127-142).
+
+B3. BLOCKER — several `blockedBy` cells use shorthand that is unsafe for filing scripts.
+
+Rows use `RT-04a,b,c,d`, `RT-05a,b,c,d`, `RT-07a,b`, and `RT-10(a→b ; a→10c)` shorthand (docs/design/2026-05-21-release-train-ticket-spec.md:30,40,45,81). SOP §19 says blockedBy wiring must use intent-named helper semantics with `blocked_key` and `blocker_key`, because raw inward/outward and shorthand have caused inverted links (docs/sop/jira-ticket-conventions.md:1047-1095). Filing checklist rule 9 also requires deleting stale Blocks before adding new and verifying the graph is a DAG because JIRA has no cycle detection (docs/sop/runner-ticket-filing-checklist.md:105-112). Fix: expand every shorthand into explicit edge pairs before filing; do not let a human/script infer `RT-04a,b,c,d`.
+
+B4. BLOCKER — RT-00 is marked `type:meta-doc` even though it is a prerequisite doc implementation ticket, not a roll-up with children.
+
+RT-00 is the ADR acceptance/supersession/cross-ref prerequisite (docs/design/2026-05-21-release-train-ticket-spec.md:17). Filing checklist says `type:meta` only for tickets that actually have children; meta routes to read-only safe-default and refuses code push (docs/sop/runner-ticket-filing-checklist.md:71-77). Label conventions say a single implementation ticket with paths under docs/scripts/backend/etc. and no children must not be `type:meta` (docs/sop/jira-label-conventions.md:190-198). If `type:meta-doc` is filed as a free `type` value, it is outside the documented `file_jira_ticket.py --type` choices (`bug`, `feature`, `docs`, `meta`) (scripts/file_jira_ticket.py:274-286). Fix RT-00 to Story, tier:X, type:docs or ops-docs, area:docs, no `type:meta` unless it is an actual parent with children.
+
+B5. OPEN DECISION DEPENDENCY — RT-12 should be blockedBy the final-git-tag semantics decision and bridge inventory.
+
+RT-12 currently depends on staging, cosign, release_train, and migration (docs/design/2026-05-21-release-train-ticket-spec.md:57). It does not depend on resolving the two open decisions that directly affect implementation: final git-tag semantics and bridge image inventory (docs/design/2026-05-21-release-train-ticket-spec.md:94-95). These should not be comments inside RT-12/RT-13; they should be blockers or decision_points. Otherwise a runner can implement one interpretation and create the exact tag/rebuild contradiction called out in the audits (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:406-421).
+
+## C. Area-Label Correctness
+
+C1. BLOCKER — the spec uses `ci(or devops)` and `gerrit(or devops)` placeholders; those are not fileable labels.
+
+RT-04a and RT-09 list `ci(or devops),tests/backend` variants, and RT-04c lists `gerrit(or devops)` (docs/design/2026-05-21-release-train-ticket-spec.md:26,28,51). The runner's actual recognized areas are only backend/frontend/devops/tests/db/docs/security/embedded/tooling (auto-runner-jira.py:147-150); the schema mirrors the same enum (docs/sop/jira-label-schema.yaml:53-59); `file_jira_ticket.py` currently accepts `gerrit` but not `ci`, and separately rejects `db` despite runner/schema accepting it (scripts/file_jira_ticket.py:37-47,62-66,184-193). A literal `ci(or devops)` label will fail. A disguised `devops` label under-declares `.gitlab-ci.yml` per S12 path mapping (`.gitlab-ci.yml` -> `area:ci`, Gerrit config -> `area:gerrit`) (docs/sop/sprint-s12-ticket-decomposition-rules.md:48-62). Fix: RT-03 must land first and update all three places: runner, schema/label docs, capability matrix, and filing CLI/tests; then use exact `area:ci`/`area:gerrit`, not alternates. If RT-03 chooses not to add them, those tickets must be tier:X human/operator or split with devops-only paths.
+
+C2. BLOCKER — RT-03 itself under-declares areas.
+
+RT-03 says it will add `area:ci`/`area:gerrit` to `RECOGNISED_AREAS`, capability_matrix, label conventions, validator, and prompt-builder tests (docs/design/2026-05-21-release-train-ticket-spec.md:20). That touches at least:
+- `auto-runner-jira.py` => tooling (auto-runner-jira.py:143-150).
+- `config/capability_matrix.yaml` => config/tooling/devops-like governance (config/capability_matrix.yaml:50-58).
+- `docs/sop/jira-label-conventions.md` and `docs/sop/jira-label-schema.yaml` => docs (docs/sop/jira-label-schema.yaml:53-59; docs/sop/jira-label-conventions.md:68-82).
+- `scripts/file_jira_ticket.py` / validator / tests => tooling/tests (scripts/file_jira_ticket.py:37-47; tests/test_lint_jira_ticket_spec.py:138-153).
+
+The row lists only `tooling,tests` (docs/design/2026-05-21-release-train-ticket-spec.md:20). Filing checklist rule 4 requires area labels to span every AC directory (docs/sop/runner-ticket-filing-checklist.md:63-69). Fix: add `docs` and likely `devops`/`tooling` explicitly, and include the filing CLI (`scripts/file_jira_ticket.py`) because otherwise area vocabulary still cannot be filed cleanly.
+
+C3. BLOCKER — `area:db` tickets cannot be filed by the current filing CLI even though runner/schema accept db.
+
+RT-04b, RT-10a, and RT-11 use `db` (docs/design/2026-05-21-release-train-ticket-spec.md:27,53,56). The runner whitelist includes db (auto-runner-jira.py:147-150), and schema enum includes db (docs/sop/jira-label-schema.yaml:53-59), but `scripts/file_jira_ticket.py` intentionally omits db from `VALID_AREAS` and treats it as a runner-only area that exits with an error (scripts/file_jira_ticket.py:37-47,62-66,184-193). This is a filing-time hazard independent of the release spec. Fix: add a pre-RT-03 filing-tooling correction for db drift, or include db correction in RT-03 before any db ticket is filed.
+
+C4. BLOCKER — RT-01 under-declares backend/docs if it really covers webhooks and rollback boundary.
+
+RT-01 is `area:devops`, caps `no-commits`, and key AC includes disabled systemd units plus `webhooks` main-push and GitHub/GitLab main triggers OFF plus rollback boundary documentation (docs/design/2026-05-21-release-train-ticket-spec.md:18). Webhook code lives in `backend/routers/webhooks.py`, cited as a main-hardcoded landmine by ADR-0040 (docs/adr/ADR-0040-single-trunk-release-train.md:49) and prior audit (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:371-378). Rollback boundary docs imply docs area. Per area-span rule, devops alone is insufficient if the ticket changes or validates backend code/docs (docs/sop/runner-ticket-filing-checklist.md:63-69). Fix: split RT-01 into ops freeze (tier:X, devops, runner:no-commits-expected) and BOT webhook code/config cleanup (backend,tests,possibly tooling/docs), plus rollback docs if needed.
+
+C5. BLOCKER — RT-08 under-declares devops/ops activation.
+
+RT-08 is `backend,tests`, but key AC says prod restart exposes triplet and missing/mismatch overlay fails the gate (docs/design/2026-05-21-release-train-ticket-spec.md:46). The prior work-plan audit warned the overlay depends on deploy-time lock/load semantics and prod restart evidence (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:71-86). If the ticket writes deploy env locks, compose wiring, or runs/proves prod restart, it touches devops/ops. Fix: either add devops and an activation/ops child, or scope RT-08 to backend code/tests only and add a separate tier:X activation ticket blockedBy RT-08.
+
+C6. BLOCKER — RT-13 combines bot code and operator rollback/prod exercise in one `tier:M` feature ticket.
+
+RT-13 is `[BOT+OP]`, tier:M, areas tooling/backend, with a rollback command and prod status join (docs/design/2026-05-21-release-train-ticket-spec.md:58). The filing checklist says anything with a human-only AC must be tier:X; soft labels are not gates (docs/sop/runner-ticket-filing-checklist.md:47-54). Ops-only tickets need `runner:no-commits-expected` when no commits are expected (docs/sop/jira-ticket-conventions.md:1296-1340). Fix: split into RT-13a BOT tool implementation (tooling/backend/tests, tier:M, gerrit_push) and RT-13b OP/tier:X prod status+rollback exercise (devops, runner:no-commits-expected) blockedBy RT-13a and RT-08/RT-10a.
+
+C7. BLOCKER — RT-17 uses `area:gerrit` before the vocabulary migration is guaranteed to be available at filing time.
+
+RT-17 lists `devops,gerrit` (docs/design/2026-05-21-release-train-ticket-spec.md:69). Today `area:gerrit` is not in runner/schema whitelist (auto-runner-jira.py:147-150; docs/sop/jira-label-schema.yaml:53-59), and the spec itself says `ci`/`gerrit` are not yet recognized (docs/design/2026-05-21-release-train-ticket-spec.md:5,93). If the whole batch is filed before RT-03 lands, RT-17 is an unknown-area pickup-loop hazard. Fix: either do not file RT-17 until after RT-03 publishes the vocabulary, or file it as tier:X/no class until re-labeled after RT-03.
+
+C8. Many devops feature tickets need activation children or waivers.
+
+S12 rules require every functional ticket with deployable artifact/config to have a paired activation ticket; enforcement triggers include `area:devops + type:feature` and new deploy/systemd/yaml artifacts (docs/sop/sprint-s12-ticket-decomposition-rules.md:356-431). The lint script concretely rejects devops specs lacking an activation bullet (scripts/lint-jira-ticket-spec.py:1-12,30-36,146-157). RT-02, RT-05a/b, RT-06, RT-07a/b, RT-12, and RT-14 are all devops/tooling feature tickets with deploy/release artifacts (docs/design/2026-05-21-release-train-ticket-spec.md:19,36-37,41,43-44,57,59). Integration gates are not automatically activation tickets. Fix: add activation child/waiver per devops feature row, or explicitly make the `[GATE]` ticket include activation scope and name it as such.
+
+## D. Capability / Tier / Type Correctness
+
+D1. BLOCKER — missing `class:*` on every row.
+
+JIRA conventions require Class, Tier, and Area labels on every ticket (docs/sop/jira-ticket-conventions.md:70-76), and label conventions explain class drives runner JQL pickup (docs/sop/jira-label-conventions.md:68-77). The ticket spec has tier/type/areas/caps but no `class` column or per-ticket class decision (docs/design/2026-05-21-release-train-ticket-spec.md:15-20). Fix: add `class:subscription-codex` / `class:subscription-claude` / no class/operator as a per-row filing field. This matters because file_jira_ticket requires `--class` (scripts/file_jira_ticket.py:274-286).
+
+D2. BLOCKER — `caps` shorthand is not exact labels.
+
+Rows use `gerrit_push` and `no-commits` shorthand (docs/design/2026-05-21-release-train-ticket-spec.md:18-20,26-30,68-69). The actual capability override label form is `capability:enable=<cap>` (docs/sop/jira-label-conventions.md:86-95; docs/sop/jira-label-schema.yaml:63-76), and the ops-only label is `runner:no-commits-expected` (docs/sop/jira-ticket-conventions.md:1331-1340). Fix the table to list literal labels: `capability:enable=gerrit_push`, `runner:no-commits-expected`, and any deploy/migration capability needed.
+
+D3. BLOCKER — several type values are not file_jira_ticket-compatible and/or are unsafe.
+
+`file_jira_ticket.py` supports `--type bug|feature|docs|meta` (scripts/file_jira_ticket.py:274-286). The spec uses `type:meta-doc`, `ops`, `meta·tier:X`, `Story·tier:X·ops`, etc. (docs/design/2026-05-21-release-train-ticket-spec.md:17-18,25,35,42,60,68-69). The schema allows free `type:*`, but the filing CLI does not; more importantly, `type:meta` has side effects and is only for true roll-ups (docs/sop/jira-label-conventions.md:190-198; docs/sop/runner-ticket-filing-checklist.md:71-77). Fix: normalize to CLI-supported types or update the CLI/schema/tests first. Parent rows with children can use `type:meta`; implementation/ops/doc rows should use `type:feature`, `type:docs`, or another validated type only after tooling supports it.
+
+D4. BLOCKER — tier:X + runner class/capability needs precise handling.
+
+The filing checklist says tier:X is human-only and runner JQL excludes tier:X (docs/sop/runner-ticket-filing-checklist.md:47-54). The filing CLI's pickup JQL excludes `tier:X` (scripts/file_jira_ticket.py:112-121), and `--check` prints that tier:X is intentionally excluded (scripts/file_jira_ticket.py:261-270). Therefore RT-00, RT-01, parent metas, RT-16, and RT-17 must not be filed expecting bot pickup unless they are split or manually advanced. The spec currently labels some as `[OP]`/`[GATE]`, but still uses Story rows and caps shorthand (docs/design/2026-05-21-release-train-ticket-spec.md:17-18,68-69). Fix: explicitly mark operator/no-class or `class:operator` if supported, and split any code-producing child out of tier:X.
+
+D5. MED — tier:S RT-04d has `gerrit_push` but tier:S may not need or permit full integration scope.
+
+RT-04d is `Story·tier:S·tests` with `gerrit_push` (docs/design/2026-05-21-release-train-ticket-spec.md:29). Capability matrix grants tests/S code_edit/run_tests/run_lint/jira_update but not gerrit_push by default (config/capability_matrix.yaml:68-71), so an explicit `capability:enable=gerrit_push` is required if it will push test code. Filing checklist rule 6 says pushable tickets need explicit `capability:enable=gerrit_push` when the matrix denies it (docs/sop/runner-ticket-filing-checklist.md:79-86). Fix: make cap literal or tier:M if it is a broader negative integration test.
+
+D6. BLOCKER — mixed deploy/migration tickets may need capabilities beyond gerrit_push.
+
+Capability matrix gives `run_migration` only to db areas and `deploy_action` only to devops tier M/L (config/capability_matrix.yaml:80-87). RT-10a/RT-11 include db/migration work (docs/design/2026-05-21-release-train-ticket-spec.md:53,56); RT-05/RT-07/RT-12/RT-16 involve deployment actions (docs/design/2026-05-21-release-train-ticket-spec.md:35-45,57,68). If labels are wrong or tier:S, the runner can lose deploy/migration capabilities. Fix: specify required effective capability set per ticket, not only `gerrit_push`, and include exact areas that grant `run_migration`/`deploy_action` where appropriate.
+
+## E. 4-AC + Integration-Ticket Completeness
+
+E1. BLOCKER — the ticket spec is not yet a fileable ticket spec because it lacks full per-ticket 4-AC descriptions and verify blocks.
+
+The prompt asked whether these tickets will file and execute cleanly. As written, they are only table rows with one “key Exercised AC” column (docs/design/2026-05-21-release-train-ticket-spec.md:15-20). Filing checklist requires every implementation ticket to have all four AC sections plus Go-Live, or N/A rationale (docs/sop/runner-ticket-filing-checklist.md:56-61). S12 rules require every runtime expectation AC bullet to include a machine-executable `verify:` block or explicit deferred-to-operator waiver (docs/sop/sprint-s12-ticket-decomposition-rules.md:202-270). JIRA conventions require every Story description to contain `## Prerequisites` YAML with blocks_on/soft_prereqs/mutex/schema_locks/live_state/external_blockers (docs/sop/jira-ticket-conventions.md:284-299). None of that is present in the RT rows. Fix: expand each RT row into a full per-ticket spec before POST.
+
+E2. PASS-PARTIAL — sibling integration tickets exist for RT-04, RT-05, RT-07, RT-10, RT-15, and RT-16 as end-to-end dry-run.
+
+The spec correctly includes [GATE] tickets blockedBy siblings for green signal (RT-04e), staging fidelity (RT-05e), prod deploy lockdown (RT-07c), concurrent promote race (RT-10c), FE flags (RT-15c), and global dry-run (RT-16) (docs/design/2026-05-21-release-train-ticket-spec.md:30,40,45,55,63,68). This aligns with S12 sibling integration rule (docs/sop/sprint-s12-ticket-decomposition-rules.md:113-120,176-184).
+
+E3. GAP — RT-06 is labeled atomic but has no sibling split or integration/activation structure.
+
+RT-06 covers CI signing mode, verifier behavior, audit JSON truth, docs, and tampered/unsigned tests in one row (docs/design/2026-05-21-release-train-ticket-spec.md:41). Prior work-plan audit warned trust mode has three conflicting claims and must be fixed atomically with integration tests (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:440-455). If it remains one ticket, it must include all paths/areas and full verify blocks. If split into CI/verifier/docs/tests, it needs a [GATE] integration ticket blockedBy all siblings. Current row is under-specified for either path.
+
+E4. GAP — RT-02 audit harness likely needs activation/evidence rows, not just code.
+
+RT-02 extends `deployment-audit.sh` with new check kinds and says a not-activated item shows RED (docs/design/2026-05-21-release-train-ticket-spec.md:19). The work-plan audit said the current deployment audit harness cannot catch release-train failures unless new manifest kinds/checks are added and expected-live rows exist before closing corresponding work (docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:37-52). RT-02 should include Deploy/Exercised AC for installing/running the audit and a manifest row that intentionally fails, plus activation child/waiver per devops rule if it deploys a scheduled audit.
+
+E5. GAP — RT-13 status/rollback needs an exercised ops ticket, not only implementation.
+
+Prior Model A audit says the operator command is mandatory before enabling Model A and rollback should take `--to vX.Y.Z` and resolve digest triplet from immutable release_audit (docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:119-133,373-383). RT-13 includes the command but not a separate operator exercise or activation evidence (docs/design/2026-05-21-release-train-ticket-spec.md:58). Add RT-13b [OP/GATE] blockedBy RT-13a to run against staging/prod-like environment and post durable evidence.
+
+## F. Filing-Time Hazards
+
+F1. BLOCKER — filing all tickets in one batch before RT-03 lands will create unknown-area / invalid-area loops.
+
+The spec explicitly says `ci`/`gerrit` are not yet recognized and points to RT-03 (docs/design/2026-05-21-release-train-ticket-spec.md:5,93). The runner will raise UnknownAreaLabelError on unknown areas (auto-runner-jira.py:153-159,1107-1110). The filing checklist says unknown area labels can cause pickup/revert loops (docs/sop/runner-ticket-filing-checklist.md:40-45,194-199). Therefore do not batch-file RT-04a/04c/09/17 with `area:ci`/`area:gerrit` until RT-03 is published, or file them as HOLD/no class and relabel after RT-03.
+
+F2. BLOCKER — file_jira_ticket.py currently conflicts with the canonical area set.
+
+Current `file_jira_ticket.py` accepts `gerrit` but not `ci`, and rejects `db` as a runner-only area even though runner/schema include db (scripts/file_jira_ticket.py:37-47,62-66,184-193; auto-runner-jira.py:147-150; docs/sop/jira-label-schema.yaml:53-59). This means RT-04b/10a/11 with db cannot be filed via the standard script, while `gerrit` could be filed but then fail runner/schema. RT-03 must correct this drift before filing dependent tickets.
+
+F3. BLOCKER — parent META rows with area `—` violate required labels if filed as Stories.
+
+Every ticket requires area labels (docs/sop/jira-ticket-conventions.md:70-76). Parent rows RT-04/05/07/10/15 use `areas —` (docs/design/2026-05-21-release-train-ticket-spec.md:25,35,42,52,60). If these are actual JIRA Stories, they need at least area:docs/tooling or a validated Epic/META filing path. Empty area is not allowed by capability resolution, which requires at least one area for multi-area resolve (backend/agents/capability_matrix.py:210-231). Fix parent filing format.
+
+F4. BLOCKER — no exact `runner:no-commits-expected` labels on ops-only rows.
+
+Rows use caps `no-commits` (docs/design/2026-05-21-release-train-ticket-spec.md:18,68-69). The real label is `runner:no-commits-expected` (docs/sop/jira-ticket-conventions.md:1331-1340), and the runner prompt-builder/zero-commit path key off that exact label (docs/sop/jira-ticket-conventions.md:1344-1363; auto-runner-jira.py:1155-1164). Fix every ops-only ticket to use the exact label or no class/tier:X operator handling.
+
+F5. BLOCKER — coord-override labels need operator approval/comments.
+
+Capability overrides and `runner:no-commits-expected` change execution semantics; the schema marks `capability:*` as coord_override and `runner:no-commits-expected` as coord_override_adjacent (docs/sop/jira-label-schema.yaml:63-76,154-160). Label conventions say capability overrides are operator-gated (docs/sop/jira-label-conventions.md:86-95). If a filing script auto-adds `capability:enable=gerrit_push`, that is fine for default subscription tickets, but non-default capability changes and ops-only labels should be explicitly operator-approved in the ticket body/comment.
+
+F6. BLOCKER — no Prerequisites YAML means dependency graph may exist only as table prose, not runner-readable metadata.
+
+JIRA conventions require `## Prerequisites` YAML in every Story description (docs/sop/jira-ticket-conventions.md:284-299). The table has a `blockedBy` column, but the actual ticket descriptions must include blocks_on and the filing/wire script must create Blocks links in the correct direction. Without that, scheduler/live-state enforcement can miss blockers (docs/sop/jira-ticket-conventions.md:397-406).
+
+F7. MED — summary prefix discipline is stated globally but not normalized per ticket.
+
+The spec says 6-tag prefix discipline applies (docs/design/2026-05-21-release-train-ticket-spec.md:5), but some rows have `[BOT+OP]`, `[META]`, `[GATE]`, `[OP]` (docs/design/2026-05-21-release-train-ticket-spec.md:51,52,68-69). `[BOT+OP]` is not one of `[BOT/OP/META/REF/GATE/HOLD]`; split it instead. RT-13 is the main offender.
+
+# Gap List — Work-Plan / Audit Items With No Ticket
+
+1. Hotfix stop-the-line / no-fix-isolation policy: required by ADR-0040 and retire-main audit, no RT ticket. Cite: docs/adr/ADR-0040-single-trunk-release-train.md:45; docs/audit/codex-reviews/retire-main-release-train-codex-audit-2026-05-21.txt:140-151.
+2. Final tag / promote actor protection: protect `v*` tags and promotion rights; no explicit RT ticket. Cite: docs/audit/codex-reviews/model-b-rc-promote-codex-audit-2026-05-21.txt:159-163.
+3. Final git-tag semantics decision: acknowledged open in spec but no decision ticket/blocker. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:94; docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:406-421.
+4. Bridge runtime inventory before RT-12/RT-13: acknowledged open in spec but no ticket. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:95; docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:423-438.
+5. Force/break-glass policy implementation across old force-promote paths: work-plan prose exists, but no explicit RT ticket. Cite: docs/design/2026-05-21-release-train-workplan.md:51-52; docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:493-507.
+6. Webhooks code cleanup/retargeting: RT-01 freezes webhooks, but no bot backend ticket owns code removal/retarget. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:18; docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:371-387.
+7. Filing-tool area drift (`db`, `ci`, `gerrit`) correction: RT-03 partly covers ci/gerrit, but not the current db/file_jira drift. Cite: scripts/file_jira_ticket.py:37-47,62-66,184-193.
+
+# Per-Ticket Fix List
+
+- RT-00: change `type:meta-doc` to a supported non-meta docs/ops-doc type; keep tier:X if operator doc acceptance, or split doc edits into a bot docs ticket. Add exact Prerequisites YAML and 4-AC. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:17; docs/sop/runner-ticket-filing-checklist.md:71-77.
+- RT-01: split ops freeze from backend webhook code cleanup and rollback docs. Use exact `runner:no-commits-expected` on the ops ticket; add backend/docs areas or separate tickets. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:18; docs/sop/runner-ticket-filing-checklist.md:63-69.
+- RT-02: add activation/Deploy/Exercised evidence for audit harness live use or explicit activation waiver. Use exact labels. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:19; docs/sop/sprint-s12-ticket-decomposition-rules.md:356-431.
+- RT-03: include docs/schema/file_jira/capability_matrix/prompt-builder/test areas. Explicitly fix `scripts/file_jira_ticket.py` db/ci/gerrit drift, `jira-label-schema.yaml`, `jira-label-conventions.md`, `config/capability_matrix.yaml`, and `auto-runner-jira.py`. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:20; scripts/file_jira_ticket.py:37-47,62-66.
+- RT-04 parent: file as valid parent/meta with real area/class strategy, not area `—`. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:25; docs/sop/jira-ticket-conventions.md:70-76.
+- RT-04a: replace `ci(or devops)` with exact area after RT-03, or mark human/HOLD. Add `.gitlab-ci.yml` area coverage and full verify blocks. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:26; docs/sop/sprint-s12-ticket-decomposition-rules.md:48-62.
+- RT-04b: cannot file with current CLI because `db` is rejected; fix RT-03/filing CLI first. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:27; scripts/file_jira_ticket.py:184-193.
+- RT-04c: split repo `.gerrit/project.config` change from protected settings activation; do not use `gerrit(or devops)`. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:28; docs/sop/runner-ticket-filing-checklist.md:47-54.
+- RT-04d: if tier:S, add literal `capability:enable=gerrit_push` or make tier:M. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:29; config/capability_matrix.yaml:68-71.
+- RT-04e: expand blockedBy shorthand into explicit edges; include all sibling areas or ensure it only verifies. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:30; docs/sop/jira-ticket-conventions.md:1071-1095.
+- RT-05/07/10/15 parents: add valid area/class/type strategy; area `—` is not fileable as Story. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:35,42,52,60; docs/sop/jira-ticket-conventions.md:70-76.
+- RT-05a/b/06/07a/07b/12/14: add activation child/waiver for devops feature work. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:36-37,41,43-44,57,59; docs/sop/sprint-s12-ticket-decomposition-rules.md:424-431.
+- RT-05d: likely needs devops/tests area if it changes staging gate writer/JSONL verification scripts, not backend only. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:39; docs/sop/runner-ticket-filing-checklist.md:63-69.
+- RT-07c: blockedBy shorthand `RT-07a,b` must be expanded; add actual reject-test verify commands. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:45; docs/sop/sprint-s12-ticket-decomposition-rules.md:202-270.
+- RT-08: add devops/activation split for prod restart/overlay load evidence, or scope as backend-only and add an OP gate. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:46; docs/audit/codex-reviews/release-train-workplan-codex-audit-2026-05-21.txt:71-86.
+- RT-09: replace `ci(or devops),backend` after RT-03; add final tag semantics decision dependency if CI changes touch v* rules. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:51,94.
+- RT-10a/RT-11: fix db filing-tool drift first; include migration capability and rollback/break-glass verify blocks. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:53,56; config/capability_matrix.yaml:80-83.
+- RT-10c: expand integration/race test with machine verify and likely include backend/db areas if test uses release_train schema. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:55; docs/sop/sprint-s12-ticket-decomposition-rules.md:202-270.
+- RT-12: block on final-git-tag semantics decision and bridge inventory; add protected tag/promote actor dependency; add activation/ops split if promotion is exercised against registry/prod-like state. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:57,94-95.
+- RT-13: split BOT tool from OP rollback exercise; make OP child tier:X + `runner:no-commits-expected`. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:58; docs/sop/runner-ticket-filing-checklist.md:47-54.
+- RT-15a/b/c: coverage is good, but add public/private flag allowlist, fail-closed verify blocks, SSR/bootstrap verification, and enum drift test. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:61-63; docs/audit/codex-reviews/retire-main-release-train-codex-audit-2026-05-21.txt:193-257.
+- RT-16: use exact `runner:no-commits-expected`; decide if evidence JSON is posted only or committed. It must also depend on RT-13 OP exercise if RT-13 is split. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:68; docs/sop/jira-ticket-conventions.md:1331-1340.
+- RT-17: do not file with `area:gerrit` until RT-03 lands; split code deletion from protected Gerrit/systemd live cleanup if any commits are required. Cite: docs/design/2026-05-21-release-train-ticket-spec.md:69; auto-runner-jira.py:147-150.
+
+# Filing Verdict
+
+GO-WITH-FIXES.
+
+Do not file this spec to JIRA as-is. It is coverage-complete enough to proceed after fixes, but filing now will likely produce unknown-area errors, db filing-script errors, type/meta routing hazards, tier:X/no-commit misclassification, and 4-AC/verify-block incompleteness. Required before filing:
+
+1. Expand every RT row into a real Story description with Prerequisites YAML, literal labels, four AC sections, Go-Live, verify blocks, and explicit Blocks edges.
+2. Land/fix RT-03 vocabulary and filing-tool drift first, including `ci`, `gerrit`, and `db` consistency across `auto-runner-jira.py`, `scripts/file_jira_ticket.py`, `docs/sop/jira-label-schema.yaml`, `docs/sop/jira-label-conventions.md`, `config/capability_matrix.yaml`, and tests.
+3. Add missing tickets/blockers for hotfix stop-the-line policy, final tag/promote actor protection, final git-tag semantics decision, bridge runtime inventory, force/break-glass implementation, and webhook code cleanup.
+4. Split mixed BOT+OP and devops activation work into code tickets plus activation/integration tickets.
+
+After those corrections, the dependency graph can be filed safely; RT-12 is correctly blocked by staging and migration gates, and the old P0.6/P1.3 cycle is no longer present.

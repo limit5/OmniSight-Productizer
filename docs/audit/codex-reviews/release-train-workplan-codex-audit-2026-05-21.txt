@@ -1,0 +1,587 @@
+Release-train migration work plan audit
+Date: 2026-05-21
+Reviewer: Codex / GPT-5.5
+Scope: docs/codex-review-prompts/2026-05-21-release-train-workplan-audit-prompt.md
+Target under review: docs/design/2026-05-21-release-train-workplan.md
+
+Executive stance
+
+The revised Model A direction is still the right destination, but the expanded work plan is not yet safe to file into runner tickets or execute as written. It correctly carries forward many must-fixes from the Model A audit, but several of the most important safeguards are still prose-level rather than executable: P0.1 green evidence, P0.7 runtime overlay, P1.3 release_train locking, P1.5 staging digest proof, and P2.5 dry-run all need machine-checkable artifacts and explicit integration tickets. The plan also has a critical sequencing inversion: its own critical path promotes before the staging gate work item, contradicting Model A's candidate -> staging -> promote invariant.
+
+Verdict on the WORK PLAN: NO-GO for filing/execution as-is; GO-WITH-FIXES after the sequencing and runner/deployability fixes below are incorporated.
+
+A. Shipped-but-not-deployed
+
+A1. HIGH — The plan repeats the 4-AC words, but several Deploy/Exercised ACs are not yet concrete host-verifiable evidence.
+
+Evidence:
+- The work plan says every item has Code, Deploy, Integration, Exercised, and Go-Live, and that no item closes on code merge: docs/design/2026-05-21-release-train-workplan.md:5, docs/design/2026-05-21-release-train-workplan.md:92-93.
+- The shipped-not-deployed incident says the root failure is that every existing gate stops at “merged to develop” and the activation step is skipped: docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md:22-30, docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md:36-40.
+- The anti-pattern cure requires concrete host evidence for `deployed: yes` such as systemctl, docker ps, /proc env, or alembic current; “merged to develop” is not evidence: docs/sop/architecture-anti-patterns.md:412-421.
+- The runner filing checklist requires all four AC sections plus a Go-Live target, with sections that do not apply closed as N/A because: docs/sop/runner-ticket-filing-checklist.md:56-61.
+
+Problem:
+The work plan says “Exercised=a known-bad SHA actually goes red and blocks” for P0.1, “/api/version on prod returns the live triplet” for P0.7, “two concurrent promote attempts” for P1.3, and “one full dry-run” for P2.5, but it does not define the exact verify commands, evidence files, host manifests, JIRA ticket labels, or blocking integration tickets that prove those ACs ran. That is precisely the failure shape from AUDIT-23: documentation existed, activation did not.
+
+Why it bites:
+A runner can merge a CI job, a compose change, or a script rewrite and mark the ticket Published while no GitLab schedule, staging stack, prod env lock, systemd/timer, or operator command has been activated. The release train then appears implemented but produces no enforceable staging/prod signal.
+
+Concrete fix:
+Before filing tickets, rewrite every work item AC with machine-executable verify blocks and host evidence. Minimum examples:
+- P0.1 Deploy/Exercised: GitLab pipeline URL for two exact SHAs, one passing and one intentionally failing, plus a query command that returns green/red by full SHA.
+- P0.2 Deploy/Exercised: `docker compose config` fails on missing image ref, `docker inspect`/registry digest equality evidence for all active staging containers.
+- P0.7 Deploy/Exercised: `curl https://prod.../api/version | jq` proving `build_git_sha`, final tag, three digests, and audit id.
+- P1.3 Exercised: a pytest or integration script that starts two concurrent promote attempts and asserts one row wins.
+- P2.5: a dedicated integration ticket blockedBy all siblings, with a durable evidence JSON/JSONL artifact.
+
+A2. HIGH — `scripts/deployment-audit.sh` does not currently catch most release-train not-deployed failures.
+
+Evidence:
+- The deployment audit harness is manifest-based and supports only `systemd-unit`, `systemd-timer`, `container`, `env-var`, and `alembic-head`: scripts/deployment-audit.sh:21-37, scripts/deployment-audit.sh:75-208.
+- Its built-in manifest is old D/E/F release infrastructure: release-milestone-checker, auto-promote-develop, auto-promote-main, release audit DB env, bridge sync, staging gate timers, and alembic head: scripts/deployment-audit.sh:255-270.
+- It exits fatal only for expected=yes red rows in that manifest: scripts/deployment-audit.sh:321-329.
+
+Problem:
+The work plan leans on the shipped-but-not-deployed guard, but the existing recurring audit cannot validate GitLab CI SHA-green records, GitLab CR digest retention, cosign trust mode, deploy-ref lockdown, release_train state, promote tag digest equality, `/api/version` overlay fields, FE/BE compatibility gating, or old automation disablement unless new manifest kinds/checks are added.
+
+Why it bites:
+P0.1/P0.3/P0.4/P0.5/P0.6/P0.7/P1.3/P1.4/P1.5 could all merge and still be invisible to the current deployment-audit harness. The plan would repeat AUDIT-23 in a new form: code shipped, checks not live.
+
+Concrete fix:
+Add a P0.0 guard ticket before the existing P0 series: extend `scripts/deployment-audit.sh` or add a release-train audit harness with check kinds for `gitlab-sha-status`, `registry-digest`, `cosign-verify`, `deploy-ref-rejected`, `http-json-field`, `release-train-row`, and `disabled-unit`. Add those expected-live rows before closing the corresponding work item.
+
+A3. HIGH — P0.2 and P1.5 are the most likely “validated but not actually deployed” items because staging currently points at GHCR/latest and cached pulls.
+
+Evidence:
+- The work plan wants staging off GHCR/latest, fail-closed on unset tag, and digest equality verification: docs/design/2026-05-21-release-train-workplan.md:20-22.
+- Existing staging compose defaults backend-a/backend-b/frontend/bridge-daemon to GHCR plus `${OMNISIGHT_IMAGE_TAG:-latest}` and `pull_policy: missing`: deploy/staging/docker-compose.yml:79-81, deploy/staging/docker-compose.yml:128-130, deploy/staging/docker-compose.yml:220-222, deploy/staging/docker-compose.yml:262-265.
+- `staging_deploy.sh` exports only `OMNISIGHT_IMAGE_TAG` and then runs `docker compose pull`/`up`; it does not verify resolved digest equality: scripts/staging_deploy.sh:238-250.
+- Current staging sync deploys the full develop tip SHA as an image tag: scripts/sync_staging_to_develop.sh:178-193, scripts/sync_staging_to_develop.sh:252-259.
+- Current GitLab CI builds only v* tags and publishes `${CI_COMMIT_TAG}`, `sha-${CI_COMMIT_SHORT_SHA}`, and `latest`, not full raw SHA tags: .gitlab-ci.yml:1-4, .gitlab-ci.yml:118-120.
+
+Problem:
+P0.2 and P1.5 are correct but must be executed as one coherent artifact-contract change. If a runner lands only compose edits or only staging scripts, the stage can still validate an old GHCR latest/cached image while the release train later promotes GitLab CR digests.
+
+Why it bites:
+The operator sees “candidate SHA passed staging” while staging exercised a different registry/image. That exactly repeats the AUDIT-23 pattern, but with a worse failure mode: false positive validation rather than missing validation.
+
+Concrete fix:
+Make P0.2/P1.5 one atomic staging-fidelity group or explicitly add an integration ticket blockedBy both. The exercised evidence must include: missing ref rejected; three GitLab CR image refs/digests pulled; post-pull observed digests equal the candidate bundle; staging gate JSONL includes the digest triplet and observed `/api/version` payload.
+
+A4. MED — P0.7 `/api/version` overlay can merge without becoming live because the endpoint is cached at startup and currently exposes only baked fields.
+
+Evidence:
+- Work plan P0.7 wants build git fields and deployed tag/digest overlay: docs/design/2026-05-21-release-train-workplan.md:40-42.
+- `emit_bundle_json.sh` writes `git_ref`, `git_sha`, and image digests into a bundle: scripts/emit_bundle_json.sh:109-118.
+- `build_version_payload()` currently returns `bundle_id`, API fields, OpenAPI hash, DB migration head, and frontend contract only: backend/api_versioning.py:307-324.
+- The `/api/version` endpoint caches the payload at install/startup time: backend/api_versioning.py:330-345.
+
+Problem:
+The plan says to use deploy-time lock/release_audit overlay, but the current endpoint is a startup-cached closure over baked bundle data. Without a specific reload/startup contract, a deploy-time lock written after process start will not appear until restart, and an overlay file/database outage may silently fall back to no overlay.
+
+Why it bites:
+The operator command can report one digest while live `/api/version` reports stale/no deployed digest. That undermines the primary Model A operational identity guarantee.
+
+Concrete fix:
+Define overlay load semantics before implementation: either overlay is read once before app start from an env lock guaranteed present, or it is read per request with explicit cache invalidation and error state. The Deploy/Exercised AC must prove a prod restart exposes the new triplet and a missing/mismatched overlay fails the staging/prod gate.
+
+A5. MED — Prod deploy lockdown P0.5 is correctly identified but should be exercised with real rejection tests before any train item depends on it.
+
+Evidence:
+- Work plan P0.5 removes the branch default, branch allowlist entries, `-rc` tags, and insecure skip verify: docs/design/2026-05-21-release-train-workplan.md:32-34.
+- Current prod deploy defaults to branch `main`, accepts `--branch`, `--tag`, and `--insecure-skip-verify`: scripts/deploy-prod.sh:8-21, scripts/deploy-prod.sh:26-33, scripts/deploy-prod.sh:44-59.
+- Current checker accepts branch or tag and skips both allowlist and signature when insecure skip is set: scripts/check_deploy_ref.sh:57-70, scripts/check_deploy_ref.sh:143-150.
+- Current allowlist permits `branch main`, `hotfix/*`, `release/*`, and `vX.Y.Z-rc.N`/hotfix tags: deploy/prod-deploy-allowlist.txt:21-29.
+
+Problem:
+P0.5 has a good Exercised AC, but it must be a blocking deployed gate because the current prod path can bypass final-tag/digest-only semantics in multiple independent places.
+
+Why it bites:
+One old operator invocation or old automation path can deploy `main`, a release branch, or an rc tag directly to prod even after the release_train state says final promotion is the only path.
+
+Concrete fix:
+Make P0.5 an atomic group with a test harness: `check_deploy_ref --kind branch --ref main` rejects, release/hotfix branches reject, `vX.Y.Z-rc.N` rejects, missing tag/digest rejects, final semver tag or approved digest passes, and any break-glass path writes an immutable audit row.
+
+B. Project-advancement cadence
+
+B1. HIGH — P0.1 is a real bottleneck and the plan does not yet define a throughput-preserving green signal.
+
+Evidence:
+- The work plan says P0.1 is critical path and full suite is 60-180 minutes, so batching/sharding is required: docs/design/2026-05-21-release-train-workplan.md:15-18.
+- It later repeats that P0.1 is the bottleneck and there is no per-SHA green today: docs/design/2026-05-21-release-train-workplan.md:89-97.
+- Current GitLab CI has build/sign/sbom/attest/audit stages only, no test/lint stage: .gitlab-ci.yml:6-11.
+- Gerrit Verified exists for develop but the submit requirement is disabled via `applicableIf = is:false`: .gerrit/project.config:107-115, .gerrit/project.config:312-315.
+
+Problem:
+“Per-SHA green” is necessary, but the plan treats it as one item rather than a flow-control design. If every candidate waits 60-180 minutes and every develop SHA must become green before it can be considered, the release train will either stall or operators will start force-promoting around it.
+
+Why it bites:
+Develop keeps receiving AI-runner merges. A chosen SHA may age out while later commits accumulate. If the green signal is slow and unsharded, the train has no daily cadence. If the signal is bypassable, the train recreates the “merged but not deploy-ready” gap.
+
+Concrete fix:
+Split P0.1 into two parts:
+1. Fast per-change submit gate on Gerrit/develop: lint + targeted pytest + frontend type/build + migration static check.
+2. Release-candidate SHA certification: full backend pytest, frontend test/build, Docker build/sign/SBOM/attest, staging digest exercise, and migration release-to-release gate.
+Store both keyed by full SHA. Candidate selection may use “last certified SHA” rather than blocking develop merges on the full suite.
+
+B2. HIGH — The critical path in the work plan is wrong: it promotes before the staging gate.
+
+Evidence:
+- Model A lifecycle validates staging before promote: docs/design/2026-05-21-model-a-candidate-build-release-train.md:46-56.
+- The revised Model A must build exact SHA, validate staging by digest, then promote the same digests: docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:437-443.
+- The work plan critical path lists `P1.4 (promote) -> P1.5 (staging gate)`: docs/design/2026-05-21-release-train-workplan.md:89-90.
+- P1.4’s AC says a real candidate promotes, while P1.5’s AC says digest mismatch or FE/BE skew blocks promote: docs/design/2026-05-21-release-train-workplan.md:60-66.
+
+Problem:
+P1.5 must precede P1.4. As written, the plan can build the promote job and exercise a promotion before the staging digest gate exists, which is the opposite of Model A’s safety invariant.
+
+Why it bites:
+The first “successful” dry run could prove only retag mechanics, not that staging validated the promoted digest set. That is a direct shipped-but-not-deployed/false-validation risk.
+
+Concrete fix:
+Correct the critical path to: P0.1/P0.2/P0.3/P0.5/P0.7 -> P1.1 -> P1.3 -> P1.5 -> P0.4 -> P1.4 -> P1.6 -> P2.5. P1.4 may be developed in parallel with P1.5, but its Exercised AC cannot close until P1.5 evidence exists.
+
+B3. MED — The plan does not say whether develop freezes during the migration window, and several items imply old and new release systems coexist.
+
+Evidence:
+- ADR-0040 says frequent cadence is mandatory because there is no stabilization branch: docs/adr/ADR-0040-single-trunk-release-train.md:44-47.
+- Work plan says Phase 1 starts after P0 green/staging/lockdown are live and old automation is retired only after Phase 1 is exercised: docs/design/2026-05-21-release-train-workplan.md:46, docs/design/2026-05-21-release-train-workplan.md:92-93.
+- Current old automation can still push refs/for/main or tag main/release branches: backend/agents/auto_promote_main.py:1-7, backend/agents/auto_promote_main.py:206-236; backend/agents/auto_tag_release.py:1-7, backend/agents/auto_tag_release.py:193-241.
+
+Problem:
+The plan needs an explicit migration-mode policy: normal feature tickets continue to flow to develop, but release-cut automation is frozen/disabled while the deploy contract changes. Without it, either the whole project freezes behind P0.1, or old release machinery keeps producing main/tag signals while the new train is half-built.
+
+Why it bites:
+Project-advancement cadence suffers in both directions: a blanket freeze stalls AI-runner throughput; no freeze risks split-brain release state.
+
+Concrete fix:
+Add a “migration window operating mode” section: develop feature work continues; old automated release cut/tag/prod deploy timers are disabled/frozen before P0.5/P1 work is exercised; manual prod deploy remains on the old approved final tag only until the new dry-run passes; no new release identity is cut during the window except rehearsals explicitly marked non-prod.
+
+B4. MED — Dependency deadlock risk: P0.6 depends on P1.3 but is listed as Phase 0 shared prereq.
+
+Evidence:
+- P0.6 says extend retention to protect digests referenced by `release_train`, and declares deps P1.3: docs/design/2026-05-21-release-train-workplan.md:36-38.
+- P1.3 itself depends on P0.1: docs/design/2026-05-21-release-train-workplan.md:56-58.
+- The filing checklist warns additive blockedBy cycles wedge chains and requires deleting stale links before adding new: docs/sop/runner-ticket-filing-checklist.md:105-112.
+
+Problem:
+P0.6 is not actually a Phase 0 independent prereq if it depends on P1.3. If filed mechanically as P0 blocks P1 and P1 blocks P0, JIRA blockedBy links can create the additive-dependency deadlocks the project has already seen.
+
+Why it bites:
+The runner scheduler can mark both tickets waiting on each other, and human planning sees Phase 0 incomplete forever.
+
+Concrete fix:
+Split P0.6 into P0.6a and P1.7:
+- P0.6a: GitLab CR API support and tag classifier for `sha-<40hex>` + final semver, dry-run only, no release_train protection.
+- P1.7: release_train/release_audit protection refs and deletion policy, blockedBy P1.3.
+
+B5. MED — Realistic critical path is longer than the plan suggests because old-runner and operator tooling are correctness gates, not polish.
+
+Evidence:
+- Model A audit says operator status/rollback is mandatory before enabling Model A: docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:119-133, docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:416-429.
+- Work plan P1.6 marks operator status + rollback mandatory: docs/design/2026-05-21-release-train-workplan.md:68-70.
+- Current `/api/version` lacks build/deploy identity fields: backend/api_versioning.py:307-324.
+- Current prod compose is tag-env based, not generated digest lock based: docker-compose.prod.yml:152-153, docker-compose.prod.yml:264-265, docker-compose.prod.yml:416-417.
+
+Problem:
+The actual critical path includes P1.6 before any production use, not after promote as a nice-to-have. Without it, the first train may technically promote but operators cannot safely identify or roll back prod.
+
+Why it bites:
+A 3am incident reintroduces identity archaeology: version in JIRA, SHA in bundle, digests in registry/compose, and no one command joining them.
+
+Concrete fix:
+Make P1.6 block P2.5 and first prod go-live. Add a rehearsal step proving `release_train_status.py --env prod` joins runtime `/api/version`, compose lock, registry final tag resolution, and release_audit to one record.
+
+C. AI-runner execution
+
+C1. HIGH — Several 🤖 items touch `area:ci` and `area:gerrit`, but the live runner area whitelist lacks those areas.
+
+Evidence:
+- The work plan marks P0.1, P1.1, P2.3, and others as runner-pickable: docs/design/2026-05-21-release-train-workplan.md:15-17, docs/design/2026-05-21-release-train-workplan.md:48-50, docs/design/2026-05-21-release-train-workplan.md:80-81.
+- S12 path mapping says `.gitlab-ci.yml` maps to `area:ci` and Gerrit config maps to `area:gerrit`: docs/sop/sprint-s12-ticket-decomposition-rules.md:50-62.
+- The runner-recognized areas are only backend, frontend, devops, tests, db, docs, security, embedded, tooling: auto-runner-jira.py:143-150.
+- The capability matrix has rows for those same areas, but no `ci` or `gerrit`: config/capability_matrix.yaml:58-95.
+- Unknown area labels are a typed error because they previously caused self-revert loops: auto-runner-jira.py:153-159.
+
+Problem:
+The plan’s 🤖 markings are not runner-real. A correctly filed P0.1/P1.1 `.gitlab-ci.yml` ticket should carry `area:ci`, but that label is unknown to the runner. A `.gerrit/project.config` ticket should carry `area:gerrit`, also unknown. If the filer instead uses `area:devops` to dodge this, the area-span validation conflicts with the SOP.
+
+Why it bites:
+The runner either refuses/reverts due to unknown labels, or accepts under incorrect areas and later self-halts because the AC references out-of-area files.
+
+Concrete fix:
+Before filing any 🤖 CI/Gerrit tickets, add `ci` and `gerrit` to `RECOGNISED_AREAS`, `jira-label-conventions`, the capability matrix, validator tests, and prompt-builder tests; or mark every `.gitlab-ci.yml`/`.gerrit/project.config` item as 👤 until the area vocabulary is migrated.
+
+C2. HIGH — P0.1 is mislabeled 👤+🤖 unless decomposed; it spans CI, Gerrit config, backend tests, frontend tests, deploy evidence, and maybe project settings.
+
+Evidence:
+- P0.1 proposes either GitLab CI test stage or enabling Gerrit Verified on develop and requires bad-SHA blocking: docs/design/2026-05-21-release-train-workplan.md:15-18.
+- The runner filing checklist says area labels must span every AC’s directory and single-area filing wedges pickup: docs/sop/runner-ticket-filing-checklist.md:63-69.
+- 4-AC grouped siblings require an integration ticket blockedBy all siblings: docs/sop/sprint-s12-ticket-decomposition-rules.md:113-120, docs/sop/sprint-s12-ticket-decomposition-rules.md:176-184.
+
+Problem:
+P0.1 is not one runner ticket. It includes `.gitlab-ci.yml`, `.gerrit/project.config`, backend tests, frontend commands, status persistence, and release-blocking behavior. It must be decomposed into bounded children plus a human/project-settings gate.
+
+Why it bites:
+A single runner will either over-touch multiple domains, hit missing area/capability rows, or ship only a partial green signal with no blocking enforcement.
+
+Concrete fix:
+Decompose P0.1 into: CI job definition, green evidence store/query, Gerrit Verified enablement or GitLab branch protection, bad-SHA negative test, and integration verifier. Mark GitLab/Gerrit protected setting changes as 👤 or `runner:no-commits-expected` ops-only with human evidence.
+
+C3. MED — Capability matrix safe-default and push permissions will burden runner throughput unless tickets are labeled precisely.
+
+Evidence:
+- The matrix safe-default grants only `mcp_search` and `memory_recall`: config/capability_matrix.yaml:34-42.
+- Type `meta` routes to read-only safe-default and refuses Gerrit push per the filing checklist: docs/sop/runner-ticket-filing-checklist.md:71-77.
+- The checklist warns well-labelled implementation tickets sometimes need explicit `capability:enable=gerrit_push`: docs/sop/runner-ticket-filing-checklist.md:79-86.
+- Devops deploy_action exists only for tier M/L, not S: config/capability_matrix.yaml:84-87.
+
+Problem:
+The plan only marks 🤖/👤; it does not specify issuetype Story, tier, type, class, areas, or capability overrides. Several items need pushes, tests, migrations, and deploy actions. If filed as meta, Task, tier:S devops, or with missing areas, they will stall or revert.
+
+Why it bites:
+Runner throughput gets worse during the migration: repeated safe-default denials, no-commit paths, and re-pickup loops consume cycles while old release work is waiting.
+
+Concrete fix:
+Add a filing appendix for each work item: suggested issue type, tier, type, areas, required capabilities, mutex/file paths, blockedBy, and whether `runner:no-commits-expected` applies. Minimum: implementation tickets should be Story + type:feature + tier:M where Gerrit push/deploy_action is needed; integration tickets tier:M; operator-only environment activation tier:X or ops-only.
+
+C4. HIGH — Several work items are inherently human/operator-gated despite 🤖 tags.
+
+Evidence:
+- P0.5 changes prod deploy admissibility and removes emergency bypass behavior: docs/design/2026-05-21-release-train-workplan.md:32-34.
+- P0.7 needs prod `/api/version` overlay evidence: docs/design/2026-05-21-release-train-workplan.md:40-42.
+- P1.6 requires an operator status + rollback command and exercised digest rollback: docs/design/2026-05-21-release-train-workplan.md:68-70.
+- Runner ops-only tickets require the `runner:no-commits-expected` label when no code commits are expected: docs/sop/jira-ticket-conventions.md:1296-1340.
+
+Problem:
+Runners can write code and tests, but they cannot safely make protected GitLab/Gerrit settings, install prod env locks, execute production rollbacks, or remove live systemd units without human action. The current 🤖 label overstates runner autonomy.
+
+Why it bites:
+A runner may produce code-only changes and mark ACs as N/A or unexercised, leaving the exact activation gap the operator is worried about.
+
+Concrete fix:
+For each mixed item, split code from activation. Code children may be 🤖; activation/verification children are 👤 or ops-only and must cite host evidence. Parent integration remains blocked until both close.
+
+D. Sequencing / atomicity / rollback
+
+D1. CRITICAL — Phase order contradicts ADR-0040 migration guidance on freezing old release automation.
+
+Evidence:
+- ADR-0040 migration order says freeze old release automation before any behavior change: docs/adr/ADR-0040-single-trunk-release-train.md:63-72.
+- The work plan places retirement of old release automation in Phase 2, after Phase 1 core is implemented: docs/design/2026-05-21-release-train-workplan.md:74-85.
+- Existing old automation still targets main/release branches: backend/agents/auto_promote_main.py:1-7, backend/agents/auto_promote_main.py:206-236; backend/agents/auto_tag_release.py:1-7, backend/agents/auto_tag_release.py:193-241.
+
+Problem:
+The plan delays disabling old automation until after new train components are implemented/exercised, while ADR-0040 says to freeze it first. “Disable THEN delete” in P2.1 is too late if P0.5/P1 changes already alter prod-deploy and staging semantics.
+
+Why it bites:
+During the migration window, old automation can create refs/for/main or release/v* tags while new Model A state is being tested. That is split-brain release identity.
+
+Concrete fix:
+Add Phase 0.0 “freeze old release writers”: stop/disable auto-promote-main, auto-promote-develop, auto-tag-release, release-cut guard timers, and any webhook release-build triggers; leave rollback instructions for re-enabling only before any new v* train tag/promotion exists. P2.1 then becomes deletion/cleanup after P2.5.
+
+D2. CRITICAL — P1.4 promote must not be exercised before P1.5 staging gate and P0.4 migration gate.
+
+Evidence:
+- Work plan P1.4 promotes by digest and P1.5 then says staging gate blocks promote on mismatch/skew: docs/design/2026-05-21-release-train-workplan.md:60-66.
+- Work plan critical path puts P1.4 before P1.5: docs/design/2026-05-21-release-train-workplan.md:89-90.
+- P0.4 blocks promote when previous image cannot run post-migration, but depends on P0.7 provenance: docs/design/2026-05-21-release-train-workplan.md:28-30.
+- Existing prod deploy runs Alembic upgrade before rolling replicas and warns partial multi-migration batches may be left behind: scripts/deploy-prod.sh:330-378.
+
+Problem:
+Promotion is the irreversible state transition that claims a final version. It must be gated by staging digest evidence and migration rollback compatibility first.
+
+Why it bites:
+A promoted final tag can exist for a digest set that never passed staging or cannot roll back after migrations. Even if prod deploy is later blocked, the release identity/audit is polluted.
+
+Concrete fix:
+Reorder: candidate build -> release_train reserved state -> staging digest deploy/migration/FEBE gate -> release-to-release migration rollback gate -> promote by retag -> prod deploy by digest lock.
+
+D3. HIGH — “Atomic group” language is incomplete; the work plan lists only one atomic group explicitly and omits integration-ticket enforcement.
+
+Evidence:
+- P0.5 names an atomic group with allowlist + check_deploy_ref: docs/design/2026-05-21-release-train-workplan.md:32-34.
+- ADR-0040 lists atomic change groups for deploy validation, staging-sync/GitLab publication/staging compose, Gerrit/systemd disablement, FE flags, and ADR/runbook/rollback policy: docs/adr/ADR-0040-single-trunk-release-train.md:74-76.
+- SOP says related sibling groups require an integration ticket at filing time, blockedBy all siblings; “we’ll add the integration ticket later” is an anti-pattern: docs/sop/sprint-s12-ticket-decomposition-rules.md:113-120, docs/sop/sprint-s12-ticket-decomposition-rules.md:182-184.
+
+Problem:
+The work plan needs explicit atomic groups and integration tickets for staging fidelity, deploy lockdown, release_train/promote, overlay/status, Gerrit/automation retirement, and docs/ADR updates. Otherwise runner children can close independently and leave half-migrated states.
+
+Why it bites:
+Half of a group is often worse than none: deploy-prod tag-only with old CI tag rebuild semantics, staging digest scripts with GHCR compose, promote job without release_train lock, or ADR accepted while live code still supports main.
+
+Concrete fix:
+Add parent integration tickets per group, blockedBy all implementation children, with end-to-end evidence. Parent META cannot close until integration tickets close.
+
+D4. HIGH — Rollback after Phase 0 changes prod-deploy behavior is under-specified.
+
+Evidence:
+- P0.5 changes prod-deploy to final tag/digest only: docs/design/2026-05-21-release-train-workplan.md:32-34.
+- ADR rollback says pre-cut can re-enable old units/allowlist only if no v* tag was cut under the new model; post-cut never delete/move tags and rollback by previous approved digest subject to migration compat: docs/adr/ADR-0040-single-trunk-release-train.md:76.
+- Current deploy-prod rollback instructions are just previous tag checkout plus rerun with `--skip-build`: scripts/deploy-prod.sh:469-471.
+
+Problem:
+If Phase 1 fails after P0.5 is live, operators need to know whether to keep tag/digest-only prod deploy, temporarily restore old allowlist, or manually deploy the last approved tag. The work plan does not state the rollback boundary.
+
+Why it bites:
+A failed migration can leave prod deploy refusing the old branch-based emergency path before the new release_train/rollback tool exists.
+
+Concrete fix:
+Add rollback checkpoints:
+- After P0.5 but before P1.4: rollback = revert deploy-prod/check_deploy_ref/allowlist as one reviewed change, unless any new final digest/tag has been promoted.
+- After first new promotion: no ref movement/revert; deploy previous approved digest through release_train_status/rollback.
+- Every checkpoint includes a tested command and release_audit row.
+
+D5. MED — P2.5 is listed after P2.1/P2.2/P2.4 even though it is the gate before declaring done.
+
+Evidence:
+- Work plan calls P2.5 “gate before declaring done”: docs/design/2026-05-21-release-train-workplan.md:84-85.
+- Work plan also says old automation retired only after P2.5 dry-run: docs/design/2026-05-21-release-train-workplan.md:92-93.
+- But Phase 2 order lists P2.1 retire old automation, P2.2 Gerrit cutover, P2.4 main retirement before P2.5: docs/design/2026-05-21-release-train-workplan.md:74-85.
+
+Problem:
+The prose and order conflict. You cannot both retire old automation before P2.5 and retire it only after P2.5.
+
+Why it bites:
+Agents filing tickets by section order will do P2.1 before the dry-run, while operators reading the guard may expect the reverse.
+
+Concrete fix:
+Split retirement into freeze/disable before Phase 1, dry-run, then delete/ADR cleanup/main retirement after dry-run. Rename P2.1 to “delete old automation after P2.5” or move it after P2.5.
+
+E. Flaws / holes / contradictions vs code and prior audits
+
+E1. HIGH — ADR-0040’s FE feature-flag must-fix is silently dropped from the work plan.
+
+Evidence:
+- ADR-0040 says frontend feature flags are required so incomplete FE features can dark-ship: docs/adr/ADR-0040-single-trunk-release-train.md:38, docs/adr/ADR-0040-single-trunk-release-train.md:44-48.
+- ADR-0040 blocking holes say existing feature_flags router is an operator/admin registry, and needs frontend-safe effective flags, FE provider/hook, and tier enum alignment: docs/adr/ADR-0040-single-trunk-release-train.md:60.
+- Existing backend feature flag router exposes owner, rollout_pct, and allowed_tenants in registry rows: backend/routers/feature_flags.py:80-99, backend/routers/feature_flags.py:160-178, backend/routers/feature_flags.py:181-199.
+- Existing frontend API type uses tiers `preview/release/runtime`, not backend `early_access/staged/ga`: lib/api.ts:3219-3227.
+- The work plan has no FE feature-flag work item: docs/design/2026-05-21-release-train-workplan.md:11-85.
+
+Problem:
+Single-trunk releases without FE runtime flags cannot safely carry incomplete UI through frequent trains. This was a blocking hole in ADR-0040 and a prior audit finding, but the expanded work plan omits it.
+
+Why it bites:
+Cadence pressure will force a choice between blocking the train for incomplete frontend work or shipping visible unfinished UI. That undermines the “develop keeps flowing” premise.
+
+Concrete fix:
+Add a Phase 0/P1 shared prereq: frontend-safe effective feature flags endpoint, public flag allowlist, FE provider/hook/bootstrap, fail-closed behavior, and tier enum alignment. Gate first trunk release carrying incomplete UI on it.
+
+E2. HIGH — `backend/routers/webhooks.py` was in ADR-0040’s blast radius but is missing from the work plan.
+
+Evidence:
+- ADR-0040 explicitly lists `backend/routers/webhooks.py` as one of five live main-hardcoded landmines: docs/adr/ADR-0040-single-trunk-release-train.md:49.
+- Current webhooks code force-pushes main to replication targets after merge: backend/routers/webhooks.py:1454-1471.
+- It packages artifacts from the main repo: backend/routers/webhooks.py:1500-1505, backend/routers/webhooks.py:1517-1527.
+- It triggers GitHub Actions on `-r main` and GitLab pipelines with `ref=main`: backend/routers/webhooks.py:1648-1654, backend/routers/webhooks.py:1703-1714.
+- The work plan does not list webhooks in P0/P1/P2: docs/design/2026-05-21-release-train-workplan.md:11-85.
+
+Problem:
+A live webhook side channel will keep treating main as the CI/release ref even after the release train moves to develop SHA candidates and final digest promotion.
+
+Why it bites:
+After a merge, the webhook can force-push main and trigger CI on main, producing misleading artifacts or failing noisily while the new train is supposed to be authoritative.
+
+Concrete fix:
+Add a work item in the freeze/cutover group: remove/retarget webhooks main replication and CI triggers to the new release-train contract. If tag/digest pipeline is the only release builder, ordinary merge webhooks must not trigger release CI.
+
+E3. MED — P2.3 ADR supersession is too late for runner/human consistency.
+
+Evidence:
+- ADR-0040 is still Proposed: docs/adr/ADR-0040-single-trunk-release-train.md:1-10.
+- ADR-0040 says implementation/migration is tracked separately and supersedes multiple old ADRs: docs/adr/ADR-0040-single-trunk-release-train.md:10-18.
+- Work plan defers ADR Proposed->Accepted and cross-ref updates to P2.3: docs/design/2026-05-21-release-train-workplan.md:80-81.
+- The project rules warn consistency with existing conventions and docs matters; tickets read SOP/ADR context for scope.
+
+Problem:
+If code tickets are filed before the normative ADR/runbook contract is accepted/superseded, runners and reviewers see old ADRs saying main/release branches are authoritative while new tickets say the opposite.
+
+Why it bites:
+Future agents may reintroduce main/release behavior or challenge scoped changes as contradicting accepted ADRs.
+
+Concrete fix:
+Move ADR acceptance/runbook contract ahead of implementation after the work plan is fixed, or at least create a “migration contract” doc accepted by the operator before code tickets. P2.3 can remain cleanup for obsolete cross-refs.
+
+E4. MED — The plan still under-specifies final git tag vs final image tag semantics.
+
+Evidence:
+- ADR-0040 says a release is a `v*` git tag on a develop commit and that the tag triggers existing GitLab CI: docs/adr/ADR-0040-single-trunk-release-train.md:34-36.
+- Revised Model A says reserve `vX.Y.Z` early but do not create the image/git tag until promote: docs/design/2026-05-21-model-a-candidate-build-release-train.md:5-12.
+- Current GitLab workflow runs for any `CI_COMMIT_TAG =~ /^v.*/`: .gitlab-ci.yml:1-4.
+- Work plan P1.2 says reserve version and do not create image/git tag until promote, while P1.4 says retag digest to `vX.Y.Z`: docs/design/2026-05-21-release-train-workplan.md:52-62.
+
+Problem:
+The plan must explicitly decide whether final `vX.Y.Z` git tags still exist and, if they do, how their creation avoids triggering a rebuild that invalidates staging. The current CI makes every v* tag a build trigger.
+
+Why it bites:
+A promote job that pushes a final git tag can accidentally start the old build/sign pipeline and produce a new image for the final tag, defeating promote-by-digest.
+
+Concrete fix:
+Before P1.4, revise CI/ADR semantics: final git tags are either disabled as build triggers and only annotate the already-promoted digest, or the release identity is final image tag/digest plus release_train row and ADR-0040 is updated accordingly. Add a test that final git tag creation does not rebuild runtime images.
+
+E5. MED — The plan names bridge digests, but prod/staging compose do not consistently deploy a bridge image.
+
+Evidence:
+- GitLab CI builds a `bridge` image via the image matrix: .gitlab-ci.yml:37-45.
+- Work plan P0.7/P1.4/P1.5/P1.6 talk about backend/frontend/bridge digest triplets: docs/design/2026-05-21-release-train-workplan.md:40-42, docs/design/2026-05-21-release-train-workplan.md:60-70.
+- Staging `bridge-daemon` uses the backend image, not a separate bridge image: deploy/staging/docker-compose.yml:262-270.
+- Prod compose evidence reviewed shows backend and frontend image refs but not a separate bridge runtime ref in the release-critical service list: docker-compose.prod.yml:152-153, docker-compose.prod.yml:264-265, docker-compose.prod.yml:416-417.
+
+Problem:
+The release-train digest set may include an image that the runtime deployment does not actually consume, while missing any bridge/sora-bridge host sync/deploy evidence that is operationally real.
+
+Why it bites:
+The train can certify/promote three images but only deploy two, or assume a bridge image is live while a separate bridge host is running stale code.
+
+Concrete fix:
+Inventory release runtime components before implementing P1.4/P1.6: decide whether bridge is a first-class deployed image, a backend image profile, or an external git-sync host. The digest lock/status tool must match actual deployed components, not an abstract CI matrix.
+
+E6. MED — P0.3 trust-mode consistency is correctly included, but current code has three conflicting trust claims that must be fixed atomically.
+
+Evidence:
+- Work plan P0.3 chooses key-based or real GitLab OIDC keyless and notes current audit JSON is false: docs/design/2026-05-21-release-train-workplan.md:24-26.
+- CI signs with `cosign sign --key "$COSIGN_KEY"` and verifies with `deploy/cosign/cosign.pub`: .gitlab-ci.yml:143-151.
+- Audit JSON claims `signed_with: "cosign-keyless-gitlab-oidc"`: .gitlab-ci.yml:259-287.
+- Standalone verifier falls back to GitHub Actions keyless identity if no PEM key is present: scripts/verify_image_signature.sh:16-24, scripts/verify_image_signature.sh:108-118.
+
+Problem:
+If P0.3 is split across CI, verifier, and docs without an integration test, some components will still assert keyless while others sign key-based.
+
+Why it bites:
+Promotion/deploy verification can fail on valid images or pass with misleading audit claims.
+
+Concrete fix:
+Make P0.3 one atomic group with a tampered/unsigned negative test and a real-pipeline positive test using the same verifier path the promote and deploy gates will call.
+
+F. Hidden coupling / blast radius under-counted
+
+F1. HIGH — Release conductor/release_state is version-keyed and not sufficient for Model A release_train state.
+
+Evidence:
+- Existing release_state is one row per `RELEASE-vX.Y.Z`, with optimistic row_version transitions: backend/release_conductor/state_machine.py:1-16, backend/release_conductor/state_machine.py:186-224, backend/release_conductor/state_machine.py:236-345.
+- States are generic pending/building/staging/canary/done/failed/rolled_back: backend/release_conductor/state_machine.py:62-130.
+- It has no candidate SHA, green evidence, source digests, final tag digest equality, or promotion actor fields: backend/release_conductor/state_machine.py:211-224, backend/release_conductor/state_machine.py:377-420.
+- Work plan P1.3 correctly proposes a new release_train table/ref-lock: docs/design/2026-05-21-release-train-workplan.md:56-58.
+
+Problem:
+The plan should explicitly say not to retrofit release_train into the existing release_state without a schema boundary. Release_state can coordinate release process stages, but it cannot prove digest promotion correctness.
+
+Why it bites:
+A future implementer may extend release_state ad hoc, creating partial state where process stage says done but digest equality/audit is absent.
+
+Concrete fix:
+P1.3 should define `release_train` as a separate table/lock with migration, indexes, uniqueness constraints, CAS, and tests. Release_conductor references it by release_id/version but does not own digest correctness.
+
+F2. HIGH — Existing pipeline coordinator is not a release train driver.
+
+Evidence:
+- Coordinator module describes itself as skeleton/no-op foundation and empty work graph: backend/agents/pipeline_coordinator.py:1-19.
+- Default work graph provider yields an empty graph: backend/agents/pipeline_coordinator.py:1192-1199, backend/agents/pipeline_coordinator.py:1253-1269.
+- Production wiring defaults to shadow/observe-only; acting requires explicit action_executor: backend/agents/pipeline_coordinator.py:1862-1886.
+- Prior Model A audit warned a release_train service cannot be treated as an extension of the shadow coordinator without major acting-mode code: docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:275-289.
+
+Problem:
+The work plan names runner/AI execution and release_train state, but it does not explicitly prevent using the existing coordinator as the scheduler/promoter before it has deterministic actions and recovery.
+
+Why it bites:
+Release decisions could land in an observe-only AI coordinator, leaving humans unsure whether coordinator, auto_tag_release, release_conductor cron, or manual runbooks own the train.
+
+Concrete fix:
+Add a design constraint: release_train is deterministic service/script first; AI coordinator remains advisory until explicit acting-mode actions, idempotent recovery, and integration tests are shipped.
+
+F3. MED — Force-promote override semantics remain dangerous in a no-branch train.
+
+Evidence:
+- `release_milestone_checker` emits `milestone_force_promoted` when `force_promote` is set even with blockers: scripts/release_milestone_checker.py:540-550.
+- `auto_promote_main` treats normal and force-promoted events as promotion authorization: backend/agents/auto_promote_main.py:40-48, backend/agents/auto_promote_main.py:290-297, backend/agents/auto_promote_main.py:438-446.
+- Work plan does not mention force-promote rewrite/removal: docs/design/2026-05-21-release-train-workplan.md:11-85.
+
+Problem:
+A force path copied into release_train could create/promote a final version despite red staging/migration/digest gates.
+
+Why it bites:
+The old model’s force path still went through Gerrit main review; the new model’s force path could mutate final image tags or prod digests directly.
+
+Concrete fix:
+Add a force/break-glass policy item: no unattended force promote; emergency override requires human command, exact SHA, immutable audit reason, and explicit record of which gates were bypassed. It must not move final tags or bypass digest equality.
+
+F4. MED — Release audit durability is still a known hidden dependency.
+
+Evidence:
+- AUDIT-23 found `OMNISIGHT_DATABASE_URL` missing led the D5 audit sink to silently use local SQLite: docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md:48-50, docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md:119-120.
+- `sync_staging_to_develop.sh` says audit writes are best-effort and never block or fail the sync: scripts/sync_staging_to_develop.sh:51-53, scripts/sync_staging_to_develop.sh:159-175.
+- `staging_gate.py` also writes audit best-effort and never blocks gate runs: backend/agents/staging_gate.py:33-37, backend/agents/staging_gate.py:329-336.
+- Work plan P0.7/P1.6 relies on release_audit/promotion_audit_id for runtime identity: docs/design/2026-05-21-release-train-workplan.md:40-42, docs/design/2026-05-21-release-train-workplan.md:68-70.
+
+Problem:
+The plan relies on release_audit as a source of identity truth, but existing producers often treat audit as non-fatal and the project has already seen the DSN silently missing.
+
+Why it bites:
+A promotion can succeed while the audit row is absent, then `/api/version` overlay and rollback tool cannot prove identity.
+
+Concrete fix:
+For release_train promotion and prod deploy only, audit writes must be hard gates, not best-effort. If release_train row/release_audit insert fails, promotion/deploy fails before tag/digest mutation or before prod switch.
+
+F5. MED — Retention and candidate churn under-count SBOM/attestation artifacts and tag aliases.
+
+Evidence:
+- Existing CI artifacts for bundle/SBOM/attestation/audit expire in 90 days: .gitlab-ci.yml:81-87, .gitlab-ci.yml:167-171, .gitlab-ci.yml:201-205, .gitlab-ci.yml:288-292.
+- Existing retention script is GHCR-oriented and classifies rc/develop/feature tags, not `sha-<40hex>`: scripts/enforce_image_retention.py:1-2, scripts/enforce_image_retention.py:17-22, scripts/enforce_image_retention.py:96-112.
+- Work plan P0.6 wants GitLab CR retention and protecting release_train references: docs/design/2026-05-21-release-train-workplan.md:36-38.
+
+Problem:
+P0.6 needs to cover not just runtime manifests, but signatures, attestations, SBOMs, promotion audit bundles, and source SHA aliases needed for rollback/provenance.
+
+Why it bites:
+Operators may keep final tags but lose source candidate evidence after artifact expiration or GC, making future forensic/audit proof incomplete.
+
+Concrete fix:
+Define artifact retention classes: final runtime digests forever; source SHA digests referenced by final releases forever or for a policy window; SBOM/attestation/audit artifacts mirrored to durable storage for final releases; unpromoted SHA candidates deleted after N days.
+
+F6. LOW — Prod compose still defaults image tag to latest even after registry fail-fast, so P0.5/P1.6 must remove tag default and preferably use generated digest lock.
+
+Evidence:
+- Prod compose requires registry but defaults image tag to latest in comments and image refs: docker-compose.prod.yml:9-16, docker-compose.prod.yml:33-35, docker-compose.prod.yml:152-153, docker-compose.prod.yml:264-265, docker-compose.prod.yml:416-417.
+- `deploy-prod.sh` writes `OMNISIGHT_IMAGE_TAG` to `.env` from tag/env/short SHA: scripts/deploy-prod.sh:282-291.
+- Prior Model A audit recommended generated env lock and no hand-edited digest triplets: docs/audit/codex-reviews/model-a-candidate-build-codex-audit-2026-05-21.txt:259-273.
+
+Problem:
+The work plan says digest lock/status but does not explicitly include prod compose fail-closed tag removal in P0.5/P1.6.
+
+Why it bites:
+Unset tag in prod can still deploy latest. That is a direct recurrence of the operator’s #1 worry.
+
+Concrete fix:
+Change prod compose to `${OMNISIGHT_IMAGE_TAG:?image tag required}` or digest refs generated from release_train lock. Deploy-prod should refuse to run without a release_train-approved final tag/digest triplet.
+
+Corrected / re-sequenced plan
+
+0. P0.0 — Migration operating mode + freeze old release writers (👤): disable/freeze old auto-promote-main, auto-promote-develop, auto-tag-release, release-cut guard timers, and main-triggering webhooks. Document rollback boundary before any new tag/promotion exists. This is disable/freeze, not final deletion.
+1. P0.1a — Runner vocabulary/filing prep (👤+🤖): add or decide against `area:ci`/`area:gerrit`; define ticket labels/capabilities/mutexes for every item; add integration-ticket skeletons.
+2. P0.1b — Fast exact-SHA green signal (👤+🤖 decomposed): CI/Gerrit green evidence keyed by full SHA, with negative bad-SHA proof. Keep develop flowing; full certification can be candidate-level.
+3. P0.2/P1.5 atomic staging fidelity group (🤖+👤 integration): GitLab CR/digest-only staging, fail-closed refs, pull/digest verification, migration-before-ingress, FE/BE compat as hard staging gate, JSONL evidence including digest triplet and `/api/version`.
+4. P0.3 — Cosign trust-mode consistency (🤖): one signer/verifier/audit claim, positive and unsigned/tampered negative tests.
+5. P0.5 — Prod deploy lockdown (🤖+👤): final tag/digest only, no branches/rc/latest/insecure skip without audited break-glass; exercise rejection tests.
+6. P0.7 — Build/deploy identity overlay (🤖): `/api/version` and `/readyz` expose build_git_sha/ref and deployed tag/digest/audit id with clear runtime load semantics.
+7. P1.1 — API/manual `CANDIDATE_SHA` candidate pipeline (🤖): exact checkout of full develop SHA, build `sha-<fullsha>`, sign/attest by digest, no latest, resource_group.
+8. P1.2/P1.3 — Early version reservation + release_train lock (🤖+👤): reserve semver for planning; implement release_train table/ref-lock with CAS, digest fields, green evidence, state, actor, audit hard-gate.
+9. P0.4 — Release-to-release migration rollback gate (🤖): after release_train/provenance exists, compare previous final image/migration head to candidate and block rollback-unsafe promote unless break-glass.
+10. P1.4 — Promote job (🤖): retag all live runtime images by digest to final version only after staging and migration gates; verify final tag -> digest equality; hard-fail audit write; idempotent failed state.
+11. P1.6 — Operator status/rollback tool (👤+🤖): one command joins prod runtime, compose lock, registry tag resolution, and release_audit/release_train; rollback by final version resolves digest triplet.
+12. P1.7 — GitLab CR retention with release_train protection (🤖): split from P0.6; includes final/provenance artifact retention.
+13. P1.8 — FE runtime feature flags (🤖+👤): frontend-safe effective flags endpoint, public allowlist, FE provider/hook/bootstrap, enum alignment, fail-closed; required before trunk releases with incomplete UI.
+14. P2.5 — End-to-end dry-run integration ticket (👤): exact SHA -> candidate -> staging by digest -> migration gate -> promote final -> prod-by-digest -> status -> rollback; durable evidence file.
+15. P2 cleanup after dry-run (👤+🤖): delete old automation, Gerrit cutover, ADR Accepted/supersession/cross-refs, main vestigial/delete decision. Deletion happens after dry-run; freeze happened at P0.0.
+
+Top 5 things to change before filing any ticket
+
+1. Fix the ordering bug: P1.5 staging gate and P0.4 migration gate must block P1.4 promote. Update the critical path and dependency graph.
+2. Add Phase 0.0 freeze and rollback policy for old release writers/webhooks; do not wait until P2 to disable old automation.
+3. Add runner filing metadata and/or extend runner area vocabulary for `area:ci` and `area:gerrit`; otherwise 🤖 labels are not actionable.
+4. Convert the 4-AC prose into machine-executable verify blocks and explicit integration tickets blockedBy sibling groups. Extend `deployment-audit.sh` or add a release-train audit harness for GitLab/registry/cosign/API/release_train checks.
+5. Restore omitted blast-radius items: `backend/routers/webhooks.py`, FE runtime feature flags, final git-tag/no-rebuild semantics, and release_audit hard-gating for promotion/prod deploy.
+
+Overall verdict
+
+NO-GO for executing or filing this work plan as written. It is directionally sound and captures most Model A must-fixes, but the current draft can still repeat the project’s shipped-but-not-deployed failure mode because too many ACs are prose-only, the runner labels are not real for CI/Gerrit work, old automation freeze is too late, and the critical path incorrectly promotes before staging validation. With the corrected sequence and filing/evidence changes above, it becomes GO-WITH-FIXES.
