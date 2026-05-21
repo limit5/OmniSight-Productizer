@@ -52,7 +52,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import yaml
 
@@ -314,6 +314,75 @@ class FeatureFlagSDK:
                 self._cache.pop(k, None)
 
 
+# ── RT-15a (OP-1593): frontend-safe effective-flags contract ─────────
+#
+# ``PUBLIC_FLAG_ALLOWLIST`` is the curated set of flag names that are
+# safe to surface to the browser via ``GET /api/feature-flags/effective``
+# (RT-15a). A flag becomes visible to the frontend ONLY by being listed
+# here — everything else stays invisible (fail-closed by omission). This
+# is a deliberate allow-list, not a deny-list: the default posture for a
+# brand-new flag is "not exposed".
+#
+# Membership rule (schema_lock ff-effective-contract):
+#   - Add a name here ONLY after it has been vetted as browser-safe.
+#   - NEVER add a backend-internal flag (e.g. the ``ks.*`` / ``wp.*`` env
+#     knobs) — exposing those leaks infrastructure posture to untrusted
+#     clients.
+#   - The endpoint returns ONLY ``{name: bool}`` — never owner,
+#     rollout_pct, allowed_tenants, tier, or expiry.
+#
+# The initial entries are the ``ui.*`` frontend surface that RT-15b will
+# consume; until a matching ``feature_flags`` row exists each resolves
+# ``False`` (fail-closed), which is the correct dark-ship default.
+PUBLIC_FLAG_ALLOWLIST: frozenset[str] = frozenset({
+    "ui.release_train.enabled",
+    "ui.new_navigation.enabled",
+})
+
+
+async def effective_flags(
+    tenant_id: str,
+    *,
+    allowlist: Iterable[str] | None = None,
+    conn: Any | None = None,
+) -> dict[str, bool]:
+    """Server-evaluate the public flag allow-list for one tenant.
+
+    Returns a flat ``{flag_name: bool}`` mapping that contains ONLY the
+    allow-listed public flag names — no owner / rollout_pct /
+    allowed_tenants / tier / expiry is ever included (RT-15a leak guard).
+
+    Every flag is resolved through the tenant-aware, fail-closed resolver
+    :func:`backend.agents.feature_flags.is_enabled`, so a DB error, a
+    missing row, or a malformed column resolves that single flag to
+    ``False`` (fail-closed) instead of raising. A per-flag belt-and-
+    braces ``try`` ensures one flag's failure can never abort the whole
+    public payload.
+
+    ``allowlist`` overrides :data:`PUBLIC_FLAG_ALLOWLIST` (tests pass an
+    explicit set); ``conn`` is forwarded to the resolver so request
+    handlers can reuse their request-scoped connection.
+    """
+    from backend.agents import feature_flags as _agent_ff
+
+    names = sorted(
+        PUBLIC_FLAG_ALLOWLIST if allowlist is None else set(allowlist)
+    )
+    tenant = str(tenant_id or "").strip()
+    out: dict[str, bool] = {}
+    for name in names:
+        try:
+            out[name] = bool(
+                await _agent_ff.is_enabled(name, tenant, conn=conn)
+            )
+        except Exception as exc:  # pragma: no cover - is_enabled fails closed
+            logger.warning(
+                "effective_flags: %s failed-closed: %s", name, exc
+            )
+            out[name] = False
+    return out
+
+
 default_sdk = FeatureFlagSDK()
 
 
@@ -334,10 +403,12 @@ def invalidate_flag_sdk_cache(name: str | None = None) -> None:
 __all__ = [
     "CACHE_TTL_SECONDS",
     "DEFAULT_ROLLOUT_CONFIG_PATH",
+    "PUBLIC_FLAG_ALLOWLIST",
     "FeatureFlagRollout",
     "FeatureFlagSDK",
     "bucket_for",
     "default_sdk",
+    "effective_flags",
     "invalidate_flag_sdk_cache",
     "is_flag_enabled",
     "load_rollout_config",
