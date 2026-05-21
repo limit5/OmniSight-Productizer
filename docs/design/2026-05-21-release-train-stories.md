@@ -93,12 +93,14 @@ Files: backend/agents/<green_evidence>.py (new), alembic migration, backend/test
 Out-of-scope: CI job = RT-04a.
 AC — Exercised(verify): `green_status(<sha>)` returns pass/fail; absent SHA = fail-closed.
 
-## RT-04c — `[OP][RT-04c] Enable Gerrit Verified on develop`
+## RT-04c — `[OP][RT-04c] Enable Gerrit Verified on develop` — ⚠ DECOUPLED FROM THE TRAIN (2026-05-22)
 labels: type:docs(ops) · tier:X · class:operator · area:gerrit,devops · runner:no-commits-expected
 prereqs: blocks_on=[RT-03,RT-04a]
-Goal: Activate Verified submit-requirement on develop (currently applicableIf=is:false). Protected-setting activation only.
-Files: .gerrit/project.config (Verified SR ~312).
-AC — Exercised(verify): a develop change without Verified cannot submit.
+**⚠ NOT a release-train dependency. Decoupled from RT-04e on 2026-05-22 — do NOT re-link as a blocker of RT-04e/RT-09/RT-10a.** Reason: this is green-as-GATE (submit-time Verified ENFORCEMENT, blocks every develop merge), whereas the train needs green-as-RECORD (per-SHA, non-blocking — RT-04a fast checks + RT-04b store). Enforcing Verified contradicts RT-04e's "develop merges NOT blocked on full suite / non-blocking develop flow". See ADR-0040 §"Clarification (2026-05-22)".
+**⚠ Do NOT flip the Verified SR until a live ci-bot Verified feeder is wired** (CI passes → ci-bot votes Verified+1 on the develop change). `.gitlab-ci.yml` has no Verified voting today → enabling the SR now would LOCK develop (every change needs Verified+1 that nobody grants). If pursued, use a FAST per-change check (not the 60-180min full suite) and treat it as a standalone branch-protection hardening, never a train blocker.
+Goal (standalone hardening, deferred): activate Verified submit-requirement on develop (currently applicableIf=is:false) AFTER the feeder exists. Protected-setting activation only.
+Files: .gerrit/project.config (Verified SR ~312) + the ci-bot Verified-feeder wiring (prereq).
+AC — Exercised(verify): with the feeder live, a develop change without CI-asserted Verified cannot submit, and a passing change DOES get Verified+1 (so develop is not locked).
 
 ## RT-04d — `[BOT][RT-04d] Bad full-SHA rejection tests (tests only)`
 labels: type:feature(tests) · tier:M · class:sub-codex · area:tests · capability:enable=gerrit_push · agent:auto
