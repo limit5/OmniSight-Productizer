@@ -21,10 +21,17 @@ Design notes:
   this module exists so an operator on a single replica can already
   tell "is my FE skewed against my BE?" without waiting for the
   metrics scrape cycle.
-* Observation, not gating. ``/readyz`` reports the verdict but the
-  ``ready`` gate is intentionally NOT downgraded on mismatch — the
-  ticket's non-goal explicitly bans degrading UX further on a skew
-  that the operator can't fix from the request side.
+* Observation by default, hard gate in staging (RT-05c / OP-1575).
+  ``summary()`` is policy-free: it returns the ``ok`` verdict and never
+  decides whether a mismatch should block. In prod/dev/CI ``/readyz``
+  reports the verdict but the ``ready`` gate is intentionally NOT
+  downgraded on mismatch — OP-1483's non-goal bans degrading prod UX on
+  a skew the operator can't fix from the request side. The staging
+  compose flips ``OMNISIGHT_REQUIRE_FRONTEND_COMPAT`` so the same
+  ``summary()`` verdict becomes a hard ``/readyz`` gate (the gating
+  decision lives in ``backend.routers.health._check_frontend_compat`` /
+  ``_readyz_handler``), turning a skewed bundle into a red staging
+  canary that blocks promote.
 * Counter increment is fire-and-forget. The Prometheus metric is the
   authoritative cross-replica view; ``record_observation`` increments
   the matching counter so ``rate()`` queries fire the
