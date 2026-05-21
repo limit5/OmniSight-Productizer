@@ -4,10 +4,10 @@
 #   cp deploy/staging/.env.example deploy/staging/.env  # create locally
 #   docker compose -f deploy/staging/docker-compose.yml --env-file deploy/staging/.env up -d
 #
-# Auto-deploy path:
-#   scripts/staging_deploy.sh consumes `change-merged` events for main,
-#   assigns color-specific host ports, pulls the D2 image tag, starts the
-#   standby Compose project, and switches the external Caddy ingress.
+# Release-train path:
+#   OMNISIGHT_REGISTRY defaults to the GitLab CR project namespace, and
+#   OMNISIGHT_IMAGE_TAG is required so staging never falls back to a default tag.
+#   RT-05b owns deploy-by-digest; this file remains tag-based for RT-05a.
 services:
   postgres:
     image: postgres:16-alpine
@@ -77,8 +77,8 @@ services:
     mem_reservation: 16m
 
   backend-a:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    image: ${OMNISIGHT_REGISTRY:-sora.services:49154/omnisight/OmniSight-Productizer}/backend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
+    pull_policy: always
     build:
       context: ../..
       dockerfile: Dockerfile.backend
@@ -126,8 +126,8 @@ services:
       start_period: 20s
 
   backend-b:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    image: ${OMNISIGHT_REGISTRY:-sora.services:49154/omnisight/OmniSight-Productizer}/backend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
+    pull_policy: always
     build:
       context: ../..
       dockerfile: Dockerfile.backend
@@ -218,8 +218,8 @@ services:
       start_period: 10s
 
   frontend:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-frontend:${OMNISIGHT_IMAGE_TAG:-latest}
-    pull_policy: missing
+    image: ${OMNISIGHT_REGISTRY:-sora.services:49154/omnisight/OmniSight-Productizer}/frontend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
+    pull_policy: always
     build:
       context: ../..
       dockerfile: Dockerfile.frontend
@@ -236,8 +236,8 @@ services:
       - NODE_ENV=production
       - HOSTNAME=0.0.0.0
       - NODE_OPTIONS=--max-old-space-size=1024
-      - OMNISIGHT_FRONTEND_BUILD_COMMIT=${OMNISIGHT_IMAGE_TAG:-}
-      - OMNISIGHT_MASTER_HEAD_COMMIT=${OMNISIGHT_IMAGE_TAG:-}
+      - OMNISIGHT_FRONTEND_BUILD_COMMIT=${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
+      - OMNISIGHT_MASTER_HEAD_COMMIT=${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
       - OMNISIGHT_FRONTEND_BUILD_LAG_COMMITS=0
     depends_on:
       caddy:
@@ -260,9 +260,9 @@ services:
       start_period: 20s
 
   bridge-daemon:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-backend:${OMNISIGHT_IMAGE_TAG:-latest}
+    image: ${OMNISIGHT_REGISTRY:-sora.services:49154/omnisight/OmniSight-Productizer}/backend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
     profiles: ["bridge"]
-    pull_policy: missing
+    pull_policy: always
     build:
       context: ../..
       dockerfile: Dockerfile.backend
