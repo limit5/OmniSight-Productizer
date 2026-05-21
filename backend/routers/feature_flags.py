@@ -39,6 +39,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from backend import auth
+from backend import feature_flag_sdk as _ff_sdk
 from backend import feature_flags as _flags
 from backend.db_pool import get_pool
 
@@ -198,6 +199,35 @@ async def list_feature_flags(
             "can_toggle": auth.role_at_least(actor.role, "admin"),
         },
     )
+
+
+@router.get("/effective")
+async def get_effective_feature_flags(
+    _request: Request,
+    actor: auth.User = Depends(auth.require_viewer),
+) -> JSONResponse:
+    """RT-15a (OP-1593): frontend-safe effective feature flags.
+
+    Returns ONLY the public-allow-listed flags as server-evaluated
+    booleans for the authenticated caller's tenant. Unlike the operator
+    ``GET /feature-flags`` registry (which exposes owner / rollout_pct /
+    allowed_tenants / tier), this payload is a flat ``{flag_name: bool}``
+    map with no leak of internal flag metadata.
+
+    Fail-closed posture: any backend / DB error resolves flags to
+    ``False`` rather than returning a 5xx, so the frontend always
+    receives a complete, conservative payload it can bootstrap from. The
+    per-flag fail-closed lives in :func:`backend.feature_flag_sdk.effective_flags`;
+    the outer guard here covers the unexpected case where building the
+    payload itself raises.
+    """
+    try:
+        flags = await _ff_sdk.effective_flags(actor.tenant_id)
+    except Exception:  # pragma: no cover - effective_flags fails closed
+        flags = {
+            name: False for name in sorted(_ff_sdk.PUBLIC_FLAG_ALLOWLIST)
+        }
+    return JSONResponse(status_code=200, content={"flags": flags})
 
 
 @router.patch("/{flag_name:path}")
