@@ -1,9 +1,11 @@
 workflow:
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v.*/'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
     - when: never
 
 stages:
+  - gate
   - build
   - sign
   - sbom
@@ -19,10 +21,98 @@ variables:
   COSIGN_VERSION: v2.4.1
   SYFT_VERSION: v1.17.0
   IMAGE_TAG_SHA: "sha-${CI_COMMIT_SHORT_SHA}"
+  GIT_DEPTH: "100"
 
 .tag_rules:
   rules:
     - if: '$CI_COMMIT_TAG =~ /^v.*/'
+
+.fast_gate_rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
+
+fast-gate:
+  extends:
+    - .fast_gate_rules
+  stage: gate
+  image: node:20.17-bookworm
+  timeout: 30m
+  before_script:
+    - set -euo pipefail
+    - apt-get update
+    - apt-get install -y --no-install-recommends git python3 python3-pip python3-venv
+    - corepack enable
+    - python3 -m venv backend/.venv
+    - backend/.venv/bin/pip install --upgrade pip
+    - backend/.venv/bin/pip install -r backend/requirements.txt -r backend/requirements-dev.txt
+    - pnpm install --frozen-lockfile
+  script:
+    - test "$CI_COMMIT_BRANCH" = "develop"
+    - test -n "$CI_COMMIT_SHA"
+    - test "${#CI_COMMIT_SHA}" = "40"
+    - printf 'FAST_GATE_SHA=%s\n' "$CI_COMMIT_SHA" > fast-gate.env
+    - |
+      if [ -z "${CI_COMMIT_BEFORE_SHA:-}" ] || [ "$CI_COMMIT_BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+        BASE_SHA="$(git rev-list --max-parents=0 "$CI_COMMIT_SHA")"
+      else
+        BASE_SHA="$CI_COMMIT_BEFORE_SHA"
+      fi
+      printf 'FAST_GATE_BASE_SHA=%s\n' "$BASE_SHA" >> fast-gate.env
+      git diff --name-only "$BASE_SHA" "$CI_COMMIT_SHA" > fast-gate-changed-files.txt
+    - |
+      PY_CHANGED="$(grep -E '^(backend|scripts|tests)/.*\.py$' fast-gate-changed-files.txt || true)"
+      if [ -n "$PY_CHANGED" ]; then
+        printf '%s\n' "$PY_CHANGED" | xargs backend/.venv/bin/ruff check
+      else
+        echo "no changed Python files for ruff"
+      fi
+    - backend/.venv/bin/python scripts/ci_test_impact.py --repo-root . $(cat fast-gate-changed-files.txt) > fast-gate-impact.json
+    - |
+      POLICY="$(backend/.venv/bin/python -c 'import json; print(json.load(open("fast-gate-impact.json"))["policy"])')"
+      TEST_FILES="$(backend/.venv/bin/python -c 'import json; print(" ".join(json.load(open("fast-gate-impact.json"))["test_files"]))')"
+      case "$POLICY" in
+        affected)
+          test -n "$TEST_FILES"
+          backend/.venv/bin/pytest --no-cov -q $TEST_FILES
+          ;;
+        full)
+          backend/.venv/bin/pytest --no-cov -q backend/tests tests
+          ;;
+        skip|frontend-only|lint-only)
+          echo "pytest skipped by impact policy: $POLICY"
+          ;;
+        *)
+          echo "unknown impact policy: $POLICY"
+          exit 1
+          ;;
+      esac
+    - pnpm exec tsc --noEmit
+    - pnpm run build
+    - |
+      MIGRATION_REVS="$(sed -n 's#^backend/alembic/versions/\([0-9][0-9A-Za-z]*\)_.*\.py$#\1#p' fast-gate-changed-files.txt)"
+      if [ -n "$MIGRATION_REVS" ]; then
+        backend/.venv/bin/python scripts/check_migration_syntax.py --strict --only $MIGRATION_REVS
+      else
+        echo "no changed Alembic migrations for strict syntax scan"
+      fi
+    - |
+      HEAD_OUTPUT="$(backend/.venv/bin/alembic -c backend/alembic.ini heads)"
+      HEAD_COUNT="$(printf '%s\n' "$HEAD_OUTPUT" | grep -c '(head)' || true)"
+      if [ "$HEAD_COUNT" -ne 1 ]; then
+        echo "FAIL: expected exactly one Alembic head, got $HEAD_COUNT"
+        printf '%s\n' "$HEAD_OUTPUT"
+        exit 1
+      fi
+  artifacts:
+    name: "fast-gate-${CI_COMMIT_SHA}"
+    when: always
+    paths:
+      - fast-gate.env
+      - fast-gate-changed-files.txt
+      - fast-gate-impact.json
+    reports:
+      dotenv: fast-gate.env
+    expire_in: 14 days
 
 .docker_job:
   image: docker:27.3.1

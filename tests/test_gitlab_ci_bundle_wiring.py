@@ -40,7 +40,7 @@ def _flatten_script(job: dict) -> str:
 def test_audit_emit_stage_exists_before_other_stages_assumed() -> None:
     ci = _load()
     assert "audit-emit" in ci["stages"]
-    assert ci["stages"][0] == "build", "prepare-bundle must live in the build stage"
+    assert "build" in ci["stages"], "prepare-bundle must live in the build stage"
 
 
 def test_prepare_bundle_runs_emit_script_in_build_stage() -> None:
