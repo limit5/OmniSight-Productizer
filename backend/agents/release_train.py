@@ -69,6 +69,15 @@ ReservationEventSink = Callable[[str, dict[str, Any]], None]
 
 EVENT_RELEASE_VERSION_RESERVED = "release_version_reserved"
 
+# Migration rollback-compat gate seam (RT-11): a coroutine that, given
+# the train being promoted, returns a :class:`MigrationCompatResult`
+# verdict on whether the previous-final → candidate migration delta can
+# be cleanly rolled back. Invoked AFTER CAS-acquire and BEFORE the audit
+# / tag writes. The production builder :func:`migration_compat_gate`
+# wires it to ``scripts.check_migration_compat`` but it is injectable so
+# tests can drive the block / break-glass paths without a versions tree.
+MigrationGate = Callable[["ReleaseTrainRow"], Awaitable["MigrationCompatResult"]]
+
 # A full git commit SHA is exactly 40 lowercase hex characters; querying
 # / keying is by full SHA only (mirrors green_evidence). The 40-char
 # ``length`` CHECK in migration 0247 is the DB-side backstop.
@@ -112,18 +121,16 @@ class DigestEqualityError(ReleaseTrainError):
     """Final tag digest equality was not proven; promote aborted."""
 
 
-@dataclass(frozen=True)
-class BreakGlassOverride:
-    """Human break-glass evidence for exceptional promote-time gates.
+class MigrationCompatBlocked(ReleaseTrainError):
+    """RT-11: a rollback-unsafe migration blocks the promote.
 
-    RT-22 permits only an explicit human command carrying the exact
-    candidate SHA and a non-empty audit reason. This payload is audit
-    evidence; it never bypasses final digest equality.
+    Raised after CAS-acquire and *before* any audit / tag write when the
+    previous-final → candidate migration delta cannot be cleanly rolled
+    back and no break-glass override was supplied. The train row is left
+    in ``failed`` state. A deliberate operator override
+    (:class:`BreakGlass`) bypasses this — but only after a break-glass
+    audit row is durably written.
     """
-
-    human_command: str
-    candidate_sha: str
-    audit_reason: str
 
 
 class VersionReservationConflict(ReleaseTrainError):
@@ -194,6 +201,43 @@ class VersionReservationResult:
     event: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class MigrationCompatResult:
+    """RT-11 verdict from the migration rollback-compat gate.
+
+    ``rollback_safe`` is ``False`` when promoting the candidate would
+    leave prod with no clean downgrade path to the previous-final
+    release. ``unsafe_migrations`` lists the offending migration paths so
+    the block reason / break-glass audit row can name them.
+    """
+
+    rollback_safe: bool
+    reason: str = ""
+    unsafe_migrations: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BreakGlass:
+    """Audited human override of a promote-time safety gate — the digest-equality
+    force-promote (RT-22) or the rollback-unsafe migration block (RT-11). Never
+    bypasses final digest equality; always requires a durable break-glass audit row."""
+
+    actor: str
+    reason: str
+    candidate_sha: str = ""   # when non-empty, the force-promote path requires it to match the promoted SHA exactly
+    human_command: str = ""   # optional operator command string, recorded in the audit payload when present
+
+    def __post_init__(self) -> None:
+        actor = (self.actor or "").strip()
+        reason = (self.reason or "").strip()
+        if not actor:
+            raise ValueError("break-glass requires a non-empty actor")
+        if not reason:
+            raise ValueError("break-glass requires a non-empty reason")
+        object.__setattr__(self, "actor", actor)
+        object.__setattr__(self, "reason", reason)
+
+
 class PostgresReleaseTrainStore:
     """``release_train`` table backed store."""
 
@@ -226,9 +270,10 @@ class PostgresReleaseTrainStore:
         candidate_sha: str,
         actor: str,
         *,
-        break_glass: BreakGlassOverride | None = None,
+        break_glass: BreakGlass | None = None,
         tag_writer: TagWriter | None = None,
         audit_log: AuditLog | None = None,
+        migration_gate: MigrationGate | None = None,
     ) -> PromoteResult:
         return await promote(
             candidate_sha,
@@ -236,6 +281,7 @@ class PostgresReleaseTrainStore:
             break_glass=break_glass,
             tag_writer=tag_writer,
             audit_log=audit_log,
+            migration_gate=migration_gate,
             conn_factory=self._factory,
         )
 
@@ -435,20 +481,30 @@ async def promote(
     candidate_sha: str,
     actor: str,
     *,
-    break_glass: BreakGlassOverride | None = None,
+    break_glass: BreakGlass | None = None,
     tag_writer: TagWriter | None = None,
     audit_log: AuditLog | None = None,
+    migration_gate: MigrationGate | None = None,
     conn_factory: ConnFactory | None = None,
 ) -> PromoteResult:
-    """Promote ``candidate_sha``: CAS-acquire, audit hard-gate, then tag.
+    """Promote ``candidate_sha``: CAS-acquire, migration gate, audit, tag.
 
-    Ordering (the two RT-10a invariants):
+    Ordering (the RT-10a invariants + the RT-11 rollback-compat gate):
 
     1. **CAS-acquire** flips ``pending`` -> ``promoting`` atomically. If
        no ``pending`` row matches (another promote already won, or the
        train is absent / already promoted), raises
        :class:`PromoteRaceLost` (or :class:`UnknownTrain` when there is
        no row at all). No audit / tag side effect on the loser.
+
+    1b. **Migration rollback-compat gate (RT-11).** When ``migration_gate``
+       is supplied the winner runs it before any audit / tag write. A
+       rollback-unsafe verdict (the previous-final → candidate delta has
+       no clean downgrade) marks the train ``failed`` and raises
+       :class:`MigrationCompatBlocked` — *unless* a :class:`BreakGlass`
+       override is supplied, in which case a break-glass audit row is
+       written first (itself a hard gate: if that row cannot be persisted
+       the promote aborts ``failed`` rather than silently overriding).
 
     2. **Audit hard gate.** The winner writes an audit row. If the
        insert fails (the seam returns ``None`` or raises), the train is
@@ -507,6 +563,45 @@ async def promote(
             )
 
         train = _row_to_train(acquired)
+
+        # (1b) RT-11 migration rollback-compat gate -- before any audit /
+        # tag write. A rollback-unsafe delta blocks the promote unless an
+        # audited break-glass override is supplied.
+        if migration_gate is not None:
+            try:
+                compat = await migration_gate(train)
+            except Exception as exc:  # noqa: BLE001 -- gate failure = fail-closed block
+                await _mark_failed(conn, normalized)
+                raise MigrationCompatBlocked(
+                    f"migration compat gate raised for {normalized}: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            if not compat.rollback_safe:
+                if break_glass is None:
+                    await _mark_failed(conn, normalized)
+                    raise MigrationCompatBlocked(
+                        f"promote blocked for {normalized}: rollback-unsafe "
+                        f"migration(s) {list(compat.unsafe_migrations)}: "
+                        f"{compat.reason}"
+                    )
+                # Break-glass override -- HARD gate: the override decision
+                # must be durably audited before we proceed past the block.
+                try:
+                    bg_audit_id = await _break_glass_audit_insert(
+                        audit_log, train, break_glass, compat
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    await _mark_failed(conn, normalized)
+                    raise AuditWriteError(
+                        f"break-glass audit insert raised for {normalized}: "
+                        f"{type(exc).__name__}: {exc}"
+                    ) from exc
+                if bg_audit_id is None:
+                    await _mark_failed(conn, normalized)
+                    raise AuditWriteError(
+                        f"break-glass override for {normalized} requires an "
+                        "audit row; insert returned no row id"
+                    )
 
         # (2) Audit HARD gate -- before any tag write.
         try:
@@ -608,26 +703,103 @@ async def _audit_insert(
 
 
 def _break_glass_payload(
-    break_glass: BreakGlassOverride | None, candidate_sha: str
+    break_glass: BreakGlass | None, candidate_sha: str
 ) -> dict[str, str] | None:
     if break_glass is None:
         return None
-    if not isinstance(break_glass, BreakGlassOverride):
-        raise TypeError("break_glass must be a BreakGlassOverride")
-    command = _required_text(
-        "break_glass.human_command", break_glass.human_command
-    )
-    exact_sha = _full_sha("break_glass.candidate_sha", break_glass.candidate_sha)
-    if exact_sha != candidate_sha:
-        raise ValueError(
-            "break_glass.candidate_sha must match candidate_sha exactly"
-        )
-    reason = _required_text("break_glass.audit_reason", break_glass.audit_reason)
-    return {
-        "human_command": command,
+    if not isinstance(break_glass, BreakGlass):
+        raise TypeError("break_glass must be a BreakGlass")
+    actor = _required_text("break_glass.actor", break_glass.actor)
+    reason = _required_text("break_glass.reason", break_glass.reason)
+    if break_glass.candidate_sha:
+        exact_sha = _full_sha("break_glass.candidate_sha", break_glass.candidate_sha)
+        if exact_sha != candidate_sha:
+            raise ValueError(
+                "break_glass.candidate_sha must match candidate_sha exactly"
+            )
+    else:
+        exact_sha = candidate_sha
+    payload = {
+        "actor": actor,
+        "reason": reason,
         "candidate_sha": exact_sha,
-        "audit_reason": reason,
     }
+    if break_glass.human_command:
+        payload["human_command"] = break_glass.human_command
+    return payload
+
+
+async def _break_glass_audit_insert(
+    audit_log: AuditLog | None,
+    train: ReleaseTrainRow,
+    break_glass: BreakGlass,
+    compat: MigrationCompatResult,
+) -> int | None:
+    """Write the RT-11 break-glass override audit row; return its id.
+
+    Returns ``None`` (or raises) on a failed insert -- the caller treats
+    either as a hard-gate failure and aborts the promote. Records the
+    overriding actor, their reason, and the rollback-unsafe migrations so
+    a post-incident review can reconstruct exactly what was force-promoted.
+    """
+
+    if audit_log is None:
+        from backend import audit
+
+        audit_log = audit.log
+
+    return await audit_log(
+        "release_train.promote.break_glass",
+        "release_train",
+        train.candidate_sha,
+        before={"rollback_safe": False},
+        after={
+            "break_glass_actor": break_glass.actor,
+            "break_glass_reason": break_glass.reason,
+            "unsafe_migrations": list(compat.unsafe_migrations),
+            "compat_reason": compat.reason,
+        },
+        actor=break_glass.actor,
+    )
+
+
+def migration_compat_gate(
+    previous_final_head: str | None,
+    candidate_head: str,
+    *,
+    versions_dir: Any | None = None,
+) -> MigrationGate:
+    """Build the production RT-11 gate backed by ``check_migration_compat``.
+
+    Wraps the synchronous release-to-release scan in
+    :func:`asyncio.to_thread` so the promote coroutine never blocks the
+    event loop on filesystem / AST work. Kept as a factory (and the
+    ``promote`` seam injectable) so tests can substitute a fake gate.
+    """
+
+    async def _gate(train: ReleaseTrainRow) -> MigrationCompatResult:
+        import asyncio
+
+        from scripts.check_migration_compat import (
+            VERSIONS_DIR,
+            check_release_to_release_compat,
+        )
+
+        target_dir = versions_dir if versions_dir is not None else VERSIONS_DIR
+
+        def _run() -> MigrationCompatResult:
+            res = check_release_to_release_compat(
+                previous_final_head, candidate_head, versions_dir=target_dir
+            )
+            return MigrationCompatResult(
+                rollback_safe=res.rollback_safe,
+                reason=res.reason,
+                unsafe_migrations=tuple(res.unsafe_migrations),
+            )
+
+        return await asyncio.to_thread(_run)
+
+    return _gate
 
 
 async def _mark_failed(conn: Any, candidate_sha: str) -> None:
@@ -759,9 +931,11 @@ def _required_text(field: str, value: Any) -> str:
 
 __all__ = [
     "AuditWriteError",
-    "BreakGlassOverride",
+    "BreakGlass",
     "DigestEqualityError",
     "EVENT_RELEASE_VERSION_RESERVED",
+    "MigrationCompatBlocked",
+    "MigrationCompatResult",
     "PROMOTION_STATES",
     "PostgresReleaseTrainStore",
     "PromoteRaceLost",
@@ -776,6 +950,7 @@ __all__ = [
     "VersionReservationStateError",
     "create_train",
     "get_train",
+    "migration_compat_gate",
     "promote",
     "release_version_reserved_event",
     "reserve_version",
