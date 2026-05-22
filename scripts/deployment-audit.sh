@@ -195,8 +195,13 @@ check_alembic_head() {  # name(expected-rev|"auto") expected ticket
   [ "$alembic_cmd" = "alembic" ] && [ -x "$HOME/.local/bin/alembic" ] && alembic_cmd="$HOME/.local/bin/alembic"
   have "$alembic_cmd" || { record "WARN" "alembic-head" "$want" "$exp" "$ticket" "alembic absent — run from the backend venv on prod"; return; }
   [ -r "$REPO/backend/alembic.ini" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "backend/alembic.ini missing"; return; }
-  local cur; cur="$( (cd "$REPO/backend" && "$alembic_cmd" current 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
-  [ -n "$cur" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "\`alembic current\` returned nothing — DB unreachable or alembic_version empty"; return; }
+  # Read PROD's live PG head first (the audit shell has no prod DSN, so a bare
+  # `alembic current` reads the stale local sqlite and falsely reports drift).
+  # Fall back to local alembic only if the prod PG container is unreachable.
+  local pg_ctr="${OMNISIGHT_PROD_PG_CONTAINER:-omnisight-pg-primary}"
+  local cur; cur="$(docker exec "$pg_ctr" psql -U "${OMNISIGHT_PROD_PG_USER:-omnisight}" -d "${OMNISIGHT_PROD_PG_DB:-omnisight}" -tA -c 'SELECT version_num FROM alembic_version' 2>/dev/null | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
+  [ -n "$cur" ] || cur="$( (cd "$REPO/backend" && "$alembic_cmd" current 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
+  [ -n "$cur" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "prod PG ($pg_ctr) unreachable AND local alembic empty"; return; }
   if [ "$want" = "auto" ]; then
     local head; head="$( (cd "$REPO/backend" && "$alembic_cmd" heads 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
     if [ "$cur" = "$head" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "current=$cur == repo head"
@@ -259,14 +264,14 @@ builtin_manifest() {
   cat <<'EOF'
 # kind            name                                                            expected  ticket    note
 systemd-timer     release-milestone-checker.timer                                 yes       OP-762    D1 milestone gate — was unenabled until 2026-05-12
-systemd-timer     auto-promote-develop.timer                                      yes       OP-877    D5 daily develop->refs/for/main
-systemd-unit      auto-promote-main.service                                       n-a       OP-766    superseded-in-place by OP-960 Gerrit-review path; if active, check it is not racing
-env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service             yes       OP-964    AUDIT-16 — release_audit DSN; absent => silent SQLite fallback
-systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    Phase A — RUN ON THE sora-bridge HOST
-container         staging@http://localhost:8010/healthz                           gated     OP-927    R5 / AUDIT-19 staging env — not up yet by design
-systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — enable as final step of AUDIT-19
-systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — enable as final step of AUDIT-19
-alembic-head      auto                                                            yes       OP-964    prod PG must be at repo head (no manual upgrade pending)
+systemd-timer     auto-promote-develop.timer                                      n-a       OP-877    RETIRED by release-train (ADR-0040 / RT-01) — develop->main promote removed
+systemd-unit      auto-promote-main.service                                       n-a       OP-766    RETIRED by release-train (ADR-0040 / RT-01) — main being retired
+env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service             n-a       OP-964    auto-promote-develop retired (RT-01) — env-var no longer expected
+systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    REAL gap: control-plane stranded on main@rc1; re-point off main deferred to cutover
+container         staging@http://localhost:8010/healthz                           yes       OP-927    AUDIT-19 staging stood up 2026-05-22 (project omnisight-staging, repo compose)
+systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
+systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
+alembic-head      auto                                                            n-a       OP-964    informational — reads PROD PG; /readyz authoritatively gates prod image-vs-DB drift (prod runs a release tag, behind develop by design)
 EOF
 }
 
