@@ -33,6 +33,7 @@ process-wide mutation is the SIGTERM handler the daemon installs in
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import logging
@@ -326,6 +327,34 @@ class LiveActionExecutor:
         self._client = client
 
     def execute(self, action: Action, ctx: DecisionContext) -> dict[str, Any]:
+        if action.kind == ACTION_NOOP:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "noop",
+            }
+        if action.kind not in {
+            ACTION_RELABEL,
+            ACTION_TRANSITION,
+            ACTION_MENTION_OPERATOR,
+            ACTION_MARK_FOR_FOLLOWUP,
+            ACTION_ESCALATE,
+            ACTION_FILE_TICKET,
+        }:
+            return {
+                "kind": getattr(action, "kind", "unknown"),
+                "target": getattr(action, "target", ""),
+                "executed": False,
+                "reason": "unsupported",
+            }
+        if action.dry_run:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "dry_run",
+            }
         if action.kind == ACTION_RELABEL:
             return self._execute_relabel(action)
         if action.kind == ACTION_TRANSITION:
@@ -338,19 +367,7 @@ class LiveActionExecutor:
             return self._execute_escalate(action)
         if action.kind == ACTION_FILE_TICKET:
             return self._execute_file_ticket(action)
-        if action.kind == ACTION_NOOP:
-            return {
-                "kind": action.kind,
-                "target": action.target,
-                "executed": False,
-                "reason": "noop",
-            }
-        return {
-            "kind": getattr(action, "kind", "unknown"),
-            "target": getattr(action, "target", ""),
-            "executed": False,
-            "reason": "unsupported",
-        }
+        raise AssertionError(f"unhandled action kind: {action.kind}")
 
     def _jira(self) -> Any:
         if self._client is None:
@@ -1552,8 +1569,10 @@ class PipelineCoordinator:
         deduper: EventDeduper | None = None,
         sprint_replan_handler: SprintReplanHandler | None = None,
         learning_loop: "Any | None" = None,
+        acting: bool = False,
     ) -> None:
         self._config = config
+        self._acting = acting
         self._engine = engine or DecisionEngine()
         self._mode_selector = mode_selector or ModeSelector()
         self._clock = clock
@@ -2068,6 +2087,12 @@ class PipelineCoordinator:
         if self._config.capacity_path is not None:
             write_capacity_snapshot(ctx.capacity, self._config.capacity_path)
         result = self._engine.evaluate(ctx)
+        if self._acting:
+            actions = tuple(
+                a if isinstance(a, NoopAction) else dataclasses.replace(a, dry_run=False)
+                for a in result.actions
+            )
+            result = dataclasses.replace(result, actions=actions)
         # Hand each real (non-noop) action to the action layer. In shadow
         # mode it only records the would-be execution; the outcomes go into
         # the decision-log line so a fired rule is observable end-to-end.
@@ -2265,6 +2290,7 @@ def build_default_coordinator(
         engine=build_hybrid_engine(decision_log_dir=config.decision_log_dir),
         action_executor=action_executor,
         cold_start_gateway=_default_cold_start_gateway(config, acting=acting),
+        acting=acting,
         sprint_replan_handler=build_default_sprint_replan_handler(
             config_dir=config.config_dir,
             decision_log_dir=config.decision_log_dir,
