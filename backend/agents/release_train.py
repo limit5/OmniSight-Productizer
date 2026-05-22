@@ -802,6 +802,99 @@ def migration_compat_gate(
     return _gate
 
 
+def bundle_tag_writer(
+    *,
+    bundle_id: str,
+    from_env: str = "staging",
+    actor: str = "",
+    approval_refs: tuple[str, ...] = (),
+    registry: str | None = None,
+    parent_attestation: str | None = None,
+    predicate_out_dir: Any | None = None,
+    audit_log_path: Any | None = None,
+    staging_evidence_path: Any | None = None,
+    require_staging_gate: bool = True,
+    verify_cosign: bool = True,
+    runner: Any | None = None,
+) -> TagWriter:
+    """Build the production RT-12 ``tag_writer`` for :func:`promote`.
+
+    The release-train state machine (RT-10a) owns the CAS, the RT-11
+    migration gate, and the audit hard-gate; the actual image retag is
+    RT-12 and is supplied here. This factory wraps
+    ``scripts.promote_image_bundle`` so :func:`promote` can call it as its
+    ``tag_writer`` seam: given the winning :class:`ReleaseTrainRow` it
+    retags the validated backend+frontend digests (RT-21 pair) to the
+    train's ``reserved_version`` (``vX.Y.Z``) in GitLab CR, verifies each
+    final tag resolves to the exact validated digest, attests per image,
+    and returns whether **every** final digest equalled the validated
+    source digest. That boolean becomes ``final_digest_equality`` on the
+    train; a ``False`` (or any retag failure) aborts the promote.
+
+    The retag never rebuilds and never creates a ``v*`` git tag (RT-20);
+    the synchronous subprocess work runs in :func:`asyncio.to_thread` so
+    the promote coroutine never blocks the event loop.
+    """
+
+    async def _writer(train: ReleaseTrainRow) -> bool:
+        import asyncio
+        from pathlib import Path as _Path
+
+        import subprocess
+
+        from scripts.promote_image_bundle import (
+            DEFAULT_AUDIT_LOG,
+            DEFAULT_REGISTRY,
+            build_promotions,
+            load_staging_evidence,
+            promote_images,
+        )
+
+        if train.reserved_version is None:
+            raise ReleaseTrainError(
+                f"promote of {train.candidate_sha} requires a reserved_version "
+                "(RT-10b) before the RT-12 retag"
+            )
+        target_registry = registry or DEFAULT_REGISTRY
+
+        def _run() -> bool:
+            promotions = build_promotions(
+                version=train.reserved_version,
+                digests={
+                    "backend": train.source_digest_backend,
+                    "frontend": train.source_digest_frontend,
+                },
+                registry=target_registry,
+            )
+            staging_evidence = None
+            if require_staging_gate and staging_evidence_path is not None:
+                staging_evidence = load_staging_evidence(
+                    _Path(staging_evidence_path), bundle_id=bundle_id
+                )
+
+            outcome = promote_images(
+                promotions,
+                version=train.reserved_version,
+                bundle_id=bundle_id,
+                from_env=from_env,
+                actor=actor or train.actor,
+                approval_refs=list(approval_refs),
+                audit_log=_Path(audit_log_path) if audit_log_path else DEFAULT_AUDIT_LOG,
+                parent_attestation=parent_attestation,
+                predicate_out_dir=_Path(predicate_out_dir) if predicate_out_dir else None,
+                staging_evidence=staging_evidence,
+                require_staging_gate=require_staging_gate,
+                dry_run=False,
+                verify_cosign=verify_cosign,
+                runner=runner if runner is not None else subprocess.run,
+            )
+            return outcome.final_digest_equality
+
+        return await asyncio.to_thread(_run)
+
+    return _writer
+
+
 async def _mark_failed(conn: Any, candidate_sha: str) -> None:
     """Move an in-flight ``promoting`` row to ``failed`` (best-effort)."""
 
@@ -948,6 +1041,7 @@ __all__ = [
     "VersionReservationConflict",
     "VersionReservationResult",
     "VersionReservationStateError",
+    "bundle_tag_writer",
     "create_train",
     "get_train",
     "migration_compat_gate",
