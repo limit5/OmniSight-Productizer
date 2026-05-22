@@ -33,6 +33,7 @@ process-wide mutation is the SIGTERM handler the daemon installs in
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -57,7 +58,11 @@ from backend.agents.pipeline_coordinator_modes import (
 )
 from backend.agents.pipeline_coordinator_llm_consultation import build_hybrid_engine
 from backend.agents.pipeline_coordinator_rules import (
+    ACTION_ESCALATE,
     ACTION_FILE_TICKET,
+    ACTION_MARK_FOR_FOLLOWUP,
+    ACTION_MENTION_OPERATOR,
+    ACTION_NOOP,
     ACTION_RELABEL,
     ACTION_TRANSITION,
     Action,
@@ -289,6 +294,289 @@ class ShadowActionExecutor:
             "executed": self.executed,
             "shadow": True,
         }
+
+
+NEEDS_OPERATOR_ACTION_LABEL = "needs-operator-action"
+FOLLOWUP_LABEL_PREFIX = "coord-resume-after:"
+CLAIM_LABEL_PREFIX = "claim:"
+_VOLATILE_ACTION_PARAM_KEYS = frozenset(
+    {
+        "decision_id",
+        "timestamp",
+        "timestamps",
+        "transient_observation",
+        "transient_observations",
+        "observation_ts",
+        "observed_at",
+        "created_at",
+        "updated_at",
+        "now",
+        "tick_id",
+    }
+)
+
+
+class LiveActionExecutor:
+    """Execute ADR-0021 §6 actions against JIRA with stable idempotency keys."""
+
+    executed: bool = True
+
+    def __init__(self, config: CoordinatorConfig, *, client: Any | None = None) -> None:
+        self._config = config
+        self._client = client
+
+    def execute(self, action: Action, ctx: DecisionContext) -> dict[str, Any]:
+        if action.kind == ACTION_RELABEL:
+            return self._execute_relabel(action)
+        if action.kind == ACTION_TRANSITION:
+            return self._execute_transition(action)
+        if action.kind == ACTION_MENTION_OPERATOR:
+            return self._execute_mention(action)
+        if action.kind == ACTION_MARK_FOR_FOLLOWUP:
+            return self._execute_followup(action)
+        if action.kind == ACTION_ESCALATE:
+            return self._execute_escalate(action)
+        if action.kind == ACTION_FILE_TICKET:
+            return self._execute_file_ticket(action)
+        if action.kind == ACTION_NOOP:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "noop",
+            }
+        return {
+            "kind": getattr(action, "kind", "unknown"),
+            "target": getattr(action, "target", ""),
+            "executed": False,
+            "reason": "unsupported",
+        }
+
+    def _jira(self) -> Any:
+        if self._client is None:
+            from backend.agents import jira_dispatch
+
+            self._client = jira_dispatch.make_client(self._config.jira_agent_class)
+        return self._client
+
+    def _execute_transition(self, action: Action) -> dict[str, Any]:
+        from backend.agents import jira_dispatch
+
+        target_status = str(action.params.get("to_status") or "")
+        base_key = self._idem_base(action)
+        if target_status in jira_dispatch.TODO_STATUS_NAMES or target_status.lower() in {
+            "todo",
+            "to do",
+        }:
+            reason = str(action.params.get("reason") or "Coordinator live action requested To Do.")
+            jira_dispatch.transition_back_to_todo(
+                self._jira(),
+                action.target,
+                reason=reason,
+                idem_key=f"{base_key}:transition",
+            )
+            outcome = {"to_status": "To Do"}
+        elif target_status in jira_dispatch.UNDER_REVIEW_STATUS_NAMES or target_status.lower() in {
+            "under_review",
+            "under review",
+        }:
+            issued = jira_dispatch.transition_to_under_review_if_needed(
+                self._jira(),
+                action.target,
+                idem_key=f"{base_key}:transition",
+            )
+            outcome = {"to_status": "Under Review", "issued": issued}
+        else:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "unsupported_transition",
+                "outcome": {"to_status": target_status},
+            }
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": True,
+            "outcome": outcome,
+        }
+
+    def _execute_relabel(self, action: Action) -> dict[str, Any]:
+        from backend.agents import jira_dispatch
+
+        add = tuple(str(x) for x in action.params.get("add", ()))
+        remove = tuple(str(x) for x in action.params.get("remove", ()))
+        base_key = self._idem_base(action)
+        outcomes: list[dict[str, Any]] = []
+        # T2: pre-mutation rechecks hook here before each live JIRA mutation.
+        for label in add:
+            jira_dispatch.add_label(
+                self._jira(), action.target, label, idem_key=f"{base_key}:add:{label}"
+            )
+            outcomes.append({"op": "add", "label": label})
+        for label in remove:
+            jira_dispatch.remove_label(
+                self._jira(), action.target, label, idem_key=f"{base_key}:remove:{label}"
+            )
+            outcomes.append({"op": "remove", "label": label})
+            if label.startswith(CLAIM_LABEL_PREFIX):
+                jira_dispatch.clear_assignee(
+                    self._jira(), action.target, idem_key=f"{base_key}:clear-assignee"
+                )
+                outcomes.append({"op": "clear_assignee"})
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": bool(outcomes),
+            "outcome": outcomes,
+        }
+
+    def _execute_mention(self, action: Action) -> dict[str, Any]:
+        from backend.agents import jira_dispatch
+
+        message = str(action.params.get("message") or "")
+        urgency = str(action.params.get("urgency") or "medium")
+        base_key = self._idem_base(action)
+        jira_dispatch.add_comment(
+            self._jira(), action.target, message, idem_key=f"{base_key}:comment"
+        )
+        outcome: list[dict[str, Any]] = [{"op": "comment", "urgency": urgency}]
+        if urgency == "high":
+            jira_dispatch.add_label(
+                self._jira(),
+                action.target,
+                NEEDS_OPERATOR_ACTION_LABEL,
+                idem_key=f"{base_key}:label",
+            )
+            outcome.append({"op": "label", "label": NEEDS_OPERATOR_ACTION_LABEL})
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": True,
+            "outcome": outcome,
+        }
+
+    def _execute_followup(self, action: Action) -> dict[str, Any]:
+        from backend.agents import jira_dispatch
+
+        when = str(action.params.get("when") or "")
+        why = str(action.params.get("why") or "")
+        label = f"{FOLLOWUP_LABEL_PREFIX}{when}"
+        base_key = self._idem_base(action)
+        jira_dispatch.add_label(
+            self._jira(), action.target, label, idem_key=f"{base_key}:label"
+        )
+        jira_dispatch.add_comment(
+            self._jira(), action.target, why, idem_key=f"{base_key}:comment"
+        )
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": True,
+            "outcome": [{"op": "label", "label": label}, {"op": "comment"}],
+        }
+
+    def _execute_escalate(self, action: Action) -> dict[str, Any]:
+        from backend.agents import jira_dispatch
+
+        reason = str(action.params.get("reason") or "")
+        base_key = self._idem_base(action)
+        jira_dispatch.add_label(
+            self._jira(),
+            action.target,
+            NEEDS_OPERATOR_ACTION_LABEL,
+            idem_key=f"{base_key}:label",
+        )
+        jira_dispatch.add_comment(
+            self._jira(), action.target, reason, idem_key=f"{base_key}:comment"
+        )
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": True,
+            "outcome": [
+                {"op": "label", "label": NEEDS_OPERATOR_ACTION_LABEL},
+                {"op": "comment"},
+            ],
+        }
+
+    def _execute_file_ticket(self, action: Action) -> dict[str, Any]:
+        from backend.agents import jira_dispatch
+
+        message = self._file_ticket_operator_message(action)
+        semantic = dict(action.params)
+        semantic["operator_message"] = message
+        base_key = self._idem_base(action, semantic_params=semantic)
+        jira_dispatch.add_comment(
+            self._jira(), action.target, message, idem_key=f"{base_key}:comment"
+        )
+        jira_dispatch.add_label(
+            self._jira(),
+            action.target,
+            NEEDS_OPERATOR_ACTION_LABEL,
+            idem_key=f"{base_key}:label",
+        )
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": False,
+            "reason": "requires_operator",
+            "outcome": [
+                {
+                    "kind": action.kind,
+                    "target": action.target,
+                    "executed": False,
+                    "reason": "requires_operator",
+                },
+                {
+                    "kind": ACTION_MENTION_OPERATOR,
+                    "target": action.target,
+                    "executed": True,
+                    "outcome": [
+                        {"op": "comment"},
+                        {"op": "label", "label": NEEDS_OPERATOR_ACTION_LABEL},
+                    ],
+                },
+            ],
+        }
+
+    def _file_ticket_operator_message(self, action: Action) -> str:
+        target_area = str(action.params.get("target_area") or "backend")
+        blocking = str(action.params.get("blocking") or action.target)
+        description = str(action.params.get("description") or "")
+        return (
+            "[coord-acting] file_ticket requires operator action: "
+            f"target_area={target_area}; blocking={blocking}; {description}"
+        )
+
+    def _idem_base(
+        self,
+        action: Action,
+        *,
+        semantic_params: Mapping[str, Any] | None = None,
+    ) -> str:
+        payload = {
+            "params": self._canonical_semantic_params(
+                semantic_params if semantic_params is not None else action.params
+            )
+        }
+        material = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+        return f"coord:{action.kind}:{action.target}:{digest}"
+
+    def _canonical_semantic_params(self, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            return {
+                str(k): self._canonical_semantic_params(v)
+                for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+                if str(k) not in _VOLATILE_ACTION_PARAM_KEYS
+            }
+        if isinstance(value, (list, tuple, set, frozenset)):
+            normalised = [self._canonical_semantic_params(v) for v in value]
+            if all(isinstance(v, (str, int, float, bool, type(None))) for v in normalised):
+                return sorted(normalised, key=lambda item: str(item))
+            return normalised
+        return value
 
 
 # Action executor seam: anything with ``execute(action, ctx) -> dict``.
