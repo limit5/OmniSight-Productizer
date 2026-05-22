@@ -1,0 +1,1633 @@
+Reading prompt from stdin...
+OpenAI Codex v0.128.0 (research preview)
+--------
+workdir: /home/user/work/sora/OmniSight-Productizer
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, /home/user/.codex/memories]
+reasoning effort: none
+reasoning summaries: none
+session id: 019e511b-eea8-76b0-9432-bb917c201dee
+--------
+user
+Adversarially audit a small DESIGN fix for the OmniSight pipeline-coordinator cold-start Startup-1 infra phase.
+
+IMPORTANT — code version: the repo workdir is on a STALE local develop; the SHIPPED/current code is at /home/user/sora-bridge/backend/agents/pipeline_coordinator.py (commit e39432c, includes OP-1618 per-phase caps). READ THAT shipped file, not the workdir copy, for _startup_1_infra and the config. run_deployment_audit + InfraUnit + InfraAuditResult are identical in both, but verify against the shipped file.
+
+READ:
+- docs/operations/2026-05-23-coldstart-startup1-expected-units-design.md  (the design — your target)
+- /home/user/sora-bridge/backend/agents/pipeline_coordinator.py — run_deployment_audit (~:916-963), InfraUnit (~:513), InfraAuditResult.down (~:527), _startup_1_infra (the start/cap/halt loop), ShadowColdStartGateway.start_unit, _default_cold_start_gateway, CoordinatorConfig (cold_start_max_infra)
+- scripts/deployment-audit.sh — the `expected ∈ {yes,gated,n-a}` row schema (header ~:22-37, record() ~:57-60, check_systemd_unit/timer ~:76-94, the manifest rows ~:267-273 for auto-promote-main/develop + staging-gate)
+
+CONTEXT: the OP-1619 acting-flip shadow preview showed cold-start Startup-1 trying to start RETIRED units (auto-promote-main.service expected=n-a "RETIRED by release-train", auto-promote-develop.timer expected=n-a, staging-gate-smoke.timer expected=gated) because run_deployment_audit drops the audit row's `expected` field and treats every non-OK systemd row as `down`. In acting mode the live gateway would `systemctl start` a RETIRED develop->main release-autopilot unit. The fix: InfraUnit carries `expected`; InfraAuditResult.down returns only `expected=="yes" AND not live`.
+
+AUDIT:
+1. Is the root cause correctly identified (the dropped `expected` field), and is the fix (filter down to expected=yes) correct + complete? Any other place that consumes audit.down or InfraUnit and would need the same treatment?
+2. Answer the design's Q1-Q4 with file:line evidence. Especially: is "never start gated/n-a" correct for ALL current manifest rows (check the audit.sh manifest — are there any expected=yes units that are LEGITIMATELY expected live + that this fix must keep starting)?
+3. D1 (missing/unknown expected -> not-started, default-deny): is this safe, or could it mask a real expected=yes outage? Does deployment-audit.sh ALWAYS emit `expected` for systemd rows?
+4. Does the fix interact with the OP-1618 cap logic, the halt/mention_operator path, or the shadow-vs-acting gateway split in any way the design missed?
+5. Is tier:M + area:backend,tests correct (single-file backend change, no new module/schema/security)?
+
+Output PRIORITIZED findings (BLOCKER/SHOULD-FIX/NICE) with file:line. End with a one-line verdict: file-ready / file-ready-with-conditions / needs-v2. Audit only, modify nothing.
+
+warning: Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the vendored bubblewrap in the meantime.
+codex
+I’ll audit this read-only against the shipped coordinator and the design doc, then cross-check the audit script schema and manifest rows. I’ll keep the findings prioritized and avoid touching files.
+exec
+/bin/bash -lc "nl -ba docs/operations/2026-05-23-coldstart-startup1-expected-units-design.md | sed -n '1,240p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+     1	# Cold-start Startup-1 must honor the audit's `expected` field — DESIGN (for codex audit)
+     2	
+     3	**Status**: DRAFT for codex audit (2026-05-23). Small, surgical fix. Found by the
+     4	OP-1619 acting-flip shadow preview (2026-05-23): a fresh shadow cold-start on the
+     5	shipped code (~/sora-bridge @ e39432c, OP-1618) halted at Startup-1 trying to
+     6	`start_unit` **RETIRED** release-autopilot units.
+     7	
+     8	## Problem
+     9	`run_deployment_audit` (pipeline_coordinator.py:916-963) parses
+    10	`scripts/deployment-audit.sh`'s JSONL rows but **drops the `expected` field** — it
+    11	builds each `InfraUnit` from `name` + `status` only (:957-963):
+    12	```python
+    13	units.append(InfraUnit(name=row.get("name","?"), live=row.get("status")=="OK"))
+    14	```
+    15	`InfraAuditResult.down` (:527-529) then returns every non-OK systemd row, and
+    16	`_startup_1_infra` (:1445-1473) calls `gw.start_unit(unit)` for EVERY down unit
+    17	(capped per `cold_start_max_infra`, OP-1618), then halts boot if any remain down.
+    18	
+    19	But `deployment-audit.sh` already classifies each row `expected ∈ {yes, gated,
+    20	n-a}` (header :22/:32; the script only counts `expected=yes` reds as failures,
+    21	:60). Units the operator deliberately retired/gated are RED-but-not-failures.
+    22	
+    23	**Live evidence (2026-05-23 audit):**
+    24	| unit | status | expected | note |
+    25	|---|---|---|---|
+    26	| `auto-promote-main.service` | RED | **n-a** | "RETIRED by release-train (ADR-0040/RT-01) — main being retired" (audit.sh:268) |
+    27	| `auto-promote-develop.timer` | RED | **n-a** | RETIRED (audit.sh:267) |
+    28	| `staging-gate-smoke.timer` | RED | **gated** | red until bucket-D digest-resolution (OP-1607) (audit.sh:273) |
+    29	
+    30	Because the coordinator drops `expected`, all three land in `down`. In **shadow**
+    31	this is only recorded (ShadowColdStartGateway is observe-only — verified: the
+    32	logged `start_unit ok:true` did NOT actually start the unit). In **acting mode**
+    33	(OP-1619) the live gateway would `systemctl --user start` them — i.e. **start a
+    34	RETIRED develop→main release-autopilot unit** (`auto-promote-main.service`),
+    35	risking an unintended release promotion, and then halt boot on the still-down set.
+    36	The OP-1618 `cold_start_max_infra=1` cap limits the COUNT but not WHICH unit, so
+    37	it does not protect against this.
+    38	
+    39	## Design — filter `down` to `expected=yes` only
+    40	1. `InfraUnit` (pipeline_coordinator.py:513-518) gains an `expected: str = "yes"`
+    41	   field (the audit row's classification).
+    42	2. `run_deployment_audit` (:957-963) reads `row.get("expected")` into it.
+    43	3. `InfraAuditResult.down` (:527-529) returns only units that are **`expected ==
+    44	   "yes"` AND not live**. `gated` / `n-a` non-OK units are NOT down (their
+    45	   inactivity is correct, not a failure → cold-start neither starts them nor
+    46	   halts on them).
+    47	4. No change to `_startup_1_infra`'s start/cap/halt loop — it just receives a
+    48	   correctly-filtered `down` list. (Halt semantics preserved for genuinely-down
+    49	   `expected=yes` infra.)
+    50	
+    51	This mirrors the audit script's own failure rule (`status==RED && expected==yes`,
+    52	audit.sh:60) — the coordinator simply stops being more aggressive than the audit
+    53	it wraps.
+    54	
+    55	## Design decisions (for audit)
+    56	- **D1 — unknown/missing `expected` → NOT expected-live (default-deny start).**
+    57	  A row with no `expected` (malformed / older audit) is treated as NOT
+    58	  must-start, so the coordinator never auto-starts a unit it cannot confirm is
+    59	  expected. Rationale: the failure mode we are fixing is *starting things we
+    60	  shouldn't*; the safe default is to under-start (the operator is alerted via the
+    61	  normal audit anyway), not to start an unknown unit. (Counter-view for codex: a
+    62	  genuinely-down `expected=yes` unit whose field went missing would then be
+    63	  silently not-started — but the audit script always emits `expected`, so a
+    64	  missing field signals a parse/contract break, where not-starting is safer.)
+    65	- **D2 — `gated` is treated like `n-a` (not started, not halted).** A gated unit
+    66	  is expected-red-until-a-condition; auto-starting it would fight the gate.
+    67	- **D3 — scope is read-side only.** No change to `deployment-audit.sh` (it is
+    68	  already correct). The bug is purely the coordinator dropping the field.
+    69	
+    70	## Open questions for codex
+    71	- Q1: should `gated` ever be auto-started (e.g. a gate that's actually satisfiable
+    72	  by a start), or is "never start gated/n-a" correct for all current rows?
+    73	- Q2: is `expected` the right discriminator, or should the coordinator also honor
+    74	  a per-row "auto_start: false" hint (the audit has no such field today)?
+    75	- Q3: D1 default — confirm "missing expected → not-started" can't mask a real
+    76	  expected=yes outage (given the script always emits the field).
+    77	- Q4: anything else the acting-flip relies on from Startup-1 that this changes.
+    78	
+    79	## Tests (planned)
+    80	- A non-OK `expected=n-a` row (e.g. auto-promote-main.service) → NOT in
+    81	  `audit.down` → `_startup_1_infra` does not call `start_unit`, does not halt.
+    82	- A non-OK `expected=gated` row → not in `down`.
+    83	- A non-OK `expected=yes` row → still in `down` → started/halted as today.
+    84	- Missing `expected` → not in `down` (D1).
+    85	- `InfraAuditResult.down` filter unit test + a `run_deployment_audit` parse test
+    86	  with a mixed-row fixture.
+    87	- Regression: shadow cold-start on the current host → Startup-1 no longer lists
+    88	  the 3 retired/gated units in `still_down`; does not halt on them.
+    89	
+    90	## Relationship to the acting flip (OP-1619)
+    91	This is a HARD pre-flip blocker: until it lands + is shadow-verified, flipping
+    92	`acting=True` would attempt to start retired release-autopilot units. It is NOT
+    93	part of the §6 executor epic (OP-1612) — different subsystem (Startup-1 infra).
+    94	File standalone; **OP-1619 blockedBy this ticket**.
+
+exec
+/bin/bash -lc 'pwd && git branch --show-current && git status --short' in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+/home/user/work/sora/OmniSight-Productizer
+develop
+ M audit/image_promotion_audit.jsonl
+?? audit/promotion-predicates/
+?? docs/audit/codex-reviews/coldstart-startup1-expected-units-codex-audit-2026-05-23.txt
+?? docs/audit/codex-reviews/coordinator-acting-executor-design-codex-audit-2026-05-22.txt
+?? docs/audit/codex-reviews/coordinator-acting-executor-design-v2-codex-audit-2026-05-22.txt
+?? docs/audit/codex-reviews/coordinator-acting-executor-design-v3-codex-audit-2026-05-22.txt
+?? docs/audit/codex-reviews/coordinator-acting-executor-design-v4-codex-audit-2026-05-22.txt
+?? docs/audit/codex-reviews/coordinator-acting-executor-ticket-draft-codex-audit-2026-05-23.txt
+?? docs/operations/2026-05-22-coordinator-acting-live-action-executor-design-v2.md
+?? docs/operations/2026-05-22-coordinator-acting-live-action-executor-design-v3.md
+?? docs/operations/2026-05-22-coordinator-acting-live-action-executor-design-v4.md
+?? docs/operations/2026-05-22-coordinator-acting-live-action-executor-design.md
+?? docs/operations/2026-05-23-coldstart-startup1-expected-units-design.md
+?? docs/operations/2026-05-23-coordinator-acting-executor-ticket-draft.md
+
+exec
+/bin/bash -lc "nl -ba scripts/deployment-audit.sh | sed -n '1,120p;250,285p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+     1	#!/usr/bin/env bash
+     2	# scripts/deployment-audit.sh — [OP-976] AUDIT-23
+     3	#
+     4	# Re-runnable "shipped vs deployed" verification harness. For each row in an
+     5	# expected-live manifest it applies the AUDIT-23 §4 verification methodology
+     6	# and prints a green/red table; exits non-zero if any row marked `expected=yes`
+     7	# is red. Designed to be the standing regression guard against the
+     8	# "shipped-but-not-deployed" anti-pattern (see
+     9	# docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md §6.3).
+    10	#
+    11	# Run it ON THE HOST that owns the artefacts (the prod host for the release
+    12	# units; the sora-bridge host for the bridge units). Re-run quarterly minimum,
+    13	# or wrap it in deploy/systemd/deployment-audit.{service,timer} for a daily run.
+    14	#
+    15	# Usage:
+    16	#   scripts/deployment-audit.sh                 # built-in expected-live list
+    17	#   scripts/deployment-audit.sh MANIFEST.tsv    # host-specific manifest file
+    18	#   DEPLOYMENT_AUDIT_USER_SYSTEMD=0 scripts/deployment-audit.sh   # use system bus
+    19	#   DEPLOYMENT_AUDIT_JSONL_LOG=/path/audit.jsonl scripts/deployment-audit.sh
+    20	#
+    21	# Manifest format — tab-separated, `#` comments and blank lines ignored:
+    22	#   <kind>  <name>  <expected>  <ticket>  [note]
+    23	#
+    24	#   kind ∈ {
+    25	#     systemd-unit     name = unit (e.g. auto-promote-main.service)
+    26	#     systemd-timer    name = timer (e.g. release-milestone-checker.timer); also
+    27	#                      checks the bound service's last Result + list-timers LAST
+    28	#     container        name = docker name substring, or  substr@http://host:port/healthz
+    29	#     env-var          name = VAR@unit.service   or   VAR@pgrep-pattern
+    30	#     alembic-head     name = expected-revision   or   "auto" (compare vs `alembic heads`)
+    31	#   }
+    32	#   expected ∈ { yes, gated, n-a }
+    33	#     yes   → a red row makes this script exit 1
+    34	#     gated → peer-gated by design (e.g. staging-gate timers); red is reported, not fatal
+    35	#     n-a   → informational only
+    36	#
+    37	# Exit: 0 = every `expected=yes` row green · 1 = ≥1 red · 2 = bad usage / no host.
+    38	
+    39	set -uo pipefail
+    40	
+    41	REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    42	USE_USER_BUS="${DEPLOYMENT_AUDIT_USER_SYSTEMD:-1}"
+    43	SYSTEMCTL=(systemctl)
+    44	[ "$USE_USER_BUS" = "1" ] && SYSTEMCTL=(systemctl --user)
+    45	
+    46	err()  { echo "❌ deployment-audit: $*" >&2; exit 2; }
+    47	have() { command -v "$1" >/dev/null 2>&1; }
+    48	
+    49	looks_prod_value() {
+    50	  local val="$1"
+    51	  [ -n "$val" ] && ! echo "$val" | grep -qiE 'sqlite|localhost|127\.0\.0\.1|placeholder|changeme'
+    52	}
+    53	
+    54	# ── results accumulator ───────────────────────────────────────────────────────
+    55	FAIL=0          # number of red rows with expected=yes
+    56	ROWS=()         # "status|kind|name|expected|ticket|detail"
+    57	record() {      # record <STATUS> <kind> <name> <expected> <ticket> <detail>
+    58	  local status="$1" kind="$2" name="$3" exp="$4" ticket="$5" detail="$6"
+    59	  ROWS+=("${status}|${kind}|${name}|${exp}|${ticket}|${detail}")
+    60	  if [ "$status" = "RED" ] && [ "$exp" = "yes" ]; then FAIL=$((FAIL + 1)); fi
+    61	}
+    62	
+    63	# ── prerequisite: linger (all --user units die at logout without it) ──────────
+    64	check_linger() {
+    65	  [ "$USE_USER_BUS" = "1" ] || return 0
+    66	  have loginctl || { record "WARN" "linger" "$USER" "n-a" "OP-976" "loginctl absent — cannot verify"; return 0; }
+    67	  local v; v="$(loginctl show-user "$USER" -p Linger --value 2>/dev/null || echo unknown)"
+    68	  if [ "$v" = "yes" ]; then
+    69	    record "OK" "linger" "$USER" "yes" "OP-976" "Linger=yes"
+    70	  else
+    71	    record "RED" "linger" "$USER" "yes" "OP-976" "Linger=$v — every --user timer stops at logout; run: loginctl enable-linger $USER"
+    72	  fi
+    73	}
+    74	
+    75	# ── per-kind checks ───────────────────────────────────────────────────────────
+    76	check_systemd_unit() {  # name expected ticket
+    77	  local name="$1" exp="$2" ticket="$3"
+    78	  have systemctl || { record "WARN" "systemd-unit" "$name" "$exp" "$ticket" "systemctl absent"; return; }
+    79	  local active enabled load
+    80	  load="$("${SYSTEMCTL[@]}" show "$name" -p LoadState --value 2>/dev/null || true)"
+    81	  if [ "$load" = "not-found" ]; then
+    82	    record "RED" "systemd-unit" "$name" "$exp" "$ticket" "unit not installed (no $name in the user/systemd manager) — copy from deploy/systemd/ + daemon-reload + enable --now"
+    83	    return
+    84	  fi
+    85	  active="$("${SYSTEMCTL[@]}" is-active   "$name" 2>/dev/null || true)"
+    86	  enabled="$("${SYSTEMCTL[@]}" is-enabled "$name" 2>/dev/null || true)"
+    87	  if [ "$active" = "active" ] && [ "$enabled" = "enabled" ]; then
+    88	    record "OK" "systemd-unit" "$name" "$exp" "$ticket" "active+enabled"
+    89	  else
+    90	    record "RED" "systemd-unit" "$name" "$exp" "$ticket" "is-active=$active is-enabled=$enabled"
+    91	  fi
+    92	}
+    93	
+    94	check_systemd_timer() {  # name expected ticket
+    95	  local timer="$1" exp="$2" ticket="$3"
+    96	  have systemctl || { record "WARN" "systemd-timer" "$timer" "$exp" "$ticket" "systemctl absent"; return; }
+    97	  local enabled svc last result load
+    98	  load="$("${SYSTEMCTL[@]}" show "$timer" -p LoadState --value 2>/dev/null || true)"
+    99	  if [ "$load" = "not-found" ]; then
+   100	    record "RED" "systemd-timer" "$timer" "$exp" "$ticket" "timer not installed — copy deploy/systemd/${timer%.timer}.{service,timer} to ~/.config/systemd/user/ + daemon-reload + enable --now"
+   101	    return
+   102	  fi
+   103	  enabled="$("${SYSTEMCTL[@]}" is-enabled "$timer" 2>/dev/null || true)"
+   104	  svc="$("${SYSTEMCTL[@]}" show "$timer" -p Unit --value 2>/dev/null || true)"
+   105	  [ -n "$svc" ] || svc="${timer%.timer}.service"
+   106	  last="$("${SYSTEMCTL[@]}" list-timers --all 2>/dev/null | awk -v t="$timer" '$0 ~ t {print "LAST="$5" "$6}' | head -1)"
+   107	  result="$("${SYSTEMCTL[@]}" show "$svc" -p Result --value 2>/dev/null || true)"
+   108	  if [ "$enabled" = "enabled" ] && { [ "$result" = "success" ] || [ -z "$result" ]; }; then
+   109	    record "OK" "systemd-timer" "$timer" "$exp" "$ticket" "enabled; ${svc} Result=${result:-n/a}; ${last:-no-list-timers-row}"
+   110	  else
+   111	    record "RED" "systemd-timer" "$timer" "$exp" "$ticket" "is-enabled=$enabled; ${svc} Result=${result:-n/a}; ${last:-no-list-timers-row}"
+   112	  fi
+   113	}
+   114	
+   115	check_container() {  # name(substr[@probeurl]) expected ticket
+   116	  local spec="$1" exp="$2" ticket="$3"
+   117	  local substr="${spec%@*}" probe=""
+   118	  [ "$spec" != "$substr" ] && probe="${spec#*@}"
+   119	  have docker || { record "WARN" "container" "$spec" "$exp" "$ticket" "docker absent"; return; }
+   120	  local line; line="$(docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | grep -i -- "$substr" | head -1)"
+   250	    "red": int(red),
+   251	    "warn": int(warn),
+   252	    "fatal_red": int(fatal),
+   253	    "rows": rows,
+   254	}
+   255	with open(log, "a", encoding="utf-8") as fh:
+   256	    fh.write(json.dumps(record, sort_keys=True) + "\n")
+   257	'
+   258	}
+   259	
+   260	# ── built-in expected-live manifest (AUDIT-23 §3 rows that should be live) ────
+   261	# Override by passing a manifest path as $1. Edit per host (the bridge units
+   262	# live on the sora-bridge host, not the prod host).
+   263	builtin_manifest() {
+   264	  cat <<'EOF'
+   265	# kind            name                                                            expected  ticket    note
+   266	systemd-timer     release-milestone-checker.timer                                 yes       OP-762    D1 milestone gate — was unenabled until 2026-05-12
+   267	systemd-timer     auto-promote-develop.timer                                      n-a       OP-877    RETIRED by release-train (ADR-0040 / RT-01) — develop->main promote removed
+   268	systemd-unit      auto-promote-main.service                                       n-a       OP-766    RETIRED by release-train (ADR-0040 / RT-01) — main being retired
+   269	env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service             n-a       OP-964    auto-promote-develop retired (RT-01) — env-var no longer expected
+   270	systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    REAL gap: control-plane stranded on main@rc1; re-point off main deferred to cutover
+   271	container         staging@http://localhost:8010/healthz                           yes       OP-927    AUDIT-19 staging stood up 2026-05-22 (project omnisight-staging, repo compose)
+   272	systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
+   273	systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
+   274	alembic-head      auto                                                            n-a       OP-964    informational — reads PROD PG; /readyz authoritatively gates prod image-vs-DB drift (prod runs a release tag, behind develop by design)
+   275	EOF
+   276	}
+   277	
+   278	# ── main ──────────────────────────────────────────────────────────────────────
+   279	main() {
+   280	  local manifest_src
+   281	  if [ $# -ge 1 ]; then
+   282	    [ -r "$1" ] || err "manifest '$1' not readable"
+   283	    manifest_src="$(cat "$1")"
+   284	  else
+   285	    manifest_src="$(builtin_manifest)"
+
+exec
+/bin/bash -lc "nl -ba /home/user/sora-bridge/backend/agents/pipeline_coordinator.py | sed -n '480,560p;880,990p;1160,1245p;1300,1365p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+   480	    """Execute ADR-0021 §6 actions against JIRA with stable idempotency keys."""
+   481	
+   482	    executed: bool = True
+   483	
+   484	    def __init__(self, config: CoordinatorConfig, *, client: Any | None = None) -> None:
+   485	        self._config = config
+   486	        self._client = client
+   487	
+   488	    def execute(self, action: Action, ctx: DecisionContext) -> dict[str, Any]:
+   489	        if action.kind == ACTION_NOOP:
+   490	            return {
+   491	                "kind": action.kind,
+   492	                "target": action.target,
+   493	                "executed": False,
+   494	                "reason": "noop",
+   495	            }
+   496	        if action.kind not in {
+   497	            ACTION_RELABEL,
+   498	            ACTION_TRANSITION,
+   499	            ACTION_MENTION_OPERATOR,
+   500	            ACTION_MARK_FOR_FOLLOWUP,
+   501	            ACTION_ESCALATE,
+   502	            ACTION_FILE_TICKET,
+   503	        }:
+   504	            return {
+   505	                "kind": getattr(action, "kind", "unknown"),
+   506	                "target": getattr(action, "target", ""),
+   507	                "executed": False,
+   508	                "reason": "unsupported",
+   509	            }
+   510	        if action.dry_run:
+   511	            return {
+   512	                "kind": action.kind,
+   513	                "target": action.target,
+   514	                "executed": False,
+   515	                "reason": "dry_run",
+   516	            }
+   517	        if action.kind == ACTION_RELABEL:
+   518	            return self._execute_relabel(action)
+   519	        if action.kind == ACTION_TRANSITION:
+   520	            return self._execute_transition(action)
+   521	        if action.kind == ACTION_MENTION_OPERATOR:
+   522	            return self._execute_mention(action)
+   523	        if action.kind == ACTION_MARK_FOR_FOLLOWUP:
+   524	            return self._execute_followup(action)
+   525	        if action.kind == ACTION_ESCALATE:
+   526	            return self._execute_escalate(action)
+   527	        if action.kind == ACTION_FILE_TICKET:
+   528	            return self._execute_file_ticket(action)
+   529	        raise AssertionError(f"unhandled action kind: {action.kind}")
+   530	
+   531	    def _jira(self) -> Any:
+   532	        if self._client is None:
+   533	            from backend.agents import jira_dispatch
+   534	
+   535	            self._client = jira_dispatch.make_client(self._config.jira_agent_class)
+   536	        return self._client
+   537	
+   538	    def _pre_mutation_recheck(self, action: Action) -> dict[str, Any] | None:
+   539	        from backend.agents import jira_dispatch
+   540	
+   541	        try:
+   542	            labels = set(jira_dispatch.fetch_ticket_labels(self._jira(), action.target))
+   543	        except Exception as exc:  # noqa: BLE001
+   544	            logger.warning(
+   545	                "[pipeline_coordinator] live label recheck failed for %s: %s",
+   546	                action.target,
+   547	                exc,
+   548	            )
+   549	            return {
+   550	                "kind": action.kind,
+   551	                "target": action.target,
+   552	                "executed": False,
+   553	                "reason": "label_read_failed",
+   554	            }
+   555	        if "coord-skip" in labels or "coord-quarantine" in labels:
+   556	            return {
+   557	                "kind": action.kind,
+   558	                "target": action.target,
+   559	                "executed": False,
+   560	                "reason": "coord_skip",
+   880	                    continue
+   881	                payload = record.get("event") if isinstance(record, dict) else record
+   882	                if isinstance(payload, dict):
+   883	                    events.append(
+   884	                        {
+   885	                            "source": "bridge",
+   886	                            "trigger": f"bridge-event:{payload.get('type', 'unknown')}",
+   887	                            "payload": payload,
+   888	                            "bridge_record_ts": record.get("ts")
+   889	                            if isinstance(record, dict)
+   890	                            else None,
+   891	                        }
+   892	                    )
+   893	            self._offset = fh.tell()
+   894	        return events
+   895	
+   896	
+   897	class JiraEventPoller:
+   898	    """60s JIRA poll for coordinator-triggering ticket states."""
+   899	
+   900	    def __init__(
+   901	        self,
+   902	        *,
+   903	        agent_class: str,
+   904	        clock: Clock = _utc_now,
+   905	        interval_seconds: float = DEFAULT_JIRA_POLL_INTERVAL_SECONDS,
+   906	        client_factory: Callable[[str], Any] | None = None,
+   907	        search: Callable[[Any, str], list[dict[str, Any]]] | None = None,
+   908	    ) -> None:
+   909	        self._agent_class = agent_class
+   910	        self._clock = clock
+   911	        self._interval = timedelta(seconds=interval_seconds)
+   912	        self._client_factory = client_factory
+   913	        self._search = search
+   914	        self._client: Any | None = None
+   915	        self._last_poll: datetime | None = None
+   916	
+   917	    def due(self) -> bool:
+   918	        return (
+   919	            self._last_poll is None
+   920	            or self._clock() - self._last_poll >= self._interval
+   921	        )
+   922	
+   923	    def poll(self) -> list[dict[str, Any]]:
+   924	        if not self.due():
+   925	            return []
+   926	        self._last_poll = self._clock()
+   927	        try:
+   928	            client = self._client or self._make_client()
+   929	            self._client = client
+   930	            issues = self._search_issues(client, coordinator_jql(client.project_key))
+   931	        except Exception as exc:  # noqa: BLE001 — source failure is non-fatal
+   932	            logger.warning("[pipeline_coordinator] jira poll failed: %s", exc)
+   933	            return []
+   934	        events: list[dict[str, Any]] = []
+   935	        for issue in issues:
+   936	            key = str(issue.get("key") or "")
+   937	            if not key:
+   938	                continue
+   939	            events.append(
+   940	                {
+   941	                    "source": "jira",
+   942	                    "trigger": "jira-poll",
+   943	                    "ticket_key": key,
+   944	                    "payload": issue,
+   945	                }
+   946	            )
+   947	        return events
+   948	
+   949	    def _make_client(self) -> Any:
+   950	        if self._client_factory is not None:
+   951	            return self._client_factory(self._agent_class)
+   952	        from backend.agents import jira_dispatch
+   953	
+   954	        return jira_dispatch.make_client(self._agent_class)
+   955	
+   956	    def _search_issues(self, client: Any, jql: str) -> list[dict[str, Any]]:
+   957	        if self._search is not None:
+   958	            return self._search(client, jql)
+   959	        from backend.agents import jira_dispatch
+   960	
+   961	        resp = jira_dispatch._request(
+   962	            client,
+   963	            "POST",
+   964	            "/search/jql",
+   965	            {
+   966	                "jql": jql,
+   967	                "fields": ["summary", "labels", "status", "assignee", "updated"],
+   968	                "maxResults": 100,
+   969	            },
+   970	        )
+   971	        return list(resp.get("issues", []))
+   972	
+   973	
+   974	def coordinator_jql(project_key: str) -> str:
+   975	    """ADR-0021 §4 JQL for the 60s coordinator poll."""
+   976	
+   977	    return (
+   978	        f'project = "{project_key}" '
+   979	        'AND (labels is EMPTY OR labels not in ("coord-skip")) '
+   980	        "AND ("
+   981	        'labels = "needs-coordinator" '
+   982	        'OR (status in ("Done", "Closed", "Won\'t Do", "却下") '
+   983	        "AND statusCategoryChangedDate >= -1d) "
+   984	        'OR (status = "進行中" AND assignee is EMPTY)'
+   985	        ") "
+   986	        "ORDER BY updated ASC"
+   987	    )
+   988	
+   989	
+   990	
+  1160	    # ── Startup-1 ──
+  1161	    def audit_infra(self) -> InfraAuditResult:
+  1162	        return run_deployment_audit(
+  1163	            repo_root=self._repo_root, timeout_seconds=self._cli_timeout
+  1164	        )
+  1165	
+  1166	    def start_unit(self, unit: str) -> bool:
+  1167	        try:
+  1168	            proc = subprocess.run(
+  1169	                ["systemctl", "--user", "start", unit],
+  1170	                capture_output=True,
+  1171	                text=True,
+  1172	                timeout=self._cli_timeout,
+  1173	            )
+  1174	        except (OSError, subprocess.SubprocessError) as exc:
+  1175	            logger.warning("[pipeline_coordinator] systemctl start %s failed: %s", unit, exc)
+  1176	            return False
+  1177	        if proc.returncode != 0:
+  1178	            logger.warning(
+  1179	                "[pipeline_coordinator] systemctl start %s rc=%d: %s",
+  1180	                unit, proc.returncode, proc.stderr.strip(),
+  1181	            )
+  1182	        return proc.returncode == 0
+  1183	
+  1184	    # ── Startup-2 ──
+  1185	    def interrupted_tickets(self) -> list[InterruptedTicket]:
+  1186	        client = self._jira()
+  1187	        if client is None:
+  1188	            return []
+  1189	        try:
+  1190	            from backend.agents import jira_dispatch
+  1191	
+  1192	            jql = (
+  1193	                f'project = "{client.project_key}" '
+  1194	                'AND status in ("In Progress", "進行中") '
+  1195	                "ORDER BY updated ASC"
+  1196	            )
+  1197	            resp = jira_dispatch._request(
+  1198	                client, "POST", "/search/jql",
+  1199	                {"jql": jql, "fields": ["status", "updated"], "maxResults": 100},
+  1200	            )
+  1201	        except Exception as exc:  # noqa: BLE001
+  1202	            logger.warning("[pipeline_coordinator] interrupted-ticket query failed: %s", exc)
+  1203	            return []
+  1204	        from backend.agents.pipeline_coordinator_rules import (
+  1205	            DEFAULT_CLI_TIMEOUT_SECONDS,
+  1206	            STALE_MULTIPLIER,
+  1207	        )
+  1208	
+  1209	        stale_after = DEFAULT_CLI_TIMEOUT_SECONDS * STALE_MULTIPLIER
+  1210	        now = datetime.now(timezone.utc)
+  1211	        out: list[InterruptedTicket] = []
+  1212	        for issue in resp.get("issues", []):
+  1213	            fields = issue.get("fields") or {}
+  1214	            status = str((fields.get("status") or {}).get("name", ""))
+  1215	            # ``updated`` is a coarse last-activity proxy for staleness (the
+  1216	            # exact 進行中-entry time needs the changelog; updated is a safe,
+  1217	            # cheaper lower bound — if it's old, the ticket is certainly stale).
+  1218	            stale = False
+  1219	            updated_raw = fields.get("updated")
+  1220	            if isinstance(updated_raw, str):
+  1221	                try:
+  1222	                    updated = datetime.fromisoformat(updated_raw.replace("Z", "+00:00"))
+  1223	                    stale = (now - updated).total_seconds() > stale_after
+  1224	                except ValueError:
+  1225	                    pass
+  1226	            out.append(
+  1227	                InterruptedTicket(key=issue.get("key", "?"), status=status, stale=stale)
+  1228	            )
+  1229	        return out
+  1230	
+  1231	    def has_live_runner(self, key: str) -> bool:
+  1232	        return _ticket_has_live_runner(key, repo_root=self._repo_root)
+  1233	
+  1234	    def gerrit_change_mergeable(self, key: str) -> bool:
+  1235	        # Conservative: only a *positively confirmed* mergeable open change
+  1236	        # routes a ticket to Under Review (§3.3 (b)). When the Gerrit query
+  1237	        # is unavailable we return False so the ticket falls through to the
+  1238	        # resume / revert / operator branches rather than a wrong transition.
+  1239	        try:
+  1240	            return _gerrit_open_change_mergeable(key, self._agent_class)
+  1241	        except Exception as exc:  # noqa: BLE001
+  1242	            logger.warning("[pipeline_coordinator] gerrit mergeable check failed for %s: %s", key, exc)
+  1243	            return False
+  1244	
+  1245	    def branch_has_commits(self, key: str) -> bool:
+  1300	    def clear_assignee(self, key: str) -> None:
+  1301	        client = self._jira()
+  1302	        if client is None:
+  1303	            return
+  1304	        try:
+  1305	            from backend.agents import jira_dispatch
+  1306	
+  1307	            jira_dispatch.clear_assignee(client, key)
+  1308	        except Exception as exc:  # noqa: BLE001
+  1309	            logger.warning("[pipeline_coordinator] clear_assignee(%s) failed: %s", key, exc)
+  1310	
+  1311	    # ── shared ──
+  1312	    def mention_operator(self, key: str, message: str, *, urgency: str = "high") -> None:
+  1313	        client = self._jira()
+  1314	        if client is None:
+  1315	            logger.error("[pipeline_coordinator] OPERATOR-ALERT (JIRA down) %s: %s", key, message)
+  1316	            return
+  1317	        try:
+  1318	            from backend.agents import jira_dispatch
+  1319	
+  1320	            jira_dispatch.add_comment(client, key, f"@nanakusa-sora {message}")
+  1321	            if urgency == "high":
+  1322	                jira_dispatch.add_label(client, key, "needs-operator-action")
+  1323	        except Exception as exc:  # noqa: BLE001
+  1324	            logger.warning("[pipeline_coordinator] mention_operator(%s) failed: %s", key, exc)
+  1325	
+  1326	    def _add_label(self, key: str, label: str) -> None:
+  1327	        client = self._jira()
+  1328	        if client is None:
+  1329	            return
+  1330	        try:
+  1331	            from backend.agents import jira_dispatch
+  1332	
+  1333	            jira_dispatch.add_label(client, key, label)
+  1334	        except Exception as exc:  # noqa: BLE001
+  1335	            logger.warning("[pipeline_coordinator] add_label(%s, %s) failed: %s", key, label, exc)
+  1336	
+  1337	
+  1338	class ShadowColdStartGateway:
+  1339	    """Observe-only :class:`ColdStartGateway` for the 7-day shadow canary (OP-1555).
+  1340	
+  1341	    Wraps a real gateway and forwards every *read* (``audit_infra`` /
+  1342	    ``interrupted_tickets`` / ``stale_sweep_plan`` + the per-ticket probes) so
+  1343	    the 4-phase recovery still sees the true world — observation is the whole
+  1344	    point of shadow mode — but turns every *mutator* into a record-only no-op:
+  1345	    the would-be ``reset_to_todo`` / ``mark_resumable`` /
+  1346	    ``transition_under_review`` / ``remove_label`` / ``clear_assignee`` /
+  1347	    ``start_unit`` / ``mention_operator`` is logged (and lands in the decision
+  1348	    log via the orchestrator's per-phase ``startup_phase`` records) without
+  1349	    ever touching live JIRA / git / systemctl.
+  1350	
+  1351	    This is the cold-start sibling of :class:`ShadowActionExecutor` and of the
+  1352	    ``sprint_replan(shadow=not acting)`` wiring: the single ``acting`` switch in
+  1353	    :func:`build_default_coordinator` flips engine + sprint-replan + cold-start
+  1354	    together. Before OP-1555, ``build_default_coordinator`` wired the live
+  1355	    gateway unconditionally, so a coordinator deployed "in shadow mode"
+  1356	    (``acting=False``) still mutated live JIRA on every boot — the gap this
+  1357	    closes (sibling of OP-1552).
+  1358	    """
+  1359	
+  1360	    #: Marks this gateway observe-only (parallels ``ShadowActionExecutor.executed``).
+  1361	    acting: bool = False
+  1362	
+  1363	    def __init__(self, delegate: ColdStartGateway) -> None:
+  1364	        self._delegate = delegate
+  1365	
+
+codex
+The first pass confirms the design is pointing at the right shipped file, but the line numbers in the design are stale relative to the current file layout. I’m narrowing on the actual symbols and all consumers now, so the final cites are exact.
+exec
+/bin/bash -lc "rg -n \"record \\\".*\\\" \\\"systemd-|systemd-unit|systemd-timer|expected\" scripts/deployment-audit.sh" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+5:# expected-live manifest it applies the AUDIT-23 §4 verification methodology
+6:# and prints a green/red table; exits non-zero if any row marked `expected=yes`
+16:#   scripts/deployment-audit.sh                 # built-in expected-live list
+22:#   <kind>  <name>  <expected>  <ticket>  [note]
+25:#     systemd-unit     name = unit (e.g. auto-promote-main.service)
+26:#     systemd-timer    name = timer (e.g. release-milestone-checker.timer); also
+30:#     alembic-head     name = expected-revision   or   "auto" (compare vs `alembic heads`)
+32:#   expected ∈ { yes, gated, n-a }
+37:# Exit: 0 = every `expected=yes` row green · 1 = ≥1 red · 2 = bad usage / no host.
+55:FAIL=0          # number of red rows with expected=yes
+56:ROWS=()         # "status|kind|name|expected|ticket|detail"
+57:record() {      # record <STATUS> <kind> <name> <expected> <ticket> <detail>
+76:check_systemd_unit() {  # name expected ticket
+78:  have systemctl || { record "WARN" "systemd-unit" "$name" "$exp" "$ticket" "systemctl absent"; return; }
+82:    record "RED" "systemd-unit" "$name" "$exp" "$ticket" "unit not installed (no $name in the user/systemd manager) — copy from deploy/systemd/ + daemon-reload + enable --now"
+88:    record "OK" "systemd-unit" "$name" "$exp" "$ticket" "active+enabled"
+90:    record "RED" "systemd-unit" "$name" "$exp" "$ticket" "is-active=$active is-enabled=$enabled"
+94:check_systemd_timer() {  # name expected ticket
+96:  have systemctl || { record "WARN" "systemd-timer" "$timer" "$exp" "$ticket" "systemctl absent"; return; }
+100:    record "RED" "systemd-timer" "$timer" "$exp" "$ticket" "timer not installed — copy deploy/systemd/${timer%.timer}.{service,timer} to ~/.config/systemd/user/ + daemon-reload + enable --now"
+109:    record "OK" "systemd-timer" "$timer" "$exp" "$ticket" "enabled; ${svc} Result=${result:-n/a}; ${last:-no-list-timers-row}"
+111:    record "RED" "systemd-timer" "$timer" "$exp" "$ticket" "is-enabled=$enabled; ${svc} Result=${result:-n/a}; ${last:-no-list-timers-row}"
+115:check_container() {  # name(substr[@probeurl]) expected ticket
+139:check_env_var() {  # name(VAR@unit-or-pgrep) expected ticket
+191:check_alembic_head() {  # name(expected-rev|"auto") expected ticket
+211:    else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "current=$cur != expected=$want"; fi
+234:    status, kind, name, expected, ticket, detail = line.rstrip("\n").split("|", 5)
+239:        "expected": expected,
+260:# ── built-in expected-live manifest (AUDIT-23 §3 rows that should be live) ────
+265:# kind            name                                                            expected  ticket    note
+266:systemd-timer     release-milestone-checker.timer                                 yes       OP-762    D1 milestone gate — was unenabled until 2026-05-12
+267:systemd-timer     auto-promote-develop.timer                                      n-a       OP-877    RETIRED by release-train (ADR-0040 / RT-01) — develop->main promote removed
+268:systemd-unit      auto-promote-main.service                                       n-a       OP-766    RETIRED by release-train (ADR-0040 / RT-01) — main being retired
+269:env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service             n-a       OP-964    auto-promote-develop retired (RT-01) — env-var no longer expected
+270:systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    REAL gap: control-plane stranded on main@rc1; re-point off main deferred to cutover
+272:systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
+273:systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
+297:    read -r kind name expected ticket note <<<"$raw"
+299:    expected="${expected:-yes}"; ticket="${ticket:--}"
+301:      systemd-unit)  check_systemd_unit  "$name" "$expected" "$ticket" ;;
+302:      systemd-timer) check_systemd_timer "$name" "$expected" "$ticket" ;;
+303:      container)     check_container     "$name" "$expected" "$ticket" ;;
+304:      env-var)       check_env_var       "$name" "$expected" "$ticket" ;;
+305:      alembic-head)  check_alembic_head  "$name" "$expected" "$ticket" ;;
+306:      *)             record "WARN" "$kind" "$name" "$expected" "$ticket" "unknown kind" ;;
+330:  echo "summary: ${ok} green · ${red} red · ${warn} warn · ${FAIL} red-with-expected=yes (fatal)"
+333:    echo "RESULT: FAIL — $FAIL expected-live artefact(s) not deployed. See DETAIL column; remediation in docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md §5."
+337:  echo "RESULT: PASS — all expected-live artefacts confirmed (gated/warn rows are informational)."
+
+exec
+/bin/bash -lc "rg -n \"class InfraUnit|class InfraAuditResult|def run_deployment_audit|def _startup_1_infra|cold_start_max_infra|def start_unit|def _default_cold_start_gateway|InfraUnit\\(|\\.down\\b|audit\\.down\" /home/user/sora-bridge/backend/agents/pipeline_coordinator.py" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+154:    cold_start_max_infra: int = DEFAULT_COLD_START_MAX_INFRA
+198:            cold_start_max_infra=_env_int_from_mapping(
+1027:class InfraUnit:
+1035:class InfraAuditResult:
+1099:    def start_unit(self, unit: str) -> bool: ...
+1166:    def start_unit(self, unit: str) -> bool:
+1386:    def start_unit(self, unit: str) -> bool:
+1429:def run_deployment_audit(
+1474:                    InfraUnit(name=row.get("name", "?"), live=row.get("status") == "OK")
+1657:def _default_cold_start_gateway(
+2074:    def _startup_1_infra(self, report: ColdStartReport) -> None:
+2078:        starts_remaining = self._config.cold_start_max_infra
+2079:        for unit in audit.down:
+2098:            report.still_down_units = list(recheck.down)
+
+exec
+/bin/bash -lc "nl -ba scripts/deployment-audit.sh | sed -n '120,260p;285,345p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+   120	  local line; line="$(docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null | grep -i -- "$substr" | head -1)"
+   121	  if [ -z "$line" ]; then
+   122	    record "RED" "container" "$spec" "$exp" "$ticket" "no running container matching '$substr' (never \`docker compose up\`?)"
+   123	    return
+   124	  fi
+   125	  local status="${line#*$'\t'}"
+   126	  if [ -n "$probe" ] && have curl; then
+   127	    if curl -fsS -m 5 "$probe" >/dev/null 2>&1; then
+   128	      record "OK" "container" "$spec" "$exp" "$ticket" "$line; probe $probe → 2xx"
+   129	    else
+   130	      record "RED" "container" "$spec" "$exp" "$ticket" "$line; probe $probe FAILED"
+   131	    fi
+   132	  elif echo "$status" | grep -qi 'unhealthy'; then
+   133	    record "RED" "container" "$spec" "$exp" "$ticket" "$line (unhealthy)"
+   134	  else
+   135	    record "OK" "container" "$spec" "$exp" "$ticket" "$line"
+   136	  fi
+   137	}
+   138	
+   139	check_env_var() {  # name(VAR@unit-or-pgrep) expected ticket
+   140	  local spec="$1" exp="$2" ticket="$3"
+   141	  local var="${spec%@*}" src="${spec#*@}"
+   142	  [ "$spec" != "$var" ] || { record "WARN" "env-var" "$spec" "$exp" "$ticket" "spec must be VAR@unit-or-pgrep"; return; }
+   143	  local pid=""
+   144	  if [[ "$src" == *.service ]] && have systemctl; then
+   145	    local env_line env_files file_path file_val
+   146	    env_line="$("${SYSTEMCTL[@]}" show "$src" -p Environment --value 2>/dev/null || true)"
+   147	    file_val="$(printf '%s\n' "$env_line" | tr ' ' '\n' | grep -E "^${var}=" | head -1 | cut -d= -f2- || true)"
+   148	    if [ -n "$file_val" ]; then
+   149	      if looks_prod_value "$file_val"; then
+   150	        record "OK" "env-var" "$spec" "$exp" "$ticket" "$var configured in systemd Environment"
+   151	      else
+   152	        record "RED" "env-var" "$spec" "$exp" "$ticket" "$var configured in systemd Environment but looks like a dev/default value"
+   153	      fi
+   154	      return
+   155	    fi
+   156	    env_files="$("${SYSTEMCTL[@]}" show "$src" -p EnvironmentFiles --value 2>/dev/null || true)"
+   157	    while IFS= read -r file_line; do
+   158	      file_path="${file_line%% *}"
+   159	      [ -r "$file_path" ] || continue
+   160	      file_val="$(grep -E "^${var}=" "$file_path" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+   161	      [ -n "$file_val" ] || continue
+   162	      if looks_prod_value "$file_val"; then
+   163	        record "OK" "env-var" "$spec" "$exp" "$ticket" "$var configured via ${file_path}"
+   164	      else
+   165	        record "RED" "env-var" "$spec" "$exp" "$ticket" "$var configured via ${file_path} but looks like a dev/default value"
+   166	      fi
+   167	      return
+   168	    done <<<"$env_files"
+   169	    pid="$("${SYSTEMCTL[@]}" show "$src" -p MainPID --value 2>/dev/null || true)"
+   170	    [ "$pid" = "0" ] && pid=""
+   171	  fi
+   172	  if [ -z "$pid" ] && have pgrep; then pid="$(pgrep -f -- "$src" 2>/dev/null | head -1 || true)"; fi
+   173	  if [ -z "$pid" ]; then
+   174	    record "RED" "env-var" "$spec" "$exp" "$ticket" "no live PID for '$src' — cannot inspect /proc/<pid>/environ"
+   175	    return
+   176	  fi
+   177	  if [ ! -r "/proc/$pid/environ" ]; then
+   178	    record "WARN" "env-var" "$spec" "$exp" "$ticket" "PID $pid found but /proc/$pid/environ not readable (run as the owning user / root)"
+   179	    return
+   180	  fi
+   181	  local val; val="$(tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -E "^${var}=" | head -1 | cut -d= -f2-)"
+   182	  if [ -z "$val" ]; then
+   183	    record "RED" "env-var" "$spec" "$exp" "$ticket" "$var not set in PID $pid env (silent fallback / default in effect)"
+   184	  elif ! looks_prod_value "$val"; then
+   185	    record "RED" "env-var" "$spec" "$exp" "$ticket" "$var=$val (PID $pid) — looks like a dev/default value, not the prod target"
+   186	  else
+   187	    record "OK" "env-var" "$spec" "$exp" "$ticket" "$var set in PID $pid (=${val%%:*}...)"
+   188	  fi
+   189	}
+   190	
+   191	check_alembic_head() {  # name(expected-rev|"auto") expected ticket
+   192	  local want="$1" exp="$2" ticket="$3"
+   193	  local alembic_cmd="alembic"
+   194	  [ -x "$REPO/backend/.venv/bin/alembic" ] && alembic_cmd="$REPO/backend/.venv/bin/alembic"
+   195	  [ "$alembic_cmd" = "alembic" ] && [ -x "$HOME/.local/bin/alembic" ] && alembic_cmd="$HOME/.local/bin/alembic"
+   196	  have "$alembic_cmd" || { record "WARN" "alembic-head" "$want" "$exp" "$ticket" "alembic absent — run from the backend venv on prod"; return; }
+   197	  [ -r "$REPO/backend/alembic.ini" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "backend/alembic.ini missing"; return; }
+   198	  # Read PROD's live PG head first (the audit shell has no prod DSN, so a bare
+   199	  # `alembic current` reads the stale local sqlite and falsely reports drift).
+   200	  # Fall back to local alembic only if the prod PG container is unreachable.
+   201	  local pg_ctr="${OMNISIGHT_PROD_PG_CONTAINER:-omnisight-pg-primary}"
+   202	  local cur; cur="$(docker exec "$pg_ctr" psql -U "${OMNISIGHT_PROD_PG_USER:-omnisight}" -d "${OMNISIGHT_PROD_PG_DB:-omnisight}" -tA -c 'SELECT version_num FROM alembic_version' 2>/dev/null | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
+   203	  [ -n "$cur" ] || cur="$( (cd "$REPO/backend" && "$alembic_cmd" current 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
+   204	  [ -n "$cur" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "prod PG ($pg_ctr) unreachable AND local alembic empty"; return; }
+   205	  if [ "$want" = "auto" ]; then
+   206	    local head; head="$( (cd "$REPO/backend" && "$alembic_cmd" heads 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
+   207	    if [ "$cur" = "$head" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "current=$cur == repo head"
+   208	    else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "current=$cur != repo head=$head — un-applied migration; run \`alembic upgrade head\` on prod"; fi
+   209	  else
+   210	    if [ "$cur" = "$want" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "current=$cur"
+   211	    else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "current=$cur != expected=$want"; fi
+   212	  fi
+   213	}
+   214	
+   215	append_jsonl() {
+   216	  local result="$1" ok="$2" red="$3" warn="$4" log="${DEPLOYMENT_AUDIT_JSONL_LOG:-}"
+   217	  [ -n "$log" ] || return 0
+   218	  mkdir -p "$(dirname "$log")" || return 0
+   219	  {
+   220	    printf '%s|%s|%s|%s|%s\n' "$result" "$ok" "$red" "$warn" "$FAIL"
+   221	    printf '%s\n' "${ROWS[@]}"
+   222	  } | python3 -c '
+   223	import json
+   224	import os
+   225	import socket
+   226	import sys
+   227	from datetime import datetime, timezone
+   228	
+   229	log = os.environ["DEPLOYMENT_AUDIT_JSONL_LOG"]
+   230	summary = sys.stdin.readline().rstrip("\n").split("|")
+   231	result, ok, red, warn, fatal = summary
+   232	rows = []
+   233	for line in sys.stdin:
+   234	    status, kind, name, expected, ticket, detail = line.rstrip("\n").split("|", 5)
+   235	    rows.append({
+   236	        "status": status,
+   237	        "kind": kind,
+   238	        "name": name,
+   239	        "expected": expected,
+   240	        "ticket": ticket,
+   241	        "detail": detail,
+   242	    })
+   243	record = {
+   244	    "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+   245	    "event": "deployment_audit",
+   246	    "source": "scripts/deployment-audit.sh",
+   247	    "host": socket.gethostname(),
+   248	    "result": result,
+   249	    "green": int(ok),
+   250	    "red": int(red),
+   251	    "warn": int(warn),
+   252	    "fatal_red": int(fatal),
+   253	    "rows": rows,
+   254	}
+   255	with open(log, "a", encoding="utf-8") as fh:
+   256	    fh.write(json.dumps(record, sort_keys=True) + "\n")
+   257	'
+   258	}
+   259	
+   260	# ── built-in expected-live manifest (AUDIT-23 §3 rows that should be live) ────
+   285	    manifest_src="$(builtin_manifest)"
+   286	  fi
+   287	
+   288	  echo "deployment-audit (OP-976 / AUDIT-23) — host=$(hostname) user=$USER bus=$([ "$USE_USER_BUS" = 1 ] && echo --user || echo system) date=$(date -u +%FT%TZ)"
+   289	  echo
+   290	
+   291	  check_linger
+   292	
+   293	  while IFS= read -r raw; do
+   294	    raw="${raw%%$'\r'}"
+   295	    case "$raw" in ''|\#*) continue;; esac
+   296	    # split on runs of whitespace into up to 5 fields (note may contain spaces)
+   297	    read -r kind name expected ticket note <<<"$raw"
+   298	    [ -n "${kind:-}" ] && [ -n "${name:-}" ] || { echo "  (skipping malformed manifest line: $raw)" >&2; continue; }
+   299	    expected="${expected:-yes}"; ticket="${ticket:--}"
+   300	    case "$kind" in
+   301	      systemd-unit)  check_systemd_unit  "$name" "$expected" "$ticket" ;;
+   302	      systemd-timer) check_systemd_timer "$name" "$expected" "$ticket" ;;
+   303	      container)     check_container     "$name" "$expected" "$ticket" ;;
+   304	      env-var)       check_env_var       "$name" "$expected" "$ticket" ;;
+   305	      alembic-head)  check_alembic_head  "$name" "$expected" "$ticket" ;;
+   306	      *)             record "WARN" "$kind" "$name" "$expected" "$ticket" "unknown kind" ;;
+   307	    esac
+   308	  done <<<"$manifest_src"
+   309	
+   310	  # ── report ──────────────────────────────────────────────────────────────────
+   311	  echo
+   312	  printf '%-5s  %-14s  %-58s  %-8s  %-9s  %s\n' STATUS KIND NAME EXPECTED TICKET DETAIL
+   313	  printf '%-5s  %-14s  %-58s  %-8s  %-9s  %s\n' '-----' '--------------' '----------------------------------------------------------' '--------' '---------' '------'
+   314	  local r status kind name exp ticket detail mark
+   315	  for r in "${ROWS[@]}"; do
+   316	    IFS='|' read -r status kind name exp ticket detail <<<"$r"
+   317	    case "$status" in
+   318	      OK)   mark='✓ OK  ' ;;
+   319	      RED)  mark='✗ RED ' ;;
+   320	      WARN) mark='? WARN' ;;
+   321	      *)    mark="$status" ;;
+   322	    esac
+   323	    printf '%-5s  %-14s  %-58s  %-8s  %-9s  %s\n' "$mark" "$kind" "$name" "$exp" "$ticket" "$detail"
+   324	  done
+   325	  echo
+   326	  local ok red warn
+   327	  ok=$(  printf '%s\n' "${ROWS[@]}" | grep -c '^OK|'   || true)
+   328	  red=$( printf '%s\n' "${ROWS[@]}" | grep -c '^RED|'  || true)
+   329	  warn=$(printf '%s\n' "${ROWS[@]}" | grep -c '^WARN|' || true)
+   330	  echo "summary: ${ok} green · ${red} red · ${warn} warn · ${FAIL} red-with-expected=yes (fatal)"
+   331	  if [ "$FAIL" -gt 0 ]; then
+   332	    append_jsonl "FAIL" "$ok" "$red" "$warn"
+   333	    echo "RESULT: FAIL — $FAIL expected-live artefact(s) not deployed. See DETAIL column; remediation in docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md §5."
+   334	    exit 1
+   335	  fi
+   336	  append_jsonl "PASS" "$ok" "$red" "$warn"
+   337	  echo "RESULT: PASS — all expected-live artefacts confirmed (gated/warn rows are informational)."
+   338	  exit 0
+   339	}
+   340	
+   341	main "$@"
+
+exec
+/bin/bash -lc "nl -ba /home/user/sora-bridge/backend/agents/pipeline_coordinator.py | sed -n '130,210p;1018,1055p;1088,1110p;1368,1395p;1420,1482p;1648,1668p;2068,2108p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+   130	_FILE_MODE = 0o600
+   131	
+   132	
+   133	@dataclass(frozen=True)
+   134	class CoordinatorConfig:
+   135	    """Filesystem paths + loop cadence for the coordinator daemon.
+   136	
+   137	    Paths default under ``~/.config/omnisight/coordinator`` (survives a
+   138	    WSL ``/run`` wipe). ``from_env`` honours the same decision-log env var
+   139	    the bridge uses so both agents share one audit trail.
+   140	    """
+   141	
+   142	    config_dir: Path
+   143	    heartbeat_path: Path
+   144	    decision_log_dir: Path
+   145	    capacity_path: Path | None = None
+   146	    bridge_events_path: Path | None = None
+   147	    jira_agent_class: str = "subscription-claude"
+   148	    heartbeat_interval_seconds: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS
+   149	    tick_interval_seconds: float = DEFAULT_TICK_INTERVAL_SECONDS
+   150	    jira_poll_interval_seconds: float = DEFAULT_JIRA_POLL_INTERVAL_SECONDS
+   151	    sweep_interval_seconds: float = DEFAULT_SWEEP_INTERVAL_SECONDS
+   152	    event_dedupe_seconds: float = DEFAULT_EVENT_DEDUPE_SECONDS
+   153	    acting: bool = False
+   154	    cold_start_max_infra: int = DEFAULT_COLD_START_MAX_INFRA
+   155	    cold_start_max_reconcile: int = DEFAULT_COLD_START_MAX_RECONCILE
+   156	    cold_start_max_sweep: int = DEFAULT_COLD_START_MAX_SWEEP
+   157	
+   158	    def __post_init__(self) -> None:
+   159	        if self.capacity_path is None:
+   160	            object.__setattr__(
+   161	                self,
+   162	                "capacity_path",
+   163	                capacity_path_from_env(self.config_dir),
+   164	            )
+   165	        if self.bridge_events_path is None:
+   166	            object.__setattr__(
+   167	                self,
+   168	                "bridge_events_path",
+   169	                self.config_dir / "bridge-events.jsonl",
+   170	            )
+   171	
+   172	    @classmethod
+   173	    def from_env(
+   174	        cls,
+   175	        env: dict[str, str] | None = None,
+   176	        *,
+   177	        config_dir: Path | None = None,
+   178	    ) -> "CoordinatorConfig":
+   179	        env = env if env is not None else dict(os.environ)
+   180	        base = (
+   181	            Path(config_dir)
+   182	            if config_dir is not None
+   183	            else Path(env.get(CONFIG_DIR_ENV, str(DEFAULT_CONFIG_DIR))).expanduser()
+   184	        )
+   185	        decision_log_dir = Path(
+   186	            env.get(DECISION_LOG_DIR_ENV, str(base / "decision-log"))
+   187	        ).expanduser()
+   188	        return cls(
+   189	            config_dir=base,
+   190	            heartbeat_path=base / "heartbeat",
+   191	            decision_log_dir=decision_log_dir,
+   192	            capacity_path=capacity_path_from_env(base, env),
+   193	            bridge_events_path=Path(
+   194	                env.get(BRIDGE_EVENTS_FILE_ENV, str(base / "bridge-events.jsonl"))
+   195	            ).expanduser(),
+   196	            jira_agent_class=env.get(JIRA_AGENT_CLASS_ENV, "subscription-claude"),
+   197	            acting=_env_truthy(env.get(ACTING_ENV)),
+   198	            cold_start_max_infra=_env_int_from_mapping(
+   199	                env, COLD_START_MAX_INFRA_ENV, DEFAULT_COLD_START_MAX_INFRA
+   200	            ),
+   201	            cold_start_max_reconcile=_env_int_from_mapping(
+   202	                env, COLD_START_MAX_RECONCILE_ENV, DEFAULT_COLD_START_MAX_RECONCILE
+   203	            ),
+   204	            cold_start_max_sweep=_env_int_from_mapping(
+   205	                env, COLD_START_MAX_SWEEP_ENV, DEFAULT_COLD_START_MAX_SWEEP
+   206	            ),
+   207	        )
+   208	
+   209	
+   210	# ── L1 heartbeat (ADR-0021 §9 L1) ─────────────────────────────────────
+  1018	
+  1019	# Label the runner reads to continue from an existing feature branch (§3.3 (a)).
+  1020	RESUME_FROM_FEATURE_LABEL = "runner:resume-from-feature-branch"
+  1021	
+  1022	# L6 replays at most this far back (ADR §9 L6: "last 24h of decision log").
+  1023	L6_REPLAY_WINDOW_HOURS = 24.0
+  1024	
+  1025	
+  1026	@dataclass(frozen=True)
+  1027	class InfraUnit:
+  1028	    """One expected-live unit as reported by the deployment audit (Startup-1)."""
+  1029	
+  1030	    name: str
+  1031	    live: bool
+  1032	
+  1033	
+  1034	@dataclass(frozen=True)
+  1035	class InfraAuditResult:
+  1036	    """Outcome of a Startup-1 deployment audit pass."""
+  1037	
+  1038	    units: tuple[InfraUnit, ...] = ()
+  1039	
+  1040	    @property
+  1041	    def down(self) -> tuple[str, ...]:
+  1042	        return tuple(u.name for u in self.units if not u.live)
+  1043	
+  1044	
+  1045	@dataclass(frozen=True)
+  1046	class InterruptedTicket:
+  1047	    """A ticket left ``進行中`` by an interrupted/crashed runner (Startup-2).
+  1048	
+  1049	    ``stale`` is the gateway's verdict on whether the ticket has had no
+  1050	    activity for > 2× the CLI timeout (ADR §3.3 (c)) — it separates a truly
+  1051	    abandoned ticket (revert) from one a runner may have only just started
+  1052	    on (ambiguous → operator, case (d)).
+  1053	    """
+  1054	
+  1055	    key: str
+  1088	@runtime_checkable
+  1089	class ColdStartGateway(Protocol):
+  1090	    """The infra / JIRA / git seam the 4-phase recovery drives (ADR §3.3).
+  1091	
+  1092	    Every method is best-effort in production: an adapter that cannot reach
+  1093	    its backend returns an empty / conservative answer rather than raising,
+  1094	    so a degraded environment can never wedge the daemon before its loop.
+  1095	    """
+  1096	
+  1097	    # ── Startup-1 (infra) ──
+  1098	    def audit_infra(self) -> InfraAuditResult: ...
+  1099	    def start_unit(self, unit: str) -> bool: ...
+  1100	
+  1101	    # ── Startup-2 (JIRA reconcile) ──
+  1102	    def interrupted_tickets(self) -> list[InterruptedTicket]: ...
+  1103	    def has_live_runner(self, key: str) -> bool: ...
+  1104	    def gerrit_change_mergeable(self, key: str) -> bool: ...
+  1105	    def branch_has_commits(self, key: str) -> bool: ...
+  1106	    def mark_resumable(self, key: str) -> None: ...
+  1107	    def transition_under_review(self, key: str) -> None: ...
+  1108	    def reset_to_todo(self, key: str) -> None: ...
+  1109	
+  1110	    # ── Startup-3 (stale sweep) ──
+  1368	        return self._delegate.audit_infra()
+  1369	
+  1370	    def interrupted_tickets(self) -> list[InterruptedTicket]:
+  1371	        return self._delegate.interrupted_tickets()
+  1372	
+  1373	    def has_live_runner(self, key: str) -> bool:
+  1374	        return self._delegate.has_live_runner(key)
+  1375	
+  1376	    def gerrit_change_mergeable(self, key: str) -> bool:
+  1377	        return self._delegate.gerrit_change_mergeable(key)
+  1378	
+  1379	    def branch_has_commits(self, key: str) -> bool:
+  1380	        return self._delegate.branch_has_commits(key)
+  1381	
+  1382	    def stale_sweep_plan(self) -> StaleSweepPlan:
+  1383	        return self._delegate.stale_sweep_plan()
+  1384	
+  1385	    # ── mutators: record-only (never touch live JIRA / git / systemctl) ──
+  1386	    def start_unit(self, unit: str) -> bool:
+  1387	        # Record the would-be systemctl start and report success so the
+  1388	        # observe-only boot proceeds past Startup-1 to actually observe the
+  1389	        # reconcile + sweep phases, rather than halting on infra it was
+  1390	        # explicitly told not to touch.
+  1391	        self._record_shadow("start_unit", unit)
+  1392	        return True
+  1393	
+  1394	    def mark_resumable(self, key: str) -> None:
+  1395	        self._record_shadow("mark_resumable", key)
+  1420	            target,
+  1421	        )
+  1422	
+  1423	
+  1424	def _repo_root() -> Path:
+  1425	    """Repo root holding ``scripts/`` + git worktree (this file is backend/agents/*)."""
+  1426	    return Path(__file__).resolve().parents[2]
+  1427	
+  1428	
+  1429	def run_deployment_audit(
+  1430	    *, repo_root: Path | None = None, timeout_seconds: float = 60.0
+  1431	) -> InfraAuditResult:
+  1432	    """Run ``scripts/deployment-audit.sh`` (29a) and parse its unit verdicts.
+  1433	
+  1434	    The script's ``DEPLOYMENT_AUDIT_JSONL_LOG`` hook is used to get a
+  1435	    machine-readable row dump (rather than scraping the human table); each
+  1436	    ``systemd-unit`` / ``systemd-timer`` row maps to an :class:`InfraUnit`
+  1437	    (``live = status == "OK"``). The script exits non-zero when an
+  1438	    expected-live row is red — that's expected input here, not an error, so
+  1439	    the return code is ignored and only the JSONL is read.
+  1440	    """
+  1441	    repo_root = Path(repo_root) if repo_root is not None else _repo_root()
+  1442	    script = repo_root / "scripts" / "deployment-audit.sh"
+  1443	    if not script.exists():
+  1444	        logger.warning("[pipeline_coordinator] deployment-audit.sh not found at %s", script)
+  1445	        return InfraAuditResult()
+  1446	    import tempfile
+  1447	
+  1448	    with tempfile.NamedTemporaryFile(
+  1449	        prefix="coord-audit-", suffix=".jsonl", delete=False
+  1450	    ) as tmp:
+  1451	        jsonl_path = Path(tmp.name)
+  1452	    try:
+  1453	        env = dict(os.environ)
+  1454	        env["DEPLOYMENT_AUDIT_JSONL_LOG"] = str(jsonl_path)
+  1455	        try:
+  1456	            subprocess.run(
+  1457	                ["bash", str(script)],
+  1458	                cwd=str(repo_root),
+  1459	                env=env,
+  1460	                capture_output=True,
+  1461	                text=True,
+  1462	                timeout=timeout_seconds,
+  1463	            )
+  1464	        except (OSError, subprocess.SubprocessError) as exc:
+  1465	            logger.warning("[pipeline_coordinator] deployment-audit.sh run failed: %s", exc)
+  1466	            return InfraAuditResult()
+  1467	        record = _last_json_line(jsonl_path)
+  1468	        if not record:
+  1469	            return InfraAuditResult()
+  1470	        units: list[InfraUnit] = []
+  1471	        for row in record.get("rows", []):
+  1472	            if row.get("kind") in ("systemd-unit", "systemd-timer"):
+  1473	                units.append(
+  1474	                    InfraUnit(name=row.get("name", "?"), live=row.get("status") == "OK")
+  1475	                )
+  1476	        return InfraAuditResult(units=tuple(units))
+  1477	    finally:
+  1478	        try:
+  1479	            jsonl_path.unlink()
+  1480	        except OSError:
+  1481	            pass
+  1482	
+  1648	        if dead:
+  1649	            resolved_waiting[key] = tuple(dead)
+  1650	    return StaleSweepPlan(
+  1651	        stale_claims=stale_claims,
+  1652	        orphan_assignees=tuple(orphan_assignees),
+  1653	        resolved_waiting=resolved_waiting,
+  1654	    )
+  1655	
+  1656	
+  1657	def _default_cold_start_gateway(
+  1658	    config: CoordinatorConfig, *, acting: bool = False
+  1659	) -> ColdStartGateway:
+  1660	    """Production gateway wiring (no I/O at construction — lazy + fail-open).
+  1661	
+  1662	    ``acting=False`` (the default — the 29f-14 7-day shadow canary, OP-1555)
+  1663	    wraps the live gateway in :class:`ShadowColdStartGateway` so cold-start
+  1664	    observes the world but performs zero JIRA/git/systemctl mutation;
+  1665	    ``acting=True`` returns the live gateway so the 4-phase recovery mutates as
+  1666	    designed. The same single ``acting`` switch gates the engine action layer
+  1667	    and the sprint re-plan handler (see :func:`build_default_coordinator`).
+  1668	    """
+  2068	                "reconciled": len(report.reconciled),
+  2069	                "swept": len(report.swept),
+  2070	            }
+  2071	        )
+  2072	        return report
+  2073	
+  2074	    def _startup_1_infra(self, report: ColdStartReport) -> None:
+  2075	        """Startup-1: verify infra; start any down unit; halt if still down."""
+  2076	        gw = self._cold_start_gateway
+  2077	        audit = gw.audit_infra()
+  2078	        starts_remaining = self._config.cold_start_max_infra
+  2079	        for unit in audit.down:
+  2080	            if starts_remaining <= 0:
+  2081	                report.still_down_units.append(unit)
+  2082	                self._log_cold_start(
+  2083	                    {"event": STARTUP_PHASE_EVENT, "phase": 1, "unit": unit,
+  2084	                     "action": "start_unit", "ok": False, "reason": "phase_cap"}
+  2085	                )
+  2086	                continue
+  2087	            starts_remaining -= 1
+  2088	            ok = gw.start_unit(unit)
+  2089	            (report.started_units if ok else report.still_down_units).append(unit)
+  2090	            self._log_cold_start(
+  2091	                {"event": STARTUP_PHASE_EVENT, "phase": 1, "unit": unit,
+  2092	                 "action": "start_unit", "ok": ok}
+  2093	            )
+  2094	        # Re-verify after starts: a unit that refused to start (or died again)
+  2095	        # leaves the infra degraded → @-operator + halt (do not enter loop).
+  2096	        if report.still_down_units:
+  2097	            recheck = gw.audit_infra()
+  2098	            report.still_down_units = list(recheck.down)
+  2099	        if report.still_down_units:
+  2100	            report.phase1_halted = True
+  2101	            gw.mention_operator(
+  2102	                "OP",  # infra-level alert is not ticket-scoped
+  2103	                "[cold-start Startup-1] coordinator could not bring up "
+  2104	                f"{report.still_down_units}; halting startup rather than "
+  2105	                "entering the loop with degraded infra (ADR-0021 §3.3).",
+  2106	                urgency="high",
+  2107	            )
+  2108	            self._log_cold_start(
+
+exec
+/bin/bash -lc 'rg -n "run_deployment_audit|InfraAuditResult|InfraUnit|cold_start_max_infra|_startup_1_infra|start_unit" backend/tests /home/user/sora-bridge/backend/tests 2>/dev/null' in /home/user/work/sora/OmniSight-Productizer
+exec
+/bin/bash -lc "rg -n \"audit_infra\\(|startup_1|still_down_units|down_units|InfraAuditResult|InfraUnit|start_unit\\(\" /home/user/sora-bridge/backend/agents /home/user/sora-bridge/backend/tests 2>/dev/null" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1027:class InfraUnit:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1035:class InfraAuditResult:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1038:    units: tuple[InfraUnit, ...] = ()
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1080:    still_down_units: list[str] = field(default_factory=list)
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1098:    def audit_infra(self) -> InfraAuditResult: ...
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1099:    def start_unit(self, unit: str) -> bool: ...
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1161:    def audit_infra(self) -> InfraAuditResult:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1166:    def start_unit(self, unit: str) -> bool:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1367:    def audit_infra(self) -> InfraAuditResult:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1368:        return self._delegate.audit_infra()
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1386:    def start_unit(self, unit: str) -> bool:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1431:) -> InfraAuditResult:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1436:    ``systemd-unit`` / ``systemd-timer`` row maps to an :class:`InfraUnit`
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1445:        return InfraAuditResult()
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1466:            return InfraAuditResult()
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1469:            return InfraAuditResult()
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1470:        units: list[InfraUnit] = []
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1474:                    InfraUnit(name=row.get("name", "?"), live=row.get("status") == "OK")
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1476:        return InfraAuditResult(units=tuple(units))
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2052:        self._startup_1_infra(report)
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2056:                 "still_down": report.still_down_units}
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2074:    def _startup_1_infra(self, report: ColdStartReport) -> None:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2077:        audit = gw.audit_infra()
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2081:                report.still_down_units.append(unit)
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2088:            ok = gw.start_unit(unit)
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2089:            (report.started_units if ok else report.still_down_units).append(unit)
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2096:        if report.still_down_units:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2097:            recheck = gw.audit_infra()
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2098:            report.still_down_units = list(recheck.down)
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2099:        if report.still_down_units:
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2104:                f"{report.still_down_units}; halting startup rather than "
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2110:                 "still_down": report.still_down_units}
+/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2416:                report.still_down_units,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:17:   - _startup_1_infra: start down units / still-down / hard-down halt
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:18:       → test_startup_1_starts_down_units,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:19:         test_startup_1_recheck_clears_transient_down_unit,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:20:         test_startup_1_halts_and_mentions_operator_when_unit_stays_down
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:77:    InfraAuditResult,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:78:    InfraUnit,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:119:    real I/O. ``audits`` is a sequence of :class:`InfraAuditResult` returned
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:128:        audits: list[InfraAuditResult] | None = None,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:136:        self._audits = list(audits) if audits else [InfraAuditResult()]
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:154:    def audit_infra(self) -> InfraAuditResult:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:159:    def start_unit(self, unit: str) -> bool:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:224:    def audit_infra(self) -> InfraAuditResult:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:225:        return InfraAuditResult()
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:227:    def start_unit(self, unit: str) -> bool:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:314:def _units(*specs: tuple[str, bool]) -> InfraAuditResult:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:315:    return InfraAuditResult(units=tuple(InfraUnit(name=n, live=live) for n, live in specs))
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:379:# ── Code AC: _startup_1_infra ─────────────────────────────────────────
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:382:def test_startup_1_starts_down_units(tmp_path: Path) -> None:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:391:    coord._startup_1_infra(report)
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:395:    assert report.still_down_units == []
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:401:def test_startup_1_recheck_clears_transient_down_unit(tmp_path: Path) -> None:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:411:    coord._startup_1_infra(report)
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:415:    assert report.still_down_units == []
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:420:def test_startup_1_halts_and_mentions_operator_when_unit_stays_down(tmp_path: Path) -> None:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:422:    still_down_units, phase1_halted, @-operator. Must NOT raise, and startup()
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:435:    assert report.still_down_units == ["dead.service"]
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:838:    coord._startup_1_infra(report)
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:905:    assert gw.audit_infra() == InfraAuditResult()
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:941:    systemd-timer JSONL rows to InfraUnits (live = status == 'OK'); non-unit
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:970:    assert run_deployment_audit(repo_root=tmp_path) == InfraAuditResult()
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:1094:    assert gw.audit_infra() == fake.audit_infra()  # delegate consulted
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:1103:    assert gw.start_unit("coordinator.service") is True
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_integration.py:28:    InfraAuditResult,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_integration.py:209:    def audit_infra(self) -> InfraAuditResult:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_integration.py:210:        return InfraAuditResult()
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_integration.py:212:    def start_unit(self, unit: str) -> bool:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:39:    InfraAuditResult,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:248:    def audit_infra(self) -> InfraAuditResult:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:249:        return InfraAuditResult()
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:251:    def start_unit(self, unit: str) -> bool:
+
+ succeeded in 121ms:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:39:    InfraAuditResult,
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:248:    def audit_infra(self) -> InfraAuditResult:
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:249:        return InfraAuditResult()
+/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_chaos.py:251:    def start_unit(self, unit: str) -> bool:
+backend/tests/test_pipeline_coordinator_coldstart.py:17:   - _startup_1_infra: start down units / still-down / hard-down halt
+backend/tests/test_pipeline_coordinator_coldstart.py:35:   - run_deployment_audit / _last_json_line / _build_stale_sweep_plan helpers
+backend/tests/test_pipeline_coordinator_coldstart.py:36:       → test_run_deployment_audit_parses_units,
+backend/tests/test_pipeline_coordinator_coldstart.py:37:         test_run_deployment_audit_missing_script_is_empty,
+backend/tests/test_pipeline_coordinator_coldstart.py:77:    InfraAuditResult,
+backend/tests/test_pipeline_coordinator_coldstart.py:78:    InfraUnit,
+backend/tests/test_pipeline_coordinator_coldstart.py:88:    run_deployment_audit,
+backend/tests/test_pipeline_coordinator_coldstart.py:116:    real I/O. ``audits`` is a sequence of :class:`InfraAuditResult` returned
+backend/tests/test_pipeline_coordinator_coldstart.py:125:        audits: list[InfraAuditResult] | None = None,
+backend/tests/test_pipeline_coordinator_coldstart.py:133:        self._audits = list(audits) if audits else [InfraAuditResult()]
+backend/tests/test_pipeline_coordinator_coldstart.py:151:    def audit_infra(self) -> InfraAuditResult:
+backend/tests/test_pipeline_coordinator_coldstart.py:156:    def start_unit(self, unit: str) -> bool:
+backend/tests/test_pipeline_coordinator_coldstart.py:202:    def audit_infra(self) -> InfraAuditResult:
+backend/tests/test_pipeline_coordinator_coldstart.py:203:        return InfraAuditResult()
+backend/tests/test_pipeline_coordinator_coldstart.py:205:    def start_unit(self, unit: str) -> bool:
+backend/tests/test_pipeline_coordinator_coldstart.py:278:def _units(*specs: tuple[str, bool]) -> InfraAuditResult:
+backend/tests/test_pipeline_coordinator_coldstart.py:279:    return InfraAuditResult(units=tuple(InfraUnit(name=n, live=live) for n, live in specs))
+backend/tests/test_pipeline_coordinator_coldstart.py:292:        "audit_infra", "start_unit", "interrupted_tickets", "has_live_runner",
+backend/tests/test_pipeline_coordinator_coldstart.py:343:# ── Code AC: _startup_1_infra ─────────────────────────────────────────
+backend/tests/test_pipeline_coordinator_coldstart.py:355:    coord._startup_1_infra(report)
+backend/tests/test_pipeline_coordinator_coldstart.py:375:    coord._startup_1_infra(report)
+backend/tests/test_pipeline_coordinator_coldstart.py:672:    assert gw.audit_infra() == InfraAuditResult()
+backend/tests/test_pipeline_coordinator_coldstart.py:706:def test_run_deployment_audit_parses_units(tmp_path: Path) -> None:
+backend/tests/test_pipeline_coordinator_coldstart.py:707:    """run_deployment_audit runs the audit script and maps systemd-unit /
+backend/tests/test_pipeline_coordinator_coldstart.py:708:    systemd-timer JSONL rows to InfraUnits (live = status == 'OK'); non-unit
+backend/tests/test_pipeline_coordinator_coldstart.py:727:    result = run_deployment_audit(repo_root=tmp_path, timeout_seconds=15.0)
+backend/tests/test_pipeline_coordinator_coldstart.py:735:def test_run_deployment_audit_missing_script_is_empty(tmp_path: Path) -> None:
+backend/tests/test_pipeline_coordinator_coldstart.py:737:    assert run_deployment_audit(repo_root=tmp_path) == InfraAuditResult()
+backend/tests/test_pipeline_coordinator_coldstart.py:827:    a down unit (start_unit), the four §3.3 reconcile branches that mutate
+backend/tests/test_pipeline_coordinator_coldstart.py:868:    # Mutators record-only: delegate is never touched, start_unit reports
+backend/tests/test_pipeline_coordinator_coldstart.py:870:    assert gw.start_unit("coordinator.service") is True
+backend/tests/test_pipeline_coordinator_coldstart.py:898:    # start_unit reports success and records the would-be start).
+backend/tests/test_pipeline_coordinator_integration.py:28:    InfraAuditResult,
+backend/tests/test_pipeline_coordinator_integration.py:209:    def audit_infra(self) -> InfraAuditResult:
+backend/tests/test_pipeline_coordinator_integration.py:210:        return InfraAuditResult()
+backend/tests/test_pipeline_coordinator_integration.py:212:    def start_unit(self, unit: str) -> bool:
+
+exec
+/bin/bash -lc "nl -ba /home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py | sed -n '306,322p;379,440p;816,845p;932,965p;1088,1106p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+   306	    records: list[dict[str, Any]] = []
+   307	    for f in sorted(directory.glob("*.jsonl")):
+   308	        for line in f.read_text(encoding="utf-8").splitlines():
+   309	            if line.strip():
+   310	                records.append(json.loads(line))
+   311	    return records
+   312	
+   313	
+   314	def _units(*specs: tuple[str, bool]) -> InfraAuditResult:
+   315	    return InfraAuditResult(units=tuple(InfraUnit(name=n, live=live) for n, live in specs))
+   316	
+   317	
+   318	# ── Code AC: FakeColdStartGateway implements the Protocol ─────────────
+   319	
+   320	
+   321	def test_fake_gateway_satisfies_coldstart_protocol() -> None:
+   322	    """The fake (and the degraded fake) structurally satisfy the runtime
+   379	# ── Code AC: _startup_1_infra ─────────────────────────────────────────
+   380	
+   381	
+   382	def test_startup_1_starts_down_units(tmp_path: Path) -> None:
+   383	    """Down units are started; a single clean audit means no re-verify."""
+   384	    gw = FakeColdStartGateway(
+   385	        audits=[_units(("a.service", False), ("b.service", False), ("c.service", True))],
+   386	        start_results={"a.service": True, "b.service": True},
+   387	    )
+   388	    coord = _coordinator(tmp_path, gw)
+   389	    report = ColdStartReport()
+   390	
+   391	    coord._startup_1_infra(report)
+   392	
+   393	    assert gw.started == ["a.service", "b.service"]
+   394	    assert report.started_units == ["a.service", "b.service"]
+   395	    assert report.still_down_units == []
+   396	    assert report.phase1_halted is False
+   397	    assert gw.audit_calls == 1  # no re-verify when nothing stayed down
+   398	    assert gw.operator_mentions == []
+   399	
+   400	
+   401	def test_startup_1_recheck_clears_transient_down_unit(tmp_path: Path) -> None:
+   402	    """A unit whose start returns False but is live on re-verify does NOT
+   403	    halt — the re-audit is authoritative (started slow, now up)."""
+   404	    gw = FakeColdStartGateway(
+   405	        audits=[_units(("slow.service", False)), _units(("slow.service", True))],
+   406	        start_results={"slow.service": False},
+   407	    )
+   408	    coord = _coordinator(tmp_path, gw)
+   409	    report = ColdStartReport()
+   410	
+   411	    coord._startup_1_infra(report)
+   412	
+   413	    assert gw.started == ["slow.service"]
+   414	    assert gw.audit_calls == 2  # re-verified because start reported failure
+   415	    assert report.still_down_units == []
+   416	    assert report.phase1_halted is False
+   417	    assert gw.operator_mentions == []
+   418	
+   419	
+   420	def test_startup_1_halts_and_mentions_operator_when_unit_stays_down(tmp_path: Path) -> None:
+   421	    """A hard-down expected-live unit: still down on re-verify → record in
+   422	    still_down_units, phase1_halted, @-operator. Must NOT raise, and startup()
+   423	    stops before reconcile/sweep (entering a degraded loop is worse)."""
+   424	    gw = FakeColdStartGateway(
+   425	        audits=[_units(("dead.service", False)), _units(("dead.service", False))],
+   426	        start_results={"dead.service": False},
+   427	        interrupted=[InterruptedTicket(key="OP-1", stale=True)],
+   428	        sweep_plan=StaleSweepPlan(orphan_assignees=("OP-2",)),
+   429	    )
+   430	    coord = _coordinator(tmp_path, gw)
+   431	
+   432	    report = coord.startup()  # does not raise
+   433	
+   434	    assert report.phase1_halted is True
+   435	    assert report.still_down_units == ["dead.service"]
+   436	    assert report.entered_loop is False
+   437	    # Operator was @-mentioned at high urgency on the infra-level alert.
+   438	    assert len(gw.operator_mentions) == 1
+   439	    key, _msg, urgency = gw.operator_mentions[0]
+   440	    assert (key, urgency) == ("OP", "high")
+   816	    sweeps = {(r["ticket"], r["sweep"]) for r in report.swept}
+   817	    assert sweeps == {("OP-A", "stale-claim"), ("OP-B", "orphan-assignee"), ("OP-C", "resolved-waiting")}
+   818	
+   819	
+   820	def test_cold_start_per_phase_caps_limit_mutators(tmp_path: Path) -> None:
+   821	    """OP-1618: Startup-1/2/3 caps are enforced at mutator call sites."""
+   822	    cfg = _config(
+   823	        tmp_path,
+   824	        cold_start_max_infra=1,
+   825	        cold_start_max_reconcile=1,
+   826	        cold_start_max_sweep=1,
+   827	    )
+   828	
+   829	    infra = FakeColdStartGateway(
+   830	        audits=[
+   831	            _units(("a.service", False), ("b.service", False)),
+   832	            _units(("b.service", False)),
+   833	        ],
+   834	        start_results={"a.service": True, "b.service": True},
+   835	    )
+   836	    coord = _coordinator(tmp_path, infra, config=cfg)
+   837	    report = ColdStartReport()
+   838	    coord._startup_1_infra(report)
+   839	    assert infra.started == ["a.service"]
+   840	    assert report.phase1_halted is True
+   841	
+   842	    reconcile = FakeColdStartGateway(
+   843	        interrupted=[
+   844	            InterruptedTicket(key="OP-MERGE", stale=True),
+   845	            InterruptedTicket(key="OP-BRANCH", stale=True),
+   932	    assert gw.interrupted_tickets() == []
+   933	    assert gw.stale_sweep_plan() == StaleSweepPlan()
+   934	
+   935	
+   936	# ── Code AC: helper coverage ──────────────────────────────────────────
+   937	
+   938	
+   939	def test_run_deployment_audit_parses_units(tmp_path: Path) -> None:
+   940	    """run_deployment_audit runs the audit script and maps systemd-unit /
+   941	    systemd-timer JSONL rows to InfraUnits (live = status == 'OK'); non-unit
+   942	    rows are ignored."""
+   943	    scripts = tmp_path / "scripts"
+   944	    scripts.mkdir()
+   945	    script = scripts / "deployment-audit.sh"
+   946	    rows = {
+   947	        "rows": [
+   948	            {"kind": "systemd-unit", "name": "coordinator.service", "status": "OK"},
+   949	            {"kind": "systemd-unit", "name": "bridge.service", "status": "FAIL"},
+   950	            {"kind": "systemd-timer", "name": "audit.timer", "status": "OK"},
+   951	            {"kind": "http", "name": "api", "status": "OK"},
+   952	        ]
+   953	    }
+   954	    script.write_text(
+   955	        "#!/usr/bin/env bash\n"
+   956	        f"printf '%s\\n' '{json.dumps(rows)}' > \"$DEPLOYMENT_AUDIT_JSONL_LOG\"\n",
+   957	        encoding="utf-8",
+   958	    )
+   959	
+   960	    result = run_deployment_audit(repo_root=tmp_path, timeout_seconds=15.0)
+   961	
+   962	    assert {u.name for u in result.units} == {
+   963	        "coordinator.service", "bridge.service", "audit.timer"
+   964	    }
+   965	    assert result.down == ("bridge.service",)
+  1088	    gw = ShadowColdStartGateway(fake)
+  1089	
+  1090	    assert isinstance(gw, ColdStartGateway)
+  1091	    assert gw.acting is False
+  1092	
+  1093	    # Reads forwarded unchanged.
+  1094	    assert gw.audit_infra() == fake.audit_infra()  # delegate consulted
+  1095	    assert gw.interrupted_tickets() == fake.interrupted_tickets()
+  1096	    assert gw.stale_sweep_plan() == fake.stale_sweep_plan()
+  1097	    assert gw.gerrit_change_mergeable("OP-MERGE") is True
+  1098	    assert gw.branch_has_commits("OP-BRANCH") is True
+  1099	    assert gw.has_live_runner("OP-MERGE") is False
+  1100	
+  1101	    # Mutators record-only: delegate is never touched, start_unit reports
+  1102	    # success so an observe-only boot proceeds rather than halting.
+  1103	    assert gw.start_unit("coordinator.service") is True
+  1104	    gw.mark_resumable("OP-BRANCH")
+  1105	    gw.transition_under_review("OP-MERGE")
+  1106	    gw.reset_to_todo("OP-STALE")
+
+exec
+/bin/bash -lc "nl -ba /home/user/sora-bridge/backend/agents/pipeline_coordinator.py | sed -n '1668,1680p;2044,2062p;2108,2116p;2408,2420p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+  1668	    """
+  1669	    live = JiraDispatchColdStartGateway(agent_class=config.jira_agent_class)
+  1670	    return live if acting else ShadowColdStartGateway(live)
+  1671	
+  1672	
+  1673	# ── Daemon ────────────────────────────────────────────────────────────
+  1674	
+  1675	
+  1676	class PipelineCoordinator:
+  1677	    """Skeleton coordinator daemon: tick → evaluate → log no-op → heartbeat.
+  1678	
+  1679	    Collaborators are injected for deterministic tests; ``from_env`` /
+  1680	    default construction wires the production defaults. The daemon holds
+  2044	        Startup-4 (log steady-state entry). If Startup-1 cannot bring the
+  2045	        expected infra up, the daemon halts startup (``phase1_halted=True``)
+  2046	        and does NOT proceed — entering the loop with degraded infra is worse
+  2047	        than not running (ADR §3.3 Startup-1 failure path). :meth:`run` reads
+  2048	        the report to decide whether to enter the loop.
+  2049	        """
+  2050	        report = ColdStartReport()
+  2051	        self._log_cold_start({"event": COLD_START_BEGAN_EVENT})
+  2052	        self._startup_1_infra(report)
+  2053	        if report.phase1_halted:
+  2054	            self._log_cold_start(
+  2055	                {"event": COLD_START_COMPLETE_EVENT, "halted_at": "startup-1",
+  2056	                 "still_down": report.still_down_units}
+  2057	            )
+  2058	            return report
+  2059	        self._l6_crash_recovery(report)
+  2060	        self._startup_2_reconcile(report)
+  2061	        self._startup_3_sweep(report)
+  2062	        self._startup_4_enter_loop(report)
+  2108	            self._log_cold_start(
+  2109	                {"event": STARTUP_PHASE_EVENT, "phase": 1, "action": "halt",
+  2110	                 "still_down": report.still_down_units}
+  2111	            )
+  2112	
+  2113	    def _l6_crash_recovery(self, report: ColdStartReport) -> None:
+  2114	        """L6 (ADR §9): replay last 24h decision log; resume/complete/rollback.
+  2115	
+  2116	        A ``tick_intent`` with no matching ``decision_tick`` (paired by
+  2408	        is NOT entered and 0 ticks are returned. Otherwise hands off to
+  2409	        :meth:`run_forever` (Startup-4).
+  2410	        """
+  2411	        report = self.startup()
+  2412	        if report.phase1_halted:
+  2413	            logger.error(
+  2414	                "[pipeline_coordinator] cold-start halted in Startup-1 "
+  2415	                "(infra still down: %s) — not entering steady-state loop",
+  2416	                report.still_down_units,
+  2417	            )
+  2418	            return 0
+  2419	        return self.run_forever(install_signals=install_signals, max_ticks=max_ticks)
+  2420	
+
+codex
+**Findings**
+
+No BLOCKER findings.
+
+SHOULD-FIX: The implementation must preserve D1 exactly: `run_deployment_audit` should pass the raw row value, not default missing `expected` to `"yes"`. In shipped code the bug is at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1471-1475`: systemd rows are reduced to `InfraUnit(name, live)` and `expected` is dropped. If the fix uses `row.get("expected", "yes")`, it would contradict the design’s “missing expected -> not-started” default-deny rule. Use an exact `expected == "yes"` predicate in `InfraAuditResult.down` at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1040-1042`.
+
+NICE: Add an explicit malformed-row test for missing/unknown `expected`. The shipped tests currently construct two-field units via `_units` at `/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:314-315`, and `test_run_deployment_audit_parses_units` at `/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:939-965` does not cover `expected`. This is the only place likely to regress D1 silently.
+
+**Answers**
+
+Root cause is correctly identified. `deployment-audit.sh` records `expected` in every JSONL row at `scripts/deployment-audit.sh:233-241`, and only counts `RED && expected=yes` as fatal at `scripts/deployment-audit.sh:57-60`. The shipped coordinator drops that field at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1471-1475`, then treats every non-live unit as down at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1040-1042`, so `_startup_1_infra` starts them at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2077-2089`. Filtering `down` to `expected == "yes" and not live` is the right fix.
+
+No other production consumer needs separate treatment. `rg` shows `InfraAuditResult.down` is consumed by `_startup_1_infra` only: initial loop at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2079` and recheck at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2097-2098`. `ShadowColdStartGateway.audit_infra` forwards unchanged at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1367-1368`; `start_unit` is record-only in shadow at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1386-1392`.
+
+Q1: “Never start gated/n-a” is correct for current systemd manifest rows. The non-yes systemd rows are retired or gated: `auto-promote-develop.timer` n-a, `auto-promote-main.service` n-a, `staging-gate-canary.timer` gated, and `staging-gate-smoke.timer` gated at `scripts/deployment-audit.sh:267-273`. The expected-live systemd rows that must keep starting are `release-milestone-checker.timer` and `sora-bridge-sync.timer` at `scripts/deployment-audit.sh:266` and `scripts/deployment-audit.sh:270`.
+
+Q2: `expected` is the right discriminator for this small fix. The audit script has no `auto_start` field; its manifest contract is explicitly `expected ∈ { yes, gated, n-a }` at `scripts/deployment-audit.sh:21-35`, and its failure rule is already based on `expected=yes` at `scripts/deployment-audit.sh:57-60`.
+
+Q3: D1 is safe for the shipped script, with the implementation caveat above. `deployment-audit.sh` always provides an expected value to `record`: manifest parsing defaults missing manifest fields to `yes` at `scripts/deployment-audit.sh:297-299`, all systemd checks pass that value through at `scripts/deployment-audit.sh:76-111`, and JSONL serialization writes `"expected"` at `scripts/deployment-audit.sh:233-241`. A missing JSON `expected` means contract break; default-deny is safer than starting an unknown unit, but should be tested.
+
+Q4: The fix does not break OP-1618 caps, halt semantics, or shadow/acting split. It changes the candidate set before the existing cap loop at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2077-2088`, so `cold_start_max_infra` from `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:154` and `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:198-200` applies only to true expected-live down units. Halt and operator mention remain preserved for remaining expected-live failures at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2096-2110`. Acting mode still uses the live gateway while shadow wraps it at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1657-1670`.
+
+Tier/area looks correct: tier:M + area:backend,tests fits a single backend coordinator data/parse/filter change plus focused tests, with no new schema, module, dependency, or security boundary.
+
+Verdict: file-ready-with-conditions.
+tokens used
+101,468
+**Findings**
+
+No BLOCKER findings.
+
+SHOULD-FIX: The implementation must preserve D1 exactly: `run_deployment_audit` should pass the raw row value, not default missing `expected` to `"yes"`. In shipped code the bug is at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1471-1475`: systemd rows are reduced to `InfraUnit(name, live)` and `expected` is dropped. If the fix uses `row.get("expected", "yes")`, it would contradict the design’s “missing expected -> not-started” default-deny rule. Use an exact `expected == "yes"` predicate in `InfraAuditResult.down` at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1040-1042`.
+
+NICE: Add an explicit malformed-row test for missing/unknown `expected`. The shipped tests currently construct two-field units via `_units` at `/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:314-315`, and `test_run_deployment_audit_parses_units` at `/home/user/sora-bridge/backend/tests/test_pipeline_coordinator_coldstart.py:939-965` does not cover `expected`. This is the only place likely to regress D1 silently.
+
+**Answers**
+
+Root cause is correctly identified. `deployment-audit.sh` records `expected` in every JSONL row at `scripts/deployment-audit.sh:233-241`, and only counts `RED && expected=yes` as fatal at `scripts/deployment-audit.sh:57-60`. The shipped coordinator drops that field at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1471-1475`, then treats every non-live unit as down at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1040-1042`, so `_startup_1_infra` starts them at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2077-2089`. Filtering `down` to `expected == "yes" and not live` is the right fix.
+
+No other production consumer needs separate treatment. `rg` shows `InfraAuditResult.down` is consumed by `_startup_1_infra` only: initial loop at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2079` and recheck at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2097-2098`. `ShadowColdStartGateway.audit_infra` forwards unchanged at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1367-1368`; `start_unit` is record-only in shadow at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1386-1392`.
+
+Q1: “Never start gated/n-a” is correct for current systemd manifest rows. The non-yes systemd rows are retired or gated: `auto-promote-develop.timer` n-a, `auto-promote-main.service` n-a, `staging-gate-canary.timer` gated, and `staging-gate-smoke.timer` gated at `scripts/deployment-audit.sh:267-273`. The expected-live systemd rows that must keep starting are `release-milestone-checker.timer` and `sora-bridge-sync.timer` at `scripts/deployment-audit.sh:266` and `scripts/deployment-audit.sh:270`.
+
+Q2: `expected` is the right discriminator for this small fix. The audit script has no `auto_start` field; its manifest contract is explicitly `expected ∈ { yes, gated, n-a }` at `scripts/deployment-audit.sh:21-35`, and its failure rule is already based on `expected=yes` at `scripts/deployment-audit.sh:57-60`.
+
+Q3: D1 is safe for the shipped script, with the implementation caveat above. `deployment-audit.sh` always provides an expected value to `record`: manifest parsing defaults missing manifest fields to `yes` at `scripts/deployment-audit.sh:297-299`, all systemd checks pass that value through at `scripts/deployment-audit.sh:76-111`, and JSONL serialization writes `"expected"` at `scripts/deployment-audit.sh:233-241`. A missing JSON `expected` means contract break; default-deny is safer than starting an unknown unit, but should be tested.
+
+Q4: The fix does not break OP-1618 caps, halt semantics, or shadow/acting split. It changes the candidate set before the existing cap loop at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2077-2088`, so `cold_start_max_infra` from `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:154` and `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:198-200` applies only to true expected-live down units. Halt and operator mention remain preserved for remaining expected-live failures at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:2096-2110`. Acting mode still uses the live gateway while shadow wraps it at `/home/user/sora-bridge/backend/agents/pipeline_coordinator.py:1657-1670`.
+
+Tier/area looks correct: tier:M + area:backend,tests fits a single backend coordinator data/parse/filter change plus focused tests, with no new schema, module, dependency, or security boundary.
+
+Verdict: file-ready-with-conditions.
