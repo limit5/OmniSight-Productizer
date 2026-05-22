@@ -359,6 +359,59 @@ class LiveActionExecutor:
             self._client = jira_dispatch.make_client(self._config.jira_agent_class)
         return self._client
 
+    def _pre_mutation_recheck(self, action: Action) -> dict[str, Any] | None:
+        from backend.agents import jira_dispatch
+
+        try:
+            labels = set(jira_dispatch.fetch_ticket_labels(self._jira(), action.target))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[pipeline_coordinator] live label recheck failed for %s: %s",
+                action.target,
+                exc,
+            )
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "label_read_failed",
+            }
+        if "coord-skip" in labels or "coord-quarantine" in labels:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "coord_skip",
+            }
+        return None
+
+    def _destructive_transition_recheck(self, action: Action) -> dict[str, Any] | None:
+        from backend.agents import jira_dispatch
+
+        try:
+            status = jira_dispatch.get_issue_status(self._jira(), action.target)
+            runner_live = _ticket_has_live_runner(action.target, fail_on_probe_error=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "[pipeline_coordinator] destructive transition recheck failed for %s: %s",
+                action.target,
+                exc,
+            )
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "context_stale",
+            }
+        if status not in jira_dispatch.IN_PROGRESS_STATUS_NAMES or runner_live:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "context_stale",
+            }
+        return None
+
     def _execute_transition(self, action: Action) -> dict[str, Any]:
         from backend.agents import jira_dispatch
 
@@ -368,6 +421,12 @@ class LiveActionExecutor:
             "todo",
             "to do",
         }:
+            blocked = self._pre_mutation_recheck(action)
+            if blocked is not None:
+                return blocked
+            blocked = self._destructive_transition_recheck(action)
+            if blocked is not None:
+                return blocked
             reason = str(action.params.get("reason") or "Coordinator live action requested To Do.")
             jira_dispatch.transition_back_to_todo(
                 self._jira(),
@@ -380,6 +439,9 @@ class LiveActionExecutor:
             "under_review",
             "under review",
         }:
+            blocked = self._pre_mutation_recheck(action)
+            if blocked is not None:
+                return blocked
             issued = jira_dispatch.transition_to_under_review_if_needed(
                 self._jira(),
                 action.target,
@@ -404,11 +466,13 @@ class LiveActionExecutor:
     def _execute_relabel(self, action: Action) -> dict[str, Any]:
         from backend.agents import jira_dispatch
 
+        blocked = self._pre_mutation_recheck(action)
+        if blocked is not None:
+            return blocked
         add = tuple(str(x) for x in action.params.get("add", ()))
         remove = tuple(str(x) for x in action.params.get("remove", ()))
         base_key = self._idem_base(action)
         outcomes: list[dict[str, Any]] = []
-        # T2: pre-mutation rechecks hook here before each live JIRA mutation.
         for label in add:
             jira_dispatch.add_label(
                 self._jira(), action.target, label, idem_key=f"{base_key}:add:{label}"
@@ -434,6 +498,9 @@ class LiveActionExecutor:
     def _execute_mention(self, action: Action) -> dict[str, Any]:
         from backend.agents import jira_dispatch
 
+        blocked = self._pre_mutation_recheck(action)
+        if blocked is not None:
+            return blocked
         message = str(action.params.get("message") or "")
         urgency = str(action.params.get("urgency") or "medium")
         base_key = self._idem_base(action)
@@ -459,6 +526,9 @@ class LiveActionExecutor:
     def _execute_followup(self, action: Action) -> dict[str, Any]:
         from backend.agents import jira_dispatch
 
+        blocked = self._pre_mutation_recheck(action)
+        if blocked is not None:
+            return blocked
         when = str(action.params.get("when") or "")
         why = str(action.params.get("why") or "")
         label = f"{FOLLOWUP_LABEL_PREFIX}{when}"
@@ -479,6 +549,9 @@ class LiveActionExecutor:
     def _execute_escalate(self, action: Action) -> dict[str, Any]:
         from backend.agents import jira_dispatch
 
+        blocked = self._pre_mutation_recheck(action)
+        if blocked is not None:
+            return blocked
         reason = str(action.params.get("reason") or "")
         base_key = self._idem_base(action)
         jira_dispatch.add_label(
@@ -503,6 +576,9 @@ class LiveActionExecutor:
     def _execute_file_ticket(self, action: Action) -> dict[str, Any]:
         from backend.agents import jira_dispatch
 
+        blocked = self._pre_mutation_recheck(action)
+        if blocked is not None:
+            return blocked
         message = self._file_ticket_operator_message(action)
         semantic = dict(action.params)
         semantic["operator_message"] = message
@@ -1271,7 +1347,12 @@ def _last_json_line(path: Path) -> dict[str, Any] | None:
     return None
 
 
-def _ticket_has_live_runner(key: str, *, repo_root: Path | None = None) -> bool:
+def _ticket_has_live_runner(
+    key: str,
+    *,
+    repo_root: Path | None = None,
+    fail_on_probe_error: bool = False,
+) -> bool:
     """ADR §3.3 Startup-2: a runner is live for ``key`` if a process cmdline
     references it (auto-runner / its fresh feature branch) or an ephemeral
     worktree sentinel for the ticket exists. Best-effort; any probe error
@@ -1299,7 +1380,9 @@ def _ticket_has_live_runner(key: str, *, repo_root: Path | None = None) -> bool:
             for child in base.iterdir():
                 if child.is_dir() and key in child.name:
                     return True
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if fail_on_probe_error:
+            raise RuntimeError("live-runner sentinel probe failed") from exc
         pass
     return False
 

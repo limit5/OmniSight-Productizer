@@ -12,6 +12,7 @@ from backend.agents.pipeline_coordinator import (
     LiveActionExecutor,
     NEEDS_OPERATOR_ACTION_LABEL,
 )
+from backend.agents import pipeline_coordinator
 from backend.agents.pipeline_coordinator_capacity import CapacitySnapshot
 from backend.agents.pipeline_coordinator_rules import (
     ACTION_ESCALATE,
@@ -34,6 +35,8 @@ class RecordingJiraClient:
         self.agent_class = agent_class
         self.calls: list[tuple[str, str, Any, str | None]] = []
         self.seen_idem_keys: set[str] = set()
+        self.labels: tuple[str, ...] = ()
+        self.status = "In Progress"
 
     def record(self, op: str, key: str, payload: Any, idem_key: str | None) -> bool:
         if idem_key in self.seen_idem_keys:
@@ -108,6 +111,12 @@ def jira_dispatch(monkeypatch: pytest.MonkeyPatch):
     ) -> bool:
         return client.record("transition_to_under_review_if_needed", key, None, idem_key)
 
+    def fetch_ticket_labels(client: RecordingJiraClient, key: str) -> tuple[str, ...]:
+        return client.labels
+
+    def get_issue_status(client: RecordingJiraClient, key: str) -> str:
+        return client.status
+
     monkeypatch.setattr(dispatch, "make_client", make_client)
     monkeypatch.setattr(dispatch, "add_comment", add_comment)
     monkeypatch.setattr(dispatch, "add_label", add_label)
@@ -118,6 +127,13 @@ def jira_dispatch(monkeypatch: pytest.MonkeyPatch):
         dispatch,
         "transition_to_under_review_if_needed",
         transition_to_under_review_if_needed,
+    )
+    monkeypatch.setattr(dispatch, "fetch_ticket_labels", fetch_ticket_labels)
+    monkeypatch.setattr(dispatch, "get_issue_status", get_issue_status)
+    monkeypatch.setattr(
+        pipeline_coordinator,
+        "_ticket_has_live_runner",
+        lambda key, **_: False,
     )
     return clients
 
@@ -322,6 +338,149 @@ def test_composite_relabel_uses_distinct_idem_keys(
     assert jira_dispatch[0].calls[0][3].endswith(":add:coord-a")
     assert jira_dispatch[0].calls[1][3].endswith(":add:coord-b")
     assert jira_dispatch[0].calls[0][3] != jira_dispatch[0].calls[1][3]
+
+
+@pytest.mark.parametrize("label", ["coord-skip", "coord-quarantine"])
+def test_live_executor_coord_skip_labels_block_mutation(
+    config: CoordinatorConfig,
+    ctx: DecisionContext,
+    jira_dispatch: list[RecordingJiraClient],
+    label: str,
+) -> None:
+    client = RecordingJiraClient()
+    client.labels = (label,)
+    executor = LiveActionExecutor(config, client=client)
+
+    result = executor.execute(
+        Action(
+            ACTION_MENTION_OPERATOR,
+            "OP-1614",
+            {"message": "operator note", "urgency": "medium"},
+            dry_run=False,
+        ),
+        ctx,
+    )
+
+    assert result == {
+        "kind": ACTION_MENTION_OPERATOR,
+        "target": "OP-1614",
+        "executed": False,
+        "reason": "coord_skip",
+    }
+    assert client.calls == []
+
+
+def test_live_executor_label_read_failure_blocks_mutation(
+    config: CoordinatorConfig,
+    ctx: DecisionContext,
+    monkeypatch: pytest.MonkeyPatch,
+    jira_dispatch: list[RecordingJiraClient],
+) -> None:
+    from backend.agents import jira_dispatch as dispatch
+
+    def boom(client: RecordingJiraClient, key: str) -> tuple[str, ...]:
+        raise RuntimeError("labels unavailable")
+
+    monkeypatch.setattr(dispatch, "fetch_ticket_labels", boom)
+    executor = LiveActionExecutor(config)
+
+    result = executor.execute(
+        Action(
+            ACTION_RELABEL,
+            "OP-1614",
+            {"add": ["coord-ready"], "remove": []},
+            dry_run=False,
+        ),
+        ctx,
+    )
+
+    assert result == {
+        "kind": ACTION_RELABEL,
+        "target": "OP-1614",
+        "executed": False,
+        "reason": "label_read_failed",
+    }
+    assert jira_dispatch[0].calls == []
+
+
+@pytest.mark.parametrize("status", ["To Do", "Under Review"])
+def test_live_executor_to_do_transition_rechecks_status_before_mutation(
+    config: CoordinatorConfig,
+    ctx: DecisionContext,
+    jira_dispatch: list[RecordingJiraClient],
+    status: str,
+) -> None:
+    client = RecordingJiraClient()
+    client.status = status
+    executor = LiveActionExecutor(config, client=client)
+
+    result = executor.execute(
+        Action(ACTION_TRANSITION, "OP-1614", {"to_status": "To Do"}, dry_run=False),
+        ctx,
+    )
+
+    assert result == {
+        "kind": ACTION_TRANSITION,
+        "target": "OP-1614",
+        "executed": False,
+        "reason": "context_stale",
+    }
+    assert client.calls == []
+
+
+def test_live_executor_to_do_transition_rechecks_live_runner_before_mutation(
+    config: CoordinatorConfig,
+    ctx: DecisionContext,
+    monkeypatch: pytest.MonkeyPatch,
+    jira_dispatch: list[RecordingJiraClient],
+) -> None:
+    monkeypatch.setattr(
+        pipeline_coordinator,
+        "_ticket_has_live_runner",
+        lambda key, **_: True,
+    )
+    client = RecordingJiraClient()
+    executor = LiveActionExecutor(config, client=client)
+
+    result = executor.execute(
+        Action(ACTION_TRANSITION, "OP-1614", {"to_status": "To Do"}, dry_run=False),
+        ctx,
+    )
+
+    assert result == {
+        "kind": ACTION_TRANSITION,
+        "target": "OP-1614",
+        "executed": False,
+        "reason": "context_stale",
+    }
+    assert client.calls == []
+
+
+def test_live_executor_to_do_transition_probe_error_fails_closed(
+    config: CoordinatorConfig,
+    ctx: DecisionContext,
+    monkeypatch: pytest.MonkeyPatch,
+    jira_dispatch: list[RecordingJiraClient],
+) -> None:
+    def boom(key: str, **_: Any) -> bool:
+        raise RuntimeError("runner probe failed")
+
+    monkeypatch.setattr(pipeline_coordinator, "_ticket_has_live_runner", boom)
+    client = RecordingJiraClient()
+    executor = LiveActionExecutor(config, client=client)
+
+    result = executor.execute(
+        Action(ACTION_TRANSITION, "OP-1614", {"to_status": "To Do"}, dry_run=False),
+        ctx,
+    )
+
+    assert result == {
+        "kind": ACTION_TRANSITION,
+        "target": "OP-1614",
+        "executed": False,
+        "reason": "context_stale",
+    }
+    assert client.calls == []
 
 
 def test_unknown_action_kind_is_unsupported(config: CoordinatorConfig, ctx: DecisionContext) -> None:
