@@ -206,6 +206,32 @@ def test_run_once_reads_release_tagged_event_and_advances_cursor(tmp_path: Path)
     assert (repo / "docs" / "releases" / "v9.99.0.md").exists()
 
 
+def test_release_version_reserved_event_drafts_notes_pre_promote(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    jira = FakeJira(_synthetic_tickets())
+    pusher = FakePusher()
+
+    result = rng.draft_release_notes_for_event(
+        {
+            "event": "release_version_reserved",
+            "fixVersion": "v9.99.0",
+            "candidateSha": "a" * 40,
+            "metaTicket": "OP-1586",
+        },
+        repo=repo,
+        jira=jira,
+        pusher=pusher,
+        prepare_review=lambda _repo: None,
+        notify=lambda _channel, _severity, _detail: None,
+        event_sink=lambda _event, _payload: None,
+    )
+
+    assert result.status == "drafted"
+    assert jira.seen_versions == ["v9.99.0"]
+    assert (repo / "docs" / "releases" / "v9.99.0.md").exists()
+    assert pusher.calls == [(repo, "subscription-codex", "develop")]
+
+
 def test_non_release_tagged_event_is_ignored(tmp_path: Path) -> None:
     result = rng.draft_release_notes_for_event(
         {"event": "main_promoted", "fixVersion": "v9.99.0"},

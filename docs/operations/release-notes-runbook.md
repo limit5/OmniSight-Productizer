@@ -11,6 +11,11 @@ Run from the repository root:
 scripts/release_notes_from_milestone.py --version vX.Y.Z
 ```
 
+For the release train, `vX.Y.Z` is reserved before promote. That
+planning reservation is enough for release notes and changelog review:
+the tools read JIRA `fixVersion=vX.Y.Z` and do not require a `vX.Y.Z`
+image tag or git tag to exist.
+
 The script:
 
 - verifies that the JIRA fixVersion exists;
