@@ -132,6 +132,22 @@ class CheckResult:
     evidence: str
 
 
+@dataclass(frozen=True)
+class ReleaseCompatResult:
+    """Verdict of the RT-11 previous-final → candidate rollback-compat scan.
+
+    ``rollback_safe`` is ``False`` when *any* migration newly introduced
+    between the previous-final release head and the candidate head cannot
+    be cleanly rolled back to the previous release (so promoting the
+    candidate would strand prod with no safe downgrade path).
+    """
+
+    rollback_safe: bool
+    reason: str
+    unsafe_migrations: tuple[str, ...] = ()
+    checked_migrations: tuple[str, ...] = ()
+
+
 def _display_path(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(REPO_ROOT))
@@ -704,6 +720,232 @@ def check_breaking_trailer(source: str, commit_message: str | None) -> CheckResu
     )
 
 
+# ── RT-11 release-to-release rollback-compat gate ────────────────────
+#
+# RT-10a built the per-PR / per-patchset compat gate above (does this
+# single migration land safely on develop). RT-11 adds the *promote-time*
+# question: if we promote this candidate to prod and it goes bad, can we
+# roll the prod image back to the previous-final release? That is safe
+# only when every migration introduced *between* the previous-final
+# release head and the candidate head is backwards-compatible with the
+# previous release's code — i.e. the previous-final image can still run
+# against the forward-migrated schema. A ``breaking`` change, a
+# deprecation-window rename/drop, or any statically-destructive operation
+# strands prod with no clean downgrade and is therefore rollback-unsafe.
+
+# Tags that are inherently unsafe to roll back across a release boundary:
+# a rename/drop breaks the previous release's code reading the old shape.
+ROLLBACK_UNSAFE_TAGS: tuple[str, ...] = (
+    "breaking",
+    "deprecation-window-1of2",
+    "deprecation-window-2of2",
+)
+
+
+def classify_rollback_safety(source: str) -> CheckResult:
+    """Is rolling *back* across this one migration safe for prev-final code?
+
+    Fail-closed: an untagged migration is treated as unsafe (we cannot
+    prove the rollback is clean). A ``breaking`` /
+    ``deprecation-window-*`` migration is unsafe by tag; everything else
+    additionally has to clear the OP-765 static destructive-operation
+    scan before it counts as rollback-safe.
+    """
+    tag = parse_compat_tag(source)
+    if tag is None:
+        return CheckResult(
+            False,
+            "rollback-safety",
+            "rollback-safety undetermined: migration lacks a `backwards-compat:` tag (fail-closed)",
+            "module-level docstring scan",
+        )
+    if tag in ROLLBACK_UNSAFE_TAGS:
+        return CheckResult(
+            False,
+            "rollback-safety",
+            (
+                f"rollback-unsafe: backwards-compat: {tag} cannot be cleanly "
+                "rolled back to the previous-final release"
+            ),
+            "compat tag",
+        )
+    static = classify_old_code_compat(source)
+    if not static.ok:
+        return CheckResult(
+            False,
+            "rollback-safety",
+            f"rollback-unsafe: {static.reason}",
+            static.evidence,
+        )
+    return CheckResult(
+        True,
+        "rollback-safety",
+        f"rollback-safe: backwards-compat: {tag}",
+        "compat tag + static scan",
+    )
+
+
+def _spec_index(versions_dir: Path) -> dict[str, MigrationSpec]:
+    out: dict[str, MigrationSpec] = {}
+    if not versions_dir.exists():
+        return out
+    for path in versions_dir.glob("*.py"):
+        if path.name == "__init__.py":
+            continue
+        try:
+            spec = parse_migration(path)
+        except Exception:
+            continue
+        out[spec.revision] = spec
+    return out
+
+
+def _ancestry(head: str | None, specs: dict[str, MigrationSpec]) -> set[str]:
+    """Revisions reachable from ``head`` by following ``down_revision``.
+
+    Includes ``head`` itself. Unknown revisions terminate that branch of
+    the walk (recorded, but not expanded).
+    """
+    seen: set[str] = set()
+    if head is None:
+        return seen
+    stack = [head]
+    while stack:
+        rev = stack.pop()
+        if rev in seen:
+            continue
+        seen.add(rev)
+        spec = specs.get(rev)
+        if spec is None:
+            continue
+        down = spec.down_revision
+        if isinstance(down, tuple):
+            stack.extend(down)
+        elif isinstance(down, str):
+            stack.append(down)
+    return seen
+
+
+def migrations_between(
+    previous_final_head: str | None,
+    candidate_head: str,
+    *,
+    versions_dir: Path = VERSIONS_DIR,
+) -> list[MigrationSpec]:
+    """Migrations present in ``candidate_head``'s ancestry but not in
+    ``previous_final_head``'s — the delta a promote would ship.
+
+    Returned revision-sorted for stable reporting. Raises ``ValueError``
+    if either head is unknown to ``versions_dir`` (a misconfigured gate
+    must fail loudly, not silently pass an empty delta).
+    """
+    specs = _spec_index(versions_dir)
+    if candidate_head not in specs:
+        raise ValueError(
+            f"candidate head revision {candidate_head!r} not found in {versions_dir}"
+        )
+    if previous_final_head is not None and previous_final_head not in specs:
+        raise ValueError(
+            f"previous-final head revision {previous_final_head!r} not found in {versions_dir}"
+        )
+    prev_ancestry = _ancestry(previous_final_head, specs)
+    new_specs: list[MigrationSpec] = []
+    seen: set[str] = set()
+    stack = [candidate_head]
+    while stack:
+        rev = stack.pop()
+        if rev in seen or rev in prev_ancestry:
+            continue
+        seen.add(rev)
+        spec = specs.get(rev)
+        if spec is None:
+            continue
+        new_specs.append(spec)
+        down = spec.down_revision
+        if isinstance(down, tuple):
+            stack.extend(down)
+        elif isinstance(down, str):
+            stack.append(down)
+    new_specs.sort(key=lambda s: s.revision)
+    return new_specs
+
+
+def check_release_to_release_compat(
+    previous_final_head: str | None,
+    candidate_head: str,
+    *,
+    versions_dir: Path = VERSIONS_DIR,
+) -> ReleaseCompatResult:
+    """Aggregate :func:`classify_rollback_safety` over the promote delta.
+
+    ``rollback_safe`` is ``True`` only when every migration newly
+    introduced between the previous-final release and the candidate is
+    rollback-safe. A previous-final head equal to (or absent for) the
+    candidate yields a trivially-safe verdict.
+    """
+    if previous_final_head is not None and previous_final_head == candidate_head:
+        return ReleaseCompatResult(
+            True, "previous-final head == candidate head; no new migrations"
+        )
+    new_specs = migrations_between(
+        previous_final_head, candidate_head, versions_dir=versions_dir
+    )
+    if not new_specs:
+        return ReleaseCompatResult(
+            True, "no new migrations between previous-final and candidate"
+        )
+    checked: list[str] = []
+    unsafe: list[str] = []
+    reasons: list[str] = []
+    for spec in new_specs:
+        display = _display_path(spec.path)
+        checked.append(display)
+        result = classify_rollback_safety(spec.path.read_text(encoding="utf-8"))
+        if not result.ok:
+            unsafe.append(display)
+            reasons.append(f"{display}: {result.reason}")
+    if unsafe:
+        return ReleaseCompatResult(
+            False, "; ".join(reasons), tuple(unsafe), tuple(checked)
+        )
+    return ReleaseCompatResult(
+        True,
+        f"all {len(checked)} new migration(s) rollback-safe",
+        (),
+        tuple(checked),
+    )
+
+
+def append_break_glass_audit(
+    path: Path,
+    *,
+    ticket: str,
+    approved_by: str,
+    result: ReleaseCompatResult,
+    previous_final_head: str | None,
+    candidate_head: str,
+) -> None:
+    """Append the RT-11 break-glass override audit row (JSONL).
+
+    Mirrors :func:`append_override_audit`; records *which* migrations were
+    overridden so a post-incident review can reconstruct exactly what
+    rollback-unsafe change was force-promoted and by whom.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "ticket": ticket,
+        "event": "release_to_release_break_glass",
+        "approved_by": approved_by,
+        "previous_final_head": previous_final_head,
+        "candidate_head": candidate_head,
+        "unsafe_migrations": list(result.unsafe_migrations),
+        "reason": result.reason,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
 def _alembic(cmd: Sequence[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["alembic", *cmd],
@@ -895,6 +1137,81 @@ def _emit_ci_error(message: str) -> None:
         print(f"::error title=migration_compat_check::{message}")
 
 
+def _run_release_to_release(args: argparse.Namespace) -> int:
+    """RT-11 promote-time release-to-release rollback-compat mode."""
+    if not args.candidate_head:
+        result = CheckResult(
+            False,
+            "release-to-release",
+            "--candidate-head is required for --release-to-release mode",
+            "argv",
+        )
+        _emit_ci_error(result.reason)
+        print(json.dumps({"ok": False, "checks": [result.__dict__]}, indent=2))
+        return 1
+
+    try:
+        compat = check_release_to_release_compat(
+            args.previous_final_head or None,
+            args.candidate_head,
+            versions_dir=VERSIONS_DIR,
+        )
+    except ValueError as exc:
+        _emit_ci_error(str(exc))
+        print(
+            json.dumps(
+                {"ok": False, "mode": "release-to-release", "verdict": str(exc)},
+                indent=2,
+            )
+        )
+        return 1
+
+    report: dict[str, object] = {
+        "ticket": args.ticket,
+        "mode": "release-to-release",
+        "previous_final_head": args.previous_final_head,
+        "candidate_head": args.candidate_head,
+        "checked_migrations": list(compat.checked_migrations),
+        "unsafe_migrations": list(compat.unsafe_migrations),
+        "rollback_safe": compat.rollback_safe,
+        "reason": compat.reason,
+    }
+
+    if compat.rollback_safe:
+        report["ok"] = True
+        report["verdict"] = "Verified +1"
+        print(json.dumps(report, indent=2))
+        return 0
+
+    if args.break_glass:
+        if args.approved_by != "sora":
+            report["ok"] = False
+            report["verdict"] = "Verified -1"
+            report["break_glass"] = "refused: --break-glass requires --approved-by sora"
+            _emit_ci_error(str(report["break_glass"]))
+            print(json.dumps(report, indent=2))
+            return 1
+        append_break_glass_audit(
+            Path(args.audit_log),
+            ticket=args.ticket,
+            approved_by=args.approved_by,
+            result=compat,
+            previous_final_head=args.previous_final_head,
+            candidate_head=args.candidate_head,
+        )
+        report["ok"] = True
+        report["verdict"] = "break-glass"
+        report["break_glass"] = f"rollback-unsafe override audit-logged to {args.audit_log}"
+        print(json.dumps(report, indent=2))
+        return 0
+
+    report["ok"] = False
+    report["verdict"] = "Verified -1"
+    _emit_ci_error(compat.reason)
+    print(json.dumps(report, indent=2))
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -910,6 +1227,33 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=os.environ.get("GITHUB_BASE_REF") or "origin/main",
     )
     parser.add_argument("--head-ref", default=os.environ.get("GITHUB_SHA") or "HEAD")
+    parser.add_argument(
+        "--release-to-release",
+        action="store_true",
+        help=(
+            "RT-11 promote-time mode: compare the previous-final release "
+            "migration head against the candidate head and BLOCK if any "
+            "newly-introduced migration is rollback-unsafe"
+        ),
+    )
+    parser.add_argument(
+        "--previous-final-head",
+        default=os.environ.get("MIGRATION_COMPAT_PREV_FINAL_HEAD"),
+        help="previous-final release migration head revision (release-to-release mode)",
+    )
+    parser.add_argument(
+        "--candidate-head",
+        default=os.environ.get("MIGRATION_COMPAT_CANDIDATE_HEAD"),
+        help="candidate migration head revision (release-to-release mode)",
+    )
+    parser.add_argument(
+        "--break-glass",
+        action="store_true",
+        help=(
+            "override a rollback-unsafe release-to-release verdict; requires "
+            "--approved-by sora and appends a break-glass audit row"
+        ),
+    )
     parser.add_argument("--engine", choices=["sqlite", "postgres"], default="sqlite")
     parser.add_argument("--url", default=os.environ.get("MIGRATION_COMPAT_DB_URL"))
     parser.add_argument(
@@ -946,6 +1290,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if args.release_to_release:
+        return _run_release_to_release(args)
 
     raw_files = (
         [Path(f) for f in args.files]

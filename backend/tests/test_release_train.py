@@ -28,7 +28,7 @@ from backend.agents.release_train import (
     EVENT_RELEASE_VERSION_RESERVED,
     PROMOTION_STATES,
     AuditWriteError,
-    BreakGlassOverride,
+    BreakGlass,
     DigestEqualityError,
     PostgresReleaseTrainStore,
     PromoteRaceLost,
@@ -233,10 +233,11 @@ async def test_break_glass_requires_human_command_exact_sha_and_reason() -> None
     async def tag_writer(train) -> bool:
         return True
 
-    bad_sha = BreakGlassOverride(
-        human_command="release-train promote --break-glass",
+    bad_sha = BreakGlass(
+        actor="release-manager",
+        reason="migration gate emergency approved by release manager",
         candidate_sha=SHA_B,
-        audit_reason="migration gate emergency approved by release manager",
+        human_command="release-train promote --break-glass",
     )
     with pytest.raises(ValueError, match="must match candidate_sha exactly"):
         await promote(
@@ -249,19 +250,14 @@ async def test_break_glass_requires_human_command_exact_sha_and_reason() -> None
         )
     assert conn.rows[SHA_A]["promotion_state"] == "pending"
 
-    missing_reason = BreakGlassOverride(
-        human_command="release-train promote --break-glass",
-        candidate_sha=SHA_A,
-        audit_reason="",
-    )
-    with pytest.raises(ValueError, match="audit_reason"):
-        await promote(
-            SHA_A,
-            "release-manager",
-            break_glass=missing_reason,
-            tag_writer=tag_writer,
-            audit_log=audit_ok,
-            conn_factory=_factory(conn),
+    # An empty reason is rejected at construction time -- a break-glass with
+    # no recorded justification is not auditable.
+    with pytest.raises(ValueError, match="reason"):
+        BreakGlass(
+            actor="release-manager",
+            reason="",
+            candidate_sha=SHA_A,
+            human_command="release-train promote --break-glass",
         )
     assert conn.rows[SHA_A]["promotion_state"] == "pending"
 
@@ -281,10 +277,11 @@ async def test_break_glass_payload_is_written_to_promote_audit() -> None:
     await promote(
         SHA_A,
         "release-manager",
-        break_glass=BreakGlassOverride(
-            human_command="release-train promote --candidate " + SHA_A,
+        break_glass=BreakGlass(
+            actor="release-manager",
+            reason="human-approved rollback compatibility exception",
             candidate_sha=SHA_A,
-            audit_reason="human-approved rollback compatibility exception",
+            human_command="release-train promote --candidate " + SHA_A,
         ),
         tag_writer=tag_writer,
         audit_log=audit_ok,
@@ -298,9 +295,10 @@ async def test_break_glass_payload_is_written_to_promote_audit() -> None:
             "source_digest_frontend": DIGEST_FE,
             "reserved_version": None,
             "break_glass": {
-                "human_command": "release-train promote --candidate " + SHA_A,
+                "actor": "release-manager",
+                "reason": "human-approved rollback compatibility exception",
                 "candidate_sha": SHA_A,
-                "audit_reason": "human-approved rollback compatibility exception",
+                "human_command": "release-train promote --candidate " + SHA_A,
             },
         }
     ]
@@ -494,10 +492,11 @@ async def test_break_glass_cannot_bypass_digest_equality_failure() -> None:
         await promote(
             SHA_A,
             "release-manager",
-            break_glass=BreakGlassOverride(
-                human_command="release-train promote --candidate " + SHA_A,
+            break_glass=BreakGlass(
+                actor="release-manager",
+                reason="emergency approval cannot override digest equality",
                 candidate_sha=SHA_A,
-                audit_reason="emergency approval cannot override digest equality",
+                human_command="release-train promote --candidate " + SHA_A,
             ),
             tag_writer=tag_writer,
             audit_log=audit_ok,
@@ -606,7 +605,16 @@ async def test_reserve_version_after_promote_state_is_rejected() -> None:
     async def audit_ok(*a: Any, **k: Any) -> int:
         return 7
 
-    await promote(SHA_A, "rm", audit_log=audit_ok, conn_factory=_factory(conn))
+    async def tag_writer(train) -> bool:
+        return True
+
+    await promote(
+        SHA_A,
+        "rm",
+        tag_writer=tag_writer,
+        audit_log=audit_ok,
+        conn_factory=_factory(conn),
+    )
 
     with pytest.raises(VersionReservationStateError):
         await reserve_version(SHA_A, "v1.2.3", conn_factory=_factory(conn))
