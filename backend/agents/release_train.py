@@ -102,6 +102,24 @@ class AuditWriteError(ReleaseTrainError):
     """
 
 
+class DigestEqualityError(ReleaseTrainError):
+    """Final tag digest equality was not proven; promote aborted."""
+
+
+@dataclass(frozen=True)
+class BreakGlassOverride:
+    """Human break-glass evidence for exceptional promote-time gates.
+
+    RT-22 permits only an explicit human command carrying the exact
+    candidate SHA and a non-empty audit reason. This payload is audit
+    evidence; it never bypasses final digest equality.
+    """
+
+    human_command: str
+    candidate_sha: str
+    audit_reason: str
+
+
 @dataclass(frozen=True)
 class ReleaseTrainRow:
     """One release-train candidate row."""
@@ -184,12 +202,14 @@ class PostgresReleaseTrainStore:
         candidate_sha: str,
         actor: str,
         *,
+        break_glass: BreakGlassOverride | None = None,
         tag_writer: TagWriter | None = None,
         audit_log: AuditLog | None = None,
     ) -> PromoteResult:
         return await promote(
             candidate_sha,
             actor,
+            break_glass=break_glass,
             tag_writer=tag_writer,
             audit_log=audit_log,
             conn_factory=self._factory,
@@ -275,6 +295,7 @@ async def promote(
     candidate_sha: str,
     actor: str,
     *,
+    break_glass: BreakGlassOverride | None = None,
     tag_writer: TagWriter | None = None,
     audit_log: AuditLog | None = None,
     conn_factory: ConnFactory | None = None,
@@ -297,11 +318,10 @@ async def promote(
 
     3. **Tag write** (``tag_writer``, RT-12) runs only after the audit
        row exists. Its boolean return is persisted as
-       ``final_digest_equality``. A ``tag_writer`` failure also marks
-       the train ``failed`` (the audit row already records the attempt).
-       When ``tag_writer`` is ``None`` (RT-12 not yet wired) the promote
-       completes with ``final_digest_equality`` left unverified
-       (recorded ``False``: nothing proved equality).
+       ``final_digest_equality``. A missing writer, false equality, or
+       ``tag_writer`` failure marks the train ``failed`` (the audit row
+       already records the attempt). No break-glass payload can bypass
+       this equality check.
 
     On success transitions ``promoting`` -> ``promoted`` and returns the
     :class:`PromoteResult`.
@@ -311,6 +331,7 @@ async def promote(
     if normalized is None:
         raise UnknownTrain(f"not a 40-hex candidate SHA: {candidate_sha!r}")
     actor = _text(actor)
+    break_glass_payload = _break_glass_payload(break_glass, normalized)
 
     async with _acquire(conn_factory) as conn:
         # (1) CAS-acquire. The WHERE re-checks promotion_state at commit
@@ -349,7 +370,9 @@ async def promote(
 
         # (2) Audit HARD gate -- before any tag write.
         try:
-            audit_id = await _audit_insert(audit_log, train, actor)
+            audit_id = await _audit_insert(
+                audit_log, train, actor, break_glass=break_glass_payload
+            )
         except Exception as exc:  # noqa: BLE001 -- convert to hard-gate failure
             await _mark_failed(conn, normalized)
             raise AuditWriteError(
@@ -374,6 +397,12 @@ async def promote(
                 f"tag write failed for {normalized} after audit row "
                 f"{audit_id}: {type(exc).__name__}: {exc}"
             ) from exc
+        if not final_equality:
+            await _mark_failed(conn, normalized)
+            raise DigestEqualityError(
+                f"final digest equality was not proven for {normalized}; "
+                "aborting promote"
+            )
 
         promoted = await conn.fetchrow(
             """
@@ -400,7 +429,11 @@ async def promote(
 
 
 async def _audit_insert(
-    audit_log: AuditLog | None, train: ReleaseTrainRow, actor: str
+    audit_log: AuditLog | None,
+    train: ReleaseTrainRow,
+    actor: str,
+    *,
+    break_glass: dict[str, str] | None = None,
 ) -> int | None:
     """Write the promote audit row; return its id or ``None`` on failure.
 
@@ -415,19 +448,46 @@ async def _audit_insert(
 
         audit_log = audit.log
 
+    after = {
+        "promotion_state": "promoting",
+        "source_digest_backend": train.source_digest_backend,
+        "source_digest_frontend": train.source_digest_frontend,
+        "reserved_version": train.reserved_version,
+    }
+    if break_glass is not None:
+        after["break_glass"] = break_glass
+
     return await audit_log(
         "release_train.promote",
         "release_train",
         train.candidate_sha,
         before={"promotion_state": "pending"},
-        after={
-            "promotion_state": "promoting",
-            "source_digest_backend": train.source_digest_backend,
-            "source_digest_frontend": train.source_digest_frontend,
-            "reserved_version": train.reserved_version,
-        },
+        after=after,
         actor=actor,
     )
+
+
+def _break_glass_payload(
+    break_glass: BreakGlassOverride | None, candidate_sha: str
+) -> dict[str, str] | None:
+    if break_glass is None:
+        return None
+    if not isinstance(break_glass, BreakGlassOverride):
+        raise TypeError("break_glass must be a BreakGlassOverride")
+    command = _required_text(
+        "break_glass.human_command", break_glass.human_command
+    )
+    exact_sha = _full_sha("break_glass.candidate_sha", break_glass.candidate_sha)
+    if exact_sha != candidate_sha:
+        raise ValueError(
+            "break_glass.candidate_sha must match candidate_sha exactly"
+        )
+    reason = _required_text("break_glass.audit_reason", break_glass.audit_reason)
+    return {
+        "human_command": command,
+        "candidate_sha": exact_sha,
+        "audit_reason": reason,
+    }
 
 
 async def _mark_failed(conn: Any, candidate_sha: str) -> None:
@@ -539,8 +599,19 @@ def _text(value: Any) -> str:
     return value.strip()
 
 
+def _required_text(field: str, value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError(f"{field} must be a string")
+    clean = value.strip()
+    if not clean:
+        raise ValueError(f"{field} must be non-empty")
+    return clean
+
+
 __all__ = [
     "AuditWriteError",
+    "BreakGlassOverride",
+    "DigestEqualityError",
     "PROMOTION_STATES",
     "PostgresReleaseTrainStore",
     "PromoteRaceLost",

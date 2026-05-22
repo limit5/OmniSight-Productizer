@@ -24,6 +24,8 @@ import pytest
 from backend.agents.release_train import (
     PROMOTION_STATES,
     AuditWriteError,
+    BreakGlassOverride,
+    DigestEqualityError,
     PostgresReleaseTrainStore,
     PromoteRaceLost,
     PromoteResult,
@@ -200,6 +202,89 @@ async def test_promote_succeeds_and_records_audit_and_equality() -> None:
     assert row.row_version == 2
 
 
+async def test_break_glass_requires_human_command_exact_sha_and_reason() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+
+    async def audit_ok(*a: Any, **k: Any) -> int:
+        return 1
+
+    async def tag_writer(train) -> bool:
+        return True
+
+    bad_sha = BreakGlassOverride(
+        human_command="release-train promote --break-glass",
+        candidate_sha=SHA_B,
+        audit_reason="migration gate emergency approved by release manager",
+    )
+    with pytest.raises(ValueError, match="must match candidate_sha exactly"):
+        await promote(
+            SHA_A,
+            "release-manager",
+            break_glass=bad_sha,
+            tag_writer=tag_writer,
+            audit_log=audit_ok,
+            conn_factory=_factory(conn),
+        )
+    assert conn.rows[SHA_A]["promotion_state"] == "pending"
+
+    missing_reason = BreakGlassOverride(
+        human_command="release-train promote --break-glass",
+        candidate_sha=SHA_A,
+        audit_reason="",
+    )
+    with pytest.raises(ValueError, match="audit_reason"):
+        await promote(
+            SHA_A,
+            "release-manager",
+            break_glass=missing_reason,
+            tag_writer=tag_writer,
+            audit_log=audit_ok,
+            conn_factory=_factory(conn),
+        )
+    assert conn.rows[SHA_A]["promotion_state"] == "pending"
+
+
+async def test_break_glass_payload_is_written_to_promote_audit() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+    audit_after: list[dict[str, Any]] = []
+
+    async def audit_ok(*a: Any, **k: Any) -> int:
+        audit_after.append(k["after"])
+        return 77
+
+    async def tag_writer(train) -> bool:
+        return True
+
+    await promote(
+        SHA_A,
+        "release-manager",
+        break_glass=BreakGlassOverride(
+            human_command="release-train promote --candidate " + SHA_A,
+            candidate_sha=SHA_A,
+            audit_reason="human-approved rollback compatibility exception",
+        ),
+        tag_writer=tag_writer,
+        audit_log=audit_ok,
+        conn_factory=_factory(conn),
+    )
+
+    assert audit_after == [
+        {
+            "promotion_state": "promoting",
+            "source_digest_backend": DIGEST_BE,
+            "source_digest_frontend": DIGEST_FE,
+            "reserved_version": None,
+            "break_glass": {
+                "human_command": "release-train promote --candidate " + SHA_A,
+                "candidate_sha": SHA_A,
+                "audit_reason": "human-approved rollback compatibility exception",
+            },
+        }
+    ]
+
+
 async def test_two_concurrent_promotes_exactly_one_wins() -> None:
     conn = _FakeConn()
     await _seed(conn)
@@ -259,7 +344,16 @@ async def test_second_sequential_promote_loses_after_first_promoted() -> None:
     async def audit_ok(*a: Any, **k: Any) -> int:
         return 7
 
-    await promote(SHA_A, "rm", audit_log=audit_ok, conn_factory=_factory(conn))
+    async def tag_writer(train) -> bool:
+        return True
+
+    await promote(
+        SHA_A,
+        "rm",
+        tag_writer=tag_writer,
+        audit_log=audit_ok,
+        conn_factory=_factory(conn),
+    )
     # The train is now 'promoted'; a re-promote finds no 'pending' row.
     with pytest.raises(PromoteRaceLost):
         await promote(SHA_A, "rm", audit_log=audit_ok, conn_factory=_factory(conn))
@@ -348,18 +442,50 @@ async def test_tag_writer_failure_after_audit_marks_failed() -> None:
     assert row is not None and row.promotion_state == "failed"
 
 
-async def test_promote_without_tag_writer_records_equality_false() -> None:
+async def test_promote_without_tag_writer_fails_digest_equality_closed() -> None:
     conn = _FakeConn()
     await _seed(conn)
 
     async def audit_ok(*a: Any, **k: Any) -> int:
         return 1
 
-    result = await promote(
-        SHA_A, "rm", audit_log=audit_ok, conn_factory=_factory(conn)
-    )
-    # No tag_writer (RT-12 not wired): nothing proved digest equality.
-    assert result.final_digest_equality is False
+    with pytest.raises(DigestEqualityError):
+        await promote(
+            SHA_A, "rm", audit_log=audit_ok, conn_factory=_factory(conn)
+        )
+    row = await get_train(SHA_A, conn_factory=_factory(conn))
+    assert row is not None
+    assert row.promotion_state == "failed"
+    assert row.final_digest_equality is None
+
+
+async def test_break_glass_cannot_bypass_digest_equality_failure() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+
+    async def audit_ok(*a: Any, **k: Any) -> int:
+        return 2
+
+    async def tag_writer(train) -> bool:
+        return False
+
+    with pytest.raises(DigestEqualityError):
+        await promote(
+            SHA_A,
+            "release-manager",
+            break_glass=BreakGlassOverride(
+                human_command="release-train promote --candidate " + SHA_A,
+                candidate_sha=SHA_A,
+                audit_reason="emergency approval cannot override digest equality",
+            ),
+            tag_writer=tag_writer,
+            audit_log=audit_ok,
+            conn_factory=_factory(conn),
+        )
+    row = await get_train(SHA_A, conn_factory=_factory(conn))
+    assert row is not None
+    assert row.promotion_state == "failed"
+    assert row.final_digest_equality is None
 
 
 # -- store wrapper + validation ---------------------------------------------
@@ -373,7 +499,12 @@ async def test_store_wrapper_delegates() -> None:
     async def audit_ok(*a: Any, **k: Any) -> int:
         return 5
 
-    result = await store.promote(SHA_B, "rm", audit_log=audit_ok)
+    async def tag_writer(train) -> bool:
+        return True
+
+    result = await store.promote(
+        SHA_B, "rm", tag_writer=tag_writer, audit_log=audit_ok
+    )
     assert result.candidate_sha == SHA_B
     row = await store.get_train(SHA_B)
     assert row is not None and row.promotion_state == "promoted"
