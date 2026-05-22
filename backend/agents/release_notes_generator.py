@@ -1,10 +1,13 @@
-"""OP-777 release notes generator for release-tagged events.
+"""OP-777 release notes generator for release planning events.
 
-Consumes ``release_tagged`` records from the Sprint D release log, builds
+Consumes release planning records from the release log, builds
 ``docs/releases/vX.Y.Z.md`` from JIRA fixVersion tickets plus per-file
 lessons, and pushes the result to Gerrit for operator polish. The module
-keeps all mutable state in cursor files / git refs; module globals are
-constants so multi-worker processes derive the same values independently.
+accepts both the legacy post-tag event and the RT-10b planning-only
+reservation event so notes can be reviewed before promotion creates an
+image tag. The module keeps all mutable state in cursor files / git refs;
+module globals are constants so multi-worker processes derive the same
+values independently.
 """
 from __future__ import annotations
 
@@ -25,7 +28,11 @@ from backend.agents import jira_dispatch
 log = logging.getLogger(__name__)
 
 EVENT_RELEASE_TAGGED = "release_tagged"
+EVENT_RELEASE_VERSION_RESERVED = "release_version_reserved"
 EVENT_RELEASE_NOTES_DRAFTED = "release_notes_drafted"
+RELEASE_NOTE_INPUT_EVENTS = frozenset(
+    {EVENT_RELEASE_TAGGED, EVENT_RELEASE_VERSION_RESERVED}
+)
 DEFAULT_AGENT_CLASS = "subscription-codex"
 DEFAULT_REPO = Path("/home/user/sora-bridge")
 DEFAULT_EVENT_LOG = Path("/home/user/work/sora/logs/release-milestone/systemd.log")
@@ -347,8 +354,8 @@ def draft_release_notes_for_event(
     notify: NotifyFn = _default_notify,
     event_sink: EventSink = emit_event,
 ) -> DraftResult:
-    """Generate release notes for one ``release_tagged`` record."""
-    if event.get("event") != EVENT_RELEASE_TAGGED:
+    """Generate release notes for one release planning record."""
+    if event.get("event") not in RELEASE_NOTE_INPUT_EVENTS:
         return DraftResult("ignored", "")
 
     try:

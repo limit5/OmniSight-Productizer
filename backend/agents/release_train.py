@@ -1,4 +1,4 @@
-"""OP-1585 [RT-10a] -- release_train model + CAS / audit-hard-gate promote.
+"""OP-1585/OP-1586 [RT-10a/RT-10b] -- release_train model.
 
 Owns the persistence + concurrency primitive behind the release-train
 promote (design doc ``docs/design/2026-05-21-release-train-stories.md``
@@ -35,9 +35,11 @@ production. The table is created by alembic migration
 ``0247_release_train`` (PG schema is alembic-owned; the sqlite branch
 exists for the migration's own portability tests).
 
-Out of scope (RT-10a): the version *reservation* flow is RT-10b; the
-image retag itself is RT-12; the standalone race test is RT-10c. This
-module ships the table, the model, the CAS, and the audit hard gate.
+OP-1586 / RT-10b adds the planning-only version reservation: a
+``reserved_version`` can be attached to a pending train so JIRA
+fixVersion / RELEASE META / release notes have a stable version before
+promotion. It deliberately does not create image tags or git tags; the
+image retag itself remains RT-12.
 """
 
 from __future__ import annotations
@@ -63,11 +65,15 @@ AuditLog = Callable[..., Awaitable[int | None]]
 # retag and returning whether the retagged *final* digest equalled the
 # validated *source* digest. Invoked ONLY after the audit gate passes.
 TagWriter = Callable[["ReleaseTrainRow"], Awaitable[bool]]
+ReservationEventSink = Callable[[str, dict[str, Any]], None]
+
+EVENT_RELEASE_VERSION_RESERVED = "release_version_reserved"
 
 # A full git commit SHA is exactly 40 lowercase hex characters; querying
 # / keying is by full SHA only (mirrors green_evidence). The 40-char
 # ``length`` CHECK in migration 0247 is the DB-side backstop.
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_RELEASE_VERSION_RE = re.compile(r"^v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9_.-]+)?$")
 
 # Closed promotion-state enum -- mirrors the CHECK constraint literal in
 # alembic migration 0247 (asserted equal in the tests).
@@ -120,6 +126,14 @@ class BreakGlassOverride:
     audit_reason: str
 
 
+class VersionReservationConflict(ReleaseTrainError):
+    """The train already reserved a different release version."""
+
+
+class VersionReservationStateError(ReleaseTrainError):
+    """The train is not in a state where planning reservation is allowed."""
+
+
 @dataclass(frozen=True)
 class ReleaseTrainRow:
     """One release-train candidate row."""
@@ -170,6 +184,16 @@ class PromoteResult:
     row_version: int
 
 
+@dataclass(frozen=True)
+class VersionReservationResult:
+    """Outcome of a planning-only :func:`reserve_version` call."""
+
+    candidate_sha: str
+    reserved_version: str
+    row_version: int
+    event: dict[str, Any]
+
+
 class PostgresReleaseTrainStore:
     """``release_train`` table backed store."""
 
@@ -212,6 +236,24 @@ class PostgresReleaseTrainStore:
             break_glass=break_glass,
             tag_writer=tag_writer,
             audit_log=audit_log,
+            conn_factory=self._factory,
+        )
+
+    async def reserve_version(
+        self,
+        candidate_sha: str,
+        reserved_version: str,
+        *,
+        actor: str = "",
+        meta_ticket: str | None = None,
+        event_sink: ReservationEventSink | None = None,
+    ) -> VersionReservationResult:
+        return await reserve_version(
+            candidate_sha,
+            reserved_version,
+            actor=actor,
+            meta_ticket=meta_ticket,
+            event_sink=event_sink,
             conn_factory=self._factory,
         )
 
@@ -289,6 +331,104 @@ async def get_train(
             normalized,
         )
     return _row_to_train(row) if row is not None else None
+
+
+async def reserve_version(
+    candidate_sha: str,
+    reserved_version: str,
+    *,
+    actor: str = "",
+    meta_ticket: str | None = None,
+    event_sink: ReservationEventSink | None = None,
+    conn_factory: ConnFactory | None = None,
+) -> VersionReservationResult:
+    """Attach a planning-only release version to a pending train.
+
+    This is RT-10b's boundary: the reserved ``vX.Y.Z`` is for JIRA
+    fixVersion / RELEASE META / release notes and changelog preparation
+    only. The function never calls a tag writer and never creates a git
+    or image tag. Repeating the same reservation is idempotent enough
+    for conductor retries; trying to swap to a different version raises
+    :class:`VersionReservationConflict`.
+    """
+
+    normalized = _normalize_sha(candidate_sha)
+    if normalized is None:
+        raise UnknownTrain(f"not a 40-hex candidate SHA: {candidate_sha!r}")
+    version = _release_version(reserved_version)
+    actor = _text(actor)
+
+    async with _acquire(conn_factory) as conn:
+        saved = await conn.fetchrow(
+            """
+            UPDATE release_train
+            SET reserved_version = $2,
+                actor = $3,
+                row_version = row_version + 1,
+                updated_at = NOW()
+            WHERE candidate_sha = $1
+              AND promotion_state = 'pending'
+              AND (reserved_version IS NULL OR reserved_version = $2)
+            RETURNING candidate_sha, source_digest_backend,
+                      source_digest_frontend, reserved_version,
+                      promotion_state, actor, row_version,
+                      final_digest_equality, promotion_audit_id
+            """,
+            normalized,
+            version,
+            actor,
+        )
+        if saved is None:
+            existing = await conn.fetchrow(
+                """
+                SELECT candidate_sha, source_digest_backend, source_digest_frontend,
+                       reserved_version, promotion_state, actor, row_version,
+                       final_digest_equality, promotion_audit_id
+                FROM release_train
+                WHERE candidate_sha = $1
+                """,
+                normalized,
+            )
+            if existing is None:
+                raise UnknownTrain(f"no release_train row for {normalized}")
+            current = _row_to_train(existing)
+            if current.promotion_state != "pending":
+                raise VersionReservationStateError(
+                    f"cannot reserve version for {normalized} in "
+                    f"{current.promotion_state!r} state"
+                )
+            raise VersionReservationConflict(
+                f"{normalized} already reserved "
+                f"{current.reserved_version!r}; refused {version!r}"
+            )
+
+    row = _row_to_train(saved)
+    event = release_version_reserved_event(row, meta_ticket=meta_ticket)
+    if event_sink is not None:
+        event_sink(EVENT_RELEASE_VERSION_RESERVED, event)
+    return VersionReservationResult(
+        candidate_sha=row.candidate_sha,
+        reserved_version=version,
+        row_version=row.row_version,
+        event=event,
+    )
+
+
+def release_version_reserved_event(
+    row: ReleaseTrainRow, *, meta_ticket: str | None = None
+) -> dict[str, Any]:
+    """Return the release-conductor event for planning-only reservation."""
+
+    if row.reserved_version is None:
+        raise ValueError("reserved_version must be set before emitting event")
+    event: dict[str, Any] = {
+        "event": EVENT_RELEASE_VERSION_RESERVED,
+        "fixVersion": row.reserved_version,
+        "candidateSha": row.candidate_sha,
+    }
+    if meta_ticket is not None and meta_ticket.strip():
+        event["metaTicket"] = meta_ticket.strip()
+    return event
 
 
 async def promote(
@@ -591,6 +731,15 @@ def _optional(field: str, value: str | None) -> str | None:
     return clean or None
 
 
+def _release_version(value: Any) -> str:
+    if not isinstance(value, str):
+        raise TypeError("reserved_version must be a string")
+    clean = value.strip()
+    if not _RELEASE_VERSION_RE.fullmatch(clean):
+        raise ValueError("reserved_version must match vMAJOR.MINOR.PATCH")
+    return clean
+
+
 def _text(value: Any) -> str:
     if value is None:
         return ""
@@ -612,15 +761,22 @@ __all__ = [
     "AuditWriteError",
     "BreakGlassOverride",
     "DigestEqualityError",
+    "EVENT_RELEASE_VERSION_RESERVED",
     "PROMOTION_STATES",
     "PostgresReleaseTrainStore",
     "PromoteRaceLost",
     "PromoteResult",
     "PromotionState",
+    "ReservationEventSink",
     "ReleaseTrainError",
     "ReleaseTrainRow",
     "UnknownTrain",
+    "VersionReservationConflict",
+    "VersionReservationResult",
+    "VersionReservationStateError",
     "create_train",
     "get_train",
     "promote",
+    "release_version_reserved_event",
+    "reserve_version",
 ]

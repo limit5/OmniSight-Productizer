@@ -14,14 +14,18 @@ fake connection:
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from backend.agents.release_train import (
+    EVENT_RELEASE_VERSION_RESERVED,
     PROMOTION_STATES,
     AuditWriteError,
     BreakGlassOverride,
@@ -31,9 +35,12 @@ from backend.agents.release_train import (
     PromoteResult,
     ReleaseTrainError,
     UnknownTrain,
+    VersionReservationConflict,
+    VersionReservationStateError,
     create_train,
     get_train,
     promote,
+    reserve_version,
 )
 
 
@@ -42,6 +49,7 @@ SHA_B = "0123456789abcdef0123456789abcdef01234567"
 SHA_ABSENT = "f" * 40
 DIGEST_BE = "sha256:" + "1" * 64
 DIGEST_FE = "sha256:" + "2" * 64
+AUTO_CHANGELOG = Path(__file__).resolve().parents[2] / "scripts" / "auto_changelog.py"
 
 
 class _FakeRow(dict[str, Any]):
@@ -78,6 +86,19 @@ class _FakeConn:
         if "INSERT INTO release_train" in sql:
             row = self._new_row(args)
             self.rows[row["candidate_sha"]] = row
+            return _FakeRow(row)
+        if "SET reserved_version" in sql:
+            sha, version, actor = args
+            row = self.rows.get(sha)
+            if (
+                row is None
+                or row["promotion_state"] != "pending"
+                or row["reserved_version"] not in (None, version)
+            ):
+                return None
+            row["reserved_version"] = version
+            row["actor"] = actor
+            row["row_version"] += 1
             return _FakeRow(row)
         if "SELECT 1 FROM release_train" in sql:
             return _FakeRow(one=1) if args[0] in self.rows else None
@@ -520,6 +541,111 @@ async def test_create_train_rejects_empty_digest() -> None:
     conn = _FakeConn()
     with pytest.raises(ValueError, match="non-empty image digest"):
         await create_train(SHA_A, "", DIGEST_FE, conn_factory=_factory(conn))
+
+
+# -- RT-10b: planning-only version reservation ------------------------------
+
+
+async def test_reserve_version_sets_fixversion_without_tag_writer() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    result = await reserve_version(
+        SHA_A,
+        "v1.2.3",
+        actor="planner",
+        meta_ticket="OP-1586",
+        event_sink=lambda event, payload: events.append((event, payload)),
+        conn_factory=_factory(conn),
+    )
+
+    assert result.reserved_version == "v1.2.3"
+    assert result.event == {
+        "event": "release_version_reserved",
+        "fixVersion": "v1.2.3",
+        "candidateSha": SHA_A,
+        "metaTicket": "OP-1586",
+    }
+    assert events == [(EVENT_RELEASE_VERSION_RESERVED, result.event)]
+
+    row = await get_train(SHA_A, conn_factory=_factory(conn))
+    assert row is not None
+    assert row.reserved_version == "v1.2.3"
+    assert row.promotion_state == "pending"
+    assert row.final_digest_equality is None
+    assert row.promotion_audit_id is None
+
+
+async def test_reserve_version_same_version_is_retry_safe() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+
+    first = await reserve_version(
+        " " + SHA_A.upper() + " ", " v1.2.3 ", conn_factory=_factory(conn)
+    )
+    second = await reserve_version(SHA_A, "v1.2.3", conn_factory=_factory(conn))
+
+    assert first.reserved_version == second.reserved_version == "v1.2.3"
+    assert second.row_version == 2
+
+
+async def test_reserve_version_conflicting_version_is_rejected() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+    await reserve_version(SHA_A, "v1.2.3", conn_factory=_factory(conn))
+
+    with pytest.raises(VersionReservationConflict):
+        await reserve_version(SHA_A, "v1.2.4", conn_factory=_factory(conn))
+
+
+async def test_reserve_version_after_promote_state_is_rejected() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+
+    async def audit_ok(*a: Any, **k: Any) -> int:
+        return 7
+
+    await promote(SHA_A, "rm", audit_log=audit_ok, conn_factory=_factory(conn))
+
+    with pytest.raises(VersionReservationStateError):
+        await reserve_version(SHA_A, "v1.2.3", conn_factory=_factory(conn))
+
+
+async def test_reserve_version_rejects_malformed_version() -> None:
+    conn = _FakeConn()
+    await _seed(conn)
+
+    with pytest.raises(ValueError, match="vMAJOR.MINOR.PATCH"):
+        await reserve_version(SHA_A, "sha-" + SHA_A, conn_factory=_factory(conn))
+
+
+def _load_auto_changelog():
+    spec = importlib.util.spec_from_file_location("auto_changelog", AUTO_CHANGELOG)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_changelog_renders_from_reserved_fixversion_without_tag(tmp_path: Path) -> None:
+    mod = _load_auto_changelog()
+    output = tmp_path / "CHANGELOG.md"
+
+    inserted, path = mod.update_changelog(
+        path=output,
+        version="v1.2.3",
+        tickets=[mod.ChangelogTicket("OP-1586", "Reserve version for planning")],
+        template=False,
+        today=date(2026, 5, 22),
+    )
+
+    assert inserted is True
+    assert path == str(output)
+    text = output.read_text(encoding="utf-8")
+    assert "## v1.2.3 - 2026-05-22" in text
+    assert "- OP-1586 - Reserve version for planning" in text
 
 
 # -- enum drift guard against the migration ---------------------------------
