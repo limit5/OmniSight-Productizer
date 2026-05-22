@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
-"""OP-1481 — sign an image-promotion attestation with cosign keyless.
+"""OP-1481 — sign an image-promotion attestation with cosign.
 
 The promotion CLI builds the predicate and delegates the actual
 ``cosign attest`` call here so operators can re-run or inspect the
 attestation step independently.
+
+OP-1610 (ADR-0040 hole #5): when ``COSIGN_KEY`` is set this signs with the
+self-managed key (``--key $COSIGN_KEY``; cosign reads ``COSIGN_PASSWORD`` for
+an encrypted key). When unset it falls back to cosign keyless-OIDC.
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,7 +23,9 @@ from typing import Any, Callable
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PREDICATE_DIR = REPO_ROOT / "audit" / "promotion-predicates"
-DEFAULT_ATTESTATION_TYPE = "omnisight.image.promotion.v1"
+# OP-1610: cosign ≥2.x requires a URI predicate-type (the bare
+# "omnisight.image.promotion.v1" is rejected as an invalid predicate type).
+DEFAULT_ATTESTATION_TYPE = "https://omnisight.dev/attestation/image-promotion/v1"
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -67,9 +74,14 @@ def attest(
     dry_run: bool = False,
     runner: Runner = subprocess.run,
 ) -> list[str]:
-    cmd = [
-        "cosign",
-        "attest",
+    cmd = ["cosign", "attest"]
+    # OP-1610 (ADR-0040 #5): self-managed COSIGN_KEY when set, else keyless-OIDC.
+    cosign_key = os.environ.get("COSIGN_KEY", "").strip()
+    if cosign_key:
+        # Self-managed key → a PRIVATE signature. Do NOT upload to the public
+        # Sigstore Rekor tlog (it would leak promotion metadata + image refs).
+        cmd += ["--key", cosign_key, "--tlog-upload=false"]
+    cmd += [
         "--predicate",
         str(predicate_path),
         "--type",
