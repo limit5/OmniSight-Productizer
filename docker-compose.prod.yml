@@ -648,7 +648,8 @@ services:
   #   dedicated ``installer-docker-socket-proxy`` with the §4.6 ACL.
   # ──────────────────────────────────────────────────────────────────
   omnisight-installer:
-    image: ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-installer:bs-v1
+    # ADR-0042: migrated GHCR -> GitLab CR (bs-vN hard-pin preserved). Bump bs-v1->bs-v2 by re-tag.
+    image: ${OMNISIGHT_REGISTRY}/installer:bs-v1
     pull_policy: missing
     build:
       context: .
