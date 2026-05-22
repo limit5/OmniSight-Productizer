@@ -24,12 +24,27 @@ from backend.config import settings
 
 
 EVENT_RELEASE_TAGGED = "release_tagged"
+REGISTRY_ENV = "OMNISIGHT_REGISTRY"
 DEFAULT_EVENT_LOG = Path("/home/user/work/sora/logs/release-milestone/staging.log")
 DEFAULT_CURSOR = Path("/home/user/work/sora/logs/release-milestone/release-approval.cursor")
 DEFAULT_STORE = Path(os.environ.get("OMNISIGHT_RELEASE_APPROVAL_DIR", "data/release-approvals"))
-DEFAULT_IMAGE_REPOSITORY = os.environ.get(
-    "OMNISIGHT_RELEASE_IMAGE_REPOSITORY",
-    "ghcr.io/omnisight/productizer",
+
+
+def _required_omnisight_registry() -> str:
+    registry = os.environ.get(REGISTRY_ENV, "").strip().rstrip("/")
+    if not registry:
+        raise RuntimeError(f"{REGISTRY_ENV} is required")
+    return registry
+
+
+def _default_image_repository() -> str:
+    return f"{_required_omnisight_registry()}/backend"
+
+
+DEFAULT_IMAGE_REPOSITORY = (
+    _default_image_repository()
+    if os.environ.get(REGISTRY_ENV, "").strip()
+    else ""
 )
 DEFAULT_APPROVAL_BASE_URL = os.environ.get(
     "OMNISIGHT_RELEASE_APPROVAL_BASE_URL",
@@ -242,7 +257,7 @@ class ProductionDeployOrchestrator:
         *,
         runner: CommandRunner = run_command,
         compose_file: str = "docker-compose.prod.yml",
-        image_repository: str = DEFAULT_IMAGE_REPOSITORY,
+        image_repository: str | None = None,
         staging_rollback_command: list[str] | None = None,
         health_timeout_seconds: float = 120.0,
         deploy_timeout_seconds: float = 600.0,
@@ -250,7 +265,9 @@ class ProductionDeployOrchestrator:
     ) -> None:
         self.runner = runner
         self.compose_file = compose_file
-        self.image_repository = image_repository
+        self.image_repository = (
+            image_repository if image_repository is not None else _default_image_repository()
+        )
         raw_cancel = os.environ.get("OMNISIGHT_RELEASE_STAGING_ROLLBACK_CMD", "").strip()
         self.staging_rollback_command = (
             list(staging_rollback_command)

@@ -11,6 +11,8 @@ from fastapi.testclient import TestClient
 from backend import production_release as pr
 from backend.routers import release_approval
 
+TEST_REGISTRY = "sora.services:49160/omnisight/omnisight-productizer"
+
 
 class RecordingRunner:
     def __init__(self, *, fail_on: str = "") -> None:
@@ -31,6 +33,11 @@ class FakeClock:
         current = self.now
         self.now += 42.0
         return current
+
+
+@pytest.fixture(autouse=True)
+def _registry_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OMNISIGHT_REGISTRY", TEST_REGISTRY)
 
 
 def test_release_tagged_creates_pending_approval_and_notification_link(tmp_path: Path) -> None:
@@ -117,7 +124,7 @@ def test_ship_blue_green_sequence_completes_under_ten_minutes() -> None:
 
     assert elapsed < 600
     assert runner.calls == [
-        ["docker", "pull", "ghcr.io/omnisight/productizer:v9.99.0"],
+        ["docker", "pull", f"{TEST_REGISTRY}/backend:v9.99.0"],
         [
             "docker", "compose", "-f", "docker-compose.prod.yml", "run", "--rm",
             "--no-deps", "-e", "PYTHONSAFEPATH=1", "-w", "/app/backend",

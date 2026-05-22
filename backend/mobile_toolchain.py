@@ -6,7 +6,7 @@ into an executable build plan. Three responsibilities:
 1. **Local Linux builds (Android / Flutter-Android / RN-Android)** —
    resolve the gradle-wrapper / fastlane invocation, shell out either
    directly (when the caller already runs inside the
-   ``ghcr.io/omnisight/mobile-build`` image) or via ``docker run``
+   ``${OMNISIGHT_REGISTRY}/mobile-build`` image) or via ``docker run``
    against the image.
 
 2. **Remote macOS delegation (iOS)** — Linux cannot build iOS. The
@@ -60,7 +60,7 @@ Public API
     Pure command-builder helpers.
 ``MOBILE_BUILD_IMAGE``
     Canonical name of the P1 Docker image
-    (``ghcr.io/omnisight/mobile-build``).
+    (``${OMNISIGHT_REGISTRY}/mobile-build``).
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ logger = logging.getLogger(__name__)
 
 
 # ── Canonical image / env var names ────────────────────────────────
-MOBILE_BUILD_IMAGE: str = "ghcr.io/omnisight/mobile-build"
+MOBILE_BUILD_IMAGE: str = "${OMNISIGHT_REGISTRY}/mobile-build"
 """P1 Docker image name. Consumers should reference this constant
 rather than hard-coding the string — when the image moves to a new
 registry or tag, one-line change here propagates."""
@@ -167,7 +167,7 @@ class NoGradleFallbackError(MobileToolchainError):
 
     The two actions that surface this error don't have a Gradle helper
     by design — template scaffolding and SDK manager invocations are
-    baked into ``ghcr.io/omnisight/mobile-build`` and only become
+    baked into ``${OMNISIGHT_REGISTRY}/mobile-build`` and only become
     callable from the host once an operator runs
     ``scripts/install_android_cli.sh`` (or the build moves into the
     Docker image, where the CLI ships pre-installed). Surfacing this
@@ -807,7 +807,7 @@ def docker_run_android_command(
     extra_env: Optional[Mapping[str, str]] = None,
 ) -> list[str]:
     """Wrap an ``inner_argv`` gradle invocation in a ``docker run``
-    against ``ghcr.io/omnisight/mobile-build``.
+    against ``${OMNISIGHT_REGISTRY}/mobile-build``.
 
     The generated command mounts ``project_root`` at ``/workspace``
     and forwards ``extra_env`` (names only — values stay in the
@@ -837,7 +837,7 @@ def describe(toolchain: MobileToolchain) -> str:
 
     Example::
 
-        android/arm64-v8a sdk=35 min=24 -> ghcr.io/omnisight/mobile-build:latest (docker=yes)
+        android/arm64-v8a sdk=35 min=24 -> ${OMNISIGHT_REGISTRY}/mobile-build:latest (docker=yes)
         ios/arm64 sdk=17.5 min=16.0 -> macOS builder: Self-hosted macOS runner
     """
     head = (

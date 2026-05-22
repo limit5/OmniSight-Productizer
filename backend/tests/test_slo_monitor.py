@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-import pytest
 import yaml
 
 from backend.slo_monitor import (
@@ -22,6 +21,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SLO_CONFIG = PROJECT_ROOT / "config" / "slos.yaml"
 SYSTEMD_SERVICE = PROJECT_ROOT / "deploy" / "systemd" / "omnisight-slo-monitor.service"
 DEPLOY_PROD = PROJECT_ROOT / "scripts" / "deploy-prod.sh"
+TEST_REGISTRY = "sora.services:49160/omnisight/omnisight-productizer"
 
 
 class _Source:
@@ -124,14 +124,22 @@ def test_compose_rollback_checks_previous_images_before_redeploy() -> None:
         previous_tag="v1.2.2",
         namespace="acme",
         runner=runner,
-        env={},
+        env={"OMNISIGHT_REGISTRY": TEST_REGISTRY},
     )
 
     result = rollback.rollback(timeout_seconds=300)
 
     assert result.status == "rolled_back"
-    assert calls[0] == ("docker", "manifest", "inspect", image_refs_for_tag("acme", "v1.2.2")[0])
-    assert calls[1] == ("docker", "manifest", "inspect", image_refs_for_tag("acme", "v1.2.2")[1])
+    assert image_refs_for_tag(
+        "acme",
+        "v1.2.2",
+        env={"OMNISIGHT_REGISTRY": TEST_REGISTRY},
+    ) == (
+        f"{TEST_REGISTRY}/backend:v1.2.2",
+        f"{TEST_REGISTRY}/frontend:v1.2.2",
+    )
+    assert calls[0] == ("docker", "manifest", "inspect", f"{TEST_REGISTRY}/backend:v1.2.2")
+    assert calls[1] == ("docker", "manifest", "inspect", f"{TEST_REGISTRY}/frontend:v1.2.2")
     assert calls[2][-len(APP_SERVICES):] == APP_SERVICES
     assert calls[3][-len(APP_SERVICES):] == APP_SERVICES
 
@@ -147,7 +155,7 @@ def test_compose_rollback_halts_when_previous_image_missing() -> None:
         previous_tag="v1.2.2",
         namespace="acme",
         runner=runner,
-        env={},
+        env={"OMNISIGHT_REGISTRY": TEST_REGISTRY},
     )
 
     result = rollback.rollback(timeout_seconds=300)

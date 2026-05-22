@@ -217,10 +217,27 @@ def _run_command(
     )
 
 
-def image_refs_for_tag(namespace: str, tag: str) -> tuple[str, str]:
+REGISTRY_ENV = "OMNISIGHT_REGISTRY"
+
+
+def _required_omnisight_registry(env: Mapping[str, str] | None = None) -> str:
+    source = env if env is not None else os.environ
+    registry = source.get(REGISTRY_ENV, "").strip().rstrip("/")
+    if not registry:
+        raise RuntimeError(f"{REGISTRY_ENV} is required")
+    return registry
+
+
+def image_refs_for_tag(
+    namespace: str,
+    tag: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> tuple[str, str]:
+    registry = _required_omnisight_registry(env)
     return (
-        f"ghcr.io/{namespace}/omnisight-backend:{tag}",
-        f"ghcr.io/{namespace}/omnisight-frontend:{tag}",
+        f"{registry}/backend:{tag}",
+        f"{registry}/frontend:{tag}",
     )
 
 
@@ -236,7 +253,7 @@ class ComposeRollbackExecutor:
         if not self.previous_tag:
             return False, "previous image tag is not configured"
         missing: list[str] = []
-        for image in image_refs_for_tag(self.namespace, self.previous_tag):
+        for image in image_refs_for_tag(self.namespace, self.previous_tag, env=self.env):
             result = self.runner(
                 ("docker", "manifest", "inspect", image),
                 env=self.env,

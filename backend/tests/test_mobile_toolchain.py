@@ -15,7 +15,7 @@ Covers:
 All tests are pure-Python; none invoke subprocess, shell out to
 docker, or reach any remote host. The P2 (#287) simulate track will
 add the execution-side integration tests against the actual
-``ghcr.io/omnisight/mobile-build`` image.
+``${OMNISIGHT_REGISTRY}/mobile-build`` image.
 """
 
 from __future__ import annotations
@@ -31,9 +31,9 @@ from backend import mobile_toolchain as mt
 #  Constants / canonical names
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def test_mobile_build_image_is_ghcr_omnisight():
+def test_mobile_build_image_uses_registry_placeholder():
     """Operators + CI configs hard-reference this string. Pin it."""
-    assert mt.MOBILE_BUILD_IMAGE == "ghcr.io/omnisight/mobile-build"
+    assert mt.MOBILE_BUILD_IMAGE == "${OMNISIGHT_REGISTRY}/mobile-build"
 
 
 def test_supported_macos_builders_is_the_four_from_todo():
