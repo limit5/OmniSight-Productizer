@@ -60,7 +60,12 @@ Wants=network-online.target staging-audit-verify-token.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-WorkingDirectory=/home/user/sora-bridge/deploy/staging
+; 2026-05-22: re-pointed from the retired sora-bridge copy to the repo stack
+; (project omnisight-staging, deploy/staging/.env). NOTE: a FRESH staging DB
+; must be `alembic upgrade head`-initialised once before first boot — the
+; backend integrity probe will not bootstrap an empty DB. The named PG volume
+; persists across reboot, so up -d --wait works after the one-time init.
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer/deploy/staging
 ; environment=staging is part of the env contract verify-env-contract.sh
 ; enforces; export it here too so the compose project + the contract
 ; check agree even if the operator's .env / .env.local omits it.
@@ -70,11 +75,11 @@ Environment=OMNISIGHT_STAGING_HEALTHZ_URL=http://localhost:18080/healthz
 ; Optional per-host overrides (staging port, alternative env file path,
 ; sandbox-key prefixes). `-` => optional; absence is not an error.
 EnvironmentFile=-/home/user/.config/omnisight/staging-compose.env
-ExecStartPre=/home/user/sora-bridge/infra/staging/verify-env-contract.sh
+ExecStartPre=/home/user/work/sora/OmniSight-Productizer/infra/staging/verify-env-contract.sh
 ExecStartPre=/usr/bin/test -s /home/user/.config/omnisight/staging-audit-verify-token
-ExecStart=/usr/bin/docker compose -f /home/user/sora-bridge/deploy/staging/docker-compose.yml up -d --wait --remove-orphans
+ExecStart=/usr/bin/docker compose -p omnisight-staging --env-file /home/user/work/sora/OmniSight-Productizer/deploy/staging/.env -f /home/user/work/sora/OmniSight-Productizer/deploy/staging/docker-compose.yml up -d --wait --remove-orphans
 ExecStartPost=/usr/bin/curl -fsS --retry 12 --retry-delay 5 --retry-connrefused -o /dev/null ${OMNISIGHT_STAGING_HEALTHZ_URL}
-ExecStop=/usr/bin/docker compose -f /home/user/sora-bridge/deploy/staging/docker-compose.yml down
+ExecStop=/usr/bin/docker compose -p omnisight-staging --env-file /home/user/work/sora/OmniSight-Productizer/deploy/staging/.env -f /home/user/work/sora/OmniSight-Productizer/deploy/staging/docker-compose.yml down
 ; First boot pulls the GHCR backend/frontend images + builds nothing
 ; (pull_policy: missing); allow 5 min. Subsequent boots converge in
 ; seconds because `up -d --wait` short-circuits on already-healthy state.
