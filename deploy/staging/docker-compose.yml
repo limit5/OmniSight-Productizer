@@ -90,6 +90,13 @@ services:
       - staging-data:/app/data
       - staging-artifacts:/app/.artifacts
       - staging-sdks:/app/.sdks
+      # [OP-1606] RT-08 deploy-overlay lock — host dir written by
+      # scripts/write_deploy_overlay_lock.py (via scripts/staging_deploy.sh)
+      # before bring-up, mounted read-only so the backend reads
+      # /etc/omnisight/deploy-overlay.lock once at startup. Default points at a
+      # shared dir for the plain `compose up` path (overlay observational);
+      # the blue-green deploy exports a per-color OMNISIGHT_DEPLOY_OVERLAY_DIR.
+      - ${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/staging/overlay}:/etc/omnisight:ro
     secrets:
       - staging_audit_verify_token
     environment:
@@ -144,6 +151,8 @@ services:
       - staging-data:/app/data
       - staging-artifacts:/app/.artifacts
       - staging-sdks:/app/.sdks
+      # [OP-1606] RT-08 deploy-overlay lock — see backend-a for the contract.
+      - ${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/staging/overlay}:/etc/omnisight:ro
     secrets:
       - staging_audit_verify_token
     environment:

@@ -37,6 +37,10 @@ DOCKER_BIN="${DOCKER_BIN:-docker}"
 # overridable via --bundle. Empty => digest verification skipped (legacy path).
 CANDIDATE_BUNDLE="${OMNISIGHT_CANDIDATE_BUNDLE:-}"
 STATE_DIR="${OMNISIGHT_STAGING_STATE_DIR:-/var/lib/omnisight/staging}"
+# [OP-1606] RT-08 deploy-overlay lock writer + per-color host dir mounted at
+# /etc/omnisight in the backend containers (see deploy/staging/docker-compose.yml).
+OVERLAY_LOCK_WRITER="${OMNISIGHT_OVERLAY_LOCK_WRITER:-$ROOT/scripts/write_deploy_overlay_lock.py}"
+OVERLAY_STATE_DIR="${OMNISIGHT_STAGING_OVERLAY_DIR:-$STATE_DIR/overlay}"
 ACTIVE_COLOR_FILE="$STATE_DIR/active_color"
 ACTIVE_TAG_FILE="$STATE_DIR/active_tag"
 ACTIVE_UPSTREAM_FILE="${OMNISIGHT_STAGING_ACTIVE_UPSTREAM:-$STATE_DIR/active-upstream.caddy}"
@@ -350,6 +354,36 @@ verify_pulled_digests() {
 	log "digest equality: backend+frontend pulled digests == candidate bundle"
 }
 
+# ── RT-08 deploy-overlay lock (OP-1606) ─────────────────────────────────────
+# Write the deployment-identity lock for $color from the certified candidate
+# bundle into a per-color host dir, and export OMNISIGHT_DEPLOY_OVERLAY_DIR so
+# the compose mounts THAT dir at /etc/omnisight in the backend containers. The
+# backend reads /etc/omnisight/deploy-overlay.lock once at startup, serves the
+# six identity fields on /api/version, and gates /readyz on them when
+# OMNISIGHT_REQUIRE_DEPLOY_OVERLAY=1 (staging .env). Per-color dirs keep the
+# standby's identity separate from the still-serving active color during a
+# blue-green switch. No candidate bundle => skip (the legacy change-merged
+# webhook path); the overlay then stays observational, matching the digest-
+# verification skip above.
+write_overlay_lock() {
+	local color="$1" image_tag="$2"
+	local dir="${OVERLAY_STATE_DIR}-${color}"
+	if [[ -z "$CANDIDATE_BUNDLE" ]]; then
+		log "deploy-overlay: no candidate bundle — skipping RT-08 lock write for $color (overlay stays observational)"
+		return 0
+	fi
+	mkdir -p "$dir"
+	if ! python3 "$OVERLAY_LOCK_WRITER" \
+		--bundle "$CANDIDATE_BUNDLE" \
+		--tag "$image_tag" \
+		--out "$dir/deploy-overlay.lock"; then
+		alert StagingOverlayLockWriteFailed "could not write RT-08 deploy-overlay lock for $color from $CANDIDATE_BUNDLE"
+		return 1
+	fi
+	export OMNISIGHT_DEPLOY_OVERLAY_DIR="$dir"
+	log "deploy-overlay: wrote RT-08 lock $dir/deploy-overlay.lock for $color tag=$image_tag"
+}
+
 deploy_color() {
 	local color="$1"
 	local image_tag="$2"
@@ -366,6 +400,12 @@ deploy_color() {
 	# just pulled matches the certified candidate bundle (RT-05b).
 	if ! verify_pulled_digests "$image_tag"; then
 		alert StagingDigestMismatch "post-pull digest != candidate bundle for tag $image_tag; refusing to start $color"
+		return 1
+	fi
+	# RT-08: populate the deployment-identity lock BEFORE bringing $color up so
+	# the backend reads a complete lock at startup (a write failure aborts the
+	# deploy — fail-closed).
+	if ! write_overlay_lock "$color" "$image_tag"; then
 		return 1
 	fi
 	eval "$compose up -d"
