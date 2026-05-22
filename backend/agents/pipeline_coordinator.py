@@ -102,6 +102,9 @@ DECISION_LOG_DIR_ENV = "OMNISIGHT_COORDINATOR_DECISION_LOG_DIR"
 CONFIG_DIR_ENV = "OMNISIGHT_COORDINATOR_CONFIG_DIR"
 BRIDGE_EVENTS_FILE_ENV = "OMNISIGHT_COORDINATOR_BRIDGE_EVENTS_FILE"
 JIRA_AGENT_CLASS_ENV = "OMNISIGHT_COORDINATOR_JIRA_AGENT_CLASS"
+MAX_ACTIONS_PER_TICK_ENV = "OMNISIGHT_COORDINATOR_MAX_ACTIONS_PER_TICK"
+ACTING_KILL_ENV = "OMNISIGHT_COORDINATOR_ACTING_KILL"
+FAIRNESS_LOG_RECORD_CAP_ENV = "OMNISIGHT_COORDINATOR_FAIRNESS_LOG_RECORD_CAP"
 
 # ADR-0021 §9 L1: heartbeat every 60s.
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
@@ -111,6 +114,9 @@ DEFAULT_TICK_INTERVAL_SECONDS = 1.0
 DEFAULT_JIRA_POLL_INTERVAL_SECONDS = 60.0
 DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0 * 60.0
 DEFAULT_EVENT_DEDUPE_SECONDS = 5.0 * 60.0
+DEFAULT_MAX_ACTIONS_PER_TICK = 1
+DEFAULT_FAIRNESS_LOG_RECORD_CAP = 1000
+FAIRNESS_CURSOR_WINDOW = timedelta(hours=24)
 
 # Directory / file permission bits (ADR-0021 §3.1: dir 0700, files 0600).
 _DIR_MODE = 0o700
@@ -264,6 +270,27 @@ def record_ts(record: dict[str, Any]) -> datetime | None:
         return datetime.fromisoformat(raw)
     except ValueError:
         return None
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "[pipeline_coordinator] invalid %s=%r; using %d",
+            name,
+            raw,
+            default,
+        )
+        return default
+    return max(minimum, value)
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name) == "1"
 
 
 # ── Action layer (ADR-0021 §6) — shadow stub for 29f-3 ────────────────
@@ -1716,6 +1743,92 @@ class PipelineCoordinator:
             },
         }
 
+    def _recent_decision_log_records(
+        self,
+        *,
+        window: timedelta = FAIRNESS_CURSOR_WINDOW,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Read the bounded newest-first decision-log tail used for fairness."""
+        now = self._clock()
+        since = now - window
+        limit = (
+            _env_int(
+                FAIRNESS_LOG_RECORD_CAP_ENV,
+                DEFAULT_FAIRNESS_LOG_RECORD_CAP,
+                minimum=1,
+            )
+            if limit is None
+            else limit
+        )
+        records: list[dict[str, Any]] = []
+        directory = self._decision_log.directory
+        if not directory.exists():
+            return records
+        for path in sorted(directory.glob("*.jsonl"), reverse=True):
+            try:
+                day = datetime.fromisoformat(path.stem).date()
+            except ValueError:
+                continue
+            if day < since.date() or day > now.date():
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError as exc:
+                logger.warning(
+                    "[pipeline_coordinator] fairness log read failed for %s: %s",
+                    path,
+                    exc,
+                )
+                continue
+            for line in reversed(lines):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                ts = record_ts(record)
+                if ts is None or ts < since or ts > now:
+                    continue
+                records.append(record)
+                if len(records) >= limit:
+                    return records
+        return records
+
+    def _last_attempted_action_target(self) -> str | None:
+        for record in self._recent_decision_log_records():
+            if record.get("event") != "decision_tick":
+                continue
+            for result in reversed(record.get("action_results") or []):
+                if not isinstance(result, dict):
+                    continue
+                if result.get("reason") == "tick_cap":
+                    continue
+                target = result.get("target")
+                if isinstance(target, str) and target:
+                    return target
+        return None
+
+    def _fair_action_order(self, actions: tuple[Action, ...]) -> tuple[Action, ...]:
+        real_actions = [a for a in actions if not isinstance(a, NoopAction)]
+        if len(real_actions) <= 1:
+            return actions
+        by_target: dict[str, list[Action]] = {}
+        for action in real_actions:
+            by_target.setdefault(action.target, []).append(action)
+        targets = list(by_target)
+        last_target = self._last_attempted_action_target()
+        if last_target in by_target and len(targets) > 1:
+            idx = targets.index(last_target) + 1
+            targets = targets[idx:] + targets[:idx]
+        ordered_real = [action for target in targets for action in by_target[target]]
+        ordered_iter = iter(ordered_real)
+        return tuple(
+            action if isinstance(action, NoopAction) else next(ordered_iter)
+            for action in actions
+        )
+
     def build_context(self) -> DecisionContext:
         """Assemble the per-tick :class:`DecisionContext`.
 
@@ -2087,24 +2200,82 @@ class PipelineCoordinator:
         if self._config.capacity_path is not None:
             write_capacity_snapshot(ctx.capacity, self._config.capacity_path)
         result = self._engine.evaluate(ctx)
-        if self._acting:
+        kill_switch = _env_flag(ACTING_KILL_ENV)
+        if self._acting and not kill_switch:
             actions = tuple(
                 a if isinstance(a, NoopAction) else dataclasses.replace(a, dry_run=False)
                 for a in result.actions
             )
             result = dataclasses.replace(result, actions=actions)
+        elif kill_switch:
+            logger.warning("[pipeline_coordinator] acting kill-switch active; observing only")
+            actions = tuple(
+                a if isinstance(a, NoopAction) else dataclasses.replace(a, dry_run=True)
+                for a in result.actions
+            )
+            result = dataclasses.replace(result, actions=actions)
+        fair_actions = self._fair_action_order(result.actions)
+        if fair_actions is not result.actions:
+            result = dataclasses.replace(result, actions=fair_actions)
         # Hand each real (non-noop) action to the action layer. In shadow
         # mode it only records the would-be execution; the outcomes go into
         # the decision-log line so a fired rule is observable end-to-end.
-        action_results = [
-            self._action_executor(a, ctx)
-            for a in result.actions
-            if not isinstance(a, NoopAction)
-        ]
+        action_results = self._execute_tick_actions(result.actions, ctx)
         record = self._build_tick_record(result, action_results)
         self._decision_log.append(record)
         self._run_learning_loop(record, result)
         return result
+
+    def _execute_tick_actions(
+        self,
+        actions: tuple[Action, ...],
+        ctx: DecisionContext,
+    ) -> list[dict[str, Any]]:
+        max_actions = _env_int(
+            MAX_ACTIONS_PER_TICK_ENV,
+            DEFAULT_MAX_ACTIONS_PER_TICK,
+            minimum=0,
+        )
+        attempted = 0
+        action_results: list[dict[str, Any]] = []
+        for action in actions:
+            if isinstance(action, NoopAction):
+                continue
+            if attempted >= max_actions:
+                logger.warning(
+                    "[pipeline_coordinator] tick action cap reached for %s %s",
+                    action.kind,
+                    action.target,
+                )
+                action_results.append(
+                    {
+                        "kind": action.kind,
+                        "target": action.target,
+                        "executed": False,
+                        "reason": "tick_cap",
+                    }
+                )
+                continue
+            attempted += 1
+            try:
+                action_results.append(self._action_executor(action, ctx))
+            except Exception as exc:  # noqa: BLE001
+                # A single bad executor call must not suppress the tick log.
+                logger.warning(
+                    "[pipeline_coordinator] action executor failed for %s %s: %s",
+                    action.kind,
+                    action.target,
+                    exc,
+                )
+                action_results.append(
+                    {
+                        "kind": action.kind,
+                        "target": action.target,
+                        "executed": False,
+                        "error": str(exc),
+                    }
+                )
+        return action_results
 
     def _run_learning_loop(self, record: dict[str, Any], result: DecisionResult) -> None:
         """Write back a Tier-2 decision + fire any due daily/weekly handler.

@@ -47,6 +47,22 @@ class RecordingExecutor:
         }
 
 
+class FailingThenRecordingExecutor:
+    def __init__(self) -> None:
+        self.actions: list[Action] = []
+
+    def __call__(self, action: Action, ctx: DecisionContext) -> dict[str, Any]:
+        self.actions.append(action)
+        if len(self.actions) == 1:
+            raise RuntimeError("boom")
+        return {
+            "kind": action.kind,
+            "target": action.target,
+            "executed": not action.dry_run,
+            "dry_run": action.dry_run,
+        }
+
+
 class RecordingLearningLoop:
     def __init__(self) -> None:
         self.writebacks: list[dict[str, Any]] = []
@@ -159,6 +175,160 @@ def test_run_once_shadow_leaves_action_dry_run_true(tmp_path: Path) -> None:
     [record] = _read_log_records(coord.config.decision_log_dir)
     assert record["dry_run"] is True
     assert record["actions"][0]["dry_run"] is True
+
+
+def test_run_once_caps_actions_and_logs_tick_cap(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COORDINATOR_MAX_ACTIONS_PER_TICK", "1")
+    original = _decision_result(
+        actions=(
+            Action.mention_operator("OP-1616-A", message="a"),
+            Action.mention_operator("OP-1616-B", message="b"),
+            Action.mention_operator("OP-1616-C", message="c"),
+        )
+    )
+    executor = RecordingExecutor()
+    coord = PipelineCoordinator(
+        _config(tmp_path),
+        engine=FixedEngine(original),
+        clock=lambda: NOW,
+        capacity_provider=_capacity,
+        action_executor=executor,
+        acting=True,
+    )
+
+    coord.run_once()
+
+    assert [a.target for a in executor.actions] == ["OP-1616-A"]
+    [record] = _read_log_records(coord.config.decision_log_dir)
+    assert record["action_results"] == [
+        {
+            "kind": ACTION_MENTION_OPERATOR,
+            "target": "OP-1616-A",
+            "executed": True,
+            "dry_run": False,
+        },
+        {
+            "kind": ACTION_MENTION_OPERATOR,
+            "target": "OP-1616-B",
+            "executed": False,
+            "reason": "tick_cap",
+        },
+        {
+            "kind": ACTION_MENTION_OPERATOR,
+            "target": "OP-1616-C",
+            "executed": False,
+            "reason": "tick_cap",
+        },
+    ]
+
+
+def test_run_once_executor_exception_still_records_tick(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COORDINATOR_MAX_ACTIONS_PER_TICK", "2")
+    original = _decision_result(
+        actions=(
+            Action.mention_operator("OP-1616-A", message="a"),
+            Action.mention_operator("OP-1616-B", message="b"),
+        )
+    )
+    executor = FailingThenRecordingExecutor()
+    coord = PipelineCoordinator(
+        _config(tmp_path),
+        engine=FixedEngine(original),
+        clock=lambda: NOW,
+        capacity_provider=_capacity,
+        action_executor=executor,
+        acting=True,
+    )
+
+    coord.run_once()
+
+    [record] = _read_log_records(coord.config.decision_log_dir)
+    assert record["decision_id"] == original.decision_id
+    assert record["action_results"][0] == {
+        "kind": ACTION_MENTION_OPERATOR,
+        "target": "OP-1616-A",
+        "executed": False,
+        "error": "boom",
+    }
+    assert record["action_results"][1] == {
+        "kind": ACTION_MENTION_OPERATOR,
+        "target": "OP-1616-B",
+        "executed": True,
+        "dry_run": False,
+    }
+
+
+def test_run_once_kill_switch_forces_observe_only(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COORDINATOR_ACTING_KILL", "1")
+    original = _decision_result(
+        actions=(Action.mention_operator("OP-1616", message="note", dry_run=False),)
+    )
+    executor = RecordingExecutor()
+    coord = PipelineCoordinator(
+        _config(tmp_path),
+        engine=FixedEngine(original),
+        clock=lambda: NOW,
+        capacity_provider=_capacity,
+        action_executor=executor,
+        acting=True,
+    )
+
+    result = coord.run_once()
+
+    assert result.actions[0].dry_run is True
+    assert executor.actions[0].dry_run is True
+    [record] = _read_log_records(coord.config.decision_log_dir)
+    assert record["dry_run"] is True
+    assert record["action_results"] == [
+        {
+            "kind": ACTION_MENTION_OPERATOR,
+            "target": "OP-1616",
+            "executed": False,
+            "dry_run": True,
+        }
+    ]
+
+
+def test_run_once_fairness_cursor_advances_across_capped_ticks(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COORDINATOR_MAX_ACTIONS_PER_TICK", "1")
+    original = _decision_result(
+        actions=(
+            Action.mention_operator("OP-1616-A", message="a"),
+            Action.mention_operator("OP-1616-B", message="b"),
+            Action.mention_operator("OP-1616-C", message="c"),
+        )
+    )
+    executor = RecordingExecutor()
+    coord = PipelineCoordinator(
+        _config(tmp_path),
+        engine=FixedEngine(original),
+        clock=lambda: NOW,
+        capacity_provider=_capacity,
+        action_executor=executor,
+        acting=True,
+    )
+
+    coord.run_once()
+    coord.run_once()
+    coord.run_once()
+
+    assert [a.target for a in executor.actions] == [
+        "OP-1616-A",
+        "OP-1616-B",
+        "OP-1616-C",
+    ]
 
 
 def test_live_executor_default_denies_dry_run_actions(
