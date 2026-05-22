@@ -409,6 +409,10 @@ deploy_color() {
 		return 1
 	fi
 	eval "$compose up -d"
+	# OP-1609: the backend reads the deploy-overlay lock once at startup.
+	# Recreate only the backends after the lock write so same-config redeploys
+	# pick up changed lock content without bouncing stateful dependencies.
+	eval "$compose up -d --no-deps --force-recreate backend-a backend-b"
 }
 
 drain_color() {

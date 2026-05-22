@@ -20,6 +20,7 @@ pin the writer this ticket adds and its wiring:
 from __future__ import annotations
 
 import importlib.util
+import stat
 import sys
 from pathlib import Path
 
@@ -163,6 +164,15 @@ def test_write_lock_round_trips_through_reader(tmp_path):
     assert overlay["promotion_audit_id"] == "v0.5.0-rc4-4218e1c7"
 
 
+def test_write_lock_is_world_readable_for_container_uid(tmp_path):
+    """OP-1609: backend uid 65532 reads the lock through a read-only mount."""
+    out = tmp_path / "deploy-overlay.lock"
+    fields = writer.resolve_fields(_bundle(), tag="v0.5.0-rc4", env={})
+    writer.write_lock(out, fields)
+
+    assert stat.S_IMODE(out.stat().st_mode) == 0o644
+
+
 def test_write_lock_refuses_incomplete_and_writes_nothing(tmp_path):
     out = tmp_path / "deploy-overlay.lock"
     bundle = _bundle()
@@ -244,6 +254,15 @@ def test_staging_deploy_sh_invokes_writer_before_bringup():
     assert "OMNISIGHT_DEPLOY_OVERLAY_DIR" in text
     # The lock must be written before `compose up` (fail-closed bring-up).
     assert text.index("write_overlay_lock \"$color\"") < text.index('eval "$compose up -d"')
+
+
+def test_staging_deploy_sh_force_recreates_backends_after_overlay_write():
+    text = STAGING_DEPLOY_SH.read_text(encoding="utf-8")
+    write_idx = text.index("write_overlay_lock \"$color\"")
+    recreate_idx = text.index(
+        'eval "$compose up -d --no-deps --force-recreate backend-a backend-b"'
+    )
+    assert write_idx < recreate_idx
 
 
 def test_staging_compose_mounts_overlay_lock_into_both_backends():

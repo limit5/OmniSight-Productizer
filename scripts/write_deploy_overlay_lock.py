@@ -32,7 +32,8 @@ never advertise a half-known identity.
 
 The lock is the same env-file (``KEY=value``) shape the compose ``env_file:``
 understands, and is written atomically (temp file + ``os.replace``) so a reader
-mid-deploy never sees a torn file.
+mid-deploy never sees a torn file. The final file is mode ``0644`` because the
+backend runs as uid 65532 against a read-only mount and must be able to read it.
 
 Usage (the staging deploy path, scripts/staging_deploy.sh, invokes this):
 
@@ -196,6 +197,7 @@ def write_lock(path: Path, fields: Mapping[str, str]) -> Path:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(body)
+            os.fchmod(handle.fileno(), 0o644)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path)

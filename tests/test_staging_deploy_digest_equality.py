@@ -300,6 +300,15 @@ def test_staging_deploy_verifies_before_up():
     assert verify_idx < up_idx, "digest verification must gate `compose up`"
 
 
+def test_staging_deploy_force_recreates_backends_after_overlay_write():
+    text = STAGING_DEPLOY.read_text()
+    write_idx = text.index("write_overlay_lock \"$color\"")
+    recreate_idx = text.index(
+        'eval "$compose up -d --no-deps --force-recreate backend-a backend-b"'
+    )
+    assert write_idx < recreate_idx, "backends must re-read the overlay lock"
+
+
 def test_sync_does_not_digest_check_rollback():
     """The previous-tag rollbacks must NOT pass a bundle (they re-deploy an
     already-good tag, not the candidate)."""
