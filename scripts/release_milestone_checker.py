@@ -6,13 +6,9 @@ version:
 
 * ``milestone_ready`` when every promotion gate is green.
 * ``milestone_blocked`` with machine-readable reasons when any gate is red.
-* ``milestone_force_promoted`` (ADR-0019 / OP-967 AUDIT-18b) when gates
-  are red **but** the fixVersion carries the operator emergency-override
-  label ``release:force-promote``. The original blockers ride along in
-  ``reasons`` so the audit trail records exactly what was bypassed; when
-  gates are actually green the override is a no-op (plain ``milestone_ready``).
-* ``LabelInvalid`` when the fixVersion carries a near-miss of the override
-  label (e.g. ``release:force_promote``) — rejected, not silently honored.
+* ``LabelInvalid`` when the fixVersion carries the retired unattended
+  force-promote label ``release:force-promote`` or a near-miss spelling
+  (e.g. ``release:force_promote``) -- rejected, not silently honored.
 
 The integration layer is deliberately thin. Pure gate evaluation is kept
 small enough for tests to exercise without live JIRA, Gerrit, or CI access.
@@ -37,13 +33,11 @@ from typing import Any, Iterable, Protocol
 PUBLISHED_STATUS_NAMES = {"Published", "公開済み"}
 GREEN_STATUSES = {"green", "ok", "pass", "passed", "success"}
 
-# ── ADR-0019 operator force-promote override ───────────────────────────
-# The one valid spelling of the fixVersion label (frozen wire contract).
+# ── RT-22: unattended force-promote labels are retired ──────────────────
 FORCE_PROMOTE_LABEL = "release:force-promote"
-# Subtle misspellings an operator might type instead — ``release:force_promote``
-# and friends. Anything that *looks* like the override but isn't the frozen
-# form is rejected (``LabelInvalid``), not silently honored — mirrors the
-# AUDIT-13a ``release:force_create`` rejection in release_conductor_cron.sh.
+# Subtle misspellings an operator might type instead -- ``release:force_promote``
+# and friends. Anything that looks like the retired override is rejected
+# (``LabelInvalid``), not silently honored.
 _FORCE_PROMOTE_TYPO_RE = re.compile(r"^release:force[-_]?promote$")
 # Same label surface release_conductor_cron.sh::query_fix_version_labels
 # reads: the literal ``labels`` array plus ``release:*`` tokens embedded in
@@ -408,18 +402,18 @@ def parse_fix_version_labels(version_rows: Iterable[dict[str, Any]], version: st
 
 
 def resolve_force_promote(labels: Iterable[str], version: str) -> MilestoneResult | bool:
-    """Interpret a fixVersion label set against the ADR-0019 override contract.
+    """Reject retired force-promote labels.
 
-    Returns ``True`` when ``release:force-promote`` is present, ``False``
-    when no override applies, and a ``LabelInvalid`` :class:`MilestoneResult`
-    when a near-miss spelling (``release:force_promote`` …) is present —
-    the caller should emit that result verbatim and act on nothing else.
+    Returns ``False`` when no retired override spelling is present, and a
+    ``LabelInvalid`` :class:`MilestoneResult` when ``release:force-promote`` or
+    a near-miss spelling (``release:force_promote`` ...) is present -- the
+    caller should emit that result verbatim and act on nothing else.
     """
     label_set = set(labels)
     collisions = sorted(
         label
         for label in label_set
-        if label != FORCE_PROMOTE_LABEL and _FORCE_PROMOTE_TYPO_RE.match(label)
+        if label == FORCE_PROMOTE_LABEL or _FORCE_PROMOTE_TYPO_RE.match(label)
     )
     if collisions:
         return MilestoneResult(
@@ -431,13 +425,14 @@ def resolve_force_promote(labels: Iterable[str], version: str) -> MilestoneResul
                     "code": "label_format_collision",
                     "labels": collisions,
                     "detail": (
-                        f"fixVersion label(s) {collisions} resemble {FORCE_PROMOTE_LABEL!r} "
-                        "but are not the frozen wire form; fix the label on the JIRA version"
+                        f"fixVersion label(s) {collisions} match the retired "
+                        "unattended force-promote path; use the audited human "
+                        "release-train break-glass command instead"
                     ),
                 },
             ),
         )
-    return FORCE_PROMOTE_LABEL in label_set
+    return False
 
 
 def evaluate_version(
@@ -450,11 +445,7 @@ def evaluate_version(
 ) -> MilestoneResult:
     now = now or utc_now()
 
-    # ── ADR-0019 operator force-promote override ───────────────────────
-    # The fixVersion label set is read *now*, at gate-evaluation time —
-    # never a value cached at META-creation time: operators add
-    # ``release:force-promote`` mid-chain, after a gate has gone red.
-    force_promote = False
+    # ── RT-22: fail closed on retired unattended force-promote labels ───
     try:
         labels = list(jira.fix_version_labels(version))
     except Exception as exc:  # LabelLookupFailedDuringForce — fail closed
@@ -467,7 +458,6 @@ def evaluate_version(
         if isinstance(decision, MilestoneResult):
             # LabelFormatCollision -> LabelInvalid; do not act on anything else.
             return decision
-        force_promote = decision
 
     reasons: list[dict[str, Any]] = []
 
@@ -533,20 +523,7 @@ def evaluate_version(
         reasons.append(smoke.evidence)
 
     if not reasons:
-        # Gates green — any override is a no-op; emit the normal ready event
-        # with no warning block so the warning stays meaningful (it appears
-        # only when something was actually bypassed). ADR-0019 §"Emit".
         return MilestoneResult(version=version, event="milestone_ready", reasons=())
-    if force_promote:
-        # Gates red but the operator override is set: emit the
-        # green-equivalent ``milestone_force_promoted`` carrying the
-        # original blockers, instead of ``milestone_blocked`` (ADR-0019).
-        return MilestoneResult(
-            version=version,
-            event="milestone_force_promoted",
-            reasons=tuple(reasons),
-            operator_override=True,
-        )
     return MilestoneResult(version=version, event="milestone_blocked", reasons=tuple(reasons))
 
 

@@ -285,7 +285,7 @@ def test_ticket_merged_on_develop_uses_current_patch_set_flag() -> None:
     assert "--current-patch-set" in cmd
 
 
-# ── OP-967 AUDIT-18b — release:force-promote operator override (ADR-0019) ──
+# ── OP-1589 RT-22 — retired unattended release:force-promote labels ──
 
 
 _NOW = datetime(2026, 5, 12, 8, 0, tzinfo=timezone.utc)
@@ -321,7 +321,10 @@ def test_parse_fix_version_labels_mirrors_cron_heredoc() -> None:
 
 
 def test_resolve_force_promote_distinguishes_present_absent_and_typo() -> None:
-    assert checker.resolve_force_promote(["release:force-promote"], "v9.99.0") is True
+    exact = checker.resolve_force_promote(["release:force-promote"], "v9.99.0")
+    assert isinstance(exact, checker.MilestoneResult)
+    assert exact.event == "LabelInvalid"
+    assert exact.reasons[0]["code"] == "label_format_collision"
     assert checker.resolve_force_promote(["release:skip-auto-conductor"], "v9.99.0") is False
     assert checker.resolve_force_promote([], "v9.99.0") is False
     typo = checker.resolve_force_promote(["release:force_promote"], "v9.99.0")
@@ -331,20 +334,23 @@ def test_resolve_force_promote_distinguishes_present_absent_and_typo() -> None:
     assert typo.reasons[0]["labels"] == ["release:force_promote"]
 
 
-def test_force_promote_label_converts_blocked_to_force_promoted() -> None:
-    """Synthetic fixVersion with the label: a gate that would normally emit
-    ``milestone_blocked`` instead emits ``milestone_force_promoted`` with the
-    original blockers carried in ``reasons`` (AC #2, AC #4)."""
+def test_force_promote_label_is_rejected_instead_of_force_promoted() -> None:
+    """RT-22: the old fixVersion label must not turn red gates green."""
     tickets = _tickets(["公開済み", "進行中"])
     result = _eval(tickets=tickets, labels=["release:force-promote"])
 
-    assert result.event == "milestone_force_promoted"
-    assert result.operator_override is True
+    assert result.event == "LabelInvalid"
+    assert result.operator_override is False
     assert result.reasons == (
         {
-            "gate": "jira_fixversion",
-            "code": "tickets_not_published",
-            "tickets": ["OP-902"],
+            "gate": "operator_label",
+            "code": "label_format_collision",
+            "labels": ["release:force-promote"],
+            "detail": (
+                "fixVersion label(s) ['release:force-promote'] match the retired "
+                "unattended force-promote path; use the audited human "
+                "release-train break-glass command instead"
+            ),
         },
     )
 
@@ -365,15 +371,14 @@ def test_without_force_promote_label_stays_blocked() -> None:
     )
 
 
-def test_force_promote_label_is_noop_when_gates_green() -> None:
-    """Gates green ⇒ override is a no-op: plain ``milestone_ready``, no
-    warning block (ADR-0019 §"Emit")."""
+def test_force_promote_label_is_rejected_even_when_gates_green() -> None:
+    """RT-22: the retired unattended force label is invalid, not a no-op."""
     tickets = _tickets(["公開済み", "公開済み"])
     result = _eval(tickets=tickets, labels=["release:force-promote"])
 
-    assert result.event == "milestone_ready"
+    assert result.event == "LabelInvalid"
     assert result.operator_override is False
-    assert result.reasons == ()
+    assert result.reasons[0]["code"] == "label_format_collision"
 
 
 def test_force_promote_typo_label_emits_label_invalid() -> None:
@@ -401,22 +406,7 @@ def test_label_lookup_failure_fails_closed(capsys) -> None:
     assert "JIRA 503" in err
 
 
-def test_emit_event_force_promoted_payload(capsys) -> None:
-    checker.emit_event(
-        "milestone_force_promoted",
-        version="v9.99.0",
-        reasons=[{"gate": "ci_canary", "code": "status_not_green"}],
-        operator_override=True,
-    )
-    record = json.loads(capsys.readouterr().out.strip())
-    assert record["event"] == "milestone_force_promoted"
-    assert record["level"] == "WARN"
-    assert record["fixVersion"] == "v9.99.0"
-    assert record["operator_override"] is True
-    assert record["reasons"] == [{"gate": "ci_canary", "code": "status_not_green"}]
-
-
-def test_check_all_emits_force_promoted_event(capsys) -> None:
+def test_check_all_emits_label_invalid_not_force_promoted(capsys) -> None:
     tickets = _tickets(["進行中"])
     checker.check_all(
         jira=FakeJira(tickets, labels=["release:force-promote"]),
@@ -425,15 +415,13 @@ def test_check_all_emits_force_promoted_event(capsys) -> None:
         now=_NOW,
     )
     out = capsys.readouterr().out
-    assert '"event": "milestone_force_promoted"' in out
-    assert '"operator_override": true' in out
+    assert '"event": "LabelInvalid"' in out
+    assert "milestone_force_promoted" not in out
+    assert "operator_override" not in out
 
 
-def test_d5_wrapper_recognizes_force_promoted_as_green() -> None:
-    """Static guard that the D5 inline heredoc treats ``milestone_force_promoted``
-    as a ``milestone_ready`` equivalent (AC #3); the behavioural end-to-end
-    lives in ``test_auto_promote.py``."""
-    text = (REPO_ROOT / "scripts" / "auto_promote_develop_to_main.sh").read_text()
-    assert "milestone_force_promoted" in text
-    assert "EVENT_MILESTONE_FORCE_PROMOTED" in text
-    assert "GREEN_MILESTONE_EVENTS" in text
+def test_checker_no_longer_emits_force_promoted_event() -> None:
+    """Static guard for RT-22: the checker has no green force event path."""
+    text = SCRIPT.read_text()
+    assert 'event="milestone_force_promoted"' not in text
+    assert '"milestone_force_promoted"' not in text
