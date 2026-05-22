@@ -246,7 +246,7 @@ candidate-prepare-bundle:
     - export API_SUPPORTED="${API_SUPPORTED:-v1,v2}"
     - export FRONTEND_BUILT_AGAINST_API="${FRONTEND_BUILT_AGAINST_API:-v1}"
     - export DB_MIGRATION_HEAD="${DB_MIGRATION_HEAD:-unknown}"
-    - placeholder_digest="sha256:$(python3 -c 'print("0"*64)')"
+    - placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
     - export IMAGE_DIGEST_BACKEND="$placeholder_digest"
     - export IMAGE_DIGEST_FRONTEND="$placeholder_digest"
     - export IMAGE_DIGEST_BRIDGE="$placeholder_digest"
@@ -307,6 +307,50 @@ candidate-build-image:
         --label "org.opencontainers.image.bundle.sha=${BUNDLE_SHA}" \
         --tag "${IMAGE_BASE}:${CANDIDATE_IMAGE_TAG}" \
         .
+
+candidate-seal-bundle:
+  extends:
+    - .docker_job
+    - .candidate_rules
+  stage: sign
+  resource_group: candidate-image-pipeline
+  needs:
+    - job: candidate-prepare-bundle
+      artifacts: true
+    - job: candidate-build-image
+  script:
+    - test -n "${CANDIDATE_SHA:-}"
+    - test "${#CANDIDATE_SHA}" = "40"
+    - test "${CANDIDATE_IMAGE_TAG}" = "sha-${CANDIDATE_SHA}"
+    - test -f bundle.json
+    - export GIT_SHA="$(jq -r '.git_sha' bundle.json)"
+    - export GIT_REF="$(jq -r '.git_ref' bundle.json)"
+    - export BUILD_TIME="$(jq -r '.build_time' bundle.json)"
+    - export BUNDLE_ID="$(jq -r '.bundle_id' bundle.json)"
+    - export API_REQUIRED="$(jq -r '.contracts.api_required' bundle.json)"
+    - export API_SUPPORTED="$(jq -r '.contracts.api_supported | join(",")' bundle.json)"
+    - export FRONTEND_BUILT_AGAINST_API="$(jq -r '.contracts.frontend_built_against_api' bundle.json)"
+    - export OPENAPI_HASH="$(jq -r '.contracts.openapi_hash' bundle.json)"
+    - export DB_MIGRATION_HEAD="$(jq -r '.contracts.db_migration_head' bundle.json)"
+    - export IMAGE_DIGEST_BACKEND="$(docker buildx imagetools inspect "${CI_REGISTRY_IMAGE}/backend:${CANDIDATE_IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - export IMAGE_DIGEST_FRONTEND="$(docker buildx imagetools inspect "${CI_REGISTRY_IMAGE}/frontend:${CANDIDATE_IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | jq -r .)"
+    - export IMAGE_DIGEST_BRIDGE="$(jq -r '.images.bridge.digest' bundle.json)"
+    - placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    - test -n "$IMAGE_DIGEST_BACKEND" && test "$IMAGE_DIGEST_BACKEND" != "$placeholder_digest"
+    - test -n "$IMAGE_DIGEST_FRONTEND" && test "$IMAGE_DIGEST_FRONTEND" != "$placeholder_digest"
+    - bash scripts/emit_bundle_json.sh > bundle.json.sealed
+    - jq 'del(.images.bridge)' bundle.json.sealed > bundle.json
+    - BUNDLE_SHA="$(sha256sum bundle.json | awk '{print $1}')"
+    - test -n "$BUNDLE_SHA"
+    - printf 'BUNDLE_ID=%s\nBUNDLE_SHA=%s\nCANDIDATE_IMAGE_TAG=%s\n' "$BUNDLE_ID" "$BUNDLE_SHA" "$CANDIDATE_IMAGE_TAG" > candidate-bundle.env
+    - echo "sealed candidate bundle_id=$BUNDLE_ID bundle_sha=$BUNDLE_SHA backend_digest=$IMAGE_DIGEST_BACKEND frontend_digest=$IMAGE_DIGEST_FRONTEND"
+  artifacts:
+    name: "candidate-bundle-${CANDIDATE_SHA}"
+    paths:
+      - bundle.json
+    reports:
+      dotenv: candidate-bundle.env
+    expire_in: 90 days
 
 candidate-sign-image:
   extends:

@@ -90,6 +90,29 @@ def test_candidate_build_pushes_only_full_sha_tag_without_latest_or_release_tag(
     assert "git tag" not in flat
 
 
+def test_candidate_seal_bundle_rewrites_artifact_with_resolved_pair_digests() -> None:
+    ci = _load()
+    job = ci["candidate-seal-bundle"]
+    flat = _flatten_script(job)
+
+    assert job["stage"] == "sign"
+    assert job["resource_group"] == "candidate-image-pipeline"
+    assert "candidate-prepare-bundle" in _needed_jobs(job)
+    assert "candidate-build-image" in _needed_jobs(job)
+    assert job["artifacts"]["reports"]["dotenv"] == "candidate-bundle.env"
+    assert "bundle.json" in job["artifacts"]["paths"]
+
+    assert "${CI_REGISTRY_IMAGE}/backend:${CANDIDATE_IMAGE_TAG}" in flat
+    assert "${CI_REGISTRY_IMAGE}/frontend:${CANDIDATE_IMAGE_TAG}" in flat
+    assert "IMAGE_DIGEST_BACKEND=" in flat
+    assert "IMAGE_DIGEST_FRONTEND=" in flat
+    assert 'test "$IMAGE_DIGEST_BACKEND" != "$placeholder_digest"' in flat
+    assert 'test "$IMAGE_DIGEST_FRONTEND" != "$placeholder_digest"' in flat
+    assert "scripts/emit_bundle_json.sh > bundle.json.sealed" in flat
+    assert "jq 'del(.images.bridge)' bundle.json.sealed > bundle.json" in flat
+    assert "BUNDLE_SHA=" in flat
+
+
 def test_candidate_sign_sbom_and_attest_resolve_digest_by_full_sha_tag() -> None:
     ci = _load()
 
