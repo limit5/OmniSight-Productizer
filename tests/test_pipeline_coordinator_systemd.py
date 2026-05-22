@@ -67,6 +67,7 @@ def test_coordinator_unit_runs_from_sora_bridge_checkout() -> None:
         env["OMNISIGHT_COORDINATOR_DECISION_LOG_DIR"]
         == f"{CONFIG_DIR}/decision-log"
     )
+    assert env["OMNISIGHT_COORDINATOR_ACTING"] == "0"
     assert (
         _directive(service, "ExecStart")
         == "/usr/bin/python3 -m backend.agents.pipeline_coordinator"

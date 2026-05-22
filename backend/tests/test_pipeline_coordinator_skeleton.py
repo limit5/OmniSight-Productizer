@@ -23,6 +23,7 @@ import signal
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -325,6 +326,71 @@ def test_config_from_env_honours_decision_log_env(monkeypatch, tmp_path: Path) -
     cfg = CoordinatorConfig.from_env(config_dir=tmp_path / "cfg")
     assert cfg.decision_log_dir == target
     assert cfg.heartbeat_path == tmp_path / "cfg" / "heartbeat"
+
+
+def test_config_from_env_reads_acting_and_cold_start_caps(monkeypatch, tmp_path: Path) -> None:
+    """OP-1618: env gate + per-phase cold-start cap envs are parsed together."""
+    monkeypatch.setenv(pc.ACTING_ENV, "true")
+    monkeypatch.setenv(pc.COLD_START_MAX_INFRA_ENV, "2")
+    monkeypatch.setenv(pc.COLD_START_MAX_RECONCILE_ENV, "3")
+    monkeypatch.setenv(pc.COLD_START_MAX_SWEEP_ENV, "4")
+
+    cfg = CoordinatorConfig.from_env(config_dir=tmp_path / "cfg")
+
+    assert cfg.acting is True
+    assert cfg.cold_start_max_infra == 2
+    assert cfg.cold_start_max_reconcile == 3
+    assert cfg.cold_start_max_sweep == 4
+
+
+def test_config_from_env_defaults_to_shadow_and_one_per_phase_cap(tmp_path: Path) -> None:
+    """OP-1618: unset daemon env stays shadow-safe and caps each phase at one."""
+    cfg = CoordinatorConfig.from_env(env={}, config_dir=tmp_path / "cfg")
+
+    assert cfg.acting is False
+    assert cfg.cold_start_max_infra == 1
+    assert cfg.cold_start_max_reconcile == 1
+    assert cfg.cold_start_max_sweep == 1
+
+
+def test_main_env_gate_selects_shadow_or_live_executor(monkeypatch, tmp_path: Path) -> None:
+    """OP-1618: main() uses the daemon env gate to wire shadow vs live action."""
+    captured: list[dict[str, Any]] = []
+
+    class _FakeCoordinator:
+        def run_once(self) -> None:
+            return None
+
+        def run_forever(self) -> None:
+            return None
+
+        def run(self) -> None:
+            return None
+
+    class _FakeLiveActionExecutor:
+        def __init__(self, config: CoordinatorConfig) -> None:
+            captured.append({"live_agent_class": config.jira_agent_class})
+
+        def execute(self, action, ctx):
+            return {"executed": True}
+
+    def _build(config, *, acting=False, action_executor=None):
+        captured.append({"acting": acting, "has_executor": action_executor is not None})
+        return _FakeCoordinator()
+
+    monkeypatch.setattr(pc, "LiveActionExecutor", _FakeLiveActionExecutor)
+    monkeypatch.setattr(pc, "build_default_coordinator", _build)
+
+    monkeypatch.delenv(pc.ACTING_ENV, raising=False)
+    assert pc.main(["--once", "--config-dir", str(tmp_path / "shadow")]) == 0
+    monkeypatch.setenv(pc.ACTING_ENV, "1")
+    assert pc.main(["--once", "--config-dir", str(tmp_path / "acting")]) == 0
+
+    assert captured == [
+        {"acting": False, "has_executor": False},
+        {"live_agent_class": "subscription-claude"},
+        {"acting": True, "has_executor": True},
+    ]
 
 
 def test_main_once_runs_single_tick(tmp_path: Path, monkeypatch) -> None:

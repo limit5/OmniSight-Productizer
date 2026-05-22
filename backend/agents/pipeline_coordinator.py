@@ -103,8 +103,12 @@ CONFIG_DIR_ENV = "OMNISIGHT_COORDINATOR_CONFIG_DIR"
 BRIDGE_EVENTS_FILE_ENV = "OMNISIGHT_COORDINATOR_BRIDGE_EVENTS_FILE"
 JIRA_AGENT_CLASS_ENV = "OMNISIGHT_COORDINATOR_JIRA_AGENT_CLASS"
 MAX_ACTIONS_PER_TICK_ENV = "OMNISIGHT_COORDINATOR_MAX_ACTIONS_PER_TICK"
+ACTING_ENV = "OMNISIGHT_COORDINATOR_ACTING"
 ACTING_KILL_ENV = "OMNISIGHT_COORDINATOR_ACTING_KILL"
 FAIRNESS_LOG_RECORD_CAP_ENV = "OMNISIGHT_COORDINATOR_FAIRNESS_LOG_RECORD_CAP"
+COLD_START_MAX_INFRA_ENV = "OMNISIGHT_COORDINATOR_COLD_START_MAX_INFRA"
+COLD_START_MAX_RECONCILE_ENV = "OMNISIGHT_COORDINATOR_COLD_START_MAX_RECONCILE"
+COLD_START_MAX_SWEEP_ENV = "OMNISIGHT_COORDINATOR_COLD_START_MAX_SWEEP"
 
 # ADR-0021 §9 L1: heartbeat every 60s.
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
@@ -116,6 +120,9 @@ DEFAULT_SWEEP_INTERVAL_SECONDS = 60.0 * 60.0
 DEFAULT_EVENT_DEDUPE_SECONDS = 5.0 * 60.0
 DEFAULT_MAX_ACTIONS_PER_TICK = 1
 DEFAULT_FAIRNESS_LOG_RECORD_CAP = 1000
+DEFAULT_COLD_START_MAX_INFRA = 1
+DEFAULT_COLD_START_MAX_RECONCILE = 1
+DEFAULT_COLD_START_MAX_SWEEP = 1
 FAIRNESS_CURSOR_WINDOW = timedelta(hours=24)
 
 # Directory / file permission bits (ADR-0021 §3.1: dir 0700, files 0600).
@@ -143,6 +150,10 @@ class CoordinatorConfig:
     jira_poll_interval_seconds: float = DEFAULT_JIRA_POLL_INTERVAL_SECONDS
     sweep_interval_seconds: float = DEFAULT_SWEEP_INTERVAL_SECONDS
     event_dedupe_seconds: float = DEFAULT_EVENT_DEDUPE_SECONDS
+    acting: bool = False
+    cold_start_max_infra: int = DEFAULT_COLD_START_MAX_INFRA
+    cold_start_max_reconcile: int = DEFAULT_COLD_START_MAX_RECONCILE
+    cold_start_max_sweep: int = DEFAULT_COLD_START_MAX_SWEEP
 
     def __post_init__(self) -> None:
         if self.capacity_path is None:
@@ -183,6 +194,16 @@ class CoordinatorConfig:
                 env.get(BRIDGE_EVENTS_FILE_ENV, str(base / "bridge-events.jsonl"))
             ).expanduser(),
             jira_agent_class=env.get(JIRA_AGENT_CLASS_ENV, "subscription-claude"),
+            acting=_env_truthy(env.get(ACTING_ENV)),
+            cold_start_max_infra=_env_int_from_mapping(
+                env, COLD_START_MAX_INFRA_ENV, DEFAULT_COLD_START_MAX_INFRA
+            ),
+            cold_start_max_reconcile=_env_int_from_mapping(
+                env, COLD_START_MAX_RECONCILE_ENV, DEFAULT_COLD_START_MAX_RECONCILE
+            ),
+            cold_start_max_sweep=_env_int_from_mapping(
+                env, COLD_START_MAX_SWEEP_ENV, DEFAULT_COLD_START_MAX_SWEEP
+            ),
         )
 
 
@@ -287,6 +308,33 @@ def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
         )
         return default
     return max(minimum, value)
+
+
+def _env_int_from_mapping(
+    env: Mapping[str, str],
+    name: str,
+    default: int,
+    *,
+    minimum: int = 0,
+) -> int:
+    raw = env.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            "[pipeline_coordinator] invalid %s=%r; using %d",
+            name,
+            raw,
+            default,
+        )
+        return default
+    return max(minimum, value)
+
+
+def _env_truthy(raw: str | None) -> bool:
+    return raw is not None and raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_flag(name: str) -> bool:
@@ -1618,7 +1666,7 @@ def _default_cold_start_gateway(
     designed. The same single ``acting`` switch gates the engine action layer
     and the sprint re-plan handler (see :func:`build_default_coordinator`).
     """
-    live = JiraDispatchColdStartGateway()
+    live = JiraDispatchColdStartGateway(agent_class=config.jira_agent_class)
     return live if acting else ShadowColdStartGateway(live)
 
 
@@ -2027,7 +2075,16 @@ class PipelineCoordinator:
         """Startup-1: verify infra; start any down unit; halt if still down."""
         gw = self._cold_start_gateway
         audit = gw.audit_infra()
+        starts_remaining = self._config.cold_start_max_infra
         for unit in audit.down:
+            if starts_remaining <= 0:
+                report.still_down_units.append(unit)
+                self._log_cold_start(
+                    {"event": STARTUP_PHASE_EVENT, "phase": 1, "unit": unit,
+                     "action": "start_unit", "ok": False, "reason": "phase_cap"}
+                )
+                continue
+            starts_remaining -= 1
             ok = gw.start_unit(unit)
             (report.started_units if ok else report.still_down_units).append(unit)
             self._log_cold_start(
@@ -2232,22 +2289,39 @@ class PipelineCoordinator:
         hasn't committed yet) is never aggressively reverted out from under.
         """
         gw = self._cold_start_gateway
+        mutations_remaining = self._config.cold_start_max_reconcile
         for ticket in gw.interrupted_tickets():
             key = ticket.key
             if gw.has_live_runner(key):
                 self._record_reconcile(report, key, "live-runner", "leave")
             elif gw.gerrit_change_mergeable(key):
+                if mutations_remaining <= 0:
+                    self._record_reconcile(report, key, "gerrit-mergeable", "phase_cap")
+                    continue
+                mutations_remaining -= 1
                 gw.transition_under_review(key)
                 self._record_reconcile(report, key, "gerrit-mergeable", "under_review")
             elif gw.branch_has_commits(key):
+                if mutations_remaining <= 0:
+                    self._record_reconcile(report, key, "branch-has-commits", "phase_cap")
+                    continue
+                mutations_remaining -= 1
                 gw.mark_resumable(key)
                 self._record_reconcile(report, key, "branch-has-commits", "resume")
             elif ticket.stale:
                 # No commits, no live runner, long-stale → abandoned work.
+                if mutations_remaining <= 0:
+                    self._record_reconcile(report, key, "no-commits-stale", "phase_cap")
+                    continue
+                mutations_remaining -= 1
                 gw.reset_to_todo(key)
                 self._record_reconcile(report, key, "no-commits-stale", "revert_todo")
             else:
                 # No commits but recent — a runner may have only just started.
+                if mutations_remaining <= 0:
+                    self._record_reconcile(report, key, "ambiguous", "phase_cap")
+                    continue
+                mutations_remaining -= 1
                 gw.mention_operator(
                     key,
                     "[cold-start Startup-2(d)] interrupted with no commits but "
@@ -2268,18 +2342,39 @@ class PipelineCoordinator:
         """Startup-3: drop orphaned claim:* / dead waiting-* + clear assignees."""
         gw = self._cold_start_gateway
         plan = gw.stale_sweep_plan()
+        mutations_remaining = self._config.cold_start_max_sweep
         for key, labels in plan.stale_claims.items():
+            removed: list[str] = []
             for label in labels:
+                if mutations_remaining <= 0:
+                    self._record_sweep(report, key, "stale-claim", removed)
+                    return
+                mutations_remaining -= 1
                 gw.remove_label(key, label)
+                removed.append(label)
+            if mutations_remaining <= 0:
+                self._record_sweep(report, key, "stale-claim", removed)
+                return
+            mutations_remaining -= 1
             gw.clear_assignee(key)
-            self._record_sweep(report, key, "stale-claim", list(labels))
+            self._record_sweep(report, key, "stale-claim", removed)
         for key in plan.orphan_assignees:
+            if mutations_remaining <= 0:
+                self._record_sweep(report, key, "orphan-assignee", [])
+                return
+            mutations_remaining -= 1
             gw.clear_assignee(key)
             self._record_sweep(report, key, "orphan-assignee", [])
         for key, labels in plan.resolved_waiting.items():
+            removed: list[str] = []
             for label in labels:
+                if mutations_remaining <= 0:
+                    self._record_sweep(report, key, "resolved-waiting", removed)
+                    return
+                mutations_remaining -= 1
                 gw.remove_label(key, label)
-            self._record_sweep(report, key, "resolved-waiting", list(labels))
+                removed.append(label)
+            self._record_sweep(report, key, "resolved-waiting", removed)
 
     def _record_sweep(
         self, report: ColdStartReport, key: str, kind: str, labels: list[str]
@@ -2570,7 +2665,7 @@ class PipelineCoordinator:
 def build_default_coordinator(
     config: CoordinatorConfig | None = None,
     *,
-    acting: bool = False,
+    acting: bool | None = None,
     action_executor: ActionExecutor | None = None,
 ) -> PipelineCoordinator:
     """Production wiring: env config, hybrid Tier-1+Tier-2 engine, shadow layer.
@@ -2588,6 +2683,7 @@ def build_default_coordinator(
     observe-only (cold-start via :class:`ShadowColdStartGateway`, OP-1555).
     """
     config = config or CoordinatorConfig.from_env()
+    acting = config.acting if acting is None else acting
     if acting and action_executor is None:
         raise ValueError("acting=True requires an explicit action_executor")
     if not acting and action_executor is not None:
@@ -2642,7 +2738,12 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO)
     config = CoordinatorConfig.from_env(config_dir=args.config_dir)
-    coordinator = build_default_coordinator(config)
+    action_executor = LiveActionExecutor(config).execute if config.acting else None
+    coordinator = build_default_coordinator(
+        config,
+        acting=config.acting,
+        action_executor=action_executor,
+    )
     if args.once:
         coordinator.run_once()
         return 0

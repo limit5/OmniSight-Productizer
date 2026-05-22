@@ -264,15 +264,26 @@ class DegradedGateway:
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _config(tmp_path: Path) -> CoordinatorConfig:
+def _config(
+    tmp_path: Path,
+    *,
+    cold_start_max_infra: int = 100,
+    cold_start_max_reconcile: int = 100,
+    cold_start_max_sweep: int = 100,
+    jira_agent_class: str = "subscription-claude",
+) -> CoordinatorConfig:
     base = tmp_path / "coordinator"
     return CoordinatorConfig(
         config_dir=base,
         heartbeat_path=base / "heartbeat",
         decision_log_dir=base / "decision-log",
+        jira_agent_class=jira_agent_class,
         heartbeat_interval_seconds=60.0,
         tick_interval_seconds=60.0,
         sweep_interval_seconds=3600.0,
+        cold_start_max_infra=cold_start_max_infra,
+        cold_start_max_reconcile=cold_start_max_reconcile,
+        cold_start_max_sweep=cold_start_max_sweep,
     )
 
 
@@ -280,10 +291,11 @@ def _coordinator(
     tmp_path: Path,
     gateway: Any,
     clock: FakeClock | None = None,
+    config: CoordinatorConfig | None = None,
     **kw: Any,
 ) -> PipelineCoordinator:
     return PipelineCoordinator(
-        _config(tmp_path),
+        config or _config(tmp_path),
         clock=clock or FakeClock(),
         cold_start_gateway=gateway,
         **kw,
@@ -805,6 +817,65 @@ def test_startup_3_sweep_applies_plan(tmp_path: Path) -> None:
     assert sweeps == {("OP-A", "stale-claim"), ("OP-B", "orphan-assignee"), ("OP-C", "resolved-waiting")}
 
 
+def test_cold_start_per_phase_caps_limit_mutators(tmp_path: Path) -> None:
+    """OP-1618: Startup-1/2/3 caps are enforced at mutator call sites."""
+    cfg = _config(
+        tmp_path,
+        cold_start_max_infra=1,
+        cold_start_max_reconcile=1,
+        cold_start_max_sweep=1,
+    )
+
+    infra = FakeColdStartGateway(
+        audits=[
+            _units(("a.service", False), ("b.service", False)),
+            _units(("b.service", False)),
+        ],
+        start_results={"a.service": True, "b.service": True},
+    )
+    coord = _coordinator(tmp_path, infra, config=cfg)
+    report = ColdStartReport()
+    coord._startup_1_infra(report)
+    assert infra.started == ["a.service"]
+    assert report.phase1_halted is True
+
+    reconcile = FakeColdStartGateway(
+        interrupted=[
+            InterruptedTicket(key="OP-MERGE", stale=True),
+            InterruptedTicket(key="OP-BRANCH", stale=True),
+            InterruptedTicket(key="OP-STALE", stale=True),
+        ],
+        mergeable=("OP-MERGE",),
+        with_commits=("OP-BRANCH",),
+    )
+    coord = _coordinator(tmp_path, reconcile, config=cfg)
+    report = ColdStartReport()
+    coord._startup_2_reconcile(report)
+    assert reconcile.transitioned == ["OP-MERGE"]
+    assert reconcile.marked_resumable == []
+    assert reconcile.reset_todo == []
+    assert [r["action"] for r in report.reconciled] == [
+        "under_review",
+        "phase_cap",
+        "phase_cap",
+    ]
+
+    sweep = FakeColdStartGateway(
+        sweep_plan=StaleSweepPlan(
+            stale_claims={"OP-A": ("claim:default:OP-A",)},
+            orphan_assignees=("OP-B",),
+        )
+    )
+    coord = _coordinator(tmp_path, sweep, config=cfg)
+    report = ColdStartReport()
+    coord._startup_3_sweep(report)
+    assert sweep.removed_labels == [("OP-A", "claim:default:OP-A")]
+    assert sweep.cleared_assignees == []
+    assert report.swept == [
+        {"ticket": "OP-A", "sweep": "stale-claim", "labels": ["claim:default:OP-A"]}
+    ]
+
+
 # ── Code AC: Fail-open ────────────────────────────────────────────────
 
 
@@ -1117,13 +1188,15 @@ def test_default_cold_start_gateway_shadow_vs_acting(tmp_path: Path) -> None:
     """_default_cold_start_gateway returns the observe-only ShadowColdStartGateway
     by default (acting=False) and the live JiraDispatchColdStartGateway only
     when acting=True."""
-    cfg = _config(tmp_path)
+    cfg = _config(tmp_path, jira_agent_class="subscription-claude")
     shadow = _default_cold_start_gateway(cfg)
     assert isinstance(shadow, ShadowColdStartGateway)
     assert isinstance(shadow._delegate, JiraDispatchColdStartGateway)
+    assert shadow._delegate._agent_class == "subscription-claude"
 
     live = _default_cold_start_gateway(cfg, acting=True)
     assert isinstance(live, JiraDispatchColdStartGateway)
+    assert live._agent_class == "subscription-claude"
 
 
 def test_build_default_coordinator_threads_acting_to_cold_start(

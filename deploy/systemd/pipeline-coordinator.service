@@ -30,6 +30,10 @@ Environment=PYTHONPATH=/home/user/sora-bridge
 Environment=PYTHONUNBUFFERED=1
 Environment=OMNISIGHT_COORDINATOR_CONFIG_DIR=/home/user/.config/omnisight/coordinator
 Environment=OMNISIGHT_COORDINATOR_DECISION_LOG_DIR=/home/user/.config/omnisight/coordinator/decision-log
+; OP-1618 / T6: daemon-side authorization for live coordinator actions.
+; Keep unset/0 for shadow. T7 flips this to 1 after review; this is separate
+; from runner pickup capability_matrix.yaml permissions.
+Environment=OMNISIGHT_COORDINATOR_ACTING=0
 ; OP-1005 / 29f-7: the no-arg entrypoint runs the 4-phase cold-start
 ; recovery (ADR-0021 §3.3 + §9 L6 crash-replay) BEFORE entering the
 ; steady-state loop — so every real boot reconciles infra + interrupted
