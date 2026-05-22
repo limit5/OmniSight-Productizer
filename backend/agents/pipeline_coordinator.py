@@ -344,6 +344,90 @@ _VOLATILE_ACTION_PARAM_KEYS = frozenset(
 )
 
 
+def _canonical_action_semantic_params(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            str(k): _canonical_action_semantic_params(v)
+            for k, v in sorted(value.items(), key=lambda item: str(item[0]))
+            if str(k) not in _VOLATILE_ACTION_PARAM_KEYS
+        }
+    if isinstance(value, (list, tuple, set, frozenset)):
+        normalised = [_canonical_action_semantic_params(v) for v in value]
+        if all(isinstance(v, (str, int, float, bool, type(None))) for v in normalised):
+            return sorted(normalised, key=lambda item: str(item))
+        return normalised
+    return value
+
+
+def _action_idem_base(
+    action: Action,
+    *,
+    semantic_params: Mapping[str, Any] | None = None,
+) -> str:
+    payload = {
+        "params": _canonical_action_semantic_params(
+            semantic_params if semantic_params is not None else action.params
+        )
+    }
+    material = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return f"coord:{action.kind}:{action.target}:{digest}"
+
+
+def _file_ticket_operator_message(action: Action) -> str:
+    target_area = str(action.params.get("target_area") or "backend")
+    blocking = str(action.params.get("blocking") or action.target)
+    description = str(action.params.get("description") or "")
+    return (
+        "[coord-acting] file_ticket requires operator action: "
+        f"target_area={target_area}; blocking={blocking}; {description}"
+    )
+
+
+def _planned_action_idem_keys(action: Action) -> list[str]:
+    base_key = _action_idem_base(action)
+    if action.kind == ACTION_RELABEL:
+        keys = [f"{base_key}:add:{label}" for label in action.params.get("add", ())]
+        keys.extend(f"{base_key}:remove:{label}" for label in action.params.get("remove", ()))
+        removes_claim = any(
+            str(label).startswith(CLAIM_LABEL_PREFIX)
+            for label in action.params.get("remove", ())
+        )
+        if removes_claim:
+            keys.append(f"{base_key}:clear-assignee")
+        return keys
+    if action.kind == ACTION_TRANSITION:
+        return [f"{base_key}:transition"]
+    if action.kind == ACTION_MENTION_OPERATOR:
+        keys = [f"{base_key}:comment"]
+        if str(action.params.get("urgency") or "medium") == "high":
+            keys.append(f"{base_key}:label")
+        return keys
+    if action.kind == ACTION_MARK_FOR_FOLLOWUP:
+        return [f"{base_key}:label", f"{base_key}:comment"]
+    if action.kind == ACTION_ESCALATE:
+        return [f"{base_key}:label", f"{base_key}:comment"]
+    if action.kind == ACTION_FILE_TICKET:
+        semantic = dict(action.params)
+        semantic["operator_message"] = _file_ticket_operator_message(action)
+        file_base_key = _action_idem_base(action, semantic_params=semantic)
+        return [f"{file_base_key}:comment", f"{file_base_key}:label"]
+    return []
+
+
+def _action_from_record(record: Mapping[str, Any]) -> Action | None:
+    kind = record.get("kind")
+    if not isinstance(kind, str) or kind == ACTION_NOOP:
+        return None
+    target = str(record.get("target") or "")
+    params = record.get("params") if isinstance(record.get("params"), Mapping) else {}
+    dry_run = bool(record.get("dry_run", True))
+    try:
+        return Action(kind=kind, target=target, params=params, dry_run=dry_run)
+    except ValueError:
+        return None
+
+
 class LiveActionExecutor:
     """Execute ADR-0021 §6 actions against JIRA with stable idempotency keys."""
 
@@ -460,7 +544,7 @@ class LiveActionExecutor:
         from backend.agents import jira_dispatch
 
         target_status = str(action.params.get("to_status") or "")
-        base_key = self._idem_base(action)
+        base_key = _action_idem_base(action)
         if target_status in jira_dispatch.TODO_STATUS_NAMES or target_status.lower() in {
             "todo",
             "to do",
@@ -515,7 +599,7 @@ class LiveActionExecutor:
             return blocked
         add = tuple(str(x) for x in action.params.get("add", ()))
         remove = tuple(str(x) for x in action.params.get("remove", ()))
-        base_key = self._idem_base(action)
+        base_key = _action_idem_base(action)
         outcomes: list[dict[str, Any]] = []
         for label in add:
             jira_dispatch.add_label(
@@ -547,7 +631,7 @@ class LiveActionExecutor:
             return blocked
         message = str(action.params.get("message") or "")
         urgency = str(action.params.get("urgency") or "medium")
-        base_key = self._idem_base(action)
+        base_key = _action_idem_base(action)
         jira_dispatch.add_comment(
             self._jira(), action.target, message, idem_key=f"{base_key}:comment"
         )
@@ -576,7 +660,7 @@ class LiveActionExecutor:
         when = str(action.params.get("when") or "")
         why = str(action.params.get("why") or "")
         label = f"{FOLLOWUP_LABEL_PREFIX}{when}"
-        base_key = self._idem_base(action)
+        base_key = _action_idem_base(action)
         jira_dispatch.add_label(
             self._jira(), action.target, label, idem_key=f"{base_key}:label"
         )
@@ -597,7 +681,7 @@ class LiveActionExecutor:
         if blocked is not None:
             return blocked
         reason = str(action.params.get("reason") or "")
-        base_key = self._idem_base(action)
+        base_key = _action_idem_base(action)
         jira_dispatch.add_label(
             self._jira(),
             action.target,
@@ -623,10 +707,10 @@ class LiveActionExecutor:
         blocked = self._pre_mutation_recheck(action)
         if blocked is not None:
             return blocked
-        message = self._file_ticket_operator_message(action)
+        message = _file_ticket_operator_message(action)
         semantic = dict(action.params)
         semantic["operator_message"] = message
-        base_key = self._idem_base(action, semantic_params=semantic)
+        base_key = _action_idem_base(action, semantic_params=semantic)
         jira_dispatch.add_comment(
             self._jira(), action.target, message, idem_key=f"{base_key}:comment"
         )
@@ -660,43 +744,16 @@ class LiveActionExecutor:
             ],
         }
 
-    def _file_ticket_operator_message(self, action: Action) -> str:
-        target_area = str(action.params.get("target_area") or "backend")
-        blocking = str(action.params.get("blocking") or action.target)
-        description = str(action.params.get("description") or "")
-        return (
-            "[coord-acting] file_ticket requires operator action: "
-            f"target_area={target_area}; blocking={blocking}; {description}"
-        )
-
     def _idem_base(
         self,
         action: Action,
         *,
         semantic_params: Mapping[str, Any] | None = None,
     ) -> str:
-        payload = {
-            "params": self._canonical_semantic_params(
-                semantic_params if semantic_params is not None else action.params
-            )
-        }
-        material = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
-        digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
-        return f"coord:{action.kind}:{action.target}:{digest}"
+        return _action_idem_base(action, semantic_params=semantic_params)
 
     def _canonical_semantic_params(self, value: Any) -> Any:
-        if isinstance(value, Mapping):
-            return {
-                str(k): self._canonical_semantic_params(v)
-                for k, v in sorted(value.items(), key=lambda item: str(item[0]))
-                if str(k) not in _VOLATILE_ACTION_PARAM_KEYS
-            }
-        if isinstance(value, (list, tuple, set, frozenset)):
-            normalised = [self._canonical_semantic_params(v) for v in value]
-            if all(isinstance(v, (str, int, float, bool, type(None))) for v in normalised):
-                return sorted(normalised, key=lambda item: str(item))
-            return normalised
-        return value
+        return _canonical_action_semantic_params(value)
 
 
 # Action executor seam: anything with ``execute(action, ctx) -> dict``.
@@ -1898,6 +1955,27 @@ class PipelineCoordinator:
             record["action_results"] = action_results
         return record
 
+    def _build_tick_intent_record(self, result: DecisionResult) -> dict[str, Any] | None:
+        actions = [a for a in result.actions if not isinstance(a, NoopAction)]
+        if not actions:
+            return None
+        action_records = []
+        for action in actions:
+            rec = action.to_record()
+            rec["idem_keys"] = _planned_action_idem_keys(action)
+            action_records.append(rec)
+        return {
+            "ts": self._clock().isoformat(),
+            "event": "tick_intent",
+            "engine_version": result.engine_version,
+            "mode": result.mode,
+            "decision_id": result.decision_id,
+            "actions": action_records,
+            "reason": result.reason,
+            "dry_run": all(a.dry_run for a in actions),
+            "pid": os.getpid(),
+        }
+
     # ── cold-start 4-phase recovery (ADR §3.3 + §9 L6) ──
 
     def _log_cold_start(self, record: dict[str, Any]) -> None:
@@ -1978,29 +2056,49 @@ class PipelineCoordinator:
     def _l6_crash_recovery(self, report: ColdStartReport) -> None:
         """L6 (ADR §9): replay last 24h decision log; resume/complete/rollback.
 
-        A ``shutdown_began`` with no matching ``shutdown_complete`` (paired by
-        ``decision_id``) means the daemon crashed mid-drain. For each such
-        crash we look at the immediately-preceding tick: if it executed a real
-        (non-dry-run) action that was never confirmed complete, we resolve it
-        per action kind — idempotent relabel/transition are *completed*
-        (re-issued safely), file_ticket is effectively irreversible so we
-        *escalate*, everything else is a logged no-op. Every resolution writes
-        a ``crash_recovery_applied`` record (ADR §9 L6).
+        A ``tick_intent`` with no matching ``decision_tick`` (paired by
+        ``decision_id``) means the daemon may have crashed after intent append
+        and before outcome append. We re-run those planned real actions while
+        the idempotency store is still inside its 24h TTL. The legacy
+        ``shutdown_began`` path remains as a fallback for pre-intent drains.
+        Every resolution writes a ``crash_recovery_applied`` record (ADR §9 L6).
         """
         records = self._read_recent_decision_log()
         began: dict[str, dict[str, Any]] = {}
         completed: set[str] = set()
+        outcome_ticks: set[str] = set()
+        intents: dict[str, dict[str, Any]] = {}
         last_real_action_tick: dict[str, Any] | None = None
         for rec in records:
             event = rec.get("event")
-            if event == "decision_tick" and not rec.get("dry_run", True) and rec.get("actions"):
-                last_real_action_tick = rec
+            if event == "tick_intent":
+                decision_id = str(rec.get("decision_id", ""))
+                if decision_id:
+                    intents[decision_id] = rec
+            elif event == "decision_tick":
+                decision_id = str(rec.get("decision_id", ""))
+                if decision_id:
+                    outcome_ticks.add(decision_id)
+                if not rec.get("dry_run", True) and rec.get("actions"):
+                    last_real_action_tick = rec
             elif event == "shutdown_began":
                 began[str(rec.get("decision_id", ""))] = rec
                 # Snapshot which real-action tick preceded this drain.
                 rec["_preceding_real_tick"] = last_real_action_tick
             elif event == "shutdown_complete":
                 completed.add(str(rec.get("decision_id", "")))
+        for decision_id, intent in intents.items():
+            if decision_id in outcome_ticks:
+                continue
+            resolutions = self._resolve_interrupted_actions(intent)
+            entry = {
+                "event": CRASH_RECOVERY_EVENT,
+                "crashed_decision_id": decision_id,
+                "source_event": "tick_intent",
+                "resolutions": resolutions,
+            }
+            report.crash_recoveries.append(entry)
+            self._log_cold_start(entry)
         for drain_id, drain_rec in began.items():
             if drain_id in completed:
                 continue  # clean shutdown — nothing to recover
@@ -2018,6 +2116,40 @@ class PipelineCoordinator:
         """Map each interrupted action of a crashed tick to a recovery step."""
         if not tick:
             return [{"resolution": "noop", "reason": "no in-flight real action before crash"}]
+        if tick.get("event") == "tick_intent":
+            if tick.get("dry_run", True):
+                return [{"resolution": "noop", "reason": "dry-run intent"}]
+            if not self._within_l6_replay_window(tick):
+                return [{"resolution": "skipped", "reason": "intent outside idempotency ttl"}]
+            replayable: list[tuple[Action, list[str]]] = []
+            for rec in tick.get("actions", []):
+                action = _action_from_record(rec)
+                if action is None:
+                    continue
+                keys = rec.get("idem_keys")
+                replayable.append(
+                    (
+                        action,
+                        [str(key) for key in keys] if isinstance(keys, list) else [],
+                    )
+                )
+            actions = tuple(action for action, _keys in replayable)
+            if not actions:
+                return [{"resolution": "noop", "reason": "intent has no replayable actions"}]
+            ctx = self.build_context()
+            action_results = self._execute_tick_actions(actions, ctx)
+            out: list[dict[str, Any]] = []
+            for (action, intent_keys), result in zip(replayable, action_results, strict=False):
+                out.append(
+                    {
+                        "kind": action.kind,
+                        "target": action.target,
+                        "resolution": "completed" if result.get("executed") else "replayed",
+                        "idem_keys": intent_keys or _planned_action_idem_keys(action),
+                        "action_result": result,
+                    }
+                )
+            return out
         gw = self._cold_start_gateway
         out: list[dict[str, Any]] = []
         for action in tick.get("actions", []):
@@ -2043,6 +2175,12 @@ class PipelineCoordinator:
                 resolution = "noop"
             out.append({"kind": kind, "target": target, "resolution": resolution})
         return out
+
+    def _within_l6_replay_window(self, record: Mapping[str, Any]) -> bool:
+        ts = record_ts(record)
+        if ts is None:
+            return True
+        return ts >= self._clock() - timedelta(hours=L6_REPLAY_WINDOW_HOURS)
 
     def _read_recent_decision_log(self) -> list[dict[str, Any]]:
         """Return decision-log records from the last :data:`L6_REPLAY_WINDOW_HOURS`.
@@ -2217,6 +2355,9 @@ class PipelineCoordinator:
         fair_actions = self._fair_action_order(result.actions)
         if fair_actions is not result.actions:
             result = dataclasses.replace(result, actions=fair_actions)
+        intent_record = self._build_tick_intent_record(result)
+        if intent_record is not None:
+            self._decision_log.append(intent_record)
         # Hand each real (non-noop) action to the action layer. In shadow
         # mode it only records the would-be execution; the outcomes go into
         # the decision-log line so a fired rule is observable end-to-end.

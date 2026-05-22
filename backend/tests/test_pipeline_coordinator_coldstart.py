@@ -89,9 +89,12 @@ from backend.agents.pipeline_coordinator import (
 )
 from backend.agents.pipeline_coordinator_rules import (
     ACTION_FILE_TICKET,
+    ACTION_MENTION_OPERATOR,
     ACTION_NOOP,
     ACTION_RELABEL,
     ACTION_TRANSITION,
+    Action,
+    DecisionContext,
 )
 
 
@@ -194,6 +197,25 @@ class FakeColdStartGateway:
         self.operator_mentions.append((key, message, urgency))
 
 
+class RecordingReplayExecutor:
+    def __init__(self, *, already_applied: set[str] | None = None) -> None:
+        self.already_applied = set(already_applied or set())
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, action: Action, ctx: DecisionContext) -> dict[str, Any]:
+        key = f"{action.kind}:{action.target}"
+        self.calls.append((action.kind, action.target))
+        if key in self.already_applied:
+            return {
+                "kind": action.kind,
+                "target": action.target,
+                "executed": False,
+                "reason": "idempotent_skip",
+            }
+        self.already_applied.add(key)
+        return {"kind": action.kind, "target": action.target, "executed": True}
+
+
 class DegradedGateway:
     """A fail-open gateway that yields empty / conservative answers for every
     method (the contract the production adapters honour: never raise, always
@@ -258,11 +280,13 @@ def _coordinator(
     tmp_path: Path,
     gateway: Any,
     clock: FakeClock | None = None,
+    **kw: Any,
 ) -> PipelineCoordinator:
     return PipelineCoordinator(
         _config(tmp_path),
         clock=clock or FakeClock(),
         cold_start_gateway=gateway,
+        **kw,
     )
 
 
@@ -516,6 +540,144 @@ def test_l6_resolves_interrupted_actions_by_kind(tmp_path: Path) -> None:
     assert len(gw.operator_mentions) == 1
     assert gw.operator_mentions[0][0] == "OP-12"
     assert gw.operator_mentions[0][2] == "medium"
+
+
+def test_l6_replays_missing_tick_intent_under_stable_keys(tmp_path: Path) -> None:
+    """An intent with no matching decision_tick is replayed through the action
+    layer under the stable keys captured before the original execution."""
+    clock = FakeClock()
+    executor = RecordingReplayExecutor()
+    coord = _coordinator(
+        tmp_path,
+        FakeColdStartGateway(),
+        clock=clock,
+        action_executor=executor,
+    )
+    ts = (clock() - timedelta(hours=1)).isoformat()
+    _seed_log(
+        coord,
+        [
+            {
+                "ts": ts,
+                "event": "tick_intent",
+                "decision_id": "intent-missing-outcome",
+                "dry_run": False,
+                "actions": [
+                    {
+                        "kind": ACTION_TRANSITION,
+                        "target": "OP-1617",
+                        "params": {"to_status": "Under Review"},
+                        "dry_run": False,
+                        "idem_keys": ["coord:transition:OP-1617:ea04b4efdc91378d:transition"],
+                    }
+                ],
+            }
+        ],
+    )
+    report = ColdStartReport()
+
+    coord._l6_crash_recovery(report)
+
+    assert executor.calls == [(ACTION_TRANSITION, "OP-1617")]
+    [recovery] = report.crash_recoveries
+    assert recovery["source_event"] == "tick_intent"
+    assert recovery["crashed_decision_id"] == "intent-missing-outcome"
+    assert recovery["resolutions"] == [
+        {
+            "kind": ACTION_TRANSITION,
+            "target": "OP-1617",
+            "resolution": "completed",
+            "idem_keys": ["coord:transition:OP-1617:ea04b4efdc91378d:transition"],
+            "action_result": {
+                "kind": ACTION_TRANSITION,
+                "target": "OP-1617",
+                "executed": True,
+            },
+        }
+    ]
+
+
+def test_l6_tick_intent_with_matching_outcome_is_not_replayed(tmp_path: Path) -> None:
+    clock = FakeClock()
+    executor = RecordingReplayExecutor()
+    coord = _coordinator(
+        tmp_path,
+        FakeColdStartGateway(),
+        clock=clock,
+        action_executor=executor,
+    )
+    ts = (clock() - timedelta(hours=1)).isoformat()
+    action = {
+        "kind": ACTION_MENTION_OPERATOR,
+        "target": "OP-1617",
+        "params": {"message": "note"},
+        "dry_run": False,
+        "idem_keys": ["coord:mention_operator:OP-1617:ed46013ec0574c8e:comment"],
+    }
+    _seed_log(
+        coord,
+        [
+            {
+                "ts": ts,
+                "event": "tick_intent",
+                "decision_id": "intent-complete",
+                "dry_run": False,
+                "actions": [action],
+            },
+            {
+                "ts": ts,
+                "event": "decision_tick",
+                "decision_id": "intent-complete",
+                "dry_run": False,
+                "actions": [action],
+                "action_results": [{"kind": ACTION_MENTION_OPERATOR, "executed": True}],
+            },
+        ],
+    )
+    report = ColdStartReport()
+
+    coord._l6_crash_recovery(report)
+
+    assert executor.calls == []
+    assert report.crash_recoveries == []
+
+
+def test_l6_tick_intent_outside_idempotency_window_is_skipped(tmp_path: Path) -> None:
+    clock = FakeClock()
+    executor = RecordingReplayExecutor()
+    coord = _coordinator(
+        tmp_path,
+        FakeColdStartGateway(),
+        clock=clock,
+        action_executor=executor,
+    )
+    ts = (clock() - timedelta(hours=L6_REPLAY_WINDOW_HOURS, seconds=1)).isoformat()
+    _seed_log(
+        coord,
+        [
+            {
+                "ts": ts,
+                "event": "tick_intent",
+                "decision_id": "intent-expired",
+                "dry_run": False,
+                "actions": [
+                    {
+                        "kind": ACTION_TRANSITION,
+                        "target": "OP-1617",
+                        "params": {"to_status": "Under Review"},
+                        "dry_run": False,
+                        "idem_keys": ["coord:transition:OP-1617:ea04b4efdc91378d:transition"],
+                    }
+                ],
+            }
+        ],
+    )
+    report = ColdStartReport()
+
+    coord._l6_crash_recovery(report)
+
+    assert executor.calls == []
+    assert report.crash_recoveries == []
 
 
 def test_l6_no_preceding_real_action_is_noop(tmp_path: Path) -> None:

@@ -13,6 +13,7 @@ from backend.agents.pipeline_coordinator import (
 from backend.agents.pipeline_coordinator_capacity import CapacitySnapshot
 from backend.agents.pipeline_coordinator_rules import (
     ACTION_MENTION_OPERATOR,
+    ACTION_TRANSITION,
     Action,
     DecisionContext,
     DecisionResult,
@@ -45,6 +46,15 @@ class RecordingExecutor:
             "executed": not action.dry_run,
             "dry_run": action.dry_run,
         }
+
+
+class CrashingExecutor:
+    def __init__(self) -> None:
+        self.actions: list[Action] = []
+
+    def __call__(self, action: Action, ctx: DecisionContext) -> dict[str, Any]:
+        self.actions.append(action)
+        raise RuntimeError("simulated crash after intent")
 
 
 class FailingThenRecordingExecutor:
@@ -108,6 +118,14 @@ def _read_log_records(directory: Path) -> list[dict[str, Any]]:
     return records
 
 
+def _decision_tick_records(directory: Path) -> list[dict[str, Any]]:
+    return [r for r in _read_log_records(directory) if r["event"] == "decision_tick"]
+
+
+def _intent_records(directory: Path) -> list[dict[str, Any]]:
+    return [r for r in _read_log_records(directory) if r["event"] == "tick_intent"]
+
+
 def _decision_result(*, actions: tuple[Action, ...]) -> DecisionResult:
     return DecisionResult(
         decision_id="decision-op-1615",
@@ -147,7 +165,12 @@ def test_run_once_acting_flips_actions_rebuilds_result_and_logs_live_dry_run(
     assert result.actions[0].dry_run is False
     assert isinstance(result.actions[1], NoopAction)
     assert executor.actions == [result.actions[0]]
-    [record] = _read_log_records(coord.config.decision_log_dir)
+    [intent] = _intent_records(coord.config.decision_log_dir)
+    [record] = _decision_tick_records(coord.config.decision_log_dir)
+    assert intent["decision_id"] == original.decision_id
+    assert intent["actions"][0]["idem_keys"] == [
+        "coord:mention_operator:OP-1615:8a46d55d7185a5f3:comment"
+    ]
     assert record["decision_id"] == original.decision_id
     assert record["dry_run"] is False
     assert record["actions"][0]["dry_run"] is False
@@ -172,9 +195,44 @@ def test_run_once_shadow_leaves_action_dry_run_true(tmp_path: Path) -> None:
     assert result is original
     assert result.actions[0].dry_run is True
     assert executor.actions == [original.actions[0]]
-    [record] = _read_log_records(coord.config.decision_log_dir)
+    [intent] = _intent_records(coord.config.decision_log_dir)
+    [record] = _decision_tick_records(coord.config.decision_log_dir)
+    assert intent["dry_run"] is True
     assert record["dry_run"] is True
     assert record["actions"][0]["dry_run"] is True
+
+
+def test_run_once_writes_intent_before_execute(tmp_path: Path) -> None:
+    original = _decision_result(
+        actions=(Action.transition("OP-1617", to_status="Under Review"),)
+    )
+    executor = CrashingExecutor()
+    coord = PipelineCoordinator(
+        _config(tmp_path),
+        engine=FixedEngine(original),
+        clock=lambda: NOW,
+        capacity_provider=_capacity,
+        action_executor=executor,
+        acting=True,
+    )
+
+    coord.run_once()
+
+    records = _read_log_records(coord.config.decision_log_dir)
+    assert [r["event"] for r in records] == ["tick_intent", "decision_tick"]
+    intent, outcome = records
+    assert intent["decision_id"] == outcome["decision_id"] == original.decision_id
+    assert intent["dry_run"] is False
+    assert intent["actions"] == [
+        {
+            "kind": ACTION_TRANSITION,
+            "target": "OP-1617",
+            "params": {"to_status": "Under Review"},
+            "dry_run": False,
+            "idem_keys": ["coord:transition:OP-1617:e7d18f44ba0728c1:transition"],
+        }
+    ]
+    assert outcome["action_results"][0]["error"] == "simulated crash after intent"
 
 
 def test_run_once_caps_actions_and_logs_tick_cap(
@@ -202,7 +260,7 @@ def test_run_once_caps_actions_and_logs_tick_cap(
     coord.run_once()
 
     assert [a.target for a in executor.actions] == ["OP-1616-A"]
-    [record] = _read_log_records(coord.config.decision_log_dir)
+    [record] = _decision_tick_records(coord.config.decision_log_dir)
     assert record["action_results"] == [
         {
             "kind": ACTION_MENTION_OPERATOR,
@@ -248,7 +306,7 @@ def test_run_once_executor_exception_still_records_tick(
 
     coord.run_once()
 
-    [record] = _read_log_records(coord.config.decision_log_dir)
+    [record] = _decision_tick_records(coord.config.decision_log_dir)
     assert record["decision_id"] == original.decision_id
     assert record["action_results"][0] == {
         "kind": ACTION_MENTION_OPERATOR,
@@ -286,7 +344,7 @@ def test_run_once_kill_switch_forces_observe_only(
 
     assert result.actions[0].dry_run is True
     assert executor.actions[0].dry_run is True
-    [record] = _read_log_records(coord.config.decision_log_dir)
+    [record] = _decision_tick_records(coord.config.decision_log_dir)
     assert record["dry_run"] is True
     assert record["action_results"] == [
         {
