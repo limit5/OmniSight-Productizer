@@ -175,6 +175,30 @@ systemctl --user daemon-reload
 systemctl --user restart pipeline-coordinator.service   # see §5 — restart runs cold-start
 ```
 
+### 3.2 Acting flip + rollback (OP-1619, live 2026-05-23)
+
+Acting mode (`OMNISIGHT_COORDINATOR_ACTING=1`) lets the §6 action layer **and** the
+cold-start gateway MUTATE live JIRA. Gated on OP-1612 (LiveActionExecutor), OP-1621 +
+OP-1622 (cold-start operator-intent guards: never start retired/`expected!=yes` units;
+skip `coord-skip`/`coord-quarantine`/`tier:X`/META in Startup-2/3), OP-1555/OP-1556.
+
+Flip ON (via the §3.1 drop-in):
+- add `Environment=OMNISIGHT_COORDINATOR_ACTING=1`
+- remove any `OMNISIGHT_COORDINATOR_DAILY_BUDGET_USD=0` line (D5 — restores the $5/day
+  Tier-2 default; OP-1556 idle-noop prevents idle burn)
+- keep `MAX_ACTIONS_PER_TICK` at its default 1 for a first flip
+- daemon-reload + restart; the boot runs a **LIVE** cold-start.
+
+**Rollback — BOTH require a restart.** The kill-switch is read from `os.environ`
+(fixed at process launch), so a drop-in change is NOT seen by the running process
+without a restart (verified 2026-05-23, OP-1619):
+- (a) kill-switch: add `Environment=OMNISIGHT_COORDINATOR_ACTING_KILL=1` +
+  daemon-reload + restart → observe-only (logs `acting kill-switch active; observing
+  only`); the engine still ticks, zero mutation.
+- (b) full off: remove the ACTING line + daemon-reload + restart → `acting=False` shadow.
+
+(TODO follow-up: a true no-restart kill would read a sentinel FILE per tick, not env.)
+
 ## 4. Decision-log inspection
 
 One JSON line per decision, append-only, one file per UTC day under
@@ -333,7 +357,23 @@ A clean restart re-runs them: stop the watchdog, restart the
 coordinator (which re-boots through cold-start), restart the watchdog
 ([§5.2](#52-pause-everything--the-watchdog-will-fight-you)).
 
-### 6.6 Escalation
+### 6.6 Coordinator down with `start-limit-hit` (crash-loop)
+
+`Restart=on-failure` + `StartLimitBurst=3` / `StartLimitIntervalUSec=5min`: ≥3 crashes
+within 5 min → systemd refuses the next start → unit sits at
+`failed (Result: start-limit-hit)` and does NOT auto-recover (a plain `restart` is also
+refused). The watchdog cannot recover this state — it issues `restart`, not `reset-failed`.
+
+```bash
+systemctl --user reset-failed pipeline-coordinator.service
+systemctl --user start pipeline-coordinator.service
+```
+Then confirm `is-active`=active, heartbeat fresh, and `ACTING=1` is still in the env
+(it survives — it lives in the §3.1 drop-in). Mitigations to consider: raise
+`StartLimitBurst`; have the watchdog (or an `OnFailure=` unit) run `reset-failed`
+before `restart`; periodically confirm the watchdog itself is up.
+
+### 6.7 Escalation
 
 When recovery isn't obvious, the daemon @-mentions the operator and
 adds `needs-operator-action`. Per CLAUDE.md L1: after 2 identical
