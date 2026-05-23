@@ -282,18 +282,20 @@ def test_e2e_empty_scanner_treated_as_missing(tmp_path: Path) -> None:
 
 
 def test_e2e_present_scanner_advances_past_preflight(tmp_path: Path) -> None:
-    """With the scanner present, the preflight passes and the script
-    advances to the next stage. Our stub `docker` returns empty service
-    list and there is no host DB, so the *expected* die is the
-    live-DB one — proving the DLP gate let us through."""
+    """With the scanner present, the preflight passes and the script advances
+    to the live-DB stage. Our stub `docker` returns exit 0 for `inspect` (so the
+    OP-1640 PG branch engages) and an empty service list for `ps`, so the
+    *expected* die is the PG precondition ("backend-a not running") — or, on a
+    host without the PG container, the SQLite "no live DB found". Either way it
+    died AFTER the DLP-scanner preflight, proving the gate let us through."""
     stub_repo, env = _build_stub_repo(tmp_path, with_scanner=True)
 
     proc = _run_backup(stub_repo, env)
 
-    assert proc.returncode != 0  # we still error on no live DB; that's fine
+    assert proc.returncode != 0  # still error at the live-DB stage; that's fine
     combined = proc.stdout + proc.stderr
-    assert "no live DB found" in combined, (
-        f"Expected to die at live-DB probe (preflight passed) but got:\n"
+    assert ("backend-a not running" in combined or "no live DB found" in combined), (
+        f"Expected to die at the live-DB stage (preflight passed) but got:\n"
         f"stdout={proc.stdout}\nstderr={proc.stderr}"
     )
     assert "DLP scanner missing" not in combined

@@ -258,3 +258,50 @@ def test_backup_prod_db_uploads_immutable_s3_with_encryption() -> None:
     assert "--storage-class \"$storage_class\"" in text
     assert "GLACIER_IR" in text
     assert "upload_offsite_immutable \"$FINAL\"" in text
+
+
+# ── OP-1640: high_entropy_token is no longer a blocking signal (it fires on
+# every by-design opaque ID / SHA / hash); the hard gate stays on
+# required_envelope_plaintext + sensitive-named columns + strong secret labels.
+def _write_single(path: Path, table: str, column: str, value: str) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(f"CREATE TABLE {table} (id INTEGER PRIMARY KEY, {column} TEXT)")
+        conn.execute(f"INSERT INTO {table} ({column}) VALUES (?)", (value,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_high_entropy_token_alone_does_not_block(tmp_path: Path) -> None:
+    db_path = tmp_path / "opaque.db"
+    # 64-char hex opaque id — would fire high_entropy_token; must NOT block now.
+    _write_single(db_path, "runner_incidents", "incident_id", "a" * 64)
+    report = backup_dlp_scan.scan_backup_db(db_path)
+    assert report.passed is True, report.to_dict()
+
+
+def test_sessions_token_plaintext_still_blocks(tmp_path: Path) -> None:
+    db_path = tmp_path / "sess.db"
+    _write_single(db_path, "sessions", "token", "plaintext_not_envelope_json")
+    report = backup_dlp_scan.scan_backup_db(db_path)
+    assert report.passed is False
+    assert report.findings[0].labels == ["required_envelope_plaintext"]
+
+
+def test_sensitive_named_column_plaintext_still_blocks(tmp_path: Path) -> None:
+    db_path = tmp_path / "cred.db"
+    # A non-regex-matching value in a secret-NAMED column must still block.
+    _write_single(db_path, "creds", "client_secret", "just-some-opaque-value-xyz")
+    report = backup_dlp_scan.scan_backup_db(db_path)
+    assert report.passed is False
+
+
+def test_blocking_labels_drops_high_entropy_and_reviewed_tuples() -> None:
+    f = backup_dlp_scan._blocking_labels
+    assert f("x", "y", ["high_entropy_token"]) == []
+    assert f("audit_log", "actor", ["api_key_assignment"]) == []
+    assert f("llm_credentials", "metadata", ["ai_internal"]) == []
+    # the same labels still block on OTHER columns / other labels survive
+    assert f("creds", "field", ["api_key_assignment"]) == ["api_key_assignment"]
+    assert f("x", "y", ["high_entropy_token", "openai"]) == ["openai"]

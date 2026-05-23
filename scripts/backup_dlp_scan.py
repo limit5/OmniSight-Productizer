@@ -81,11 +81,48 @@ EXPECTED_HIGH_ENTROPY_COLUMNS: set[tuple[str, str]] = {
 }
 
 
+# OP-1640 — when the gate first scanned the LIVE prod PG (not the stale SQLite
+# it scanned before), `high_entropy_token` fired on every by-design opaque
+# identifier — sha256 IDs, git SHAs, lookup hashes, audit/metadata JSON
+# (4348 reviewed false positives, zero real leaks). High entropy is NOT a
+# secret signal, so it is NOT a blocking backup-DLP label; the hard gate is
+# `required_envelope_plaintext` + sensitive-named columns + the strong,
+# format-specific secret labels from ``redact()``.
+NON_BLOCKING_DLP_LABELS: set[str] = {"high_entropy_token"}
+
+# Reviewed (2026-05-23, against live prod) strong-label FALSE POSITIVES — each
+# is a (table, column, label) tuple confirmed benign: audit_log.actor values
+# are actor identity labels like "apikey:gerrit-webhook" (not a key);
+# workflow_runs.metadata keys are user/source/test_run/target_platform;
+# llm_credentials.metadata holds only base_url (the real secret is the SKIPPED
+# `encrypted_value` column). Scoped narrowly to (table,column,label) so the
+# label still blocks on every OTHER column.
+EXPECTED_DLP_LABEL_COLUMNS: set[tuple[str, str, str]] = {
+    ("audit_log", "actor", "api_key_assignment"),
+    ("workflow_runs", "metadata", "api_key_assignment"),
+    ("llm_credentials", "metadata", "ai_internal"),
+}
+
+
+def _blocking_labels(table: str, column: str, labels: list[str]) -> list[str]:
+    """Filter redact() labels down to the ones that should BLOCK the backup:
+    drops the over-broad ``high_entropy_token`` and the narrowly-reviewed
+    (table,column,label) false positives. Everything else still blocks."""
+    table_key = table.strip().lower()
+    column_key = column.strip().lower()
+    return [
+        label
+        for label in labels
+        if label not in NON_BLOCKING_DLP_LABELS
+        and (table_key, column_key, label) not in EXPECTED_DLP_LABEL_COLUMNS
+    ]
+
+
 @dataclass
 class BackupDLPFinding:
     table: str
     column: str
-    rowid: int
+    rowid: int | str  # SQLite rowid (int) or Postgres ctid (str)
     labels: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -146,6 +183,33 @@ def _looks_like_ks_envelope(value: str) -> bool:
         dek_ref = payload.get("dek_ref")
         return isinstance(payload.get("ciphertext"), str) and isinstance(dek_ref, dict)
     return {"dek", "tid", "nonce_b64", "ciphertext_b64"}.issubset(payload)
+
+
+def _classify_cell(table: str, column: str, value: Any) -> list[str] | None:
+    """Shared SQLite/Postgres cell classifier. Returns DLP finding labels for
+    *value*, or ``None`` if the cell is clean. Single source of truth so the
+    SQLite and Postgres scanners cannot drift."""
+    if not isinstance(value, str) or not value:
+        return None
+    _, labels = redact(value)
+    if _is_required_envelope_column(table, column):
+        # FX.10.7 — sessions.token MUST be KS envelope JSON. Plaintext (or
+        # unrecognised JSON) fails the gate. This is the HARD gate.
+        if not _looks_like_ks_envelope(value):
+            return ["required_envelope_plaintext"]
+        return None
+    blocking = _blocking_labels(table, column, labels)
+    if blocking:
+        if (table, column) in EXPECTED_HIGH_ENTROPY_COLUMNS:
+            # Reviewed-and-known-safe column (legacy allowlist).
+            return None
+        return blocking
+    # No blocking label fired, but a secret-NAMED column with any plaintext
+    # value still fails — value-pattern misses don't excuse a column that is
+    # supposed to hold an encrypted secret.
+    if _is_sensitive_plaintext_column(column):
+        return ["sensitive_column_plaintext"]
+    return None
 
 
 def _iter_user_tables(conn: sqlite3.Connection) -> Iterable[str]:
@@ -209,42 +273,14 @@ def scan_backup_db(db_path: Path | str) -> BackupDLPReport:
             for row in conn.execute(sql):
                 rowid = int(row["__rowid"])
                 for column in columns:
-                    value = row[column]
-                    if not isinstance(value, str) or not value:
-                        continue
-                    _, labels = redact(value)
-                    if _is_required_envelope_column(table, column):
-                        # FX.10.7 — sessions.token MUST be KS envelope JSON.
-                        # Plaintext (or unrecognised JSON) fails the gate.
-                        if not _looks_like_ks_envelope(value):
-                            findings.append(
-                                BackupDLPFinding(
-                                    table=table,
-                                    column=column,
-                                    rowid=rowid,
-                                    labels=["required_envelope_plaintext"],
-                                )
-                            )
-                    elif labels:
-                        if (table, column) in EXPECTED_HIGH_ENTROPY_COLUMNS:
-                            # Reviewed-and-known-safe column; DLP gate is for
-                            # unintentional plaintext leaks elsewhere.
-                            continue
+                    labels = _classify_cell(table, column, row[column])
+                    if labels:
                         findings.append(
                             BackupDLPFinding(
                                 table=table,
                                 column=column,
                                 rowid=rowid,
                                 labels=labels,
-                            )
-                        )
-                    elif _is_sensitive_plaintext_column(column):
-                        findings.append(
-                            BackupDLPFinding(
-                                table=table,
-                                column=column,
-                                rowid=rowid,
-                                labels=["sensitive_column_plaintext"],
                             )
                         )
     except sqlite3.Error as exc:
@@ -255,15 +291,109 @@ def scan_backup_db(db_path: Path | str) -> BackupDLPReport:
     return BackupDLPReport(str(path), len(findings), findings)
 
 
+_PG_TEXT_TYPES = {"text", "character varying", "character", "json", "jsonb", "citext"}
+
+
+def _sanitize_pg_url(url: str) -> str:
+    """Strip credentials from a PG URL for safe display/logging."""
+    import re
+
+    return re.sub(r"://[^@/]*@", "://***@", url)
+
+
+def scan_postgres_db(database_url: str) -> BackupDLPReport:
+    """Scan a PostgreSQL database for plaintext secret-shaped values.
+
+    Mirrors :func:`scan_backup_db` but over a live PG connection (used to scan
+    a throwaway DB restored from the pre-deploy ``pg_dump``). Uses the SAME
+    :func:`_classify_cell` so SQLite and PG gates cannot drift. Fail-closed on
+    any connection/query error (returns an error report → exit non-zero)."""
+    safe = _sanitize_pg_url(database_url)
+    try:
+        import psycopg2  # lazy — only needed in PG mode
+    except Exception as exc:  # pragma: no cover - import guard
+        return BackupDLPReport(safe, 0, [], error=f"psycopg2 import failed: {exc}")
+
+    # psycopg2 speaks plain libpq; drop any SQLAlchemy driver suffix.
+    dsn = database_url.replace("+asyncpg", "").replace("+psycopg2", "")
+    findings: list[BackupDLPFinding] = []
+    try:
+        conn = psycopg2.connect(dsn)
+    except Exception as exc:
+        return BackupDLPReport(safe, 0, [], error=f"connect failed: {exc}")
+    try:
+        conn.set_session(readonly=True, autocommit=True)
+        cur = conn.cursor()
+        # Ordinary base tables in the public schema + their text-like columns.
+        cur.execute(
+            """
+            SELECT c.table_name, c.column_name, c.data_type
+            FROM information_schema.columns c
+            JOIN information_schema.tables t
+              ON t.table_schema = c.table_schema AND t.table_name = c.table_name
+            WHERE c.table_schema = 'public' AND t.table_type = 'BASE TABLE'
+            ORDER BY c.table_name, c.ordinal_position
+            """
+        )
+        cols_by_table: dict[str, list[str]] = {}
+        for table_name, column_name, data_type in cur.fetchall():
+            if str(data_type).lower() not in _PG_TEXT_TYPES:
+                continue
+            if _is_skipped_column(str(column_name)):
+                continue
+            cols_by_table.setdefault(str(table_name), []).append(str(column_name))
+
+        for table, columns in cols_by_table.items():
+            if not columns:
+                continue
+            select_cols = ", ".join(_quote_ident(col) for col in columns)
+            cur.execute(
+                f"SELECT ctid::text AS __rowid, {select_cols} FROM {_quote_ident(table)}"
+            )
+            colnames = [d[0] for d in cur.description]
+            for row in cur:
+                rowmap = dict(zip(colnames, row))
+                rowid = str(rowmap.get("__rowid"))
+                for column in columns:
+                    value = rowmap.get(column)
+                    # JSON/JSONB columns arrive as parsed objects from psycopg2;
+                    # _classify_cell only inspects str values, so re-serialise
+                    # dict/list so envelope JSON is checked as text.
+                    if isinstance(value, (dict, list)):
+                        value = json.dumps(value)
+                    labels = _classify_cell(table, column, value)
+                    if labels:
+                        findings.append(
+                            BackupDLPFinding(
+                                table=table, column=column, rowid=rowid, labels=labels
+                            )
+                        )
+    except Exception as exc:
+        return BackupDLPReport(safe, len(findings), findings, error=str(exc))
+    finally:
+        conn.close()
+
+    return BackupDLPReport(safe, len(findings), findings)
+
+
 def _main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Scan a SQLite backup for plaintext secret leakage.",
+        description="Scan a SQLite backup or PostgreSQL DB for plaintext secret leakage.",
     )
-    parser.add_argument("db_path")
+    parser.add_argument("db_path", nargs="?", help="SQLite backup file path.")
+    parser.add_argument(
+        "--postgres-url",
+        help="PostgreSQL URL to scan (e.g. a throwaway DB restored from pg_dump).",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    report = scan_backup_db(args.db_path)
+    if args.postgres_url:
+        report = scan_postgres_db(args.postgres_url)
+    elif args.db_path:
+        report = scan_backup_db(args.db_path)
+    else:
+        parser.error("provide a SQLite db_path or --postgres-url")
     if args.json:
         print(json.dumps(report.to_dict(), sort_keys=True))
     elif report.passed:

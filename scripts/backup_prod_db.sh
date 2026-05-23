@@ -36,11 +36,15 @@ set -Eeuo pipefail
 
 LABEL="manual"
 PRUNE=30
+# OP-1640: prod runs PostgreSQL-HA, so the default is a real pg_dump of the
+# live PG. --sqlite forces the legacy SQLite path (dev / single-file installs).
+SQLITE_MODE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --label) LABEL="$2"; shift 2;;
     --prune) PRUNE="$2"; shift 2;;
+    --sqlite) SQLITE_MODE=true; shift;;
     -h|--help) sed -n '2,24p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 1;;
   esac
@@ -158,28 +162,65 @@ DLP_SCANNER="$REPO/scripts/backup_dlp_scan.py"
 command -v python3 >/dev/null || \
   die "python3 missing; DLP scanner cannot run; aborting BEFORE plaintext extract"
 
-# Prefer the docker-compose-managed volume (canonical live DB).
-# Fallback to host path if someone's running without compose.
 COMPOSE_FILE="$REPO/docker-compose.prod.yml"
-LIVE_DB=""
-if docker compose -f "$COMPOSE_FILE" ps --services --filter status=running 2>/dev/null | grep -qx backend-a; then
-  LIVE_DB="docker"
-elif [[ -f "$REPO/data/omnisight.db" ]]; then
-  LIVE_DB="host"
+PG_CONTAINER="${OMNISIGHT_PG_CONTAINER:-omnisight-pg-primary}"
+
+# ── OP-1640: prefer a REAL pg_dump of the live PostgreSQL ──
+# Prod runs PostgreSQL-HA (pg-primary). The legacy SQLite path backed up a
+# STALE /app/data/omnisight.db (a pre-PG leftover in the data volume) — NOT
+# the live DB — so it was useless rollback insurance. pg_dump (custom format)
+# is MVCC-consistent. The mandatory DLP scan runs against a THROWAWAY DB
+# restored from the dump (proving the very artifact we encrypt is clean), via
+# backend-a (psycopg2 + db_ha network); the temp DB is always dropped.
+if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
+  ok "PG mode: pg_dump live PostgreSQL via $PG_CONTAINER"
+  docker compose -f "$COMPOSE_FILE" ps --services --filter status=running 2>/dev/null | grep -qx backend-a \
+    || die "backend-a not running; cannot run the PG DLP scan"
+  PG_USER="$(docker exec "$PG_CONTAINER" printenv POSTGRES_USER 2>/dev/null || true)"; PG_USER="${PG_USER:-omnisight}"
+  PG_DB="$(docker exec "$PG_CONTAINER" printenv POSTGRES_DB 2>/dev/null || true)"; PG_DB="${PG_DB:-omnisight}"
+  PLAIN="$BKP_DIR/${LABEL}-${TS}.dump"
+  # MVCC-consistent custom-format dump streamed to the host file (umask 077).
+  ( umask 077; docker exec "$PG_CONTAINER" pg_dump -U "$PG_USER" -d "$PG_DB" \
+      --format=custom --no-owner --no-privileges > "$PLAIN" ) || die "pg_dump failed"
+  chmod 600 "$PLAIN"
+  # Restore into a throwaway DB inside pg-primary, scan it, always drop it.
+  TMP_DB="omnisight_backup_dlp_${TS}_$$"
+  _cleanup_tmp_db() { docker exec "$PG_CONTAINER" dropdb -U "$PG_USER" --if-exists "$TMP_DB" >/dev/null 2>&1 || true; }
+  trap _cleanup_tmp_db EXIT
+  docker exec "$PG_CONTAINER" createdb -U "$PG_USER" "$TMP_DB" || die "DLP temp DB create failed"
+  docker exec -i "$PG_CONTAINER" pg_restore -U "$PG_USER" -d "$TMP_DB" \
+      --no-owner --no-privileges < "$PLAIN" || die "DLP temp DB restore failed"
+  # Scan via backend-a; build the temp-DB URL INSIDE the container from its own
+  # OMNISIGHT_DATABASE_URL so the password never appears in host process argv.
+  if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
+        --volume "$DLP_SCANNER:/app/scripts/backup_dlp_scan.py:ro" \
+        -e OMNISIGHT_DLP_TMP_DB="$TMP_DB" \
+        --entrypoint sh backend-a -c '
+          url="$(python3 -c "import os; b=os.environ[\"OMNISIGHT_DATABASE_URL\"].rsplit(chr(47),1)[0]; print(b+chr(47)+os.environ[\"OMNISIGHT_DLP_TMP_DB\"])")"
+          exec python3 /app/scripts/backup_dlp_scan.py --postgres-url "$url"'; then
+    _cleanup_tmp_db; trap - EXIT
+    shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
+    die "backup DLP scan failed; plaintext pg_dump shredded"
+  fi
+  _cleanup_tmp_db; trap - EXIT
+  ok "backup DLP scan passed (PG; scanned a restored temp copy of the dump)"
 else
-  die "no live DB found (backend-a not running and no host data/omnisight.db)"
-fi
-
-PLAIN="$BKP_DIR/${LABEL}-${TS}.db"
-
-if [[ "$LIVE_DB" == "docker" ]]; then
-  ok "using live DB via backend-a (WAL-safe online backup)"
-  # Capture backup + quick_check inside the container (where sqlite3
-  # lib + the DB coexist), then stream to host via tar to preserve
-  # perms + avoid a mid-copy read by the app. `sqlite3.Connection.backup`
-  # is the canonical WAL-safe online API — works while the app is
-  # actively writing.
-  docker compose -f "$COMPOSE_FILE" exec -T backend-a python3 - <<'PY' > "$PLAIN" || die "backup via container failed"
+  # ── Legacy SQLite path: only with explicit --sqlite (dev / single-file). ──
+  # Fail closed otherwise so we never silently back up a stale SQLite again.
+  [[ "$SQLITE_MODE" == true ]] || \
+    die "PostgreSQL container '$PG_CONTAINER' not found and --sqlite not set — refusing to back up a possibly-stale SQLite file (OP-1640)"
+  LIVE_DB=""
+  if docker compose -f "$COMPOSE_FILE" ps --services --filter status=running 2>/dev/null | grep -qx backend-a; then
+    LIVE_DB="docker"
+  elif [[ -f "$REPO/data/omnisight.db" ]]; then
+    LIVE_DB="host"
+  else
+    die "no live DB found (backend-a not running and no host data/omnisight.db)"
+  fi
+  PLAIN="$BKP_DIR/${LABEL}-${TS}.db"
+  if [[ "$LIVE_DB" == "docker" ]]; then
+    ok "using live SQLite via backend-a (WAL-safe online backup)"
+    docker compose -f "$COMPOSE_FILE" exec -T backend-a python3 - <<'PY' > "$PLAIN" || die "backup via container failed"
 import sqlite3, sys, os, tempfile
 src = sqlite3.connect("/app/data/omnisight.db")
 tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
@@ -195,9 +236,9 @@ with open(tmp.name, "rb") as fh:
     sys.stdout.buffer.write(fh.read())
 os.unlink(tmp.name)
 PY
-else
-  ok "using host file directly (no compose running)"
-  python3 - "$REPO/data/omnisight.db" "$PLAIN" <<'PY' || die "backup failed"
+  else
+    ok "using host SQLite file directly (no compose running)"
+    python3 - "$REPO/data/omnisight.db" "$PLAIN" <<'PY' || die "backup failed"
 import sqlite3, sys
 src = sqlite3.connect(sys.argv[1]); dst = sqlite3.connect(sys.argv[2])
 with dst: src.backup(dst)
@@ -206,21 +247,14 @@ dst.close(); src.close()
 if check != "ok":
     sys.stderr.write(f"quick_check: {check!r}\n"); sys.exit(1)
 PY
+  fi
+  chmod 600 "$PLAIN"
+  if ! python3 "$DLP_SCANNER" "$PLAIN"; then
+    shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
+    die "backup DLP scan failed; plaintext backup shredded"
+  fi
+  ok "backup DLP scan passed"
 fi
-
-# Perms 0600 — the WSL filesystem is visible from Windows via \\wsl$;
-# 0644 would leak every admin hash / session token / audit record to
-# any Windows user on the host.
-chmod 600 "$PLAIN"
-
-# Use $DLP_SCANNER (validated above) rather than re-stringifying the
-# path — keeps a single source of truth and prevents drift between
-# preflight check and actual invocation.
-if ! python3 "$DLP_SCANNER" "$PLAIN"; then
-  shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
-  die "backup DLP scan failed; plaintext backup shredded"
-fi
-ok "backup DLP scan passed"
 
 # gpg instead of `openssl enc` — OpenSSL 3 removed AEAD cipher support
 # from `enc` (AES-256-GCM is no longer selectable) so we'd be left
