@@ -3,8 +3,8 @@
 **Ticket:** OP-883 (D11, META OP-761 Sprint D §Phase 3) • **Status:** active
 **Module:** `backend/orchestrator/slo_monitor.py`
 **Config:** `config/slo_thresholds.yaml`
-**Related runbooks:** `docs/operations/slo-monitor-rollback.md` (OP-772
-deploy-window worker, narrower scope) • `docs/operations/prod-deploy-runbook.md`
+**Related runbooks:** `docs/operations/slo-monitor-rollback.md` (canonical
+auto-rollback contract) • `docs/operations/prod-deploy-runbook.md`
 (OP-881 D9 deploy orchestrator) • `docs/operations/as-rollout-and-rollback.md`
 (OP-771 D10 canary controller).
 

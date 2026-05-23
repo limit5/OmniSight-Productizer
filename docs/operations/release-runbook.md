@@ -319,23 +319,19 @@ curl -fsS https://prod.example.com/admin/deploy-audit/verify
 
 ## 5. SLO breach response
 
-**Trigger:** `backend.slo_monitor` posts a `medium` (or higher)
-operator notification with subject `slo.breach.<route>` after three
-consecutive 30-second windows above threshold for the same route. The
-monitor will then attempt **automatic** rollback if the previous
-backend and frontend tags exist in GHCR.
+**Trigger:** `backend.orchestrator.slo_monitor` posts a critical
+operator notification after the configured sustained-breach window
+elapses. The monitor then attempts **automatic** rollback through the
+OP-883 orchestrator path; while progressive canary is HOLD'd and
+`canary_state.json` is absent, it defaults to full production rollback.
 
 **Steps (operator-side, while the monitor is acting):**
 
 1. Open the SLO dashboard tile: `/admin/slo-monitor`. Confirm the
    breach is real (not a Prometheus scrape glitch).
-2. Watch the auto-rollback. The monitor will log a
-   `kind=slo_breach, status=started` row and on success a
-   `kind=rollback, status=succeeded, elapsed_seconds=<n>` row.
-3. If the monitor halts (previous image missing from registry), it
-   posts a `high` alert and stops. Pivot to §3 manual rollback,
-   substituting the previous tag from `git tag --merged release/vX.Y
-   --sort=-creatordate | sed -n '2p'`.
+2. Watch the auto-rollback. The monitor emits `slo.breach` with the
+   selected rollback mode and then invokes the OP-883 rollback trigger.
+3. If the monitor reports rollback failure, pivot to §3 manual rollback.
 
 **Verification:**
 
@@ -365,8 +361,8 @@ curl -fsS https://prod.example.com/admin/deploy-audit/verify
 
 - `docs/operations/slo-monitor-rollback.md` — monitor + auto-rollback
   contract
-- `config/slos.yaml` — thresholds (error rate < 0.5 %, p95 < 500 ms)
-- `backend/slo_monitor.py` — implementation
+- `config/slo_thresholds.yaml` — thresholds (error rate < 1 %, p95 < 500 ms)
+- `backend/orchestrator/slo_monitor.py` — implementation
 
 ---
 

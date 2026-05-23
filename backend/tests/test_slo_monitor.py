@@ -1,168 +1,75 @@
-"""OP-772 — SLO monitor and auto-rollback regression tests."""
+"""OP-1634 -- canonical SLO monitor wiring regression tests."""
 
 from __future__ import annotations
 
-import subprocess
 from pathlib import Path
 
-import yaml
-
-from backend.slo_monitor import (
-    APP_SERVICES,
-    ComposeRollbackExecutor,
-    ConsecutiveBreachDetector,
-    RouteWindow,
-    SloMonitor,
-    image_refs_for_tag,
-    load_slo_config,
-)
+from backend.orchestrator import slo_monitor as sm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-SLO_CONFIG = PROJECT_ROOT / "config" / "slos.yaml"
+SLO_THRESHOLDS = PROJECT_ROOT / "config" / "slo_thresholds.yaml"
+RETIRED_SLO_CONFIG = PROJECT_ROOT / "config" / "slos.yaml"
 SYSTEMD_SERVICE = PROJECT_ROOT / "deploy" / "systemd" / "omnisight-slo-monitor.service"
 DEPLOY_PROD = PROJECT_ROOT / "scripts" / "deploy-prod.sh"
-TEST_REGISTRY = "sora.services:49160/omnisight/omnisight-productizer"
 
 
-class _Source:
-    def __init__(self, windows: list[list[RouteWindow]]) -> None:
-        self.windows = list(windows)
-        self.calls = 0
+def test_backend_slo_monitor_is_deprecation_shim() -> None:
+    import backend.slo_monitor as legacy
 
-    def fetch(self, window_seconds: int):
-        self.calls += 1
-        return self.windows.pop(0)
+    assert legacy.main is sm.main
+    assert legacy.SloMonitor is sm.SloMonitor
+    assert legacy.DEFAULT_CONFIG_PATH == sm.DEFAULT_CONFIG_PATH
 
 
-class _Rollback:
-    def __init__(self):
-        self.calls = 0
-
-    def rollback(self, timeout_seconds: int):
-        from backend.slo_monitor import RollbackResult
-
-        self.calls += 1
-        return RollbackResult("rolled_back", "v1.2.2", 42.0, "ok")
-
-
-def test_slo_definitions_in_config_match_op_772_thresholds() -> None:
-    cfg = load_slo_config(SLO_CONFIG)
-
-    assert cfg.interval_seconds == 30
-    assert cfg.post_deploy_monitor_seconds == 3600
-    assert cfg.breach_consecutive_windows == 3
-    assert cfg.rollback_max_seconds == 300
-    assert cfg.error_budget_seconds == 3600
-    default = cfg.routes["*"]
-    assert default.error_rate_lt == 0.005
-    assert default.p95_latency_ms_lt == 500
-    assert default.success_rate_gt == 0.995
-
-
-def test_monitor_systemd_worker_runs_persistent_30s_loop() -> None:
+def test_slo_monitor_systemd_unit_runs_canonical_orchestrator_from_bridge() -> None:
     text = SYSTEMD_SERVICE.read_text(encoding="utf-8")
-    cfg = yaml.safe_load(SLO_CONFIG.read_text(encoding="utf-8"))
 
-    assert "Type=simple" in text
-    assert "Restart=always" in text
-    assert "python -m backend.slo_monitor" in text
-    assert cfg["interval_seconds"] == 30
-
-
-def test_detector_requires_three_consecutive_30s_windows() -> None:
-    cfg = load_slo_config(SLO_CONFIG)
-    detector = ConsecutiveBreachDetector(cfg)
-    bad = RouteWindow(route="/api/workflows", error_rate=0.006, p95_latency_ms=200, success_rate=0.999)
-
-    assert detector.observe([bad]) == []
-    assert detector.observe([bad]) == []
-    breaches = detector.observe([bad])
-
-    assert len(breaches) == 1
-    assert breaches[0].route == "/api/workflows"
-    assert breaches[0].metric == "error_rate"
-    assert breaches[0].windows == 3
+    assert "WorkingDirectory=%h/sora-bridge" in text
+    assert "EnvironmentFile=-%h/sora-bridge/.env" in text
+    assert (
+        "ExecStart=%h/sora-bridge/backend/.venv/bin/python "
+        "-m backend.orchestrator.slo_monitor"
+    ) in text
+    assert "python -m backend.slo_monitor" not in text
+    assert "%h/work/sora/OmniSight-Productizer" not in text
 
 
-def test_synthetic_regression_rolls_back_after_three_windows(monkeypatch) -> None:
-    cfg = load_slo_config(SLO_CONFIG)
-    bad = RouteWindow(route="/api/workflows", error_rate=0.006, p95_latency_ms=510, success_rate=0.994)
-    source = _Source([[bad], [bad], [bad]])
-    rollback = _Rollback()
-    notified: list[str] = []
+def test_slo_thresholds_are_single_canonical_config_source() -> None:
+    thresholds = sm.load_thresholds(SLO_THRESHOLDS)
 
-    async def fake_breach(breach):
-        notified.append(f"breach:{breach.metric}")
-
-    async def fake_rollback(result):
-        notified.append(f"rollback:{result.status}")
-
-    monkeypatch.setattr("backend.slo_monitor.notify_slo_breach", fake_breach)
-    monkeypatch.setattr("backend.slo_monitor.notify_rollback", fake_rollback)
-
-    result = SloMonitor(
-        config=cfg,
-        source=source,
-        rollback=rollback,
-        sleeper=lambda _seconds: None,
-    ).run_for(120)
-
-    assert result is not None
-    assert result.status == "rolled_back"
-    assert rollback.calls == 1
-    assert notified == ["breach:error_rate", "rollback:rolled_back"]
+    assert sm.DEFAULT_CONFIG_PATH == SLO_THRESHOLDS
+    assert not RETIRED_SLO_CONFIG.exists()
+    assert thresholds.error_rate_max == 0.01
+    assert thresholds.p95_latency_ms_max == 500
+    assert thresholds.sample_interval_seconds == 30
+    assert thresholds.breach_sustain_seconds == 120
+    assert thresholds.cooldown_seconds == 600
 
 
-def test_compose_rollback_checks_previous_images_before_redeploy() -> None:
-    calls: list[tuple[str, ...]] = []
+def test_missing_canary_state_defaults_to_full_rollback(monkeypatch) -> None:
+    rolled_back: list[str] = []
 
-    def runner(args, *, env=None, timeout=None):
-        calls.append(tuple(args))
-        return subprocess.CompletedProcess(args, 0, stdout="ok", stderr="")
+    def _missing_state():
+        raise FileNotFoundError("canary_state.json")
 
-    rollback = ComposeRollbackExecutor(
-        previous_tag="v1.2.2",
-        namespace="acme",
-        runner=runner,
-        env={"OMNISIGHT_REGISTRY": TEST_REGISTRY},
+    class _FakeProductionDeployOrchestrator:
+        def _rollback(self, tag: str) -> None:
+            rolled_back.append(tag)
+
+    monkeypatch.setattr("backend.canary_rollout.load_state", _missing_state)
+    monkeypatch.setattr(
+        "backend.production_release.ProductionDeployOrchestrator",
+        _FakeProductionDeployOrchestrator,
     )
+    monkeypatch.setenv("OMNISIGHT_PROD_CURRENT_IMAGE_TAG", "v1.2.3")
 
-    result = rollback.rollback(timeout_seconds=300)
+    rollback = sm.build_default_rollback()
 
-    assert result.status == "rolled_back"
-    assert image_refs_for_tag(
-        "acme",
-        "v1.2.2",
-        env={"OMNISIGHT_REGISTRY": TEST_REGISTRY},
-    ) == (
-        f"{TEST_REGISTRY}/backend:v1.2.2",
-        f"{TEST_REGISTRY}/frontend:v1.2.2",
-    )
-    assert calls[0] == ("docker", "manifest", "inspect", f"{TEST_REGISTRY}/backend:v1.2.2")
-    assert calls[1] == ("docker", "manifest", "inspect", f"{TEST_REGISTRY}/frontend:v1.2.2")
-    assert calls[2][-len(APP_SERVICES):] == APP_SERVICES
-    assert calls[3][-len(APP_SERVICES):] == APP_SERVICES
-
-
-def test_compose_rollback_halts_when_previous_image_missing() -> None:
-    calls: list[tuple[str, ...]] = []
-
-    def runner(args, *, env=None, timeout=None):
-        calls.append(tuple(args))
-        return subprocess.CompletedProcess(args, 1, stdout="", stderr="missing")
-
-    rollback = ComposeRollbackExecutor(
-        previous_tag="v1.2.2",
-        namespace="acme",
-        runner=runner,
-        env={"OMNISIGHT_REGISTRY": TEST_REGISTRY},
-    )
-
-    result = rollback.rollback(timeout_seconds=300)
-
-    assert result.status == "halted"
-    assert "missing previous image" in result.detail
-    assert len(calls) == 2
+    assert rollback.mode == "full"
+    outcome = rollback.trigger("slo breach")
+    assert outcome.mode == "full"
+    assert outcome.status == "rolled_back"
+    assert rolled_back == ["v1.2.3"]
 
 
 def test_deploy_prod_persists_current_and_previous_tags_for_monitor() -> None:

@@ -1,25 +1,26 @@
-# OP-772 SLO Monitor + Auto-Rollback
+# OP-883 SLO Monitor + Auto-Rollback
 
-Production deploys use `config/slos.yaml` as the SLO source of truth:
+Production deploys use `config/slo_thresholds.yaml` as the SLO source of truth:
 
-- error rate `< 0.5%`
+- error rate `< 1%`
 - p95 latency `< 500 ms`
-- success rate `> 99.5%`
-- monthly error budget `1 h`
+- sustained breach window `> 2 min`
+- rollback cooldown `10 min`
 
-`deploy/systemd/omnisight-slo-monitor.service` runs `python -m backend.slo_monitor`
+`deploy/systemd/omnisight-slo-monitor.service` runs
+`python -m backend.orchestrator.slo_monitor` from `/home/user/sora-bridge`
 as a persistent worker. The worker samples Prometheus every 30 seconds and
-keeps running through the deploy and for the post-deploy hour. A breach is
-three consecutive 30-second windows above threshold for the same route metric.
+keeps running continuously. A breach is sustained until the configured
+`breach_sustain_seconds` window elapses.
 
-When a breach fires, the monitor posts a medium operator notification, checks
-that the previous backend and frontend image tags exist in GHCR, and then runs:
+When a breach fires, the monitor posts a critical operator notification and
+triggers the OP-883 orchestrator rollback. Because progressive canary is HOLD'd
+(OP-931/932/933), `canary_state.json` is absent in the current production
+topology and the monitor defaults to the full production rollback path.
 
 ```bash
-OMNISIGHT_IMAGE_TAG=<previous-tag> \
-docker compose -f docker-compose.prod.yml up -d --no-deps backend-a backend-b frontend
+python -m backend.orchestrator.slo_monitor
 ```
 
-Rollback is bounded by `rollback_max_seconds: 300`. If either previous image is
-missing from the registry, the monitor posts a high-severity alert and halts
-without changing the running services; the operator must intervene manually.
+`backend/slo_monitor.py` remains only as a deprecated compatibility shim that
+forwards to `backend.orchestrator.slo_monitor`.

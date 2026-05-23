@@ -1,10 +1,10 @@
 """OP-883 D11 -- continuous SLO monitor with auto-rollback on breach.
 
-This is the **orchestrator-side** SLO monitor sitting one level above
-:mod:`backend.slo_monitor` (the OP-772 deploy-window worker that wraps
-Prometheus + ``docker compose``). The D11 monitor runs continuously in
-production and decides between **D10 canary** rollback and **D9 full**
-prod rollback when an SLO breach is sustained past the AC #3 window.
+This is the canonical **orchestrator-side** SLO monitor. The retired
+OP-772 :mod:`backend.slo_monitor` module is now only a compatibility
+shim that forwards here. The D11 monitor runs continuously in production
+and decides between **D10 canary** rollback and **D9 full** prod rollback
+when an SLO breach is sustained past the AC #3 window.
 
 The five acceptance criteria from META OP-761 §Phase 3:
 
@@ -552,11 +552,7 @@ class SloMonitor:
 
 
 class _PrometheusMetricSource:
-    """Minimal Prometheus HTTP source -- delegates to the OP-772 client
-    when the daemon is wired in. Lives here as a thin adapter so the
-    OP-883 monitor doesn't import the heavier OP-772 worker at module
-    import time (which would drag in ``yaml``-only config + ``docker``
-    side effects)."""
+    """Minimal Prometheus HTTP source for the canonical OP-883 daemon."""
 
     def __init__(self, base_url: str) -> None:
         self.base_url = base_url.rstrip("/")

@@ -26,11 +26,9 @@ flag file in the override-source test), or Docker. Sources are stubbed:
 ``_FakeMetricSource`` returns scripted samples, ``_FakeOverride``
 toggles via an attribute, ``_FakeRollback`` records invocations.
 
-The file lives at ``test_slo_monitor_op883.py`` (not the bare
-``test_slo_monitor.py`` mentioned in the OP-883 spec) because the
-OP-772 deploy-window worker already owns ``test_slo_monitor.py``; the
-``_<ticket>`` suffix matches the existing ``test_deploy_audit_op779``
-/ ``test_canary_rollout_op771`` convention.
+The file lives at ``test_slo_monitor_op883.py`` for the detailed OP-883
+behavior contract; ``test_slo_monitor.py`` covers the canonical unit and
+legacy-shim wiring from OP-1634.
 """
 from __future__ import annotations
 

@@ -1,11 +1,10 @@
-# OP-883 D11 — SLO thresholds for the orchestrator-side continuous
-# monitor (backend.orchestrator.slo_monitor). These numbers come from
-# the META OP-761 §Phase 3 acceptance criteria.
+# OP-883 D11 — canonical SLO thresholds for the orchestrator-side
+# continuous monitor (backend.orchestrator.slo_monitor). These numbers
+# come from the META OP-761 §Phase 3 acceptance criteria.
 #
-# Distinct from config/slos.yaml (OP-772 deploy-window worker): that
-# file drives the post-deploy 1-hour soak monitor and its tighter
-# 0.5% / 99.5% per-route SLOs. THIS file drives the always-on monitor
-# that decides between D10 canary abort and D9 full prod rollback.
+# OP-1634 reconciled the retired OP-772 config/slos.yaml source into
+# this file. The canonical monitor keeps the OP-883 1% error-rate budget;
+# the 0.5% deploy-window worker threshold is no longer used in production.
 schema_version: 1
 
 # AC #2 — error rate < 1% (1-min window) AND p95 < 500ms (5-min window).
