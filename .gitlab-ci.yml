@@ -116,7 +116,10 @@ fast-gate:
         echo "no changed Alembic migrations for strict syntax scan"
       fi
     - |
-      HEAD_OUTPUT="$(backend/.venv/bin/alembic -c backend/alembic.ini heads)"
+      # alembic resolves `script_location = alembic` relative to the CWD
+      # (alembic quirk), not to alembic.ini's dir — run from backend/ where
+      # ./alembic exists (matches deploy-prod.sh's `-w /app/backend`).
+      HEAD_OUTPUT="$(cd backend && .venv/bin/alembic -c alembic.ini heads)"
       HEAD_COUNT="$(printf '%s\n' "$HEAD_OUTPUT" | grep -c '(head)' || true)"
       if [ "$HEAD_COUNT" -ne 1 ]; then
         echo "FAIL: expected exactly one Alembic head, got $HEAD_COUNT"
