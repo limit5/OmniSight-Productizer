@@ -63,8 +63,10 @@ the daemon entry point asks for them.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +85,13 @@ DEFAULT_CONFIG_PATH = PROJECT_ROOT / "config" / "slo_thresholds.yaml"
 DEFAULT_SUPPRESS_FLAG_DIR = PROJECT_ROOT / "deploy" / "blue-green"
 DEFAULT_SUPPRESS_FLAG_NAME = "slo_monitor_suppress.flag"
 SUPPRESS_ENV_VAR = "OMNISIGHT_SLO_MONITOR_SUPPRESS"
+PREVIOUS_IMAGE_TAG_ENV_VAR = "OMNISIGHT_PREVIOUS_IMAGE_TAG"
+PREVIOUS_IMAGE_ALEMBIC_HEAD_ENV_VAR = "OMNISIGHT_PREVIOUS_IMAGE_ALEMBIC_HEAD"
+CURRENT_IMAGE_TAG_ENV_VAR = "OMNISIGHT_PROD_CURRENT_IMAGE_TAG"
+REGISTRY_ENV_VAR = "OMNISIGHT_REGISTRY"
+DEFAULT_BACKEND_IMAGE_REPOSITORY = (
+    "sora.services:49160/omnisight/omnisight-productizer/backend"
+)
 
 
 # ─── Error catalog ────────────────────────────────────────────────────
@@ -102,6 +111,10 @@ class MetricSourceUnavailable(SloMonitorError):
 
 class CooldownInEffect(SloMonitorError):
     """Manual rollback attempt during the AC #4 cooldown window."""
+
+
+class RollbackMigrationSafetyRefused(SloMonitorError):
+    """Auto-rollback target cannot be proven bootable on the live DB."""
 
 
 # ─── Data types ───────────────────────────────────────────────────────
@@ -224,6 +237,11 @@ class RollbackTrigger(Protocol):
         """Fire the rollback. May raise on unrecoverable failure."""
 
 
+class RollbackMigrationSafetyProbe(Protocol):
+    def check(self, *, previous_tag: str) -> None:
+        """Raise when the previous image is not safe for the live DB."""
+
+
 # ─── Config loader ────────────────────────────────────────────────────
 
 
@@ -311,6 +329,158 @@ class FileOrEnvOverrideSource:
             return self.flag_path.is_file()
         except OSError:
             return False
+
+
+# ─── Full rollback migration-safety preflight ─────────────────────────
+
+
+@dataclass(frozen=True)
+class _ManifestDbRollbackSafetyProbe:
+    """Refuse image rollback unless the target image matches live DB head.
+
+    The image side uses the baked ``MANIFEST.json.alembic_head_in_image``
+    contract. Prefer the deploy-time env lock when present; otherwise
+    read the manifest from the previous backend image without starting
+    the app. The live side is the authoritative ``alembic_version`` row.
+    Unknown state is a refusal: an unproven rollback target must not be
+    auto-executed during an SLO incident.
+    """
+
+    db_url: str | None = None
+    image_repository: str | None = None
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+
+    def check(self, *, previous_tag: str) -> None:
+        image_head = self._previous_image_head(previous_tag)
+        db_head = self._live_db_head()
+        if image_head != db_head:
+            raise RollbackMigrationSafetyRefused(
+                "migration-incompatible rollback target: "
+                f"previous_tag={previous_tag} image_head={image_head} "
+                f"live_db_head={db_head}"
+            )
+
+    def _previous_image_head(self, previous_tag: str) -> str:
+        env_head = os.environ.get(PREVIOUS_IMAGE_ALEMBIC_HEAD_ENV_VAR, "").strip()
+        if env_head:
+            return env_head
+        image_ref = f"{self._image_repository()}:{previous_tag}"
+        proc = self.runner(
+            [
+                "docker", "run", "--rm", "--entrypoint", "cat",
+                image_ref, "/app/MANIFEST.json",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30.0,
+            check=False,
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            raise RollbackMigrationSafetyRefused(
+                "cannot determine previous image migration head: "
+                f"previous_tag={previous_tag} image={image_ref} detail={detail}"
+            )
+        try:
+            manifest = json.loads(proc.stdout)
+        except json.JSONDecodeError as exc:
+            raise RollbackMigrationSafetyRefused(
+                "previous image manifest is not valid JSON: "
+                f"previous_tag={previous_tag} image={image_ref}: {exc}"
+            ) from exc
+        head = manifest.get("alembic_head_in_image")
+        if not isinstance(head, str) or not head.strip():
+            raise RollbackMigrationSafetyRefused(
+                "previous image manifest missing alembic_head_in_image: "
+                f"previous_tag={previous_tag} image={image_ref}"
+            )
+        return head.strip()
+
+    def _live_db_head(self) -> str:
+        db_url = self.db_url or _rollback_db_url()
+        if not db_url:
+            raise RollbackMigrationSafetyRefused(
+                "cannot determine live DB head: database URL is unset"
+            )
+        try:
+            from sqlalchemy import create_engine, text
+            from sqlalchemy.pool import NullPool
+
+            engine = create_engine(db_url, poolclass=NullPool)
+            with engine.connect() as conn:
+                rows = conn.execute(
+                    text("SELECT version_num FROM alembic_version")
+                ).scalars().all()
+        except Exception as exc:
+            raise RollbackMigrationSafetyRefused(
+                f"cannot determine live DB head: {type(exc).__name__}: {exc}"
+            ) from exc
+        heads = sorted(str(row).strip() for row in rows if str(row).strip())
+        if len(heads) != 1:
+            raise RollbackMigrationSafetyRefused(
+                "cannot determine live DB head: "
+                f"expected one alembic_version row, got {heads}"
+            )
+        return heads[0]
+
+    def _image_repository(self) -> str:
+        if self.image_repository:
+            return self.image_repository.rstrip("/")
+        registry = os.environ.get(REGISTRY_ENV_VAR, "").strip().rstrip("/")
+        if registry:
+            return f"{registry}/backend"
+        return DEFAULT_BACKEND_IMAGE_REPOSITORY
+
+
+def _rollback_db_url() -> str:
+    for name in ("OMNISIGHT_DATABASE_URL", "SQLALCHEMY_URL", "DATABASE_URL"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+@dataclass
+class ComposeRollbackExecutor:
+    """D9 full rollback executor with migration-safe preflight."""
+
+    rollback_action: Callable[[str], None]
+    safety_probe: RollbackMigrationSafetyProbe
+    alert: Callable[[str, str], None] | None = None
+    previous_tag_env_var: str = PREVIOUS_IMAGE_TAG_ENV_VAR
+    current_tag_env_var: str = CURRENT_IMAGE_TAG_ENV_VAR
+
+    @property
+    def mode(self) -> str:
+        return "full"
+
+    def trigger(self, reason: str) -> RollbackOutcome:
+        previous_tag = os.environ.get(self.previous_tag_env_var, "").strip()
+        current_tag = os.environ.get(self.current_tag_env_var, "current").strip()
+        if not previous_tag:
+            self._refuse(
+                reason,
+                "previous image tag is unset; refusing blind full rollback",
+            )
+        try:
+            self.safety_probe.check(previous_tag=previous_tag)
+        except RollbackMigrationSafetyRefused as exc:
+            self._refuse(reason, str(exc))
+        self.rollback_action(current_tag)
+        return RollbackOutcome(
+            mode="full",
+            status="rolled_back",
+            detail=f"tag={current_tag} previous_tag={previous_tag} reason={reason}",
+        )
+
+    def _refuse(self, reason: str, detail: str) -> None:
+        message = f"{detail}; breach_reason={reason}"
+        if self.alert is not None:
+            self.alert(
+                "SLO auto-rollback refused: migration safety check failed",
+                message,
+            )
+        raise RollbackMigrationSafetyRefused(message)
 
 
 # ─── SloMonitor ───────────────────────────────────────────────────────
@@ -635,7 +805,10 @@ class _CompositeRollbackTrigger:
         return self.full_trigger(reason)
 
 
-def build_default_rollback() -> RollbackTrigger:
+def build_default_rollback(
+    *, alert: Callable[[str, str], None] | None = None,
+    migration_safety_probe: RollbackMigrationSafetyProbe | None = None,
+) -> RollbackTrigger:
     """Wire D10 canary abort + D9 full prod rollback.
 
     The canary side defers to :mod:`backend.canary_rollout` (its
@@ -669,21 +842,20 @@ def build_default_rollback() -> RollbackTrigger:
             detail=f"rollout_id={new_state.rollout_id} status={new_state.status}",
         )
 
-    def _full_trigger(reason: str) -> RollbackOutcome:
+    def _full_rollback_action(tag: str) -> None:
         from backend import production_release
-        tag = os.environ.get(
-            "OMNISIGHT_PROD_CURRENT_IMAGE_TAG", "current",
-        )
         orch = production_release.ProductionDeployOrchestrator()
         orch._rollback(tag)  # noqa: SLF001 -- intentional: D9 hook
-        return RollbackOutcome(
-            mode="full", status="rolled_back",
-            detail=f"tag={tag} reason={reason}",
-        )
+
+    full_executor = ComposeRollbackExecutor(
+        rollback_action=_full_rollback_action,
+        safety_probe=migration_safety_probe or _ManifestDbRollbackSafetyProbe(),
+        alert=alert,
+    )
 
     return _CompositeRollbackTrigger(
         canary_trigger=_canary_trigger,
-        full_trigger=_full_trigger,
+        full_trigger=full_executor.trigger,
         canary_active=_canary_active,
     )
 
@@ -727,7 +899,7 @@ def build_default_monitor(
         thresholds=thresholds,
         source=_PrometheusMetricSource(prom_url),
         override_source=FileOrEnvOverrideSource(),
-        rollback=build_default_rollback(),
+        rollback=build_default_rollback(alert=_notify),
         notify=_notify,
     )
 

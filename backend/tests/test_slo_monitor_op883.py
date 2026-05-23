@@ -192,10 +192,10 @@ def _make_monitor(
     *,
     source: _FakeMetricSource,
     override: _FakeOverride | None = None,
-    rollback: _FakeRollback | None = None,
+    rollback: sm.RollbackTrigger | None = None,
     clock: _Clock | None = None,
     notify: Callable[[str, str], None] | None = None,
-) -> tuple[sm.SloMonitor, _Clock, _FakeRollback, _FakeOverride]:
+) -> tuple[sm.SloMonitor, _Clock, sm.RollbackTrigger, _FakeOverride]:
     clock = clock or _Clock()
     rollback = rollback or _FakeRollback()
     override = override or _FakeOverride()
@@ -267,6 +267,48 @@ def test_breach_triggers_rollback(sse_spy):
     assert payload["rollback_mode"] == "canary"
     assert "error_rate" in payload["breached_metrics"]
     assert payload["error_rate"] == pytest.approx(0.05)
+
+
+def test_full_rollback_refuses_when_previous_image_behind_live_db(
+    monkeypatch, sse_spy,
+):
+    """OP-1636 -- SLO breach must not brick prod by rolling back to
+    an image whose Alembic head is behind the live DB."""
+
+    class _RejectingProbe:
+        def check(self, *, previous_tag: str) -> None:
+            raise sm.RollbackMigrationSafetyRefused(
+                "migration-incompatible rollback target: "
+                f"previous_tag={previous_tag} image_head=0245 live_db_head=0247"
+            )
+
+    rollback_calls: list[str] = []
+    alerts: list[tuple[str, str]] = []
+    monkeypatch.setenv(sm.PREVIOUS_IMAGE_TAG_ENV_VAR, "v0.5.0-rc5-hotfix4")
+    monkeypatch.setenv(sm.CURRENT_IMAGE_TAG_ENV_VAR, "v0.5.0")
+    executor = sm.ComposeRollbackExecutor(
+        rollback_action=lambda tag: rollback_calls.append(tag),
+        safety_probe=_RejectingProbe(),
+        alert=lambda title, message: alerts.append((title, message)),
+    )
+    src = _FakeMetricSource(samples=[_err_breach()])
+    monitor, clock, _rb, _ = _make_monitor(source=src, rollback=executor)
+
+    first = monitor.tick()
+    assert first.action == sm.TickAction.breach_pending
+    clock.advance(_TEST_THRESHOLDS.breach_sustain_seconds)
+    triggered = monitor.tick()
+
+    assert triggered.action == sm.TickAction.rollback_triggered
+    assert triggered.rollback is not None
+    assert triggered.rollback.mode == "full"
+    assert triggered.rollback.status == "failed"
+    assert "migration-incompatible rollback target" in triggered.rollback.detail
+    assert rollback_calls == []
+    assert len(alerts) == 1
+    assert alerts[0][0] == "SLO auto-rollback refused: migration safety check failed"
+    assert "live_db_head=0247" in alerts[0][1]
+    assert sse_spy.events[-1][1]["rollback_mode"] == "full"
 
 
 # ── T2: recovery within cooldown ─────────────────────────────────────

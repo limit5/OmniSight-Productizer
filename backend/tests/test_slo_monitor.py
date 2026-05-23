@@ -52,6 +52,10 @@ def test_missing_canary_state_defaults_to_full_rollback(monkeypatch) -> None:
     def _missing_state():
         raise FileNotFoundError("canary_state.json")
 
+    class _CompatibleMigrationProbe:
+        def check(self, *, previous_tag: str) -> None:
+            assert previous_tag == "v1.2.2"
+
     class _FakeProductionDeployOrchestrator:
         def _rollback(self, tag: str) -> None:
             rolled_back.append(tag)
@@ -62,8 +66,11 @@ def test_missing_canary_state_defaults_to_full_rollback(monkeypatch) -> None:
         _FakeProductionDeployOrchestrator,
     )
     monkeypatch.setenv("OMNISIGHT_PROD_CURRENT_IMAGE_TAG", "v1.2.3")
+    monkeypatch.setenv("OMNISIGHT_PREVIOUS_IMAGE_TAG", "v1.2.2")
 
-    rollback = sm.build_default_rollback()
+    rollback = sm.build_default_rollback(
+        migration_safety_probe=_CompatibleMigrationProbe()
+    )
 
     assert rollback.mode == "full"
     outcome = rollback.trigger("slo breach")
