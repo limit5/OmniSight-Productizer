@@ -334,6 +334,7 @@ def test_config_from_env_reads_acting_and_cold_start_caps(monkeypatch, tmp_path:
     monkeypatch.setenv(pc.COLD_START_MAX_INFRA_ENV, "2")
     monkeypatch.setenv(pc.COLD_START_MAX_RECONCILE_ENV, "3")
     monkeypatch.setenv(pc.COLD_START_MAX_SWEEP_ENV, "4")
+    monkeypatch.setenv(pc.COLD_START_BOT_ACCOUNT_IDS_ENV, "bot-a, bot-b")
 
     cfg = CoordinatorConfig.from_env(config_dir=tmp_path / "cfg")
 
@@ -341,6 +342,7 @@ def test_config_from_env_reads_acting_and_cold_start_caps(monkeypatch, tmp_path:
     assert cfg.cold_start_max_infra == 2
     assert cfg.cold_start_max_reconcile == 3
     assert cfg.cold_start_max_sweep == 4
+    assert cfg.cold_start_bot_account_ids == ("bot-a", "bot-b")
 
 
 def test_config_from_env_defaults_to_shadow_and_one_per_phase_cap(tmp_path: Path) -> None:

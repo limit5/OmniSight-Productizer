@@ -60,6 +60,7 @@ actions but call NO live mutator:
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -132,6 +133,7 @@ class FakeColdStartGateway:
         mergeable: tuple[str, ...] = (),
         with_commits: tuple[str, ...] = (),
         live_labels: dict[str, tuple[str, ...]] | None = None,
+        bot_account_ids: tuple[str, ...] = ("bot-account",),
         sweep_plan: StaleSweepPlan | None = None,
     ) -> None:
         self._audits = list(audits) if audits else [InfraAuditResult()]
@@ -141,6 +143,7 @@ class FakeColdStartGateway:
         self._mergeable = set(mergeable)
         self._commits = set(with_commits)
         self._live_labels = dict(live_labels or {})
+        self._bot_account_ids = tuple(bot_account_ids)
         self._sweep_plan = sweep_plan or StaleSweepPlan()
         # Call records (assertion surface).
         self.audit_calls = 0
@@ -164,7 +167,12 @@ class FakeColdStartGateway:
 
     # ── Startup-2 ──
     def interrupted_tickets(self) -> list[InterruptedTicket]:
-        return list(self._interrupted)
+        return [
+            ticket
+            if ticket.assignee_account_id is not None
+            else replace(ticket, assignee_account_id="bot-account")
+            for ticket in self._interrupted
+        ]
 
     def has_live_runner(self, key: str) -> bool:
         return key in self._live
@@ -177,6 +185,9 @@ class FakeColdStartGateway:
 
     def ticket_labels(self, key: str) -> tuple[str, ...]:
         return self._live_labels.get(key, ())
+
+    def bot_account_ids(self) -> tuple[str, ...]:
+        return self._bot_account_ids
 
     def mark_resumable(self, key: str) -> None:
         self.marked_resumable.append(key)
@@ -279,6 +290,7 @@ def _config(
     cold_start_max_reconcile: int = 100,
     cold_start_max_sweep: int = 100,
     jira_agent_class: str = "subscription-claude",
+    cold_start_bot_account_ids: tuple[str, ...] = (),
 ) -> CoordinatorConfig:
     base = tmp_path / "coordinator"
     return CoordinatorConfig(
@@ -292,6 +304,7 @@ def _config(
         cold_start_max_infra=cold_start_max_infra,
         cold_start_max_reconcile=cold_start_max_reconcile,
         cold_start_max_sweep=cold_start_max_sweep,
+        cold_start_bot_account_ids=cold_start_bot_account_ids,
     )
 
 
@@ -856,6 +869,59 @@ def test_startup_2_live_coord_guard_skips_each_mutator(tmp_path: Path) -> None:
     }
 
 
+def test_startup_2_human_assignee_skips_reconcile(tmp_path: Path) -> None:
+    """OP-1623: Startup-2 default-denies non-allowlisted assignee accountIds."""
+    gw = FakeColdStartGateway(
+        interrupted=[
+            InterruptedTicket(
+                key="OP-HUMAN",
+                stale=True,
+                assignee_account_id="human-account",
+            ),
+            InterruptedTicket(
+                key="OP-UNKNOWN",
+                stale=True,
+                assignee_account_id="unlisted-bot",
+            ),
+            InterruptedTicket(
+                key="OP-BOT",
+                stale=True,
+                assignee_account_id="bot-account",
+            ),
+        ],
+        mergeable=("OP-HUMAN", "OP-UNKNOWN", "OP-BOT"),
+    )
+    coord = _coordinator(
+        tmp_path,
+        gw,
+        config=_config(tmp_path, cold_start_bot_account_ids=("bot-account",)),
+    )
+    report = ColdStartReport()
+
+    coord._startup_2_reconcile(report)
+
+    assert gw.transitioned == ["OP-BOT"]
+    assert gw.marked_resumable == []
+    assert gw.reset_todo == []
+    assert [r for r in report.reconciled if r["action"] == "human-assigned"] == [
+        {
+            "ticket": "OP-HUMAN",
+            "classification": "human-assigned",
+            "action": "human-assigned",
+        },
+        {
+            "ticket": "OP-UNKNOWN",
+            "classification": "human-assigned",
+            "action": "human-assigned",
+        },
+    ]
+    assert report.reconciled[-1] == {
+        "ticket": "OP-BOT",
+        "classification": "gerrit-mergeable",
+        "action": "under_review",
+    }
+
+
 # ── Code AC: _startup_3_sweep ─────────────────────────────────────────
 
 
@@ -911,6 +977,35 @@ def test_startup_3_live_coord_guard_skips_each_mutator(tmp_path: Path) -> None:
         ("OP-B", "coord_skip"),
         ("OP-C", "coord_skip"),
     }
+
+
+def test_startup_3_human_orphan_assignee_skips_clear(tmp_path: Path) -> None:
+    """OP-1623: Startup-3 only clears orphan assignees whose accountId is
+    allowlisted as a bot; humans and allowlist misses are recorded and kept."""
+    plan = StaleSweepPlan(
+        orphan_assignees=("OP-HUMAN", "OP-UNKNOWN", "OP-BOT"),
+        orphan_assignee_account_ids={
+            "OP-HUMAN": "human-account",
+            "OP-UNKNOWN": "unlisted-bot",
+            "OP-BOT": "bot-account",
+        },
+    )
+    gw = FakeColdStartGateway(sweep_plan=plan)
+    coord = _coordinator(
+        tmp_path,
+        gw,
+        config=_config(tmp_path, cold_start_bot_account_ids=("bot-account",)),
+    )
+    report = ColdStartReport()
+
+    coord._startup_3_sweep(report)
+
+    assert gw.cleared_assignees == ["OP-BOT"]
+    assert [(r["ticket"], r["sweep"]) for r in report.swept] == [
+        ("OP-HUMAN", "human-assigned"),
+        ("OP-UNKNOWN", "human-assigned"),
+        ("OP-BOT", "orphan-assignee"),
+    ]
 
 
 def test_cold_start_per_phase_caps_limit_mutators(tmp_path: Path) -> None:
@@ -1303,9 +1398,10 @@ def test_interrupted_tickets_jql_excludes_operator_intent_and_fetches_labels(
 
     assert [ticket.key for ticket in tickets] == ["OP-PLAIN"]
     assert tickets[0].labels == ()
+    assert tickets[0].assignee_account_id is None
     jql = captured["payload"]["jql"]
     assert 'labels not in ("coord-skip","coord-quarantine","tier:X","priority:meta","type:meta")' in jql
-    assert captured["payload"]["fields"] == ["status", "updated", "labels"]
+    assert captured["payload"]["fields"] == ["status", "updated", "labels", "assignee"]
 
 
 def test_build_stale_sweep_plan_classifies_hygiene(monkeypatch, tmp_path: Path) -> None:
@@ -1403,6 +1499,7 @@ def test_build_stale_sweep_plan_classifies_hygiene(monkeypatch, tmp_path: Path) 
 
     assert plan.stale_claims == {"OP-A": ("claim:default:OP-A",)}
     assert plan.orphan_assignees == ("OP-B",)
+    assert plan.orphan_assignee_account_ids == {"OP-B": "bot"}
     assert plan.resolved_waiting == {"OP-C": ("runner-blocked:waiting-OP-50",)}
     assert 'labels not in ("coord-skip","coord-quarantine","tier:X")' in captured["payload"]["jql"]
 

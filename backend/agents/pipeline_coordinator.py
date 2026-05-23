@@ -109,6 +109,7 @@ FAIRNESS_LOG_RECORD_CAP_ENV = "OMNISIGHT_COORDINATOR_FAIRNESS_LOG_RECORD_CAP"
 COLD_START_MAX_INFRA_ENV = "OMNISIGHT_COORDINATOR_COLD_START_MAX_INFRA"
 COLD_START_MAX_RECONCILE_ENV = "OMNISIGHT_COORDINATOR_COLD_START_MAX_RECONCILE"
 COLD_START_MAX_SWEEP_ENV = "OMNISIGHT_COORDINATOR_COLD_START_MAX_SWEEP"
+COLD_START_BOT_ACCOUNT_IDS_ENV = "OMNISIGHT_COORDINATOR_COLD_START_BOT_ACCOUNT_IDS"
 
 # ADR-0021 §9 L1: heartbeat every 60s.
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 60.0
@@ -154,6 +155,7 @@ class CoordinatorConfig:
     cold_start_max_infra: int = DEFAULT_COLD_START_MAX_INFRA
     cold_start_max_reconcile: int = DEFAULT_COLD_START_MAX_RECONCILE
     cold_start_max_sweep: int = DEFAULT_COLD_START_MAX_SWEEP
+    cold_start_bot_account_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.capacity_path is None:
@@ -203,6 +205,9 @@ class CoordinatorConfig:
             ),
             cold_start_max_sweep=_env_int_from_mapping(
                 env, COLD_START_MAX_SWEEP_ENV, DEFAULT_COLD_START_MAX_SWEEP
+            ),
+            cold_start_bot_account_ids=_env_csv_tuple(
+                env.get(COLD_START_BOT_ACCOUNT_IDS_ENV)
             ),
         )
 
@@ -331,6 +336,12 @@ def _env_int_from_mapping(
         )
         return default
     return max(minimum, value)
+
+
+def _env_csv_tuple(raw: str | None) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
 def _env_truthy(raw: str | None) -> bool:
@@ -1069,6 +1080,7 @@ class InterruptedTicket:
     status: str = ""
     stale: bool = False
     labels: tuple[str, ...] = ()
+    assignee_account_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1083,6 +1095,7 @@ class StaleSweepPlan:
 
     stale_claims: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     orphan_assignees: tuple[str, ...] = ()
+    orphan_assignee_account_ids: Mapping[str, str | None] = field(default_factory=dict)
     resolved_waiting: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
@@ -1148,10 +1161,12 @@ class JiraDispatchColdStartGateway:
         repo_root: Path | None = None,
         agent_class: str = "claude",
         cli_timeout_seconds: float = 60.0,
+        bot_account_ids: tuple[str, ...] = (),
     ) -> None:
         self._repo_root = Path(repo_root) if repo_root is not None else _repo_root()
         self._agent_class = agent_class
         self._cli_timeout = cli_timeout_seconds
+        self._configured_bot_account_ids = tuple(bot_account_ids)
         self._client: Any = None
         self._client_tried = False
 
@@ -1171,6 +1186,15 @@ class JiraDispatchColdStartGateway:
                 )
                 self._client = None
         return self._client
+
+    def bot_account_ids(self) -> tuple[str, ...]:
+        ids = set(self._configured_bot_account_ids)
+        client = self._jira()
+        if client is not None:
+            account_id = getattr(client, "bot_account_id", None)
+            if account_id:
+                ids.add(str(account_id))
+        return tuple(sorted(ids))
 
     # ── Startup-1 ──
     def audit_infra(self) -> InfraAuditResult:
@@ -1213,7 +1237,11 @@ class JiraDispatchColdStartGateway:
             )
             resp = jira_dispatch._request(
                 client, "POST", "/search/jql",
-                {"jql": jql, "fields": ["status", "updated", "labels"], "maxResults": 100},
+                {
+                    "jql": jql,
+                    "fields": ["status", "updated", "labels", "assignee"],
+                    "maxResults": 100,
+                },
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] interrupted-ticket query failed: %s", exc)
@@ -1230,6 +1258,10 @@ class JiraDispatchColdStartGateway:
             fields = issue.get("fields") or {}
             status = str((fields.get("status") or {}).get("name", ""))
             labels = tuple(str(label) for label in fields.get("labels") or ())
+            assignee = fields.get("assignee") or {}
+            assignee_account_id = (
+                assignee.get("accountId") if isinstance(assignee, dict) else None
+            )
             if STARTUP_2_OPERATOR_INTENT_LABELS.intersection(labels):
                 continue
             # ``updated`` is a coarse last-activity proxy for staleness (the
@@ -1245,7 +1277,11 @@ class JiraDispatchColdStartGateway:
                     pass
             out.append(
                 InterruptedTicket(
-                    key=issue.get("key", "?"), status=status, stale=stale, labels=labels
+                    key=issue.get("key", "?"),
+                    status=status,
+                    stale=stale,
+                    labels=labels,
+                    assignee_account_id=assignee_account_id,
                 )
             )
         return out
@@ -1461,6 +1497,12 @@ class ShadowColdStartGateway:
 
     def stale_sweep_plan(self) -> StaleSweepPlan:
         return self._delegate.stale_sweep_plan()
+
+    def bot_account_ids(self) -> tuple[str, ...]:
+        reader = getattr(self._delegate, "bot_account_ids", None)
+        if reader is None:
+            return ()
+        return tuple(reader())
 
     # ── mutators: record-only (never touch live JIRA / git / systemctl) ──
     def start_unit(self, unit: str) -> bool:
@@ -1708,6 +1750,7 @@ def _build_stale_sweep_plan(client: Any, *, repo_root: Path | None = None) -> St
     )
     stale_claims: dict[str, tuple[str, ...]] = {}
     orphan_assignees: list[str] = []
+    orphan_assignee_account_ids: dict[str, str | None] = {}
     resolved_waiting: dict[str, tuple[str, ...]] = {}
     for issue in resp.get("issues", []):
         key = issue.get("key", "?")
@@ -1717,6 +1760,9 @@ def _build_stale_sweep_plan(client: Any, *, repo_root: Path | None = None) -> St
         if STARTUP_3_OPERATOR_INTENT_LABELS.intersection(labels):
             continue
         assignee = fields.get("assignee")
+        assignee_account_id = (
+            assignee.get("accountId") if isinstance(assignee, dict) else None
+        )
         claim_labels = tuple(l for l in labels if l.startswith(CLAIM_LABEL_PREFIX))
         terminal_claim_statuses = set(PUBLISHED_STATUS_NAMES) | {"Archived"}
         if (
@@ -1727,6 +1773,7 @@ def _build_stale_sweep_plan(client: Any, *, repo_root: Path | None = None) -> St
             stale_claims[key] = claim_labels
         elif assignee and status in jira_dispatch.TODO_STATUS_NAMES and not claim_labels:
             orphan_assignees.append(key)
+            orphan_assignee_account_ids[key] = assignee_account_id
         waiting = tuple(l for l in labels if l.startswith(DEPENDENCY_WAITING_LABEL_PREFIX))
         dead: list[str] = []
         for label in waiting:
@@ -1742,6 +1789,7 @@ def _build_stale_sweep_plan(client: Any, *, repo_root: Path | None = None) -> St
     return StaleSweepPlan(
         stale_claims=stale_claims,
         orphan_assignees=tuple(orphan_assignees),
+        orphan_assignee_account_ids=orphan_assignee_account_ids,
         resolved_waiting=resolved_waiting,
     )
 
@@ -1758,7 +1806,10 @@ def _default_cold_start_gateway(
     designed. The same single ``acting`` switch gates the engine action layer
     and the sprint re-plan handler (see :func:`build_default_coordinator`).
     """
-    live = JiraDispatchColdStartGateway(agent_class=config.jira_agent_class)
+    live = JiraDispatchColdStartGateway(
+        agent_class=config.jira_agent_class,
+        bot_account_ids=config.cold_start_bot_account_ids,
+    )
     return live if acting else ShadowColdStartGateway(live)
 
 
@@ -2384,7 +2435,9 @@ class PipelineCoordinator:
         mutations_remaining = self._config.cold_start_max_reconcile
         for ticket in gw.interrupted_tickets():
             key = ticket.key
-            if gw.has_live_runner(key):
+            if not self._cold_start_bot_assignee(ticket.assignee_account_id):
+                self._record_reconcile(report, key, "human-assigned", "human-assigned")
+            elif gw.has_live_runner(key):
                 self._record_reconcile(report, key, "live-runner", "leave")
             elif gw.gerrit_change_mergeable(key):
                 if mutations_remaining <= 0:
@@ -2446,6 +2499,18 @@ class PipelineCoordinator:
         labels = set(self._cold_start_gateway.ticket_labels(key))
         return bool(STARTUP_RECHECK_OPERATOR_GUARD_LABELS.intersection(labels))
 
+    def _cold_start_bot_account_ids(self) -> set[str]:
+        ids = set(self._config.cold_start_bot_account_ids)
+        reader = getattr(self._cold_start_gateway, "bot_account_ids", None)
+        if reader is not None:
+            ids.update(str(account_id) for account_id in reader() if account_id)
+        return ids
+
+    def _cold_start_bot_assignee(self, account_id: str | None) -> bool:
+        if account_id is None:
+            return False
+        return account_id in self._cold_start_bot_account_ids()
+
     def _startup_3_sweep(self, report: ColdStartReport) -> None:
         """Startup-3: drop orphaned claim:* / dead waiting-* + clear assignees."""
         gw = self._cold_start_gateway
@@ -2481,6 +2546,13 @@ class PipelineCoordinator:
             if mutations_remaining <= 0:
                 self._record_sweep(report, key, "orphan-assignee", [])
                 return
+            account_ids = plan.orphan_assignee_account_ids
+            if (
+                key in account_ids
+                and not self._cold_start_bot_assignee(account_ids.get(key))
+            ):
+                self._record_sweep(report, key, "human-assigned", [])
+                continue
             if self._cold_start_operator_guarded(key):
                 self._record_sweep(report, key, "coord_skip", [])
                 continue
