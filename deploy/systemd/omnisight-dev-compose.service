@@ -1,0 +1,94 @@
+; [OP-1645] Boreas-B A4 — systemd wrapper that activates the OP-1642 dev
+; compose stack under a managed lifecycle, boot-safe.
+;
+; This unit does NOT define any services itself — it wraps the dev stack
+; shipped by OP-1642 (deploy/dev/docker-compose.yml):
+;
+;   ExecStartPre — infra/dev/verify-env-contract.sh refuses to start the
+;                  stack if deploy/dev/.env points at prod (a prod DSN, a
+;                  live API key, or a missing OMNISIGHT_ENV=dev). A boot
+;                  with a fat-fingered .env fails loudly here instead of
+;                  silently bringing dev up against prod Postgres — the
+;                  shell half of the A2 (OP-1643) env-contract guard. The
+;                  in-process guard (backend/env_contract.py) is the other
+;                  half, at connection time.
+;   ExecStart    — docker compose ... up -d --wait  (blocks until postgres
+;                  + backend-a healthchecks are green, so `systemctl start`
+;                  returns non-zero if the stack does not converge).
+;   ExecStartPost— curl the dev backend /readyz; a 200 confirms backend-a
+;                  came up AND its alembic drift gate passed (the image
+;                  /readyz fails closed if the DB is behind/ahead of the
+;                  image migration head — the host-reboot retro lesson).
+;                  Non-200 fails the unit and triggers ExecStop's `down`.
+;   ExecStop     — docker compose ... down  (clean teardown).
+;
+; Cgroup isolation: dev is a THIRD stack co-tenanted with prod (+ staging)
+; on the same box until a dedicated dev host exists (A5, deferred).
+; MemoryMax/CPUQuota cap it at <=25% of the box — below staging's 30%, as
+; dev is the lowest-priority tenant — so a runaway dev process (a build
+; loop, a leak, an agent fork bomb) cannot starve prod. Requires cgroup v2
+; for the percentage accounting; on v1 the user manager logs "Failed to
+; set MemoryMax" and the limit silently no-ops (see the staging runbook
+; CgroupV1Fallback for the absolute-bytes fallback).
+;
+; NOTE: a FRESH dev DB must be `alembic upgrade heads`-initialised ONCE
+; before first boot — the backend drift gate CHECKS the head but will not
+; bootstrap an empty DB. The named PG volume (omnisight-dev_dev-postgres)
+; persists across reboot, so `up -d --wait` converges after the one-time
+; init. One-time init (already run for the current volume, 2026-05-24):
+;   docker compose -p omnisight-dev --env-file deploy/dev/.env \
+;     -f deploy/dev/docker-compose.yml run --rm --no-deps -w /app/backend \
+;     backend-a python -m alembic upgrade heads
+;
+; Install (user-level — no sudo; mirrors omnisight-staging-compose):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/omnisight-dev-compose.service ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now omnisight-dev-compose.service
+;   loginctl enable-linger "$USER"   # survives logout / starts on boot
+;
+; Verify:
+;   systemctl --user status omnisight-dev-compose
+;   docker ps --filter name=omnisight-dev
+;   curl -fsS http://localhost:8020/readyz
+
+[Unit]
+Description=OmniSight dev stack (docker compose up -d --wait) — OP-1645
+Documentation=file:///home/user/work/sora/OmniSight-Productizer/docs/sprint-boreas/boreas-b-A1-dev-isolation-design.md
+; dockerd is a system service; the user manager has no ordering edge to it,
+; so we only order after the network. compose `up` retries the socket; the
+; ExecStartPre contract check does not need docker.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/user/work/sora/OmniSight-Productizer/deploy/dev
+; OMNISIGHT_ENV=dev is part of the env contract verify-env-contract.sh
+; enforces; export it here too so the compose project + the contract check
+; agree even if the operator's .env omits it.
+Environment=OMNISIGHT_ENV=dev
+Environment=OMNISIGHT_DEV_READYZ_URL=http://localhost:8020/readyz
+; Optional per-host overrides (alternative env-file path, dev port). `-` =>
+; optional; absence is not an error.
+EnvironmentFile=-/home/user/.config/omnisight/dev-compose.env
+ExecStartPre=/home/user/work/sora/OmniSight-Productizer/infra/dev/verify-env-contract.sh
+ExecStart=/usr/bin/docker compose -p omnisight-dev --env-file /home/user/work/sora/OmniSight-Productizer/deploy/dev/.env -f /home/user/work/sora/OmniSight-Productizer/deploy/dev/docker-compose.yml up -d --wait --remove-orphans
+ExecStartPost=/usr/bin/curl -fsS --retry 12 --retry-delay 5 --retry-connrefused -o /dev/null ${OMNISIGHT_DEV_READYZ_URL}
+ExecStop=/usr/bin/docker compose -p omnisight-dev --env-file /home/user/work/sora/OmniSight-Productizer/deploy/dev/.env -f /home/user/work/sora/OmniSight-Productizer/deploy/dev/docker-compose.yml down
+; First boot pulls the backend image (pull_policy: always); allow 5 min.
+; Subsequent boots converge in seconds because `up -d --wait` short-circuits
+; on already-healthy state.
+TimeoutStartSec=300
+TimeoutStopSec=90
+
+; ── Cgroup quota — dev may never take down prod ──
+; Percentages relative to host total RAM / one CPU's runtime. Requires
+; cgroup v2 (see header / staging runbook CgroupV1Fallback).
+MemoryMax=25%
+CPUQuota=25%
+IOWeight=40
+
+[Install]
+WantedBy=default.target
