@@ -14,7 +14,10 @@ Type=simple
 WorkingDirectory=%h/sora-bridge
 Environment=PYTHONUNBUFFERED=1
 EnvironmentFile=-%h/sora-bridge/.env
-ExecStart=%h/sora-bridge/backend/.venv/bin/python -m backend.orchestrator.slo_monitor
+# OP-1636/F4: ~/sora-bridge has no venv (OP-1634 repointed here but assumed one);
+# use the system python3 like pipeline-coordinator.service does. WorkingDirectory
+# = ~/sora-bridge so `backend.orchestrator.slo_monitor` resolves.
+ExecStart=/usr/bin/python3 -m backend.orchestrator.slo_monitor
 Restart=always
 RestartSec=5
 TimeoutStopSec=20

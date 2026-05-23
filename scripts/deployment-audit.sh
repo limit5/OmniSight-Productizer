@@ -270,6 +270,7 @@ env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service           
 systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    REAL gap: control-plane stranded on main@rc1; re-point off main deferred to cutover
 systemd-unit      pipeline-coordinator.service                                    yes       OP-1547   coordinator daemon (ADR-0021) — must be live
 systemd-unit      pipeline-coordinator-watchdog.service                           yes       OP-1547   coordinator liveness watchdog — must be live
+systemd-unit      omnisight-slo-monitor.service                                   yes       OP-1636   SLO auto-rollback monitor (OP-883) — activated 2026-05-23 (F4); migration-safe rollback (OP-1641, fail-closed)
 container         staging@http://localhost:8010/healthz                           yes       OP-927    AUDIT-19 staging stood up 2026-05-22 (project omnisight-staging, repo compose)
 systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
 systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
