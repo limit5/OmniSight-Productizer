@@ -131,6 +131,7 @@ def _resolve_pg_dsn() -> str:
         low = url.lower()
         if low.startswith(("postgresql://", "postgres://", "postgresql+asyncpg://", "postgres+asyncpg://", "asyncpg://")):
             # asyncpg accepts postgresql://... directly; strip driver qualifier.
+            resolved = url  # already postgresql://
             for prefix, canon in (
                 ("postgresql+asyncpg://", "postgresql://"),
                 ("postgres+asyncpg://", "postgresql://"),
@@ -138,8 +139,13 @@ def _resolve_pg_dsn() -> str:
                 ("postgres://", "postgresql://"),
             ):
                 if low.startswith(prefix):
-                    return canon + url[len(prefix):]
-            return url  # already postgresql://
+                    resolved = canon + url[len(prefix):]
+                    break
+            # [OP-1643] A2: env↔DB contract — fail closed if a dev process
+            # resolved a prod-looking PG DSN here (or vice-versa).
+            from backend.env_contract import enforce_env_db_contract
+            enforce_env_db_contract(resolved, source="db._resolve_pg_dsn")
+            return resolved
     return ""
 
 

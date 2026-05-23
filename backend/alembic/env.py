@@ -78,9 +78,29 @@ def _resolve_db_url() -> str:
 target_metadata = None
 
 
+def _guard_env_db_contract(url: str) -> None:
+    # [OP-1643] A2: env↔DB contract — explicit guard for the migration
+    # entrypoint. Required separately from the runtime hooks because
+    # SQLALCHEMY_URL wins first in _resolve_db_url() and bypasses the
+    # OMNISIGHT_DATABASE_URL/DATABASE_URL order the other hooks see. Best-effort
+    # import (a minimal standalone alembic invocation may not have backend on
+    # sys.path); when importable it enforces strictly (raises → exit 78).
+    try:
+        import sys
+        root = Path(__file__).resolve().parents[2]
+        if str(root) not in sys.path:
+            sys.path.insert(0, str(root))
+        from backend.env_contract import enforce_env_db_contract  # type: ignore
+    except Exception:  # pragma: no cover — defensive, keeps bare alembic usable
+        return
+    enforce_env_db_contract(url, source="alembic.env")
+
+
 def run_migrations_offline() -> None:
+    _url = _resolve_db_url()
+    _guard_env_db_contract(_url)
     context.configure(
-        url=_resolve_db_url(),
+        url=_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -92,6 +112,7 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     url = _resolve_db_url()
+    _guard_env_db_contract(url)
     # Only pre-create a parent directory when the URL is SQLite;
     # Postgres/MySQL URLs point at a network server, not a file path.
     if url.startswith("sqlite:///"):

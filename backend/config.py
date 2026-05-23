@@ -1126,6 +1126,15 @@ _PROVIDER_PREFIXES: dict[str, tuple[str, ...]] = {
 
 _MIN_BEARER_LEN = 16  # 128-bit entropy, roughly
 
+# [OP-1643] Boreas-B A2 — re-export the env-contract guard from its dependency-
+# light home so callers can `from backend.config import enforce_env_db_contract`.
+# The real implementation lives in backend.env_contract to avoid an import cycle
+# with the connection primitives that call it.
+from backend.env_contract import (  # noqa: E402,F401
+    EnvContractViolation,
+    enforce_env_db_contract,
+)
+
 
 class ConfigValidationError(SystemExit):
     """Startup-time settings rejected — refuse to boot (exit 78 = EX_CONFIG)."""
@@ -1298,6 +1307,18 @@ def validate_startup_config(strict: bool | None = None) -> list[str]:
     # Exit code 78 (EX_CONFIG from sysexits.h) signals a configuration
     # error to container orchestrators.
     env_name = (settings.env or os.environ.get("OMNISIGHT_ENV") or "").strip().lower()
+
+    # [OP-1643] A2: env↔DB contract — fail closed early (clear startup error)
+    # if this process's declared env disagrees with its Postgres DSN. The
+    # connection primitives (db_pool.init_pool / db._resolve_pg_dsn) also guard
+    # at connect time; this gives the backend an earlier, more legible failure.
+    _dsn = (os.environ.get("OMNISIGHT_DATABASE_URL") or os.environ.get("DATABASE_URL") or "").strip()
+    if _dsn:
+        try:
+            enforce_env_db_contract(_dsn, source="validate_startup_config", env=env_name or None)
+        except EnvContractViolation as exc:
+            hard_errors.append(exc.message)
+
     if env_name == "production" and auth_mode != "strict":
         hard_errors.append(
             f"ENV=production requires OMNISIGHT_AUTH_MODE=strict "
