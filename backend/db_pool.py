@@ -132,6 +132,12 @@ async def init_pool(
             "the pool (e.g. switching DSN)."
         )
 
+    # [OP-1643] A2: env↔DB contract — fail closed before opening the pool if a
+    # dev process resolved a prod-looking DSN (or vice-versa). Connection-time
+    # chokepoint for the pool family (backend, runners, coordinator, audit).
+    from backend.env_contract import enforce_env_db_contract
+    enforce_env_db_contract(dsn, source="db_pool.init_pool")
+
     init_cb = init if init is not None else _set_connection_defaults
 
     logger.info(

@@ -167,6 +167,17 @@ class DatabaseURL:
                 f"asyncpg_connect_kwargs() only valid for Postgres; "
                 f"dialect={self.dialect!r}"
             )
+        # [OP-1643] A2: env↔DB contract — single connection-time chokepoint for
+        # the direct-``asyncpg.connect`` family (character_card,
+        # runner_metrics_recorder, agent_drift_report, scripts/*) which all call
+        # ``asyncpg_connect_kwargs()`` immediately before connecting. Classify a
+        # minimal reconstructed DSN (only user/db/port matter to the guard).
+        from backend.env_contract import enforce_env_db_contract
+        _synthetic = (
+            f"postgresql://{self.username or ''}@{self.host or ''}:"
+            f"{self.port if self.port is not None else ''}/{self.database or ''}"
+        )
+        enforce_env_db_contract(_synthetic, source="db_url.asyncpg_connect_kwargs")
         kw: dict[str, object] = {}
         if self.host:
             kw["host"] = self.host
