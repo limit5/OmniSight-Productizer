@@ -47,7 +47,16 @@ fast-gate:
     - apt-get update
     - apt-get install -y --no-install-recommends git python3 python3-pip python3-venv
     - corepack enable
-    - python3 -m venv backend/.venv
+    # Debian bookworm's python3 is 3.11.2, which can activate dependency
+    # markers that are false for the Python 3.12 runtime lockfile (e.g.
+    # redis 7.4.0's `async-timeout ; python_full_version<"3.11.3"`),
+    # breaking the hashed `pip install --require-hashes`. Bootstrap the
+    # CI interpreter to 3.12 (matching the runtime image + the lockfile
+    # compile env) via pinned uv; no requirements lockfile change.
+    - python3 -m pip install --user --break-system-packages "uv==0.8.13"
+    - ~/.local/bin/uv python install 3.12
+    - ~/.local/bin/uv venv --seed --python 3.12 backend/.venv
+    - backend/.venv/bin/python --version
     - backend/.venv/bin/pip install --upgrade pip
     - backend/.venv/bin/pip install -r backend/requirements.txt -r backend/requirements-dev.txt
     - pnpm install --frozen-lockfile
