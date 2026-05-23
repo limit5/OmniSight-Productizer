@@ -337,6 +337,9 @@ candidate-seal-bundle:
       artifacts: true
     - job: candidate-build-image
   script:
+    # emit_bundle_json.sh needs python3; .docker_job's apk add omits it
+    # (other docker jobs don't need it). Install it locally for the seal.
+    - apk add --no-cache python3
     - test -n "${CANDIDATE_SHA:-}"
     - test "${#CANDIDATE_SHA}" = "40"
     - test "${CANDIDATE_IMAGE_TAG}" = "sha-${CANDIDATE_SHA}"
