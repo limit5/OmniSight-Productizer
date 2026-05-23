@@ -424,9 +424,10 @@ export default function DisplaySettingsPage() {
                 )}
               </div>
               <div className="flex shrink-0 flex-col items-end gap-1">
-                <label className="flex cursor-pointer items-center gap-2 text-xs">
+                <label htmlFor="force-full-override-switch" className="flex cursor-pointer items-center gap-2 text-xs">
                   <span>強制全開</span>
                   <Switch
+                    id="force-full-override-switch"
                     data-testid="force-full-override-switch"
                     checked={battery.forceFullOverride}
                     onCheckedChange={battery.setForceFullOverride}

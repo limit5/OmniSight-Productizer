@@ -546,8 +546,8 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                 <div className="mt-2 p-2 rounded bg-[var(--secondary)] space-y-2.5 overflow-hidden">
                   {/* Budget input — preset buttons */}
                   <div>
-                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] mb-1 block">$/day</label>
-                    <div className="flex flex-wrap gap-1">
+                    <span id="token-budget-perday-label" className="font-mono text-[9px] text-[var(--muted-foreground)] mb-1 block">$/day</span>
+                    <div role="group" aria-labelledby="token-budget-perday-label" className="flex flex-wrap gap-1">
                       {[0, 1, 5, 10, 50, 100].map(val => (
                         <button
                           key={val}
@@ -565,8 +565,9 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   </div>
                   {/* Threshold sliders — local state for smooth drag, commit on release */}
                   <div className="flex items-center gap-1.5">
-                    <label className="font-mono text-[9px] text-yellow-500 w-16 shrink-0">Warn</label>
+                    <label htmlFor="token-warn-threshold" className="font-mono text-[9px] text-yellow-500 w-16 shrink-0">Warn</label>
                     <input
+                      id="token-warn-threshold"
                       type="range" min="0.5" max={localDegrade} step="0.05"
                       value={localWarn}
                       className="flex-1 h-1 accent-yellow-500 min-w-0"
@@ -577,8 +578,9 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                     <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-7 text-right shrink-0">{(localWarn * 100).toFixed(0)}%</span>
                   </div>
                   <div className="flex items-center gap-1.5">
-                    <label className="font-mono text-[9px] text-[var(--hardware-orange)] w-16 shrink-0">Degrade</label>
+                    <label htmlFor="token-degrade-threshold" className="font-mono text-[9px] text-[var(--hardware-orange)] w-16 shrink-0">Degrade</label>
                     <input
+                      id="token-degrade-threshold"
                       type="range" min={localWarn} max="1" step="0.05"
                       value={localDegrade}
                       className="flex-1 h-1 accent-[var(--hardware-orange)] min-w-0"
@@ -590,7 +592,7 @@ export function TokenUsageStats({ className = "", externalUsage, configuredProvi
                   </div>
                   {/* Fallback info */}
                   <div className="flex items-center gap-1.5 pt-1 border-t border-[var(--border)]/50">
-                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-16 shrink-0">Fallback</label>
+                    <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-16 shrink-0">Fallback</span>
                     <span className="font-mono text-[9px] text-[var(--foreground)] truncate">{budgetInfo.fallback_provider} / {budgetInfo.fallback_model}</span>
                   </div>
                 </div>

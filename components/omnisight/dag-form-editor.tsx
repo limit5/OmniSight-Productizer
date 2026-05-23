@@ -21,7 +21,7 @@
  * toolchains surface as a validator warning at edit time.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { ArrowDown, ArrowUp, Plus, Trash2, X } from "lucide-react"
 import { fetchToolchains } from "@/lib/api"
 
@@ -185,14 +185,20 @@ export function DagFormEditor({ value, onChange, focusRequest }: Props) {
   // intention. We still show all other ids so the operator can reorder.
   const allIds = useMemo(() => value.tasks.map((t) => t.task_id), [value.tasks])
 
+  // Stable, instance-unique id so the visible "dag_id" label is properly
+  // associated with its input (jsx-a11y/label-has-associated-control) even
+  // when multiple Dag editors mount on the same page.
+  const dagIdFieldId = useId()
+
   // ─── render ────────────────────────────────────────────────────
 
   return (
     <div className="flex flex-col gap-3">
       {/* DAG-level fields */}
       <div className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 items-center">
-        <label className="text-xs font-mono text-[var(--muted-foreground)]">dag_id</label>
+        <label htmlFor={dagIdFieldId} className="text-xs font-mono text-[var(--muted-foreground)]">dag_id</label>
         <input
+          id={dagIdFieldId}
           type="text"
           value={value.dag_id}
           onChange={(e) => patchDag({ dag_id: e.target.value })}

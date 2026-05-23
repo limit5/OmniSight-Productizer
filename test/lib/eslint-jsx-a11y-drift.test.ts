@@ -49,6 +49,10 @@ const CRITICAL_RULES = [
   "jsx-a11y/html-has-lang",
   "jsx-a11y/iframe-has-title",
   "jsx-a11y/img-redundant-alt",
+  // FX2.D9.3 (OP-231) — promoted warn → error after sweeping the
+  // settings/admin tree to 0 violations. A visible <label> with no
+  // programmatic association leaves its control with no accessible name.
+  "jsx-a11y/label-has-associated-control",
   "jsx-a11y/no-access-key",
   "jsx-a11y/no-distracting-elements",
   "jsx-a11y/no-redundant-roles",
@@ -65,7 +69,6 @@ const CRITICAL_RULES = [
 const BEHAVIOURAL_RULES_AT_WARN = [
   "jsx-a11y/click-events-have-key-events",
   "jsx-a11y/interactive-supports-focus",
-  "jsx-a11y/label-has-associated-control",
   "jsx-a11y/media-has-caption",
   "jsx-a11y/mouse-events-have-key-events",
   "jsx-a11y/no-autofocus",
@@ -149,6 +152,11 @@ describe("FX.7.12 jsx-a11y eslint rule drift guard", () => {
           <li role="listitem" aria-selected="true">x</li>
           {/* aria-role: unknown role */}
           <div role="totally-not-a-real-aria-role" />
+          {/* label-has-associated-control: label with no htmlFor / nesting */}
+          <div>
+            <label>Username</label>
+            <input type="text" />
+          </div>
         </>
       )
       export default X
@@ -169,6 +177,7 @@ describe("FX.7.12 jsx-a11y eslint rule drift guard", () => {
       "jsx-a11y/anchor-is-valid",
       "jsx-a11y/role-supports-aria-props",
       "jsx-a11y/aria-role",
+      "jsx-a11y/label-has-associated-control",
     ]) {
       expect(
         errorRules.has(expected),

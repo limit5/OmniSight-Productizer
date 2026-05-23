@@ -480,8 +480,9 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
                     Token: {tokenFingerprint}
                   </div>
                   <div>
-                    <label className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Account</label>
+                    <label htmlFor="cf-tunnel-account" className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Account</label>
                     <select
+                      id="cf-tunnel-account"
                       value={selectedAccount}
                       onChange={e => setSelectedAccount(e.target.value)}
                       className="w-full px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-[10px]"
@@ -492,8 +493,9 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
                   </div>
                   {zones.length > 0 && (
                     <div>
-                      <label className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Zone (Domain)</label>
+                      <label htmlFor="cf-tunnel-zone" className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Zone (Domain)</label>
                       <select
+                        id="cf-tunnel-zone"
                         value={selectedZone}
                         onChange={e => setSelectedZone(e.target.value)}
                         className="w-full px-2 py-1.5 rounded border border-[var(--border)] bg-[var(--background)] font-mono text-[10px]"
@@ -517,8 +519,9 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
               {step === "hostnames" && (
                 <div className="space-y-3">
                   <div>
-                    <label className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Tunnel Name</label>
+                    <label htmlFor="cf-tunnel-name" className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Tunnel Name</label>
                     <input
+                      id="cf-tunnel-name"
                       type="text"
                       value={tunnelName}
                       onChange={e => setTunnelName(e.target.value)}
@@ -526,13 +529,15 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
                     />
                   </div>
                   <div>
-                    <label className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Hostnames</label>
+                    <span id="cf-tunnel-hostnames-label" className="font-mono text-[10px] text-[var(--foreground)] block mb-1">Hostnames</span>
                     {hostnames.map((h, i) => (
                       <div key={i} className="flex items-center gap-1 mb-1">
                         <Globe size={8} className="text-[var(--neural-blue)] shrink-0" />
                         <input
                           type="text"
                           value={h}
+                          aria-labelledby="cf-tunnel-hostnames-label"
+                          aria-label={`Hostname ${i + 1}`}
                           onChange={e => {
                             const next = [...hostnames]
                             next[i] = e.target.value
@@ -542,6 +547,7 @@ export default function CloudflareTunnelSetup({ open, onClose }: CloudflareTunne
                         />
                         <button
                           onClick={() => setHostnames(hostnames.filter((_, j) => j !== i))}
+                          aria-label={`Remove hostname ${i + 1}`}
                           className="text-[var(--critical-red)] hover:text-[var(--critical-red)]/80"
                         >
                           <X size={10} />

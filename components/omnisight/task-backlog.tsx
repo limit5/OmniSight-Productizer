@@ -791,10 +791,11 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
             
             <div className="p-4 space-y-4">
               <div>
-                <label className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
+                <label htmlFor="task-backlog-new-title" className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
                   TASK DESCRIPTION
                 </label>
                 <input
+                  id="task-backlog-new-title"
                   type="text"
                   value={newTaskTitle}
                   onChange={(e) => setNewTaskTitle(e.target.value)}
@@ -806,10 +807,10 @@ export function TaskBacklog({ agents, tasks: externalTasks, onAssignTask, onCrea
               </div>
               
               <div>
-                <label className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
+                <span id="task-backlog-priority-label" className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
                   PRIORITY
-                </label>
-                <div className="flex gap-2">
+                </span>
+                <div role="group" aria-labelledby="task-backlog-priority-label" className="flex gap-2">
                   {(["low", "medium", "high", "critical"] as TaskPriority[]).map(p => (
                     <button
                       key={p}

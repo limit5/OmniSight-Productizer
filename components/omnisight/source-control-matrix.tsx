@@ -506,10 +506,11 @@ export function SourceControlMatrix({
             <div className="px-6 py-4 space-y-4">
               {/* Project Name */}
               <div>
-                <label className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
+                <label htmlFor="scm-genesis-project-name" className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
                   PROJECT DESIGNATION
                 </label>
                 <input
+                  id="scm-genesis-project-name"
                   type="text"
                   value={newRepoName}
                   onChange={(e) => setNewRepoName(e.target.value)}
@@ -521,10 +522,11 @@ export function SourceControlMatrix({
               
               {/* Target Agent (Optional) */}
               <div>
-                <label className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
+                <label htmlFor="scm-genesis-target-agent" className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
                   AUTO-TETHER TO ORCHESTRATOR (OPTIONAL)
                 </label>
                 <select
+                  id="scm-genesis-target-agent"
                   value={targetAgent}
                   onChange={(e) => setTargetAgent(e.target.value)}
                   className="w-full px-3 py-2 rounded bg-[var(--secondary)] border border-[var(--border)] font-mono text-sm text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:ring-2 focus-visible:ring-2 focus:ring-[var(--artifact-purple)] focus-visible:ring-[var(--artifact-purple)]"
@@ -639,10 +641,11 @@ export function SourceControlMatrix({
             <div className="px-6 py-4 space-y-4">
               {/* Repository URL */}
               <div>
-                <label className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
+                <label htmlFor="scm-clone-repo-url" className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
                   REPOSITORY URL
                 </label>
                 <input
+                  id="scm-clone-repo-url"
                   type="text"
                   value={newRepoUrl}
                   onChange={(e) => setNewRepoUrl(e.target.value)}
@@ -654,10 +657,11 @@ export function SourceControlMatrix({
               
               {/* Branch */}
               <div>
-                <label className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
+                <label htmlFor="scm-clone-branch" className="block font-mono text-xs text-[var(--muted-foreground)] mb-2">
                   BRANCH
                 </label>
                 <input
+                  id="scm-clone-branch"
                   type="text"
                   value={newRepoBranch}
                   onChange={(e) => setNewRepoBranch(e.target.value)}

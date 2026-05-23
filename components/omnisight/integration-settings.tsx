@@ -282,8 +282,9 @@ function TenantSecretsSection({ settingsData }: { settingsData: Record<string, R
       {adding ? (
         <div className="mt-2 p-2 rounded border border-[var(--neural-blue)]/30 bg-[var(--secondary)] space-y-1.5">
           <div className="flex items-center gap-2">
-            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-14 shrink-0">Type</label>
+            <label htmlFor="tenant-secret-type" className="font-mono text-[9px] text-[var(--muted-foreground)] w-14 shrink-0">Type</label>
             <select
+              id="tenant-secret-type"
               value={newType}
               onChange={e => setNewType(e.target.value)}
               className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)]"
@@ -726,8 +727,9 @@ function AccountManagerSection({
             <SettingField label="Webhook Secret" value={form.webhook_secret} type="password" onChange={v => setForm(f => ({ ...f, webhook_secret: v }))} />
           )}
           <div className="flex items-start gap-2">
-            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 pt-1">URL Patterns</label>
+            <label htmlFor="git-account-url-patterns" className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 pt-1">URL Patterns</label>
             <textarea
+              id="git-account-url-patterns"
               value={form.url_patterns}
               onChange={e => setForm(f => ({ ...f, url_patterns: e.target.value }))}
               rows={2}
@@ -737,9 +739,11 @@ function AccountManagerSection({
             />
           </div>
           <div className="flex items-center gap-2">
-            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Default ⭐</label>
+            <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Default ⭐</span>
             <button
               onClick={() => setForm(f => ({ ...f, is_default: !f.is_default }))}
+              aria-label="Set as default git account"
+              aria-pressed={form.is_default}
               className={`px-2 py-0.5 rounded font-mono text-[9px] transition-colors ${
                 form.is_default
                   ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
@@ -1229,9 +1233,11 @@ function LLMCredentialManagerSection() {
             <SettingField label="API Key" value={form.value} type="password" onChange={v => setForm(f => ({ ...f, value: v }))} />
           )}
           <div className="flex items-center gap-2">
-            <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Default ⭐</label>
+            <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Default ⭐</span>
             <button
               onClick={() => setForm(f => ({ ...f, is_default: !f.is_default }))}
+              aria-label="Set as default LLM credential"
+              aria-pressed={form.is_default}
               className={`px-2 py-0.5 rounded font-mono text-[9px] transition-colors ${
                 form.is_default
                   ? "bg-[var(--validation-emerald)]/20 text-[var(--validation-emerald)]"
@@ -4035,8 +4041,9 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
               return (
                 <>
                   <div className="flex items-center gap-2">
-                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Provider</label>
+                    <label htmlFor="llm-active-provider" className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Provider</label>
                     <select
+                      id="llm-active-provider"
                       value={currentProvider}
                       onChange={e => {
                         setVal("llm_provider", e.target.value)
@@ -4055,8 +4062,9 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                   </div>
                   {/* Active Model — dropdown linked to provider */}
                   <div className="flex items-center gap-2">
-                    <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Model</label>
+                    <label htmlFor="llm-active-model" className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">Model</label>
                     <select
+                      id="llm-active-model"
                       value={currentModel}
                       onChange={e => setVal("llm_model", e.target.value)}
                       className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)] border border-[var(--border)] text-[var(--foreground)] focus:outline-none focus-visible:outline-none focus:border-[var(--neural-blue)] focus-visible:border-[var(--neural-blue)]"
@@ -4492,14 +4500,14 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                   const gerritConfigured = hasValue("webhooks", "gerrit_secret")
                   return (
                     <div className="flex items-center gap-2" data-testid="webhook-secret-row-gerrit">
-                      <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
+                      <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0 flex items-center gap-1">
                         <span
                           className={`w-1.5 h-1.5 rounded-full ${gerritConfigured ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/30"}`}
                           title={badgeTitle(gerritConfigured)}
                           data-testid="webhook-secret-dot-gerrit"
                         />
                         Gerrit Secret
-                      </label>
+                      </span>
                       <div className="flex-1 flex items-center gap-2">
                         <span
                           className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)]/50 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] select-none"
@@ -4558,9 +4566,9 @@ export function IntegrationSettings({ open, onClose }: IntegrationSettingsProps)
                     who pre-generate the value out-of-band, but the rotate
                     button is the ergonomic default. */}
                 <div className="flex items-center gap-2 pt-1" data-testid="jira-webhook-secret-rotate-row">
-                  <label className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">
+                  <span className="font-mono text-[9px] text-[var(--muted-foreground)] w-20 shrink-0">
                     Webhook Secret
-                  </label>
+                  </span>
                   <div className="flex-1 flex items-center gap-2">
                     <span
                       className="flex-1 font-mono text-[10px] px-2 py-1 rounded bg-[var(--background)]/50 border border-dashed border-[var(--border)] text-[var(--muted-foreground)] select-none"

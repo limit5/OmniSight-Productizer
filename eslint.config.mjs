@@ -79,6 +79,12 @@ export default tseslint.config(
       "jsx-a11y/role-supports-aria-props": "error",
       "jsx-a11y/scope": "error",
       "jsx-a11y/tabindex-no-positive": "error",
+      // FX2.D9.3 (OP-231) — promoted warn → error. Every visible form
+      // label must be programmatically associated with its control
+      // (htmlFor/id, nesting, or aria-labelledby) so the accessible name
+      // is exposed. The full settings/admin tree was swept to 0 violations
+      // before this flip; the drift guard pins it at error.
+      "jsx-a11y/label-has-associated-control": "error",
       // === Behavioral / refactor-required (warn for now) ===
       // These need design judgement (do you really want a div onClick?
       // should this be a button?) and tend to surface dozens of hits
@@ -86,7 +92,6 @@ export default tseslint.config(
       // cycle, then promote individually.
       "jsx-a11y/click-events-have-key-events": "warn",
       "jsx-a11y/interactive-supports-focus": "warn",
-      "jsx-a11y/label-has-associated-control": "warn",
       "jsx-a11y/media-has-caption": "warn",
       "jsx-a11y/mouse-events-have-key-events": "warn",
       "jsx-a11y/no-autofocus": "warn",
