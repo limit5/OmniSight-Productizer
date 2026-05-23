@@ -375,6 +375,11 @@ class ShadowActionExecutor:
 NEEDS_OPERATOR_ACTION_LABEL = "needs-operator-action"
 FOLLOWUP_LABEL_PREFIX = "coord-resume-after:"
 CLAIM_LABEL_PREFIX = "claim:"
+STARTUP_RECHECK_OPERATOR_GUARD_LABELS = frozenset({"coord-skip", "coord-quarantine"})
+STARTUP_2_OPERATOR_INTENT_LABELS = frozenset(
+    {"coord-skip", "coord-quarantine", "tier:X", "priority:meta", "type:meta"}
+)
+STARTUP_3_OPERATOR_INTENT_LABELS = frozenset({"coord-skip", "coord-quarantine", "tier:X"})
 _VOLATILE_ACTION_PARAM_KEYS = frozenset(
     {
         "decision_id",
@@ -1056,6 +1061,7 @@ class InterruptedTicket:
     key: str
     status: str = ""
     stale: bool = False
+    labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1104,6 +1110,7 @@ class ColdStartGateway(Protocol):
     def has_live_runner(self, key: str) -> bool: ...
     def gerrit_change_mergeable(self, key: str) -> bool: ...
     def branch_has_commits(self, key: str) -> bool: ...
+    def ticket_labels(self, key: str) -> tuple[str, ...]: ...
     def mark_resumable(self, key: str) -> None: ...
     def transition_under_review(self, key: str) -> None: ...
     def reset_to_todo(self, key: str) -> None: ...
@@ -1193,11 +1200,13 @@ class JiraDispatchColdStartGateway:
             jql = (
                 f'project = "{client.project_key}" '
                 'AND status in ("In Progress", "進行中") '
+                'AND (labels is EMPTY OR labels not in '
+                '("coord-skip","coord-quarantine","tier:X","priority:meta","type:meta")) '
                 "ORDER BY updated ASC"
             )
             resp = jira_dispatch._request(
                 client, "POST", "/search/jql",
-                {"jql": jql, "fields": ["status", "updated"], "maxResults": 100},
+                {"jql": jql, "fields": ["status", "updated", "labels"], "maxResults": 100},
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] interrupted-ticket query failed: %s", exc)
@@ -1213,6 +1222,9 @@ class JiraDispatchColdStartGateway:
         for issue in resp.get("issues", []):
             fields = issue.get("fields") or {}
             status = str((fields.get("status") or {}).get("name", ""))
+            labels = tuple(str(label) for label in fields.get("labels") or ())
+            if STARTUP_2_OPERATOR_INTENT_LABELS.intersection(labels):
+                continue
             # ``updated`` is a coarse last-activity proxy for staleness (the
             # exact 進行中-entry time needs the changelog; updated is a safe,
             # cheaper lower bound — if it's old, the ticket is certainly stale).
@@ -1225,7 +1237,9 @@ class JiraDispatchColdStartGateway:
                 except ValueError:
                     pass
             out.append(
-                InterruptedTicket(key=issue.get("key", "?"), status=status, stale=stale)
+                InterruptedTicket(
+                    key=issue.get("key", "?"), status=status, stale=stale, labels=labels
+                )
             )
         return out
 
@@ -1245,6 +1259,18 @@ class JiraDispatchColdStartGateway:
 
     def branch_has_commits(self, key: str) -> bool:
         return _feature_branch_has_commits(key, repo_root=self._repo_root)
+
+    def ticket_labels(self, key: str) -> tuple[str, ...]:
+        client = self._jira()
+        if client is None:
+            return ()
+        try:
+            from backend.agents import jira_dispatch
+
+            return jira_dispatch.fetch_ticket_labels(client, key)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[pipeline_coordinator] ticket_labels(%s) failed: %s", key, exc)
+            return ()
 
     def mark_resumable(self, key: str) -> None:
         self._add_label(key, RESUME_FROM_FEATURE_LABEL)
@@ -1379,6 +1405,9 @@ class ShadowColdStartGateway:
 
     def branch_has_commits(self, key: str) -> bool:
         return self._delegate.branch_has_commits(key)
+
+    def ticket_labels(self, key: str) -> tuple[str, ...]:
+        return self._delegate.ticket_labels(key)
 
     def stale_sweep_plan(self) -> StaleSweepPlan:
         return self._delegate.stale_sweep_plan()
@@ -1620,6 +1649,7 @@ def _build_stale_sweep_plan(client: Any, *, repo_root: Path | None = None) -> St
         f'project = "{client.project_key}" '
         'AND (labels ~ "claim:*" OR labels ~ "runner-blocked:waiting-*" '
         'OR (status = "To Do" AND assignee is not EMPTY)) '
+        'AND (labels is EMPTY OR labels not in ("coord-skip","coord-quarantine","tier:X")) '
         "ORDER BY updated ASC"
     )
     resp = jira_dispatch._request(
@@ -1634,9 +1664,16 @@ def _build_stale_sweep_plan(client: Any, *, repo_root: Path | None = None) -> St
         fields = issue.get("fields") or {}
         status = str((fields.get("status") or {}).get("name", ""))
         labels = list(fields.get("labels") or [])
+        if STARTUP_3_OPERATOR_INTENT_LABELS.intersection(labels):
+            continue
         assignee = fields.get("assignee")
         claim_labels = tuple(l for l in labels if l.startswith(CLAIM_LABEL_PREFIX))
-        if claim_labels and not _ticket_has_live_runner(key, repo_root=repo_root):
+        terminal_claim_statuses = set(PUBLISHED_STATUS_NAMES) | {"Archived"}
+        if (
+            claim_labels
+            and status not in terminal_claim_statuses
+            and not _ticket_has_live_runner(key, repo_root=repo_root)
+        ):
             stale_claims[key] = claim_labels
         elif assignee and status in jira_dispatch.TODO_STATUS_NAMES and not claim_labels:
             orphan_assignees.append(key)
@@ -2303,12 +2340,18 @@ class PipelineCoordinator:
                 if mutations_remaining <= 0:
                     self._record_reconcile(report, key, "gerrit-mergeable", "phase_cap")
                     continue
+                if self._cold_start_operator_guarded(key):
+                    self._record_reconcile(report, key, "gerrit-mergeable", "coord_skip")
+                    continue
                 mutations_remaining -= 1
                 gw.transition_under_review(key)
                 self._record_reconcile(report, key, "gerrit-mergeable", "under_review")
             elif gw.branch_has_commits(key):
                 if mutations_remaining <= 0:
                     self._record_reconcile(report, key, "branch-has-commits", "phase_cap")
+                    continue
+                if self._cold_start_operator_guarded(key):
+                    self._record_reconcile(report, key, "branch-has-commits", "coord_skip")
                     continue
                 mutations_remaining -= 1
                 gw.mark_resumable(key)
@@ -2318,6 +2361,9 @@ class PipelineCoordinator:
                 if mutations_remaining <= 0:
                     self._record_reconcile(report, key, "no-commits-stale", "phase_cap")
                     continue
+                if self._cold_start_operator_guarded(key):
+                    self._record_reconcile(report, key, "no-commits-stale", "coord_skip")
+                    continue
                 mutations_remaining -= 1
                 gw.reset_to_todo(key)
                 self._record_reconcile(report, key, "no-commits-stale", "revert_todo")
@@ -2325,6 +2371,9 @@ class PipelineCoordinator:
                 # No commits but recent — a runner may have only just started.
                 if mutations_remaining <= 0:
                     self._record_reconcile(report, key, "ambiguous", "phase_cap")
+                    continue
+                if self._cold_start_operator_guarded(key):
+                    self._record_reconcile(report, key, "ambiguous", "coord_skip")
                     continue
                 mutations_remaining -= 1
                 gw.mention_operator(
@@ -2343,6 +2392,10 @@ class PipelineCoordinator:
         report.reconciled.append({"ticket": key, "classification": classification, "action": action})
         self._log_cold_start(entry)
 
+    def _cold_start_operator_guarded(self, key: str) -> bool:
+        labels = set(self._cold_start_gateway.ticket_labels(key))
+        return bool(STARTUP_RECHECK_OPERATOR_GUARD_LABELS.intersection(labels))
+
     def _startup_3_sweep(self, report: ColdStartReport) -> None:
         """Startup-3: drop orphaned claim:* / dead waiting-* + clear assignees."""
         gw = self._cold_start_gateway
@@ -2354,19 +2407,33 @@ class PipelineCoordinator:
                 if mutations_remaining <= 0:
                     self._record_sweep(report, key, "stale-claim", removed)
                     return
+                if self._cold_start_operator_guarded(key):
+                    self._record_sweep(report, key, "coord_skip", removed)
+                    break
                 mutations_remaining -= 1
                 gw.remove_label(key, label)
                 removed.append(label)
+            else:
+                if mutations_remaining <= 0:
+                    self._record_sweep(report, key, "stale-claim", removed)
+                    return
+                if self._cold_start_operator_guarded(key):
+                    self._record_sweep(report, key, "coord_skip", removed)
+                    continue
+                mutations_remaining -= 1
+                gw.clear_assignee(key)
+                self._record_sweep(report, key, "stale-claim", removed)
+                continue
             if mutations_remaining <= 0:
                 self._record_sweep(report, key, "stale-claim", removed)
                 return
-            mutations_remaining -= 1
-            gw.clear_assignee(key)
-            self._record_sweep(report, key, "stale-claim", removed)
         for key in plan.orphan_assignees:
             if mutations_remaining <= 0:
                 self._record_sweep(report, key, "orphan-assignee", [])
                 return
+            if self._cold_start_operator_guarded(key):
+                self._record_sweep(report, key, "coord_skip", [])
+                continue
             mutations_remaining -= 1
             gw.clear_assignee(key)
             self._record_sweep(report, key, "orphan-assignee", [])
@@ -2376,10 +2443,14 @@ class PipelineCoordinator:
                 if mutations_remaining <= 0:
                     self._record_sweep(report, key, "resolved-waiting", removed)
                     return
+                if self._cold_start_operator_guarded(key):
+                    self._record_sweep(report, key, "coord_skip", removed)
+                    break
                 mutations_remaining -= 1
                 gw.remove_label(key, label)
                 removed.append(label)
-            self._record_sweep(report, key, "resolved-waiting", removed)
+            else:
+                self._record_sweep(report, key, "resolved-waiting", removed)
 
     def _record_sweep(
         self, report: ColdStartReport, key: str, kind: str, labels: list[str]

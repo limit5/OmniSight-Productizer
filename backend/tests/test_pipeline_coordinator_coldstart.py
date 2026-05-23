@@ -131,6 +131,7 @@ class FakeColdStartGateway:
         live_runners: tuple[str, ...] = (),
         mergeable: tuple[str, ...] = (),
         with_commits: tuple[str, ...] = (),
+        live_labels: dict[str, tuple[str, ...]] | None = None,
         sweep_plan: StaleSweepPlan | None = None,
     ) -> None:
         self._audits = list(audits) if audits else [InfraAuditResult()]
@@ -139,6 +140,7 @@ class FakeColdStartGateway:
         self._live = set(live_runners)
         self._mergeable = set(mergeable)
         self._commits = set(with_commits)
+        self._live_labels = dict(live_labels or {})
         self._sweep_plan = sweep_plan or StaleSweepPlan()
         # Call records (assertion surface).
         self.audit_calls = 0
@@ -172,6 +174,9 @@ class FakeColdStartGateway:
 
     def branch_has_commits(self, key: str) -> bool:
         return key in self._commits
+
+    def ticket_labels(self, key: str) -> tuple[str, ...]:
+        return self._live_labels.get(key, ())
 
     def mark_resumable(self, key: str) -> None:
         self.marked_resumable.append(key)
@@ -238,6 +243,9 @@ class DegradedGateway:
 
     def branch_has_commits(self, key: str) -> bool:
         return False
+
+    def ticket_labels(self, key: str) -> tuple[str, ...]:
+        return ()
 
     def mark_resumable(self, key: str) -> None:
         return None
@@ -335,7 +343,7 @@ def test_fake_gateway_satisfies_coldstart_protocol() -> None:
     for method in (
         "audit_infra", "start_unit", "interrupted_tickets", "has_live_runner",
         "gerrit_change_mergeable", "branch_has_commits", "mark_resumable",
-        "transition_under_review", "reset_to_todo", "stale_sweep_plan",
+        "ticket_labels", "transition_under_review", "reset_to_todo", "stale_sweep_plan",
         "remove_label", "clear_assignee", "mention_operator",
     ):
         assert callable(getattr(FakeColdStartGateway(), method)), method
@@ -811,6 +819,43 @@ def test_startup_2_mergeable_beats_branch_commits(tmp_path: Path) -> None:
     assert report.reconciled[0]["classification"] == "gerrit-mergeable"
 
 
+def test_startup_2_live_coord_guard_skips_each_mutator(tmp_path: Path) -> None:
+    """OP-1622: Startup-2 re-reads labels at the mutation boundary and skips
+    every reconcile mutator when coord-skip / coord-quarantine appeared after
+    the initial interrupted-ticket snapshot."""
+    gw = FakeColdStartGateway(
+        interrupted=[
+            InterruptedTicket(key="OP-MERGE", stale=True),
+            InterruptedTicket(key="OP-BRANCH", stale=True),
+            InterruptedTicket(key="OP-STALE", stale=True),
+            InterruptedTicket(key="OP-AMBIG", stale=False),
+        ],
+        mergeable=("OP-MERGE",),
+        with_commits=("OP-BRANCH",),
+        live_labels={
+            "OP-MERGE": ("coord-skip",),
+            "OP-BRANCH": ("coord-quarantine",),
+            "OP-STALE": ("coord-skip",),
+            "OP-AMBIG": ("coord-quarantine",),
+        },
+    )
+    coord = _coordinator(tmp_path, gw)
+    report = ColdStartReport()
+
+    coord._startup_2_reconcile(report)
+
+    assert gw.transitioned == []
+    assert gw.marked_resumable == []
+    assert gw.reset_todo == []
+    assert gw.operator_mentions == []
+    assert {r["ticket"]: r["action"] for r in report.reconciled} == {
+        "OP-MERGE": "coord_skip",
+        "OP-BRANCH": "coord_skip",
+        "OP-STALE": "coord_skip",
+        "OP-AMBIG": "coord_skip",
+    }
+
+
 # ── Code AC: _startup_3_sweep ─────────────────────────────────────────
 
 
@@ -836,6 +881,36 @@ def test_startup_3_sweep_applies_plan(tmp_path: Path) -> None:
 
     sweeps = {(r["ticket"], r["sweep"]) for r in report.swept}
     assert sweeps == {("OP-A", "stale-claim"), ("OP-B", "orphan-assignee"), ("OP-C", "resolved-waiting")}
+
+
+def test_startup_3_live_coord_guard_skips_each_mutator(tmp_path: Path) -> None:
+    """OP-1622: Startup-3 re-reads labels before remove_label / clear_assignee
+    and records coord_skip instead of mutating guarded tickets."""
+    plan = StaleSweepPlan(
+        stale_claims={"OP-A": ("claim:default:OP-A",)},
+        orphan_assignees=("OP-B",),
+        resolved_waiting={"OP-C": ("runner-blocked:waiting-OP-50",)},
+    )
+    gw = FakeColdStartGateway(
+        sweep_plan=plan,
+        live_labels={
+            "OP-A": ("coord-skip",),
+            "OP-B": ("coord-quarantine",),
+            "OP-C": ("coord-skip",),
+        },
+    )
+    coord = _coordinator(tmp_path, gw)
+    report = ColdStartReport()
+
+    coord._startup_3_sweep(report)
+
+    assert gw.removed_labels == []
+    assert gw.cleared_assignees == []
+    assert {(r["ticket"], r["sweep"]) for r in report.swept} == {
+        ("OP-A", "coord_skip"),
+        ("OP-B", "coord_skip"),
+        ("OP-C", "coord_skip"),
+    }
 
 
 def test_cold_start_per_phase_caps_limit_mutators(tmp_path: Path) -> None:
@@ -930,6 +1005,7 @@ def test_production_gateway_swallows_backend_failures(monkeypatch, tmp_path: Pat
     gw._client_tried = True  # short-circuit lazy make_client (no network)
     assert gw.interrupted_tickets() == []
     assert gw.stale_sweep_plan() == StaleSweepPlan()
+    assert gw.ticket_labels("OP-1") == ()
     # Void methods must not raise even with no client behind them.
     gw.transition_under_review("OP-1")
     gw.reset_to_todo("OP-1")
@@ -952,6 +1028,7 @@ def test_production_gateway_swallows_backend_failures(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(jira_dispatch, "_request", _raise)
     assert gw.interrupted_tickets() == []
     assert gw.stale_sweep_plan() == StaleSweepPlan()
+    assert gw.ticket_labels("OP-1") == ()
 
 
 # ── Code AC: helper coverage ──────────────────────────────────────────
@@ -1069,12 +1146,80 @@ def test_last_json_line_variants(tmp_path: Path) -> None:
     assert _last_json_line(torn) is None
 
 
+def test_interrupted_tickets_jql_excludes_operator_intent_and_fetches_labels(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """OP-1622: Startup-2 selection excludes operator-intent labels and fetches
+    labels so the gateway can defensively drop any guarded issue in the
+    returned snapshot."""
+    from backend.agents import jira_dispatch
+
+    captured: dict[str, Any] = {}
+
+    def _request(client, method, path, payload):
+        captured.update({"method": method, "path": path, "payload": payload})
+        return {
+            "issues": [
+                {
+                    "key": "OP-PLAIN",
+                    "fields": {
+                        "status": {"name": "In Progress"},
+                        "updated": "2026-05-20T00:00:00.000+0000",
+                        "labels": [],
+                    },
+                },
+                {
+                    "key": "OP-SKIP",
+                    "fields": {
+                        "status": {"name": "In Progress"},
+                        "updated": "2026-05-20T00:00:00.000+0000",
+                        "labels": ["coord-skip"],
+                    },
+                },
+                {
+                    "key": "OP-TIER-X",
+                    "fields": {
+                        "status": {"name": "In Progress"},
+                        "updated": "2026-05-20T00:00:00.000+0000",
+                        "labels": ["tier:X"],
+                    },
+                },
+                {
+                    "key": "OP-META",
+                    "fields": {
+                        "status": {"name": "In Progress"},
+                        "updated": "2026-05-20T00:00:00.000+0000",
+                        "labels": ["priority:meta"],
+                    },
+                },
+            ]
+        }
+
+    monkeypatch.setattr(jira_dispatch, "_request", _request)
+
+    class _Client:
+        project_key = "OP"
+
+    gw = JiraDispatchColdStartGateway(repo_root=tmp_path)
+    gw._client = _Client()
+    gw._client_tried = True
+
+    tickets = gw.interrupted_tickets()
+
+    assert [ticket.key for ticket in tickets] == ["OP-PLAIN"]
+    assert tickets[0].labels == ()
+    jql = captured["payload"]["jql"]
+    assert 'labels not in ("coord-skip","coord-quarantine","tier:X","priority:meta","type:meta")' in jql
+    assert captured["payload"]["fields"] == ["status", "updated", "labels"]
+
+
 def test_build_stale_sweep_plan_classifies_hygiene(monkeypatch, tmp_path: Path) -> None:
     """_build_stale_sweep_plan turns a JIRA snapshot into the three hygiene
     classes: orphaned claim:* with no live runner, To-Do bot-assigned with no
     claim, and waiting-X markers whose blocker X is already published."""
     from backend.agents import jira_dispatch
 
+    captured: dict[str, Any] = {}
     issues = {
         "issues": [
             {
@@ -1101,9 +1246,54 @@ def test_build_stale_sweep_plan_classifies_hygiene(monkeypatch, tmp_path: Path) 
                     "assignee": None,
                 },
             },
+            {
+                "key": "OP-D",
+                "fields": {
+                    "status": {"name": "In Progress"},
+                    "labels": ["coord-skip", "claim:default:OP-D"],
+                    "assignee": {"accountId": "bot"},
+                },
+            },
+            {
+                "key": "OP-E",
+                "fields": {
+                    "status": {"name": "Published"},
+                    "labels": ["claim:default:OP-E"],
+                    "assignee": {"accountId": "bot"},
+                },
+            },
+            {
+                "key": "OP-F",
+                "fields": {
+                    "status": {"name": "Archived"},
+                    "labels": ["claim:default:OP-F"],
+                    "assignee": {"accountId": "bot"},
+                },
+            },
+            {
+                "key": "OP-G",
+                "fields": {
+                    "status": {"name": "In Progress"},
+                    "labels": ["coord-quarantine", "claim:default:OP-G"],
+                    "assignee": {"accountId": "bot"},
+                },
+            },
+            {
+                "key": "OP-H",
+                "fields": {
+                    "status": {"name": "To Do"},
+                    "labels": ["tier:X"],
+                    "assignee": {"accountId": "bot"},
+                },
+            },
         ]
     }
-    monkeypatch.setattr(jira_dispatch, "_request", lambda *a, **k: issues)
+
+    def _request(client, method, path, payload):
+        captured.update({"method": method, "path": path, "payload": payload})
+        return issues
+
+    monkeypatch.setattr(jira_dispatch, "_request", _request)
     monkeypatch.setattr(
         jira_dispatch, "get_issue_status",
         lambda client, key: "Published" if key == "OP-50" else "In Progress",
@@ -1119,6 +1309,7 @@ def test_build_stale_sweep_plan_classifies_hygiene(monkeypatch, tmp_path: Path) 
     assert plan.stale_claims == {"OP-A": ("claim:default:OP-A",)}
     assert plan.orphan_assignees == ("OP-B",)
     assert plan.resolved_waiting == {"OP-C": ("runner-blocked:waiting-OP-50",)}
+    assert 'labels not in ("coord-skip","coord-quarantine","tier:X")' in captured["payload"]["jql"]
 
 
 # ── OP-1555: shadow-gate cold-start (observe-only canary) ─────────────
@@ -1171,6 +1362,7 @@ def test_shadow_gateway_satisfies_protocol_and_forwards_reads(tmp_path: Path) ->
     assert gw.gerrit_change_mergeable("OP-MERGE") is True
     assert gw.branch_has_commits("OP-BRANCH") is True
     assert gw.has_live_runner("OP-MERGE") is False
+    assert gw.ticket_labels("OP-MERGE") == ()
 
     # Mutators record-only: delegate is never touched, start_unit reports
     # success so an observe-only boot proceeds rather than halting.
