@@ -1031,6 +1031,101 @@ def test_production_gateway_swallows_backend_failures(monkeypatch, tmp_path: Pat
     assert gw.ticket_labels("OP-1") == ()
 
 
+def test_production_gateway_mutators_use_stable_idem_keys(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """OP-1630: cold-start mutators pass deterministic coordinator idem keys
+    to jira_dispatch, so replaying the same boot mutation collapses to one
+    effective write at the idempotency layer."""
+    from backend.agents import jira_dispatch
+
+    class _Client:
+        project_key = "OP"
+        agent_class = "claude"
+
+    requests: list[tuple[str, str, str]] = []
+    effective: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    def _request_idempotent(client, method, path, body, idem_key):
+        requests.append((method, path, idem_key))
+        if idem_key not in seen:
+            seen.add(idem_key)
+            effective.append((method, path, idem_key))
+        return {"ok": True}
+
+    monkeypatch.setattr(jira_dispatch, "_request_idempotent", _request_idempotent)
+    monkeypatch.setattr(
+        jira_dispatch, "get_issue_status", lambda client, key: "In Progress"
+    )
+    monkeypatch.setattr(jira_dispatch, "fetch_labels", lambda client, key: [])
+    from backend.agents import runner_stoploss
+
+    monkeypatch.setattr(
+        runner_stoploss,
+        "register_revert",
+        lambda client, key, labels: None,
+    )
+
+    gw = JiraDispatchColdStartGateway(repo_root=tmp_path)
+    gw._client = _Client()
+    gw._client_tried = True
+
+    for _ in range(2):
+        gw.mark_resumable("OP-1630")
+        gw.transition_under_review("OP-1630")
+        gw.reset_to_todo("OP-1630")
+        gw.remove_label("OP-1630", "claim:default:OP-1630")
+        gw.clear_assignee("OP-1630")
+        gw.mention_operator("OP-1630", "ambiguous cold-start ticket", urgency="high")
+
+    by_path: dict[str, list[str]] = {}
+    for _, path, idem_key in requests:
+        by_path.setdefault(path, []).append(idem_key)
+
+    for idem_keys in by_path.values():
+        assert len(idem_keys) % 2 == 0
+        assert all(idem_key.startswith("coord:") for idem_key in idem_keys)
+
+    assert len(set(by_path["/issue/OP-1630/comment"])) == 2
+    assert len([r for r in effective if r[1] == "/issue/OP-1630/comment"]) == 2
+    mention_key = [
+        idem_key
+        for _, path, idem_key in requests
+        if path == "/issue/OP-1630/comment" and ":mention_operator:" in idem_key
+    ]
+    reset_comment_key = [
+        idem_key
+        for _, path, idem_key in requests
+        if path == "/issue/OP-1630/comment" and ":transition:" in idem_key
+    ]
+    assert len(mention_key) == 2
+    assert len(set(mention_key)) == 1
+    assert len([r for r in effective if r[2] == mention_key[0]]) == 1
+    assert len(reset_comment_key) == 2
+    assert len(set(reset_comment_key)) == 1
+    assert len([r for r in effective if r[2] == reset_comment_key[0]]) == 1
+
+    add_resume_key = [
+        idem_key
+        for _, path, idem_key in requests
+        if path == "/issue/OP-1630" and f":add:{pc.RESUME_FROM_FEATURE_LABEL}" in idem_key
+    ]
+    remove_claim_key = [
+        idem_key
+        for _, path, idem_key in requests
+        if path == "/issue/OP-1630" and ":remove:claim:default:OP-1630" in idem_key
+    ]
+    clear_assignee_key = [
+        idem_key
+        for _, path, idem_key in requests
+        if path == "/issue/OP-1630" and idem_key.endswith(":clear-assignee")
+    ]
+    assert len(set(add_resume_key)) == 1
+    assert len(set(remove_claim_key)) == 1
+    assert len(set(clear_assignee_key)) == 1
+
+
 # ── Code AC: helper coverage ──────────────────────────────────────────
 
 

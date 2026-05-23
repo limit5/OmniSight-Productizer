@@ -468,6 +468,13 @@ def _planned_action_idem_keys(action: Action) -> list[str]:
     return []
 
 
+def _cold_start_idem_base(kind: str, target: str, content: Mapping[str, Any]) -> str:
+    payload = {"params": _canonical_action_semantic_params(content)}
+    material = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+    return f"coord:{kind}:{target}:{digest}"
+
+
 def _action_from_record(record: Mapping[str, Any]) -> Action | None:
     kind = record.get("kind")
     if not isinstance(kind, str) or kind == ACTION_NOOP:
@@ -1273,7 +1280,14 @@ class JiraDispatchColdStartGateway:
             return ()
 
     def mark_resumable(self, key: str) -> None:
-        self._add_label(key, RESUME_FROM_FEATURE_LABEL)
+        base_key = _cold_start_idem_base(
+            ACTION_RELABEL, key, {"add": [RESUME_FROM_FEATURE_LABEL]}
+        )
+        self._add_label(
+            key,
+            RESUME_FROM_FEATURE_LABEL,
+            idem_key=f"{base_key}:add:{RESUME_FROM_FEATURE_LABEL}",
+        )
 
     def transition_under_review(self, key: str) -> None:
         client = self._jira()
@@ -1283,7 +1297,12 @@ class JiraDispatchColdStartGateway:
             from backend.agents import jira_dispatch
 
             # Idempotent per OP-691: skips when already Under Review.
-            jira_dispatch.transition_to_under_review_if_needed(client, key)
+            base_key = _cold_start_idem_base(
+                ACTION_TRANSITION, key, {"to_status": "Under Review"}
+            )
+            jira_dispatch.transition_to_under_review_if_needed(
+                client, key, idem_key=f"{base_key}:transition"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] transition_under_review(%s) failed: %s", key, exc)
 
@@ -1294,10 +1313,18 @@ class JiraDispatchColdStartGateway:
         try:
             from backend.agents import jira_dispatch
 
+            reason = (
+                "[cold-start Startup-2(c)] interrupted with no commits/activity; "
+                "reverting to To Do for clean re-pickup."
+            )
+            base_key = _cold_start_idem_base(
+                ACTION_TRANSITION, key, {"reason": reason, "to_status": "To Do"}
+            )
             jira_dispatch.transition_back_to_todo(
-                client, key,
-                reason="[cold-start Startup-2(c)] interrupted with no commits/activity; "
-                       "reverting to To Do for clean re-pickup.",
+                client,
+                key,
+                reason=reason,
+                idem_key=f"{base_key}:transition",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] reset_to_todo(%s) failed: %s", key, exc)
@@ -1320,7 +1347,12 @@ class JiraDispatchColdStartGateway:
         try:
             from backend.agents import jira_dispatch
 
-            jira_dispatch.remove_label(client, key, label)
+            base_key = _cold_start_idem_base(
+                ACTION_RELABEL, key, {"remove": [label]}
+            )
+            jira_dispatch.remove_label(
+                client, key, label, idem_key=f"{base_key}:remove:{label}"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] remove_label(%s, %s) failed: %s", key, label, exc)
 
@@ -1331,7 +1363,12 @@ class JiraDispatchColdStartGateway:
         try:
             from backend.agents import jira_dispatch
 
-            jira_dispatch.clear_assignee(client, key)
+            base_key = _cold_start_idem_base(
+                ACTION_RELABEL, key, {"clear_assignee": True}
+            )
+            jira_dispatch.clear_assignee(
+                client, key, idem_key=f"{base_key}:clear-assignee"
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] clear_assignee(%s) failed: %s", key, exc)
 
@@ -1344,20 +1381,33 @@ class JiraDispatchColdStartGateway:
         try:
             from backend.agents import jira_dispatch
 
-            jira_dispatch.add_comment(client, key, f"@nanakusa-sora {message}")
+            comment = f"@nanakusa-sora {message}"
+            base_key = _cold_start_idem_base(
+                ACTION_MENTION_OPERATOR,
+                key,
+                {"message": comment, "urgency": urgency},
+            )
+            jira_dispatch.add_comment(
+                client, key, comment, idem_key=f"{base_key}:comment"
+            )
             if urgency == "high":
-                jira_dispatch.add_label(client, key, "needs-operator-action")
+                jira_dispatch.add_label(
+                    client,
+                    key,
+                    "needs-operator-action",
+                    idem_key=f"{base_key}:label",
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] mention_operator(%s) failed: %s", key, exc)
 
-    def _add_label(self, key: str, label: str) -> None:
+    def _add_label(self, key: str, label: str, *, idem_key: str | None = None) -> None:
         client = self._jira()
         if client is None:
             return
         try:
             from backend.agents import jira_dispatch
 
-            jira_dispatch.add_label(client, key, label)
+            jira_dispatch.add_label(client, key, label, idem_key=idem_key)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[pipeline_coordinator] add_label(%s, %s) failed: %s", key, label, exc)
 
