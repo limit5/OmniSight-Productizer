@@ -311,8 +311,16 @@ def _read_log_records(directory: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _units(*specs: tuple[str, bool]) -> InfraAuditResult:
-    return InfraAuditResult(units=tuple(InfraUnit(name=n, live=live) for n, live in specs))
+def _units(*specs: tuple[str, bool] | tuple[str, bool, str]) -> InfraAuditResult:
+    units: list[InfraUnit] = []
+    for spec in specs:
+        if len(spec) == 2:
+            name, live = spec
+            units.append(InfraUnit(name=name, live=live))
+        else:
+            name, live, expected = spec
+            units.append(InfraUnit(name=name, live=live, expected=expected))
+    return InfraAuditResult(units=tuple(units))
 
 
 # ── Code AC: FakeColdStartGateway implements the Protocol ─────────────
@@ -445,6 +453,19 @@ def test_startup_1_halts_and_mentions_operator_when_unit_stays_down(tmp_path: Pa
     assert events[-1] == COLD_START_COMPLETE_EVENT
     complete = _read_log_records(coord.config.decision_log_dir)[-1]
     assert complete["halted_at"] == "startup-1"
+
+
+def test_infra_audit_down_filters_to_expected_live_units() -> None:
+    """Startup-1 only receives expected=yes units that are not live."""
+    audit = _units(
+        ("release-milestone-checker.timer", False, "yes"),
+        ("sora-bridge-sync.timer", True, "yes"),
+        ("auto-promote-main.service", False, "n-a"),
+        ("staging-gate-smoke.timer", False, "gated"),
+        ("unknown.service", False, "unexpected"),
+    )
+
+    assert audit.down == ("release-milestone-checker.timer",)
 
 
 # ── Code AC: _l6_crash_recovery ───────────────────────────────────────
@@ -938,16 +959,54 @@ def test_production_gateway_swallows_backend_failures(monkeypatch, tmp_path: Pat
 
 def test_run_deployment_audit_parses_units(tmp_path: Path) -> None:
     """run_deployment_audit runs the audit script and maps systemd-unit /
-    systemd-timer JSONL rows to InfraUnits (live = status == 'OK'); non-unit
-    rows are ignored."""
+    systemd-timer JSONL rows to InfraUnits (live = status == 'OK', expected
+    from the row); non-unit rows are ignored."""
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     script = scripts / "deployment-audit.sh"
     rows = {
         "rows": [
-            {"kind": "systemd-unit", "name": "coordinator.service", "status": "OK"},
-            {"kind": "systemd-unit", "name": "bridge.service", "status": "FAIL"},
-            {"kind": "systemd-timer", "name": "audit.timer", "status": "OK"},
+            {
+                "kind": "systemd-unit",
+                "name": "coordinator.service",
+                "status": "OK",
+                "expected": "yes",
+            },
+            {
+                "kind": "systemd-unit",
+                "name": "bridge.service",
+                "status": "FAIL",
+                "expected": "yes",
+            },
+            {
+                "kind": "systemd-timer",
+                "name": "audit.timer",
+                "status": "OK",
+                "expected": "yes",
+            },
+            {
+                "kind": "systemd-unit",
+                "name": "auto-promote-main.service",
+                "status": "FAIL",
+                "expected": "n-a",
+            },
+            {
+                "kind": "systemd-timer",
+                "name": "staging-gate-smoke.timer",
+                "status": "FAIL",
+                "expected": "gated",
+            },
+            {
+                "kind": "systemd-unit",
+                "name": "missing-expected.service",
+                "status": "FAIL",
+            },
+            {
+                "kind": "systemd-unit",
+                "name": "unknown-expected.service",
+                "status": "FAIL",
+                "expected": "unknown",
+            },
             {"kind": "http", "name": "api", "status": "OK"},
         ]
     }
@@ -960,7 +1019,22 @@ def test_run_deployment_audit_parses_units(tmp_path: Path) -> None:
     result = run_deployment_audit(repo_root=tmp_path, timeout_seconds=15.0)
 
     assert {u.name for u in result.units} == {
-        "coordinator.service", "bridge.service", "audit.timer"
+        "coordinator.service",
+        "bridge.service",
+        "audit.timer",
+        "auto-promote-main.service",
+        "staging-gate-smoke.timer",
+        "missing-expected.service",
+        "unknown-expected.service",
+    }
+    assert {u.name: u.expected for u in result.units} == {
+        "coordinator.service": "yes",
+        "bridge.service": "yes",
+        "audit.timer": "yes",
+        "auto-promote-main.service": "n-a",
+        "staging-gate-smoke.timer": "gated",
+        "missing-expected.service": None,
+        "unknown-expected.service": "unknown",
     }
     assert result.down == ("bridge.service",)
 

@@ -1029,6 +1029,7 @@ class InfraUnit:
 
     name: str
     live: bool
+    expected: str = "yes"
 
 
 @dataclass(frozen=True)
@@ -1039,7 +1040,7 @@ class InfraAuditResult:
 
     @property
     def down(self) -> tuple[str, ...]:
-        return tuple(u.name for u in self.units if not u.live)
+        return tuple(u.name for u in self.units if u.expected == "yes" and not u.live)
 
 
 @dataclass(frozen=True)
@@ -1471,7 +1472,11 @@ def run_deployment_audit(
         for row in record.get("rows", []):
             if row.get("kind") in ("systemd-unit", "systemd-timer"):
                 units.append(
-                    InfraUnit(name=row.get("name", "?"), live=row.get("status") == "OK")
+                    InfraUnit(
+                        name=row.get("name", "?"),
+                        live=row.get("status") == "OK",
+                        expected=row.get("expected"),
+                    )
                 )
         return InfraAuditResult(units=tuple(units))
     finally:
