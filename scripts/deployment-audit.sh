@@ -268,6 +268,8 @@ systemd-timer     auto-promote-develop.timer                                    
 systemd-unit      auto-promote-main.service                                       n-a       OP-766    RETIRED by release-train (ADR-0040 / RT-01) — main being retired
 env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service             n-a       OP-964    auto-promote-develop retired (RT-01) — env-var no longer expected
 systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    REAL gap: control-plane stranded on main@rc1; re-point off main deferred to cutover
+systemd-unit      pipeline-coordinator.service                                    yes       OP-1547   coordinator daemon (ADR-0021) — must be live
+systemd-unit      pipeline-coordinator-watchdog.service                           yes       OP-1547   coordinator liveness watchdog — must be live
 container         staging@http://localhost:8010/healthz                           yes       OP-927    AUDIT-19 staging stood up 2026-05-22 (project omnisight-staging, repo compose)
 systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
 systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
