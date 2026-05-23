@@ -324,8 +324,12 @@ def api_version_evidence(
         raise RuntimeError("/api/version returned non-object JSON")
 
     bundle_id = observed.get("bundle_id")
-    backend_digest = observed.get("backend_image_digest")
-    frontend_digest = observed.get("frontend_image_digest")
+    # Prefer the RT-08 overlay's deployed_digest_* (the real post-build digests
+    # the deployed backend actually serves). The image-baked *_image_digest
+    # fields are zero placeholders — an image cannot embed its own digest at
+    # build time — and would fail promote_image_bundle.py's digest-equality gate.
+    backend_digest = observed.get("deployed_digest_backend") or observed.get("backend_image_digest")
+    frontend_digest = observed.get("deployed_digest_frontend") or observed.get("frontend_image_digest")
     missing = [
         name for name, value in (
             ("bundle_id", bundle_id),
