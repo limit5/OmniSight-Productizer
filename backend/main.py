@@ -617,6 +617,10 @@ _auth_baseline.install(app)
 from backend import ha_observability as _ha_observability
 _ha_observability.register_middleware(app)
 
+# OP-1633: export stock HTTP RED metrics consumed by the SLO monitors.
+from backend import http_red_metrics as _http_red_metrics
+_http_red_metrics.register_middleware(app)
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Internet-exposure auth S4 — security response headers

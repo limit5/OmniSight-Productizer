@@ -91,6 +91,23 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # OP-1633: HTTP RED metrics consumed by slo_monitor.py. These
+    # intentionally do not use the omnisight_ prefix because the SLO
+    # monitors query the stock names directly.
+    http_requests_total = Counter(
+        "http_requests_total",
+        "HTTP requests by matched route template and raw status code",
+        labelnames=("route", "status"),
+        registry=REGISTRY,
+    )
+    http_request_duration_seconds = Histogram(
+        "http_request_duration_seconds",
+        "HTTP request duration by matched route template and raw status code",
+        labelnames=("route", "status"),
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+        registry=REGISTRY,
+    )
+
     # SSE ───────────────────────────────────────────────────────
     sse_subscribers = Gauge(
         "omnisight_sse_subscribers",
@@ -855,6 +872,8 @@ else:
     pipeline_step_seconds = _NoOp()  # type: ignore
     provider_failure_total = provider_latency_seconds = _NoOp()  # type: ignore
     model_mapping_violation_total = _NoOp()  # type: ignore
+    http_requests_total = _NoOp()  # type: ignore
+    http_request_duration_seconds = _NoOp()  # type: ignore
     sse_subscribers = sse_dropped_total = _NoOp()  # type: ignore
     workflow_step_total = _NoOp()  # type: ignore
     auth_login_total = _NoOp()  # type: ignore
@@ -973,6 +992,7 @@ def reset_for_tests() -> None:
     global REGISTRY, decision_total, decision_resolve_seconds
     global pipeline_step_seconds, provider_failure_total, provider_latency_seconds
     global model_mapping_violation_total
+    global http_requests_total, http_request_duration_seconds
     global sse_subscribers, sse_dropped_total, workflow_step_total
     global auth_login_total, subprocess_orphan_total, persist_failure_total
     global sandbox_image_rejected_total, sandbox_lifetime_killed_total
@@ -1041,6 +1061,19 @@ def reset_for_tests() -> None:
         "omnisight_model_mapping_violation_total",
         "LLM provider/model mapping guardrail violations by Guild and mode",
         labelnames=("guild_id", "mode"), registry=REGISTRY,
+    )
+    http_requests_total = Counter(
+        "http_requests_total",
+        "HTTP requests by matched route template and raw status code",
+        labelnames=("route", "status"),
+        registry=REGISTRY,
+    )
+    http_request_duration_seconds = Histogram(
+        "http_request_duration_seconds",
+        "HTTP request duration by matched route template and raw status code",
+        labelnames=("route", "status"),
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10),
+        registry=REGISTRY,
     )
     sse_subscribers = Gauge(
         "omnisight_sse_subscribers", "SSE subscribers", registry=REGISTRY,
