@@ -67,6 +67,83 @@ services:
       retries: 3
       start_period: 30s
 
+  # ──────────────────────────────────────────────────────────────
+  # OP-1663 (design doc §7 Phase 1): DAG executor — SHIPS INERT.
+  #
+  # This stanza is config-only wiring for the future DAG executor
+  # (backend.dag_executor, Dim 2 / Phase 1). It mirrors the systemd
+  # unit (deploy/systemd/omnisight-dag-executor@.service) two-gate
+  # "default OFF" design so the stanza can be merged + shipped without
+  # ever bringing the executor up:
+  #
+  #   Gate 1 — profile-gated. The service lives behind the
+  #     ``dag-executor`` compose profile, so the documented dev bring-up
+  #     (``docker compose -p omnisight-dev ... up -d``, no --profile)
+  #     does NOT start it. It is shipped config, not a started service.
+  #   Gate 2 — armed flag DEFAULT OFF. Even if an operator opts into the
+  #     profile, the entrypoint is a no-op unless
+  #     OMNISIGHT_DAG_EXECUTOR_ENABLED=1. The default here resolves to 0
+  #     (see backend/dag_executor.py::is_enabled — exactly "1" to arm),
+  #     so an un-armed executor logs one line and exits 0.
+  #
+  # Opt-in plan allowlist: OMNISIGHT_DAG_EXECUTOR_PLAN_ALLOWLIST defaults
+  # to empty == nothing allowed (opt-in, fail-closed). An operator who
+  # arms the executor must explicitly list the plan ids / dag ids a
+  # later (still-gated) phase may pick up. Shipped empty + inert here.
+  #
+  # Reuses the backend image as an ALTERNATE entrypoint
+  # (``python3 -m backend.dag_executor`` instead of uvicorn), exactly as
+  # the systemd unit clones omnisight-worker@.service. The inert skeleton
+  # spawns NO containers, so it does NOT mount /var/run/docker.sock.
+  #
+  # To intentionally arm in dev (never the default):
+  #   OMNISIGHT_DAG_EXECUTOR_ENABLED=1 \
+  #   OMNISIGHT_DAG_EXECUTOR_PLAN_ALLOWLIST=<plan-ids> \
+  #   docker compose -p omnisight-dev --env-file deploy/dev/.env \
+  #     -f deploy/dev/docker-compose.yml --profile dag-executor up -d dag-executor
+  # ──────────────────────────────────────────────────────────────
+  dag-executor:
+    image: ${OMNISIGHT_REGISTRY:-sora.services:49160/omnisight/omnisight-productizer}/backend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
+    pull_policy: always
+    profiles: ["dag-executor"]
+    command: ["python3", "-m", "backend.dag_executor", "--instance-id", "dag-exec-dev-1"]
+    volumes:
+      - dev-data:/app/data
+      - dev-artifacts:/app/.artifacts
+    environment:
+      # Gate 2 — DEFAULT OFF. Anything but exactly "1" keeps it a no-op.
+      - OMNISIGHT_DAG_EXECUTOR_ENABLED=${OMNISIGHT_DAG_EXECUTOR_ENABLED:-0}
+      # Opt-in plan allowlist — empty default == nothing allowed.
+      - OMNISIGHT_DAG_EXECUTOR_PLAN_ALLOWLIST=${OMNISIGHT_DAG_EXECUTOR_PLAN_ALLOWLIST:-}
+      - OMNISIGHT_DAG_WORKDIR=/app/.artifacts/dag_workspaces
+      - OMNISIGHT_ENV=dev
+      - OMNISIGHT_INSTANCE_ID=dev-dag-executor
+      - OMNISIGHT_REQUIRE_DEPLOY_OVERLAY=0
+      - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight_dev}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_dev}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight_dev}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_dev}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Inert: an un-armed executor exits 0 immediately; "no" keeps it from
+    # restart-looping that clean exit. (The systemd unit uses on-failure
+    # for the same reason — a clean exit must not be retried.)
+    restart: "no"
+    stop_signal: SIGTERM
+    stop_grace_period: 60s
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.agent_workspaces:uid=65532,gid=65532
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    mem_limit: 2g
+    mem_reservation: 256m
+
 volumes:
   dev-postgres:
   dev-data:
