@@ -9,7 +9,14 @@
 # 一次部署只接受「最終發行身分」：final tag (vX.Y.Z) 或 image digest。
 # 不再有 branch 部署、不再 default 到 main。
 #   ./scripts/deploy-prod.sh --tag=v1.2.0            # 部署 final release tag
-#   ./scripts/deploy-prod.sh --digest=sha256:<64hex> # 依 image digest 部署
+#   # Digest deploy pins BOTH images — backend + frontend are SEPARATE
+#   # images, each with its own digest, so one digest cannot pin the pair
+#   # (OP-1696). Pass per-image digests:
+#   ./scripts/deploy-prod.sh --backend-digest=sha256:<64hex> \
+#                            --frontend-digest=sha256:<64hex>
+#   # (--digest=sha256:<64hex> is kept as a back-compat alias for
+#   #  --backend-digest; on its own it pins ONLY the backend — pass
+#   #  --frontend-digest too for a fully digest-pinned deploy.)
 #   ./scripts/deploy-prod.sh --tag=v1.2.0 --skip-build
 #                                                    # 跳過 build（image 已存在）
 #   ./scripts/deploy-prod.sh --tag=v1.2.0 --dry-run  # 只印步驟不執行
@@ -27,7 +34,11 @@ set -euo pipefail
 
 COMPOSE_FILE="docker-compose.prod.yml"
 TAG=""
-DIGEST=""
+# OP-1696: a digest deploy pins the backend + frontend PAIR — they are
+# SEPARATE images with distinct digests, so one digest cannot pin both.
+# --digest is retained as a back-compat alias for --backend-digest.
+BACKEND_DIGEST=""
+FRONTEND_DIGEST=""
 SKIP_BUILD=false
 DRY_RUN=false
 GERRIT_SOURCE="${OMNISIGHT_GERRIT_SOURCE:-}"
@@ -46,14 +57,17 @@ step() { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}\n"; }
 for arg in "$@"; do
     case "$arg" in
         --tag=*) TAG="${arg#*=}" ;;
-        --digest=*) DIGEST="${arg#*=}" ;;
+        --digest=*) BACKEND_DIGEST="${arg#*=}" ;;            # OP-1696: back-compat alias for --backend-digest
+        --backend-digest=*) BACKEND_DIGEST="${arg#*=}" ;;
+        --frontend-digest=*) FRONTEND_DIGEST="${arg#*=}" ;;
         --skip-build) SKIP_BUILD=true ;;
         --dry-run) DRY_RUN=true ;;
         --gerrit-source=*) GERRIT_SOURCE="${arg#*=}" ;;
         --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
         --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
         --help|-h)
-            echo "Usage: $0 (--tag=vX.Y.Z | --digest=sha256:<64hex>) [--skip-build] [--dry-run] [--gerrit-source=REMOTE] [--alembic-mode=apply|pg-clone]"
+            echo "Usage: $0 (--tag=vX.Y.Z | --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex>) [--skip-build] [--dry-run] [--gerrit-source=REMOTE] [--alembic-mode=apply|pg-clone]"
+            echo "       (--digest=sha256:<64hex> is a back-compat alias for --backend-digest; pass both --backend-digest and --frontend-digest to pin both images by digest)"
             exit 0 ;;
         *) err "Unknown argument: $arg" ;;
     esac
@@ -62,11 +76,31 @@ done
 # RT-07a: a production deploy identity is a FINAL tag (vX.Y.Z) or an
 # image digest — never a branch, and never an implicit default. Require
 # exactly one. The shape of each value is enforced by check_deploy_ref.sh.
-if [ -n "$TAG" ] && [ -n "$DIGEST" ]; then
-    err "--tag and --digest are mutually exclusive — a deploy has exactly one final identity"
+# OP-1696: a digest deploy is requested when either per-image digest is
+# given. The backend + frontend are SEPARATE images with distinct digests,
+# so a single digest cannot pin the PAIR — the fully digest-pinned (cosign-
+# verified) deploy passes BOTH --backend-digest and --frontend-digest. A
+# single digest is accepted for back-compat (it pins only that image and is
+# warned about in Step 1), but the implicit main default + branch deploys
+# remain removed (RT-07a).
+DIGEST_DEPLOY=false
+if [ -n "$BACKEND_DIGEST" ] || [ -n "$FRONTEND_DIGEST" ]; then
+    DIGEST_DEPLOY=true
 fi
-if [ -z "$TAG" ] && [ -z "$DIGEST" ]; then
-    err "release-train: a final deploy identity is required — pass --tag=vX.Y.Z or --digest=sha256:<64hex>. Branch deploys (and the implicit main default) were removed in RT-07a."
+
+if [ -n "$TAG" ] && [ "$DIGEST_DEPLOY" = true ]; then
+    err "--tag and --digest/--backend-digest/--frontend-digest are mutually exclusive — a deploy has exactly one final identity"
+fi
+if [ -z "$TAG" ] && [ "$DIGEST_DEPLOY" = false ]; then
+    err "release-train: a final deploy identity is required — pass --tag=vX.Y.Z, or a digest deploy pinning BOTH images: --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex>. Branch deploys (and the implicit main default) were removed in RT-07a."
+fi
+
+# Single human-readable identity for the banner / summary / SLO-monitor record.
+if [ -n "$TAG" ]; then
+    DEPLOY_ID="$TAG"
+else
+    DEPLOY_ID="${BACKEND_DIGEST:+backend@$BACKEND_DIGEST }${FRONTEND_DIGEST:+frontend@$FRONTEND_DIGEST}"
+    DEPLOY_ID="${DEPLOY_ID% }"   # trim trailing space when only backend is pinned
 fi
 
 case "$ALEMBIC_MODE" in
@@ -235,7 +269,7 @@ _run_alembic_pg_clone() {
 
 step "OmniSight Production 零停機部署"
 echo "Compose: $COMPOSE_FILE"
-echo "Deploy:  ${TAG:-$DIGEST}"
+echo "Deploy:  $DEPLOY_ID"
 echo "Alembic: $ALEMBIC_MODE"
 echo ""
 
@@ -252,30 +286,73 @@ if [ "$DRY_RUN" = true ]; then
     verify_args+=("--allowlist-only")
 fi
 
-if [ -n "$DIGEST" ]; then
-    # Digest deploy: the image is already built and cosign-verified at
-    # this digest (RT-06), so there is no git ref to fetch or check out.
-    # Force --skip-build — the image carries the code + Alembic
-    # migrations (the alembic step below runs inside that image, not the
-    # working tree). Compose pull-by-digest via OMNISIGHT_IMAGE_DIGEST is
-    # wired in RT-07b; here we record the digest as the deploy identity.
-    scripts/check_deploy_ref.sh --kind digest --ref "$DIGEST" "${verify_args[@]}"
+if [ "$DIGEST_DEPLOY" = true ]; then
+    # Digest deploy: the images are already built and cosign-verified at
+    # these digests (RT-06), so there is no git ref to fetch or check out.
+    # Force --skip-build — the image carries the code + Alembic migrations
+    # (the alembic step below runs inside that image, not the working tree).
+    #
+    # OP-1696: pin the backend + frontend PAIR by per-image digest. They are
+    # SEPARATE images, so gate and pin each side independently and hand
+    # compose full content-addressed refs (OMNISIGHT_{BACKEND,FRONTEND}_IMAGE_REF
+    # = <registry>/<image>@sha256:...). docker-compose.prod.yml consumes those
+    # refs and falls back to the :${OMNISIGHT_IMAGE_TAG} tag path when they
+    # are unset/empty, so the tag deploy path is untouched. A side that was
+    # NOT given a digest is cleared (empty) so it deploys via the tag path.
     SKIP_BUILD=true
-    _upsert_env "OMNISIGHT_IMAGE_DIGEST" "$DIGEST"
-    log "Digest deploy: $DIGEST (skip-build；不做 git checkout)"
+
+    # Registry prefix mirrors docker-compose.prod.yml's tag path
+    # (${OMNISIGHT_REGISTRY}/<image>); resolve from env or .env so the
+    # @sha256 refs address the same registry compose would have pulled from.
+    REGISTRY="${OMNISIGHT_REGISTRY:-$(_env_file_value OMNISIGHT_REGISTRY)}"
+    if [ -z "$REGISTRY" ]; then
+        if [ "$DRY_RUN" = true ]; then
+            REGISTRY='${OMNISIGHT_REGISTRY}'   # placeholder; a real deploy resolves it from env/.env
+        else
+            err "OMNISIGHT_REGISTRY is required to build per-image digest refs (set it in env or .env, mirroring docker-compose.prod.yml)."
+        fi
+    fi
+
+    if [ -n "$BACKEND_DIGEST" ]; then
+        scripts/check_deploy_ref.sh --kind digest --ref "$BACKEND_DIGEST" "${verify_args[@]}"
+        _upsert_env "OMNISIGHT_BACKEND_IMAGE_REF" "${REGISTRY}/backend@${BACKEND_DIGEST}"
+    else
+        _upsert_env "OMNISIGHT_BACKEND_IMAGE_REF" ""
+    fi
+    if [ -n "$FRONTEND_DIGEST" ]; then
+        scripts/check_deploy_ref.sh --kind digest --ref "$FRONTEND_DIGEST" "${verify_args[@]}"
+        _upsert_env "OMNISIGHT_FRONTEND_IMAGE_REF" "${REGISTRY}/frontend@${FRONTEND_DIGEST}"
+    else
+        _upsert_env "OMNISIGHT_FRONTEND_IMAGE_REF" ""
+    fi
+
+    # A fully digest-pinned deploy pins BOTH images. Warn loudly when only
+    # one side is pinned: the other falls back to the mutable :${OMNISIGHT_IMAGE_TAG}
+    # path, which is NOT a content-addressed (cosign-verified) deploy.
+    if [ -z "$BACKEND_DIGEST" ] || [ -z "$FRONTEND_DIGEST" ]; then
+        warn "OP-1696: only one image is pinned by digest ($DEPLOY_ID); the other deploys via the mutable :\${OMNISIGHT_IMAGE_TAG} tag path. For a fully digest-pinned (cosign-verified) deploy, pass BOTH --backend-digest and --frontend-digest."
+    fi
+    log "Digest deploy: $DEPLOY_ID (skip-build；不做 git checkout)"
 else
     GERRIT_SOURCE="$(_detect_gerrit_source)"
     echo "Git source: $GERRIT_SOURCE"
     _run_cmd git fetch "$GERRIT_SOURCE" --tags
     scripts/check_deploy_ref.sh --kind tag --ref "$TAG" "${verify_args[@]}"
     _run_cmd git checkout "$TAG"
+    # OP-1696: clear any per-image digest refs left in .env by a previous
+    # digest deploy so compose falls back to the :${OMNISIGHT_IMAGE_TAG} tag
+    # path for THIS deploy. Empty values trigger compose's `:-` fallback the
+    # same as unset, so an empty assignment is enough; otherwise a stale
+    # @sha256 ref would pin the old image and silently ignore --tag.
+    _upsert_env "OMNISIGHT_BACKEND_IMAGE_REF" ""
+    _upsert_env "OMNISIGHT_FRONTEND_IMAGE_REF" ""
     log "Code 更新完成：$(git log --oneline -1)"
 fi
 
 # OP-772: expose current/previous image tags to the persistent SLO monitor
 # before any replica is restarted. The monitor uses the previous tag as
 # its rollback target if three consecutive 30 s SLO windows breach.
-CURRENT_IMAGE_TAG="${OMNISIGHT_IMAGE_TAG:-${TAG:-$DIGEST}}"
+CURRENT_IMAGE_TAG="${OMNISIGHT_IMAGE_TAG:-${TAG:-${BACKEND_DIGEST:-$FRONTEND_DIGEST}}}"
 PREVIOUS_IMAGE_TAG="$(grep -E '^OMNISIGHT_IMAGE_TAG=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
 if [ -n "${PREVIOUS_IMAGE_TAG:-}" ] && [ "$PREVIOUS_IMAGE_TAG" != "$CURRENT_IMAGE_TAG" ]; then
     _upsert_env "OMNISIGHT_PREVIOUS_IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"
@@ -453,7 +530,7 @@ fi
 step "🎉 零停機部署完成！"
 echo ""
 echo -e "${BOLD}部署摘要：${NC}"
-echo "  Version:  ${TAG:-${DIGEST:-$(git describe --tags --always 2>/dev/null || git log --oneline -1)}}"
+echo "  Version:  $DEPLOY_ID"
 echo "  Backend:  backend-a :8000 + backend-b :8001"
 echo "  Frontend: :3000"
 echo "  Caddy:    :443 → round-robin"
@@ -461,4 +538,4 @@ echo "  Status:   $(curl -sf http://localhost:8000/api/v1/health 2>/dev/null | p
 echo ""
 echo -e "${BOLD}Rollback（release-train — redeploy the previous final identity）：${NC}"
 echo "  $0 --tag=<previous-vX.Y.Z> --skip-build"
-echo "  $0 --digest=<previous-sha256:...>"
+echo "  $0 --backend-digest=<prev-sha256:...> --frontend-digest=<prev-sha256:...>"
