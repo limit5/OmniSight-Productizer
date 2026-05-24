@@ -41,7 +41,11 @@ AREA_TO_TEST_POLICY: dict[str, str] = {
     "docs":     "skip",
     "frontend": "frontend-only",
     "backend":  "affected",
-    "devops":   "lint-only",
+    # devops = deploy scripts / CI pipeline. These were lint-only, which
+    # let deploy-script and .gitlab-ci.yml edits merge develop-"green" with
+    # zero behavioural coverage (OP-1706 / finding #28). They now run the
+    # deploy/CI behavioural subset via the ``affected`` policy.
+    "devops":   "affected",
     "tests":    "affected",
     "tooling":  "lint-only",
     "security": "full",
@@ -76,10 +80,28 @@ FRONTEND_PREFIXES: tuple[str, ...] = (
 )
 FRONTEND_SUFFIXES: tuple[str, ...] = (".tsx", ".ts", ".jsx", ".css", ".scss")
 DEVOPS_PREFIXES: tuple[str, ...] = (
-    "deploy/", "docker-compose", "Dockerfile", ".github/",
+    "deploy/", "docker-compose", "Dockerfile", ".github/", ".gitlab/",
 )
+# CI pipeline definition files that live at the repo root (no directory
+# prefix to match). ``.gitlab-ci.yml`` previously fell through to "other"
+# and was treated as lint-only.
+DEVOPS_FILES: frozenset[str] = frozenset({".gitlab-ci.yml"})
 TOOLING_PREFIXES: tuple[str, ...] = (
     "scripts/", "tools/", "auto-runner",
+)
+
+# Test-file globs that make up the deploy/CI behavioural subset. A change
+# under ``deploy/`` or to a CI pipeline file runs these (via the
+# ``affected`` policy) instead of collapsing to lint-only (OP-1706 /
+# finding #28). The globs are anchored on purpose: a bare ``*ci*`` would
+# sweep in unrelated suites such as ``test_pricing`` / ``test_decision``,
+# whereas ``test_ci_*`` only matches genuine CI suites. ``*deploy*`` is
+# safe as a substring (no false friends) and covers the deploy scripts,
+# blue/green + rollback paths, overlay locks, and platform deploy tests.
+DEPLOY_CI_TEST_GLOBS: tuple[str, ...] = (
+    "test_*deploy*.py",
+    "test_ci_*.py",
+    "test_gitlab*.py",
 )
 
 
@@ -139,7 +161,7 @@ def _classify(path: str) -> str:
         return "docs"
     if _is_frontend(path):
         return "frontend"
-    if path.startswith(DEVOPS_PREFIXES):
+    if path.startswith(DEVOPS_PREFIXES) or path in DEVOPS_FILES:
         return "devops"
     if path.startswith(TOOLING_PREFIXES):
         return "tooling"
@@ -185,6 +207,39 @@ def direct_test_files(changed: str, repo_root: Path) -> list[str]:
                 if rel not in matches:
                     matches.append(rel)
     return matches
+
+
+# ── Deploy / CI behavioural subset ────────────────────────────────
+
+
+def deploy_ci_test_files(repo_root: Path) -> list[str]:
+    """Return the deploy/CI behavioural test subset present in the repo.
+
+    Deploy-script and CI-pipeline edits used to map to ``lint-only`` (no
+    pytest), so a change under ``deploy/`` or to ``.gitlab-ci.yml`` could
+    merge develop-"green" with zero behavioural coverage (OP-1706 /
+    finding #28). We discover the relevant subset by test-file name
+    convention (see ``DEPLOY_CI_TEST_GLOBS``) rather than a hand-maintained
+    list, so newly added deploy tests are picked up automatically and the
+    selection can't silently rot. Scanning is restricted to the project
+    ``tests/`` directories, keeping this scoped — not the full suite.
+    """
+
+    matches: list[str] = []
+    for tests_dir in (
+        repo_root / "backend" / "tests",
+        repo_root / "tests",
+    ):
+        if not tests_dir.is_dir():
+            continue
+        for pattern in DEPLOY_CI_TEST_GLOBS:
+            for hit in tests_dir.rglob(pattern):
+                if not hit.is_file():
+                    continue
+                rel = hit.relative_to(repo_root).as_posix()
+                if rel not in matches:
+                    matches.append(rel)
+    return sorted(matches)
 
 
 # ── Import graph ──────────────────────────────────────────────────
@@ -301,12 +356,16 @@ def classify_changes(
 
     1. Empty change list → ``skip``.
     2. All files match a single short-circuit policy (``skip``,
-       ``frontend-only``, ``lint-only``) → that policy.
+       ``frontend-only``, ``lint-only``) → that policy. Note that
+       deploy/CI ("devops") changes deliberately do **not** short-circuit
+       to lint-only any more (OP-1706 / finding #28); they fall through to
+       the ``affected`` branch so they exercise the deploy/CI subset.
     3. Any change touches a high-fan-out path → ``full``.
     4. ``security`` declared in ``declared_areas`` → ``full``.
-    5. Otherwise → ``affected``: union of direct map + import graph.
-       If no test files surface (nothing maps), fall back to ``full``
-       so we never silently approve untested code.
+    5. Otherwise → ``affected``: union of the deploy/CI subset (when a
+       deploy/CI file is touched) + direct map + import graph. If no test
+       files surface (nothing maps), fall back to ``full`` so we never
+       silently approve untested code.
     """
 
     if not changed_files:
@@ -329,12 +388,14 @@ def classify_changes(
             "frontend (+docs) only — handled by pnpm test pipeline",
         )
 
-    if buckets <= {"devops", "tooling", "docs"} and (
-        "devops" in buckets or "tooling" in buckets
-    ):
+    # Tooling-only changes (scripts/, tools/, auto-runner) stay lint-only.
+    # Deploy/CI ("devops") changes are intentionally excluded here so they
+    # fall through to the affected branch and run the deploy/CI subset
+    # rather than collapsing to lint-only (OP-1706 / finding #28).
+    if buckets <= {"tooling", "docs"} and "tooling" in buckets:
         return TestImpactResult(
             "lint-only", [],
-            "devops / tooling only — shellcheck + yamllint, no integration",
+            "tooling only — shellcheck + yamllint, no integration",
         )
 
     fan_out_hit = sorted(set(changed_files) & HIGH_FAN_OUT_PATHS)
@@ -349,6 +410,13 @@ def classify_changes(
 
     selected: set[str] = set()
     backend_change_seen = False
+
+    # Deploy/CI-affecting changes (deploy/, .gitlab-ci.yml, Dockerfiles, CI
+    # workflow dirs) pull in the deploy/CI behavioural subset so deploy-line
+    # edits never merge on a lint-only "green" (OP-1706 / finding #28).
+    deploy_ci_seen = "devops" in buckets
+    if deploy_ci_seen:
+        selected.update(deploy_ci_test_files(repo_root))
 
     for path in changed_files:
         if not _is_backend(path):
@@ -368,9 +436,9 @@ def classify_changes(
         if own:
             selected.add(own)
 
-    if not backend_change_seen:
-        # Mixed change with no backend code touched at all — defer to
-        # frontend / lint pipeline.
+    if not backend_change_seen and not deploy_ci_seen:
+        # Mixed change with no backend code and nothing deploy/CI-affecting
+        # — defer to frontend / lint pipeline.
         if buckets <= {"frontend", "docs"}:
             return TestImpactResult(
                 "frontend-only", [],
@@ -381,16 +449,29 @@ def classify_changes(
         )
 
     if not selected:
+        # Backend change with no test mapping, or a deploy/CI change with no
+        # deploy test files in the tree — never silently green-light.
         return TestImpactResult(
             "full", [],
-            "backend change with no test mapping — falling back to full suite",
+            "change with no test mapping — falling back to full suite",
         )
 
-    return TestImpactResult(
-        "affected",
-        sorted(selected),
-        f"{len(selected)} affected test file(s) selected via direct + import graph",
-    )
+    if deploy_ci_seen and not backend_change_seen:
+        reason = (
+            f"{len(selected)} deploy/CI test file(s) selected — "
+            "deploy/CI change runs the deploy behavioural subset"
+        )
+    elif deploy_ci_seen:
+        reason = (
+            f"{len(selected)} affected test file(s) selected "
+            "(deploy/CI subset + direct + import graph)"
+        )
+    else:
+        reason = (
+            f"{len(selected)} affected test file(s) selected "
+            "via direct + import graph"
+        )
+    return TestImpactResult("affected", sorted(selected), reason)
 
 
 # ── CLI entry point ───────────────────────────────────────────────
