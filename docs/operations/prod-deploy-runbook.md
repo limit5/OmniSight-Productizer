@@ -9,6 +9,11 @@
 > cutover and reads only — do not push or pull from it. Rationale and
 > tradeoffs in [ADR-0038](../adr/ADR-0038-image-pipeline-on-gitlab.md).
 
+> **Current production release (as of 2026-05-25):** prod runs **`v0.6.0`**
+> (project `omnisight-productizer`, PG-HA pgvector). This supersedes the
+> earlier `v0.5.0-rc5-hotfix4` referenced in older notes; see the
+> release-train readiness handoff §7 for the live key facts.
+
 This runbook covers the `POST /api/v1/prod/deploy` endpoint and its CLI
 twin `scripts/prod_deploy_runbook.py`. It is the only sanctioned path
 for promoting an image from staging to prod once D6/D7/D8 have produced
