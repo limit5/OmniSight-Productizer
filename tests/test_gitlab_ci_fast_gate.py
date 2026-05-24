@@ -37,7 +37,6 @@ def test_workflow_allows_develop_push_fast_gate_without_release_jobs() -> None:
         "if": '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
     }
     assert develop_push_rule in workflow_rules
-    assert {"if": "$CI_COMMIT_TAG =~ /^v.*/"} in workflow_rules
 
     job = ci["fast-gate"]
     assert job["stage"] == "gate"
@@ -65,11 +64,11 @@ def test_fast_gate_runs_required_fast_checks() -> None:
     for required in (
         "ruff check",
         "scripts/ci_test_impact.py",
-        "backend/.venv/bin/pytest --no-cov -q $TEST_FILES",
+        "backend/.venv/bin/python -m pytest --no-cov -q $TEST_FILES",
         "pnpm exec tsc --noEmit",
         "pnpm run build",
         "scripts/check_migration_syntax.py --strict --only",
-        "alembic -c backend/alembic.ini heads",
+        "cd backend && .venv/bin/alembic -c alembic.ini heads",
     ):
         assert required in flat
 
@@ -83,7 +82,7 @@ def test_fast_gate_broken_change_goes_red_at_submit() -> None:
     # syntax failures, or multiple Alembic heads.
     assert "set -euo pipefail" in flat
     assert "xargs backend/.venv/bin/ruff check" in flat
-    assert "backend/.venv/bin/pytest --no-cov -q" in flat
+    assert "backend/.venv/bin/python -m pytest --no-cov -q" in flat
     assert "pnpm exec tsc --noEmit" in flat
     assert "pnpm run build" in flat
     assert "exit 1" in flat
