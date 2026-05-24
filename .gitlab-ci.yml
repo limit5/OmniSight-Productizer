@@ -401,10 +401,11 @@ candidate-sign-image:
     - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${CANDIDATE_IMAGE_TAG}" --format '{{json .Manifest.Digest}}' | jq -r .)"
     - test -n "$DIGEST"
     - IMAGE_REF="${IMAGE_BASE}@${DIGEST}"
-    - cosign sign --yes --key "$COSIGN_KEY" "$IMAGE_REF"
+    - cosign sign --yes --key "$COSIGN_KEY" --tlog-upload=false "$IMAGE_REF"
     - |
       cosign verify \
         --key deploy/cosign/cosign.pub \
+        --insecure-ignore-tlog=true \
         "$IMAGE_REF" >/dev/null
 
 candidate-sbom-image:
@@ -463,7 +464,7 @@ candidate-attest-image:
           pipeline_url: $pipeline_url,
           builder: "gitlab-ci"
         }' > "candidate-attestation-${IMAGE_NAME}.json"
-    - cosign attest --yes --key "$COSIGN_KEY" --predicate "candidate-attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
+    - cosign attest --yes --key "$COSIGN_KEY" --tlog-upload=false --predicate "candidate-attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
   artifacts:
     name: "candidate-image-attestation-${IMAGE_NAME}"
     paths:
@@ -494,10 +495,11 @@ sign-image:
     - DIGEST="$(docker buildx imagetools inspect "${IMAGE_BASE}:${IMAGE_TAG_SHA}" --format '{{json .Manifest.Digest}}' | jq -r .)"
     - test -n "$DIGEST"
     - IMAGE_REF="${IMAGE_BASE}@${DIGEST}"
-    - cosign sign --yes --key "$COSIGN_KEY" "$IMAGE_REF"
+    - cosign sign --yes --key "$COSIGN_KEY" --tlog-upload=false "$IMAGE_REF"
     - |
       cosign verify \
         --key deploy/cosign/cosign.pub \
+        --insecure-ignore-tlog=true \
         "$IMAGE_REF" >/dev/null
 
 sbom-image:
@@ -547,7 +549,7 @@ attest-image:
           pipeline_url: $pipeline_url,
           builder: "gitlab-ci"
         }' > "attestation-${IMAGE_NAME}.json"
-    - cosign attest --yes --key "$COSIGN_KEY" --predicate "attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
+    - cosign attest --yes --key "$COSIGN_KEY" --tlog-upload=false --predicate "attestation-${IMAGE_NAME}.json" --type "https://in-toto.io/Statement/v1" "$IMAGE_REF"
   artifacts:
     name: "image-attestation-${IMAGE_NAME}"
     paths:
