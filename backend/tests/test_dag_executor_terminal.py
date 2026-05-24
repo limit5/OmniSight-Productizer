@@ -546,12 +546,21 @@ async def test_finalize_survives_missing_run_for_marker(tmp_path):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Go-Live: merged inert — finalize is NOT wired into run()'s loop seam
+#  OP-1674: the run() seam now DRIVES record_and_finalize_plan (was inert in
+#  OP-1659). The wiring lives in the _maybe_claim_and_run_one seam helper —
+#  run()'s loop body delegates to it; the helper binds the LocalTaskHandler +
+#  calls record_and_finalize_plan. Execution stays default-OFF (the dual gate
+#  is what holds the loop inert until an operator opts a dag_id in).
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_finalize_not_called_from_run_loop():
+def test_run_seam_drives_finalize_via_helper():
     import inspect
-    src = inspect.getsource(dx.DagExecutor.run)
-    assert "record_and_finalize_plan" not in src
-    assert "LocalTaskHandler" not in src
+    # run()'s loop body delegates to the seam helper...
+    run_src = inspect.getsource(dx.DagExecutor.run)
+    assert "_maybe_claim_and_run_one" in run_src
+    # ...and the seam helper is what wires the existing finalize + handler.
+    seam_src = inspect.getsource(dx.DagExecutor._maybe_claim_and_run_one)
+    assert "record_and_finalize_plan" in seam_src
+    handler_src = inspect.getsource(dx.DagExecutor._build_handler)
+    assert "LocalTaskHandler" in handler_src

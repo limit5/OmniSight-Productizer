@@ -64,6 +64,22 @@ logger = logging.getLogger(__name__)
 #: Arm flag. Unset / anything-but-"1" keeps the executor a no-op.
 ENABLE_ENV = "OMNISIGHT_DAG_EXECUTOR_ENABLED"
 
+#: Deployment kill-boundary (OP-1674): a comma-separated allowlist of dag_ids
+#: the armed executor may auto-run. Empty / unset ⇒ NOTHING is auto-runnable —
+#: an armed executor still ticks + heartbeats but claims no plan. This is one
+#: half of the dual opt-in gate; the other is the per-run metadata consent.
+ALLOW_DAG_IDS_ENV = "OMNISIGHT_DAG_EXECUTOR_ALLOW_DAG_IDS"
+
+#: Project root the :class:`PlanWorkspaceBuilder` jails task-input globs to.
+#: Unset ⇒ the executor SKIPS plan execution entirely (it cannot materialise
+#: a task's inputs without a root to copy them from).
+PROJECT_ROOT_ENV = "OMNISIGHT_DAG_PROJECT_ROOT"
+
+#: Per-run consent key in ``workflow_run.metadata`` — the submission half of
+#: the dual opt-in gate. Must be truthy for the executor to touch the plan.
+#: ``scripts/prod_smoke_test.py`` stamps it ``True`` on the smoke DAG run.
+OPT_IN_METADATA_KEY = "dag_executor_opt_in"
+
 #: Distinct instance-id namespace so dag-exec instances never collide
 #: with worker ids (``wkr-*``) on the operator surface.
 DAG_EXEC_INSTANCE_PREFIX = "dag-exec"
@@ -88,6 +104,40 @@ DEFAULT_LEASE_TTL_S = dag_storage.DEFAULT_LEASE_TTL_S
 def is_enabled() -> bool:
     """True only when ``OMNISIGHT_DAG_EXECUTOR_ENABLED`` is exactly ``"1"``."""
     return os.environ.get(ENABLE_ENV, "").strip() == "1"
+
+
+def parse_allow_dag_ids(raw: str | None) -> tuple[str, ...]:
+    """Parse the comma-separated dag-id allowlist, order-preserving + deduped.
+
+    Empty / unset ⇒ an empty tuple: the executor then auto-runs nothing, which
+    is what keeps even an *armed* executor default-OFF until an operator opts a
+    specific dag_id in (the deployment kill-boundary, :data:`ALLOW_DAG_IDS_ENV`).
+    """
+    if not raw:
+        return ()
+    seen: dict[str, None] = {}
+    for part in raw.split(","):
+        did = part.strip()
+        if did:
+            seen.setdefault(did, None)
+    return tuple(seen)
+
+
+def metadata_opt_in(metadata: dict[str, Any] | None) -> bool:
+    """True when a run's metadata carries a truthy dual-opt-in consent.
+
+    Accepts a JSON ``true`` (the ``prod_smoke_test`` submission shape) as well
+    as the ``1/true/yes/on`` string forms (reusing the env-contract truthy
+    semantics) so a hand-set string consent is honoured too. A missing key /
+    falsey value / no metadata ⇒ NOT opted in (the plan is left untouched)."""
+    if not metadata:
+        return False
+    val = metadata.get(OPT_IN_METADATA_KEY)
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, str):
+        return _truthy(val)
+    return bool(val)
 
 
 def new_instance_id(prefix: str = DAG_EXEC_INSTANCE_PREFIX) -> str:
@@ -260,11 +310,23 @@ class DagExecutor:
         *,
         heartbeat: DagExecHeartbeat | None = None,
         enabled: bool | None = None,
+        storage=None,
+        workflow=None,
+        task_runner: Callable[[list[str], Path, float], tuple[int, str, str]]
+        | None = None,
     ) -> None:
         self.config = config
         self.heartbeat = heartbeat if heartbeat is not None else DagExecHeartbeat()
         # ``enabled`` override is for tests; production reads the env flag.
         self._enabled = is_enabled() if enabled is None else enabled
+        # ``storage`` / ``workflow`` / ``task_runner`` default to the real
+        # modules / subprocess runner in production; they are injectable so the
+        # run() loop seam can be exercised in-harness with in-memory doubles
+        # (mirroring the test_dag_executor_terminal.py pattern). ``_workflow``
+        # stays ``None`` until needed so the heavy workflow import is lazy.
+        self._storage = storage if storage is not None else dag_storage
+        self._workflow = workflow
+        self._task_runner = task_runner
         self._stop = asyncio.Event()
         self._started_at = 0.0
         self._ticks = 0
@@ -313,14 +375,21 @@ class DagExecutor:
                         and self._ticks >= self.config.max_ticks):
                     break
 
-                # ── SEAM ──────────────────────────────────────────
-                # A future phase claims one ready plan here and drives it —
-                # via :meth:`claim_plan` / renew / release (OP-1656) and the
-                # :class:`SerialPlanScheduler` topological walk (OP-1657).
-                # The Phase-1 skeleton deliberately does NOTHING: no claim,
-                # no scheduler run, no terminal transition. The scheduler +
-                # lease primitives ship in the image so a later (still-gated)
-                # phase can wire them here without re-touching this loop.
+                # ── SEAM (OP-1674): claim → execute → finalize ────
+                # When armed, claim ONE ready 'executing' plan that clears the
+                # dual opt-in gate, drive it through the EXISTING
+                # record_and_finalize_plan, then release the lease — one plan
+                # per tick. Stays a NO-OP whenever the deployment allowlist is
+                # unset, OMNISIGHT_DAG_PROJECT_ROOT is unset, or no plan is
+                # both ready AND opted-in: that is the default-OFF posture
+                # (an armed-but-unconfigured executor still only ticks here).
+                try:
+                    await self._maybe_claim_and_run_one()
+                except Exception:  # a single plan tick must never kill the loop
+                    logger.exception(
+                        "dag-executor %s: plan tick failed",
+                        self.config.instance_id,
+                    )
                 self._ticks += 1
 
                 now = time.monotonic()
@@ -434,7 +503,7 @@ class DagExecutor:
         Returns the granted :class:`~backend.dag_storage.PlanLease`, or
         ``None`` if another live owner holds it (or the plan is gone).
         """
-        return await dag_storage.claim_plan(
+        return await self._storage.claim_plan(
             plan_id, self.config.instance_id,
             lease_ttl_s=self.config.lease_ttl_s, conn=conn,
         )
@@ -447,7 +516,7 @@ class DagExecutor:
         Returns the refreshed lease, or ``None`` if it was lost (lapsed or
         reclaimed) — the cue to stop driving that plan.
         """
-        return await dag_storage.renew_lease(
+        return await self._storage.renew_lease(
             lease.plan_id, lease.owner, lease.token,
             lease_ttl_s=self.config.lease_ttl_s, conn=conn,
         )
@@ -456,9 +525,136 @@ class DagExecutor:
         self, lease: "dag_storage.PlanLease", *, conn=None,
     ) -> bool:
         """Release a lease this instance holds (idempotent)."""
-        return await dag_storage.release_lease(
+        return await self._storage.release_lease(
             lease.plan_id, lease.owner, lease.token, conn=conn,
         )
+
+    # ─── run() loop seam: claim → execute → finalize (OP-1674) ───
+    #
+    # The methods below are what :meth:`run`'s SEAM calls each tick once the
+    # executor is armed. They ONLY wire the already-merged pieces — the OP-1656
+    # lease (above), discovery via :func:`dag_storage.list_plans`,
+    # :class:`PlanWorkspaceBuilder` + :class:`LocalTaskHandler`, and
+    # :func:`record_and_finalize_plan` — behind the dual opt-in gate. There is
+    # NO new claim / scheduling / handler / step-recording / terminal logic
+    # here (a ticket MUST-NOT), and NO background lease-renewer: a build that
+    # outlives the lease TTL is an accepted fast-smoke-MVP limitation.
+
+    async def _maybe_claim_and_run_one(self) -> Optional["PlanTerminalResult"]:
+        """Discover → dual-gate → claim → finalize → release ONE plan per tick.
+
+        Returns the :class:`PlanTerminalResult` of the plan driven this tick,
+        or ``None`` when nothing ran: the allowlist is unset, the project root
+        is unset, no ready+opted-in plan exists, or the claim was lost to a
+        live owner.
+
+        Dual opt-in gate — a plan is TOUCHED only when BOTH hold:
+
+          1. its ``dag_id`` is in :data:`ALLOW_DAG_IDS_ENV` (discovery iterates
+             only those ids — the deployment kill-boundary), AND
+          2. its run's ``metadata.dag_executor_opt_in`` is truthy (the per-
+             submission consent).
+
+        Either missing ⇒ the plan is left ENTIRELY untouched (never claimed),
+        which is what stops a stale / bootstrap 'executing' row from ever being
+        auto-run.
+        """
+        allow = parse_allow_dag_ids(os.environ.get(ALLOW_DAG_IDS_ENV))
+        if not allow:
+            return None  # no kill-boundary set ⇒ nothing is auto-runnable
+
+        project_root = (os.environ.get(PROJECT_ROOT_ENV) or "").strip()
+        if not project_root:
+            logger.info(
+                "dag-executor %s: %s unset — skipping plan execution this tick",
+                self.config.instance_id, PROJECT_ROOT_ENV,
+            )
+            return None
+
+        for dag_id in allow:
+            plan = await self._first_executing_plan(dag_id)
+            if plan is None:
+                continue
+            if not await self._run_opted_in(plan):
+                logger.info(
+                    "dag-executor %s: plan=%s dag=%s executing but not "
+                    "opted-in — left untouched",
+                    self.config.instance_id, plan.id, dag_id,
+                )
+                continue
+            lease = await self.claim_plan(plan.id)
+            if lease is None:
+                logger.info(
+                    "dag-executor %s: plan=%s dag=%s held by another live "
+                    "owner — skipping", self.config.instance_id, plan.id, dag_id,
+                )
+                continue
+            try:
+                handler = self._build_handler(Path(project_root))
+                result = await record_and_finalize_plan(
+                    plan, handler=handler,
+                    workflow=self._workflow, storage=self._storage,
+                )
+                logger.info(
+                    "dag-executor %s: drove plan=%s dag=%s -> %s "
+                    "(%d step(s) recorded)", self.config.instance_id,
+                    plan.id, dag_id, result.status, len(result.recorded),
+                )
+                return result
+            finally:
+                # acquire-before / release-after, one plan per tick. No
+                # background renewer: a build outliving the lease TTL is an
+                # accepted fast-smoke limitation (ticket scope).
+                await self.release_plan_lease(lease)
+        return None
+
+    async def _first_executing_plan(
+        self, dag_id: str,
+    ) -> Optional["dag_storage.StoredPlan"]:
+        """The first 'executing' plan for ``dag_id`` (mutation-round order).
+
+        Discovery is :func:`dag_storage.list_plans` (already round-ordered) +
+        a Python ``status == 'executing'`` filter — deliberately NOT a new
+        status-keyed query / ``list_executing_plans`` / status index (a ticket
+        MUST-NOT)."""
+        for plan in await self._storage.list_plans(dag_id):
+            if plan.status == "executing":
+                return plan
+        return None
+
+    async def _run_opted_in(self, plan: "dag_storage.StoredPlan") -> bool:
+        """The per-run consent half of the dual gate: the plan's run carries a
+        truthy ``metadata.dag_executor_opt_in``.
+
+        A plan with no ``run_id``, a missing run row, or an absent/falsey flag
+        is NOT opted in (returns ``False``)."""
+        run_id = plan.run_id
+        if not run_id:
+            return False
+        run = await self._wf().get_run(run_id)
+        metadata = getattr(run, "metadata", None) if run is not None else None
+        return metadata_opt_in(metadata)
+
+    def _build_handler(self, project_root: Path) -> "LocalTaskHandler":
+        """Bind the EXISTING :class:`LocalTaskHandler` over a
+        :class:`PlanWorkspaceBuilder` jailed to ``project_root``
+        (:data:`PROJECT_ROOT_ENV`).
+
+        ``self._task_runner`` is ``None`` in production (→ the real
+        :func:`_run_local` subprocess runner) and injectable for the in-harness
+        double, mirroring ``LocalTaskHandler``'s own ``runner`` seam."""
+        builder = PlanWorkspaceBuilder(project_root=project_root)
+        return LocalTaskHandler(
+            workspace_builder=builder, runner=self._task_runner,
+        )
+
+    def _wf(self):
+        """The workflow module (or injected double) used for run-metadata reads.
+
+        Lazy: production keeps ``self._workflow`` ``None`` and resolves the real
+        module on first use, so importing this module never drags in the heavy
+        :mod:`backend.workflow` graph."""
+        return self._workflow if self._workflow is not None else _import_workflow()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1671,6 +1867,11 @@ if __name__ == "__main__":  # pragma: no cover
 
 __all__ = [
     "ENABLE_ENV",
+    "ALLOW_DAG_IDS_ENV",
+    "PROJECT_ROOT_ENV",
+    "OPT_IN_METADATA_KEY",
+    "parse_allow_dag_ids",
+    "metadata_opt_in",
     "DAG_EXEC_INSTANCE_PREFIX",
     "DAG_EXEC_HEARTBEAT_PREFIX",
     "DEFAULT_POLL_INTERVAL_S",
