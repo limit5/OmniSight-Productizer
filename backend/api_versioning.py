@@ -252,8 +252,28 @@ def _load_image_manifest_db_head(path: Path = _IMAGE_MANIFEST_PATH) -> str | Non
     return value if isinstance(value, str) else None
 
 
+def _is_placeholder_digest(digest: str) -> bool:
+    """Return True for an all-zero placeholder digest (the #23 finding).
+
+    The image bake step writes ``sha256:0000...`` (algorithm prefix + an
+    all-zero hex hash) into ``bundle.json`` when the real digest is not yet
+    known at bake time. Such a value carries no identity and must never be
+    surfaced on ``/api/version`` — consumers would key on the zeros as if
+    they were a real digest. Detection is prefix-agnostic: any digest whose
+    hash portion (after an optional ``algo:`` prefix) is non-empty and all
+    zeros counts as a placeholder.
+    """
+    _, _, hash_part = digest.rpartition(":")
+    return bool(hash_part) and set(hash_part) == {"0"}
+
+
 def _bundle_image_digest(bundle: dict, image_name: str) -> str | None:
-    """Return one baked image digest from ``bundle.json`` if present."""
+    """Return one baked image digest from ``bundle.json`` if present.
+
+    An all-zero placeholder digest (see :func:`_is_placeholder_digest`,
+    finding #23) is treated as absent and resolves to ``None`` so
+    ``/api/version`` never advertises ``sha256:0000...`` for the digest.
+    """
     images = bundle.get("images")
     if not isinstance(images, dict):
         return None
@@ -261,7 +281,11 @@ def _bundle_image_digest(bundle: dict, image_name: str) -> str | None:
     if not isinstance(image, dict):
         return None
     digest = image.get("digest")
-    return digest if isinstance(digest, str) and digest else None
+    if not isinstance(digest, str) or not digest:
+        return None
+    if _is_placeholder_digest(digest):
+        return None
+    return digest
 
 
 # ─────────────────────────────────────────────────────────────────────
