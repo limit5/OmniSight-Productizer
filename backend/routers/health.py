@@ -470,6 +470,17 @@ def _check_deploy_overlay() -> tuple[bool, str]:
     without its identity lock. In dev/CI the flag is unset and the check is
     observational: it never blocks readiness, mirroring the deep-check /
     JIRA-ping knobs already in this module.
+
+    OP-1693 — digest-vs-running compare (overlay-present branch). The lock's
+    ``deployed_digest_backend`` is what the promote step INTENDED to deploy;
+    the B1b-injected ``OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND`` env is what the
+    container is ACTUALLY running. When ``OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH``
+    is set (default-OFF) AND the running-digest env is present, a mismatch
+    fails ``/readyz`` (503) so a container running an image other than the one
+    the lock claims is caught. The new check fails OPEN: with the flag unset,
+    or when the running-digest env is absent (B1b not yet wired), readiness is
+    unchanged — so this gate can never brick prod on its own. The existing
+    absent/incomplete-lock fail-closed path below is untouched.
     """
     import os as _os
     from backend import api_versioning as _av
@@ -480,11 +491,26 @@ def _check_deploy_overlay() -> tuple[bool, str]:
     ).strip().lower() in {"1", "true", "yes"}
 
     if overlay is not None:
-        return True, (
+        base = (
             f"tag={overlay.get('deployed_tag')} "
             f"sha={overlay.get('build_git_sha')} "
             f"audit={overlay.get('promotion_audit_id')}"
         )
+        enforce_digest = _os.environ.get(
+            "OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", ""
+        ).strip().lower() in {"1", "true", "yes"}
+        running_digest = _av.get_running_image_digest_backend()
+        if enforce_digest and running_digest:
+            deployed_digest = overlay.get("deployed_digest_backend")
+            if running_digest != deployed_digest:
+                return False, (
+                    "deploy_overlay_digest_mismatch: "
+                    f"running={running_digest} deployed={deployed_digest}"
+                )
+            return True, f"{base} digest_match=ok"
+        # Flag OFF or running-digest absent → fail OPEN on the new check
+        # (B1b-not-yet-wired must not brick readiness). Behaviour unchanged.
+        return True, base
     if required:
         return False, "deploy_overlay_lock_missing"
     return True, "deploy_overlay_not_required (dev/ci)"
@@ -724,8 +750,10 @@ async def _readyz_handler(verbose: bool = False) -> JSONResponse:
     # gates `ready` only when OMNISIGHT_REQUIRE_DEPLOY_OVERLAY is set (the
     # prod/staging compose sets it), so a deployed container that started
     # without its identity lock fails the readiness gate and the deploy
-    # rollout catches it. See _check_deploy_overlay docstring + ADR-0040
-    # RT-08-pre.
+    # rollout catches it. OP-1693: when OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH
+    # is set (default-OFF) and the B1b running-digest env is present, a lock
+    # whose deployed_digest_backend != the actually-running digest also flips
+    # ready to False. See _check_deploy_overlay docstring + ADR-0040 RT-08-pre.
     overlay_ok, overlay_detail = _check_deploy_overlay()
     checks["deploy_overlay"] = {"ok": overlay_ok, "detail": overlay_detail}
 

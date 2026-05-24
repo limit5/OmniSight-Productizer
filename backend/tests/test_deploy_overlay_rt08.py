@@ -42,6 +42,11 @@ export OMNISIGHT_PROMOTION_AUDIT_ID=promo-2026-05-22-001
 def _reset_overlay_cache(monkeypatch):
     """Each test starts with a clean overlay cache + no fail-closed flag."""
     monkeypatch.delenv("OMNISIGHT_REQUIRE_DEPLOY_OVERLAY", raising=False)
+    # OP-1693 — the digest-match gate is default-OFF; clear both its knobs so
+    # a stray env from the ambient shell can't leak into a test expecting the
+    # default-OFF behaviour.
+    monkeypatch.delenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", raising=False)
+    monkeypatch.delenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", raising=False)
     av.reset_deploy_overlay_cache()
     yield
     av.reset_deploy_overlay_cache()
@@ -298,3 +303,203 @@ async def test_readyz_overlay_observational_does_not_block_dev(tmp_path, monkeyp
     assert body["ready"] is True
     assert body["checks"]["deploy_overlay"]["ok"] is True
     assert "not_required" in body["checks"]["deploy_overlay"]["detail"]
+
+
+# ──────────────────────────────────────────────────────────────
+#  OP-1693 — digest-vs-running compare (gated default-OFF)
+# ──────────────────────────────────────────────────────────────
+#
+# The deploy lock's ``deployed_digest_backend`` is what the promote step
+# INTENDED to ship; the B1b-injected ``OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND``
+# env is what the container is ACTUALLY running. ``_LOCK_BODY`` pins the
+# backend digest to ``sha256:<64×'a'>``.
+
+_LOCK_BACKEND_DIGEST = "sha256:" + "a" * 64
+_WRONG_DIGEST = "sha256:" + "f" * 64
+
+
+def test_get_running_image_digest_backend_reads_env(monkeypatch):
+    # Reads the B1b-injected env, NOT bundle.json.
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _LOCK_BACKEND_DIGEST)
+    assert av.get_running_image_digest_backend() == _LOCK_BACKEND_DIGEST
+
+
+def test_get_running_image_digest_backend_absent_is_none(monkeypatch):
+    monkeypatch.delenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", raising=False)
+    assert av.get_running_image_digest_backend() is None
+    # Whitespace-only is treated as absent (env unset by deploy = empty string).
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", "   ")
+    assert av.get_running_image_digest_backend() is None
+
+
+def _wire_lock(tmp_path, monkeypatch):
+    """Load a valid overlay lock into the startup cache."""
+    lock = _write_lock(tmp_path)
+    monkeypatch.setattr(av, "DEPLOY_OVERLAY_LOCK_PATH", lock)
+    av.reset_deploy_overlay_cache()
+    return lock
+
+
+# ── _check_deploy_overlay unit matrix ─────────────────────────────
+
+
+def test_overlay_digest_flag_off_never_blocks_even_on_mismatch(tmp_path, monkeypatch):
+    # AC: flag-off => never 503, even when the running digest is wrong.
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.delenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", raising=False)
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _WRONG_DIGEST)
+
+    ok, detail = health_mod._check_deploy_overlay()
+    assert ok is True
+    assert "mismatch" not in detail
+    assert "tag=v0.5.0" in detail
+
+
+def test_overlay_digest_flag_on_match_ok(tmp_path, monkeypatch):
+    # AC: flag-on + match => ok (200).
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "1")
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _LOCK_BACKEND_DIGEST)
+
+    ok, detail = health_mod._check_deploy_overlay()
+    assert ok is True
+    assert "digest_match=ok" in detail
+
+
+def test_overlay_digest_flag_on_mismatch_fails(tmp_path, monkeypatch):
+    # AC: flag-on + mismatch => fail (503).
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "true")
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _WRONG_DIGEST)
+
+    ok, detail = health_mod._check_deploy_overlay()
+    assert ok is False
+    assert detail.startswith("deploy_overlay_digest_mismatch")
+    assert f"running={_WRONG_DIGEST}" in detail
+    assert f"deployed={_LOCK_BACKEND_DIGEST}" in detail
+
+
+def test_overlay_digest_flag_on_no_running_digest_skips(tmp_path, monkeypatch):
+    # AC: flag-on + no running digest => skip the compare, stay ok (200).
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "1")
+    monkeypatch.delenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", raising=False)
+
+    ok, detail = health_mod._check_deploy_overlay()
+    assert ok is True
+    assert "mismatch" not in detail
+    assert "digest_match" not in detail
+    assert "tag=v0.5.0" in detail
+
+
+def test_overlay_digest_does_not_read_bundle(tmp_path, monkeypatch):
+    # MUST NOT read the running digest from the bundle: a bundle carrying the
+    # #23 all-zeros placeholder must not be mistaken for the running digest.
+    # With the env absent, the compare is skipped regardless of any bundle.
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.setattr(av, "BUNDLE_MANIFEST_PATH", tmp_path / "no-bundle.json")
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "1")
+    monkeypatch.delenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", raising=False)
+
+    ok, detail = health_mod._check_deploy_overlay()
+    assert ok is True
+    assert "digest" not in detail or "digest_match" not in detail
+
+
+def test_overlay_digest_missing_lock_failclosed_preserved(tmp_path, monkeypatch):
+    # MUST NOT weaken absent-lock fail-closed: with the digest flag ON and a
+    # running digest present, a missing-but-required lock still fails on the
+    # lock-missing path (never the digest path — there is no lock to compare).
+    monkeypatch.setenv("OMNISIGHT_REQUIRE_DEPLOY_OVERLAY", "1")
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "1")
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _LOCK_BACKEND_DIGEST)
+    monkeypatch.setattr(av, "DEPLOY_OVERLAY_LOCK_PATH", tmp_path / "absent.lock")
+    av.reset_deploy_overlay_cache()
+
+    ok, detail = health_mod._check_deploy_overlay()
+    assert ok is False
+    assert detail == "deploy_overlay_lock_missing"
+
+
+# ── /readyz integration matrix ────────────────────────────────────
+
+
+def _pin_other_gates_green(monkeypatch):
+    async def _ok():
+        return True, "ok"
+
+    monkeypatch.setattr(health_mod, "_check_db", _ok)
+    monkeypatch.setattr(health_mod, "_check_migrations", _ok)
+    monkeypatch.setattr(health_mod, "_check_provider_chain", lambda: (True, "ok"))
+
+
+@pytest.mark.asyncio
+async def test_readyz_digest_mismatch_503(tmp_path, monkeypatch):
+    # AC: flag-on + mismatch => /readyz 503.
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "1")
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _WRONG_DIGEST)
+    _pin_other_gates_green(monkeypatch)
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 503
+    assert body["ready"] is False
+    assert body["checks"]["deploy_overlay"]["ok"] is False
+    assert body["checks"]["deploy_overlay"]["detail"].startswith(
+        "deploy_overlay_digest_mismatch"
+    )
+
+
+@pytest.mark.asyncio
+async def test_readyz_digest_match_200(tmp_path, monkeypatch):
+    # AC: flag-on + match => /readyz 200.
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "1")
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _LOCK_BACKEND_DIGEST)
+    _pin_other_gates_green(monkeypatch)
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 200
+    assert body["ready"] is True
+    assert body["checks"]["deploy_overlay"]["ok"] is True
+    assert "digest_match=ok" in body["checks"]["deploy_overlay"]["detail"]
+
+
+@pytest.mark.asyncio
+async def test_readyz_digest_flag_off_never_503(tmp_path, monkeypatch):
+    # AC: flag-off => /readyz never 503 even when the running digest is wrong.
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.delenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", raising=False)
+    monkeypatch.setenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", _WRONG_DIGEST)
+    _pin_other_gates_green(monkeypatch)
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 200
+    assert body["ready"] is True
+    assert body["checks"]["deploy_overlay"]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_readyz_digest_flag_on_no_running_digest_200(tmp_path, monkeypatch):
+    # AC: flag-on + no running digest => /readyz 200 (compare skipped).
+    _wire_lock(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH", "1")
+    monkeypatch.delenv("OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND", raising=False)
+    _pin_other_gates_green(monkeypatch)
+
+    resp = await health_mod._readyz_handler()
+    import json as _json
+
+    body = _json.loads(bytes(resp.body))
+    assert resp.status_code == 200
+    assert body["ready"] is True
+    assert body["checks"]["deploy_overlay"]["ok"] is True
