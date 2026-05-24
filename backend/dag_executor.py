@@ -1333,12 +1333,23 @@ class LocalTaskHandler:
     def _python_entry(task: Task) -> str:
         """The ``.py`` script a python3 task runs: first such entry in inputs.
 
+        The returned path must match the filename :meth:`PlanWorkspaceBuilder.
+        prepare` materialised into the scratch. ``prepare`` STRIPS the
+        ``external:``/``user:`` prefix off a declared input (via
+        ``_EXTERNAL_INPUT_RE``) and copies the bare tail, so a declared
+        ``external:run_test.py`` lands as ``run_test.py``. We mirror that same
+        prefix-strip here before selecting/returning the ``.py`` entry —
+        otherwise we'd run ``python3 external:run_test.py`` against a scratch
+        that only holds ``run_test.py`` → ``can't open file`` → rc=2 (OP-1677).
+
         No ``.py`` input → :class:`_LocalHandlerError` (the task FAILS) — we
         do not guess an entry point.
         """
         for inp in task.inputs:
-            if inp.strip().endswith(".py"):
-                return inp.strip()
+            ext = _EXTERNAL_INPUT_RE.match(inp.strip())
+            entry = ext.group(1) if ext is not None else inp.strip()
+            if entry.endswith(".py"):
+                return entry
         raise _LocalHandlerError(
             "python3 toolchain requires a .py file in inputs to run"
         )

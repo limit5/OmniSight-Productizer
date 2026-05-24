@@ -222,6 +222,45 @@ async def test_python3_uses_first_py_input(tmp_path):
     assert captured == [[sys.executable, "run.py"]]
 
 
+async def test_python3_entry_strips_external_user_prefix(tmp_path):
+    """OP-1677 — ``prepare`` materialises ``external:run_test.py`` as the
+    prefix-stripped ``run_test.py`` in the scratch, so the python3 command
+    must run that bare filename — NOT ``python3 external:run_test.py`` (which
+    can't open the file → rc=2). A raw ``.py`` input is unaffected.
+    """
+    captured: list[list[str]] = []
+
+    def record(argv, cwd, timeout_s):
+        captured.append(argv)
+        (Path(cwd) / "r.txt").write_text("ok")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=record)
+
+    res = await handler.run(
+        1, _task("t", toolchain="python3",
+                 inputs=["external:run_test.py"], output="r.txt"),
+    )
+    assert res.ok
+    assert captured[-1] == [sys.executable, "run_test.py"]
+
+    # user: prefix is stripped the same way prepare() does.
+    res = await handler.run(
+        2, _task("t", toolchain="python3",
+                 inputs=["user:run_test.py"], output="r.txt"),
+    )
+    assert res.ok
+    assert captured[-1] == [sys.executable, "run_test.py"]
+
+    # a raw .py input still passes through unchanged.
+    res = await handler.run(
+        3, _task("t", toolchain="python3",
+                 inputs=["x.py"], output="r.txt"),
+    )
+    assert res.ok
+    assert captured[-1] == [sys.executable, "x.py"]
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  AC: Integration — a real cmake compile produces the declared artifact
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -292,6 +331,28 @@ async def test_integration_python3_test_step(tmp_path):
                    inputs=["run_tests.py"], output="report.txt"),
     )
     assert res.ok, f"python3 step failed: rc={res.rc} reason={res.reason}\n{res.stderr}"
+    assert res.artifact.read_text() == "PASS"
+
+
+async def test_integration_python3_external_prefix_runs_stripped_script(tmp_path):
+    """OP-1677 regression — a python3 task whose ``.py`` input carries an
+    ``external:`` prefix runs the prefix-stripped script that ``prepare``
+    materialised into the scratch (``run_test.py``), succeeding (rc=0) instead
+    of failing with rc=2 ('can't open file ''external:run_test.py''').
+    """
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "run_test.py").write_text(
+        "from pathlib import Path\n"
+        "Path('report.txt').write_text('PASS')\n"
+    )
+    handler = _handler(tmp_path, project=project)
+    res = await handler.run(
+        103, _task("test", toolchain="python3",
+                   inputs=["external:run_test.py"], output="report.txt"),
+    )
+    assert res.ok, f"python3 step failed: rc={res.rc} reason={res.reason}\n{res.stderr}"
+    assert res.rc == 0
     assert res.artifact.read_text() == "PASS"
 
 
