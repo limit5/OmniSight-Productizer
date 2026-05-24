@@ -63,7 +63,13 @@ const TONE_CLASS: Record<BlockTone, string> = {
 
 export interface BlockProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
   as?: BlockElement
+  // Button-specific attributes forwarded to the polymorphic Element via
+  // {...props} when `as="button"` (e.g. bp-fleet-lanes cards). Both optional
+  // so div/section/article/etc. consumers are unaffected. HTMLAttributes<
+  // HTMLElement> carries neither, so without these the as="button" call-site
+  // fails tsc with TS2322 (OP-1688, follow-up to OP-1684's fast-gate unblock).
   type?: "button" | "submit" | "reset"
+  disabled?: boolean
   title?: ReactNode
   titleRight?: ReactNode
   icon?: LucideIcon

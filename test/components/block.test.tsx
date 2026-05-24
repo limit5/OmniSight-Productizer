@@ -264,6 +264,35 @@ describe("<Block />", () => {
     expect(onClick).toHaveBeenCalledTimes(1)
   })
 
+  it("forwards button-specific attrs (type + disabled) for as=\"button\" cards", () => {
+    // OP-1688: BlockProps now permits `type`/`disabled`, the button attrs the
+    // bp-fleet-lanes cards forward via {...props}. This both compiles the
+    // as="button" + disabled usage (tsc-level coverage) and asserts the
+    // loading-state disable reaches the rendered <button> (the fleet cards set
+    // `disabled={loadingId === agent.id}`).
+    const onClick = vi.fn()
+    render(
+      <Block
+        as="button"
+        type="button"
+        disabled
+        kind="bp.card"
+        status="booting"
+        onClick={onClick}
+        data-testid="disabled-button-block"
+      >
+        booting agent
+      </Block>,
+    )
+
+    const block = screen.getByTestId("disabled-button-block")
+    expect(block.tagName).toBe("BUTTON")
+    expect(block).toBeDisabled()
+    expect(block).toHaveAttribute("type", "button")
+    fireEvent.click(block)
+    expect(onClick).not.toHaveBeenCalled()
+  })
+
   it("opens the right-click share modal and creates a WP.9 shareable object permalink", async () => {
     const createShare = vi.fn(
       async (_body: CreateShareableObjectRequest) => ({
