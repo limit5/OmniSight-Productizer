@@ -859,6 +859,34 @@ if _AVAILABLE:
     )
     aux_service_available.labels(service="ai_core").set(float("nan"))
 
+    # OP-1665 (Dim 2): DAG executor heartbeat / liveness surface ─
+    # The dag-executor (``backend.dag_executor``) runs its own poll +
+    # heartbeat loop under the distinct ``dag-exec-*`` instance namespace.
+    # These mirror the worker heartbeat metrics but stay separate so the
+    # executor's liveness never blends into the worker pool's on the
+    # operator surface. ``dag_executor_up`` is the classic "is this executor
+    # alive" gauge: set to 1 on each heartbeat, flipped to 0 on graceful
+    # stop. The ``instance_id`` label lets Prometheus track several
+    # executors (matching ``omnisight_backend_instance_up``).
+    dag_executor_up = Gauge(
+        "omnisight_dag_executor_up",
+        "1 while a DAG executor instance is armed and heart-beating, 0 once stopped",
+        labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
+    dag_executor_heartbeat_total = Counter(
+        "omnisight_dag_executor_heartbeat_total",
+        "DAG executor heartbeat ticks emitted, by instance",
+        labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
+    dag_executor_last_heartbeat_timestamp_seconds = Gauge(
+        "omnisight_dag_executor_last_heartbeat_timestamp_seconds",
+        "Unix timestamp of the most recent DAG executor heartbeat, by instance",
+        labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
+
 else:
     # No-op stubs so callers don't have to guard every increment.
     class _NoOp:
@@ -975,6 +1003,10 @@ else:
     runner_pre_pickup_cap_gate_blocked_total = _NoOp()  # type: ignore
     runner_comment_suppressed_total = _NoOp()  # type: ignore
     aux_service_available = _NoOp()  # type: ignore
+    # OP-1665 — DAG executor heartbeat / liveness surface
+    dag_executor_up = _NoOp()  # type: ignore
+    dag_executor_heartbeat_total = _NoOp()  # type: ignore
+    dag_executor_last_heartbeat_timestamp_seconds = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1520,6 +1552,9 @@ def reset_for_tests() -> None:
     global metrics_label_cap_used, capability_matrix_unexpected_fallback_total
     global runner_pre_pickup_cap_gate_blocked_total
     global runner_comment_suppressed_total, aux_service_available
+    # OP-1665 — DAG executor heartbeat / liveness surface
+    global dag_executor_up, dag_executor_heartbeat_total
+    global dag_executor_last_heartbeat_timestamp_seconds
     billing_llm_calls_total = Counter(
         "omnisight_billing_llm_calls_total",
         "LLM calls fan-outed to billing, by tenant/project/product_line/provider/model",
@@ -1590,3 +1625,21 @@ def reset_for_tests() -> None:
         registry=REGISTRY,
     )
     aux_service_available.labels(service="ai_core").set(float("nan"))
+    dag_executor_up = Gauge(
+        "omnisight_dag_executor_up",
+        "1 while a DAG executor instance is armed and heart-beating, 0 once stopped",
+        labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
+    dag_executor_heartbeat_total = Counter(
+        "omnisight_dag_executor_heartbeat_total",
+        "DAG executor heartbeat ticks emitted, by instance",
+        labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
+    dag_executor_last_heartbeat_timestamp_seconds = Gauge(
+        "omnisight_dag_executor_last_heartbeat_timestamp_seconds",
+        "Unix timestamp of the most recent DAG executor heartbeat, by instance",
+        labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
