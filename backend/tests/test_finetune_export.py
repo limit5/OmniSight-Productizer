@@ -20,6 +20,7 @@ class _FakeStep:
     idempotency_key: str
     output: object | None = None
     error: str | None = None
+    dag_task_id: str | None = None
 
 
 @dataclass
@@ -172,7 +173,8 @@ async def _seed_run(pool, run_id: str, *, kind: str = "build/firmware",
 _step_id_seq = [0]
 
 
-async def _seed_step(pool, run_id: str, key: str, output=None, error=None):
+async def _seed_step(pool, run_id: str, key: str, output=None, error=None,
+                     dag_task_id=None):
     output_json = json.dumps(output) if output is not None else None
     import time as _t
     _step_id_seq[0] += 1
@@ -180,9 +182,10 @@ async def _seed_step(pool, run_id: str, key: str, output=None, error=None):
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO workflow_steps (id, run_id, idempotency_key, "
-            "started_at, completed_at, output_json, error) VALUES "
-            "($1, $2, $3, $4, $5, $6, $7)",
+            "started_at, completed_at, output_json, error, dag_task_id) VALUES "
+            "($1, $2, $3, $4, $5, $6, $7, $8)",
             sid, run_id, key, _t.time(), _t.time(), output_json, error,
+            dag_task_id,
         )
 
 
@@ -274,3 +277,85 @@ async def test_export_jsonl_no_eligible_runs_writes_empty_file(
     assert stats.written == 0
     assert out.exists()
     assert out.read_text() == ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-1661 — exclude DAG-executor runs from the fine-tune corpus
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_executor_marker_constant_matches_dag_executor():
+    """The literal the exporter filters on MUST equal the one the executor
+    stamps — they live as separate literals (no heavy import) but must not
+    drift."""
+    from backend import dag_executor as dx
+    assert fx._EXECUTOR_RUN_MARKER == dx.EXECUTOR_RUN_METADATA_MARKER
+
+
+def test_is_executor_run_detects_metadata_marker():
+    run = _FakeRun(id="r", metadata={fx._EXECUTOR_RUN_MARKER: True})
+    assert fx._is_executor_run(run, [])
+
+
+def test_is_executor_run_detects_dag_task_id_backstop():
+    """Even with no metadata marker, a step carrying dag_task_id flags the
+    run as executor-produced (the reliable backstop)."""
+    run = _FakeRun(id="r", metadata={})
+    steps = [_FakeStep(1, "dag-task:compile", output={"ok": True},
+                       dag_task_id="compile")]
+    assert fx._is_executor_run(run, steps)
+
+
+def test_is_executor_run_ignores_ordinary_run():
+    """An ordinary completed run (no marker, no dag_task_id) is NOT excluded —
+    the MUST-NOT: don't change selection for non-executor runs."""
+    run = _FakeRun(id="r", metadata={"hvt_passed": True})
+    steps = [_FakeStep(1, "compile", output={"ok": True})]
+    assert not fx._is_executor_run(run, steps)
+
+
+@pytest.mark.asyncio
+async def test_extract_skips_executor_run_by_metadata_marker(fresh_db):
+    await _seed_run(fresh_db, "r-exec",
+                    metadata={"hvt_passed": True, fx._EXECUTOR_RUN_MARKER: True})
+    await _seed_step(fresh_db, "r-exec", "dag-task:compile",
+                     output={"ok": True}, dag_task_id="compile")
+    reason, ex = await fx.extract_for_run("r-exec")
+    assert not reason.kept
+    assert reason.reason == "executor_run"
+    assert ex is None
+
+
+@pytest.mark.asyncio
+async def test_extract_skips_executor_run_by_dag_task_id_backstop(fresh_db):
+    """Marker stamp missed, but the step's dag_task_id still keeps the run
+    out of the corpus."""
+    await _seed_run(fresh_db, "r-exec2", metadata={"hvt_passed": True})
+    await _seed_step(fresh_db, "r-exec2", "dag-task:compile",
+                     output={"ok": True}, dag_task_id="compile")
+    reason, ex = await fx.extract_for_run("r-exec2")
+    assert not reason.kept
+    assert reason.reason == "executor_run"
+    assert ex is None
+
+
+@pytest.mark.asyncio
+async def test_export_jsonl_excludes_executor_run(fresh_db, tmp_path):
+    """Integration (local): an otherwise-eligible completed executor run is
+    excluded from the export, while a sibling ordinary run is kept."""
+    # ordinary, eligible run → kept
+    await _seed_run(fresh_db, "r-human", metadata={"hvt_passed": True})
+    await _seed_step(fresh_db, "r-human", "compile", output={"ok": True})
+    # executor run (marker + dag_task_id), otherwise eligible → excluded
+    await _seed_run(fresh_db, "r-exec",
+                    metadata={"hvt_passed": True, fx._EXECUTOR_RUN_MARKER: True})
+    await _seed_step(fresh_db, "r-exec", "dag-task:compile",
+                     output={"ok": True}, dag_task_id="compile")
+
+    out = tmp_path / "train.jsonl"
+    stats = await fx.export_jsonl(out, limit=10)
+
+    assert stats.written == 1
+    assert stats.skip_reasons.get("executor_run") == 1
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert json.loads(lines[0])["metadata"]["workflow_run_id"] == "r-human"

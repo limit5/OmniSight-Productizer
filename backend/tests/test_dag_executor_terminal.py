@@ -56,6 +56,36 @@ class FakeWorkflow:
         self.finishes: list[tuple[str, str]] = []
         self._n = 0
 
+    def seed_run(self, run_id, *, metadata=None, version=0):
+        """Pre-create a run row (as workflow.start would) so the executor's
+        marker write (OP-1661) has something to read + update."""
+        self.runs[run_id] = {
+            "status": "running", "completed_at": None,
+            "metadata": dict(metadata or {}), "version": version,
+        }
+
+    async def get_run(self, run_id):
+        r = self.runs.get(run_id)
+        if r is None:
+            return None
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            id=run_id, status=r.get("status", "running"),
+            metadata=dict(r.get("metadata", {})), version=r.get("version", 0),
+        )
+
+    async def update_run_metadata(self, run_id, expected_version, metadata):
+        r = self.runs.setdefault(
+            run_id,
+            {"status": "running", "completed_at": None,
+             "metadata": {}, "version": 0},
+        )
+        if r.get("version", 0) != expected_version:
+            raise RuntimeError("version conflict")  # mirrors VersionConflict
+        r["metadata"] = {**r.get("metadata", {}), **metadata}
+        r["version"] = r.get("version", 0) + 1
+        return r["version"]
+
     async def get_step(self, run_id, key):
         return self.steps.get((run_id, key))
 
@@ -442,6 +472,77 @@ async def test_prod_smoke_style_poll_sees_completed_and_steps(tmp_path):
     polled = await wf.list_steps("wf-poll")
     assert sorted(s.dag_task_id for s in polled) == ["compile", "test"]
     assert all(s.is_done for s in polled)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-1661 — executor runs are tagged so finetune_export excludes them
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_finalize_stamps_executor_run_marker(tmp_path):
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    wf.seed_run("wf-smoke")  # run exists, as workflow.start would have created it
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile", "out/test"))
+
+    res = await dx.record_and_finalize_plan(
+        plan, handler=handler, workflow=wf, storage=storage,
+    )
+
+    assert res.status == "completed"
+    assert wf.runs["wf-smoke"]["metadata"][dx.EXECUTOR_RUN_METADATA_MARKER] is True
+
+
+async def test_finalize_marks_failed_run_too(tmp_path):
+    """A failed executor run is tagged as well — it surfaces in workflow_runs
+    and the marker is the durable 'executor-produced' signal regardless of
+    terminal status."""
+    dag = _smoke_dag()
+    plan = _stored_plan(dag, run_id="wf-fail")
+    wf = FakeWorkflow()
+    wf.seed_run("wf-fail")
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=lambda *a: (2, "", "boom\n"))
+
+    res = await dx.record_and_finalize_plan(
+        plan, handler=handler, workflow=wf, storage=storage,
+    )
+    assert res.status == "failed"
+    assert wf.runs["wf-fail"]["metadata"][dx.EXECUTOR_RUN_METADATA_MARKER] is True
+
+
+async def test_marker_write_is_idempotent(tmp_path):
+    """A run already carrying the marker is left untouched (no version bump /
+    no duplicate write) — covers the re-claim / retry path."""
+    dag = DAG(dag_id="one", tasks=[_task("compile", output="out/compile")])
+    plan = _stored_plan(dag, run_id="wf-pre")
+    wf = FakeWorkflow()
+    wf.seed_run("wf-pre", metadata={dx.EXECUTOR_RUN_METADATA_MARKER: True},
+                version=7)
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile"))
+
+    await dx.record_and_finalize_plan(plan, handler=handler,
+                                      workflow=wf, storage=storage)
+    # marker still set, and version untouched (no needless update)
+    assert wf.runs["wf-pre"]["metadata"][dx.EXECUTOR_RUN_METADATA_MARKER] is True
+    assert wf.runs["wf-pre"]["version"] == 7
+
+
+async def test_finalize_survives_missing_run_for_marker(tmp_path):
+    """If get_run returns None (run row absent), marker stamping is a no-op and
+    finalize still completes — the exporter's dag_task_id backstop covers it."""
+    dag = DAG(dag_id="one", tasks=[_task("compile", output="out/compile")])
+    plan = _stored_plan(dag, run_id="wf-norun")
+    wf = FakeWorkflow()  # NOT seeded → get_run("wf-norun") is None
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile"))
+
+    res = await dx.record_and_finalize_plan(plan, handler=handler,
+                                            workflow=wf, storage=storage)
+    assert res.status == "completed"  # finalize unaffected by the missing run
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
