@@ -6,7 +6,7 @@
  * while callers keep their existing inner layout and test ids.
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 import type { ReactNode } from "react"
 import { Activity } from "lucide-react"
@@ -169,7 +169,58 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
+describe("isBlockModelEnabled() default", () => {
+  // WP.1 default-OFF: opt-in, not default-ON. This block intentionally
+  // installs no enable-stub so the unset env exercises the real default.
+  it("is disabled when OMNISIGHT_WP_BLOCK_MODEL_ENABLED is unset", () => {
+    expect(process.env.OMNISIGHT_WP_BLOCK_MODEL_ENABLED).toBeUndefined()
+    expect(isBlockModelEnabled()).toBe(false)
+  })
+
+  it("is enabled when OMNISIGHT_WP_BLOCK_MODEL_ENABLED=true (opt-in)", () => {
+    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "true")
+    expect(isBlockModelEnabled()).toBe(true)
+  })
+
+  it("is disabled when OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false", () => {
+    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
+    expect(isBlockModelEnabled()).toBe(false)
+  })
+
+  it("renders <Block/> without data-block-* attrs or Share menu by default", () => {
+    expect(process.env.OMNISIGHT_WP_BLOCK_MODEL_ENABLED).toBeUndefined()
+    render(
+      <Block
+        blockId="block-default-off"
+        kind="turn.message"
+        status="completed"
+        data-testid="default-off-block"
+      >
+        default-off body
+      </Block>,
+    )
+
+    const card = screen.getByTestId("default-off-block")
+    // The shell still renders identically -- only addressability is suppressed.
+    expect(card).toHaveTextContent("default-off body")
+    expect(card).not.toHaveAttribute("data-block-id")
+    expect(card).not.toHaveAttribute("data-block-kind")
+    expect(card).not.toHaveAttribute("data-block-status")
+    fireEvent.contextMenu(card)
+    expect(screen.queryByText("Share")).not.toBeInTheDocument()
+  })
+})
+
 describe("<Block />", () => {
+  // WP.1 flipped the block model to default-OFF (opt-in). These tests
+  // assert the enabled-path behaviour (addressability + Share/runbook
+  // affordances), so they opt in explicitly here rather than relying on
+  // the old default-ON. Tests that exercise the rollback override this
+  // stub with "false" in their own body.
+  beforeEach(() => {
+    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "true")
+  })
+
   it("renders the addressable block attributes and header", () => {
     render(
       <Block

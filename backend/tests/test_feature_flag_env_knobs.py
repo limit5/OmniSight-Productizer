@@ -44,6 +44,26 @@ def test_env_knob_manifest_covers_existing_ks_and_wp_knobs() -> None:
     assert ff.FEATURE_FLAG_ENV_KNOBS[BLOCK_MODEL_ENABLED_ENV].flag_name == (
         "wp.block_model.enabled"
     )
+    # WP.1 default-OFF: the advertised manifest default is opt-in so it
+    # matches the frontend knob (block.tsx isBlockModelEnabled()).
+    assert ff.FEATURE_FLAG_ENV_KNOBS[BLOCK_MODEL_ENABLED_ENV].default_state == (
+        FeatureFlagState.DISABLED
+    )
+
+
+def test_block_model_knob_defaults_disabled_opt_in() -> None:
+    """WP.1: the block model env knob is advertised default-OFF (opt-in).
+
+    The companion KS/WP GA knobs stay ENABLED; only the block model flips
+    so staging-first gradual rollout is not defeated on first prod deploy.
+    """
+    knobs = ff.FEATURE_FLAG_ENV_KNOBS
+    assert knobs[BLOCK_MODEL_ENABLED_ENV].default_state is (
+        FeatureFlagState.DISABLED
+    )
+    assert knobs[SKILLS_LOADER_ENABLED_ENV].default_state is (
+        FeatureFlagState.ENABLED
+    )
 
 
 @pytest.mark.parametrize(
