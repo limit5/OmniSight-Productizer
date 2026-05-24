@@ -183,9 +183,25 @@ def enforce_env_db_contract(
     # Test/CI carveout: tests call init_pool/connect directly with assorted
     # DSNs. Bypass ONLY when not pointed at prod — a prod DSN inside a test is
     # still a real violation worth surfacing.
+    #
+    # Tightened (OP-1698, finding #17): the in-test carveout must NOT silently
+    # un-enforce the dev<->staging contract. A 'dev' process resolving a staging
+    # DSN (or a 'staging' process resolving a dev DSN) is genuine cross-
+    # contamination, not a test artifact, so it stays enforced even under
+    # PYTEST_CURRENT_TEST/OMNISIGHT_CI_MODE. Every other non-prod case — notably
+    # env-unset test-DB setup that connects to a dev/staging DB, or env==DSN —
+    # remains exempt so the suite's own fixtures and direct init_pool/connect
+    # calls aren't poisoned.
     in_test = bool(os.environ.get("PYTEST_CURRENT_TEST")) or _truthy(os.environ.get("OMNISIGHT_CI_MODE"))
     if in_test and cls != "prod":
-        return
+        _dev_staging = {"dev", "staging"}
+        dev_staging_mismatch = (
+            canon_env in _dev_staging and cls in _dev_staging and cls != canon_env
+        )
+        if not dev_staging_mismatch:
+            return
+        # else: fall through to the real enforcement below, which raises the
+        # env-contract violation with the canonical message.
 
     # Unrecognised Postgres → hard fail (never fail-open).
     if cls == "unknown":

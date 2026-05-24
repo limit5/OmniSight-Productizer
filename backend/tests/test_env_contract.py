@@ -1,8 +1,9 @@
 """[OP-1643] Boreas-B A2 — env-contract guard truth-table + exemption tests.
 
 The guard ships a test/CI carveout (bypass when PYTEST_CURRENT_TEST/CI_MODE set
-AND the DSN is not prod). To exercise the real-process truth table we clear
-those markers per-test via ``_as_runtime``.
+AND the DSN is not prod AND it is not a dev<->staging mismatch — see OP-1698).
+To exercise the real-process truth table we clear those markers per-test via
+``_as_runtime``.
 """
 
 import pytest
@@ -107,11 +108,14 @@ def test_fail_rows(monkeypatch, env, dsn):
 
 
 # ── exemptions ────────────────────────────────────────────────────────
-def test_pytest_carveout_bypasses_nonprod(monkeypatch):
-    # PYTEST_CURRENT_TEST is set by pytest while this runs; a non-prod mismatch
-    # is bypassed so the suite isn't poisoned.
+def test_pytest_carveout_bypasses_genuine_test_setup(monkeypatch):
+    # PYTEST_CURRENT_TEST is set by pytest while this runs; the genuinely-needed
+    # test exemptions are still bypassed so the suite's own DB setup isn't
+    # poisoned: env-unset connecting to a dev/staging DB, and env==DSN.
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
-    enforce_env_db_contract(STAGING, source="test", env="dev")  # no raise
+    enforce_env_db_contract(DEV, source="test", env=None)      # unset+dev test DB
+    enforce_env_db_contract(STAGING, source="test", env=None)  # unset+staging test DB
+    enforce_env_db_contract(DEV, source="test", env="dev")     # matching, no raise
 
 
 def test_pytest_carveout_does_not_bypass_prod(monkeypatch):
@@ -121,12 +125,35 @@ def test_pytest_carveout_does_not_bypass_prod(monkeypatch):
         enforce_env_db_contract(PROD, source="test", env="dev")
 
 
+def test_pytest_carveout_does_not_bypass_dev_staging(monkeypatch):
+    # OP-1698 finding #17: a dev<->staging mismatch is real cross-contamination,
+    # NOT a test artifact, so it must fail even with PYTEST_CURRENT_TEST set.
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "x")
+    with pytest.raises(EnvContractViolation):
+        enforce_env_db_contract(STAGING, source="test", env="dev")  # dev proc, staging DSN
+    with pytest.raises(EnvContractViolation):
+        enforce_env_db_contract(DEV, source="test", env="staging")  # staging proc, dev DSN
+    # also via the port-based staging classifier, not just the db-name suffix
+    with pytest.raises(EnvContractViolation):
+        enforce_env_db_contract(DEV_PORT, source="test", env="staging")
+
+
 def test_ci_mode_carveout(monkeypatch):
     monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setenv("OMNISIGHT_CI_MODE", "1")
-    enforce_env_db_contract(DEV, source="test", env="prod")  # non-prod → bypass
+    enforce_env_db_contract(DEV, source="test", env="prod")  # non dev<->staging → bypass
     with pytest.raises(EnvContractViolation):
         enforce_env_db_contract(PROD, source="test", env="dev")  # prod → enforced
+
+
+def test_ci_mode_does_not_bypass_dev_staging(monkeypatch):
+    # OP-1698 finding #17: dev<->staging contract enforced under CI_MODE too.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("OMNISIGHT_CI_MODE", "1")
+    with pytest.raises(EnvContractViolation):
+        enforce_env_db_contract(STAGING, source="test", env="dev")
+    with pytest.raises(EnvContractViolation):
+        enforce_env_db_contract(DEV, source="test", env="staging")
 
 
 def test_disable_hatch_refused_in_prod(monkeypatch):
