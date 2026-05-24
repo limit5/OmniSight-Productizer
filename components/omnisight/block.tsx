@@ -95,7 +95,11 @@ export interface BlockProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
 
 export function isBlockModelEnabled(): boolean {
   const raw = process.env[BLOCK_MODEL_ENABLED_ENV]
-  if (raw === undefined) return true
+  // WP.1 default-OFF: the block model is opt-in. With the env unset the
+  // first prod deploy must NOT light up block addressability + Share for
+  // every <Block/> consumer, so the undefined default is disabled and the
+  // feature is enabled explicitly via OMNISIGHT_WP_BLOCK_MODEL_ENABLED=true.
+  if (raw === undefined) return false
   return !BLOCK_MODEL_ENV_FALSE_VALUES.has(raw.trim().toLowerCase())
 }
 

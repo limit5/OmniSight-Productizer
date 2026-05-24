@@ -260,7 +260,12 @@ FEATURE_FLAG_ENV_KNOBS: Mapping[str, FeatureFlagEnvKnob] = MappingProxyType({
         env_name="OMNISIGHT_WP_BLOCK_MODEL_ENABLED",
         flag_name="wp.block_model.enabled",
         tier=FeatureFlagTier.GA,
-        default_state=FeatureFlagState.ENABLED,
+        # WP.1 default-OFF: the block model ships opt-in so the advertised
+        # manifest default matches the frontend knob (block.tsx
+        # isBlockModelEnabled() returns false when the env is unset). Enable
+        # explicitly via OMNISIGHT_WP_BLOCK_MODEL_ENABLED=true for staging-first
+        # gradual rollout.
+        default_state=FeatureFlagState.DISABLED,
         owner="wp",
     ),
 })
