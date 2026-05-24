@@ -53,6 +53,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -62,8 +63,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-from backend.agents import jira_dispatch
-from backend.release_cut_metadata import RELEASE_CUT_HASHTAGS
+# OP-1702 (finding #26) — opt this tooling process into Settings'
+# ``extra='ignore'`` BEFORE the imports below pull in ``backend.config``
+# (``jira_dispatch`` does ``from backend.config import settings`` at module
+# load). The promote tooling runs from operator shells polluted with
+# unrelated env (neo4j_*, grafana_*, omnisight_project_state_inject, …);
+# without this the polluted keys trip pydantic-settings' ``extra_forbidden``
+# and the audit-DB write silently fail-opens. The literal mirrors
+# ``backend.config.TOOLING_EXTRA_ENV_FLAG`` — it cannot be imported from
+# there without first importing the very module we are gating. Scoped to
+# tooling only; the prod runtime never sets it (see backend/config.py).
+os.environ.setdefault("OMNISIGHT_TOOLING_TOLERATE_EXTRA_ENV", "1")
+
+from backend.agents import jira_dispatch  # noqa: E402 — must follow the OP-1702 env flag
+from backend.release_cut_metadata import RELEASE_CUT_HASHTAGS  # noqa: E402
 
 log = logging.getLogger(__name__)
 

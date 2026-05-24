@@ -68,6 +68,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
+# OP-1702 (finding #26) — opt this tooling process into Settings'
+# ``extra='ignore'`` BEFORE anything imports ``backend.config`` (the §6
+# audit write below imports it lazily). The gate runs from operator shells
+# polluted with unrelated env (neo4j_*, grafana_*, omnisight_project_state_inject,
+# …); without this the polluted keys trip pydantic-settings'
+# ``extra_forbidden`` and the audit-DB write silently fail-opens. The literal
+# mirrors ``backend.config.TOOLING_EXTRA_ENV_FLAG`` — it cannot be imported
+# from there without first importing the very module we are gating. Scoped to
+# tooling only; the prod runtime never sets it (see backend/config.py).
+os.environ.setdefault("OMNISIGHT_TOOLING_TOLERATE_EXTRA_ENV", "1")
+
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
