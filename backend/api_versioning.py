@@ -294,13 +294,23 @@ def _bundle_image_digest(bundle: dict, image_name: str) -> str | None:
 # The deploy/promote step writes a lock file (env-file format) carrying the
 # running deployment's identity: the build git sha/ref, the promoted image
 # tag, the backend+frontend digest PAIR (RT-21), and the promotion audit id.
-# Per ADR-0040 RT-08-pre the container reads this lock ONCE AT STARTUP; the
-# cached snapshot is served on ``/api/version`` and gates ``/readyz``. Read-
-# before-start is deliberate: deploys always rolling-restart, so "needs a
-# restart to update" is not a limitation, and it avoids per-request disk I/O
-# and cache-invalidation failure modes. Fail-closed — a deployed runtime that
-# starts without (or with an incomplete) lock must not advertise readiness, so
-# the deploy gate catches it (see ``backend.routers.health._check_deploy_overlay``).
+# Per ADR-0040 RT-08-pre the container reads this lock at startup and caches
+# the snapshot served on ``/api/version`` and gating ``/readyz``.
+#
+# OP-1708 (finding #33) — the cache now re-reads on change. The original
+# read-ONCE design meant a lock rewrite (e.g. an in-place promote that does not
+# roll the container) was only picked up after a manual ``--force-recreate``,
+# so ``/api/version`` / ``/readyz`` could advertise a stale identity. The read
+# is still cheap: :func:`get_deploy_overlay` does a single ``stat()`` per access
+# and only re-reads the file when its mtime/size signature changes, preserving
+# the OP-1491 "no heavy per-request disk I/O" intent.
+#
+# Fail-closed is unchanged: a runtime that STARTS without (or with an
+# incomplete) lock resolves the overlay to ``None`` so the deploy gate catches
+# it (see ``backend.routers.health._check_deploy_overlay``). A lock that
+# DISAPPEARS after a good read is treated as a transient (e.g. the gap in a
+# non-atomic rewrite): the last-known snapshot is retained rather than flapping
+# readiness to closed, and the next present-and-changed signature re-reads.
 DEPLOY_OVERLAY_LOCK_PATH = Path(
     os.environ.get("OMNISIGHT_DEPLOY_OVERLAY_LOCK", "/etc/omnisight/deploy-overlay.lock")
 )
@@ -328,6 +338,26 @@ OVERLAY_FIELDS: tuple[str, ...] = tuple(_OVERLAY_LOCK_FIELDS.values())
 # "loaded, but no valid lock present" (``None``).
 _OVERLAY_UNSET = object()
 _deploy_overlay_cache: object = _OVERLAY_UNSET
+# The path the cache was loaded from, and that path's change-detection
+# signature at load time, so :func:`get_deploy_overlay` can re-read on change
+# (OP-1708). ``None`` signature means "absent at last read".
+_deploy_overlay_path: Path | None = None
+_deploy_overlay_sig: tuple[int, int] | None = None
+
+
+def _lock_stat_signature(path: Path) -> tuple[int, int] | None:
+    """Return a cheap change-detection signature for the lock, or ``None``.
+
+    ``(st_mtime_ns, st_size)`` — enough to notice a rewrite without reading the
+    file. ``None`` when the lock is absent or its metadata is unreadable, which
+    the caller treats as "no change to react to" (the fail-closed read path
+    already handles a genuinely absent lock).
+    """
+    try:
+        st = path.stat()
+    except (FileNotFoundError, OSError):
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def _parse_env_lock(text: str) -> dict[str, str]:
@@ -394,33 +424,52 @@ def load_deploy_overlay(path: Path | None = None) -> dict | None:
 
 
 def init_deploy_overlay(path: Path | None = None) -> dict | None:
-    """Read the env lock ONCE and cache the snapshot (called at startup).
+    """Read the env lock and (re)cache the snapshot + its change signature.
 
-    Subsequent reads go through :func:`get_deploy_overlay`, which returns the
-    cached snapshot rather than re-reading the file. Calling this again
-    refreshes the cache (used by tests via :func:`reset_deploy_overlay_cache`
-    + this function with an injected ``path``).
+    Called at startup and again by :func:`get_deploy_overlay` whenever the
+    lock's mtime/size signature shows it changed. The signature is captured
+    BEFORE the read so a rewrite racing the read isn't masked — at worst the
+    next access re-reads once more and converges.
     """
-    global _deploy_overlay_cache
+    global _deploy_overlay_cache, _deploy_overlay_path, _deploy_overlay_sig
+    if path is None:
+        path = DEPLOY_OVERLAY_LOCK_PATH
+    _deploy_overlay_path = path
+    _deploy_overlay_sig = _lock_stat_signature(path)
     _deploy_overlay_cache = load_deploy_overlay(path)
     return _deploy_overlay_cache  # type: ignore[return-value]
 
 
 def get_deploy_overlay() -> dict | None:
-    """Return the cached deploy overlay, loading it on first access.
+    """Return the deploy overlay, re-reading the lock on change (OP-1708).
 
-    ``None`` means no valid lock was found at startup — the fail-closed
-    marker the ``/readyz`` overlay gate keys on.
+    Loads on first access. On every later access does a single ``stat()`` and
+    re-reads only when the lock is present AND its mtime/size signature differs
+    from the cached one — so a rewrite (including a lock that first APPEARS
+    after startup) is picked up without a container recreate, while an
+    unchanged lock costs just the ``stat()``.
+
+    A lock that has DISAPPEARED since the last good read is intentionally NOT
+    re-read to ``None``: the last-known snapshot is retained (transient gap in a
+    non-atomic rewrite). ``None`` still means no valid lock was present at the
+    initial read — the fail-closed marker the ``/readyz`` overlay gate keys on.
     """
+    global _deploy_overlay_cache, _deploy_overlay_sig
     if _deploy_overlay_cache is _OVERLAY_UNSET:
         return init_deploy_overlay()
+    path = _deploy_overlay_path or DEPLOY_OVERLAY_LOCK_PATH
+    current_sig = _lock_stat_signature(path)
+    if current_sig is not None and current_sig != _deploy_overlay_sig:
+        return init_deploy_overlay(path)
     return _deploy_overlay_cache  # type: ignore[return-value]
 
 
 def reset_deploy_overlay_cache() -> None:
     """Test helper — drop the cached overlay so the next access re-reads."""
-    global _deploy_overlay_cache
+    global _deploy_overlay_cache, _deploy_overlay_path, _deploy_overlay_sig
     _deploy_overlay_cache = _OVERLAY_UNSET
+    _deploy_overlay_path = None
+    _deploy_overlay_sig = None
 
 
 # Env var carrying the digest of the image the container is ACTUALLY running,
@@ -445,6 +494,22 @@ def get_running_image_digest_backend() -> str | None:
     """
     value = os.environ.get(RUNNING_IMAGE_DIGEST_BACKEND_ENV, "").strip()
     return value or None
+
+
+def _apply_overlay_fields(payload: dict, overlay: dict | None | object) -> dict:
+    """Write the RT-08 overlay identity fields onto ``payload`` in place.
+
+    Always sets every :data:`OVERLAY_FIELDS` key (``None`` when ``overlay`` is
+    not a dict) plus ``deploy_overlay_present`` so the ``/api/version`` contract
+    shape is stable. Shared by :func:`build_version_payload` (startup snapshot)
+    and the ``/api/version`` handler (per-request overlay refresh) so both
+    serialise the overlay identically.
+    """
+    overlay_fields = overlay if isinstance(overlay, dict) else {}
+    for field in OVERLAY_FIELDS:
+        payload[field] = overlay_fields.get(field)
+    payload["deploy_overlay_present"] = isinstance(overlay, dict)
+    return payload
 
 
 def build_version_payload(
@@ -533,10 +598,7 @@ def build_version_payload(
     # contract shape is stable across dev images and promoted deployments.
     # ``deploy_overlay_present`` lets a consumer distinguish "dev image, no
     # lock" from "lock read" without inspecting every field.
-    overlay_fields = overlay if isinstance(overlay, dict) else {}
-    for field in OVERLAY_FIELDS:
-        payload[field] = overlay_fields.get(field)
-    payload["deploy_overlay_present"] = isinstance(overlay, dict)
+    _apply_overlay_fields(payload, overlay)
 
     if warning is not None:
         payload["warning"] = warning
@@ -554,14 +616,24 @@ def install_version_metadata_endpoint(app: FastAPI) -> None:
     missing/malformed bundle files and resolves to the dev fallback so
     startup never crashes on an image that wasn't built with V1c bake.
 
-    OP-1582 (RT-08) — the deploy overlay env lock is also read here, once,
-    at install/startup time (``init_deploy_overlay``). The cached snapshot
-    feeds both the ``/api/version`` payload below and the ``/readyz`` overlay
-    gate, so both surfaces serve the identical read-before-start identity.
+    OP-1582 (RT-08) — the deploy overlay env lock is also read here at
+    install/startup time (``init_deploy_overlay``), feeding both this payload
+    and the ``/readyz`` overlay gate so both surfaces serve the identical
+    identity.
+
+    OP-1708 (finding #33) — the overlay lock can be rewritten under a running
+    container, so the overlay fields are refreshed per request from
+    ``get_deploy_overlay`` (which re-reads only on an mtime/size change). The
+    bundle-derived fields stay cached from install: the bundle manifest is
+    baked into the image and never changes for the container's life, so a lock
+    rewrite is now reflected on ``/api/version`` without a ``--force-recreate``
+    while bundle reads remain once-at-startup.
     """
     init_deploy_overlay()
-    cached_payload = build_version_payload()
+    base_payload = build_version_payload()
 
     @app.get("/api/version", tags=["api-version"], include_in_schema=False)
     async def _api_version() -> dict:
-        return cached_payload
+        payload = dict(base_payload)
+        _apply_overlay_fields(payload, get_deploy_overlay())
+        return payload
