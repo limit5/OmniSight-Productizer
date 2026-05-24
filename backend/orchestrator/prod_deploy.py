@@ -232,6 +232,12 @@ def _engine() -> sa.Engine:
     global _prod_engine
     if _prod_engine is None:
         url = os.environ.get("OMNISIGHT_DATABASE_URL", "sqlite:///prod_deploy_audit.db")
+        # [OP-1697] A2: env↔DB contract — fail closed before opening the engine
+        # if this process resolved a prod-looking DSN that disagrees with
+        # OMNISIGHT_ENV (or vice-versa). This create_engine path was missing
+        # from the A2 guard's "every DB entry point" coverage (finding #16).
+        from backend.env_contract import enforce_env_db_contract
+        enforce_env_db_contract(url, source="orchestrator.prod_deploy._engine")
         _prod_engine = sa.create_engine(url, future=True)
     return _prod_engine
 
