@@ -74,3 +74,63 @@ def test_select_dags_helper_accepts_both():
     assert [lbl for lbl, _ in m._select_dags("dag1")] == [
         "DAG #1: compile-flash (host_native)",
     ]
+
+
+# ── OP-1662: DAG #1 redefined compile -> run-test (was compile -> flash) ──
+#
+# The dag_id / subset label keep the historical "compile-flash" name so
+# the cross-surface contract (bootstrap _SMOKE_DAG_ID, openapi, the wizard
+# UI, e2e) does not drift — a rename is a separate cross-area ticket. What
+# changed is the *body* of step 2: a hollow t3 "flash" (you can't flash a
+# board over localhost — docs/operations/sandbox.md:320) became a genuine
+# t1 on-host self-test that consumes build/firmware.bin and writes
+# logs/test.log.
+
+
+def _dag1_tasks(m) -> list[dict]:
+    return m.DAG_1_COMPILE_FLASH_HOST_NATIVE["dag"]["tasks"]
+
+
+def test_dag1_is_compile_then_run_test():
+    m = _load(["--subset", "dag1"])
+    tasks = _dag1_tasks(m)
+    assert [t["task_id"] for t in tasks] == ["compile", "run-test"]
+    # The hollow symbolic flash step is gone for good.
+    assert all(t["task_id"] != "flash" for t in tasks)
+    assert all(t["expected_output"] != "logs/flash.log" for t in tasks)
+
+
+def test_dag1_run_test_consumes_firmware_and_writes_test_log():
+    m = _load(["--subset", "dag1"])
+    compile_t, run_test = _dag1_tasks(m)
+
+    # Step 1 (compile) is unchanged: builds the firmware image.
+    assert compile_t["task_id"] == "compile"
+    assert compile_t["expected_output"] == "build/firmware.bin"
+
+    # Step 2 (run-test) is an honest LOCAL self-test: t1 tier (not the old
+    # t3-that-swapped-to-t1), runs python3, consumes the compiled image,
+    # writes the test log, and depends on compile.
+    assert run_test["task_id"] == "run-test"
+    assert run_test["required_tier"] == "t1"
+    assert run_test["toolchain"] == "python3"
+    assert run_test["inputs"] == ["build/firmware.bin"]
+    assert run_test["expected_output"] == "logs/test.log"
+    assert run_test["depends_on"] == ["compile"]
+
+
+def test_dag1_validates_clean():
+    """The redefined DAG must pass the semantic validator (AC: validates).
+
+    No target_profile is needed: run-test is a real t1 task, so it does not
+    rely on the t3 -> LOCAL tier swap the old flash step leaned on.
+    """
+    from backend.dag_schema import DAG
+    from backend.dag_validator import validate
+
+    m = _load(["--subset", "dag1"])
+    dag = DAG.model_validate(m.DAG_1_COMPILE_FLASH_HOST_NATIVE["dag"])
+    result = validate(dag)
+    assert result.ok, result.summary() + " :: " + repr(
+        [e.to_dict() for e in result.errors]
+    )

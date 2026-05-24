@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A2 L1-05 — Production smoke test: 2 real DAGs end-to-end.
 
-DAG #1: compile-flash against host_native (Phase 64-C-LOCAL fast path)
+DAG #1: compile -> run-test against host_native (Phase 64-C-LOCAL fast path)
 DAG #2: cross-compile against aarch64 (full cross-compile path)
 
 Usage:
@@ -49,7 +49,7 @@ def _parse_cli(argv: list[str]) -> tuple[str, str]:
         choices=("dag1", "dag2", "both"),
         default="both",
         help=(
-            "dag1 = compile-flash host_native only (fast ~60s, used by the "
+            "dag1 = compile -> run-test host_native only (fast ~60s, used by the "
             "bootstrap wizard's L6 Step 5); dag2 = cross-compile aarch64 only; "
             "both (default) = run the full pair."
         ),
@@ -81,17 +81,20 @@ DAG_1_COMPILE_FLASH_HOST_NATIVE = {
                 "depends_on": [],
             },
             {
-                "task_id": "flash",
-                # On host_native the T3 resolver picks LOCAL and the
-                # validator swaps the effective tier to t1. Use python3
-                # (a t1-legal toolchain) so the symbolic "flash" step
-                # validates — there's no physical board to flash when
-                # target arch == host arch.
-                "description": "Flash built image (T3 resolves to LOCAL on host_native)",
-                "required_tier": "t3",
+                "task_id": "run-test",
+                # Honest on-host self-test, NOT a symbolic flash: this step
+                # actually consumes the compiled image (build/firmware.bin)
+                # and writes logs/test.log. It runs as a genuine t1 LOCAL
+                # task — python3 is a t1-legal toolchain — so there is no
+                # make-believe "flash over localhost", which is impossible
+                # anyway (docs/operations/sandbox.md:320). Replaces the old
+                # t3 "flash" step that only validated via the T3->LOCAL tier
+                # swap yet flashed nothing.
+                "description": "Run on-host self-test against the built firmware image",
+                "required_tier": "t1",
                 "toolchain": "python3",
                 "inputs": ["build/firmware.bin"],
-                "expected_output": "logs/flash.log",
+                "expected_output": "logs/test.log",
                 "depends_on": ["compile"],
             },
         ],
