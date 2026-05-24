@@ -1,0 +1,4399 @@
+Reading prompt from stdin...
+OpenAI Codex v0.128.0 (research preview)
+--------
+workdir: /home/user/work/sora/OmniSight-Productizer
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, /home/user/.codex/memories]
+reasoning effort: none
+reasoning summaries: none
+session id: 019e5880-cea3-7320-b046-cad659a4fab4
+--------
+user
+Pressure-test the design for OP-1676 (F4): add INTER-TASK ARTIFACT PASSING to the OmniSight DAG
+executor. Repo: /home/user/work/sora/OmniSight-Productizer. This gap was found when a runner §11-
+reverted F1: the smoke DAG's run-test task declares inputs:["build/firmware.bin"] but that artifact
+is produced by the upstream compile task in ITS OWN per-task scratch, while PlanWorkspaceBuilder.prepare
+copies a task's inputs ONLY from project_root -> downstream tasks never see upstream outputs, so no
+multi-task artifact-passing DAG can complete.
+
+READ (develop tip):
+- git show gerrit-sora/develop:backend/dag_executor.py  (PlanWorkspaceBuilder.prepare ~line 573,
+  record_and_finalize_plan ~1136, LocalTaskHandler ~860, topological_order, TaskWorkspace, LocalTaskResult)
+- git show gerrit-sora/develop:backend/dag_validator.py  (the I/O / dep-closure / MECE contract — does
+  it ALREADY require a task's inputs to be an upstream task's expected_output? quote the rule)
+- git show gerrit-sora/develop:backend/dag_schema.py  (Task.inputs / expected_output / depends_on)
+- backend/tests/test_dag_executor_terminal.py + test_dag_executor.py  (the doubles + fixture patterns)
+- docs/architecture/2026-05-24-dag-executor-followups-draft.md (F1/F2 context; F4 = new gap D)
+
+PROPOSED design (critique + correct it): in record_and_finalize_plan's topo walk, after each task
+completes, stage its expected_output artifact into a per-plan outputs area; PlanWorkspaceBuilder.prepare
+then materialises a downstream task's inputs from (project_root UNION the plan's staged upstream
+outputs). Answer:
+1. Does dag_validator ALREADY define the inputs<-upstream-expected_output contract (so F4 only makes
+   the executor HONOUR an existing contract), or would F4 also need validator changes? Quote it.
+2. Staging mechanism: per-plan temp dir keyed by output path? How does prepare know which inputs come
+   from project_root vs upstream staging (precedence if both have the same path)? Is the artifact a
+   single file (expected_output) or could it be a dir/glob?
+3. Where exactly does the staging hook go — record_and_finalize_plan (orchestrator) vs PlanWorkspaceBuilder
+   vs LocalTaskHandler — to keep per-task workspace isolation intact + not break the existing tests?
+4. Is F4 runner-safe with a tight MUST-NOT, or operator/Claude-owned? Give the exact MUST-NOT.
+5. Any OTHER multi-task gap this surfaces (e.g. does topological_order + the serial walk already pass
+   task results forward; does record_and_finalize_plan have access to prior task outputs)? Flag latent
+   gaps so the re-verify isn't surprised again.
+
+VERDICT: SOUND / SOUND-WITH-CHANGES (list) / RETHINK + the concrete staging design + F4 MUST-NOT. Tight + actionable.
+
+warning: Codex could not find bubblewrap on PATH. Install bubblewrap with your OS package manager. See the sandbox prerequisites: https://developers.openai.com/codex/concepts/sandboxing#prerequisites. Codex will use the vendored bubblewrap in the meantime.
+codex
+I’ll inspect the develop versions and local tests/docs first, then I’ll answer as a design review rather than editing code. I’ll stick to the repo’s current contracts and quote the validator rule directly.
+exec
+/bin/bash -lc 'git show gerrit-sora/develop:backend/dag_validator.py' in /home/user/work/sora/OmniSight-Productizer
+exec
+/bin/bash -lc 'git show gerrit-sora/develop:backend/dag_schema.py' in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+"""Phase 56-DAG-A — DAG schema for the self-healing planner.
+
+Pydantic models that mirror the Orchestrator template's JSON contract
+(`docs/design/self-healing-scheduling-mechanism.md` §三). Schema-level
+validation runs automatically on `DAG.model_validate(payload)`. The
+**semantic** rules (cycles, tier capability, MECE, dep closure, I/O
+entity) live in `backend/dag_validator.py` so they can be invoked
+once and produce a list of all errors at once instead of failing on
+the first.
+
+`schema_version: int = 1` lets us evolve without breaking historic
+plans stored in `dag_plans` (Phase 56-DAG-B).
+"""
+
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field, field_validator
+
+
+TierId = Literal["t1", "networked", "t3"]
+SCHEMA_VERSION = 1
+
+
+class Task(BaseModel):
+    """One node in the DAG."""
+
+    task_id: str = Field(..., min_length=1, max_length=64)
+    description: str = Field(..., min_length=1, max_length=4000)
+
+    required_tier: TierId
+    toolchain: str = Field(..., min_length=1, max_length=128)
+
+    inputs: list[str] = Field(default_factory=list)
+    expected_output: str = Field(..., min_length=1, max_length=512)
+    depends_on: list[str] = Field(default_factory=list)
+
+    # Phase 56-DAG-A — explicit MECE escape hatch. Two tasks may share
+    # an `expected_output` only when BOTH set this to True (e.g. parallel
+    # benchmark runs writing the same report path that's later merged).
+    output_overlap_ack: bool = False
+
+    @field_validator("task_id")
+    @classmethod
+    def _id_is_simple(cls, v: str) -> str:
+        # Keep id printable — used as Decision Engine key + as part of
+        # workflow_steps.idempotency_key (Phase 56-DAG-B).
+        if not v.replace("-", "").replace("_", "").isalnum():
+            raise ValueError(
+                "task_id must be alphanumeric / dash / underscore only"
+            )
+        return v
+
+    @field_validator("depends_on")
+    @classmethod
+    def _no_self_dep(cls, v: list[str], info) -> list[str]:
+        tid = info.data.get("task_id")
+        if tid and tid in v:
+            raise ValueError(f"task {tid!r} cannot depend on itself")
+        if len(v) != len(set(v)):
+            raise ValueError("depends_on must not contain duplicates")
+        return v
+
+
+class DAG(BaseModel):
+    """The full planning artefact."""
+
+    schema_version: int = SCHEMA_VERSION
+    dag_id: str = Field(..., min_length=1, max_length=64)
+    total_tasks: Optional[int] = None
+    tasks: list[Task]
+
+    @field_validator("schema_version")
+    @classmethod
+    def _supported_version(cls, v: int) -> int:
+        if v != SCHEMA_VERSION:
+            # Keep simple for v1; raise instead of silent migrate.
+            raise ValueError(
+                f"unsupported schema_version {v} (expected {SCHEMA_VERSION})"
+            )
+        return v
+
+    @field_validator("tasks")
+    @classmethod
+    def _at_least_one(cls, v: list[Task]) -> list[Task]:
+        if not v:
+            raise ValueError("DAG must have at least one task")
+        return v
+
+ succeeded in 0ms:
+"""Phase 56-DAG-A — DAG semantic validator.
+
+Pure deterministic check pass — no LLM, no DB, no IO beyond the YAML
+load of `configs/tier_capabilities.yaml`. Returns ALL errors at once
+so the Orchestrator's mutation prompt has the full picture in one
+round (vs failing on the first which would force >3 mutation rounds
+for a slightly bad DAG).
+
+Validation rule families (each emits its own ``rule`` label so the
+metric `dag_validation_error_total{rule}` can break down failures):
+
+  cycle           — DAG must be acyclic (Kahn's algorithm).
+  unknown_dep     — depends_on points at non-existent task_id.
+  duplicate_id    — two tasks with the same task_id.
+  tier_violation  — toolchain not allowed (or explicitly denied) in
+                    the task's required_tier per
+                    configs/tier_capabilities.yaml.
+  io_entity       — expected_output not a recognised entity:
+                    file path | git:<sha> | issue:<id>.
+  dep_closure     — input not produced by an upstream task and not
+                    flagged as `external:<...>` / `user:<...>`.
+  mece            — two tasks declare the same expected_output and
+                    neither carries `output_overlap_ack=true`.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, Literal
+
+import yaml
+
+from backend.dag_schema import DAG, Task
+
+logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_TIER_RULES_PATH = _PROJECT_ROOT / "configs" / "tier_capabilities.yaml"
+_PLATFORMS_DIR = _PROJECT_ROOT / "configs" / "platforms"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Rule labels + ValidationError
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RuleName = Literal[
+    "cycle", "unknown_dep", "duplicate_id",
+    "tier_violation", "unknown_toolchain",
+    "io_entity", "dep_closure", "mece",
+]
+
+
+@dataclass(frozen=True)
+class ValidationError:
+    rule: RuleName
+    task_id: str | None  # None when the error is graph-level (e.g. cycle)
+    message: str
+
+    def to_dict(self) -> dict:
+        return {"rule": self.rule, "task_id": self.task_id,
+                "message": self.message}
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    ok: bool
+    errors: list[ValidationError]
+    warnings: list[ValidationError] = ()  # type: ignore[assignment]
+
+    @property
+    def by_rule(self) -> dict[RuleName, int]:
+        out: dict[RuleName, int] = {}
+        for e in self.errors:
+            out[e.rule] = out.get(e.rule, 0) + 1
+        return out
+
+    def summary(self) -> str:
+        if self.ok:
+            return "DAG validation: OK"
+        parts = [f"{r}={c}" for r, c in self.by_rule.items()]
+        return f"DAG validation FAILED ({len(self.errors)} error(s)): " + ", ".join(parts)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Tier capability rules — loaded once, cached.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_TIER_RULES_CACHE: dict | None = None
+
+
+def _load_tier_rules() -> dict:
+    global _TIER_RULES_CACHE
+    if _TIER_RULES_CACHE is None:
+        try:
+            _TIER_RULES_CACHE = yaml.safe_load(_TIER_RULES_PATH.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.warning("tier_capabilities.yaml load failed: %s — using empty rules", exc)
+            _TIER_RULES_CACHE = {"tiers": {}}
+    return _TIER_RULES_CACHE
+
+
+def reload_tier_rules_for_tests() -> None:
+    """Test hook: forget the cached rules so a monkeypatched yaml is read."""
+    global _TIER_RULES_CACHE
+    _TIER_RULES_CACHE = None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Per-rule validators
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _check_duplicates(dag: DAG, errors: list[ValidationError]) -> None:
+    seen: dict[str, int] = {}
+    for t in dag.tasks:
+        seen[t.task_id] = seen.get(t.task_id, 0) + 1
+    for tid, n in seen.items():
+        if n > 1:
+            errors.append(ValidationError(
+                rule="duplicate_id", task_id=tid,
+                message=f"task_id {tid!r} appears {n} times",
+            ))
+
+
+def _check_unknown_deps(dag: DAG, errors: list[ValidationError]) -> None:
+    ids = {t.task_id for t in dag.tasks}
+    for t in dag.tasks:
+        for d in t.depends_on:
+            if d not in ids:
+                errors.append(ValidationError(
+                    rule="unknown_dep", task_id=t.task_id,
+                    message=f"depends_on references unknown task {d!r}",
+                ))
+
+
+def _check_cycles(dag: DAG, errors: list[ValidationError]) -> None:
+    """Kahn's algorithm. Reports the count of nodes left after a full
+    pass so the caller knows the cycle's footprint without us digging
+    out the exact cycle members (good enough for a planner mutation
+    prompt)."""
+    indeg: dict[str, int] = {t.task_id: 0 for t in dag.tasks}
+    edges: dict[str, list[str]] = {t.task_id: [] for t in dag.tasks}
+    for t in dag.tasks:
+        for d in t.depends_on:
+            if d in indeg:
+                edges[d].append(t.task_id)
+                indeg[t.task_id] += 1
+    queue = [n for n, k in indeg.items() if k == 0]
+    visited = 0
+    while queue:
+        n = queue.pop()
+        visited += 1
+        for nxt in edges[n]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                queue.append(nxt)
+    if visited != len(dag.tasks):
+        unresolved = [n for n, k in indeg.items() if k > 0]
+        errors.append(ValidationError(
+            rule="cycle", task_id=None,
+            message=(f"cyclic dependency detected; "
+                     f"{len(unresolved)} task(s) unresolved: {unresolved[:10]}"),
+        ))
+
+
+def _t3_resolves_local(target_profile: dict | None) -> bool:
+    """Ask the T3 resolver whether this plan's target would land in
+    the LOCAL runner. Import is local so dag_validator doesn't pull
+    the container / metrics module graph on pure-schema tests.
+
+    Resolution itself may lazy-import optional transport modules
+    (paramiko for SSH, etc.) that aren't shipped by every install —
+    if resolution raises for any reason, treat it as "not LOCAL" so
+    the tier-capability check falls back to the strict t3 rules
+    rather than bombing the whole validate() call.
+    """
+    try:
+        from backend.t3_resolver import resolve_from_profile, T3RunnerKind
+    except Exception:
+        return False
+    try:
+        res = resolve_from_profile(target_profile)
+    except Exception:
+        return False
+    return res.kind == T3RunnerKind.LOCAL
+
+
+def _check_tier_capability(
+    dag: DAG,
+    errors: list[ValidationError],
+    target_profile: dict | None = None,
+) -> None:
+    rules = _load_tier_rules().get("tiers", {})
+    # Pre-compute once per validate() call — same answer for every task
+    # since the target profile is a plan-wide property, not a per-task
+    # one today. When per-task `target_profile` lands (spec'd in Phase
+    # 68 ParsedSpec), move this into the loop.
+    t3_local = _t3_resolves_local(target_profile)
+
+    for t in dag.tasks:
+        # T3-LOCAL semantic swap: when a t3 task resolves to the
+        # LOCAL runner, it *physically* runs in a t1-like container
+        # on the host — so enforce t1's capability rules on it
+        # instead of t3's. Operator's declared intent (`required_tier:
+        # t3` = "this is a deployment step") is preserved; only the
+        # toolchain check flips. The true-t3 hardware-bridge path
+        # (cross-arch target, remote runner) keeps the narrow RPC-
+        # only rules.
+        effective_tier = t.required_tier
+        if t.required_tier == "t3" and t3_local:
+            effective_tier = "t1"
+
+        tier_rules = rules.get(effective_tier)
+        if tier_rules is None:
+            errors.append(ValidationError(
+                rule="tier_violation", task_id=t.task_id,
+                message=(f"tier {t.required_tier!r} has no capability "
+                         f"rules in configs/tier_capabilities.yaml"),
+            ))
+            continue
+        denied = set(tier_rules.get("toolchains_denied") or [])
+        allowed = set(tier_rules.get("toolchains_allowed") or [])
+
+        if t.toolchain in denied:
+            errors.append(ValidationError(
+                rule="tier_violation", task_id=t.task_id,
+                message=(f"toolchain {t.toolchain!r} is explicitly DENIED "
+                         f"in tier {t.required_tier!r}"),
+            ))
+        elif allowed and t.toolchain not in allowed:
+            errors.append(ValidationError(
+                rule="tier_violation", task_id=t.task_id,
+                message=(f"toolchain {t.toolchain!r} not in allow-list "
+                         f"for tier {t.required_tier!r}"),
+            ))
+
+
+# ── Unknown toolchain warning ──
+
+_KNOWN_TOOLCHAINS_CACHE: set[str] | None = None
+
+
+def _load_known_toolchains() -> set[str]:
+    global _KNOWN_TOOLCHAINS_CACHE
+    if _KNOWN_TOOLCHAINS_CACHE is not None:
+        return _KNOWN_TOOLCHAINS_CACHE
+
+    names: set[str] = set()
+    for p in _PLATFORMS_DIR.glob("*.yaml"):
+        try:
+            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+            tc = data.get("toolchain")
+            if tc:
+                names.add(tc)
+        except Exception:
+            pass
+
+    rules = _load_tier_rules().get("tiers", {})
+    for tier_rules in rules.values():
+        for tc in tier_rules.get("toolchains_allowed") or []:
+            names.add(tc)
+        for tc in tier_rules.get("toolchains_denied") or []:
+            names.add(tc)
+
+    _KNOWN_TOOLCHAINS_CACHE = names
+    return _KNOWN_TOOLCHAINS_CACHE
+
+
+def reload_known_toolchains_for_tests() -> None:
+    global _KNOWN_TOOLCHAINS_CACHE
+    _KNOWN_TOOLCHAINS_CACHE = None
+
+
+def _check_unknown_toolchain(dag: DAG, errors: list[ValidationError]) -> None:
+    known = _load_known_toolchains()
+    for t in dag.tasks:
+        if t.toolchain and t.toolchain not in known:
+            errors.append(ValidationError(
+                rule="unknown_toolchain", task_id=t.task_id,
+                message=(f"toolchain {t.toolchain!r} is not in the known "
+                         f"toolchain registry — check spelling or add it "
+                         f"to configs/platforms/ or tier_capabilities.yaml"),
+            ))
+
+
+# ── I/O entity matchers ──
+
+# A rough-but-strict file path: must contain a '/', end with a sane
+# filename, no shell metacharacters. Tightened on purpose; planners
+# tend to write paths like "the binary file" otherwise.
+_FILE_PATH_RE = re.compile(
+    r"^(?!\s)(?:[A-Za-z0-9_.\-/]+/)+[A-Za-z0-9_.\-]+\.[A-Za-z0-9]{1,12}$"
+)
+_GIT_SHA_RE = re.compile(r"^git:[a-f0-9]{7,40}$")
+_ISSUE_RE = re.compile(r"^issue:[A-Za-z0-9_.\-]{1,64}$")
+
+
+def _is_io_entity(s: str) -> bool:
+    return bool(
+        _FILE_PATH_RE.match(s) or _GIT_SHA_RE.match(s) or _ISSUE_RE.match(s)
+    )
+
+
+def _check_io_entity(dag: DAG, errors: list[ValidationError]) -> None:
+    for t in dag.tasks:
+        if not _is_io_entity(t.expected_output):
+            errors.append(ValidationError(
+                rule="io_entity", task_id=t.task_id,
+                message=(f"expected_output {t.expected_output!r} is not a "
+                         f"recognised entity (file path / git:<sha> / "
+                         f"issue:<id>)"),
+            ))
+
+
+# ── Dep closure ──
+
+# An input may be one of:
+#   * the expected_output of an upstream task (most common)
+#   * "external:<anything>" or "user:<anything>" (caller-provided)
+_INPUT_EXTERNAL_RE = re.compile(r"^(?:external|user):.+$")
+
+
+def _check_dep_closure(dag: DAG, errors: list[ValidationError]) -> None:
+    upstream_outputs: dict[str, set[str]] = {}
+    # First pass: build a map from task -> set of outputs available to
+    # downstream tasks via its expected_output.
+    out_by_id: dict[str, str] = {t.task_id: t.expected_output for t in dag.tasks}
+    deps_by_id: dict[str, list[str]] = {t.task_id: list(t.depends_on) for t in dag.tasks}
+
+    # For each task, gather the closure of upstream outputs (BFS).
+    for t in dag.tasks:
+        seen: set[str] = set()
+        stack = list(deps_by_id.get(t.task_id, []))
+        while stack:
+            d = stack.pop()
+            if d in seen or d not in out_by_id:
+                continue
+            seen.add(d)
+            stack.extend(deps_by_id.get(d, []))
+        produced = {out_by_id[d] for d in seen}
+        upstream_outputs[t.task_id] = produced
+
+    for t in dag.tasks:
+        avail = upstream_outputs.get(t.task_id, set())
+        for inp in t.inputs:
+            if _INPUT_EXTERNAL_RE.match(inp):
+                continue  # caller provides
+            if inp in avail:
+                continue
+            errors.append(ValidationError(
+                rule="dep_closure", task_id=t.task_id,
+                message=(f"input {inp!r} is not produced by any upstream "
+                         f"task and is not flagged 'external:' / 'user:'"),
+            ))
+
+
+def _check_mece(dag: DAG, errors: list[ValidationError]) -> None:
+    """Two tasks with the same expected_output trigger MECE unless
+    BOTH set output_overlap_ack=True (e.g. parallel benchmark merge)."""
+    by_output: dict[str, list[Task]] = {}
+    for t in dag.tasks:
+        by_output.setdefault(t.expected_output, []).append(t)
+    for out, ts in by_output.items():
+        if len(ts) <= 1:
+            continue
+        if all(t.output_overlap_ack for t in ts):
+            continue
+        ids = [t.task_id for t in ts]
+        errors.append(ValidationError(
+            rule="mece", task_id=None,
+            message=(f"output {out!r} produced by {len(ts)} tasks {ids} "
+                     f"without unanimous output_overlap_ack=true"),
+        ))
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Public entry point
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def validate(
+    dag: DAG,
+    *,
+    target_profile: dict | None = None,
+) -> ValidationResult:
+    """Run all semantic rules; return ALL errors (not first-fail).
+
+    `target_profile` — optional parsed platform YAML for the plan's
+    deployment target. When supplied AND t3_resolver picks LOCAL for
+    it, the t3 toolchain allow-list is widened to include t1's (see
+    `_t3_local_extends_allowed`). Default `None` keeps the pre-
+    Phase-64-C-LOCAL behaviour exactly — t3 means hardware-bridge
+    RPC only.
+    """
+    errors: list[ValidationError] = []
+    _check_duplicates(dag, errors)
+    _check_unknown_deps(dag, errors)
+    _check_cycles(dag, errors)
+    _check_tier_capability(dag, errors, target_profile=target_profile)
+    _check_io_entity(dag, errors)
+    _check_dep_closure(dag, errors)
+    _check_mece(dag, errors)
+
+    warnings: list[ValidationError] = []
+    _check_unknown_toolchain(dag, warnings)
+
+    # Best-effort metric publish.
+    try:
+        from backend import metrics as _m
+        if errors:
+            _m.dag_validation_total.labels(result="failed").inc()
+            for rule, count in _result_breakdown(errors).items():
+                _m.dag_validation_error_total.labels(rule=rule).inc(count)
+        else:
+            _m.dag_validation_total.labels(result="passed").inc()
+    except Exception:
+        pass
+
+    return ValidationResult(ok=not errors, errors=errors, warnings=warnings)
+
+
+def _result_breakdown(errors: Iterable[ValidationError]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for e in errors:
+        out[e.rule] = out.get(e.rule, 0) + 1
+    return out
+
+exec
+/bin/bash -lc 'git show gerrit-sora/develop:backend/dag_executor.py' in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+"""DAG execution engine — Dim 2 / Phase 1: inert poll-loop skeleton.
+
+This module is the *entrypoint scaffold* for the future DAG executor
+(design doc §7, Dim 2). It is deliberately **inert**:
+
+  * It is a **no-op unless ``OMNISIGHT_DAG_EXECUTOR_ENABLED=1``**. With the
+    flag unset the process logs one line and exits 0 — it claims nothing,
+    writes no heartbeat, and touches no state. This is what lets the
+    systemd unit ship "default OFF": even if an operator starts the unit
+    by accident, an un-armed executor does nothing.
+  * When armed, it runs an async poll-loop that **only ticks + heartbeats**.
+    There is intentionally NO task execution here: it does not claim a
+    ``dag_task``, does not run an agent, and never marks a plan
+    ``completed``/``failed``. Those land in a later phase. The loop body
+    is the seam where that work will hook in.
+
+Distinct identity namespace
+---------------------------
+Executor instances live under the ``dag-exec-*`` instance-id namespace
+(vs. the worker pool's ``wkr-*``) so the two are never confused on the
+operator surface. The heartbeat reuses :func:`backend.worker._get_default_store`
+(Redis when ``OMNISIGHT_REDIS_URL`` is set, else the in-memory fallback)
+but writes under a DISTINCT ``omnisight:dag-exec:`` key namespace — see
+:class:`DagExecHeartbeat`. It must NOT pollute the worker registry
+(``omnisight:worker:active``); the dag-exec set is separate.
+
+CLI::
+
+    OMNISIGHT_DAG_EXECUTOR_ENABLED=1 python -m backend.dag_executor \
+        --poll-interval-s 2 --heartbeat-interval-s 15
+
+Send SIGTERM (what the systemd unit + docker-compose use) for a clean
+shutdown: the loop stops, the heartbeat key is cleared, exit 0.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import signal
+import socket
+import sys
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
+
+from backend import dag_storage, metrics, worker
+from backend.dag_schema import DAG, Task
+from backend.env_contract import _truthy, canonical_env
+
+logger = logging.getLogger(__name__)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Tunables / namespace constants
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+#: Arm flag. Unset / anything-but-"1" keeps the executor a no-op.
+ENABLE_ENV = "OMNISIGHT_DAG_EXECUTOR_ENABLED"
+
+#: Distinct instance-id namespace so dag-exec instances never collide
+#: with worker ids (``wkr-*``) on the operator surface.
+DAG_EXEC_INSTANCE_PREFIX = "dag-exec"
+
+#: Heartbeat key namespace — DISTINCT from worker's ``omnisight:worker:``
+#: so the worker registry (``omnisight:worker:active``) is never polluted.
+DAG_EXEC_HEARTBEAT_PREFIX = "omnisight:dag-exec:"
+
+DEFAULT_POLL_INTERVAL_S = 2.0
+# Mirror the worker's registry cadence (C4 audit 2026-04-19): refresh
+# every 15 s, TTL 45 s (= 3x interval, so 2 missed pings == dead).
+DEFAULT_HEARTBEAT_INTERVAL_S = 15.0
+DEFAULT_HEARTBEAT_TTL_S = 45
+
+#: Default dag_plans lease lifetime. Tracks the heartbeat TTL so the
+#: lease a future executor phase holds expires on the same "2 missed
+#: pings == dead" budget as the operator-surface heartbeat key. The
+#: authoritative default lives in :mod:`backend.dag_storage`.
+DEFAULT_LEASE_TTL_S = dag_storage.DEFAULT_LEASE_TTL_S
+
+
+def is_enabled() -> bool:
+    """True only when ``OMNISIGHT_DAG_EXECUTOR_ENABLED`` is exactly ``"1"``."""
+    return os.environ.get(ENABLE_ENV, "").strip() == "1"
+
+
+def new_instance_id(prefix: str = DAG_EXEC_INSTANCE_PREFIX) -> str:
+    host = socket.gethostname().split(".")[0]
+    return f"{prefix}-{host}-{uuid.uuid4().hex[:8]}"
+
+
+def ensure_dag_exec_namespace(instance_id: str) -> str:
+    """Force an instance id into the ``dag-exec-*`` namespace.
+
+    A bare / mis-prefixed id (e.g. an operator passing ``--instance-id 1``)
+    is normalised to ``dag-exec-1`` so the heartbeat can never masquerade
+    as a worker.
+    """
+    iid = (instance_id or "").strip()
+    if not iid:
+        return new_instance_id()
+    if iid == DAG_EXEC_INSTANCE_PREFIX or iid.startswith(
+        DAG_EXEC_INSTANCE_PREFIX + "-"
+    ):
+        return iid
+    return f"{DAG_EXEC_INSTANCE_PREFIX}-{iid}"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Heartbeat (distinct namespace over the shared store)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class DagExecHeartbeat:
+    """Heartbeat writer for the DAG executor skeleton.
+
+    Reuses :func:`backend.worker._get_default_store` (Redis when
+    configured, else the in-memory fallback) but writes under the
+    ``omnisight:dag-exec:`` namespace rather than calling the store's
+    ``register``/``heartbeat`` methods — those are hard-wired to the
+    worker prefix (``omnisight:worker:``) and the worker active set, so
+    using them would pollute the worker registry. We instead drive the
+    backing client directly (Redis) or stash a namespaced key in the
+    in-memory store (single-process dev / tests).
+    """
+
+    def __init__(self, store: Any | None = None) -> None:
+        self._store = store if store is not None else worker._get_default_store()
+        # RedisHeartbeatStore exposes ``_client``; the memory store doesn't.
+        self._client = getattr(self._store, "_client", None)
+
+    # ─── key helpers ─────────────────────────────────────────────
+    def _alive_key(self, instance_id: str) -> str:
+        return f"{DAG_EXEC_HEARTBEAT_PREFIX}{instance_id}:alive"
+
+    def _set_key(self) -> str:
+        return f"{DAG_EXEC_HEARTBEAT_PREFIX}active"
+
+    # ─── writes ──────────────────────────────────────────────────
+    def beat(self, instance_id: str, info: dict[str, Any], ttl_s: int) -> None:
+        """Set the alive key (with TTL) + add to the dag-exec active set."""
+        if self._client is not None:
+            payload = json.dumps(info, sort_keys=True, default=str)
+            pipe = self._client.pipeline()
+            pipe.set(self._alive_key(instance_id), payload, ex=ttl_s)
+            pipe.sadd(self._set_key(), instance_id)
+            pipe.execute()
+        else:
+            # In-memory fallback: the store keys by an opaque string, so a
+            # fully-namespaced key keeps dag-exec entries from ever looking
+            # like a worker id to ``worker list``.
+            self._store.heartbeat(self._alive_key(instance_id), dict(info), ttl_s)
+
+    def clear(self, instance_id: str) -> None:
+        """Drop the alive key + remove from the active set (graceful exit)."""
+        if self._client is not None:
+            pipe = self._client.pipeline()
+            pipe.delete(self._alive_key(instance_id))
+            pipe.srem(self._set_key(), instance_id)
+            pipe.execute()
+        else:
+            self._store.deregister(self._alive_key(instance_id))
+
+    # ─── reads (operator / test surface) ─────────────────────────
+    def is_alive(self, instance_id: str) -> bool:
+        if self._client is not None:
+            return bool(self._client.exists(self._alive_key(instance_id)))
+        return self._store.get_info(self._alive_key(instance_id)) is not None
+
+    def get_info(self, instance_id: str) -> dict[str, Any] | None:
+        if self._client is not None:
+            raw = self._client.get(self._alive_key(instance_id))
+            if not raw:
+                return None
+            if isinstance(raw, bytes):
+                raw = raw.decode()
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                return None
+        return self._store.get_info(self._alive_key(instance_id))
+
+    def list_active(self) -> list[str]:
+        if self._client is not None:
+            members = self._client.smembers(self._set_key()) or set()
+            live: list[str] = []
+            for m in members:
+                iid = m.decode() if isinstance(m, bytes) else m
+                if self._client.exists(self._alive_key(iid)):
+                    live.append(iid)
+                else:
+                    self._client.srem(self._set_key(), iid)
+            return sorted(live)
+        # Memory store: recover instance ids from our namespaced keys only,
+        # so worker ids living in the same dict are never reported here.
+        prefix, suffix = DAG_EXEC_HEARTBEAT_PREFIX, ":alive"
+        out: list[str] = []
+        for key in self._store.list_active():
+            if key.startswith(prefix) and key.endswith(suffix):
+                out.append(key[len(prefix):-len(suffix)])
+        return sorted(out)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Config + result
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@dataclass
+class DagExecutorConfig:
+    instance_id: str
+    poll_interval_s: float = DEFAULT_POLL_INTERVAL_S
+    heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
+    heartbeat_ttl_s: int = DEFAULT_HEARTBEAT_TTL_S
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S
+    max_ticks: int | None = None  # tests / one-shot harness; None == forever
+
+    def __post_init__(self) -> None:
+        # Identity is load-bearing for the "never looks like a worker"
+        # guarantee — normalise here so every construction path is safe.
+        self.instance_id = ensure_dag_exec_namespace(self.instance_id)
+
+
+@dataclass
+class DagExecutorResult:
+    """What :meth:`DagExecutor.run` returns — handy for tests + ExecStop."""
+
+    enabled: bool
+    ticks: int = 0
+    heartbeats: int = 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Executor
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class DagExecutor:
+    """Inert async poll-loop skeleton for the DAG executor (Phase 1).
+
+    Lifecycle::
+
+        ex = DagExecutor(config)
+        ex.install_signal_handlers(loop)   # SIGTERM/SIGINT -> request_stop
+        await ex.run()                     # no-op if not armed; else loops
+
+    ``run()`` never executes DAG tasks and never transitions a plan; it
+    only ticks and heartbeats while armed.
+    """
+
+    def __init__(
+        self,
+        config: DagExecutorConfig,
+        *,
+        heartbeat: DagExecHeartbeat | None = None,
+        enabled: bool | None = None,
+    ) -> None:
+        self.config = config
+        self.heartbeat = heartbeat if heartbeat is not None else DagExecHeartbeat()
+        # ``enabled`` override is for tests; production reads the env flag.
+        self._enabled = is_enabled() if enabled is None else enabled
+        self._stop = asyncio.Event()
+        self._started_at = 0.0
+        self._ticks = 0
+        self._heartbeats = 0
+
+    # ─── control ─────────────────────────────────────────────────
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    def install_signal_handlers(
+        self, loop: asyncio.AbstractEventLoop | None = None
+    ) -> None:
+        """Wire SIGTERM / SIGINT to a graceful stop on the running loop."""
+        loop = loop or asyncio.get_event_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, self.request_stop)
+            except (NotImplementedError, RuntimeError, ValueError):
+                # Some runtimes (Windows, non-main thread) can't register
+                # loop signal handlers — the systemd unit still delivers
+                # SIGTERM; without a handler the default terminates us,
+                # which for an inert skeleton is also clean.
+                logger.debug("could not install signal handler for %s", sig)
+
+    # ─── main loop ───────────────────────────────────────────────
+    async def run(self) -> DagExecutorResult:
+        if not self._enabled:
+            logger.info(
+                "dag-executor %s disabled (set %s=1 to arm) — no-op exit",
+                self.config.instance_id, ENABLE_ENV,
+            )
+            return DagExecutorResult(enabled=False, ticks=0, heartbeats=0)
+
+        self._started_at = time.time()
+        logger.info(
+            "dag-executor %s armed (poll=%.1fs, heartbeat=%.1fs/ttl=%ds) — "
+            "SKELETON: ticks + heartbeat only, no task execution",
+            self.config.instance_id, self.config.poll_interval_s,
+            self.config.heartbeat_interval_s, self.config.heartbeat_ttl_s,
+        )
+        self._beat("starting")
+        last_beat = time.monotonic()
+        try:
+            while not self._stop.is_set():
+                if (self.config.max_ticks is not None
+                        and self._ticks >= self.config.max_ticks):
+                    break
+
+                # ── SEAM ──────────────────────────────────────────
+                # A future phase claims one ready plan here and drives it —
+                # via :meth:`claim_plan` / renew / release (OP-1656) and the
+                # :class:`SerialPlanScheduler` topological walk (OP-1657).
+                # The Phase-1 skeleton deliberately does NOTHING: no claim,
+                # no scheduler run, no terminal transition. The scheduler +
+                # lease primitives ship in the image so a later (still-gated)
+                # phase can wire them here without re-touching this loop.
+                self._ticks += 1
+
+                now = time.monotonic()
+                if now - last_beat >= self.config.heartbeat_interval_s:
+                    self._beat("alive")
+                    last_beat = now
+
+                # Sleep poll_interval, but wake immediately on stop.
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=self.config.poll_interval_s,
+                    )
+                except asyncio.TimeoutError:
+                    pass
+        finally:
+            self._clear()
+            logger.info(
+                "dag-executor %s stopped (ticks=%d, heartbeats=%d)",
+                self.config.instance_id, self._ticks, self._heartbeats,
+            )
+        return DagExecutorResult(
+            enabled=True, ticks=self._ticks, heartbeats=self._heartbeats,
+        )
+
+    # ─── helpers ─────────────────────────────────────────────────
+    def _beat(self, status: str) -> None:
+        try:
+            self.heartbeat.beat(
+                self.config.instance_id, self._info(status),
+                self.config.heartbeat_ttl_s,
+            )
+            self._heartbeats += 1
+        except Exception as exc:  # heartbeat is best-effort, never fatal
+            logger.warning(
+                "dag-executor %s heartbeat failed: %s",
+                self.config.instance_id, exc,
+            )
+        # OP-1665: operator-surface heartbeat metrics. Kept INDEPENDENT of the
+        # store write above (and itself best-effort) so the liveness gauge still
+        # reflects a running executor through a Redis blip, and a metric error
+        # can never break the poll loop.
+        self._record_beat_metrics()
+
+    def _record_beat_metrics(self) -> None:
+        """Bump the Prometheus heartbeat surface for this instance (OP-1665)."""
+        iid = self.config.instance_id
+        try:
+            metrics.dag_executor_up.labels(instance_id=iid).set(1)
+            metrics.dag_executor_heartbeat_total.labels(instance_id=iid).inc()
+            metrics.dag_executor_last_heartbeat_timestamp_seconds.labels(
+                instance_id=iid,
+            ).set(time.time())
+        except Exception:  # the metric surface must never fault the loop
+            logger.debug(
+                "dag-executor %s heartbeat metric update failed", iid,
+                exc_info=True,
+            )
+
+    def _clear(self) -> None:
+        try:
+            self.heartbeat.clear(self.config.instance_id)
+        except Exception as exc:
+            logger.warning(
+                "dag-executor %s heartbeat clear failed: %s",
+                self.config.instance_id, exc,
+            )
+        # OP-1665: flip the liveness gauge to 0 on graceful stop — independent
+        # of the store clear above so a scrape never shows a stopped executor
+        # as still up.
+        try:
+            metrics.dag_executor_up.labels(
+                instance_id=self.config.instance_id,
+            ).set(0)
+        except Exception:
+            logger.debug(
+                "dag-executor %s heartbeat-down metric update failed",
+                self.config.instance_id, exc_info=True,
+            )
+
+    def _info(self, status: str) -> dict[str, Any]:
+        return {
+            "instance_id": self.config.instance_id,
+            "kind": "dag-executor",
+            "host": socket.gethostname(),
+            "pid": os.getpid(),
+            "status": status,
+            "started_at": self._started_at,
+            "ticks": self._ticks,
+            "enabled": self._enabled,
+        }
+
+    # ─── dag_plans lease (OP-1656) ───────────────────────────────
+    #
+    # Thin owner-scoped wrappers over the compare-and-set primitives in
+    # :mod:`backend.dag_storage`. The executor's ``instance_id`` (already
+    # forced into the ``dag-exec-*`` namespace) is the lease owner, so a
+    # claimed plan is attributable to the exact instance on the operator
+    # surface.
+    #
+    # IMPORTANT: these are deliberately NOT called from :meth:`run`'s loop.
+    # The Phase-1 executor stays inert — the SEAM in ``run()`` claims
+    # nothing. These methods ship in the backend image as the primitive a
+    # later (still-gated) phase will call at that seam; wiring them now lets
+    # the lease be exercised by tests without arming task execution.
+
+    async def claim_plan(
+        self, plan_id: int, *, conn=None,
+    ) -> Optional["dag_storage.PlanLease"]:
+        """Try to claim ``plan_id`` for this executor instance.
+
+        Returns the granted :class:`~backend.dag_storage.PlanLease`, or
+        ``None`` if another live owner holds it (or the plan is gone).
+        """
+        return await dag_storage.claim_plan(
+            plan_id, self.config.instance_id,
+            lease_ttl_s=self.config.lease_ttl_s, conn=conn,
+        )
+
+    async def renew_plan_lease(
+        self, lease: "dag_storage.PlanLease", *, conn=None,
+    ) -> Optional["dag_storage.PlanLease"]:
+        """Heartbeat-renew a lease this instance holds.
+
+        Returns the refreshed lease, or ``None`` if it was lost (lapsed or
+        reclaimed) — the cue to stop driving that plan.
+        """
+        return await dag_storage.renew_lease(
+            lease.plan_id, lease.owner, lease.token,
+            lease_ttl_s=self.config.lease_ttl_s, conn=conn,
+        )
+
+    async def release_plan_lease(
+        self, lease: "dag_storage.PlanLease", *, conn=None,
+    ) -> bool:
+        """Release a lease this instance holds (idempotent)."""
+        return await dag_storage.release_lease(
+            lease.plan_id, lease.owner, lease.token, conn=conn,
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Serial topological scheduler (OP-1657)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Once a plan is claimed (OP-1656 lease) a single executor drives it by
+# walking ``dag.tasks`` in dependency order, SERIALLY — one task at a
+# time, no concurrency. This is the ordering substrate later tickets hang
+# real task dispatch off of; it deliberately ships with a no-op task
+# handler so the scheduler can be merged **inert** (the seam in
+# :meth:`DagExecutor.run` does not call it yet).
+#
+# The walk reuses the SAME in-degree-0 ready-set logic as
+# :func:`backend.sandbox_prewarm.pick_prewarm_candidates` (declaration-order
+# ready set → deterministic, stable replay during incident review), extended
+# from "pick the first ``depth``" to "drain the whole graph". Dependencies
+# pointing at unknown task ids are ignored (``if d in indeg``) exactly as the
+# prewarm walk and :func:`backend.dag_validator._check_cycles` do — surfacing
+# unknown deps is the validator's job, not the scheduler's.
+
+
+class CycleError(RuntimeError):
+    """Raised if a cyclic DAG reaches the scheduler.
+
+    The validator (:func:`backend.dag_validator._check_cycles`, Kahn's
+    algorithm) already blocks cycles before a plan is persisted as
+    ``validated``, so a claimed plan should never be cyclic. This is the
+    belt-and-braces guard: rather than silently dropping the unresolved
+    tail of the walk, we refuse loudly so the bug is visible.
+    """
+
+
+def topological_order(dag: DAG) -> list[Task]:
+    """Return ``dag.tasks`` in a deterministic serial topological order.
+
+    Kahn's algorithm with a **declaration-order** ready set: among the tasks
+    whose dependencies are all satisfied, the next one emitted is the one
+    declared earliest in ``dag.tasks``. That determinism matters for stable
+    replay during incident review (same plan → same execution order).
+
+    Cycle-safe: if the walk cannot drain every task (a cycle the validator
+    failed to catch), raises :class:`CycleError` naming the unresolved tasks
+    rather than returning a truncated order.
+    """
+    by_id: dict[str, Task] = {t.task_id: t for t in dag.tasks}
+    order_index: dict[str, int] = {t.task_id: i for i, t in enumerate(dag.tasks)}
+    indeg: dict[str, int] = {t.task_id: 0 for t in dag.tasks}
+    edges: dict[str, list[str]] = {t.task_id: [] for t in dag.tasks}
+    for t in dag.tasks:
+        for d in t.depends_on:
+            if d in indeg:  # ignore deps to unknown ids — validator's job
+                edges[d].append(t.task_id)
+                indeg[t.task_id] += 1
+
+    # Ready set kept sorted by declaration index so the walk is deterministic.
+    ready: list[str] = sorted(
+        (n for n, k in indeg.items() if k == 0), key=order_index.__getitem__
+    )
+    out: list[Task] = []
+    while ready:
+        n = ready.pop(0)
+        out.append(by_id[n])
+        newly: list[str] = []
+        for nxt in edges[n]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                newly.append(nxt)
+        if newly:
+            ready.extend(newly)
+            ready.sort(key=order_index.__getitem__)
+
+    if len(out) != len(dag.tasks):
+        unresolved = sorted(n for n, k in indeg.items() if k > 0)
+        raise CycleError(
+            f"cyclic dependency reached scheduler in dag {dag.dag_id!r}; "
+            f"{len(unresolved)} task(s) unresolved: {unresolved[:10]}"
+        )
+    return out
+
+
+@dataclass
+class TaskWorkspace:
+    """A prepared per-(plan, task) workspace directory.
+
+    ``path`` follows the ``workdir_root/{plan_id}-{task_id}`` convention.
+    ``copied`` lists the project-relative paths materialised from the task's
+    ``inputs`` globs (empty when no project root is bound).
+    """
+
+    plan_id: int
+    task_id: str
+    path: Path
+    copied: list[str] = field(default_factory=list)
+
+
+class PlanWorkspaceBuilder:
+    """Thin per-(plan, task) workspace helper for the serial scheduler.
+
+    Reuses :mod:`backend.worker`'s module-level ``_rmtree`` / ``_copytree`` /
+    ``_copyfile`` / ``_resolve_glob`` to materialise a fresh workspace at
+    ``workdir_root/{plan_id}-{task_id}`` and copy in the files matched by the
+    task's ``inputs`` globs (project-root jailed via ``_resolve_glob``).
+
+    It deliberately does **NOT** call :meth:`LocalSandboxRuntime.start`: that
+    path is TaskCard / git-coupled (the path-b worker flow) and would need a
+    fake ``PROJECT-NUMBER`` jira_ticket + a CATC card. The serial scheduler
+    only needs the thin "copy allowed inputs into a jailed workdir" behaviour,
+    which is exactly the low-level helpers, minus the git/TaskCard coupling.
+    """
+
+    def __init__(
+        self,
+        *,
+        workdir_root: Path | None = None,
+        project_root: Path | None = None,
+    ) -> None:
+        # Distinct default subtree from the worker's ``_sandboxes`` so a
+        # dag-exec plan workspace ({plan_id}-{task_id}) never collides with a
+        # worker sandbox ({worker_id}-{task_id}) under a shared workdir root.
+        self._root = Path(
+            workdir_root
+            or os.environ.get("OMNISIGHT_DAG_WORKDIR")
+            or Path.cwd() / ".artifacts" / "dag_workspaces"
+        )
+        self._project_root = Path(project_root) if project_root is not None else None
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def prepare(self, plan_id: int, task: Task) -> TaskWorkspace:
+        """Create ``workdir_root/{plan_id}-{task_id}`` and copy in inputs."""
+        ws = self._root / f"{plan_id}-{task.task_id}"
+        if ws.exists():
+            worker._rmtree(ws)
+        ws.mkdir(parents=True, exist_ok=True)
+
+        copied: list[str] = []
+        if self._project_root is not None:
+            for glob in task.inputs:
+                for src in worker._resolve_glob(self._project_root, glob):
+                    rel = src.relative_to(self._project_root)
+                    dst = ws / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if src.is_dir():
+                        worker._copytree(src, dst)
+                    else:
+                        worker._copyfile(src, dst)
+                    copied.append(str(rel))
+        return TaskWorkspace(
+            plan_id=plan_id, task_id=task.task_id, path=ws, copied=copied,
+        )
+
+    def cleanup(self, ws: TaskWorkspace) -> None:
+        """Remove a prepared workspace (best-effort, mirrors sandbox.stop)."""
+        try:
+            worker._rmtree(ws.path)
+        except OSError as exc:
+            logger.warning(
+                "dag plan workspace cleanup failed for %s: %s", ws.path, exc,
+            )
+
+
+@dataclass
+class TaskRun:
+    """The scheduler's per-task ordering record.
+
+    ``order_index`` is the 0-based position the task occupied in the serial
+    walk — the load-bearing "ordering state later tickets need". ``status``
+    is ``"ran"`` under the default no-op handler; real terminal states land
+    in a later phase.
+    """
+
+    task_id: str
+    order_index: int
+    workspace: Optional[Path] = None
+    status: str = "ran"
+
+
+@dataclass
+class PlanRunResult:
+    """Outcome of one serial topological walk of a plan."""
+
+    plan_id: int
+    dag_id: str
+    order: list[str]  # task_ids in execution order
+    runs: list[TaskRun] = field(default_factory=list)
+
+
+#: A task handler runs one task inside its prepared workspace. The default
+#: (:func:`_noop_task_handler`) does nothing — the scheduler ships inert and a
+#: later ticket injects the real dispatcher here. ``workspace`` is ``None``
+#: when the scheduler runs without a :class:`PlanWorkspaceBuilder`.
+TaskHandler = Callable[[Task, Optional[TaskWorkspace]], Awaitable[Any]]
+
+
+async def _noop_task_handler(task: Task, workspace: Optional[TaskWorkspace]) -> None:
+    """Default handler: record-ordering only, no execution (inert merge)."""
+    logger.debug("dag scheduler: ordered task %s (no-op handler)", task.task_id)
+    return None
+
+
+class SerialPlanScheduler:
+    """Drive a claimed plan by walking its DAG in dependency order, serially.
+
+    Construction is cheap and side-effect-free; :meth:`run_plan` does the
+    walk. Execution is strictly **serial** — each task's handler is awaited to
+    completion before the next task starts (no ``gather`` / no concurrency, an
+    explicit MUST-NOT for this ticket). Tasks are emitted in the deterministic
+    :func:`topological_order`.
+
+    The default ``task_handler`` is a no-op, so a default-constructed scheduler
+    only computes + records ordering — which is what lets OP-1657 merge inert.
+    Later tickets inject a real handler (and a :class:`PlanWorkspaceBuilder`)
+    without changing the ordering contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace_builder: PlanWorkspaceBuilder | None = None,
+        task_handler: TaskHandler | None = None,
+    ) -> None:
+        self.workspace_builder = workspace_builder
+        self.task_handler = task_handler or _noop_task_handler
+
+    async def run_plan(
+        self, plan_id: int, dag: DAG, *, cleanup: bool = False,
+    ) -> PlanRunResult:
+        """Walk ``dag`` in topological order, running each task serially.
+
+        For each task, in dependency order: optionally prepare its workspace
+        (when a builder is bound), await the handler, then record the
+        ordering. ``cleanup=True`` removes each workspace after its handler
+        returns (handy for tests / disk-tight hosts); the default keeps them.
+        """
+        order = topological_order(dag)
+        result = PlanRunResult(
+            plan_id=plan_id, dag_id=dag.dag_id,
+            order=[t.task_id for t in order],
+        )
+        logger.info(
+            "dag scheduler: plan=%s dag=%s order=%s (serial, %d task(s))",
+            plan_id, dag.dag_id, result.order, len(order),
+        )
+        for idx, task in enumerate(order):
+            ws: Optional[TaskWorkspace] = None
+            if self.workspace_builder is not None:
+                ws = self.workspace_builder.prepare(plan_id, task)
+            try:
+                await self.task_handler(task, ws)
+            finally:
+                if ws is not None and cleanup and self.workspace_builder is not None:
+                    self.workspace_builder.cleanup(ws)
+            result.runs.append(TaskRun(
+                task_id=task.task_id, order_index=idx,
+                workspace=(ws.path if ws is not None else None),
+            ))
+        return result
+
+    async def run_stored_plan(
+        self, plan: "dag_storage.StoredPlan", *, cleanup: bool = False,
+    ) -> PlanRunResult:
+        """Convenience: walk a claimed :class:`~backend.dag_storage.StoredPlan`.
+
+        Re-hydrates the DAG from the stored JSON and forwards to
+        :meth:`run_plan`. This is the shape the (still-gated) executor seam
+        will call after :meth:`DagExecutor.claim_plan` grants the lease.
+        """
+        return await self.run_plan(plan.id, plan.dag(), cleanup=cleanup)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Local task handlers (cmake / make / python3) — OP-1658
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 (codex Q7). This slice gives the serial scheduler a REAL
+# task handler for the three **local** toolchains — and ONLY those three.
+# Each task runs in its own per-plan scratch workspace
+# (``workdir_root/{plan_id}-{task_id}`` via :class:`PlanWorkspaceBuilder`,
+# materialised from ``Task.inputs`` using worker.py's low-level helpers —
+# NOT ``LocalSandboxRuntime.start`` which is TaskCard/git-coupled). We
+# capture the process ``rc`` + ``stdout``/``stderr`` and the artifact that
+# landed at the task's ``expected_output``.
+#
+# Fail-closed scope rules (each FAILS the task — never crashes):
+#   * a non-``t1`` ``required_tier`` (``networked`` / ``t3``) — out of this
+#     local-only slice;
+#   * an unknown / non-local ``toolchain`` (anything but cmake/make/python3);
+#   * an ``expected_output`` that escapes the workspace;
+#   * the toolchain exiting non-zero, or not producing the artifact.
+#
+# Workspace lifecycle: the handler CREATES + RETURNS the workspace on the
+# result; the CALLER (a later step-recording / terminal ticket) owns
+# cleanup so the artifact can be read first. We never delete it here. The
+# fail-closed side-effect guard for nonlocal toolchains beyond "just FAIL"
+# is a SEPARATE ticket's job.
+
+#: Toolchains this local slice knows how to run. Anything else FAILS the
+#: task (not a crash) — per the ticket MUST-NOT (no cross-compile / flash /
+#: remote / publish here).
+LOCAL_TOOLCHAINS: tuple[str, ...] = ("cmake", "make", "python3")
+
+#: The only tier this slice executes. ``networked`` / ``t3`` tasks FAIL as
+#: out-of-slice rather than running on the local host.
+LOCAL_TIER = "t1"
+
+#: Per-task subprocess wall-clock budget (seconds). Mirrors the
+#: ``build_adapters._run`` default; injectable per-handler for tests.
+DEFAULT_TASK_TIMEOUT_S = 600
+
+#: Sub-directory cmake configures + builds into, relative to the workspace.
+CMAKE_BUILD_DIR = "build"
+
+
+class _LocalHandlerError(Exception):
+    """Internal — a pre-flight handler problem that FAILS the task.
+
+    Used for prepare-time conditions (e.g. a ``python3`` task with no ``.py``
+    input) so :meth:`LocalTaskHandler.run` can translate them into a FAILED
+    :class:`LocalTaskResult` instead of raising out of the handler.
+    """
+
+
+@dataclass
+class LocalTaskResult:
+    """Outcome of running one task through a local toolchain handler.
+
+    ``status`` is ``"ok"`` only when the toolchain exited 0 **and** the
+    declared artifact landed at ``expected_output`` inside the workspace;
+    otherwise ``"failed"`` with a human-readable ``reason``. ``workspace``
+    is the scratch dir the handler created (``None`` only when the task
+    FAILED a gate before any workspace was built) — the caller owns its
+    cleanup. ``artifact`` is the resolved ``expected_output`` path when it
+    was produced, else ``None``.
+    """
+
+    task_id: str
+    plan_id: int
+    toolchain: str
+    status: str                       # "ok" | "failed"
+    rc: Optional[int] = None
+    stdout: str = ""
+    stderr: str = ""
+    workspace: Optional[Path] = None
+    artifact: Optional[Path] = None
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+def _run_local(
+    argv: list[str], cwd: Path, timeout_s: float,
+) -> tuple[int, str, str]:
+    """Run one local command in ``cwd``; return ``(rc, stdout, stderr)``.
+
+    Never raises: a missing binary maps to rc 127 and a timeout to rc 124
+    (mirroring :func:`backend.build_adapters._run`) so the handler can fold
+    either into a FAILED task rather than an exception.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(cwd), capture_output=True, text=True,
+            timeout=timeout_s, check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, (exc.stdout or ""), f"timeout after {timeout_s}s"
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+
+
+def _resolve_expected_output(workspace: Path, expected_output: str) -> Path:
+    """Resolve a workspace-relative ``expected_output`` inside ``workspace``.
+
+    ``expected_output`` is workspace-relative by contract. An absolute path,
+    a ``..`` segment, or anything that resolves outside the workspace raises
+    :class:`ValueError` — the caller turns that into a FAILED task (a path
+    escaping the workspace must never let a task read/write outside its
+    jail). Mirrors the jail check in :func:`backend.worker._resolve_glob`.
+    """
+    rel = (expected_output or "").strip()
+    p = Path(rel)
+    if not rel or p.is_absolute() or any(part == ".." for part in p.parts):
+        raise ValueError(
+            f"expected_output {expected_output!r} escapes the workspace"
+        )
+    candidate = workspace / rel
+    try:
+        candidate.resolve().relative_to(workspace.resolve())
+    except (ValueError, OSError):
+        raise ValueError(
+            f"expected_output {expected_output!r} escapes the workspace"
+        )
+    return candidate
+
+
+class LocalTaskHandler:
+    """Toolchain → handler dispatch for the three **local** toolchains.
+
+    Construct with a :class:`PlanWorkspaceBuilder` (the per-plan scratch
+    bridge) and call :meth:`run` per task. The handler:
+
+      1. gates on ``required_tier == "t1"`` and a known local ``toolchain``
+         (else FAIL — not a crash);
+      2. prepares + RETURNS a fresh ``{plan_id}-{task_id}`` workspace
+         (materialised from ``Task.inputs``);
+      3. runs the toolchain's command sequence serially in that workspace,
+         capturing ``rc`` / ``stdout`` / ``stderr``;
+      4. resolves the workspace-relative ``expected_output`` (escape → FAIL)
+         and requires it to exist for ``status == "ok"``.
+
+    It never cleans the workspace up — the caller owns that so artifacts can
+    be read first.
+
+    ``runner`` is injectable (``(argv, cwd, timeout_s) -> (rc, out, err)``)
+    so unit tests can exercise the dispatch / gating / artifact logic
+    without spawning real ``cmake`` / ``make`` processes.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace_builder: "PlanWorkspaceBuilder",
+        timeout_s: float = DEFAULT_TASK_TIMEOUT_S,
+        runner: Callable[[list[str], Path, float], tuple[int, str, str]]
+        | None = None,
+    ) -> None:
+        self.workspace_builder = workspace_builder
+        self.timeout_s = timeout_s
+        self._runner = runner or _run_local
+
+    # ─── public API ──────────────────────────────────────────────
+    async def run(self, plan_id: int, task: Task) -> LocalTaskResult:
+        """Run ``task`` locally for ``plan_id``; return a result, never raise."""
+        # ── gate 1: tier (this slice is t1/local only) ─────────────
+        if task.required_tier != LOCAL_TIER:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"required_tier {task.required_tier!r} is not local "
+                    f"({LOCAL_TIER}-only slice — networked/t3 out of slice)"
+                ),
+            )
+        # ── gate 2: known local toolchain ─────────────────────────
+        if task.toolchain not in LOCAL_TOOLCHAINS:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"unknown/nonlocal toolchain {task.toolchain!r} "
+                    f"(local handlers: {', '.join(LOCAL_TOOLCHAINS)})"
+                ),
+            )
+
+        # ── build the per-plan scratch workspace (handler owns creation) ──
+        ws = self.workspace_builder.prepare(plan_id, task)
+
+        try:
+            commands = self._command_sequence(task, ws)
+        except _LocalHandlerError as exc:
+            return self._fail(plan_id, task, workspace=ws.path, reason=str(exc))
+
+        # ── run the command sequence serially; stop at first non-zero ──
+        rc = 0
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+        for argv in commands:
+            rc, out, err = await asyncio.to_thread(
+                self._runner, argv, ws.path, self.timeout_s,
+            )
+            out_parts.append(out)
+            err_parts.append(err)
+            if rc != 0:
+                break
+        stdout = "".join(out_parts)
+        stderr = "".join(err_parts)
+
+        if rc != 0:
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr,
+                reason=f"{task.toolchain} exited rc={rc}",
+            )
+
+        # ── resolve + verify the declared artifact ─────────────────
+        try:
+            artifact = _resolve_expected_output(ws.path, task.expected_output)
+        except ValueError as exc:
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr, reason=str(exc),
+            )
+        if not artifact.exists():
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr,
+                reason=(
+                    f"expected_output {task.expected_output!r} not produced "
+                    f"by {task.toolchain}"
+                ),
+            )
+
+        logger.info(
+            "dag local handler: plan=%s task=%s toolchain=%s OK -> %s",
+            plan_id, task.task_id, task.toolchain, task.expected_output,
+        )
+        return LocalTaskResult(
+            task_id=task.task_id, plan_id=plan_id, toolchain=task.toolchain,
+            status="ok", rc=rc, stdout=stdout, stderr=stderr,
+            workspace=ws.path, artifact=artifact,
+        )
+
+    # ─── command derivation ──────────────────────────────────────
+    def _command_sequence(self, task: Task, ws: TaskWorkspace) -> list[list[str]]:
+        """Map a local toolchain to the command(s) to run in the workspace.
+
+        cmake → configure + build (two commands, run in order);
+        make  → ``make`` (default target);
+        python3 → run the first ``.py`` in ``inputs`` with this interpreter.
+        """
+        tc = task.toolchain
+        if tc == "cmake":
+            return [
+                ["cmake", "-S", ".", "-B", CMAKE_BUILD_DIR],
+                ["cmake", "--build", CMAKE_BUILD_DIR],
+            ]
+        if tc == "make":
+            return [["make"]]
+        if tc == "python3":
+            return [[sys.executable, self._python_entry(task)]]
+        # Unreachable: run() already gated on LOCAL_TOOLCHAINS.
+        raise _LocalHandlerError(f"no command mapping for toolchain {tc!r}")
+
+    @staticmethod
+    def _python_entry(task: Task) -> str:
+        """The ``.py`` script a python3 task runs: first such entry in inputs.
+
+        No ``.py`` input → :class:`_LocalHandlerError` (the task FAILS) — we
+        do not guess an entry point.
+        """
+        for inp in task.inputs:
+            if inp.strip().endswith(".py"):
+                return inp.strip()
+        raise _LocalHandlerError(
+            "python3 toolchain requires a .py file in inputs to run"
+        )
+
+    # ─── result helper ───────────────────────────────────────────
+    @staticmethod
+    def _fail(
+        plan_id: int, task: Task, *,
+        workspace: Optional[Path], reason: str,
+        rc: Optional[int] = None, stdout: str = "", stderr: str = "",
+    ) -> LocalTaskResult:
+        logger.info(
+            "dag local handler: plan=%s task=%s toolchain=%s FAIL — %s",
+            plan_id, task.task_id, task.toolchain, reason,
+        )
+        return LocalTaskResult(
+            task_id=task.task_id, plan_id=plan_id, toolchain=task.toolchain,
+            status="failed", rc=rc, stdout=stdout, stderr=stderr,
+            workspace=workspace, reason=reason,
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Step recording + terminal wiring (OP-1659)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 (codex E5/E6). This slice closes the executor loop ON TOP of
+# the OP-1657 serial walk + OP-1658 local handlers:
+#
+#   * one IDEMPOTENT ``workflow.step`` per task, carrying ``dag_task_id``;
+#   * ALL tasks ok   -> set_status(plan,'completed') + workflow.finish(run,'completed');
+#   * ANY task fails -> set_status(plan,'failed')    + workflow.finish(run,'failed');
+#   * the executor OWNS per-plan workspace cleanup, AFTER the steps are recorded
+#     (so a task's artifact is recorded before its scratch is removed).
+#
+# Idempotent re-claim
+# -------------------
+# A plan already in a terminal state ('completed' / 'failed') was fully
+# recorded by a prior run — we short-circuit and touch nothing (no duplicate
+# steps, no illegal re-transition). A plan still 'executing' (a mid-flight
+# crash, then re-claim) is RESUMED: each task whose step is already *done* is
+# skipped (cache-hit, handler not re-run); a task with a prior *failed* step
+# is honoured as a failure (no retry); the rest run for the first time.
+#
+# MUST-NOT (ticket scope): no new export / billing / skills / retry /
+# side-effect behaviour. We only record per-task steps + terminal statuses
+# and clean the scratch. This function is NOT wired into :meth:`DagExecutor.run`'s
+# loop seam — like every prior slice it ships INERT (a still-gated phase calls
+# it after a lease is granted), which is the "merged inert" Go-Live contract.
+
+#: Plan statuses that mean "already fully recorded" — a re-claim of one of
+#: these is a no-op (re-transitioning out of them is illegal anyway).
+_TERMINAL_PLAN_STATUSES = frozenset({"completed", "failed"})
+
+#: Run-metadata marker stamped on every workflow_run the DAG executor
+#: finalizes (OP-1661). Executor runs newly surface as status='completed'
+#: once the executor lands; this marker is the signal
+#: :mod:`backend.finetune_export` uses to exclude them from the fine-tune
+#: corpus. ``finetune_export._EXECUTOR_RUN_MARKER`` MUST equal this string
+#: (a cross-module test asserts it) — they are kept as separate literals so
+#: the lightweight exporter need not import this module's heavy graph.
+EXECUTOR_RUN_METADATA_MARKER = "dag_executor_run"
+
+
+def dag_step_key(task_id: str) -> str:
+    """The ``workflow_steps.idempotency_key`` for a task: ``dag-task:{id}``.
+
+    Stable per (run, task) so a re-claim looks the recorded step back up by
+    the same key — that lookup is the "skip already-done" resume hinge.
+    """
+    return f"dag-task:{task_id}"
+
+
+@dataclass
+class PlanTerminalResult:
+    """Outcome of recording a plan's steps + wiring its terminal status.
+
+    ``status`` is the terminal plan/run status this invocation drove the plan
+    to (``"completed"`` / ``"failed"``); ``recorded`` is the ``dag_task_id``s
+    that have a step (newly recorded this invocation **or** skipped because
+    already done). ``results`` holds the :class:`LocalTaskResult` for tasks
+    actually run here (empty on a re-claim no-op). ``already_terminal`` is
+    True when the plan was found already in a terminal state and nothing ran.
+    """
+
+    plan_id: int
+    run_id: str
+    status: str                       # "completed" | "failed"
+    recorded: list[str] = field(default_factory=list)
+    results: list["LocalTaskResult"] = field(default_factory=list)
+    already_terminal: bool = False
+
+
+def _step_output(result: "LocalTaskResult") -> dict[str, Any]:
+    """The JSON-able step payload cached for an ok task (audit / replay)."""
+    return {
+        "toolchain": result.toolchain,
+        "rc": result.rc,
+        "artifact": str(result.artifact) if result.artifact is not None else None,
+        "status": result.status,
+    }
+
+
+def _cleanup_plan_workspaces(
+    handler: "LocalTaskHandler", results: list["LocalTaskResult"],
+) -> None:
+    """Best-effort removal of each task's scratch, AFTER steps are recorded.
+
+    Reuses the handler's :class:`PlanWorkspaceBuilder` so cleanup goes through
+    the same ``worker._rmtree`` path the rest of the module uses. A task that
+    failed a gate before any workspace was built (``workspace is None``) has
+    nothing to clean.
+    """
+    builder = getattr(handler, "workspace_builder", None)
+    for r in results:
+        if r.workspace is None:
+            continue
+        ws = TaskWorkspace(plan_id=r.plan_id, task_id=r.task_id, path=r.workspace)
+        if builder is not None:
+            builder.cleanup(ws)
+        else:  # pragma: no cover - handler always carries a builder
+            try:
+                worker._rmtree(r.workspace)
+            except OSError as exc:
+                logger.warning(
+                    "dag plan workspace cleanup failed for %s: %s",
+                    r.workspace, exc,
+                )
+
+
+async def record_and_finalize_plan(
+    plan: "dag_storage.StoredPlan",
+    *,
+    handler: "LocalTaskHandler",
+    workflow=None,
+    storage=None,
+    cleanup: bool = True,
+) -> PlanTerminalResult:
+    """Run ``plan``'s tasks, record one idempotent step each, wire the terminal
+    plan status + ``workflow.finish``, then clean each task's scratch.
+
+    The tasks are walked in :func:`topological_order` and run SERIALLY through
+    ``handler`` (OP-1658's local toolchain handler). For each task a single
+    idempotent ``workflow.record_dag_step`` is written carrying its
+    ``dag_task_id``. On the first failure the walk stops, the plan + run land
+    ``failed``; otherwise both land ``completed``. Workspace cleanup runs LAST,
+    after every step is durably recorded.
+
+    Idempotent re-claim: if ``plan`` is already terminal nothing runs (no-op);
+    if it is still ``executing`` (a mid-flight crash) already-done tasks are
+    skipped and a prior failed task is honoured without re-running.
+
+    ``workflow`` / ``storage`` default to :mod:`backend.workflow` /
+    :mod:`backend.dag_storage`; both are injectable so the wiring can be
+    exercised in-harness without a database.
+    """
+    wf = workflow if workflow is not None else _import_workflow()
+    ds = storage if storage is not None else dag_storage
+
+    run_id = plan.run_id
+    if not run_id:
+        raise ValueError(
+            f"plan {plan.id} has no run_id — cannot record steps / finish a run"
+        )
+    dag = plan.dag()
+
+    # ── idempotent re-claim: a terminal plan was already fully recorded ──
+    current = await ds.get_plan(plan.id)
+    if current.status in _TERMINAL_PLAN_STATUSES:
+        recorded = [
+            s.dag_task_id for s in await wf.list_steps(run_id) if s.dag_task_id
+        ]
+        logger.info(
+            "dag finalize: plan=%s already terminal (%s) — re-claim no-op",
+            plan.id, current.status,
+        )
+        return PlanTerminalResult(
+            plan_id=plan.id, run_id=run_id, status=current.status,
+            recorded=recorded, already_terminal=True,
+        )
+
+    order = topological_order(dag)
+    results: list[LocalTaskResult] = []
+    recorded: list[str] = []
+    all_ok = True
+    for task in order:
+        key = dag_step_key(task.task_id)
+        prior = await wf.get_step(run_id, key)
+        if prior is not None:
+            # Resume: this task already has a recorded outcome — honour it
+            # without re-running (no retry). Done == ok-skip; not-done == a
+            # prior failure that fails the whole plan.
+            recorded.append(task.task_id)
+            if prior.is_done:
+                logger.info(
+                    "dag finalize: plan=%s task=%s step already done — skip",
+                    plan.id, task.task_id,
+                )
+                continue
+            logger.info(
+                "dag finalize: plan=%s task=%s has a prior failed step — "
+                "plan fails (no retry)", plan.id, task.task_id,
+            )
+            all_ok = False
+            break
+
+        result = await handler.run(plan.id, task)
+        results.append(result)
+        if result.ok:
+            await wf.record_dag_step(
+                run_id, key, dag_task_id=task.task_id,
+                output=_step_output(result),
+            )
+            recorded.append(task.task_id)
+        else:
+            await wf.record_dag_step(
+                run_id, key, dag_task_id=task.task_id,
+                error=(result.reason or "task failed")[:512],
+            )
+            recorded.append(task.task_id)
+            all_ok = False
+            break  # stop the serial walk at the first failure
+
+    terminal = "completed" if all_ok else "failed"
+    # ── tag the run as executor-produced BEFORE finishing it, so the
+    #    'completed' row finetune_export sees already carries the marker
+    #    (OP-1661 — executor runs must not pollute the fine-tune corpus).
+    await _mark_executor_run(wf, run_id)
+    # ── terminal wiring: plan status first, then finish the run ──
+    await ds.set_status(plan.id, terminal)
+    await wf.finish(run_id, terminal)
+    logger.info(
+        "dag finalize: plan=%s run=%s -> %s (%d step(s) recorded)",
+        plan.id, run_id, terminal, len(recorded),
+    )
+
+    # ── own per-plan workspace cleanup, AFTER the steps are recorded ──
+    if cleanup:
+        _cleanup_plan_workspaces(handler, results)
+
+    return PlanTerminalResult(
+        plan_id=plan.id, run_id=run_id, status=terminal,
+        recorded=recorded, results=results,
+    )
+
+
+async def _mark_executor_run(workflow, run_id: str) -> None:
+    """Stamp :data:`EXECUTOR_RUN_METADATA_MARKER` into the run's metadata so
+    :mod:`backend.finetune_export` excludes it from the training corpus
+    (OP-1661).
+
+    Best-effort + idempotent: if the run already carries the marker we touch
+    nothing, and a transient optimistic-lock version race is re-read and
+    retried once. A failure here is logged but never blocks the terminal
+    wiring — the exporter's ``dag_task_id`` backstop keeps the run out of the
+    corpus even if this stamp is missed.
+    """
+    for _attempt in range(2):
+        run = await workflow.get_run(run_id)
+        if run is None:
+            return
+        md = getattr(run, "metadata", None) or {}
+        if md.get(EXECUTOR_RUN_METADATA_MARKER):
+            return  # already tagged (idempotent re-claim / prior attempt)
+        try:
+            await workflow.update_run_metadata(
+                run_id, run.version, {EXECUTOR_RUN_METADATA_MARKER: True},
+            )
+            return
+        except Exception as exc:  # VersionConflict or similar — re-read + retry
+            logger.debug(
+                "executor-run marker write retry for run=%s: %s", run_id, exc,
+            )
+    logger.warning(
+        "could not stamp executor-run marker on run=%s — relying on the "
+        "finetune_export dag_task_id backstop", run_id,
+    )
+
+
+def _import_workflow():
+    """Lazy import of :mod:`backend.workflow` (avoids a heavy import at module
+    load — workflow pulls in the db pool / billing surface)."""
+    from backend import workflow
+    return workflow
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Fail-closed side-effect guard (OP-1660)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 Dim 6 + codex E8. Modelled on :mod:`backend.env_contract`'s
+# fail-closed style: a gate the (still-gated) NONLOCAL task handlers MUST
+# call *before* performing an irreversible / outward-facing side effect —
+# pushing to Gerrit, publishing to a registry, opening an SSH session,
+# flashing hardware, or writing a prod database.
+#
+# Fail-closed contract — the side effect is REFUSED unless BOTH:
+#   1. ``OMNISIGHT_ENV`` canonicalises to ``"prod"``
+#      (reusing :func:`backend.env_contract.canonical_env`), AND
+#   2. the explicit per-capability allow flag ``OMNISIGHT_ALLOW_<CAPABILITY>``
+#      is truthy (reusing the same ``1/true/yes/on`` semantics as the
+#      env-DB contract via :func:`backend.env_contract._truthy`).
+# Anything else — dev/staging/unset env, a missing/false allow flag, or an
+# unrecognised capability — raises :class:`SideEffectBlocked`, aborting the
+# task BEFORE any network/action call is made.
+#
+# Unlike the env-DB contract there is deliberately NO test/CI carveout: the
+# whole point of this guard is that fake creds present on a dev/staging host
+# (or inside a test) can NEVER push. Tests exercise the *allowed* path by
+# passing ``env="prod"`` + setting the allow flag, never by bypassing.
+
+#: The guarded side-effect capabilities. Each names an irreversible /
+#: outward-facing action a future nonlocal handler could take.
+GERRIT_PUSH = "gerrit_push"
+REGISTRY_PUBLISH = "registry_publish"
+SSH = "ssh"
+HARDWARE_FLASH = "hardware_flash"
+PROD_DB_WRITE = "prod_db_write"
+
+SIDE_EFFECT_CAPABILITIES: frozenset[str] = frozenset({
+    GERRIT_PUSH, REGISTRY_PUBLISH, SSH, HARDWARE_FLASH, PROD_DB_WRITE,
+})
+
+#: Prefix of the explicit per-capability allow-flag env var. The full var
+#: is ``OMNISIGHT_ALLOW_<CAPABILITY-UPPERCASED>`` (e.g.
+#: ``OMNISIGHT_ALLOW_GERRIT_PUSH``).
+SIDE_EFFECT_ALLOW_PREFIX = "OMNISIGHT_ALLOW_"
+
+
+def allow_flag_env(capability: str) -> str:
+    """The env var that must be truthy (in prod) to permit ``capability``."""
+    return f"{SIDE_EFFECT_ALLOW_PREFIX}{capability.upper()}"
+
+
+class SideEffectBlocked(RuntimeError):
+    """Raised (fail-closed) when a guarded side effect is refused.
+
+    A task-level abort, NOT a process exit (contrast
+    :class:`backend.env_contract.EnvContractViolation`, which exits 78): it
+    propagates out of the handler so the scheduler fails that one task while
+    the executor keeps running. ``capability`` / ``env`` / ``source`` are
+    preserved as attributes for structured handling and assertions.
+    """
+
+    def __init__(
+        self, capability: str, *, source: str, env: str | None, reason: str,
+    ) -> None:
+        self.capability = capability
+        self.source = source
+        self.env = env
+        self.reason = reason
+        super().__init__(
+            f"side-effect {capability!r} blocked "
+            f"(source={source}, env={env!r}): {reason}"
+        )
+        logger.critical(
+            "SideEffectBlocked: capability=%s source=%s env=%r — %s",
+            capability, source, env, reason,
+        )
+
+
+def guard_side_effect(
+    capability: str, *, source: str, env: str | None = None,
+) -> None:
+    """Fail closed unless ``OMNISIGHT_ENV=prod`` AND the per-capability flag.
+
+    Call this BEFORE any network/action call. Returns ``None`` when the side
+    effect is permitted; otherwise raises :class:`SideEffectBlocked` (so the
+    guarded action never runs). ``source`` is a short call-site label for the
+    error/log message; ``env`` overrides ``OMNISIGHT_ENV`` (used by tests).
+    """
+    canon = canonical_env(
+        env if env is not None else os.environ.get("OMNISIGHT_ENV")
+    )
+
+    # Unknown capability → refuse (fail-closed on an unrecognised gate; a
+    # typo'd capability must never silently fall through to "allowed").
+    if capability not in SIDE_EFFECT_CAPABILITIES:
+        raise SideEffectBlocked(
+            capability, source=source, env=canon,
+            reason=(
+                "unknown side-effect capability — the guarded set is "
+                f"{sorted(SIDE_EFFECT_CAPABILITIES)}"
+            ),
+        )
+
+    # Gate 1: only a prod process may EVER perform a guarded side effect.
+    if canon != "prod":
+        raise SideEffectBlocked(
+            capability, source=source, env=canon,
+            reason=(
+                f"refused outside prod (OMNISIGHT_ENV={canon!r}) — a guarded "
+                "side effect requires OMNISIGHT_ENV=prod"
+            ),
+        )
+
+    # Gate 2: prod still needs the explicit per-capability allow flag.
+    flag = allow_flag_env(capability)
+    if not _truthy(os.environ.get(flag)):
+        raise SideEffectBlocked(
+            capability, source=source, env=canon,
+            reason=(
+                f"prod env but allow flag {flag} is not set — set {flag}=1 to "
+                "explicitly permit this capability"
+            ),
+        )
+
+    logger.warning(
+        "side-effect %s PERMITTED (source=%s, env=prod, %s set) — proceeding",
+        capability, source, flag,
+    )
+
+
+def perform_side_effect(
+    capability: str,
+    action: Callable[[], Any],
+    *,
+    source: str,
+    env: str | None = None,
+) -> Any:
+    """Guard, then run ``action`` (the network/side-effecting call).
+
+    ``action`` is a zero-arg callable invoked ONLY after
+    :func:`guard_side_effect` passes, so a blocked capability aborts the task
+    BEFORE any network call. Returns whatever ``action`` returns. This is the
+    seam a nonlocal handler wraps its real push/publish/flash call in.
+    """
+    guard_side_effect(capability, source=source, env=env)
+    return action()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  CLI entry-point
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _build_arg_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="python -m backend.dag_executor",
+        description=(
+            "OmniSight DAG executor (inert Phase-1 skeleton). No-op unless "
+            f"{ENABLE_ENV}=1."
+        ),
+    )
+    p.add_argument("--instance-id", default=None,
+                   help="override the auto-generated dag-exec-* instance id")
+    p.add_argument("--poll-interval-s", type=float,
+                   default=DEFAULT_POLL_INTERVAL_S)
+    p.add_argument("--heartbeat-interval-s", type=float,
+                   default=DEFAULT_HEARTBEAT_INTERVAL_S)
+    p.add_argument("--heartbeat-ttl-s", type=int,
+                   default=DEFAULT_HEARTBEAT_TTL_S)
+    p.add_argument("--max-ticks", type=int, default=None,
+                   help="stop after N ticks (tests / one-shot)")
+    p.add_argument("--log-level", default="INFO")
+    return p
+
+
+async def _run_main(executor: DagExecutor) -> int:
+    loop = asyncio.get_running_loop()
+    executor.install_signal_handlers(loop)
+    await executor.run()
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _build_arg_parser().parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, str(args.log_level).upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    )
+    cfg = DagExecutorConfig(
+        instance_id=args.instance_id or new_instance_id(),
+        poll_interval_s=args.poll_interval_s,
+        heartbeat_interval_s=args.heartbeat_interval_s,
+        heartbeat_ttl_s=args.heartbeat_ttl_s,
+        max_ticks=args.max_ticks,
+    )
+    executor = DagExecutor(cfg)
+    return asyncio.run(_run_main(executor))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())
+
+
+__all__ = [
+    "ENABLE_ENV",
+    "DAG_EXEC_INSTANCE_PREFIX",
+    "DAG_EXEC_HEARTBEAT_PREFIX",
+    "DEFAULT_POLL_INTERVAL_S",
+    "DEFAULT_HEARTBEAT_INTERVAL_S",
+    "DEFAULT_HEARTBEAT_TTL_S",
+    "DEFAULT_LEASE_TTL_S",
+    "DagExecHeartbeat",
+    "DagExecutor",
+    "DagExecutorConfig",
+    "DagExecutorResult",
+    "CycleError",
+    "PlanRunResult",
+    "PlanWorkspaceBuilder",
+    "SerialPlanScheduler",
+    "TaskHandler",
+    "TaskRun",
+    "TaskWorkspace",
+    "LOCAL_TOOLCHAINS",
+    "LOCAL_TIER",
+    "DEFAULT_TASK_TIMEOUT_S",
+    "CMAKE_BUILD_DIR",
+    "LocalTaskHandler",
+    "LocalTaskResult",
+    "PlanTerminalResult",
+    "EXECUTOR_RUN_METADATA_MARKER",
+    "dag_step_key",
+    "record_and_finalize_plan",
+    "GERRIT_PUSH",
+    "REGISTRY_PUBLISH",
+    "SSH",
+    "HARDWARE_FLASH",
+    "PROD_DB_WRITE",
+    "SIDE_EFFECT_CAPABILITIES",
+    "SIDE_EFFECT_ALLOW_PREFIX",
+    "allow_flag_env",
+    "guard_side_effect",
+    "perform_side_effect",
+    "SideEffectBlocked",
+    "ensure_dag_exec_namespace",
+    "is_enabled",
+    "main",
+    "new_instance_id",
+    "topological_order",
+]
+
+exec
+/bin/bash -lc "sed -n '1,260p' backend/tests/test_dag_executor_terminal.py" in /home/user/work/sora/OmniSight-Productizer
+ exited 2 in 0ms:
+sed: can't read backend/tests/test_dag_executor_terminal.py: No such file or directory
+
+exec
+/bin/bash -lc "sed -n '1,320p' backend/tests/test_dag_executor.py" in /home/user/work/sora/OmniSight-Productizer
+ exited 2 in 0ms:
+sed: can't read backend/tests/test_dag_executor.py: No such file or directory
+
+exec
+/bin/bash -lc "sed -n '1,260p' docs/architecture/2026-05-24-dag-executor-followups-draft.md" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+# DAG Executor — P1-9b first-run follow-ups (DRAFT for codex → blind-test → file)
+
+**Status**: DRAFT v1 (2026-05-24). Pipeline: codex audit → revise → runner blind-test → file → runner fixes → **re-verify P1-9b**.
+**Why**: the P1-9b first real run (engine works — 185 tests + a real cmake build — but the smoke
+path can't complete) found 3 gaps. See `docs/architecture/2026-05-24-dag-execution-engine-epic-design.md` §7
++ the [[feedback_epic_decomposition_sop]] blind-spot lesson. scope:`dag-executor`. class:subscription-claude.
+
+## The 3 gaps (empirically confirmed)
+- **A — smoke DAG payload bug**: `compile` task has `inputs:[]` → `PlanWorkspaceBuilder` copies no
+  source into the scratch → cmake rc=1 → never `completed`. (Proven: inputs=[] FAIL, inputs=[src] ok.)
+- **B — run-loop seam unwired**: `DagExecutor.run()` is heartbeat-only ("SKELETON … no task
+  execution", placeholder at the loop seam). The components (claim/scheduler/handlers/
+  `record_and_finalize_plan`) exist but nothing assembles them into the live loop — no ticket owned this.
+- **C — stale dev image**: dev stack runs `v0.5.0` (pre-executor). NOT needed for source-based P1-9b
+  verification → deferred (rides the next release), filed as HOLD so it's tracked.
+
+---
+
+## F1 `[OP][dag-executor] smoke DAG: declare compile/run-test inputs + ship a buildable fixture`
+- type:bug · tier:M · area:tests,devops,backend · agent:auto · capability:enable=gerrit_push
+- **Goal**: make the smoke DAG actually buildable. (1) ship a tiny committed fixture — a minimal CMake
+  project (`CMakeLists.txt` + `main.c` that builds `firmware.bin`) + a `run_test.py` that consumes
+  `build/firmware.bin` and writes `logs/test.log`; (2) update the smoke DAG so `compile` declares
+  `inputs:["CMakeLists.txt","main.c"]` (or the fixture's files) and `run-test` declares
+  `inputs:["build/firmware.bin","run_test.py"]` + runs `run_test.py`; (3) **add the opt-in flag
+  `metadata.dag_executor_opt_in: true` to the smoke DAG submission** (the per-run half of F2's safety
+  gate). **Files**: `scripts/prod_smoke_test.py` (DAG def + submit metadata, lines ~72-99) + a NEW
+  fixture dir **`backend/dag_smoke_fixture/`** (`CMakeLists.txt`, `main.c`, `run_test.py` — the runtime
+  fixture `OMNISIGHT_DAG_PROJECT_ROOT` points at; NOT under `test_assets/`). **Spec**: this doc gap A.
+- AC — **Code**: fixture builds locally (`cmake` produces `firmware.bin`; `run_test.py` reads it,
+  writes `logs/test.log`); smoke DAG inputs declared. **Deploy**: ships in repo. **Integration**: a
+  test runs the smoke DAG's two tasks through the real `LocalTaskHandler` with project_root=fixture →
+  both `ok`, artifacts present. **Exercised**: `compile` no longer fails on an empty workspace.
+  **Go-Live**: merged.
+- **MUST NOT**: change the executor engine, `PlanWorkspaceBuilder`, or the handler internals; this is
+  payload + fixture only. Do NOT touch `prod_smoke_test.py` orchestration/CLI/poll/auth. NOT `test_assets/`.
+
+## F2 `[OP][dag-executor] wire DagExecutor.run() loop seam: claim → execute → finalize`
+- type:feature · tier:M · area:backend,tests · agent:auto · capability:enable=gerrit_push
+- blockedBy: F1. **Goal**: assemble the EXISTING components into the live loop — at the placeholder
+  seam in `DagExecutor.run()`, when armed: claim ONE ready `executing` plan (the P1-2 lease `acquire`),
+  bind `PlanWorkspaceBuilder(project_root=Path(os.environ["OMNISIGHT_DAG_PROJECT_ROOT"]))` — **skip
+  execution if that env is unset** — call `record_and_finalize_plan(plan, handler=…)`, then
+  release/renew the lease. Stay **disabled-by-default**. **Dual opt-in gate (codex): execute a plan
+  ONLY when BOTH** `dag_id ∈ OMNISIGHT_DAG_EXECUTOR_ALLOW_DAG_IDS` (env — the deployment kill-boundary)
+  **AND** the run's `metadata.dag_executor_opt_in is true` (F1 sets this) — so stale/bootstrap
+  `executing` rows are never auto-run. **Files**: `backend/dag_executor.py` (`run()` seam only) +
+  tests. **Spec**: this doc gap B + design §7 codex "smallest honest slice".
+  **Discovery (pinned, blind-test):** there is no status-keyed plan query — discover via the existing
+  `dag_storage.list_plans(dag_id)` iterated over the env-allowlist dag_ids (pick the first `executing`
+  per id). Do NOT add a `list_executing_plans()`/status index (that's reimplementing storage). **Lease
+  (pinned):** acquire→execute→release one plan per tick; a build outliving the ~45s lease TTL is an
+  ACCEPTED limitation for the fast smoke MVP — do NOT build a background lease-renewer (deferred follow-up).
+- AC — **Code**: `run()` drives one claimed+opt-in plan per tick through the existing
+  `record_and_finalize_plan`; lease acquired before + released after; `OMNISIGHT_DAG_PROJECT_ROOT`
+  bound (skip if unset); dual opt-in gate + enable-flag honored; no-op when disabled. **Deploy**:
+  backend image, default OFF. **Integration**: in-harness double (mirror `test_dag_executor_terminal.py`)
+  — an armed loop claims a seeded opt-in executing plan and drives it to `completed`; a plan missing
+  EITHER the env-allowlist OR the metadata opt-in is left untouched; unset project_root → skip.
+  **Exercised**: end-to-end — a submitted smoke DAG (F1 fixture, opt-in) reaches `completed` via the
+  loop (local). **Go-Live**: merged, executor still default-OFF.
+- **MUST NOT** *(codex-exact)*: *reimplement claim, scheduling, handlers, step recording, or terminal
+  transitions; only wire the existing lease helpers, `LocalTaskHandler`/`PlanWorkspaceBuilder`, and
+  `record_and_finalize_plan()` at the `DagExecutor.run()` seam. MUST NOT enable execution by default,
+  MUST NOT execute plans unless both the env DAG-id allowlist and per-run metadata opt-in are present,
+  and MUST NOT add promotion, timer, staging, registry, SSH, hardware, or nonlocal side-effect automation.*
+
+## F3 `[HOLD][dag-executor] rebuild dev backend image from develop (containerized executor)`
+- type:feature · tier:X · area:devops · NOT agent:auto. blockedBy: F2.
+- **Goal**: once F1+F2 land, bake the executor into a dev backend image (build from develop, push to
+  the dev registry, bump `deploy/dev/.env` `OMNISIGHT_IMAGE_TAG`) so the executor can run AS the dev
+  compose service (P1-9a stanza). **DEFERRED** — P1-9b is verifiable from develop *source* against the
+  dev DB without this; the containerized path rides the next release image. Tracked as HOLD.
+
+---
+
+## Dependency + re-verify
+`F1 → F2 → (re-verify P1-9b from source against the dev DB) ; F2 → F3 (HOLD)`. After F1+F2 merge:
+run the wired executor from a develop checkout against the dev postgres (`omnisight_dev`@58432,
+`OMNISIGHT_ENV=dev`), submit the smoke DAG, confirm `completed` <300s + 2 steps + artifacts. That
+closes P1-9b. F3 (containerize) is the later "persistent dev service" item.
+
+## Open questions for codex
+1. **`project_root` resolution (F2)** — for the smoke DAG it's the F1 fixture dir; for a general DAG
+   it's a real project checkout. Where should the loop get it: an env (`OMNISIGHT_DAG_PROJECT_ROOT`),
+   plan metadata, or a per-DAG registry? Pick the minimal-honest one for the smoke MVP without
+   over-building the general case.
+2. **Granularity** — is F1+F2 the right split, or should the fixture (F1) fold into F2's integration
+   test? (Leaning split: F1 is payload/fixture, F2 is loop glue — distinct, F1 unblocks F2's e2e AC.)
+3. **Opt-in allowlist (F2)** — how does the loop know a plan is "opt-in" to execute (so prod/bootstrap
+   inert plans are never auto-run)? A plan-metadata flag? An env allowlist of dag_ids? This is the
+   safety boundary that keeps F2 from turning every `executing` plan live.
+4. **Is F2 runner-safe** or does the assembly + project_root design need to be operator/Claude-owned?
+   (It's the integration-glue gap the SOP now warns about — the blind-test should stress it for drift.)
+
+codex
+The local checkout doesn’t have the two test files at those paths, so I’m pulling them from `gerrit-sora/develop` too. The validator already shows a dep-closure rule, but I’m checking executor ranges before deciding where the staging state should live.
+exec
+/bin/bash -lc 'git show gerrit-sora/develop:backend/tests/test_dag_executor_terminal.py' in /home/user/work/sora/OmniSight-Productizer
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_executor.py | sed -n '520,940p'" in /home/user/work/sora/OmniSight-Productizer
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_executor.py | sed -n '1060,1235p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+"""OP-1659 — step recording + terminal wiring (completed/failed + finish).
+
+Covers the acceptance criteria for the slice that closes the executor loop
+(design doc §7, codex E5/E6):
+
+  * Code — terminal transitions correct (all ok -> 'completed', any failure
+    -> 'failed', plan-status BEFORE run-finish) + idempotent re-claim skips
+    already-done steps (and is a full no-op once the plan is terminal);
+  * Integration (local) — a 2-task smoke run reaches 'completed' with 2
+    recorded steps; a forced task failure lands 'failed';
+  * Exercised — an in-harness ``prod_smoke_test``-style poll of the workflow
+    store sees status='completed' + the recorded steps;
+  * the executor OWNS per-plan workspace cleanup, AFTER steps are recorded.
+
+These run LOCALLY with an in-memory double for ``backend.workflow`` /
+``backend.dag_storage`` (no DB, no Docker, no host state outside ``tmp_path``).
+The double mirrors the real contract: a UNIQUE ``(run_id, idempotency_key)``
+step log, ``StepRecord.is_done`` semantics, and the real
+``dag_storage._ALLOWED_TRANSITIONS`` state-machine for ``set_status`` — so a
+drift in the real transition table fails these too. A separate test asserts
+the real ``workflow`` exposes the imperative recorder the executor calls, so
+the in-memory double can never mask a real-API drift.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pytest
+
+from backend import dag_executor as dx
+from backend import dag_storage as ds
+from backend.dag_schema import DAG, Task
+from backend.workflow import StepRecord
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  In-memory doubles for workflow + dag_storage (mirror the real contract)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class FakeWorkflow:
+    """In-memory stand-in for the subset of ``backend.workflow`` the executor
+    calls: ``get_step`` / ``record_dag_step`` / ``list_steps`` / ``finish``.
+
+    The step log enforces the real UNIQUE ``(run_id, idempotency_key)``
+    invariant and reuses the real :class:`StepRecord` (so ``is_done`` is the
+    real property), and ``record_dag_step`` reproduces the real "skip a
+    done step" idempotency.
+    """
+
+    def __init__(self) -> None:
+        self.steps: dict[tuple[str, str], StepRecord] = {}
+        self.runs: dict[str, dict] = {}
+        self.finishes: list[tuple[str, str]] = []
+        self._n = 0
+
+    def seed_run(self, run_id, *, metadata=None, version=0):
+        """Pre-create a run row (as workflow.start would) so the executor's
+        marker write (OP-1661) has something to read + update."""
+        self.runs[run_id] = {
+            "status": "running", "completed_at": None,
+            "metadata": dict(metadata or {}), "version": version,
+        }
+
+    async def get_run(self, run_id):
+        r = self.runs.get(run_id)
+        if r is None:
+            return None
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            id=run_id, status=r.get("status", "running"),
+            metadata=dict(r.get("metadata", {})), version=r.get("version", 0),
+        )
+
+    async def update_run_metadata(self, run_id, expected_version, metadata):
+        r = self.runs.setdefault(
+            run_id,
+            {"status": "running", "completed_at": None,
+             "metadata": {}, "version": 0},
+        )
+        if r.get("version", 0) != expected_version:
+            raise RuntimeError("version conflict")  # mirrors VersionConflict
+        r["metadata"] = {**r.get("metadata", {}), **metadata}
+        r["version"] = r.get("version", 0) + 1
+        return r["version"]
+
+    async def get_step(self, run_id, key):
+        return self.steps.get((run_id, key))
+
+    async def list_steps(self, run_id):
+        return [s for (r, _), s in self.steps.items() if r == run_id]
+
+    async def record_dag_step(self, run_id, key, *, dag_task_id=None,
+                              output=None, error=None):
+        existing = self.steps.get((run_id, key))
+        if existing and existing.is_done:
+            return existing  # skip-done idempotency
+        if existing is not None:
+            return existing  # UNIQUE collision read-back (no rewrite)
+        self._n += 1
+        now = time.time()
+        rec = StepRecord(
+            id=f"step-{self._n}", run_id=run_id, idempotency_key=key,
+            started_at=now, completed_at=now, output=output, error=error,
+            dag_task_id=dag_task_id,
+        )
+        self.steps[(run_id, key)] = rec
+        return rec
+
+    async def finish(self, run_id, status="completed", expected_version=None):
+        self.finishes.append((run_id, status))
+        self.runs.setdefault(run_id, {})
+        self.runs[run_id]["status"] = status
+        self.runs[run_id]["completed_at"] = time.time()
+
+
+class _FakePlan:
+    def __init__(self, plan_id, status):
+        self.id = plan_id
+        self.status = status
+
+
+class FakeStorage:
+    """In-memory ``dag_storage`` double. ``set_status`` is validated against
+    the REAL ``_ALLOWED_TRANSITIONS`` table so a transition the production
+    state-machine forbids raises here too."""
+
+    def __init__(self, plans: dict[int, str]):
+        self.plans = dict(plans)  # plan_id -> status
+        self.transitions: list[tuple[int, str, str]] = []
+
+    async def get_plan(self, plan_id, conn=None):
+        return _FakePlan(plan_id, self.plans[plan_id])
+
+    async def set_status(self, plan_id, new_status, *, run_id=None, conn=None):
+        cur = self.plans[plan_id]
+        if new_status not in ds._ALLOWED_TRANSITIONS[cur]:
+            raise ValueError(f"illegal transition {cur!r} -> {new_status!r}")
+        self.transitions.append((plan_id, cur, new_status))
+        self.plans[plan_id] = new_status
+        return _FakePlan(plan_id, new_status)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Fixtures / helpers (all under tmp_path — never test_assets/)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _task(task_id, *, toolchain="make", tier="t1", inputs=None,
+          output=None, depends_on=None) -> Task:
+    return Task(
+        task_id=task_id, description=f"task {task_id}",
+        required_tier=tier, toolchain=toolchain,
+        expected_output=output or f"out/{task_id}",
+        inputs=inputs or [], depends_on=depends_on or [],
+    )
+
+
+def _smoke_dag() -> DAG:
+    """The 2-task smoke: compile -> test (test depends on compile)."""
+    return DAG(dag_id="smoke", tasks=[
+        _task("compile", output="out/compile"),
+        _task("test", depends_on=["compile"], output="out/test"),
+    ])
+
+
+def _stored_plan(dag: DAG, *, plan_id=500, run_id="wf-smoke",
+                 status="executing") -> ds.StoredPlan:
+    return ds.StoredPlan(
+        id=plan_id, dag_id=dag.dag_id, run_id=run_id, parent_plan_id=None,
+        json_body=dag.model_dump_json(), status=status, mutation_round=0,
+        validation_errors=None, created_at=0.0, updated_at=0.0,
+    )
+
+
+def _handler(tmp_path, *, runner) -> dx.LocalTaskHandler:
+    builder = dx.PlanWorkspaceBuilder(workdir_root=tmp_path / "wd")
+    return dx.LocalTaskHandler(workspace_builder=builder, runner=runner)
+
+
+def _producing_runner(*relpaths):
+    """A fake runner that 'succeeds' and writes each given artifact path so
+    the handler's expected_output check passes."""
+    def run(argv, cwd, timeout_s):
+        for rel in relpaths:
+            p = Path(cwd) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("artifact")
+        return 0, "ok\n", ""
+    return run
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Pure-unit (no handler) — key + terminal semantics
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def test_dag_step_key_is_stable_and_namespaced():
+    assert dx.dag_step_key("compile") == "dag-task:compile"
+    # stable: same task -> same key (the re-claim lookup hinge)
+    assert dx.dag_step_key("compile") == dx.dag_step_key("compile")
+
+
+def test_real_workflow_exposes_imperative_recorder():
+    # The in-memory double must not mask a real-API drift: the executor calls
+    # these exact names on backend.workflow.
+    from backend import workflow as wf
+    assert callable(wf.get_step)
+    assert callable(wf.record_dag_step)
+    assert callable(wf.finish)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: Integration (local) — smoke run reaches 'completed' with 2 steps
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_smoke_run_completes_with_two_recorded_steps(tmp_path):
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile", "out/test"))
+
+    res = await dx.record_and_finalize_plan(
+        plan, handler=handler, workflow=wf, storage=storage,
+    )
+
+    assert res.status == "completed"
+    assert res.recorded == ["compile", "test"]
+    # plan transitioned executing -> completed; run finished completed
+    assert storage.plans[plan.id] == "completed"
+    assert storage.transitions == [(plan.id, "executing", "completed")]
+    assert wf.finishes == [("wf-smoke", "completed")]
+    # exactly 2 steps recorded, each carrying its dag_task_id, all done
+    steps = await wf.list_steps("wf-smoke")
+    assert len(steps) == 2
+    assert {s.dag_task_id for s in steps} == {"compile", "test"}
+    assert all(s.is_done for s in steps)
+
+
+async def test_step_carries_dag_task_id_and_output(tmp_path):
+    dag = DAG(dag_id="one", tasks=[_task("compile", output="out/compile")])
+    plan = _stored_plan(dag, run_id="wf-1")
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile"))
+
+    await dx.record_and_finalize_plan(plan, handler=handler,
+                                      workflow=wf, storage=storage)
+
+    step = (await wf.list_steps("wf-1"))[0]
+    assert step.dag_task_id == "compile"
+    assert step.output["toolchain"] == "make"
+    assert step.output["status"] == "ok"
+    assert step.output["rc"] == 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: Integration (local) — a forced task failure lands 'failed'
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_forced_failure_lands_failed(tmp_path):
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+
+    def boom(argv, cwd, timeout_s):
+        return 2, "", "boom\n"  # first task fails rc=2
+
+    handler = _handler(tmp_path, runner=boom)
+    res = await dx.record_and_finalize_plan(
+        plan, handler=handler, workflow=wf, storage=storage,
+    )
+
+    assert res.status == "failed"
+    assert storage.plans[plan.id] == "failed"
+    assert storage.transitions == [(plan.id, "executing", "failed")]
+    assert wf.finishes == [("wf-smoke", "failed")]
+    # the serial walk stops at the first failure: only 'compile' recorded,
+    # 'test' (downstream) never ran
+    steps = await wf.list_steps("wf-smoke")
+    assert [s.dag_task_id for s in steps] == ["compile"]
+    failed = steps[0]
+    assert not failed.is_done and "rc=2" in (failed.error or "")
+
+
+async def test_failed_gate_task_lands_failed_without_workspace(tmp_path):
+    # A gate failure (unknown toolchain) fails before any workspace is built —
+    # still a clean 'failed' terminal, nothing to clean.
+    dag = DAG(dag_id="bad", tasks=[_task("x", toolchain="flash_board")])
+    plan = _stored_plan(dag, run_id="wf-bad")
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner())
+
+    res = await dx.record_and_finalize_plan(plan, handler=handler,
+                                            workflow=wf, storage=storage)
+    assert res.status == "failed"
+    assert storage.plans[plan.id] == "failed"
+    assert res.results[0].workspace is None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: Code — idempotent re-claim skips already-done steps / is a no-op
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_reclaim_of_completed_plan_is_noop(tmp_path):
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    runs = {"n": 0}
+
+    def counting(argv, cwd, timeout_s):
+        runs["n"] += 1
+        for rel in ("out/compile", "out/test"):
+            p = Path(cwd) / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("a")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=counting)
+
+    first = await dx.record_and_finalize_plan(plan, handler=handler,
+                                              workflow=wf, storage=storage)
+    assert first.status == "completed" and not first.already_terminal
+    invocations_after_first = runs["n"]
+    finishes_after_first = list(wf.finishes)
+
+    # Re-claim the now-completed plan: must be a no-op — no extra handler runs,
+    # no duplicate steps, no second finish, no illegal re-transition.
+    second = await dx.record_and_finalize_plan(
+        _stored_plan(dag, status="completed"),  # plan row now reads completed
+        handler=handler, workflow=wf, storage=storage,
+    )
+    assert second.already_terminal is True
+    assert second.status == "completed"
+    assert sorted(second.recorded) == ["compile", "test"]
+    assert runs["n"] == invocations_after_first  # handler not re-invoked
+    assert wf.finishes == finishes_after_first    # no second finish
+    assert len(await wf.list_steps("wf-smoke")) == 2  # no duplicate steps
+
+
+async def test_reclaim_resumes_skipping_done_steps(tmp_path):
+    # Mid-flight crash: 'compile' already recorded done, plan still executing.
+    # Re-claim resumes: 'compile' is skipped (handler not called for it),
+    # 'test' runs for the first time, plan completes.
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    # pre-seed a DONE step for compile (as a prior, crashed invocation would)
+    await wf.record_dag_step("wf-smoke", dx.dag_step_key("compile"),
+                             dag_task_id="compile", output={"status": "ok"})
+    storage = FakeStorage({plan.id: "executing"})
+
+    ran: list[str] = []
+
+    def record(argv, cwd, timeout_s):
+        # workspace dir basename encodes plan_id-task_id
+        ran.append(Path(cwd).name)
+        (Path(cwd) / "out").mkdir(parents=True, exist_ok=True)
+        (Path(cwd) / "out" / "test").write_text("a")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=record)
+    res = await dx.record_and_finalize_plan(plan, handler=handler,
+                                            workflow=wf, storage=storage)
+
+    assert res.status == "completed"
+    assert res.recorded == ["compile", "test"]  # both accounted for
+    # only 'test' actually ran a process this invocation
+    assert ran == ["500-test"]
+    assert storage.plans[plan.id] == "completed"
+    assert len(await wf.list_steps("wf-smoke")) == 2
+
+
+async def test_reclaim_honours_prior_failed_step_without_retry(tmp_path):
+    # A prior failed step (plan still executing — crash before set_status) is
+    # honoured as a failure on re-claim; the task is NOT re-run (no retry).
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    await wf.record_dag_step("wf-smoke", dx.dag_step_key("compile"),
+                             dag_task_id="compile", error="boom")
+    storage = FakeStorage({plan.id: "executing"})
+
+    ran = {"n": 0}
+
+    def counting(argv, cwd, timeout_s):
+        ran["n"] += 1
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=counting)
+    res = await dx.record_and_finalize_plan(plan, handler=handler,
+                                            workflow=wf, storage=storage)
+    assert res.status == "failed"
+    assert ran["n"] == 0          # the failed task was not re-run
+    assert storage.plans[plan.id] == "failed"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: own per-plan workspace cleanup AFTER steps are recorded
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_workspaces_cleaned_after_recording(tmp_path):
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile", "out/test"))
+
+    res = await dx.record_and_finalize_plan(plan, handler=handler,
+                                            workflow=wf, storage=storage)
+
+    assert res.status == "completed"
+    # cleanup default on -> each task's scratch is gone, but its step is durable
+    assert all(r.workspace is not None and not r.workspace.exists()
+               for r in res.results)
+    assert len(await wf.list_steps("wf-smoke")) == 2
+
+
+async def test_cleanup_can_be_disabled(tmp_path):
+    dag = DAG(dag_id="one", tasks=[_task("compile", output="out/compile")])
+    plan = _stored_plan(dag, run_id="wf-keep")
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile"))
+
+    res = await dx.record_and_finalize_plan(plan, handler=handler, workflow=wf,
+                                            storage=storage, cleanup=False)
+    assert res.results[0].workspace.is_dir()  # scratch preserved
+
+
+async def test_missing_run_id_raises(tmp_path):
+    dag = _smoke_dag()
+    plan = _stored_plan(dag, run_id=None)
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner())
+    with pytest.raises(ValueError, match="no run_id"):
+        await dx.record_and_finalize_plan(plan, handler=handler,
+                                          workflow=wf, storage=storage)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: Exercised — in-harness prod_smoke_test-style poll
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_prod_smoke_style_poll_sees_completed_and_steps(tmp_path):
+    # Mirror a prod_smoke_test poll: drive the plan, then "poll" the workflow
+    # store (the read surface a smoke test would hit) and assert it observes a
+    # completed run carrying the recorded steps.
+    dag = _smoke_dag()
+    plan = _stored_plan(dag, run_id="wf-poll")
+    wf = FakeWorkflow()
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile", "out/test"))
+
+    await dx.record_and_finalize_plan(plan, handler=handler,
+                                      workflow=wf, storage=storage)
+
+    # poll: run status + step count, as a smoke harness would
+    assert wf.runs["wf-poll"]["status"] == "completed"
+    polled = await wf.list_steps("wf-poll")
+    assert sorted(s.dag_task_id for s in polled) == ["compile", "test"]
+    assert all(s.is_done for s in polled)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-1661 — executor runs are tagged so finetune_export excludes them
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_finalize_stamps_executor_run_marker(tmp_path):
+    dag = _smoke_dag()
+    plan = _stored_plan(dag)
+    wf = FakeWorkflow()
+    wf.seed_run("wf-smoke")  # run exists, as workflow.start would have created it
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile", "out/test"))
+
+    res = await dx.record_and_finalize_plan(
+        plan, handler=handler, workflow=wf, storage=storage,
+    )
+
+    assert res.status == "completed"
+    assert wf.runs["wf-smoke"]["metadata"][dx.EXECUTOR_RUN_METADATA_MARKER] is True
+
+
+async def test_finalize_marks_failed_run_too(tmp_path):
+    """A failed executor run is tagged as well — it surfaces in workflow_runs
+    and the marker is the durable 'executor-produced' signal regardless of
+    terminal status."""
+    dag = _smoke_dag()
+    plan = _stored_plan(dag, run_id="wf-fail")
+    wf = FakeWorkflow()
+    wf.seed_run("wf-fail")
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=lambda *a: (2, "", "boom\n"))
+
+    res = await dx.record_and_finalize_plan(
+        plan, handler=handler, workflow=wf, storage=storage,
+    )
+    assert res.status == "failed"
+    assert wf.runs["wf-fail"]["metadata"][dx.EXECUTOR_RUN_METADATA_MARKER] is True
+
+
+async def test_marker_write_is_idempotent(tmp_path):
+    """A run already carrying the marker is left untouched (no version bump /
+    no duplicate write) — covers the re-claim / retry path."""
+    dag = DAG(dag_id="one", tasks=[_task("compile", output="out/compile")])
+    plan = _stored_plan(dag, run_id="wf-pre")
+    wf = FakeWorkflow()
+    wf.seed_run("wf-pre", metadata={dx.EXECUTOR_RUN_METADATA_MARKER: True},
+                version=7)
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile"))
+
+    await dx.record_and_finalize_plan(plan, handler=handler,
+                                      workflow=wf, storage=storage)
+    # marker still set, and version untouched (no needless update)
+    assert wf.runs["wf-pre"]["metadata"][dx.EXECUTOR_RUN_METADATA_MARKER] is True
+    assert wf.runs["wf-pre"]["version"] == 7
+
+
+async def test_finalize_survives_missing_run_for_marker(tmp_path):
+    """If get_run returns None (run row absent), marker stamping is a no-op and
+    finalize still completes — the exporter's dag_task_id backstop covers it."""
+    dag = DAG(dag_id="one", tasks=[_task("compile", output="out/compile")])
+    plan = _stored_plan(dag, run_id="wf-norun")
+    wf = FakeWorkflow()  # NOT seeded → get_run("wf-norun") is None
+    storage = FakeStorage({plan.id: "executing"})
+    handler = _handler(tmp_path, runner=_producing_runner("out/compile"))
+
+    res = await dx.record_and_finalize_plan(plan, handler=handler,
+                                            workflow=wf, storage=storage)
+    assert res.status == "completed"  # finalize unaffected by the missing run
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Go-Live: merged inert — finalize is NOT wired into run()'s loop seam
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def test_finalize_not_called_from_run_loop():
+    import inspect
+    src = inspect.getsource(dx.DagExecutor.run)
+    assert "record_and_finalize_plan" not in src
+    assert "LocalTaskHandler" not in src
+
+ succeeded in 0ms:
+#: Run-metadata marker stamped on every workflow_run the DAG executor
+#: finalizes (OP-1661). Executor runs newly surface as status='completed'
+#: once the executor lands; this marker is the signal
+#: :mod:`backend.finetune_export` uses to exclude them from the fine-tune
+#: corpus. ``finetune_export._EXECUTOR_RUN_MARKER`` MUST equal this string
+#: (a cross-module test asserts it) — they are kept as separate literals so
+#: the lightweight exporter need not import this module's heavy graph.
+EXECUTOR_RUN_METADATA_MARKER = "dag_executor_run"
+
+
+def dag_step_key(task_id: str) -> str:
+    """The ``workflow_steps.idempotency_key`` for a task: ``dag-task:{id}``.
+
+    Stable per (run, task) so a re-claim looks the recorded step back up by
+    the same key — that lookup is the "skip already-done" resume hinge.
+    """
+    return f"dag-task:{task_id}"
+
+
+@dataclass
+class PlanTerminalResult:
+    """Outcome of recording a plan's steps + wiring its terminal status.
+
+    ``status`` is the terminal plan/run status this invocation drove the plan
+    to (``"completed"`` / ``"failed"``); ``recorded`` is the ``dag_task_id``s
+    that have a step (newly recorded this invocation **or** skipped because
+    already done). ``results`` holds the :class:`LocalTaskResult` for tasks
+    actually run here (empty on a re-claim no-op). ``already_terminal`` is
+    True when the plan was found already in a terminal state and nothing ran.
+    """
+
+    plan_id: int
+    run_id: str
+    status: str                       # "completed" | "failed"
+    recorded: list[str] = field(default_factory=list)
+    results: list["LocalTaskResult"] = field(default_factory=list)
+    already_terminal: bool = False
+
+
+def _step_output(result: "LocalTaskResult") -> dict[str, Any]:
+    """The JSON-able step payload cached for an ok task (audit / replay)."""
+    return {
+        "toolchain": result.toolchain,
+        "rc": result.rc,
+        "artifact": str(result.artifact) if result.artifact is not None else None,
+        "status": result.status,
+    }
+
+
+def _cleanup_plan_workspaces(
+    handler: "LocalTaskHandler", results: list["LocalTaskResult"],
+) -> None:
+    """Best-effort removal of each task's scratch, AFTER steps are recorded.
+
+    Reuses the handler's :class:`PlanWorkspaceBuilder` so cleanup goes through
+    the same ``worker._rmtree`` path the rest of the module uses. A task that
+    failed a gate before any workspace was built (``workspace is None``) has
+    nothing to clean.
+    """
+    builder = getattr(handler, "workspace_builder", None)
+    for r in results:
+        if r.workspace is None:
+            continue
+        ws = TaskWorkspace(plan_id=r.plan_id, task_id=r.task_id, path=r.workspace)
+        if builder is not None:
+            builder.cleanup(ws)
+        else:  # pragma: no cover - handler always carries a builder
+            try:
+                worker._rmtree(r.workspace)
+            except OSError as exc:
+                logger.warning(
+                    "dag plan workspace cleanup failed for %s: %s",
+                    r.workspace, exc,
+                )
+
+
+async def record_and_finalize_plan(
+    plan: "dag_storage.StoredPlan",
+    *,
+    handler: "LocalTaskHandler",
+    workflow=None,
+    storage=None,
+    cleanup: bool = True,
+) -> PlanTerminalResult:
+    """Run ``plan``'s tasks, record one idempotent step each, wire the terminal
+    plan status + ``workflow.finish``, then clean each task's scratch.
+
+    The tasks are walked in :func:`topological_order` and run SERIALLY through
+    ``handler`` (OP-1658's local toolchain handler). For each task a single
+    idempotent ``workflow.record_dag_step`` is written carrying its
+    ``dag_task_id``. On the first failure the walk stops, the plan + run land
+    ``failed``; otherwise both land ``completed``. Workspace cleanup runs LAST,
+    after every step is durably recorded.
+
+    Idempotent re-claim: if ``plan`` is already terminal nothing runs (no-op);
+    if it is still ``executing`` (a mid-flight crash) already-done tasks are
+    skipped and a prior failed task is honoured without re-running.
+
+    ``workflow`` / ``storage`` default to :mod:`backend.workflow` /
+    :mod:`backend.dag_storage`; both are injectable so the wiring can be
+    exercised in-harness without a database.
+    """
+    wf = workflow if workflow is not None else _import_workflow()
+    ds = storage if storage is not None else dag_storage
+
+    run_id = plan.run_id
+    if not run_id:
+        raise ValueError(
+            f"plan {plan.id} has no run_id — cannot record steps / finish a run"
+        )
+    dag = plan.dag()
+
+    # ── idempotent re-claim: a terminal plan was already fully recorded ──
+    current = await ds.get_plan(plan.id)
+    if current.status in _TERMINAL_PLAN_STATUSES:
+        recorded = [
+            s.dag_task_id for s in await wf.list_steps(run_id) if s.dag_task_id
+        ]
+        logger.info(
+            "dag finalize: plan=%s already terminal (%s) — re-claim no-op",
+            plan.id, current.status,
+        )
+        return PlanTerminalResult(
+            plan_id=plan.id, run_id=run_id, status=current.status,
+            recorded=recorded, already_terminal=True,
+        )
+
+    order = topological_order(dag)
+    results: list[LocalTaskResult] = []
+    recorded: list[str] = []
+    all_ok = True
+    for task in order:
+        key = dag_step_key(task.task_id)
+        prior = await wf.get_step(run_id, key)
+        if prior is not None:
+            # Resume: this task already has a recorded outcome — honour it
+            # without re-running (no retry). Done == ok-skip; not-done == a
+            # prior failure that fails the whole plan.
+            recorded.append(task.task_id)
+            if prior.is_done:
+                logger.info(
+                    "dag finalize: plan=%s task=%s step already done — skip",
+                    plan.id, task.task_id,
+                )
+                continue
+            logger.info(
+                "dag finalize: plan=%s task=%s has a prior failed step — "
+                "plan fails (no retry)", plan.id, task.task_id,
+            )
+            all_ok = False
+            break
+
+        result = await handler.run(plan.id, task)
+        results.append(result)
+        if result.ok:
+            await wf.record_dag_step(
+                run_id, key, dag_task_id=task.task_id,
+                output=_step_output(result),
+            )
+            recorded.append(task.task_id)
+        else:
+            await wf.record_dag_step(
+                run_id, key, dag_task_id=task.task_id,
+                error=(result.reason or "task failed")[:512],
+            )
+            recorded.append(task.task_id)
+            all_ok = False
+            break  # stop the serial walk at the first failure
+
+    terminal = "completed" if all_ok else "failed"
+    # ── tag the run as executor-produced BEFORE finishing it, so the
+    #    'completed' row finetune_export sees already carries the marker
+    #    (OP-1661 — executor runs must not pollute the fine-tune corpus).
+    await _mark_executor_run(wf, run_id)
+    # ── terminal wiring: plan status first, then finish the run ──
+    await ds.set_status(plan.id, terminal)
+
+ succeeded in 0ms:
+    out: list[Task] = []
+    while ready:
+        n = ready.pop(0)
+        out.append(by_id[n])
+        newly: list[str] = []
+        for nxt in edges[n]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                newly.append(nxt)
+        if newly:
+            ready.extend(newly)
+            ready.sort(key=order_index.__getitem__)
+
+    if len(out) != len(dag.tasks):
+        unresolved = sorted(n for n, k in indeg.items() if k > 0)
+        raise CycleError(
+            f"cyclic dependency reached scheduler in dag {dag.dag_id!r}; "
+            f"{len(unresolved)} task(s) unresolved: {unresolved[:10]}"
+        )
+    return out
+
+
+@dataclass
+class TaskWorkspace:
+    """A prepared per-(plan, task) workspace directory.
+
+    ``path`` follows the ``workdir_root/{plan_id}-{task_id}`` convention.
+    ``copied`` lists the project-relative paths materialised from the task's
+    ``inputs`` globs (empty when no project root is bound).
+    """
+
+    plan_id: int
+    task_id: str
+    path: Path
+    copied: list[str] = field(default_factory=list)
+
+
+class PlanWorkspaceBuilder:
+    """Thin per-(plan, task) workspace helper for the serial scheduler.
+
+    Reuses :mod:`backend.worker`'s module-level ``_rmtree`` / ``_copytree`` /
+    ``_copyfile`` / ``_resolve_glob`` to materialise a fresh workspace at
+    ``workdir_root/{plan_id}-{task_id}`` and copy in the files matched by the
+    task's ``inputs`` globs (project-root jailed via ``_resolve_glob``).
+
+    It deliberately does **NOT** call :meth:`LocalSandboxRuntime.start`: that
+    path is TaskCard / git-coupled (the path-b worker flow) and would need a
+    fake ``PROJECT-NUMBER`` jira_ticket + a CATC card. The serial scheduler
+    only needs the thin "copy allowed inputs into a jailed workdir" behaviour,
+    which is exactly the low-level helpers, minus the git/TaskCard coupling.
+    """
+
+    def __init__(
+        self,
+        *,
+        workdir_root: Path | None = None,
+        project_root: Path | None = None,
+    ) -> None:
+        # Distinct default subtree from the worker's ``_sandboxes`` so a
+        # dag-exec plan workspace ({plan_id}-{task_id}) never collides with a
+        # worker sandbox ({worker_id}-{task_id}) under a shared workdir root.
+        self._root = Path(
+            workdir_root
+            or os.environ.get("OMNISIGHT_DAG_WORKDIR")
+            or Path.cwd() / ".artifacts" / "dag_workspaces"
+        )
+        self._project_root = Path(project_root) if project_root is not None else None
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def prepare(self, plan_id: int, task: Task) -> TaskWorkspace:
+        """Create ``workdir_root/{plan_id}-{task_id}`` and copy in inputs."""
+        ws = self._root / f"{plan_id}-{task.task_id}"
+        if ws.exists():
+            worker._rmtree(ws)
+        ws.mkdir(parents=True, exist_ok=True)
+
+        copied: list[str] = []
+        if self._project_root is not None:
+            for glob in task.inputs:
+                for src in worker._resolve_glob(self._project_root, glob):
+                    rel = src.relative_to(self._project_root)
+                    dst = ws / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if src.is_dir():
+                        worker._copytree(src, dst)
+                    else:
+                        worker._copyfile(src, dst)
+                    copied.append(str(rel))
+        return TaskWorkspace(
+            plan_id=plan_id, task_id=task.task_id, path=ws, copied=copied,
+        )
+
+    def cleanup(self, ws: TaskWorkspace) -> None:
+        """Remove a prepared workspace (best-effort, mirrors sandbox.stop)."""
+        try:
+            worker._rmtree(ws.path)
+        except OSError as exc:
+            logger.warning(
+                "dag plan workspace cleanup failed for %s: %s", ws.path, exc,
+            )
+
+
+@dataclass
+class TaskRun:
+    """The scheduler's per-task ordering record.
+
+    ``order_index`` is the 0-based position the task occupied in the serial
+    walk — the load-bearing "ordering state later tickets need". ``status``
+    is ``"ran"`` under the default no-op handler; real terminal states land
+    in a later phase.
+    """
+
+    task_id: str
+    order_index: int
+    workspace: Optional[Path] = None
+    status: str = "ran"
+
+
+@dataclass
+class PlanRunResult:
+    """Outcome of one serial topological walk of a plan."""
+
+    plan_id: int
+    dag_id: str
+    order: list[str]  # task_ids in execution order
+    runs: list[TaskRun] = field(default_factory=list)
+
+
+#: A task handler runs one task inside its prepared workspace. The default
+#: (:func:`_noop_task_handler`) does nothing — the scheduler ships inert and a
+#: later ticket injects the real dispatcher here. ``workspace`` is ``None``
+#: when the scheduler runs without a :class:`PlanWorkspaceBuilder`.
+TaskHandler = Callable[[Task, Optional[TaskWorkspace]], Awaitable[Any]]
+
+
+async def _noop_task_handler(task: Task, workspace: Optional[TaskWorkspace]) -> None:
+    """Default handler: record-ordering only, no execution (inert merge)."""
+    logger.debug("dag scheduler: ordered task %s (no-op handler)", task.task_id)
+    return None
+
+
+class SerialPlanScheduler:
+    """Drive a claimed plan by walking its DAG in dependency order, serially.
+
+    Construction is cheap and side-effect-free; :meth:`run_plan` does the
+    walk. Execution is strictly **serial** — each task's handler is awaited to
+    completion before the next task starts (no ``gather`` / no concurrency, an
+    explicit MUST-NOT for this ticket). Tasks are emitted in the deterministic
+    :func:`topological_order`.
+
+    The default ``task_handler`` is a no-op, so a default-constructed scheduler
+    only computes + records ordering — which is what lets OP-1657 merge inert.
+    Later tickets inject a real handler (and a :class:`PlanWorkspaceBuilder`)
+    without changing the ordering contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace_builder: PlanWorkspaceBuilder | None = None,
+        task_handler: TaskHandler | None = None,
+    ) -> None:
+        self.workspace_builder = workspace_builder
+        self.task_handler = task_handler or _noop_task_handler
+
+    async def run_plan(
+        self, plan_id: int, dag: DAG, *, cleanup: bool = False,
+    ) -> PlanRunResult:
+        """Walk ``dag`` in topological order, running each task serially.
+
+        For each task, in dependency order: optionally prepare its workspace
+        (when a builder is bound), await the handler, then record the
+        ordering. ``cleanup=True`` removes each workspace after its handler
+        returns (handy for tests / disk-tight hosts); the default keeps them.
+        """
+        order = topological_order(dag)
+        result = PlanRunResult(
+            plan_id=plan_id, dag_id=dag.dag_id,
+            order=[t.task_id for t in order],
+        )
+        logger.info(
+            "dag scheduler: plan=%s dag=%s order=%s (serial, %d task(s))",
+            plan_id, dag.dag_id, result.order, len(order),
+        )
+        for idx, task in enumerate(order):
+            ws: Optional[TaskWorkspace] = None
+            if self.workspace_builder is not None:
+                ws = self.workspace_builder.prepare(plan_id, task)
+            try:
+                await self.task_handler(task, ws)
+            finally:
+                if ws is not None and cleanup and self.workspace_builder is not None:
+                    self.workspace_builder.cleanup(ws)
+            result.runs.append(TaskRun(
+                task_id=task.task_id, order_index=idx,
+                workspace=(ws.path if ws is not None else None),
+            ))
+        return result
+
+    async def run_stored_plan(
+        self, plan: "dag_storage.StoredPlan", *, cleanup: bool = False,
+    ) -> PlanRunResult:
+        """Convenience: walk a claimed :class:`~backend.dag_storage.StoredPlan`.
+
+        Re-hydrates the DAG from the stored JSON and forwards to
+        :meth:`run_plan`. This is the shape the (still-gated) executor seam
+        will call after :meth:`DagExecutor.claim_plan` grants the lease.
+        """
+        return await self.run_plan(plan.id, plan.dag(), cleanup=cleanup)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Local task handlers (cmake / make / python3) — OP-1658
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 (codex Q7). This slice gives the serial scheduler a REAL
+# task handler for the three **local** toolchains — and ONLY those three.
+# Each task runs in its own per-plan scratch workspace
+# (``workdir_root/{plan_id}-{task_id}`` via :class:`PlanWorkspaceBuilder`,
+# materialised from ``Task.inputs`` using worker.py's low-level helpers —
+# NOT ``LocalSandboxRuntime.start`` which is TaskCard/git-coupled). We
+# capture the process ``rc`` + ``stdout``/``stderr`` and the artifact that
+# landed at the task's ``expected_output``.
+#
+# Fail-closed scope rules (each FAILS the task — never crashes):
+#   * a non-``t1`` ``required_tier`` (``networked`` / ``t3``) — out of this
+#     local-only slice;
+#   * an unknown / non-local ``toolchain`` (anything but cmake/make/python3);
+#   * an ``expected_output`` that escapes the workspace;
+#   * the toolchain exiting non-zero, or not producing the artifact.
+#
+# Workspace lifecycle: the handler CREATES + RETURNS the workspace on the
+# result; the CALLER (a later step-recording / terminal ticket) owns
+# cleanup so the artifact can be read first. We never delete it here. The
+# fail-closed side-effect guard for nonlocal toolchains beyond "just FAIL"
+# is a SEPARATE ticket's job.
+
+#: Toolchains this local slice knows how to run. Anything else FAILS the
+#: task (not a crash) — per the ticket MUST-NOT (no cross-compile / flash /
+#: remote / publish here).
+LOCAL_TOOLCHAINS: tuple[str, ...] = ("cmake", "make", "python3")
+
+#: The only tier this slice executes. ``networked`` / ``t3`` tasks FAIL as
+#: out-of-slice rather than running on the local host.
+LOCAL_TIER = "t1"
+
+#: Per-task subprocess wall-clock budget (seconds). Mirrors the
+#: ``build_adapters._run`` default; injectable per-handler for tests.
+DEFAULT_TASK_TIMEOUT_S = 600
+
+#: Sub-directory cmake configures + builds into, relative to the workspace.
+CMAKE_BUILD_DIR = "build"
+
+
+class _LocalHandlerError(Exception):
+    """Internal — a pre-flight handler problem that FAILS the task.
+
+    Used for prepare-time conditions (e.g. a ``python3`` task with no ``.py``
+    input) so :meth:`LocalTaskHandler.run` can translate them into a FAILED
+    :class:`LocalTaskResult` instead of raising out of the handler.
+    """
+
+
+@dataclass
+class LocalTaskResult:
+    """Outcome of running one task through a local toolchain handler.
+
+    ``status`` is ``"ok"`` only when the toolchain exited 0 **and** the
+    declared artifact landed at ``expected_output`` inside the workspace;
+    otherwise ``"failed"`` with a human-readable ``reason``. ``workspace``
+    is the scratch dir the handler created (``None`` only when the task
+    FAILED a gate before any workspace was built) — the caller owns its
+    cleanup. ``artifact`` is the resolved ``expected_output`` path when it
+    was produced, else ``None``.
+    """
+
+    task_id: str
+    plan_id: int
+    toolchain: str
+    status: str                       # "ok" | "failed"
+    rc: Optional[int] = None
+    stdout: str = ""
+    stderr: str = ""
+    workspace: Optional[Path] = None
+    artifact: Optional[Path] = None
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+def _run_local(
+    argv: list[str], cwd: Path, timeout_s: float,
+) -> tuple[int, str, str]:
+    """Run one local command in ``cwd``; return ``(rc, stdout, stderr)``.
+
+    Never raises: a missing binary maps to rc 127 and a timeout to rc 124
+    (mirroring :func:`backend.build_adapters._run`) so the handler can fold
+    either into a FAILED task rather than an exception.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(cwd), capture_output=True, text=True,
+            timeout=timeout_s, check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, (exc.stdout or ""), f"timeout after {timeout_s}s"
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+
+
+def _resolve_expected_output(workspace: Path, expected_output: str) -> Path:
+    """Resolve a workspace-relative ``expected_output`` inside ``workspace``.
+
+    ``expected_output`` is workspace-relative by contract. An absolute path,
+    a ``..`` segment, or anything that resolves outside the workspace raises
+    :class:`ValueError` — the caller turns that into a FAILED task (a path
+    escaping the workspace must never let a task read/write outside its
+    jail). Mirrors the jail check in :func:`backend.worker._resolve_glob`.
+    """
+    rel = (expected_output or "").strip()
+    p = Path(rel)
+    if not rel or p.is_absolute() or any(part == ".." for part in p.parts):
+        raise ValueError(
+            f"expected_output {expected_output!r} escapes the workspace"
+        )
+    candidate = workspace / rel
+    try:
+        candidate.resolve().relative_to(workspace.resolve())
+    except (ValueError, OSError):
+        raise ValueError(
+            f"expected_output {expected_output!r} escapes the workspace"
+        )
+    return candidate
+
+
+class LocalTaskHandler:
+    """Toolchain → handler dispatch for the three **local** toolchains.
+
+    Construct with a :class:`PlanWorkspaceBuilder` (the per-plan scratch
+    bridge) and call :meth:`run` per task. The handler:
+
+      1. gates on ``required_tier == "t1"`` and a known local ``toolchain``
+         (else FAIL — not a crash);
+      2. prepares + RETURNS a fresh ``{plan_id}-{task_id}`` workspace
+         (materialised from ``Task.inputs``);
+      3. runs the toolchain's command sequence serially in that workspace,
+         capturing ``rc`` / ``stdout`` / ``stderr``;
+      4. resolves the workspace-relative ``expected_output`` (escape → FAIL)
+         and requires it to exist for ``status == "ok"``.
+
+    It never cleans the workspace up — the caller owns that so artifacts can
+    be read first.
+
+    ``runner`` is injectable (``(argv, cwd, timeout_s) -> (rc, out, err)``)
+    so unit tests can exercise the dispatch / gating / artifact logic
+    without spawning real ``cmake`` / ``make`` processes.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace_builder: "PlanWorkspaceBuilder",
+        timeout_s: float = DEFAULT_TASK_TIMEOUT_S,
+        runner: Callable[[list[str], Path, float], tuple[int, str, str]]
+        | None = None,
+    ) -> None:
+        self.workspace_builder = workspace_builder
+        self.timeout_s = timeout_s
+        self._runner = runner or _run_local
+
+    # ─── public API ──────────────────────────────────────────────
+    async def run(self, plan_id: int, task: Task) -> LocalTaskResult:
+        """Run ``task`` locally for ``plan_id``; return a result, never raise."""
+        # ── gate 1: tier (this slice is t1/local only) ─────────────
+        if task.required_tier != LOCAL_TIER:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"required_tier {task.required_tier!r} is not local "
+                    f"({LOCAL_TIER}-only slice — networked/t3 out of slice)"
+                ),
+            )
+        # ── gate 2: known local toolchain ─────────────────────────
+        if task.toolchain not in LOCAL_TOOLCHAINS:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"unknown/nonlocal toolchain {task.toolchain!r} "
+                    f"(local handlers: {', '.join(LOCAL_TOOLCHAINS)})"
+                ),
+            )
+
+        # ── build the per-plan scratch workspace (handler owns creation) ──
+        ws = self.workspace_builder.prepare(plan_id, task)
+
+        try:
+            commands = self._command_sequence(task, ws)
+        except _LocalHandlerError as exc:
+            return self._fail(plan_id, task, workspace=ws.path, reason=str(exc))
+
+        # ── run the command sequence serially; stop at first non-zero ──
+        rc = 0
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+        for argv in commands:
+            rc, out, err = await asyncio.to_thread(
+                self._runner, argv, ws.path, self.timeout_s,
+            )
+            out_parts.append(out)
+            err_parts.append(err)
+            if rc != 0:
+                break
+        stdout = "".join(out_parts)
+        stderr = "".join(err_parts)
+
+        if rc != 0:
+
+exec
+/bin/bash -lc 'git show gerrit-sora/develop:backend/tests/test_dag_executor.py' in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+"""OP-1658 — local task handlers (cmake / make / python3) in scratch.
+
+Covers the acceptance criteria for the toolchain → handler dispatch slice
+(design doc §7, codex Q7):
+
+  * Code — three local handlers (cmake / make / python3); per-plan workspace
+    isolation; an unknown / non-local toolchain (and a non-``t1`` tier)
+    FAILS the task instead of crashing; an ``expected_output`` escaping the
+    workspace FAILS;
+  * Integration — a real ``cmake`` compile and a real ``python3`` step run in
+    a scratch workspace and produce the declared artifact (local);
+  * Exercised — the ``compile`` → ``run-test`` smoke runs end-to-end locally,
+    in dependency order, each task in its own per-plan scratch.
+
+Everything is local-only: no DB, no Docker, no Gerrit, no host state outside
+the test's ``tmp_path``. Fixtures live in a test-local tmp dir — NEVER
+``test_assets/`` (read-only ground truth per CLAUDE.md).
+"""
+
+from __future__ import annotations
+
+import shutil
+import sys
+from pathlib import Path
+
+import pytest
+
+from backend import dag_executor as dx
+from backend.dag_schema import DAG, Task
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Helpers / fixtures (all under tmp_path — never test_assets/)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _task(
+    task_id: str, *, toolchain: str = "cmake", tier: str = "t1",
+    inputs=None, output: str | None = None, depends_on=None,
+) -> Task:
+    return Task(
+        task_id=task_id,
+        description=f"task {task_id}",
+        required_tier=tier,
+        toolchain=toolchain,
+        expected_output=output or f"build/{task_id}",
+        inputs=inputs or [],
+        depends_on=depends_on or [],
+    )
+
+
+def _handler(tmp_path: Path, *, project: Path | None = None, **kw) -> dx.LocalTaskHandler:
+    builder = dx.PlanWorkspaceBuilder(
+        workdir_root=tmp_path / "wd", project_root=project,
+    )
+    return dx.LocalTaskHandler(workspace_builder=builder, **kw)
+
+
+def _ok_runner(argv, cwd, timeout_s):
+    """A fake runner that 'succeeds' without spawning a real process."""
+    return 0, f"ran {argv}\n", ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: unknown / non-local toolchain -> FAIL (not a crash)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_unknown_toolchain_fails_not_crash(tmp_path):
+    handler = _handler(tmp_path)
+    res = await handler.run(1, _task("t", toolchain="flash_board"))
+    assert res.status == "failed" and not res.ok
+    assert "flash_board" in res.reason
+    # gate fired before any workspace was built — nothing for the caller to clean
+    assert res.workspace is None
+    assert res.rc is None
+
+
+@pytest.mark.parametrize("tier", ["networked", "t3"])
+async def test_nonlocal_tier_fails(tmp_path, tier):
+    handler = _handler(tmp_path)
+    res = await handler.run(1, _task("t", toolchain="cmake", tier=tier))
+    assert res.status == "failed"
+    assert tier in res.reason and "t1" in res.reason
+    assert res.workspace is None
+
+
+async def test_known_local_toolchains_are_exactly_three():
+    assert set(dx.LOCAL_TOOLCHAINS) == {"cmake", "make", "python3"}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: expected_output escaping the workspace -> FAIL
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@pytest.mark.parametrize("bad", ["../escape.bin", "/etc/passwd", "a/../../x"])
+async def test_expected_output_escape_fails(tmp_path, bad):
+    # Injected runner 'succeeds' so we reach the artifact-resolution gate.
+    handler = _handler(tmp_path, runner=_ok_runner)
+    res = await handler.run(1, _task("t", toolchain="make", output=bad))
+    assert res.status == "failed"
+    assert "escape" in res.reason.lower() or "workspace" in res.reason.lower()
+    # the workspace WAS created (gate is post-prepare) so the caller can clean it
+    assert res.workspace is not None and res.workspace.is_dir()
+
+
+def test_resolve_expected_output_jail(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    assert dx._resolve_expected_output(ws, "build/app") == ws / "build" / "app"
+    for bad in ["../x", "/abs", "a/../../b", ""]:
+        with pytest.raises(ValueError):
+            dx._resolve_expected_output(ws, bad)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: per-plan workspace isolation + lifecycle (handler creates, no cleanup)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def test_per_plan_workspace_isolation(tmp_path):
+    # Same task_id in two different plans must land in distinct scratch dirs.
+    seen: list[Path] = []
+
+    def capture(argv, cwd, timeout_s):
+        seen.append(Path(cwd))
+        # produce the declared artifact so the task is "ok"
+        (Path(cwd) / "build").mkdir(parents=True, exist_ok=True)
+        (Path(cwd) / "build" / "shared").write_text("x")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=capture)
+    r1 = await handler.run(11, _task("shared", toolchain="make", output="build/shared"))
+    r2 = await handler.run(22, _task("shared", toolchain="make", output="build/shared"))
+
+    assert r1.ok and r2.ok
+    assert r1.workspace == tmp_path / "wd" / "11-shared"
+    assert r2.workspace == tmp_path / "wd" / "22-shared"
+    assert r1.workspace != r2.workspace
+    assert seen == [r1.workspace, r2.workspace]
+
+
+async def test_handler_does_not_clean_up_workspace(tmp_path):
+    # Lifecycle: the handler returns the workspace; the CALLER owns cleanup,
+    # so the scratch (and its artifact) must survive after run() returns.
+    def produce(argv, cwd, timeout_s):
+        (Path(cwd) / "out.bin").write_text("artifact")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=produce)
+    res = await handler.run(7, _task("t", toolchain="make", output="out.bin"))
+    assert res.ok
+    assert res.workspace.is_dir()
+    assert res.artifact == res.workspace / "out.bin"
+    assert res.artifact.read_text() == "artifact"
+
+
+async def test_nonzero_rc_fails_and_captures_output(tmp_path):
+    def boom(argv, cwd, timeout_s):
+        return 2, "partial stdout\n", "boom stderr\n"
+
+    handler = _handler(tmp_path, runner=boom)
+    res = await handler.run(1, _task("t", toolchain="make", output="x"))
+    assert res.status == "failed"
+    assert res.rc == 2
+    assert "partial stdout" in res.stdout
+    assert "boom stderr" in res.stderr
+    assert "rc=2" in res.reason
+
+
+async def test_rc_zero_but_artifact_missing_fails(tmp_path):
+    handler = _handler(tmp_path, runner=_ok_runner)  # succeeds, writes nothing
+    res = await handler.run(1, _task("t", toolchain="make", output="never_made"))
+    assert res.status == "failed"
+    assert res.rc == 0
+    assert "not produced" in res.reason
+
+
+async def test_cmake_runs_configure_then_build_in_order(tmp_path):
+    calls: list[list[str]] = []
+
+    def record(argv, cwd, timeout_s):
+        calls.append(argv)
+        # materialise the artifact on the build step
+        (Path(cwd) / dx.CMAKE_BUILD_DIR).mkdir(parents=True, exist_ok=True)
+        (Path(cwd) / "build" / "app").write_text("bin")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=record)
+    res = await handler.run(1, _task("c", toolchain="cmake", output="build/app"))
+    assert res.ok
+    assert calls == [
+        ["cmake", "-S", ".", "-B", dx.CMAKE_BUILD_DIR],
+        ["cmake", "--build", dx.CMAKE_BUILD_DIR],
+    ]
+
+
+async def test_python3_requires_py_input(tmp_path):
+    handler = _handler(tmp_path, runner=_ok_runner)
+    res = await handler.run(1, _task("t", toolchain="python3", inputs=[], output="x"))
+    assert res.status == "failed"
+    assert ".py" in res.reason
+    # the prepare-time failure still built (and returned) the workspace
+    assert res.workspace is not None
+
+
+async def test_python3_uses_first_py_input(tmp_path):
+    captured: list[list[str]] = []
+
+    def record(argv, cwd, timeout_s):
+        captured.append(argv)
+        (Path(cwd) / "r.txt").write_text("ok")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=record)
+    res = await handler.run(
+        1, _task("t", toolchain="python3",
+                 inputs=["data.bin", "run.py", "other.py"], output="r.txt"),
+    )
+    assert res.ok
+    assert captured == [[sys.executable, "run.py"]]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: Integration — a real cmake compile produces the declared artifact
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+_HAS_CMAKE = shutil.which("cmake") is not None
+_HAS_CC = any(shutil.which(c) for c in ("cc", "gcc", "clang"))
+_HAS_MAKE = shutil.which("make") is not None
+
+
+def _cmake_project(root: Path) -> None:
+    """A minimal C project cmake can configure + build into ``build/hello``."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.10)\n"
+        "project(hello C)\n"
+        "add_executable(hello hello.c)\n"
+        "set_target_properties(hello PROPERTIES\n"
+        "  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})\n"
+    )
+    (root / "hello.c").write_text(
+        '#include <stdio.h>\nint main(void){printf("hi\\n");return 0;}\n'
+    )
+
+
+@pytest.mark.skipif(not (_HAS_CMAKE and _HAS_CC), reason="cmake + C compiler required")
+async def test_integration_real_cmake_compile(tmp_path):
+    project = tmp_path / "proj"
+    _cmake_project(project)
+    handler = _handler(tmp_path, project=project)
+    task = _task(
+        "compile", toolchain="cmake",
+        inputs=["CMakeLists.txt", "hello.c"], output="build/hello",
+    )
+    res = await handler.run(100, task)
+    assert res.ok, f"cmake failed: rc={res.rc} reason={res.reason}\n{res.stderr}"
+    assert res.rc == 0
+    assert res.artifact == res.workspace / "build" / "hello"
+    assert res.artifact.exists()
+
+
+@pytest.mark.skipif(not _HAS_MAKE, reason="make required")
+async def test_integration_real_make(tmp_path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    # A Makefile whose default target writes the declared artifact.
+    (project / "Makefile").write_text(
+        "all:\n\tmkdir -p out\n\techo built > out/lib.txt\n"
+    )
+    handler = _handler(tmp_path, project=project)
+    res = await handler.run(
+        101, _task("build", toolchain="make", inputs=["Makefile"], output="out/lib.txt"),
+    )
+    assert res.ok, f"make failed: rc={res.rc} reason={res.reason}\n{res.stderr}"
+    assert res.artifact.read_text().strip() == "built"
+
+
+@pytest.mark.skipif(not _HAS_CMAKE or not _HAS_CC, reason="cmake + C compiler required")
+async def test_integration_python3_test_step(tmp_path):
+    project = tmp_path / "proj"
+    project.mkdir()
+    (project / "run_tests.py").write_text(
+        "from pathlib import Path\n"
+        "Path('report.txt').write_text('PASS')\n"
+    )
+    handler = _handler(tmp_path, project=project)
+    res = await handler.run(
+        102, _task("test", toolchain="python3",
+                   inputs=["run_tests.py"], output="report.txt"),
+    )
+    assert res.ok, f"python3 step failed: rc={res.rc} reason={res.reason}\n{res.stderr}"
+    assert res.artifact.read_text() == "PASS"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AC: Exercised — compile -> run-test smoke, end-to-end, in dep order
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@pytest.mark.skipif(not (_HAS_CMAKE and _HAS_CC), reason="cmake + C compiler required")
+async def test_smoke_compile_then_test_end_to_end(tmp_path):
+    project = tmp_path / "proj"
+    _cmake_project(project)
+    (project / "run_tests.py").write_text(
+        "from pathlib import Path\n"
+        "Path('test-report.txt').write_text('1 passed')\n"
+    )
+    dag = DAG(dag_id="smoke", tasks=[
+        _task("compile", toolchain="cmake",
+              inputs=["CMakeLists.txt", "hello.c"], output="build/hello"),
+        _task("run-test", toolchain="python3", depends_on=["compile"],
+              inputs=["run_tests.py"], output="test-report.txt"),
+    ])
+    handler = _handler(tmp_path, project=project)
+
+    # Drive the two tasks in dependency order (the scheduler's contract),
+    # each in its own per-plan scratch workspace.
+    results: dict[str, dx.LocalTaskResult] = {}
+    for task in dx.topological_order(dag):
+        results[task.task_id] = await handler.run(plan_id=500, task=task)
+
+    assert [tid for tid in results] == ["compile", "run-test"]
+    assert results["compile"].ok
+    assert results["compile"].artifact.exists()
+    assert results["run-test"].ok
+    assert results["run-test"].artifact.read_text() == "1 passed"
+    # distinct scratch per task under the {plan_id}-{task_id} convention
+    assert results["compile"].workspace == tmp_path / "wd" / "500-compile"
+    assert results["run-test"].workspace == tmp_path / "wd" / "500-run-test"
+
+exec
+/bin/bash -lc 'git branch --show-current && git status --short' in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+develop
+?? audit/promotion-predicates/
+?? docs/architecture/2026-05-24-dag-execution-engine-epic-design.md
+?? docs/architecture/2026-05-24-dag-executor-followups-draft.md
+?? docs/architecture/2026-05-24-dag-executor-ticket-filing-draft.md
+?? docs/audit/codex-reviews/dag-engine-epic-design-codex-2026-05-24.txt
+?? docs/audit/codex-reviews/dag-epic-impact-audit-codex-2026-05-24.txt
+?? docs/audit/codex-reviews/dag-execution-engine-audit-codex-2026-05-24.txt
+?? docs/audit/codex-reviews/dag-followups-draft-codex-2026-05-24.txt
+?? docs/audit/codex-reviews/dag-ticket-filing-draft-codex-2026-05-24.txt
+?? docs/audit/codex-reviews/f4-inter-task-artifacts-codex-2026-05-24.txt
+?? docs/operations/2026-05-23-v0.5.0-cosign-tlog-leak-incident.md
+?? docs/operations/2026-05-23-v0.5.0-rc6-release-plan.md
+?? docs/sop/epic-decomposition-and-ticket-filing-sop.md
+
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_executor.py | sed -n '900,1065p'" in /home/user/work/sora/OmniSight-Productizer
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_validator.py | nl -ba | sed -n '235,285p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"required_tier {task.required_tier!r} is not local "
+                    f"({LOCAL_TIER}-only slice — networked/t3 out of slice)"
+                ),
+            )
+        # ── gate 2: known local toolchain ─────────────────────────
+        if task.toolchain not in LOCAL_TOOLCHAINS:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"unknown/nonlocal toolchain {task.toolchain!r} "
+                    f"(local handlers: {', '.join(LOCAL_TOOLCHAINS)})"
+                ),
+            )
+
+        # ── build the per-plan scratch workspace (handler owns creation) ──
+        ws = self.workspace_builder.prepare(plan_id, task)
+
+        try:
+            commands = self._command_sequence(task, ws)
+        except _LocalHandlerError as exc:
+            return self._fail(plan_id, task, workspace=ws.path, reason=str(exc))
+
+        # ── run the command sequence serially; stop at first non-zero ──
+        rc = 0
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+        for argv in commands:
+            rc, out, err = await asyncio.to_thread(
+                self._runner, argv, ws.path, self.timeout_s,
+            )
+            out_parts.append(out)
+            err_parts.append(err)
+            if rc != 0:
+                break
+        stdout = "".join(out_parts)
+        stderr = "".join(err_parts)
+
+        if rc != 0:
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr,
+                reason=f"{task.toolchain} exited rc={rc}",
+            )
+
+        # ── resolve + verify the declared artifact ─────────────────
+        try:
+            artifact = _resolve_expected_output(ws.path, task.expected_output)
+        except ValueError as exc:
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr, reason=str(exc),
+            )
+        if not artifact.exists():
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr,
+                reason=(
+                    f"expected_output {task.expected_output!r} not produced "
+                    f"by {task.toolchain}"
+                ),
+            )
+
+        logger.info(
+            "dag local handler: plan=%s task=%s toolchain=%s OK -> %s",
+            plan_id, task.task_id, task.toolchain, task.expected_output,
+        )
+        return LocalTaskResult(
+            task_id=task.task_id, plan_id=plan_id, toolchain=task.toolchain,
+            status="ok", rc=rc, stdout=stdout, stderr=stderr,
+            workspace=ws.path, artifact=artifact,
+        )
+
+    # ─── command derivation ──────────────────────────────────────
+    def _command_sequence(self, task: Task, ws: TaskWorkspace) -> list[list[str]]:
+        """Map a local toolchain to the command(s) to run in the workspace.
+
+        cmake → configure + build (two commands, run in order);
+        make  → ``make`` (default target);
+        python3 → run the first ``.py`` in ``inputs`` with this interpreter.
+        """
+        tc = task.toolchain
+        if tc == "cmake":
+            return [
+                ["cmake", "-S", ".", "-B", CMAKE_BUILD_DIR],
+                ["cmake", "--build", CMAKE_BUILD_DIR],
+            ]
+        if tc == "make":
+            return [["make"]]
+        if tc == "python3":
+            return [[sys.executable, self._python_entry(task)]]
+        # Unreachable: run() already gated on LOCAL_TOOLCHAINS.
+        raise _LocalHandlerError(f"no command mapping for toolchain {tc!r}")
+
+    @staticmethod
+    def _python_entry(task: Task) -> str:
+        """The ``.py`` script a python3 task runs: first such entry in inputs.
+
+        No ``.py`` input → :class:`_LocalHandlerError` (the task FAILS) — we
+        do not guess an entry point.
+        """
+        for inp in task.inputs:
+            if inp.strip().endswith(".py"):
+                return inp.strip()
+        raise _LocalHandlerError(
+            "python3 toolchain requires a .py file in inputs to run"
+        )
+
+    # ─── result helper ───────────────────────────────────────────
+    @staticmethod
+    def _fail(
+        plan_id: int, task: Task, *,
+        workspace: Optional[Path], reason: str,
+        rc: Optional[int] = None, stdout: str = "", stderr: str = "",
+    ) -> LocalTaskResult:
+        logger.info(
+            "dag local handler: plan=%s task=%s toolchain=%s FAIL — %s",
+            plan_id, task.task_id, task.toolchain, reason,
+        )
+        return LocalTaskResult(
+            task_id=task.task_id, plan_id=plan_id, toolchain=task.toolchain,
+            status="failed", rc=rc, stdout=stdout, stderr=stderr,
+            workspace=workspace, reason=reason,
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Step recording + terminal wiring (OP-1659)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 (codex E5/E6). This slice closes the executor loop ON TOP of
+# the OP-1657 serial walk + OP-1658 local handlers:
+#
+#   * one IDEMPOTENT ``workflow.step`` per task, carrying ``dag_task_id``;
+#   * ALL tasks ok   -> set_status(plan,'completed') + workflow.finish(run,'completed');
+#   * ANY task fails -> set_status(plan,'failed')    + workflow.finish(run,'failed');
+#   * the executor OWNS per-plan workspace cleanup, AFTER the steps are recorded
+#     (so a task's artifact is recorded before its scratch is removed).
+#
+# Idempotent re-claim
+# -------------------
+# A plan already in a terminal state ('completed' / 'failed') was fully
+# recorded by a prior run — we short-circuit and touch nothing (no duplicate
+# steps, no illegal re-transition). A plan still 'executing' (a mid-flight
+# crash, then re-claim) is RESUMED: each task whose step is already *done* is
+# skipped (cache-hit, handler not re-run); a task with a prior *failed* step
+# is honoured as a failure (no retry); the rest run for the first time.
+#
+# MUST-NOT (ticket scope): no new export / billing / skills / retry /
+# side-effect behaviour. We only record per-task steps + terminal statuses
+# and clean the scratch. This function is NOT wired into :meth:`DagExecutor.run`'s
+# loop seam — like every prior slice it ships INERT (a still-gated phase calls
+# it after a lease is granted), which is the "merged inert" Go-Live contract.
+
+#: Plan statuses that mean "already fully recorded" — a re-claim of one of
+#: these is a no-op (re-transitioning out of them is illegal anyway).
+_TERMINAL_PLAN_STATUSES = frozenset({"completed", "failed"})
+
+#: Run-metadata marker stamped on every workflow_run the DAG executor
+#: finalizes (OP-1661). Executor runs newly surface as status='completed'
+#: once the executor lands; this marker is the signal
+#: :mod:`backend.finetune_export` uses to exclude them from the fine-tune
+#: corpus. ``finetune_export._EXECUTOR_RUN_MARKER`` MUST equal this string
+#: (a cross-module test asserts it) — they are kept as separate literals so
+
+ succeeded in 0ms:
+   235	                message=(f"toolchain {t.toolchain!r} not in allow-list "
+   236	                         f"for tier {t.required_tier!r}"),
+   237	            ))
+   238	
+   239	
+   240	# ── Unknown toolchain warning ──
+   241	
+   242	_KNOWN_TOOLCHAINS_CACHE: set[str] | None = None
+   243	
+   244	
+   245	def _load_known_toolchains() -> set[str]:
+   246	    global _KNOWN_TOOLCHAINS_CACHE
+   247	    if _KNOWN_TOOLCHAINS_CACHE is not None:
+   248	        return _KNOWN_TOOLCHAINS_CACHE
+   249	
+   250	    names: set[str] = set()
+   251	    for p in _PLATFORMS_DIR.glob("*.yaml"):
+   252	        try:
+   253	            data = yaml.safe_load(p.read_text(encoding="utf-8"))
+   254	            tc = data.get("toolchain")
+   255	            if tc:
+   256	                names.add(tc)
+   257	        except Exception:
+   258	            pass
+   259	
+   260	    rules = _load_tier_rules().get("tiers", {})
+   261	    for tier_rules in rules.values():
+   262	        for tc in tier_rules.get("toolchains_allowed") or []:
+   263	            names.add(tc)
+   264	        for tc in tier_rules.get("toolchains_denied") or []:
+   265	            names.add(tc)
+   266	
+   267	    _KNOWN_TOOLCHAINS_CACHE = names
+   268	    return _KNOWN_TOOLCHAINS_CACHE
+   269	
+   270	
+   271	def reload_known_toolchains_for_tests() -> None:
+   272	    global _KNOWN_TOOLCHAINS_CACHE
+   273	    _KNOWN_TOOLCHAINS_CACHE = None
+   274	
+   275	
+   276	def _check_unknown_toolchain(dag: DAG, errors: list[ValidationError]) -> None:
+   277	    known = _load_known_toolchains()
+   278	    for t in dag.tasks:
+   279	        if t.toolchain and t.toolchain not in known:
+   280	            errors.append(ValidationError(
+   281	                rule="unknown_toolchain", task_id=t.task_id,
+   282	                message=(f"toolchain {t.toolchain!r} is not in the known "
+   283	                         f"toolchain registry — check spelling or add it "
+   284	                         f"to configs/platforms/ or tier_capabilities.yaml"),
+   285	            ))
+
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_executor.py | nl -ba | sed -n '1135,1205p'" in /home/user/work/sora/OmniSight-Productizer
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_executor.py | nl -ba | sed -n '565,625p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+   565	    It deliberately does **NOT** call :meth:`LocalSandboxRuntime.start`: that
+   566	    path is TaskCard / git-coupled (the path-b worker flow) and would need a
+   567	    fake ``PROJECT-NUMBER`` jira_ticket + a CATC card. The serial scheduler
+   568	    only needs the thin "copy allowed inputs into a jailed workdir" behaviour,
+   569	    which is exactly the low-level helpers, minus the git/TaskCard coupling.
+   570	    """
+   571	
+   572	    def __init__(
+   573	        self,
+   574	        *,
+   575	        workdir_root: Path | None = None,
+   576	        project_root: Path | None = None,
+   577	    ) -> None:
+   578	        # Distinct default subtree from the worker's ``_sandboxes`` so a
+   579	        # dag-exec plan workspace ({plan_id}-{task_id}) never collides with a
+   580	        # worker sandbox ({worker_id}-{task_id}) under a shared workdir root.
+   581	        self._root = Path(
+   582	            workdir_root
+   583	            or os.environ.get("OMNISIGHT_DAG_WORKDIR")
+   584	            or Path.cwd() / ".artifacts" / "dag_workspaces"
+   585	        )
+   586	        self._project_root = Path(project_root) if project_root is not None else None
+   587	        self._root.mkdir(parents=True, exist_ok=True)
+   588	
+   589	    def prepare(self, plan_id: int, task: Task) -> TaskWorkspace:
+   590	        """Create ``workdir_root/{plan_id}-{task_id}`` and copy in inputs."""
+   591	        ws = self._root / f"{plan_id}-{task.task_id}"
+   592	        if ws.exists():
+   593	            worker._rmtree(ws)
+   594	        ws.mkdir(parents=True, exist_ok=True)
+   595	
+   596	        copied: list[str] = []
+   597	        if self._project_root is not None:
+   598	            for glob in task.inputs:
+   599	                for src in worker._resolve_glob(self._project_root, glob):
+   600	                    rel = src.relative_to(self._project_root)
+   601	                    dst = ws / rel
+   602	                    dst.parent.mkdir(parents=True, exist_ok=True)
+   603	                    if src.is_dir():
+   604	                        worker._copytree(src, dst)
+   605	                    else:
+   606	                        worker._copyfile(src, dst)
+   607	                    copied.append(str(rel))
+   608	        return TaskWorkspace(
+   609	            plan_id=plan_id, task_id=task.task_id, path=ws, copied=copied,
+   610	        )
+   611	
+   612	    def cleanup(self, ws: TaskWorkspace) -> None:
+   613	        """Remove a prepared workspace (best-effort, mirrors sandbox.stop)."""
+   614	        try:
+   615	            worker._rmtree(ws.path)
+   616	        except OSError as exc:
+   617	            logger.warning(
+   618	                "dag plan workspace cleanup failed for %s: %s", ws.path, exc,
+   619	            )
+   620	
+   621	
+   622	@dataclass
+   623	class TaskRun:
+   624	    """The scheduler's per-task ordering record.
+   625	
+
+ succeeded in 0ms:
+  1135	
+  1136	async def record_and_finalize_plan(
+  1137	    plan: "dag_storage.StoredPlan",
+  1138	    *,
+  1139	    handler: "LocalTaskHandler",
+  1140	    workflow=None,
+  1141	    storage=None,
+  1142	    cleanup: bool = True,
+  1143	) -> PlanTerminalResult:
+  1144	    """Run ``plan``'s tasks, record one idempotent step each, wire the terminal
+  1145	    plan status + ``workflow.finish``, then clean each task's scratch.
+  1146	
+  1147	    The tasks are walked in :func:`topological_order` and run SERIALLY through
+  1148	    ``handler`` (OP-1658's local toolchain handler). For each task a single
+  1149	    idempotent ``workflow.record_dag_step`` is written carrying its
+  1150	    ``dag_task_id``. On the first failure the walk stops, the plan + run land
+  1151	    ``failed``; otherwise both land ``completed``. Workspace cleanup runs LAST,
+  1152	    after every step is durably recorded.
+  1153	
+  1154	    Idempotent re-claim: if ``plan`` is already terminal nothing runs (no-op);
+  1155	    if it is still ``executing`` (a mid-flight crash) already-done tasks are
+  1156	    skipped and a prior failed task is honoured without re-running.
+  1157	
+  1158	    ``workflow`` / ``storage`` default to :mod:`backend.workflow` /
+  1159	    :mod:`backend.dag_storage`; both are injectable so the wiring can be
+  1160	    exercised in-harness without a database.
+  1161	    """
+  1162	    wf = workflow if workflow is not None else _import_workflow()
+  1163	    ds = storage if storage is not None else dag_storage
+  1164	
+  1165	    run_id = plan.run_id
+  1166	    if not run_id:
+  1167	        raise ValueError(
+  1168	            f"plan {plan.id} has no run_id — cannot record steps / finish a run"
+  1169	        )
+  1170	    dag = plan.dag()
+  1171	
+  1172	    # ── idempotent re-claim: a terminal plan was already fully recorded ──
+  1173	    current = await ds.get_plan(plan.id)
+  1174	    if current.status in _TERMINAL_PLAN_STATUSES:
+  1175	        recorded = [
+  1176	            s.dag_task_id for s in await wf.list_steps(run_id) if s.dag_task_id
+  1177	        ]
+  1178	        logger.info(
+  1179	            "dag finalize: plan=%s already terminal (%s) — re-claim no-op",
+  1180	            plan.id, current.status,
+  1181	        )
+  1182	        return PlanTerminalResult(
+  1183	            plan_id=plan.id, run_id=run_id, status=current.status,
+  1184	            recorded=recorded, already_terminal=True,
+  1185	        )
+  1186	
+  1187	    order = topological_order(dag)
+  1188	    results: list[LocalTaskResult] = []
+  1189	    recorded: list[str] = []
+  1190	    all_ok = True
+  1191	    for task in order:
+  1192	        key = dag_step_key(task.task_id)
+  1193	        prior = await wf.get_step(run_id, key)
+  1194	        if prior is not None:
+  1195	            # Resume: this task already has a recorded outcome — honour it
+  1196	            # without re-running (no retry). Done == ok-skip; not-done == a
+  1197	            # prior failure that fails the whole plan.
+  1198	            recorded.append(task.task_id)
+  1199	            if prior.is_done:
+  1200	                logger.info(
+  1201	                    "dag finalize: plan=%s task=%s step already done — skip",
+  1202	                    plan.id, task.task_id,
+  1203	                )
+  1204	                continue
+  1205	            logger.info(
+
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_validator.py | nl -ba | sed -n '1,30p;305,345p'" in /home/user/work/sora/OmniSight-Productizer
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_schema.py | nl -ba | sed -n '20,50p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+    20	
+    21	
+    22	TierId = Literal["t1", "networked", "t3"]
+    23	SCHEMA_VERSION = 1
+    24	
+    25	
+    26	class Task(BaseModel):
+    27	    """One node in the DAG."""
+    28	
+    29	    task_id: str = Field(..., min_length=1, max_length=64)
+    30	    description: str = Field(..., min_length=1, max_length=4000)
+    31	
+    32	    required_tier: TierId
+    33	    toolchain: str = Field(..., min_length=1, max_length=128)
+    34	
+    35	    inputs: list[str] = Field(default_factory=list)
+    36	    expected_output: str = Field(..., min_length=1, max_length=512)
+    37	    depends_on: list[str] = Field(default_factory=list)
+    38	
+    39	    # Phase 56-DAG-A — explicit MECE escape hatch. Two tasks may share
+    40	    # an `expected_output` only when BOTH set this to True (e.g. parallel
+    41	    # benchmark runs writing the same report path that's later merged).
+    42	    output_overlap_ack: bool = False
+    43	
+    44	    @field_validator("task_id")
+    45	    @classmethod
+    46	    def _id_is_simple(cls, v: str) -> str:
+    47	        # Keep id printable — used as Decision Engine key + as part of
+    48	        # workflow_steps.idempotency_key (Phase 56-DAG-B).
+    49	        if not v.replace("-", "").replace("_", "").isalnum():
+    50	            raise ValueError(
+
+ succeeded in 0ms:
+     1	"""Phase 56-DAG-A — DAG semantic validator.
+     2	
+     3	Pure deterministic check pass — no LLM, no DB, no IO beyond the YAML
+     4	load of `configs/tier_capabilities.yaml`. Returns ALL errors at once
+     5	so the Orchestrator's mutation prompt has the full picture in one
+     6	round (vs failing on the first which would force >3 mutation rounds
+     7	for a slightly bad DAG).
+     8	
+     9	Validation rule families (each emits its own ``rule`` label so the
+    10	metric `dag_validation_error_total{rule}` can break down failures):
+    11	
+    12	  cycle           — DAG must be acyclic (Kahn's algorithm).
+    13	  unknown_dep     — depends_on points at non-existent task_id.
+    14	  duplicate_id    — two tasks with the same task_id.
+    15	  tier_violation  — toolchain not allowed (or explicitly denied) in
+    16	                    the task's required_tier per
+    17	                    configs/tier_capabilities.yaml.
+    18	  io_entity       — expected_output not a recognised entity:
+    19	                    file path | git:<sha> | issue:<id>.
+    20	  dep_closure     — input not produced by an upstream task and not
+    21	                    flagged as `external:<...>` / `user:<...>`.
+    22	  mece            — two tasks declare the same expected_output and
+    23	                    neither carries `output_overlap_ack=true`.
+    24	"""
+    25	
+    26	from __future__ import annotations
+    27	
+    28	import logging
+    29	import re
+    30	from dataclasses import dataclass
+   305	
+   306	def _check_io_entity(dag: DAG, errors: list[ValidationError]) -> None:
+   307	    for t in dag.tasks:
+   308	        if not _is_io_entity(t.expected_output):
+   309	            errors.append(ValidationError(
+   310	                rule="io_entity", task_id=t.task_id,
+   311	                message=(f"expected_output {t.expected_output!r} is not a "
+   312	                         f"recognised entity (file path / git:<sha> / "
+   313	                         f"issue:<id>)"),
+   314	            ))
+   315	
+   316	
+   317	# ── Dep closure ──
+   318	
+   319	# An input may be one of:
+   320	#   * the expected_output of an upstream task (most common)
+   321	#   * "external:<anything>" or "user:<anything>" (caller-provided)
+   322	_INPUT_EXTERNAL_RE = re.compile(r"^(?:external|user):.+$")
+   323	
+   324	
+   325	def _check_dep_closure(dag: DAG, errors: list[ValidationError]) -> None:
+   326	    upstream_outputs: dict[str, set[str]] = {}
+   327	    # First pass: build a map from task -> set of outputs available to
+   328	    # downstream tasks via its expected_output.
+   329	    out_by_id: dict[str, str] = {t.task_id: t.expected_output for t in dag.tasks}
+   330	    deps_by_id: dict[str, list[str]] = {t.task_id: list(t.depends_on) for t in dag.tasks}
+   331	
+   332	    # For each task, gather the closure of upstream outputs (BFS).
+   333	    for t in dag.tasks:
+   334	        seen: set[str] = set()
+   335	        stack = list(deps_by_id.get(t.task_id, []))
+   336	        while stack:
+   337	            d = stack.pop()
+   338	            if d in seen or d not in out_by_id:
+   339	                continue
+   340	            seen.add(d)
+   341	            stack.extend(deps_by_id.get(d, []))
+   342	        produced = {out_by_id[d] for d in seen}
+   343	        upstream_outputs[t.task_id] = produced
+   344	
+   345	    for t in dag.tasks:
+
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_executor.py | nl -ba | sed -n '1205,1245p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 102ms:
+  1205	            logger.info(
+  1206	                "dag finalize: plan=%s task=%s has a prior failed step — "
+  1207	                "plan fails (no retry)", plan.id, task.task_id,
+  1208	            )
+  1209	            all_ok = False
+  1210	            break
+  1211	
+  1212	        result = await handler.run(plan.id, task)
+  1213	        results.append(result)
+  1214	        if result.ok:
+  1215	            await wf.record_dag_step(
+  1216	                run_id, key, dag_task_id=task.task_id,
+  1217	                output=_step_output(result),
+  1218	            )
+  1219	            recorded.append(task.task_id)
+  1220	        else:
+  1221	            await wf.record_dag_step(
+  1222	                run_id, key, dag_task_id=task.task_id,
+  1223	                error=(result.reason or "task failed")[:512],
+  1224	            )
+  1225	            recorded.append(task.task_id)
+  1226	            all_ok = False
+  1227	            break  # stop the serial walk at the first failure
+  1228	
+  1229	    terminal = "completed" if all_ok else "failed"
+  1230	    # ── tag the run as executor-produced BEFORE finishing it, so the
+  1231	    #    'completed' row finetune_export sees already carries the marker
+  1232	    #    (OP-1661 — executor runs must not pollute the fine-tune corpus).
+  1233	    await _mark_executor_run(wf, run_id)
+  1234	    # ── terminal wiring: plan status first, then finish the run ──
+  1235	    await ds.set_status(plan.id, terminal)
+  1236	    await wf.finish(run_id, terminal)
+  1237	    logger.info(
+  1238	        "dag finalize: plan=%s run=%s -> %s (%d step(s) recorded)",
+  1239	        plan.id, run_id, terminal, len(recorded),
+  1240	    )
+  1241	
+  1242	    # ── own per-plan workspace cleanup, AFTER the steps are recorded ──
+  1243	    if cleanup:
+  1244	        _cleanup_plan_workspaces(handler, results)
+  1245	
+
+exec
+/bin/bash -lc "git show gerrit-sora/develop:backend/dag_validator.py | nl -ba | sed -n '345,365p'" in /home/user/work/sora/OmniSight-Productizer
+ succeeded in 0ms:
+   345	    for t in dag.tasks:
+   346	        avail = upstream_outputs.get(t.task_id, set())
+   347	        for inp in t.inputs:
+   348	            if _INPUT_EXTERNAL_RE.match(inp):
+   349	                continue  # caller provides
+   350	            if inp in avail:
+   351	                continue
+   352	            errors.append(ValidationError(
+   353	                rule="dep_closure", task_id=t.task_id,
+   354	                message=(f"input {inp!r} is not produced by any upstream "
+   355	                         f"task and is not flagged 'external:' / 'user:'"),
+   356	            ))
+   357	
+   358	
+   359	def _check_mece(dag: DAG, errors: list[ValidationError]) -> None:
+   360	    """Two tasks with the same expected_output trigger MECE unless
+   361	    BOTH set output_overlap_ack=True (e.g. parallel benchmark merge)."""
+   362	    by_output: dict[str, list[Task]] = {}
+   363	    for t in dag.tasks:
+   364	        by_output.setdefault(t.expected_output, []).append(t)
+   365	    for out, ts in by_output.items():
+
+codex
+**Verdict: SOUND-WITH-CHANGES**
+
+1. **Validator contract already exists for upstream artifacts.** F4 is mainly executor enforcement, not validator invention. The rule is explicit in `dag_validator.py`:
+
+> “dep_closure — input not produced by an upstream task and not flagged as `external:<...>` / `user:<...>`.”
+
+And the implementation says:
+
+> “An input may be one of: the expected_output of an upstream task … `external:<anything>` or `user:<anything>`.”
+
+Then it checks `if inp in avail: continue`, where `avail` is the transitive upstream `expected_output` set.
+
+Caveat: this exposes a separate mismatch. Raw project-root seed files like `CMakeLists.txt` / `main.c` are currently invalid under dep-closure unless marked `external:` / `user:`, but `PlanWorkspaceBuilder.prepare()` only knows how to copy raw globs from `project_root`. So F4 does not need validator changes for `inputs <- upstream expected_output`, but the smoke/source-input story still needs either a validator exception for project-root inputs or an executor convention for materializing `external:` / `user:` inputs.
+
+2. **Staging design:** use a per-plan staging root, preserving artifact-relative paths.
+
+Concrete shape:
+
+- `staging_root = workdir_root / f"{plan_id}-outputs"` or a builder-owned hidden dir like `workdir_root / "_plan_outputs" / str(plan_id)`.
+- After an ok task, copy `result.artifact` to `staging_root / task.expected_output`.
+- `prepare()` materializes inputs from two sources:
+  - upstream staging first or project root first must be deterministic.
+  - Prefer **upstream staging wins** when the same relative path exists in both. Reason: if a downstream task declares `build/firmware.bin` and an old file exists in project_root, the DAG contract says the upstream task’s declared output is the dependency. Falling back to project_root would mask broken artifact propagation.
+- Copy exact staged paths, not broad globs, for upstream artifacts. Use `task.inputs` string equality against staged keys.
+- For project-root inputs, keep current glob behavior if that path is not staged.
+
+Artifact shape: current schema is singular `expected_output: str`, not a list/glob. Validator’s `io_entity` says file path / `git:<sha>` / `issue:<id>`, and the file-path regex implies a concrete file path with extension. `LocalTaskHandler` technically accepts any existing path, including a directory, because it only checks `artifact.exists()`, but F4 should treat `expected_output` as one concrete path and copy file or directory if it exists. Do not add list outputs, globs, manifests, or multi-artifact semantics in F4.
+
+3. **Hook placement:** stage in `record_and_finalize_plan()`, copy in `PlanWorkspaceBuilder.prepare()`.
+
+Recommended split:
+
+- `record_and_finalize_plan()` owns the topo walk and has the successful `LocalTaskResult` immediately after `handler.run()`. Put the “after ok result, before record step / cleanup” staging hook there.
+- `PlanWorkspaceBuilder` should own materialization into task scratch because it already owns workspace creation and input copying.
+- `LocalTaskHandler` should stay unchanged. It should only run one task in its isolated scratch and report `result.artifact`.
+
+This preserves per-task workspace isolation: downstream never reads upstream scratch directly. It reads a plan-level staged copy. Existing terminal tests can keep using fake runners; add one new two-task test where task B declares input equal to task A’s `expected_output` and asserts B’s workspace receives it.
+
+4. **Runner safety:** runner-safe only with a tight MUST-NOT.
+
+Exact MUST-NOT:
+
+**MUST NOT change DAG validation semantics, schema shape, task ordering, retry/resume semantics, nonlocal toolchains, side-effect gates, run-loop enablement/opt-in gates, workflow step format, terminal transitions, or project-root source-input validation. F4 may only stage successful local task `expected_output` artifacts into a per-plan executor-owned temp area and allow downstream `prepare()` to materialize matching declared inputs from that staged area, while preserving per-task scratch isolation and existing cleanup behavior.**
+
+5. **Other latent gaps to flag:**
+
+- `topological_order()` plus the serial walk already gives the right execution order, and `record_and_finalize_plan()` already has prior task results in memory during the same invocation. So the core data path exists.
+- Resume is the tricky gap: if a prior successful step is skipped on reclaim, its scratch was likely cleaned and the staged output may not exist. Current step output records only the old scratch artifact path, not durable contents. F4 should either scope staging to first-run only and explicitly fail/skip artifact resume, or make staged outputs durable enough across reclaim. Tight MVP: document “no artifact reconstruction from prior done steps” and add a follow-up, because implementing durable artifact restore is larger.
+- Cleanup order is okay if staging happens before cleanup. Without that, successful artifacts disappear.
+- `external:` / `user:` inputs are validator-valid but not currently materializable by `prepare()`. That is separate from F4 but will surprise re-verify if smoke DAG source inputs are validated.
+- `expected_output` can be `git:` / `issue:` per validator, but local handler treats it as a workspace path. F4 should only stage filesystem outputs for local toolchains and ignore/fail non-file entities under existing local-handler rules.
+
+Concrete F4: add a small plan artifact staging helper, stage `result.artifact` after each successful task, teach `PlanWorkspaceBuilder.prepare()` to prefer staged exact input paths over project-root globs, and test `compile -> run-test` where `run-test.inputs == ["build/firmware.bin"]`.
+tokens used
+104,775
+**Verdict: SOUND-WITH-CHANGES**
+
+1. **Validator contract already exists for upstream artifacts.** F4 is mainly executor enforcement, not validator invention. The rule is explicit in `dag_validator.py`:
+
+> “dep_closure — input not produced by an upstream task and not flagged as `external:<...>` / `user:<...>`.”
+
+And the implementation says:
+
+> “An input may be one of: the expected_output of an upstream task … `external:<anything>` or `user:<anything>`.”
+
+Then it checks `if inp in avail: continue`, where `avail` is the transitive upstream `expected_output` set.
+
+Caveat: this exposes a separate mismatch. Raw project-root seed files like `CMakeLists.txt` / `main.c` are currently invalid under dep-closure unless marked `external:` / `user:`, but `PlanWorkspaceBuilder.prepare()` only knows how to copy raw globs from `project_root`. So F4 does not need validator changes for `inputs <- upstream expected_output`, but the smoke/source-input story still needs either a validator exception for project-root inputs or an executor convention for materializing `external:` / `user:` inputs.
+
+2. **Staging design:** use a per-plan staging root, preserving artifact-relative paths.
+
+Concrete shape:
+
+- `staging_root = workdir_root / f"{plan_id}-outputs"` or a builder-owned hidden dir like `workdir_root / "_plan_outputs" / str(plan_id)`.
+- After an ok task, copy `result.artifact` to `staging_root / task.expected_output`.
+- `prepare()` materializes inputs from two sources:
+  - upstream staging first or project root first must be deterministic.
+  - Prefer **upstream staging wins** when the same relative path exists in both. Reason: if a downstream task declares `build/firmware.bin` and an old file exists in project_root, the DAG contract says the upstream task’s declared output is the dependency. Falling back to project_root would mask broken artifact propagation.
+- Copy exact staged paths, not broad globs, for upstream artifacts. Use `task.inputs` string equality against staged keys.
+- For project-root inputs, keep current glob behavior if that path is not staged.
+
+Artifact shape: current schema is singular `expected_output: str`, not a list/glob. Validator’s `io_entity` says file path / `git:<sha>` / `issue:<id>`, and the file-path regex implies a concrete file path with extension. `LocalTaskHandler` technically accepts any existing path, including a directory, because it only checks `artifact.exists()`, but F4 should treat `expected_output` as one concrete path and copy file or directory if it exists. Do not add list outputs, globs, manifests, or multi-artifact semantics in F4.
+
+3. **Hook placement:** stage in `record_and_finalize_plan()`, copy in `PlanWorkspaceBuilder.prepare()`.
+
+Recommended split:
+
+- `record_and_finalize_plan()` owns the topo walk and has the successful `LocalTaskResult` immediately after `handler.run()`. Put the “after ok result, before record step / cleanup” staging hook there.
+- `PlanWorkspaceBuilder` should own materialization into task scratch because it already owns workspace creation and input copying.
+- `LocalTaskHandler` should stay unchanged. It should only run one task in its isolated scratch and report `result.artifact`.
+
+This preserves per-task workspace isolation: downstream never reads upstream scratch directly. It reads a plan-level staged copy. Existing terminal tests can keep using fake runners; add one new two-task test where task B declares input equal to task A’s `expected_output` and asserts B’s workspace receives it.
+
+4. **Runner safety:** runner-safe only with a tight MUST-NOT.
+
+Exact MUST-NOT:
+
+**MUST NOT change DAG validation semantics, schema shape, task ordering, retry/resume semantics, nonlocal toolchains, side-effect gates, run-loop enablement/opt-in gates, workflow step format, terminal transitions, or project-root source-input validation. F4 may only stage successful local task `expected_output` artifacts into a per-plan executor-owned temp area and allow downstream `prepare()` to materialize matching declared inputs from that staged area, while preserving per-task scratch isolation and existing cleanup behavior.**
+
+5. **Other latent gaps to flag:**
+
+- `topological_order()` plus the serial walk already gives the right execution order, and `record_and_finalize_plan()` already has prior task results in memory during the same invocation. So the core data path exists.
+- Resume is the tricky gap: if a prior successful step is skipped on reclaim, its scratch was likely cleaned and the staged output may not exist. Current step output records only the old scratch artifact path, not durable contents. F4 should either scope staging to first-run only and explicitly fail/skip artifact resume, or make staged outputs durable enough across reclaim. Tight MVP: document “no artifact reconstruction from prior done steps” and add a follow-up, because implementing durable artifact restore is larger.
+- Cleanup order is okay if staging happens before cleanup. Without that, successful artifacts disappear.
+- `external:` / `user:` inputs are validator-valid but not currently materializable by `prepare()`. That is separate from F4 but will surprise re-verify if smoke DAG source inputs are validated.
+- `expected_output` can be `git:` / `issue:` per validator, but local handler treats it as a workspace path. F4 should only stage filesystem outputs for local toolchains and ignore/fail non-file entities under existing local-handler rules.
+
+Concrete F4: add a small plan artifact staging helper, stage `result.artifact` after each successful task, teach `PlanWorkspaceBuilder.prepare()` to prefer staged exact input paths over project-root globs, and test `compile -> run-test` where `run-test.inputs == ["build/firmware.bin"]`.
