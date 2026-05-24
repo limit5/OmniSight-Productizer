@@ -153,3 +153,58 @@ async def test_replay_unknown_returns_none(_wf_db):
     wf = _wf_db
     payload = await wf.replay("wf-not-exist")
     assert payload is None
+
+
+@pytest.mark.asyncio
+async def test_step_persists_dag_task_id(_wf_db):
+    """OP-1653 B2: a step tagged with a DAG task id round-trips the
+    (nullable) workflow_steps.dag_task_id column."""
+    wf = _wf_db
+    run = await wf.start("invoke")
+
+    @wf.step(run, "compile", dag_task_id="T-compile")
+    async def compile_step():
+        return {"sha": "abc123"}
+
+    await compile_step()
+
+    steps = await wf.list_steps(run.id)
+    assert len(steps) == 1
+    assert steps[0].dag_task_id == "T-compile"
+    assert steps[0].output == {"sha": "abc123"}
+
+
+@pytest.mark.asyncio
+async def test_step_dag_task_id_defaults_null(_wf_db):
+    """OP-1653 B2: existing step() callers that omit dag_task_id keep
+    working — the column is nullable and defaults to None."""
+    wf = _wf_db
+    run = await wf.start("invoke")
+
+    @wf.step(run, "legacy")
+    async def legacy_step():
+        return 42
+
+    assert await legacy_step() == 42
+    steps = await wf.list_steps(run.id)
+    assert len(steps) == 1
+    assert steps[0].dag_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_step_failure_records_dag_task_id(_wf_db):
+    """OP-1653 B2: the failure path also threads dag_task_id through."""
+    wf = _wf_db
+    run = await wf.start("invoke")
+
+    @wf.step(run, "broken", dag_task_id="T-broken")
+    async def broken():
+        raise RuntimeError("nope")
+
+    with pytest.raises(RuntimeError):
+        await broken()
+
+    steps = await wf.list_steps(run.id)
+    assert len(steps) == 1
+    assert steps[0].dag_task_id == "T-broken"
+    assert not steps[0].is_done
