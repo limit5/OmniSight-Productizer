@@ -373,6 +373,89 @@ def test_project_state_skip_label_disables_injection_per_ticket(
     assert calls == [], "label override must short-circuit before any fetch"
 
 
+# ── OP-1680 (F7): Bearer auth on the project-state fetch ──
+#
+# The fetch hits an auth-gated endpoint. These pin AC #1 + #3: when
+# OMNISIGHT_RUNNER_API_TOKEN is set the urllib Request carries
+# `Authorization: Bearer <token>`; when unset no auth header is added and
+# the call still issues; and the token value is never written to the log.
+
+
+def _capture_fetch_request(monkeypatch):
+    """Patch urlopen to capture the urllib Request and return a stub 200.
+
+    Returns the mutable list the captured Request lands in so a test can
+    assert on its headers after driving the real `_fetch_project_state`.
+    """
+    import urllib.request
+
+    captured: list = []
+
+    class _FakeResp:
+        def read(self) -> bytes:
+            return b"{}"
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def _urlopen(req, *args, **kwargs):  # noqa: ARG001
+        captured.append(req)
+        return _FakeResp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    return captured
+
+
+def test_fetch_project_state_sends_bearer_when_token_set(runner, monkeypatch):
+    """AC #1 — token in env → request carries `Authorization: Bearer <token>`."""
+    monkeypatch.setenv(runner.PROJECT_STATE_API_TOKEN_ENV, "s3cret-key")
+    captured = _capture_fetch_request(monkeypatch)
+
+    result = runner._fetch_project_state("OP-1234")
+
+    assert result == {}, "stub 200 payload must parse"
+    assert len(captured) == 1, "call must still issue exactly once"
+    # urllib capitalises header keys via add_header(); "Authorization" is
+    # already in that form so get_header round-trips.
+    assert captured[0].get_header("Authorization") == "Bearer s3cret-key"
+
+
+def test_fetch_project_state_omits_auth_when_token_unset(runner, monkeypatch):
+    """AC #1 — no token → no auth header, but the call still issues."""
+    monkeypatch.delenv(runner.PROJECT_STATE_API_TOKEN_ENV, raising=False)
+    captured = _capture_fetch_request(monkeypatch)
+
+    result = runner._fetch_project_state("OP-1234")
+
+    assert result == {}
+    assert len(captured) == 1, "behaviour unchanged: call still issues when unset"
+    assert captured[0].get_header("Authorization") is None
+    # Accept header is preserved either way.
+    assert captured[0].get_header("Accept") == "application/json"
+
+
+def test_fetch_project_state_never_logs_token_value(runner, monkeypatch, capsys):
+    """AC #3 — fetch_failed log must print key + exc only, never the token."""
+    monkeypatch.setenv(runner.PROJECT_STATE_API_TOKEN_ENV, "super-secret-token")
+
+    import urllib.request
+
+    def _urlopen_boom(req, *args, **kwargs):  # noqa: ARG001
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen_boom)
+    result = runner._fetch_project_state("OP-1234")
+
+    assert result is None
+    captured = capsys.readouterr()
+    assert "fetch_failed" in captured.err
+    assert "super-secret-token" not in captured.err
+    assert "super-secret-token" not in captured.out
+
+
 def test_build_prompt_reads_cognee_recall_flag_from_env(
     runner, fake_client, monkeypatch
 ):

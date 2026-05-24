@@ -779,6 +779,16 @@ PROJECT_STATE_BACKEND_URL = os.environ.get(
 # backend that hugs its own ceiling never hangs the runner.
 PROJECT_STATE_FETCH_TIMEOUT_S = 3.0
 
+# OP-1680 (F7) — bearer token for the authenticated project-state fetch.
+#
+# /api/v1/project-state requires auth (Depends(auth.current_user)), and
+# current_user() accepts ``Authorization: Bearer <api-key>``. The runner
+# reads the key from the environment so the secret never lands in source
+# or commits; the value is minted + delivered out-of-band by P0-2. When
+# unset we omit the header entirely and the call still issues (the
+# existing fail-open degrade path then handles the resulting 401).
+PROJECT_STATE_API_TOKEN_ENV = "OMNISIGHT_RUNNER_API_TOKEN"
+
 # Operator override label (AC #5). When present on a ticket, the runner
 # skips injection for that pickup even if the feature flag is enabled.
 PROJECT_STATE_SKIP_LABEL = "project-state:skip"
@@ -801,7 +811,16 @@ def _fetch_project_state(key: str) -> dict | None:
         f"{PROJECT_STATE_BACKEND_URL}/api/v1/project-state"
         f"?ticket={urllib.parse.quote(key)}"
     )
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    headers = {"Accept": "application/json"}
+    # OP-1680: authenticate via Bearer when the operator-supplied key is in
+    # the env; omit gracefully otherwise so behaviour is unchanged (the
+    # endpoint then 401s and we fall through to the fail-open degrade path).
+    # Read at call time (not import) so a key set after module load — and the
+    # test monkeypatch — are both honoured. Never log the token value.
+    api_token = os.environ.get(PROJECT_STATE_API_TOKEN_ENV)
+    if api_token:
+        headers["Authorization"] = f"Bearer {api_token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=PROJECT_STATE_FETCH_TIMEOUT_S) as resp:
             raw = resp.read().decode("utf-8")
