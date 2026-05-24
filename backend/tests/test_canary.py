@@ -242,6 +242,32 @@ def test_observe_window_gate_blocks_premature_advance(
     assert "observe window open" in str(excinfo.value)
 
 
+def test_module_is_marked_deprecated_op1694() -> None:
+    """OP-1694: this orchestrator is deprecated in favour of the real
+    SLO-gated backend.canary_rollout.CanaryController. The marker keeps the
+    module test-only without deleting it (tests/docs/ADR still reference it)."""
+    assert getattr(canary, "__deprecated__", False) is True
+    assert "deprecated" in (canary.__doc__ or "").lower()
+    assert "canary_rollout.CanaryController" in (canary.__doc__ or "")
+
+
+def test_constructing_orchestrator_emits_deprecation_warning(
+    writer: canary.TrafficShiftWriter,
+) -> None:
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        canary.CanaryOrchestrator(
+            rollout_id="dep-check",
+            stable_color="blue",
+            canary_color="green",
+            writer=writer,
+        )
+
+
+def test_constructing_stub_monitor_emits_deprecation_warning() -> None:
+    with pytest.warns(DeprecationWarning, match="deprecated"):
+        canary._StubMonitor()
+
+
 def test_p95_latency_outside_baseline_band_triggers_rollback(
     writer: canary.TrafficShiftWriter,
 ) -> None:

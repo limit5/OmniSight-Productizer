@@ -163,6 +163,45 @@ def test_manual_pause_advance_abort_controls_rewrite_state(
     )
 
 
+def test_rolling_monitor_populates_error_rate_and_p95(monkeypatch) -> None:
+    """OP-1694: RollingDeploySloMonitor must source BOTH signals from the
+    in-process rolling SLI — p95 was previously left at 0.0 (no-op gate)."""
+    from backend import ha_observability
+
+    monkeypatch.setattr(ha_observability, "current_5xx_rate", lambda: 0.004)
+    monkeypatch.setattr(ha_observability, "current_p95_latency_ms", lambda: 742.0)
+
+    snapshot = cr.RollingDeploySloMonitor().snapshot()
+    assert snapshot.error_rate == 0.004
+    assert snapshot.p95_latency_ms == 742.0
+    assert "current_p95_latency_ms" in snapshot.source
+
+
+def test_p95_latency_breach_auto_aborts(tmp_path: Path) -> None:
+    """A p95 over the 1000ms threshold must abort, even with a clean 5xx
+    rate — proving the latency half of the gate now actually gates."""
+    controller, clock, snippet, _ = _controller(
+        tmp_path,
+        monitor=_Monitor(
+            cr.SloSnapshot(error_rate=0.0, p95_latency_ms=1500.0, source="synthetic")
+        ),
+    )
+    state = controller.start(
+        rollout_id="op-1694",
+        stable_color="blue",
+        canary_color="green",
+    )
+    clock.advance(10 * 60)
+    state, decision = controller.evaluate(state)
+
+    assert decision.action == "abort"
+    assert decision.reason.startswith("slo_p95_latency:")
+    assert state.status == "aborted"
+    # snippet rolled back to the stable upstream only.
+    text = snippet.read_text(encoding="utf-8")
+    assert "OMNISIGHT_UPSTREAM_A" in text and "OMNISIGHT_UPSTREAM_B" not in text
+
+
 def test_router_exposes_dashboard_control_with_auth_dependencies() -> None:
     from backend.routers import canary_rollout
 

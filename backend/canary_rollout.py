@@ -68,12 +68,21 @@ class SloMonitor(Protocol):
 
 
 class RollingDeploySloMonitor:
-    """D11 bridge backed by the in-process rolling 5xx SLI."""
+    """D11 bridge backed by the in-process rolling 5xx + p95-latency SLI.
+
+    OP-1694: ``p95_latency_ms`` is now populated from the rolling latency
+    window (``ha_observability.current_p95_latency_ms``). Before, it was
+    left at the dataclass default of 0.0, so ``CanaryController`` evaluated
+    ``0.0 > max_p95_latency_ms`` — always False — and the latency half of
+    the SLO gate was a no-op. With a real p95 the gate aborts a rollout
+    whose canary cohort breaches ``SloThresholds.max_p95_latency_ms``.
+    """
 
     def snapshot(self) -> SloSnapshot:
         return SloSnapshot(
             error_rate=ha_observability.current_5xx_rate(),
-            source="backend.ha_observability.current_5xx_rate",
+            p95_latency_ms=ha_observability.current_p95_latency_ms(),
+            source="backend.ha_observability.current_5xx_rate+current_p95_latency_ms",
         )
 
 
