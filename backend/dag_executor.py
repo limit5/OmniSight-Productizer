@@ -40,6 +40,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import sys
@@ -544,14 +545,38 @@ class TaskWorkspace:
     """A prepared per-(plan, task) workspace directory.
 
     ``path`` follows the ``workdir_root/{plan_id}-{task_id}`` convention.
-    ``copied`` lists the project-relative paths materialised from the task's
-    ``inputs`` globs (empty when no project root is bound).
+    ``copied`` lists the workspace-relative paths materialised into the task's
+    scratch from its ``inputs`` — whether copied from the per-plan staging
+    area (an upstream task's ``expected_output``) or from ``project_root``
+    (a source seed / ``external:`` / ``user:`` input). Empty when neither
+    source yields a match.
     """
 
     plan_id: int
     task_id: str
     path: Path
     copied: list[str] = field(default_factory=list)
+
+
+#: Subtree under ``workdir_root`` where each plan's successful task outputs are
+#: staged (OP-1676) so a downstream task can materialise an upstream-output
+#: input by exact path. The leading underscore keeps it from ever colliding
+#: with a per-task ``{plan_id}-{task_id}`` scratch dir (which starts with a
+#: digit) under a shared workdir root.
+PLAN_OUTPUTS_SUBDIR = "_plan_outputs"
+
+#: Declared-input prefixes the ``dag_validator`` accepts for caller-provided
+#: seeds (``external:<path>`` / ``user:<path>``). ``prepare()`` strips the
+#: prefix and copies the remainder from ``project_root`` with the normal glob
+#: behaviour — the raw literal (e.g. ``"external:CMakeLists.txt"``) matched no
+#: glob before this fix. Mirrors ``dag_validator._INPUT_EXTERNAL_RE`` but
+#: captures the path tail.
+_EXTERNAL_INPUT_RE = re.compile(r"^(?:external|user):(.+)$")
+
+#: ``expected_output`` entities that are NOT filesystem paths (the validator
+#: also accepts ``git:<sha>`` / ``issue:<id>``). These have no artifact to
+#: stage, so :meth:`PlanWorkspaceBuilder.stage_output` skips them.
+_NON_FILE_OUTPUT_RE = re.compile(r"^(?:git|issue):")
 
 
 class PlanWorkspaceBuilder:
@@ -587,27 +612,128 @@ class PlanWorkspaceBuilder:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def prepare(self, plan_id: int, task: Task) -> TaskWorkspace:
-        """Create ``workdir_root/{plan_id}-{task_id}`` and copy in inputs."""
+        """Create ``workdir_root/{plan_id}-{task_id}`` and materialise inputs.
+
+        Each declared input is honoured per the FULL dep-closure contract the
+        ``dag_validator`` accepts (OP-1676):
+
+          * an ``external:<path>`` / ``user:<path>`` seed — the prefix is
+            stripped and the path copied from ``project_root`` (the normal
+            glob behaviour; the raw literal matched nothing before);
+          * an UPSTREAM-OUTPUT input (an input equal to an upstream task's
+            ``expected_output``) — materialised by EXACT path from this plan's
+            staging area (populated by :meth:`stage_output`). Staging WINS over
+            ``project_root`` on a path collision;
+          * any other input — copied from ``project_root`` (source seed) via
+            the existing glob, exactly as before.
+
+        Known limitation (OP-1676, scoped to first-run): on an idempotent
+        re-claim a prior ``done`` task's output may already be cleaned, so the
+        staging copy can be absent — the upstream-output input is then simply
+        not materialised (no crash). Durable artifact restore across re-claim
+        is a separate follow-up.
+        """
         ws = self._root / f"{plan_id}-{task.task_id}"
         if ws.exists():
             worker._rmtree(ws)
         ws.mkdir(parents=True, exist_ok=True)
 
+        staging_root = self._plan_staging_root(plan_id)
         copied: list[str] = []
-        if self._project_root is not None:
-            for glob in task.inputs:
-                for src in worker._resolve_glob(self._project_root, glob):
-                    rel = src.relative_to(self._project_root)
-                    dst = ws / rel
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    if src.is_dir():
-                        worker._copytree(src, dst)
-                    else:
-                        worker._copyfile(src, dst)
-                    copied.append(str(rel))
+        for inp in task.inputs:
+            ext = _EXTERNAL_INPUT_RE.match(inp)
+            if ext is not None:
+                # external:/user: — caller-provided seed from project_root.
+                copied.extend(self._copy_from_project_root(ws, ext.group(1)))
+                continue
+
+            # Upstream-output input first (staging wins on collision); then
+            # fall back to project_root for any rel path staging did not cover.
+            staged = self._copy_from_staging(ws, staging_root, inp)
+            copied.extend(staged)
+            copied.extend(
+                self._copy_from_project_root(ws, inp, skip=set(staged))
+            )
         return TaskWorkspace(
             plan_id=plan_id, task_id=task.task_id, path=ws, copied=copied,
         )
+
+    # ─── input materialisation helpers ───────────────────────────
+    def _plan_staging_root(self, plan_id: int) -> Path:
+        """The per-plan executor-owned staging dir for upstream outputs."""
+        return self._root / PLAN_OUTPUTS_SUBDIR / str(plan_id)
+
+    def _copy_from_staging(
+        self, ws: Path, staging_root: Path, input_path: str,
+    ) -> list[str]:
+        """Materialise an upstream-output input by EXACT path from staging.
+
+        Returns the rel path(s) copied — empty when staging holds no such
+        artifact (the producing task hasn't run yet on this builder, or its
+        staged output was already cleaned on a re-claim: the documented
+        first-run-only limitation). A ``..`` segment never escapes the jail.
+        """
+        rel = input_path.lstrip("/")
+        if not rel or any(part == ".." for part in Path(rel).parts):
+            return []
+        src = staging_root / rel
+        if not src.exists():
+            return []
+        self._copy_one(src, ws / rel)
+        return [str(Path(rel))]
+
+    def _copy_from_project_root(
+        self, ws: Path, glob: str, *, skip: set[str] = frozenset(),  # type: ignore[assignment]
+    ) -> list[str]:
+        """Copy ``project_root`` glob matches into ``ws`` (project-root jailed).
+
+        ``skip`` is the set of rel paths an upstream-staging copy already won,
+        so staging takes precedence on a collision. No-op when no project root
+        is bound.
+        """
+        if self._project_root is None:
+            return []
+        out: list[str] = []
+        for src in worker._resolve_glob(self._project_root, glob):
+            rel_str = str(src.relative_to(self._project_root))
+            if rel_str in skip:
+                continue  # staging already materialised this path (it wins)
+            self._copy_one(src, ws / src.relative_to(self._project_root))
+            out.append(rel_str)
+        return out
+
+    @staticmethod
+    def _copy_one(src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if src.is_dir():
+            worker._copytree(src, dst)
+        else:
+            worker._copyfile(src, dst)
+
+    def stage_output(
+        self, plan_id: int, expected_output: str, artifact: Path | None,
+    ) -> Optional[Path]:
+        """Stage a successful task's ``expected_output`` into the plan staging
+        area, preserving its artifact-relative path (OP-1676).
+
+        Called by :func:`record_and_finalize_plan` AFTER a task succeeds and
+        BEFORE cleanup, so a downstream :meth:`prepare` can materialise a
+        matching declared input by exact path. ``expected_output`` is ONE
+        concrete file/dir path; a non-file io entity (``git:`` / ``issue:``)
+        or a missing artifact is a no-op (returns ``None``). The downstream
+        task reads this plan-level COPY — never the upstream scratch directly,
+        so per-task scratch isolation is preserved.
+        """
+        rel = (expected_output or "").strip()
+        if not rel or _NON_FILE_OUTPUT_RE.match(rel):
+            return None  # non-file io entity → nothing to stage
+        if any(part == ".." for part in Path(rel).parts):
+            return None  # defensive: never stage outside the staging root
+        if artifact is None or not artifact.exists():
+            return None
+        dst = self._plan_staging_root(plan_id) / rel
+        self._copy_one(artifact, dst)
+        return dst
 
     def cleanup(self, ws: TaskWorkspace) -> None:
         """Remove a prepared workspace (best-effort, mirrors sandbox.stop)."""
@@ -616,6 +742,20 @@ class PlanWorkspaceBuilder:
         except OSError as exc:
             logger.warning(
                 "dag plan workspace cleanup failed for %s: %s", ws.path, exc,
+            )
+
+    def cleanup_plan_staging(self, plan_id: int) -> None:
+        """Remove a plan's staging area (best-effort), AFTER all tasks ran.
+
+        Safe to call once the serial walk has finished: every downstream
+        ``prepare`` that needed an upstream output has already read its COPY.
+        """
+        staging = self._plan_staging_root(plan_id)
+        try:
+            worker._rmtree(staging)
+        except OSError as exc:
+            logger.warning(
+                "dag plan staging cleanup failed for %s: %s", staging, exc,
             )
 
 
@@ -1133,6 +1273,39 @@ def _cleanup_plan_workspaces(
                 )
 
 
+def _stage_task_output(
+    handler: "LocalTaskHandler", plan_id: int, task: Task,
+    result: "LocalTaskResult",
+) -> None:
+    """Stage an ok task's ``expected_output`` into the per-plan staging area so
+    a downstream task's :meth:`PlanWorkspaceBuilder.prepare` can materialise it
+    as a declared input (OP-1676).
+
+    Routes through the handler's :class:`PlanWorkspaceBuilder` so the staged
+    COPY lives under the same workdir root the downstream prepare() reads. A
+    non-file io entity / missing artifact is a no-op; staging failures are
+    logged but never fault the walk (a downstream task simply won't find the
+    input, which it then surfaces as its own failure).
+    """
+    builder = getattr(handler, "workspace_builder", None)
+    if builder is None or result.artifact is None:
+        return
+    try:
+        builder.stage_output(plan_id, task.expected_output, result.artifact)
+    except OSError as exc:
+        logger.warning(
+            "dag plan output staging failed for plan=%s task=%s: %s",
+            plan_id, task.task_id, exc,
+        )
+
+
+def _cleanup_plan_staging(handler: "LocalTaskHandler", plan_id: int) -> None:
+    """Best-effort removal of a plan's staging area, AFTER the walk + steps."""
+    builder = getattr(handler, "workspace_builder", None)
+    if builder is not None:
+        builder.cleanup_plan_staging(plan_id)
+
+
 async def record_and_finalize_plan(
     plan: "dag_storage.StoredPlan",
     *,
@@ -1217,6 +1390,10 @@ async def record_and_finalize_plan(
                 output=_step_output(result),
             )
             recorded.append(task.task_id)
+            # Stage the produced artifact so a downstream task's prepare() can
+            # materialise it as an upstream-output input (OP-1676). AFTER the
+            # step is durably recorded, BEFORE cleanup runs at the end.
+            _stage_task_output(handler, plan.id, task, result)
         else:
             await wf.record_dag_step(
                 run_id, key, dag_task_id=task.task_id,
@@ -1242,6 +1419,9 @@ async def record_and_finalize_plan(
     # ── own per-plan workspace cleanup, AFTER the steps are recorded ──
     if cleanup:
         _cleanup_plan_workspaces(handler, results)
+        # The plan staging area (OP-1676) is read by downstream prepare() during
+        # the walk above; with the walk done it is safe to drop too.
+        _cleanup_plan_staging(handler, plan.id)
 
     return PlanTerminalResult(
         plan_id=plan.id, run_id=run_id, status=terminal,
@@ -1504,6 +1684,7 @@ __all__ = [
     "CycleError",
     "PlanRunResult",
     "PlanWorkspaceBuilder",
+    "PLAN_OUTPUTS_SUBDIR",
     "SerialPlanScheduler",
     "TaskHandler",
     "TaskRun",
