@@ -90,13 +90,24 @@ fast-gate:
     - |
       POLICY="$(backend/.venv/bin/python -c 'import json; print(json.load(open("fast-gate-impact.json"))["policy"])')"
       TEST_FILES="$(backend/.venv/bin/python -c 'import json; print(" ".join(json.load(open("fast-gate-impact.json"))["test_files"]))')"
+      # Invoke pytest as `python -m pytest` (not the `pytest` console
+      # script) so the repo root (CWD) lands on sys.path[0]. The suite's
+      # ~835 test modules do `from backend import ...`; under prepend
+      # import mode pytest only inserts the first ancestor *without*
+      # __init__.py, which — because backend/tests/__init__.py exists but
+      # backend/__init__.py does not — is backend/, not the repo root. The
+      # console script never adds CWD, so when the impact policy selects
+      # only files under backend/tests/ the rootdir resolves to backend/
+      # and `import backend` fails (ModuleNotFoundError). `-m` restores the
+      # repo root to sys.path while leaving rootdir/configfile (and thus
+      # backend/pytest.ini's markers + asyncio config) untouched.
       case "$POLICY" in
         affected)
           test -n "$TEST_FILES"
-          backend/.venv/bin/pytest --no-cov -q $TEST_FILES
+          backend/.venv/bin/python -m pytest --no-cov -q $TEST_FILES
           ;;
         full)
-          backend/.venv/bin/pytest --no-cov -q backend/tests tests
+          backend/.venv/bin/python -m pytest --no-cov -q backend/tests tests
           ;;
         skip|frontend-only|lint-only)
           echo "pytest skipped by impact policy: $POLICY"
