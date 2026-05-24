@@ -538,6 +538,43 @@ async def _record_step(run_id: str, idempotency_key: str,
         raise
 
 
+async def get_step(run_id: str, idempotency_key: str) -> Optional[StepRecord]:
+    """Public point-lookup of one step by ``(run_id, idempotency_key)``.
+
+    Returns ``None`` when no such step exists. The DAG executor (OP-1659)
+    uses this to decide, on a re-claim, whether a task's step is already
+    *done* — a done step is skipped rather than re-run, the resume contract.
+    """
+    return await _get_step(run_id, idempotency_key)
+
+
+async def record_dag_step(run_id: str, idempotency_key: str, *,
+                          dag_task_id: str | None = None,
+                          output: Any = None,
+                          error: str | None = None) -> StepRecord:
+    """Idempotently record one finished DAG-task step (imperative form).
+
+    Counterpart to :func:`step` for the DAG executor (OP-1659), which holds a
+    task *result* in hand rather than a callable to wrap. Exactly-once on the
+    success path: when a *done* step already exists for ``(run_id,
+    idempotency_key)`` it is returned unchanged (the re-claim "skip
+    already-done" contract) — the body is never re-run and no second row is
+    written. Otherwise the step is recorded carrying ``dag_task_id``.
+
+    No retry semantics: this only writes the step the caller hands it. An
+    already-recorded *failed* step (``error`` set, not ``is_done``) is left as
+    a UNIQUE-collision read-back by :func:`_record_step` — it is never
+    rewritten to success.
+    """
+    existing = await _get_step(run_id, idempotency_key)
+    if existing and existing.is_done:
+        logger.info("workflow.record_dag_step skip-done run=%s key=%s",
+                    run_id, idempotency_key)
+        return existing
+    return await _record_step(run_id, idempotency_key, output, error,
+                              dag_task_id=dag_task_id)
+
+
 def step(run: WorkflowRun, idempotency_key: str,
          dag_task_id: str | None = None):
     """Decorator: wrap an async callable so it only runs once per

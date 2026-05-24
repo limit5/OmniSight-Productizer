@@ -993,6 +993,224 @@ class LocalTaskHandler:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Step recording + terminal wiring (OP-1659)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 (codex E5/E6). This slice closes the executor loop ON TOP of
+# the OP-1657 serial walk + OP-1658 local handlers:
+#
+#   * one IDEMPOTENT ``workflow.step`` per task, carrying ``dag_task_id``;
+#   * ALL tasks ok   -> set_status(plan,'completed') + workflow.finish(run,'completed');
+#   * ANY task fails -> set_status(plan,'failed')    + workflow.finish(run,'failed');
+#   * the executor OWNS per-plan workspace cleanup, AFTER the steps are recorded
+#     (so a task's artifact is recorded before its scratch is removed).
+#
+# Idempotent re-claim
+# -------------------
+# A plan already in a terminal state ('completed' / 'failed') was fully
+# recorded by a prior run — we short-circuit and touch nothing (no duplicate
+# steps, no illegal re-transition). A plan still 'executing' (a mid-flight
+# crash, then re-claim) is RESUMED: each task whose step is already *done* is
+# skipped (cache-hit, handler not re-run); a task with a prior *failed* step
+# is honoured as a failure (no retry); the rest run for the first time.
+#
+# MUST-NOT (ticket scope): no new export / billing / skills / retry /
+# side-effect behaviour. We only record per-task steps + terminal statuses
+# and clean the scratch. This function is NOT wired into :meth:`DagExecutor.run`'s
+# loop seam — like every prior slice it ships INERT (a still-gated phase calls
+# it after a lease is granted), which is the "merged inert" Go-Live contract.
+
+#: Plan statuses that mean "already fully recorded" — a re-claim of one of
+#: these is a no-op (re-transitioning out of them is illegal anyway).
+_TERMINAL_PLAN_STATUSES = frozenset({"completed", "failed"})
+
+
+def dag_step_key(task_id: str) -> str:
+    """The ``workflow_steps.idempotency_key`` for a task: ``dag-task:{id}``.
+
+    Stable per (run, task) so a re-claim looks the recorded step back up by
+    the same key — that lookup is the "skip already-done" resume hinge.
+    """
+    return f"dag-task:{task_id}"
+
+
+@dataclass
+class PlanTerminalResult:
+    """Outcome of recording a plan's steps + wiring its terminal status.
+
+    ``status`` is the terminal plan/run status this invocation drove the plan
+    to (``"completed"`` / ``"failed"``); ``recorded`` is the ``dag_task_id``s
+    that have a step (newly recorded this invocation **or** skipped because
+    already done). ``results`` holds the :class:`LocalTaskResult` for tasks
+    actually run here (empty on a re-claim no-op). ``already_terminal`` is
+    True when the plan was found already in a terminal state and nothing ran.
+    """
+
+    plan_id: int
+    run_id: str
+    status: str                       # "completed" | "failed"
+    recorded: list[str] = field(default_factory=list)
+    results: list["LocalTaskResult"] = field(default_factory=list)
+    already_terminal: bool = False
+
+
+def _step_output(result: "LocalTaskResult") -> dict[str, Any]:
+    """The JSON-able step payload cached for an ok task (audit / replay)."""
+    return {
+        "toolchain": result.toolchain,
+        "rc": result.rc,
+        "artifact": str(result.artifact) if result.artifact is not None else None,
+        "status": result.status,
+    }
+
+
+def _cleanup_plan_workspaces(
+    handler: "LocalTaskHandler", results: list["LocalTaskResult"],
+) -> None:
+    """Best-effort removal of each task's scratch, AFTER steps are recorded.
+
+    Reuses the handler's :class:`PlanWorkspaceBuilder` so cleanup goes through
+    the same ``worker._rmtree`` path the rest of the module uses. A task that
+    failed a gate before any workspace was built (``workspace is None``) has
+    nothing to clean.
+    """
+    builder = getattr(handler, "workspace_builder", None)
+    for r in results:
+        if r.workspace is None:
+            continue
+        ws = TaskWorkspace(plan_id=r.plan_id, task_id=r.task_id, path=r.workspace)
+        if builder is not None:
+            builder.cleanup(ws)
+        else:  # pragma: no cover - handler always carries a builder
+            try:
+                worker._rmtree(r.workspace)
+            except OSError as exc:
+                logger.warning(
+                    "dag plan workspace cleanup failed for %s: %s",
+                    r.workspace, exc,
+                )
+
+
+async def record_and_finalize_plan(
+    plan: "dag_storage.StoredPlan",
+    *,
+    handler: "LocalTaskHandler",
+    workflow=None,
+    storage=None,
+    cleanup: bool = True,
+) -> PlanTerminalResult:
+    """Run ``plan``'s tasks, record one idempotent step each, wire the terminal
+    plan status + ``workflow.finish``, then clean each task's scratch.
+
+    The tasks are walked in :func:`topological_order` and run SERIALLY through
+    ``handler`` (OP-1658's local toolchain handler). For each task a single
+    idempotent ``workflow.record_dag_step`` is written carrying its
+    ``dag_task_id``. On the first failure the walk stops, the plan + run land
+    ``failed``; otherwise both land ``completed``. Workspace cleanup runs LAST,
+    after every step is durably recorded.
+
+    Idempotent re-claim: if ``plan`` is already terminal nothing runs (no-op);
+    if it is still ``executing`` (a mid-flight crash) already-done tasks are
+    skipped and a prior failed task is honoured without re-running.
+
+    ``workflow`` / ``storage`` default to :mod:`backend.workflow` /
+    :mod:`backend.dag_storage`; both are injectable so the wiring can be
+    exercised in-harness without a database.
+    """
+    wf = workflow if workflow is not None else _import_workflow()
+    ds = storage if storage is not None else dag_storage
+
+    run_id = plan.run_id
+    if not run_id:
+        raise ValueError(
+            f"plan {plan.id} has no run_id — cannot record steps / finish a run"
+        )
+    dag = plan.dag()
+
+    # ── idempotent re-claim: a terminal plan was already fully recorded ──
+    current = await ds.get_plan(plan.id)
+    if current.status in _TERMINAL_PLAN_STATUSES:
+        recorded = [
+            s.dag_task_id for s in await wf.list_steps(run_id) if s.dag_task_id
+        ]
+        logger.info(
+            "dag finalize: plan=%s already terminal (%s) — re-claim no-op",
+            plan.id, current.status,
+        )
+        return PlanTerminalResult(
+            plan_id=plan.id, run_id=run_id, status=current.status,
+            recorded=recorded, already_terminal=True,
+        )
+
+    order = topological_order(dag)
+    results: list[LocalTaskResult] = []
+    recorded: list[str] = []
+    all_ok = True
+    for task in order:
+        key = dag_step_key(task.task_id)
+        prior = await wf.get_step(run_id, key)
+        if prior is not None:
+            # Resume: this task already has a recorded outcome — honour it
+            # without re-running (no retry). Done == ok-skip; not-done == a
+            # prior failure that fails the whole plan.
+            recorded.append(task.task_id)
+            if prior.is_done:
+                logger.info(
+                    "dag finalize: plan=%s task=%s step already done — skip",
+                    plan.id, task.task_id,
+                )
+                continue
+            logger.info(
+                "dag finalize: plan=%s task=%s has a prior failed step — "
+                "plan fails (no retry)", plan.id, task.task_id,
+            )
+            all_ok = False
+            break
+
+        result = await handler.run(plan.id, task)
+        results.append(result)
+        if result.ok:
+            await wf.record_dag_step(
+                run_id, key, dag_task_id=task.task_id,
+                output=_step_output(result),
+            )
+            recorded.append(task.task_id)
+        else:
+            await wf.record_dag_step(
+                run_id, key, dag_task_id=task.task_id,
+                error=(result.reason or "task failed")[:512],
+            )
+            recorded.append(task.task_id)
+            all_ok = False
+            break  # stop the serial walk at the first failure
+
+    terminal = "completed" if all_ok else "failed"
+    # ── terminal wiring: plan status first, then finish the run ──
+    await ds.set_status(plan.id, terminal)
+    await wf.finish(run_id, terminal)
+    logger.info(
+        "dag finalize: plan=%s run=%s -> %s (%d step(s) recorded)",
+        plan.id, run_id, terminal, len(recorded),
+    )
+
+    # ── own per-plan workspace cleanup, AFTER the steps are recorded ──
+    if cleanup:
+        _cleanup_plan_workspaces(handler, results)
+
+    return PlanTerminalResult(
+        plan_id=plan.id, run_id=run_id, status=terminal,
+        recorded=recorded, results=results,
+    )
+
+
+def _import_workflow():
+    """Lazy import of :mod:`backend.workflow` (avoids a heavy import at module
+    load — workflow pulls in the db pool / billing surface)."""
+    from backend import workflow
+    return workflow
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CLI entry-point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1072,6 +1290,9 @@ __all__ = [
     "CMAKE_BUILD_DIR",
     "LocalTaskHandler",
     "LocalTaskResult",
+    "PlanTerminalResult",
+    "dag_step_key",
+    "record_and_finalize_plan",
     "ensure_dag_exec_namespace",
     "is_enabled",
     "main",
