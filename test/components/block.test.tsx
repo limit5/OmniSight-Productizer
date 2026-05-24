@@ -12,6 +12,12 @@ import type { ReactNode } from "react"
 import { Activity } from "lucide-react"
 
 import { Block, isBlockModelEnabled } from "@/components/omnisight/block"
+import {
+  BpFleetLanes,
+  type FleetLaneDetail,
+  type FleetLanesSnapshot,
+} from "@/components/omnisight/bp-fleet-lanes"
+import { createShareableObject } from "@/lib/api"
 import type {
   CreateShareableObjectRequest,
   ExecuteRunbookRequest,
@@ -20,6 +26,25 @@ import type {
   SaveBlockAsRunbookRequest,
   SaveBlockAsRunbookResponse,
 } from "@/lib/api"
+
+vi.mock("@/lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/api")>()
+  return {
+    ...actual,
+    createShareableObject: vi.fn(
+      async (_body: CreateShareableObjectRequest) => ({
+        share_id: "bp-share-1",
+        object_kind: "block",
+        object_id: "a-run",
+        visibility: "private" as const,
+        permalink_url: "https://omnisight.local/share/bp-share-1",
+        expires_at: null,
+      }),
+    ),
+    saveBlockAsRunbook: vi.fn(),
+    executeRunbook: vi.fn(),
+  }
+})
 
 type SurfaceFixture = {
   surface: string
@@ -58,20 +83,6 @@ const SURFACE_FIXTURES: SurfaceFixture[] = [
         <span data-testid="model-label">Claude Opus</span>
         <span data-testid="model-cost">$0.42</span>
         <span data-testid="context-usage-pct">42%</span>
-      </>
-    ),
-  },
-  {
-    surface: "BP dispatch board",
-    kind: "bp.batch.run",
-    status: "running",
-    className: "rounded-sm border px-3 py-2",
-    legacyTestId: "legacy-bp",
-    migratedTestId: "migrated-bp",
-    children: (
-      <>
-        <span data-testid="batch-priority">Priority HD</span>
-        <span data-testid="batch-progress">3 / 8</span>
       </>
     ),
   },
@@ -120,8 +131,42 @@ function semanticSurfaceSnapshot(root: HTMLElement) {
   }))
 }
 
+const bpSnapshot: FleetLanesSnapshot = {
+  lanes: {
+    active: [
+      {
+        id: "a-run",
+        name: "Firmware Alpha",
+        type: "firmware",
+        sub_type: "",
+        status: "running",
+        ai_model: "claude-opus-4-7",
+        progress: { current: 3, total: 7 },
+      },
+    ],
+    scheduled: [],
+    ambient: [],
+    history: [],
+  },
+  counts: { active: 1, scheduled: 0, ambient: 0, history: 0 },
+}
+
+const bpDetail: FleetLaneDetail = {
+  ...bpSnapshot.lanes.active[0],
+  lane: "active",
+  revocable: true,
+  sub_tasks: [{ id: "st-1", label: "Boot toolchain", status: "running" }],
+  workspace: {
+    branch: "feature/op-621",
+    status: "active",
+    commit_count: 2,
+    task_id: "OP-621",
+  },
+}
+
 afterEach(() => {
   vi.unstubAllEnvs()
+  vi.clearAllMocks()
 })
 
 describe("<Block />", () => {
@@ -329,6 +374,63 @@ describe("<Block />", () => {
       expect(migrated).not.toHaveAttribute("data-block-status")
     },
   )
+
+  it("migrates the real BP dispatch board to Block lanes, cards, detail, and subtasks", async () => {
+    const onLoadDetail = vi.fn().mockResolvedValue(bpDetail)
+
+    render(<BpFleetLanes snapshot={bpSnapshot} onLoadDetail={onLoadDetail} />)
+
+    const lane = screen.getByTestId("fleet-lane-active")
+    expect(lane).toHaveAttribute("data-block-kind", "bp.lane")
+
+    const card = screen.getByTestId("fleet-card-a-run")
+    expect(card).toHaveAttribute("data-block-id", "a-run")
+    expect(card).toHaveAttribute("data-block-kind", "bp.card")
+    expect(card).toHaveAttribute("data-block-status", "running")
+
+    fireEvent.contextMenu(card)
+    fireEvent.click(await screen.findByText("Share"))
+    fireEvent.click(screen.getByTestId("block-share-create"))
+
+    await waitFor(() => expect(createShareableObject).toHaveBeenCalledTimes(1))
+    expect(createShareableObject).toHaveBeenCalledWith(
+      expect.objectContaining({
+        object_kind: "block",
+        object_id: "a-run",
+      }),
+    )
+
+    fireEvent.click(card)
+    await waitFor(() => expect(screen.getByTestId("fleet-detail-panel")).toBeInTheDocument())
+    expect(screen.getByTestId("fleet-detail-panel")).toHaveAttribute(
+      "data-block-kind",
+      "bp.detail",
+    )
+    expect(screen.getByTestId("fleet-detail-panel")).toHaveAttribute(
+      "data-block-id",
+      "a-run",
+    )
+    expect(screen.getByText("Boot toolchain").closest("[data-block-kind]")).toHaveAttribute(
+      "data-block-kind",
+      "bp.subtask",
+    )
+  })
+
+  it("keeps the real BP dispatch board raw when the Block model knob is disabled", () => {
+    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
+
+    render(<BpFleetLanes snapshot={bpSnapshot} />)
+
+    expect(isBlockModelEnabled()).toBe(false)
+    const lane = screen.getByTestId("fleet-lane-active")
+    const card = screen.getByTestId("fleet-card-a-run")
+    expect(lane).not.toHaveAttribute("data-block-kind")
+    expect(card).not.toHaveAttribute("data-block-id")
+    expect(card).not.toHaveAttribute("data-block-kind")
+
+    fireEvent.contextMenu(card)
+    expect(screen.queryByText("Share")).not.toBeInTheDocument()
+  })
 
   it("saves a block as a runbook and re-executes with operator-supplied params", async () => {
     const runbook: RunbookSummary = {

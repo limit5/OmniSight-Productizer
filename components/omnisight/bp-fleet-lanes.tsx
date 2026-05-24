@@ -19,6 +19,8 @@
 import { useCallback, useState } from "react"
 import { Activity, Calendar, Cpu, History as HistoryIcon, X } from "lucide-react"
 
+import { Block } from "./block"
+
 export const LANE_KEYS = ["active", "scheduled", "ambient", "history"] as const
 export type FleetLaneKey = (typeof LANE_KEYS)[number]
 
@@ -217,7 +219,9 @@ function Lane({
   const visual = LANE_VISUALS[laneKey]
   const Icon = visual.Icon
   return (
-    <article
+    <Block
+      as="article"
+      kind="bp.lane"
       role="listitem"
       data-testid={`fleet-lane-${laneKey}`}
       aria-label={`${visual.label} lane`}
@@ -243,9 +247,13 @@ function Lane({
           </p>
         ) : (
           agents.map((agent) => (
-            <button
+            <Block
+              as="button"
               key={agent.id}
               type="button"
+              blockId={agent.id}
+              kind="bp.card"
+              status={agent.status}
               data-testid={`fleet-card-${agent.id}`}
               data-lane={laneKey}
               onClick={() => onSelect(agent.id)}
@@ -266,11 +274,11 @@ function Lane({
                 </span>
                 <span className="font-mono">{formatProgress(agent.progress)}</span>
               </span>
-            </button>
+            </Block>
           ))
         )}
       </div>
-    </article>
+    </Block>
   )
 }
 
@@ -284,7 +292,11 @@ function DetailPanel({
   onRevoke?: () => void | Promise<void>
 }) {
   return (
-    <aside
+    <Block
+      as="aside"
+      blockId={detail.id}
+      kind="bp.detail"
+      status={detail.status}
       role="dialog"
       aria-label={`Agent ${detail.name} detail`}
       data-testid="fleet-detail-panel"
@@ -336,8 +348,11 @@ function DetailPanel({
           </h4>
           <ul className="flex flex-col gap-1">
             {detail.sub_tasks.map((st) => (
-              <li
+              <Block
+                as="li"
                 key={st.id}
+                kind="bp.subtask"
+                status={st.status}
                 className="flex items-center justify-between gap-2 rounded border border-white/10 bg-black/30 px-2 py-1 text-[11px]"
               >
                 <span className="truncate text-white/90">{st.label}</span>
@@ -346,7 +361,7 @@ function DetailPanel({
                 >
                   {st.status}
                 </span>
-              </li>
+              </Block>
             ))}
           </ul>
         </section>
@@ -364,7 +379,7 @@ function DetailPanel({
           </button>
         ) : null}
       </footer>
-    </aside>
+    </Block>
   )
 }
 
