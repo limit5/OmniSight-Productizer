@@ -696,6 +696,303 @@ class SerialPlanScheduler:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Local task handlers (cmake / make / python3) — OP-1658
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 (codex Q7). This slice gives the serial scheduler a REAL
+# task handler for the three **local** toolchains — and ONLY those three.
+# Each task runs in its own per-plan scratch workspace
+# (``workdir_root/{plan_id}-{task_id}`` via :class:`PlanWorkspaceBuilder`,
+# materialised from ``Task.inputs`` using worker.py's low-level helpers —
+# NOT ``LocalSandboxRuntime.start`` which is TaskCard/git-coupled). We
+# capture the process ``rc`` + ``stdout``/``stderr`` and the artifact that
+# landed at the task's ``expected_output``.
+#
+# Fail-closed scope rules (each FAILS the task — never crashes):
+#   * a non-``t1`` ``required_tier`` (``networked`` / ``t3``) — out of this
+#     local-only slice;
+#   * an unknown / non-local ``toolchain`` (anything but cmake/make/python3);
+#   * an ``expected_output`` that escapes the workspace;
+#   * the toolchain exiting non-zero, or not producing the artifact.
+#
+# Workspace lifecycle: the handler CREATES + RETURNS the workspace on the
+# result; the CALLER (a later step-recording / terminal ticket) owns
+# cleanup so the artifact can be read first. We never delete it here. The
+# fail-closed side-effect guard for nonlocal toolchains beyond "just FAIL"
+# is a SEPARATE ticket's job.
+
+#: Toolchains this local slice knows how to run. Anything else FAILS the
+#: task (not a crash) — per the ticket MUST-NOT (no cross-compile / flash /
+#: remote / publish here).
+LOCAL_TOOLCHAINS: tuple[str, ...] = ("cmake", "make", "python3")
+
+#: The only tier this slice executes. ``networked`` / ``t3`` tasks FAIL as
+#: out-of-slice rather than running on the local host.
+LOCAL_TIER = "t1"
+
+#: Per-task subprocess wall-clock budget (seconds). Mirrors the
+#: ``build_adapters._run`` default; injectable per-handler for tests.
+DEFAULT_TASK_TIMEOUT_S = 600
+
+#: Sub-directory cmake configures + builds into, relative to the workspace.
+CMAKE_BUILD_DIR = "build"
+
+
+class _LocalHandlerError(Exception):
+    """Internal — a pre-flight handler problem that FAILS the task.
+
+    Used for prepare-time conditions (e.g. a ``python3`` task with no ``.py``
+    input) so :meth:`LocalTaskHandler.run` can translate them into a FAILED
+    :class:`LocalTaskResult` instead of raising out of the handler.
+    """
+
+
+@dataclass
+class LocalTaskResult:
+    """Outcome of running one task through a local toolchain handler.
+
+    ``status`` is ``"ok"`` only when the toolchain exited 0 **and** the
+    declared artifact landed at ``expected_output`` inside the workspace;
+    otherwise ``"failed"`` with a human-readable ``reason``. ``workspace``
+    is the scratch dir the handler created (``None`` only when the task
+    FAILED a gate before any workspace was built) — the caller owns its
+    cleanup. ``artifact`` is the resolved ``expected_output`` path when it
+    was produced, else ``None``.
+    """
+
+    task_id: str
+    plan_id: int
+    toolchain: str
+    status: str                       # "ok" | "failed"
+    rc: Optional[int] = None
+    stdout: str = ""
+    stderr: str = ""
+    workspace: Optional[Path] = None
+    artifact: Optional[Path] = None
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "ok"
+
+
+def _run_local(
+    argv: list[str], cwd: Path, timeout_s: float,
+) -> tuple[int, str, str]:
+    """Run one local command in ``cwd``; return ``(rc, stdout, stderr)``.
+
+    Never raises: a missing binary maps to rc 127 and a timeout to rc 124
+    (mirroring :func:`backend.build_adapters._run`) so the handler can fold
+    either into a FAILED task rather than an exception.
+    """
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            argv, cwd=str(cwd), capture_output=True, text=True,
+            timeout=timeout_s, check=False,
+        )
+        return proc.returncode, proc.stdout, proc.stderr
+    except subprocess.TimeoutExpired as exc:
+        return 124, (exc.stdout or ""), f"timeout after {timeout_s}s"
+    except FileNotFoundError as exc:
+        return 127, "", str(exc)
+
+
+def _resolve_expected_output(workspace: Path, expected_output: str) -> Path:
+    """Resolve a workspace-relative ``expected_output`` inside ``workspace``.
+
+    ``expected_output`` is workspace-relative by contract. An absolute path,
+    a ``..`` segment, or anything that resolves outside the workspace raises
+    :class:`ValueError` — the caller turns that into a FAILED task (a path
+    escaping the workspace must never let a task read/write outside its
+    jail). Mirrors the jail check in :func:`backend.worker._resolve_glob`.
+    """
+    rel = (expected_output or "").strip()
+    p = Path(rel)
+    if not rel or p.is_absolute() or any(part == ".." for part in p.parts):
+        raise ValueError(
+            f"expected_output {expected_output!r} escapes the workspace"
+        )
+    candidate = workspace / rel
+    try:
+        candidate.resolve().relative_to(workspace.resolve())
+    except (ValueError, OSError):
+        raise ValueError(
+            f"expected_output {expected_output!r} escapes the workspace"
+        )
+    return candidate
+
+
+class LocalTaskHandler:
+    """Toolchain → handler dispatch for the three **local** toolchains.
+
+    Construct with a :class:`PlanWorkspaceBuilder` (the per-plan scratch
+    bridge) and call :meth:`run` per task. The handler:
+
+      1. gates on ``required_tier == "t1"`` and a known local ``toolchain``
+         (else FAIL — not a crash);
+      2. prepares + RETURNS a fresh ``{plan_id}-{task_id}`` workspace
+         (materialised from ``Task.inputs``);
+      3. runs the toolchain's command sequence serially in that workspace,
+         capturing ``rc`` / ``stdout`` / ``stderr``;
+      4. resolves the workspace-relative ``expected_output`` (escape → FAIL)
+         and requires it to exist for ``status == "ok"``.
+
+    It never cleans the workspace up — the caller owns that so artifacts can
+    be read first.
+
+    ``runner`` is injectable (``(argv, cwd, timeout_s) -> (rc, out, err)``)
+    so unit tests can exercise the dispatch / gating / artifact logic
+    without spawning real ``cmake`` / ``make`` processes.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace_builder: "PlanWorkspaceBuilder",
+        timeout_s: float = DEFAULT_TASK_TIMEOUT_S,
+        runner: Callable[[list[str], Path, float], tuple[int, str, str]]
+        | None = None,
+    ) -> None:
+        self.workspace_builder = workspace_builder
+        self.timeout_s = timeout_s
+        self._runner = runner or _run_local
+
+    # ─── public API ──────────────────────────────────────────────
+    async def run(self, plan_id: int, task: Task) -> LocalTaskResult:
+        """Run ``task`` locally for ``plan_id``; return a result, never raise."""
+        # ── gate 1: tier (this slice is t1/local only) ─────────────
+        if task.required_tier != LOCAL_TIER:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"required_tier {task.required_tier!r} is not local "
+                    f"({LOCAL_TIER}-only slice — networked/t3 out of slice)"
+                ),
+            )
+        # ── gate 2: known local toolchain ─────────────────────────
+        if task.toolchain not in LOCAL_TOOLCHAINS:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"unknown/nonlocal toolchain {task.toolchain!r} "
+                    f"(local handlers: {', '.join(LOCAL_TOOLCHAINS)})"
+                ),
+            )
+
+        # ── build the per-plan scratch workspace (handler owns creation) ──
+        ws = self.workspace_builder.prepare(plan_id, task)
+
+        try:
+            commands = self._command_sequence(task, ws)
+        except _LocalHandlerError as exc:
+            return self._fail(plan_id, task, workspace=ws.path, reason=str(exc))
+
+        # ── run the command sequence serially; stop at first non-zero ──
+        rc = 0
+        out_parts: list[str] = []
+        err_parts: list[str] = []
+        for argv in commands:
+            rc, out, err = await asyncio.to_thread(
+                self._runner, argv, ws.path, self.timeout_s,
+            )
+            out_parts.append(out)
+            err_parts.append(err)
+            if rc != 0:
+                break
+        stdout = "".join(out_parts)
+        stderr = "".join(err_parts)
+
+        if rc != 0:
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr,
+                reason=f"{task.toolchain} exited rc={rc}",
+            )
+
+        # ── resolve + verify the declared artifact ─────────────────
+        try:
+            artifact = _resolve_expected_output(ws.path, task.expected_output)
+        except ValueError as exc:
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr, reason=str(exc),
+            )
+        if not artifact.exists():
+            return self._fail(
+                plan_id, task, workspace=ws.path, rc=rc,
+                stdout=stdout, stderr=stderr,
+                reason=(
+                    f"expected_output {task.expected_output!r} not produced "
+                    f"by {task.toolchain}"
+                ),
+            )
+
+        logger.info(
+            "dag local handler: plan=%s task=%s toolchain=%s OK -> %s",
+            plan_id, task.task_id, task.toolchain, task.expected_output,
+        )
+        return LocalTaskResult(
+            task_id=task.task_id, plan_id=plan_id, toolchain=task.toolchain,
+            status="ok", rc=rc, stdout=stdout, stderr=stderr,
+            workspace=ws.path, artifact=artifact,
+        )
+
+    # ─── command derivation ──────────────────────────────────────
+    def _command_sequence(self, task: Task, ws: TaskWorkspace) -> list[list[str]]:
+        """Map a local toolchain to the command(s) to run in the workspace.
+
+        cmake → configure + build (two commands, run in order);
+        make  → ``make`` (default target);
+        python3 → run the first ``.py`` in ``inputs`` with this interpreter.
+        """
+        tc = task.toolchain
+        if tc == "cmake":
+            return [
+                ["cmake", "-S", ".", "-B", CMAKE_BUILD_DIR],
+                ["cmake", "--build", CMAKE_BUILD_DIR],
+            ]
+        if tc == "make":
+            return [["make"]]
+        if tc == "python3":
+            return [[sys.executable, self._python_entry(task)]]
+        # Unreachable: run() already gated on LOCAL_TOOLCHAINS.
+        raise _LocalHandlerError(f"no command mapping for toolchain {tc!r}")
+
+    @staticmethod
+    def _python_entry(task: Task) -> str:
+        """The ``.py`` script a python3 task runs: first such entry in inputs.
+
+        No ``.py`` input → :class:`_LocalHandlerError` (the task FAILS) — we
+        do not guess an entry point.
+        """
+        for inp in task.inputs:
+            if inp.strip().endswith(".py"):
+                return inp.strip()
+        raise _LocalHandlerError(
+            "python3 toolchain requires a .py file in inputs to run"
+        )
+
+    # ─── result helper ───────────────────────────────────────────
+    @staticmethod
+    def _fail(
+        plan_id: int, task: Task, *,
+        workspace: Optional[Path], reason: str,
+        rc: Optional[int] = None, stdout: str = "", stderr: str = "",
+    ) -> LocalTaskResult:
+        logger.info(
+            "dag local handler: plan=%s task=%s toolchain=%s FAIL — %s",
+            plan_id, task.task_id, task.toolchain, reason,
+        )
+        return LocalTaskResult(
+            task_id=task.task_id, plan_id=plan_id, toolchain=task.toolchain,
+            status="failed", rc=rc, stdout=stdout, stderr=stderr,
+            workspace=workspace, reason=reason,
+        )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CLI entry-point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -769,6 +1066,12 @@ __all__ = [
     "TaskHandler",
     "TaskRun",
     "TaskWorkspace",
+    "LOCAL_TOOLCHAINS",
+    "LOCAL_TIER",
+    "DEFAULT_TASK_TIMEOUT_S",
+    "CMAKE_BUILD_DIR",
+    "LocalTaskHandler",
+    "LocalTaskResult",
     "ensure_dag_exec_namespace",
     "is_enabled",
     "main",
