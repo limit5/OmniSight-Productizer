@@ -399,6 +399,30 @@ def reset_deploy_overlay_cache() -> None:
     _deploy_overlay_cache = _OVERLAY_UNSET
 
 
+# Env var carrying the digest of the image the container is ACTUALLY running,
+# injected by the B1b deploy-wiring step (e.g. resolved from the container
+# runtime / image inspect at launch). Deliberately separate from the lock's
+# ``deployed_digest_backend`` (what the promote step INTENDED to deploy): the
+# /readyz overlay-digest gate compares the two to catch a container running an
+# image other than the one the lock claims.
+RUNNING_IMAGE_DIGEST_BACKEND_ENV = "OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND"
+
+
+def get_running_image_digest_backend() -> str | None:
+    """Return the digest of the backend image actually running, or ``None``.
+
+    Reads the B1b-injected env :data:`RUNNING_IMAGE_DIGEST_BACKEND_ENV`. This
+    is intentionally NOT sourced from ``bundle.json`` — the baked bundle
+    manifest carries the all-zeros placeholder digest (the #23 finding), so it
+    cannot be trusted as "what is running". ``None`` (env absent or empty)
+    means the running digest is unknown; the overlay-digest gate treats that
+    as "skip the compare" (fail-OPEN) so a not-yet-B1b-wired deploy can't brick
+    readiness.
+    """
+    value = os.environ.get(RUNNING_IMAGE_DIGEST_BACKEND_ENV, "").strip()
+    return value or None
+
+
 def build_version_payload(
     *,
     bundle_path: Path | None = None,
