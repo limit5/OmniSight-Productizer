@@ -245,6 +245,108 @@ def test_api_version_evidence_rejects_missing_digest() -> None:
         )
 
 
+# ───────────────────── OP-1694 candidate digest bind ────────────────────
+
+
+def test_api_version_evidence_unbound_when_no_expected_digest() -> None:
+    """No expected digest → pre-OP-1694 behaviour; the live timer stays green
+    and the record carries no expected_* keys."""
+    evidence = sg.api_version_evidence(
+        base_url="https://staging.x",
+        timeout=1.0,
+        opener=lambda _u, _t: (200, json.dumps(API_VERSION_BODY)),
+    )
+    assert evidence["backend_digest"] == BACKEND_DIGEST
+    assert "expected_backend_digest" not in evidence
+    assert "expected_frontend_digest" not in evidence
+
+
+def test_api_version_evidence_green_when_candidate_digest_matches() -> None:
+    evidence = sg.api_version_evidence(
+        base_url="https://staging.x",
+        timeout=1.0,
+        opener=lambda _u, _t: (200, json.dumps(API_VERSION_BODY)),
+        expected_backend_digest=BACKEND_DIGEST,
+        expected_frontend_digest=FRONTEND_DIGEST,
+    )
+    assert evidence["expected_backend_digest"] == BACKEND_DIGEST
+    assert evidence["expected_frontend_digest"] == FRONTEND_DIGEST
+
+
+def test_api_version_evidence_raises_on_backend_digest_mismatch() -> None:
+    """A staging deploy serving the OLD image (2xx but wrong digest) is
+    rejected — this is the whole point of finding #24."""
+    with pytest.raises(RuntimeError, match="candidate digest mismatch"):
+        sg.api_version_evidence(
+            base_url="https://staging.x",
+            timeout=1.0,
+            opener=lambda _u, _t: (200, json.dumps(API_VERSION_BODY)),
+            expected_backend_digest="sha256:" + "c" * 64,
+        )
+
+
+def test_verify_candidate_digest_noop_without_expectations() -> None:
+    # Neither expected digest → never raises, regardless of deployed values.
+    sg.verify_candidate_digest(
+        backend_digest="sha256:whatever",
+        frontend_digest="sha256:whatever",
+        expected_backend_digest=None,
+        expected_frontend_digest=None,
+    )
+
+
+def test_digest_mismatch_marks_canary_gate_red(tmp_path: Path) -> None:
+    """End-to-end: a 2xx canary whose deployed digest != candidate is red."""
+    out = tmp_path / "canary-status.jsonl"
+
+    def evidence_probe() -> dict[str, Any]:
+        return sg.api_version_evidence(
+            base_url="https://staging.x",
+            timeout=1.0,
+            opener=lambda _u, _t: (200, json.dumps(API_VERSION_BODY)),
+            expected_backend_digest="sha256:" + "d" * 64,
+        )
+
+    result = sg.run_gate(
+        suite=sg.SUITE_CANARY,
+        revision=FAKE_SHA,
+        probe=lambda: (True, "all good"),  # /healthz+/readyz 2xx
+        out_path=out,
+        audit_sink=lambda *_a, **_k: None,
+        evidence_probe=evidence_probe,
+    )
+
+    assert result.exit_code == 2
+    rec = json.loads(out.read_text(encoding="utf-8"))
+    assert rec["status"] == "red"
+    assert "candidate digest mismatch" in rec["detail"]
+
+
+def test_main_expected_digest_args_thread_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--expected-backend-digest flips a 2xx-but-wrong-image gate to red."""
+    out = tmp_path / "canary-status.jsonl"
+    monkeypatch.setattr(
+        sg,
+        "_default_http_opener",
+        lambda url, _t: (
+            200,
+            json.dumps(API_VERSION_BODY) if url.endswith("/api/version") else "{}",
+        ),
+    )
+    rc = sg.main([
+        "--suite", "canary", "--revision", FAKE_SHA, "--out", str(out),
+        "--base-url", "https://staging.x", "--no-audit",
+        "--canary-attempts", "1", "--canary-interval", "0",
+        "--expected-backend-digest", "sha256:" + "e" * 64,
+    ])
+    assert rc == 2
+    rec = json.loads(out.read_text(encoding="utf-8"))
+    assert rec["status"] == "red"
+    assert "candidate digest mismatch" in rec["detail"]
+
+
 def test_iso_z_is_parseable_by_checker() -> None:
     now = datetime(2026, 5, 12, 12, 30, 45, tzinfo=timezone.utc)
     parsed = checker.parse_timestamp(sg.iso_z(now))

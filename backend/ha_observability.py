@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import collections
 import logging
+import math
 import os
 import socket
 import threading
@@ -177,6 +178,72 @@ def reset_rolling_window() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
+#  Rolling latency window (OP-1694)
+# ─────────────────────────────────────────────────────────────────
+# Companion to the 5xx tracker: a trailing window of observed
+# per-request latencies (ms) from which we compute a rolling p95. This
+# is the latency SLI the canary SLO gate reads via
+# ``canary_rollout.RollingDeploySloMonitor`` — before OP-1694 the
+# monitor left ``p95_latency_ms`` at 0.0 so the latency half of the gate
+# never fired. Samples are time-pruned to the same 60 s window and the
+# deque is length-capped so a traffic spike cannot grow it without bound.
+
+_LATENCY_WINDOW_SECONDS = 60
+_LATENCY_MAX_SAMPLES = 4096
+_latency_lock = threading.Lock()
+_latency_samples: collections.deque[tuple[int, float]] = collections.deque(
+    maxlen=_LATENCY_MAX_SAMPLES
+)
+
+
+def _prune_latency_locked(now_s: int) -> None:
+    """Drop latency samples older than the window. Caller holds _latency_lock."""
+    cutoff = now_s - _LATENCY_WINDOW_SECONDS
+    while _latency_samples and _latency_samples[0][0] <= cutoff:
+        _latency_samples.popleft()
+
+
+def record_http_latency(latency_ms: float, *, now: float | None = None) -> None:
+    """Record one observed HTTP request latency (ms) into the rolling window.
+
+    Feeds :func:`current_p95_latency_ms`, the canary SLO's latency signal. A
+    negative reading (a non-monotonic clock) is clamped to 0 so it cannot
+    poison the percentile. Safe from sync and async contexts. The ``now``
+    parameter exists for tests that pin wall-clock time.
+    """
+    if latency_ms < 0:
+        latency_ms = 0.0
+    now_s = int(now if now is not None else time.time())
+    with _latency_lock:
+        _prune_latency_locked(now_s)
+        _latency_samples.append((now_s, float(latency_ms)))
+
+
+def current_p95_latency_ms(*, now: float | None = None) -> float:
+    """Return the rolling p95 request latency in ms (0.0 when no traffic).
+
+    Nearest-rank p95 over the trailing ``_LATENCY_WINDOW_SECONDS``. Like
+    :func:`current_5xx_rate` this only prunes expired samples — it never
+    records one — so the canary monitor can poll it cheaply.
+    """
+    now_s = int(now if now is not None else time.time())
+    with _latency_lock:
+        _prune_latency_locked(now_s)
+        values = sorted(v for _, v in _latency_samples)
+    if not values:
+        return 0.0
+    # Nearest-rank: the smallest value at or above the 95th percentile.
+    rank = max(1, math.ceil(0.95 * len(values)))
+    return values[min(rank, len(values)) - 1]
+
+
+def reset_latency_window() -> None:
+    """Clear the in-memory latency window. Used by tests."""
+    with _latency_lock:
+        _latency_samples.clear()
+
+
+# ─────────────────────────────────────────────────────────────────
 #  Replica lag
 # ─────────────────────────────────────────────────────────────────
 def update_replica_lag(replica: str, lag_seconds: float) -> None:
@@ -224,6 +291,7 @@ def register_middleware(app) -> None:
 
     @app.middleware("http")
     async def _rolling_deploy_5xx_middleware(request, call_next):
+        started = time.perf_counter()
         try:
             response = await call_next(request)
         except Exception:
@@ -231,6 +299,9 @@ def register_middleware(app) -> None:
             # then re-raise so Starlette's exception handlers still
             # fire and the client sees the 500 payload it expects.
             record_http_response(500)
+            record_http_latency((time.perf_counter() - started) * 1000.0)
             raise
         record_http_response(response.status_code)
+        # OP-1694 — feed the rolling p95 latency window the canary SLO reads.
+        record_http_latency((time.perf_counter() - started) * 1000.0)
         return response

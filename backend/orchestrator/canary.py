@@ -1,4 +1,17 @@
-"""OP-882 (D10 / META OP-761) — canary rollout 5% → 25% → 100%.
+""".. deprecated:: OP-1694
+   **This module is DEPRECATED and retained for tests/docs/ADR references
+   only — do not wire it into the production canary path.** The documented
+   production runbook now drives the *real* SLO-gated controller,
+   :class:`backend.canary_rollout.CanaryController` with
+   :class:`backend.canary_rollout.RollingDeploySloMonitor`. This module's
+   default :class:`_StubMonitor` always reports a healthy snapshot, so the
+   SLO half of its manual gate is a permanent no-op (deploy-pipeline audit
+   findings #9/#10). A later cleanup ticket deletes this file outright; until
+   then it stays so ``backend/tests/test_canary.py`` and the ADR/runbook
+   references keep resolving. Constructing :class:`CanaryOrchestrator` or
+   :class:`_StubMonitor` now emits a :class:`DeprecationWarning`.
+
+OP-882 (D10 / META OP-761) — canary rollout 5% → 25% → 100%.
 
 Drives a staged traffic shift via Caddy ``weighted_load_balancing``
 with a manual gate at every transition, a per-stage SLO check
@@ -47,6 +60,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -55,6 +69,17 @@ from backend import events
 
 
 logger = logging.getLogger(__name__)
+
+# OP-1694 — deprecation marker. See the module docstring: the real,
+# SLO-gated production path is backend.canary_rollout.CanaryController +
+# RollingDeploySloMonitor. This module is kept for tests/docs/ADR only.
+_DEPRECATION_NOTE = (
+    "backend.orchestrator.canary is deprecated (OP-1694); use "
+    "backend.canary_rollout.CanaryController + RollingDeploySloMonitor for "
+    "the real SLO-gated canary path. This module is retained for "
+    "tests/docs/ADR references only and a later cleanup ticket deletes it."
+)
+__deprecated__ = True
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TEMPLATE_PATH = PROJECT_ROOT / "deploy" / "caddy" / "canary-template.caddy"
@@ -119,7 +144,16 @@ class SloMonitor(Protocol):
 
 
 class _StubMonitor:
-    """D11 dependency stub — always reports a healthy snapshot."""
+    """D11 dependency stub — always reports a healthy snapshot.
+
+    .. deprecated:: OP-1694
+       Test-only. Because it never reports a breach, wiring it into a real
+       rollout makes the SLO gate a no-op (audit finding #9). The production
+       monitor is :class:`backend.canary_rollout.RollingDeploySloMonitor`.
+    """
+
+    def __init__(self) -> None:
+        warnings.warn(_DEPRECATION_NOTE, DeprecationWarning, stacklevel=2)
 
     def snapshot(self) -> SloSnapshot:
         return SloSnapshot(error_rate=0.0, p95_latency_ms=100.0, source="stub")
@@ -188,6 +222,10 @@ class CanaryOrchestrator:
     _stage_index: int = field(init=False, default=-1)
     _stage_started_at: float = field(init=False, default=0.0)
     _completed: bool = field(init=False, default=False)
+
+    def __post_init__(self) -> None:
+        # OP-1694 deprecation: surface the move to the real SLO-gated path.
+        warnings.warn(_DEPRECATION_NOTE, DeprecationWarning, stacklevel=2)
 
     def start(self) -> CanaryStage:
         if self._stage_index >= 0:

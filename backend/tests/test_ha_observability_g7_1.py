@@ -213,8 +213,10 @@ def _reset_rolling_window():
     m.reset_for_tests()
     from backend import ha_observability as h
     h.reset_rolling_window()
+    h.reset_latency_window()
     yield
     h.reset_rolling_window()
+    h.reset_latency_window()
 
 
 @pytest.mark.parametrize("status,cls", [
@@ -305,6 +307,67 @@ def test_reset_rolling_window_clears_state():
     assert h.current_5xx_rate(now=1000.0) == 1.0
     h.reset_rolling_window()
     assert h.current_5xx_rate(now=1000.0) == 0.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  D2 — rolling p95 latency tracker (OP-1694)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def test_current_p95_latency_zero_when_no_traffic():
+    from backend import ha_observability as h
+    assert h.current_p95_latency_ms(now=1000.0) == 0.0
+
+
+def test_current_p95_latency_nearest_rank_over_window():
+    """p95 of 1..100 ms (nearest-rank) is the 95th value = 95 ms."""
+    from backend import ha_observability as h
+    for ms in range(1, 101):
+        h.record_http_latency(float(ms), now=1000.0)
+    assert h.current_p95_latency_ms(now=1000.5) == 95.0
+
+
+def test_record_http_latency_clamps_negative_to_zero():
+    from backend import ha_observability as h
+    h.record_http_latency(-5.0, now=1000.0)
+    assert h.current_p95_latency_ms(now=1000.0) == 0.0
+
+
+def test_latency_window_prunes_samples_older_than_60s():
+    """A stale slow sample must not keep inflating p95 forever."""
+    from backend import ha_observability as h
+    h.record_http_latency(5000.0, now=1000.0)  # one very slow request
+    h.record_http_latency(20.0, now=1090.0)    # 90s later — fresh, fast
+    assert h.current_p95_latency_ms(now=1090.0) == 20.0
+
+
+def test_reset_latency_window_clears_state():
+    from backend import ha_observability as h
+    h.record_http_latency(900.0, now=1000.0)
+    assert h.current_p95_latency_ms(now=1000.0) == 900.0
+    h.reset_latency_window()
+    assert h.current_p95_latency_ms(now=1000.0) == 0.0
+
+
+@prom_only
+def test_middleware_records_request_latency_into_p95_window():
+    """The HTTP middleware must feed the rolling p95 window, not just 5xx."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from backend import ha_observability as h
+
+    app = FastAPI()
+
+    @app.get("/ok")
+    async def _ok():
+        return {"ok": True}
+
+    h.register_middleware(app)
+    client = TestClient(app)
+    assert client.get("/ok").status_code == 200
+    # A real (tiny) latency was observed → p95 is a finite, non-negative ms.
+    p95 = h.current_p95_latency_ms()
+    assert p95 >= 0.0
+    assert p95 < 60_000.0  # sanity: a localhost call is not a minute
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -305,13 +305,56 @@ def http_probe(
     return True, f"{len(paths)} probe(s) OK on {base}"
 
 
+def verify_candidate_digest(
+    *,
+    backend_digest: str,
+    frontend_digest: str,
+    expected_backend_digest: str | None,
+    expected_frontend_digest: str | None,
+) -> None:
+    """Raise if the deployed digest diverges from the candidate we expect.
+
+    OP-1694 / audit finding #24 — a staging deploy can answer ``/healthz`` +
+    ``/readyz`` 2xx while still serving the *previous* image (an aborted or
+    half-applied rollout). A green canary that is bound only to liveness then
+    lies about the candidate. Comparing the digest the deployed backend
+    actually serves (``deployed_digest_*`` via ``/api/version``) against the
+    candidate digest we are promoting closes that hole.
+
+    No-op when neither expected digest is supplied — the gate then keeps its
+    pre-OP-1694 "evidence present" behaviour, so the live ``staging-gate-canary``
+    timer (which passes none) stays green. The bind is opt-in: CI / the runbook
+    sets the expected digest(s) for the candidate under test.
+    """
+    mismatches: list[str] = []
+    if expected_backend_digest and backend_digest != expected_backend_digest:
+        mismatches.append(
+            f"backend deployed={backend_digest} != candidate={expected_backend_digest}"
+        )
+    if expected_frontend_digest and frontend_digest != expected_frontend_digest:
+        mismatches.append(
+            f"frontend deployed={frontend_digest} != candidate={expected_frontend_digest}"
+        )
+    if mismatches:
+        raise RuntimeError("candidate digest mismatch: " + "; ".join(mismatches))
+
+
 def api_version_evidence(
     *,
     base_url: str,
     timeout: float,
     opener: HttpOpener,
+    expected_backend_digest: str | None = None,
+    expected_frontend_digest: str | None = None,
 ) -> dict[str, Any]:
-    """Observe staging ``/api/version`` and extract RT-05d JSONL evidence."""
+    """Observe staging ``/api/version`` and extract RT-05d JSONL evidence.
+
+    When ``expected_backend_digest`` / ``expected_frontend_digest`` is given,
+    the deployed digest must match the candidate or this raises (OP-1694
+    digest bind); the raise propagates to :func:`run_gate`, which marks the
+    gate red. The expected digest(s) are stamped into the evidence record so
+    the JSONL audit trail shows what the gate bound against.
+    """
     url = base_url.rstrip("/") + "/api/version"
     status, body = opener(url, timeout)
     if not (200 <= status < 300):
@@ -342,12 +385,25 @@ def api_version_evidence(
         raise RuntimeError(
             "/api/version missing staging evidence field(s): " + ",".join(missing)
         )
-    return {
+    # OP-1694 — bind the gate to the candidate image (no-op when unbound).
+    verify_candidate_digest(
+        backend_digest=backend_digest,
+        frontend_digest=frontend_digest,
+        expected_backend_digest=expected_backend_digest,
+        expected_frontend_digest=expected_frontend_digest,
+    )
+    evidence: dict[str, Any] = {
         "bundle_id": bundle_id,
         "backend_digest": backend_digest,
         "frontend_digest": frontend_digest,
         "observed_api_version": observed,
     }
+    # Record what we bound against, so the JSONL/audit trail is self-describing.
+    if expected_backend_digest:
+        evidence["expected_backend_digest"] = expected_backend_digest
+    if expected_frontend_digest:
+        evidence["expected_frontend_digest"] = expected_frontend_digest
+    return evidence
 
 
 def smoke_probe(
@@ -511,6 +567,8 @@ def _build_evidence_probe(args: argparse.Namespace) -> EvidenceProbe:
         base_url=args.base_url,
         timeout=args.http_timeout,
         opener=_default_http_opener,
+        expected_backend_digest=args.expected_backend_digest,
+        expected_frontend_digest=args.expected_frontend_digest,
     )
 
 
@@ -561,6 +619,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--canary-attempts", type=int, default=int(os.environ.get("OMNISIGHT_STAGING_CANARY_ATTEMPTS", str(DEFAULT_CANARY_ATTEMPTS))))
     p.add_argument("--canary-interval", type=float, default=float(os.environ.get("OMNISIGHT_STAGING_CANARY_INTERVAL", str(DEFAULT_CANARY_INTERVAL_SECONDS))))
     p.add_argument("--http-timeout", type=float, default=float(os.environ.get("OMNISIGHT_STAGING_HTTP_TIMEOUT", str(DEFAULT_HTTP_TIMEOUT_SECONDS))))
+    # OP-1694 candidate digest bind — when set, the gate goes red unless the
+    # staging deploy actually serves the candidate image (not just 2xx on
+    # /healthz+/readyz). Default None keeps the live timer's behaviour.
+    p.add_argument(
+        "--expected-backend-digest",
+        default=os.environ.get("OMNISIGHT_CANARY_EXPECTED_BACKEND_DIGEST") or None,
+        help="candidate backend image digest (sha256:...); when set, the gate "
+        "goes red unless staging serves it (OP-1694 digest bind)",
+    )
+    p.add_argument(
+        "--expected-frontend-digest",
+        default=os.environ.get("OMNISIGHT_CANARY_EXPECTED_FRONTEND_DIGEST") or None,
+        help="candidate frontend image digest; see --expected-backend-digest",
+    )
     # Smoke knobs.
     p.add_argument("--smoke-subset", default=os.environ.get("OMNISIGHT_STAGING_SMOKE_SUBSET", DEFAULT_SMOKE_SUBSET))
     p.add_argument("--smoke-timeout", type=int, default=int(os.environ.get("OMNISIGHT_STAGING_SMOKE_TIMEOUT", str(DEFAULT_SMOKE_TIMEOUT_SECONDS))))
