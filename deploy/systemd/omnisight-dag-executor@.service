@@ -1,0 +1,68 @@
+; systemd unit template for the OmniSight DAG executor (Dim 2 / Phase 1).
+;
+; ⚠ SHIPS INERT + DEFAULT OFF. Two independent gates keep it harmless:
+;     1. It is NOT enabled. Do NOT run `systemctl enable` for it as part
+;        of any default install — the file is shipped as an artifact only.
+;     2. Even if started, the entrypoint is a no-op unless
+;        OMNISIGHT_DAG_EXECUTOR_ENABLED=1 is set in the EnvironmentFile.
+;        This unit intentionally does NOT set that flag.
+;
+; This is cloned from omnisight-worker@.service: it reuses the same
+; backend image / working tree as an ALTERNATE entrypoint
+; (`python3 -m backend.dag_executor` instead of `backend.worker`).
+;
+; Install (only when intentionally arming a host — not by default):
+;   sudo cp deploy/systemd/omnisight-dag-executor@.service /etc/systemd/system/
+;   # Edit USER_HOME / USERNAME placeholders below for your install.
+;   # Set OMNISIGHT_DAG_EXECUTOR_ENABLED=1 in the .env to actually arm it.
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-dag-executor@1
+;
+; The "@N" template mirrors the worker's horizontal-scale shape. Each
+; instance registers under the DISTINCT dag-exec-* instance-id namespace
+; and heartbeats into the separate omnisight:dag-exec: key namespace —
+; it never appears in the worker registry (omnisight:worker:active).
+; See backend/dag_executor.py.
+;
+; Tunables via the EnvironmentFile (.env at the project root):
+;   * OMNISIGHT_DAG_EXECUTOR_ENABLED — MUST be 1 to arm; unset == no-op.
+;   * OMNISIGHT_REDIS_URL            — shared heartbeat store (optional;
+;                                      falls back to in-memory if unset).
+;
+; Graceful shutdown: systemd sends SIGTERM, the loop stops and clears its
+; heartbeat key, then exits 0. TimeoutStopSec gives it 60s before SIGKILL.
+
+[Unit]
+Description=OmniSight DAG executor — INERT skeleton (instance %i)
+Documentation=https://github.com/your-org/OmniSight-Productizer
+After=network-online.target docker.service
+Wants=network-online.target
+; Relaxed from the worker's Requires=docker.service to Wants: the inert
+; skeleton spawns NO containers, so docker is a soft dependency only.
+Wants=docker.service
+
+[Service]
+Type=exec
+User=USERNAME
+WorkingDirectory=/home/USER_HOME/work/sora/OmniSight-Productizer
+EnvironmentFile=/home/USER_HOME/work/sora/OmniSight-Productizer/.env
+Environment=OMNISIGHT_DAG_EXECUTOR_INSTANCE=%i
+ExecStart=/bin/sh -c '\
+    exec python3 -m backend.dag_executor \
+        --instance-id "dag-exec-$$(hostname -s)-%i"'
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=60
+
+; Sandboxing: the inert skeleton spawns NO docker containers, so it does
+; NOT need /var/run/docker.sock. Lock the filesystem down to read-only
+; home + a narrow writable data path.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/USER_HOME/work/sora/OmniSight-Productizer/data
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
