@@ -45,10 +45,12 @@ import socket
 import sys
 import time
 import uuid
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional
 
 from backend import dag_storage, worker
+from backend.dag_schema import DAG, Task
 
 logger = logging.getLogger(__name__)
 
@@ -310,10 +312,13 @@ class DagExecutor:
                     break
 
                 # ── SEAM ──────────────────────────────────────────
-                # A future phase claims one ready dag_task here and
-                # dispatches it — via :meth:`claim_plan` / renew / release
-                # (OP-1656). The Phase-1 skeleton deliberately does NOTHING:
-                # no claim, no agent run, no terminal transition.
+                # A future phase claims one ready plan here and drives it —
+                # via :meth:`claim_plan` / renew / release (OP-1656) and the
+                # :class:`SerialPlanScheduler` topological walk (OP-1657).
+                # The Phase-1 skeleton deliberately does NOTHING: no claim,
+                # no scheduler run, no terminal transition. The scheduler +
+                # lease primitives ship in the image so a later (still-gated)
+                # phase can wire them here without re-touching this loop.
                 self._ticks += 1
 
                 now = time.monotonic()
@@ -423,6 +428,274 @@ class DagExecutor:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Serial topological scheduler (OP-1657)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Once a plan is claimed (OP-1656 lease) a single executor drives it by
+# walking ``dag.tasks`` in dependency order, SERIALLY — one task at a
+# time, no concurrency. This is the ordering substrate later tickets hang
+# real task dispatch off of; it deliberately ships with a no-op task
+# handler so the scheduler can be merged **inert** (the seam in
+# :meth:`DagExecutor.run` does not call it yet).
+#
+# The walk reuses the SAME in-degree-0 ready-set logic as
+# :func:`backend.sandbox_prewarm.pick_prewarm_candidates` (declaration-order
+# ready set → deterministic, stable replay during incident review), extended
+# from "pick the first ``depth``" to "drain the whole graph". Dependencies
+# pointing at unknown task ids are ignored (``if d in indeg``) exactly as the
+# prewarm walk and :func:`backend.dag_validator._check_cycles` do — surfacing
+# unknown deps is the validator's job, not the scheduler's.
+
+
+class CycleError(RuntimeError):
+    """Raised if a cyclic DAG reaches the scheduler.
+
+    The validator (:func:`backend.dag_validator._check_cycles`, Kahn's
+    algorithm) already blocks cycles before a plan is persisted as
+    ``validated``, so a claimed plan should never be cyclic. This is the
+    belt-and-braces guard: rather than silently dropping the unresolved
+    tail of the walk, we refuse loudly so the bug is visible.
+    """
+
+
+def topological_order(dag: DAG) -> list[Task]:
+    """Return ``dag.tasks`` in a deterministic serial topological order.
+
+    Kahn's algorithm with a **declaration-order** ready set: among the tasks
+    whose dependencies are all satisfied, the next one emitted is the one
+    declared earliest in ``dag.tasks``. That determinism matters for stable
+    replay during incident review (same plan → same execution order).
+
+    Cycle-safe: if the walk cannot drain every task (a cycle the validator
+    failed to catch), raises :class:`CycleError` naming the unresolved tasks
+    rather than returning a truncated order.
+    """
+    by_id: dict[str, Task] = {t.task_id: t for t in dag.tasks}
+    order_index: dict[str, int] = {t.task_id: i for i, t in enumerate(dag.tasks)}
+    indeg: dict[str, int] = {t.task_id: 0 for t in dag.tasks}
+    edges: dict[str, list[str]] = {t.task_id: [] for t in dag.tasks}
+    for t in dag.tasks:
+        for d in t.depends_on:
+            if d in indeg:  # ignore deps to unknown ids — validator's job
+                edges[d].append(t.task_id)
+                indeg[t.task_id] += 1
+
+    # Ready set kept sorted by declaration index so the walk is deterministic.
+    ready: list[str] = sorted(
+        (n for n, k in indeg.items() if k == 0), key=order_index.__getitem__
+    )
+    out: list[Task] = []
+    while ready:
+        n = ready.pop(0)
+        out.append(by_id[n])
+        newly: list[str] = []
+        for nxt in edges[n]:
+            indeg[nxt] -= 1
+            if indeg[nxt] == 0:
+                newly.append(nxt)
+        if newly:
+            ready.extend(newly)
+            ready.sort(key=order_index.__getitem__)
+
+    if len(out) != len(dag.tasks):
+        unresolved = sorted(n for n, k in indeg.items() if k > 0)
+        raise CycleError(
+            f"cyclic dependency reached scheduler in dag {dag.dag_id!r}; "
+            f"{len(unresolved)} task(s) unresolved: {unresolved[:10]}"
+        )
+    return out
+
+
+@dataclass
+class TaskWorkspace:
+    """A prepared per-(plan, task) workspace directory.
+
+    ``path`` follows the ``workdir_root/{plan_id}-{task_id}`` convention.
+    ``copied`` lists the project-relative paths materialised from the task's
+    ``inputs`` globs (empty when no project root is bound).
+    """
+
+    plan_id: int
+    task_id: str
+    path: Path
+    copied: list[str] = field(default_factory=list)
+
+
+class PlanWorkspaceBuilder:
+    """Thin per-(plan, task) workspace helper for the serial scheduler.
+
+    Reuses :mod:`backend.worker`'s module-level ``_rmtree`` / ``_copytree`` /
+    ``_copyfile`` / ``_resolve_glob`` to materialise a fresh workspace at
+    ``workdir_root/{plan_id}-{task_id}`` and copy in the files matched by the
+    task's ``inputs`` globs (project-root jailed via ``_resolve_glob``).
+
+    It deliberately does **NOT** call :meth:`LocalSandboxRuntime.start`: that
+    path is TaskCard / git-coupled (the path-b worker flow) and would need a
+    fake ``PROJECT-NUMBER`` jira_ticket + a CATC card. The serial scheduler
+    only needs the thin "copy allowed inputs into a jailed workdir" behaviour,
+    which is exactly the low-level helpers, minus the git/TaskCard coupling.
+    """
+
+    def __init__(
+        self,
+        *,
+        workdir_root: Path | None = None,
+        project_root: Path | None = None,
+    ) -> None:
+        # Distinct default subtree from the worker's ``_sandboxes`` so a
+        # dag-exec plan workspace ({plan_id}-{task_id}) never collides with a
+        # worker sandbox ({worker_id}-{task_id}) under a shared workdir root.
+        self._root = Path(
+            workdir_root
+            or os.environ.get("OMNISIGHT_DAG_WORKDIR")
+            or Path.cwd() / ".artifacts" / "dag_workspaces"
+        )
+        self._project_root = Path(project_root) if project_root is not None else None
+        self._root.mkdir(parents=True, exist_ok=True)
+
+    def prepare(self, plan_id: int, task: Task) -> TaskWorkspace:
+        """Create ``workdir_root/{plan_id}-{task_id}`` and copy in inputs."""
+        ws = self._root / f"{plan_id}-{task.task_id}"
+        if ws.exists():
+            worker._rmtree(ws)
+        ws.mkdir(parents=True, exist_ok=True)
+
+        copied: list[str] = []
+        if self._project_root is not None:
+            for glob in task.inputs:
+                for src in worker._resolve_glob(self._project_root, glob):
+                    rel = src.relative_to(self._project_root)
+                    dst = ws / rel
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    if src.is_dir():
+                        worker._copytree(src, dst)
+                    else:
+                        worker._copyfile(src, dst)
+                    copied.append(str(rel))
+        return TaskWorkspace(
+            plan_id=plan_id, task_id=task.task_id, path=ws, copied=copied,
+        )
+
+    def cleanup(self, ws: TaskWorkspace) -> None:
+        """Remove a prepared workspace (best-effort, mirrors sandbox.stop)."""
+        try:
+            worker._rmtree(ws.path)
+        except OSError as exc:
+            logger.warning(
+                "dag plan workspace cleanup failed for %s: %s", ws.path, exc,
+            )
+
+
+@dataclass
+class TaskRun:
+    """The scheduler's per-task ordering record.
+
+    ``order_index`` is the 0-based position the task occupied in the serial
+    walk — the load-bearing "ordering state later tickets need". ``status``
+    is ``"ran"`` under the default no-op handler; real terminal states land
+    in a later phase.
+    """
+
+    task_id: str
+    order_index: int
+    workspace: Optional[Path] = None
+    status: str = "ran"
+
+
+@dataclass
+class PlanRunResult:
+    """Outcome of one serial topological walk of a plan."""
+
+    plan_id: int
+    dag_id: str
+    order: list[str]  # task_ids in execution order
+    runs: list[TaskRun] = field(default_factory=list)
+
+
+#: A task handler runs one task inside its prepared workspace. The default
+#: (:func:`_noop_task_handler`) does nothing — the scheduler ships inert and a
+#: later ticket injects the real dispatcher here. ``workspace`` is ``None``
+#: when the scheduler runs without a :class:`PlanWorkspaceBuilder`.
+TaskHandler = Callable[[Task, Optional[TaskWorkspace]], Awaitable[Any]]
+
+
+async def _noop_task_handler(task: Task, workspace: Optional[TaskWorkspace]) -> None:
+    """Default handler: record-ordering only, no execution (inert merge)."""
+    logger.debug("dag scheduler: ordered task %s (no-op handler)", task.task_id)
+    return None
+
+
+class SerialPlanScheduler:
+    """Drive a claimed plan by walking its DAG in dependency order, serially.
+
+    Construction is cheap and side-effect-free; :meth:`run_plan` does the
+    walk. Execution is strictly **serial** — each task's handler is awaited to
+    completion before the next task starts (no ``gather`` / no concurrency, an
+    explicit MUST-NOT for this ticket). Tasks are emitted in the deterministic
+    :func:`topological_order`.
+
+    The default ``task_handler`` is a no-op, so a default-constructed scheduler
+    only computes + records ordering — which is what lets OP-1657 merge inert.
+    Later tickets inject a real handler (and a :class:`PlanWorkspaceBuilder`)
+    without changing the ordering contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        workspace_builder: PlanWorkspaceBuilder | None = None,
+        task_handler: TaskHandler | None = None,
+    ) -> None:
+        self.workspace_builder = workspace_builder
+        self.task_handler = task_handler or _noop_task_handler
+
+    async def run_plan(
+        self, plan_id: int, dag: DAG, *, cleanup: bool = False,
+    ) -> PlanRunResult:
+        """Walk ``dag`` in topological order, running each task serially.
+
+        For each task, in dependency order: optionally prepare its workspace
+        (when a builder is bound), await the handler, then record the
+        ordering. ``cleanup=True`` removes each workspace after its handler
+        returns (handy for tests / disk-tight hosts); the default keeps them.
+        """
+        order = topological_order(dag)
+        result = PlanRunResult(
+            plan_id=plan_id, dag_id=dag.dag_id,
+            order=[t.task_id for t in order],
+        )
+        logger.info(
+            "dag scheduler: plan=%s dag=%s order=%s (serial, %d task(s))",
+            plan_id, dag.dag_id, result.order, len(order),
+        )
+        for idx, task in enumerate(order):
+            ws: Optional[TaskWorkspace] = None
+            if self.workspace_builder is not None:
+                ws = self.workspace_builder.prepare(plan_id, task)
+            try:
+                await self.task_handler(task, ws)
+            finally:
+                if ws is not None and cleanup and self.workspace_builder is not None:
+                    self.workspace_builder.cleanup(ws)
+            result.runs.append(TaskRun(
+                task_id=task.task_id, order_index=idx,
+                workspace=(ws.path if ws is not None else None),
+            ))
+        return result
+
+    async def run_stored_plan(
+        self, plan: "dag_storage.StoredPlan", *, cleanup: bool = False,
+    ) -> PlanRunResult:
+        """Convenience: walk a claimed :class:`~backend.dag_storage.StoredPlan`.
+
+        Re-hydrates the DAG from the stored JSON and forwards to
+        :meth:`run_plan`. This is the shape the (still-gated) executor seam
+        will call after :meth:`DagExecutor.claim_plan` grants the lease.
+        """
+        return await self.run_plan(plan.id, plan.dag(), cleanup=cleanup)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CLI entry-point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -489,8 +762,16 @@ __all__ = [
     "DagExecutor",
     "DagExecutorConfig",
     "DagExecutorResult",
+    "CycleError",
+    "PlanRunResult",
+    "PlanWorkspaceBuilder",
+    "SerialPlanScheduler",
+    "TaskHandler",
+    "TaskRun",
+    "TaskWorkspace",
     "ensure_dag_exec_namespace",
     "is_enabled",
     "main",
     "new_instance_id",
+    "topological_order",
 ]
