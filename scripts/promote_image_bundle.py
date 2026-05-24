@@ -48,7 +48,7 @@ DEFAULT_AUDIT_LOG = REPO_ROOT / "audit" / "image_promotion_audit.jsonl"
 # RT-12: promotion targets GitLab CR (ADR-0038/0040), not GHCR. Mirrors
 # the ``OMNISIGHT_REGISTRY`` default the deploy compose files use so the
 # repository the promote retags is the one prod actually pulls.
-DEFAULT_REGISTRY = "sora.services:49154/omnisight/OmniSight-Productizer"
+DEFAULT_REGISTRY = "sora.services:49160/omnisight/omnisight-productizer"
 
 SIGN_SCRIPT = REPO_ROOT / "scripts" / "sign_promotion_attestation.py"
 VERIFY_SIGNATURE_SH = REPO_ROOT / "scripts" / "verify_image_signature.sh"
