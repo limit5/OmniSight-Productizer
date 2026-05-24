@@ -104,19 +104,37 @@ def test_dag1_run_test_consumes_firmware_and_writes_test_log():
     m = _load(["--subset", "dag1"])
     compile_t, run_test = _dag1_tasks(m)
 
-    # Step 1 (compile) is unchanged: builds the firmware image.
+    # Step 1 (compile) builds the firmware image from the committed fixture
+    # source seeds (external: prefix so dep_closure accepts them — OP-1673).
     assert compile_t["task_id"] == "compile"
+    assert compile_t["inputs"] == ["external:CMakeLists.txt", "external:main.c"]
     assert compile_t["expected_output"] == "build/firmware.bin"
 
     # Step 2 (run-test) is an honest LOCAL self-test: t1 tier (not the old
     # t3-that-swapped-to-t1), runs python3, consumes the compiled image,
-    # writes the test log, and depends on compile.
+    # writes the test log, and depends on compile. Its inputs are the
+    # upstream output (build/firmware.bin) + an external: source seed
+    # (run_test.py from the fixture) — OP-1673.
     assert run_test["task_id"] == "run-test"
     assert run_test["required_tier"] == "t1"
     assert run_test["toolchain"] == "python3"
-    assert run_test["inputs"] == ["build/firmware.bin"]
+    assert run_test["inputs"] == ["build/firmware.bin", "external:run_test.py"]
     assert run_test["expected_output"] == "logs/test.log"
     assert run_test["depends_on"] == ["compile"]
+
+
+def test_dag1_opt_in_metadata_present():
+    """The per-run half of the executor dual opt-in gate (OP-1673).
+
+    Without metadata.dag_executor_opt_in the executor leaves this run on the
+    legacy path; the smoke DAG must opt in so it actually exercises the
+    dag-executor.
+    """
+    m = _load(["--subset", "dag1"])
+    meta = m.DAG_1_COMPILE_FLASH_HOST_NATIVE["metadata"]
+    assert meta.get("dag_executor_opt_in") is True
+    # test_run kept so the run is excluded from the finetune corpus.
+    assert meta.get("test_run") is True
 
 
 def test_dag1_validates_clean():

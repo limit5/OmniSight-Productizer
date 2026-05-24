@@ -76,7 +76,14 @@ DAG_1_COMPILE_FLASH_HOST_NATIVE = {
                 "description": "Build firmware image (host-native, no cross-compile)",
                 "required_tier": "t1",
                 "toolchain": "cmake",
-                "inputs": [],
+                # Source seeds carry the `external:` prefix so the validator's
+                # dep_closure rule accepts them (a bare "CMakeLists.txt" /
+                # "main.c" is neither an upstream output nor caller-provided
+                # and would FAIL dep_closure). The executor's prepare() strips
+                # the prefix and materialises each from project_root
+                # (backend/dag_smoke_fixture/) — OP-1676. Empty inputs used to
+                # yield an empty scratch -> cmake configure rc=1 (OP-1673).
+                "inputs": ["external:CMakeLists.txt", "external:main.c"],
                 "expected_output": "build/firmware.bin",
                 "depends_on": [],
             },
@@ -93,14 +100,25 @@ DAG_1_COMPILE_FLASH_HOST_NATIVE = {
                 "description": "Run on-host self-test against the built firmware image",
                 "required_tier": "t1",
                 "toolchain": "python3",
-                "inputs": ["build/firmware.bin"],
+                # build/firmware.bin is compile's upstream output (dep-closure
+                # legal as-is); run_test.py is an `external:` source seed from
+                # the fixture (prefix stripped + materialised by prepare()).
+                "inputs": ["build/firmware.bin", "external:run_test.py"],
                 "expected_output": "logs/test.log",
                 "depends_on": ["compile"],
             },
         ],
     },
     "target_platform": "host_native",
-    "metadata": {"source": "smoke-test:A2-DAG1", "test_run": True},
+    # dag_executor_opt_in is the per-run half of the executor's dual opt-in
+    # gate (the other half is the dev-compose allowlist, OP-1663). Without it
+    # the executor leaves this run for the legacy path. test_run keeps it out
+    # of the finetune corpus.
+    "metadata": {
+        "source": "smoke-test:A2-DAG1",
+        "test_run": True,
+        "dag_executor_opt_in": True,
+    },
 }
 
 DAG_2_CROSS_COMPILE_AARCH64 = {
