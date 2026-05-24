@@ -171,7 +171,19 @@ services:
       - OMNISIGHT_DEBUG=false
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=production
-      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      # OP-1699: prod DB is PostgreSQL via OMNISIGHT_DATABASE_URL (operator
+      # .env, tier:X). The SQLite OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      # line was REMOVED here — it was a latent footgun (deploy-audit #18):
+      # if OMNISIGHT_DATABASE_URL ever drops from .env, the backend silently
+      # falls back to SQLite at that path (precedence in backend/config.py:1315
+      # + backend/db.py:127 → _db_path) on the shared omnisight-data volume,
+      # masking a prod DB outage as a "healthy" but data-divergent stack.
+      # Fail closed instead: the bash-style `:?` guard aborts `docker compose
+      # up` when the PG DSN is unset, mirroring the OP-1515 OMNISIGHT_REGISTRY
+      # pattern above. SQLite stays the legit default for dev/test
+      # (docker-compose.yml / docker-compose.test.yml keep OMNISIGHT_DATABASE_PATH);
+      # only prod requires the URL.
+      - OMNISIGHT_DATABASE_URL=${OMNISIGHT_DATABASE_URL:?OMNISIGHT_DATABASE_URL (prod PostgreSQL DSN) is required in .env — refusing to start to avoid silent SQLite fallback (OP-1699)}
       - OMNISIGHT_INSTANCE_ID=backend-a
       - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
       - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
@@ -300,7 +312,10 @@ services:
       - OMNISIGHT_DEBUG=false
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=production
-      - OMNISIGHT_DATABASE_PATH=/app/data/omnisight.db
+      # OP-1699: SQLite OMNISIGHT_DATABASE_PATH removed + PG URL required,
+      # fail-closed. See backend-a's note above for the full rationale
+      # (deploy-audit #18 silent-SQLite-fallback footgun).
+      - OMNISIGHT_DATABASE_URL=${OMNISIGHT_DATABASE_URL:?OMNISIGHT_DATABASE_URL (prod PostgreSQL DSN) is required in .env — refusing to start to avoid silent SQLite fallback (OP-1699)}
       - OMNISIGHT_INSTANCE_ID=backend-b
       - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
       - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
