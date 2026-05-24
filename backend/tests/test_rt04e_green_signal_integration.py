@@ -293,19 +293,19 @@ def test_develop_push_runs_only_the_fast_gate() -> None:
     } in ci["workflow"]["rules"]
 
     jobs = _real_jobs(ci)
-    develop_jobs, tag_jobs = set(), set()
+    develop_jobs, cand_jobs = set(), set()
     for name in jobs:
         closure = _extends_closure(ci, name)
         if ".fast_gate_rules" in closure:
             develop_jobs.add(name)
-        if ".tag_rules" in closure:
-            tag_jobs.add(name)
+        if ".candidate_rules" in closure:
+            cand_jobs.add(name)
 
     # exactly the fast gate runs on a develop push …
     assert develop_jobs == {"fast-gate"}
-    # … and the entire certification suite is tag-only (never on develop push).
-    assert tag_jobs == set(jobs) - {"fast-gate"}
-    assert {"build-image", "sign-image", "attest-image", "audit-emit"} <= tag_jobs
+    # … and the entire certification suite is candidate-gated (ADR-0040 RT-20: no v* git tag).
+    assert cand_jobs == set(jobs) - {"fast-gate"}
+    assert {"candidate-build-image", "candidate-sign-image", "candidate-attest-image"} <= cand_jobs
 
 
 def test_fast_gate_keyed_by_same_full_sha_and_is_not_certification() -> None:

@@ -139,7 +139,7 @@ def test_candidate_sign_sbom_and_attest_resolve_digest_by_full_sha_tag() -> None
         assert "${CI_COMMIT_TAG}" not in flat
         assert "git tag" not in flat
 
-    assert 'cosign sign --yes --key "$COSIGN_KEY" "$IMAGE_REF"' in sign_flat
+    assert 'cosign sign --yes --key "$COSIGN_KEY" --tlog-upload=false "$IMAGE_REF"' in sign_flat
     assert 'cosign attest --yes --key "$COSIGN_KEY"' in attest_flat
     assert '--arg git_sha "$CANDIDATE_SHA"' in attest_flat
     assert '--arg git_ref "refs/heads/develop"' in attest_flat
