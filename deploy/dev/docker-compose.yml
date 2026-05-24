@@ -1,8 +1,13 @@
 # OP-1642 dev compose — Boreas-B Gap A. Isolated DEV env so dev work cannot touch prod.
-# Mirrors deploy/staging/ topology at minimal scale: own compose project (omnisight-dev),
-# own Postgres + omnisight_dev DB, own ports/volumes, OMNISIGHT_ENV=dev. Provable prod
-# isolation = the omnisight_dev role is REVOKE'd CONNECT on the prod DB (A1 Part 1), so even
-# a misconfigured dev process pointed at pg-primary fails closed.
+# Topology (NOT a full mirror of deploy/staging/ — see [OP-1700]): a deliberately
+# lean single-backend dev stack — own compose project (omnisight-dev), own Postgres +
+# omnisight_dev DB, one API container (backend-a), and a profile-gated inert dag-executor
+# (off by default). There is intentionally NO frontend / caddy / backend-b here; the dev
+# API is hit directly on DEV_BACKEND_A_PORT. What dev DOES share with staging/prod is the
+# isolation contract: own ports/volumes, OMNISIGHT_ENV=dev. Provable prod isolation =
+# the omnisight_dev role is REVOKE'd CONNECT on the prod DB (A1 Part 1), so even a
+# misconfigured dev process pointed at pg-primary fails closed.
+#   cp deploy/dev/.env.example deploy/dev/.env   # then edit (POSTGRES_PASSWORD, OMNISIGHT_IMAGE_TAG)
 #   docker compose -p omnisight-dev --env-file deploy/dev/.env -f deploy/dev/docker-compose.yml up -d
 # Migrate the fresh dev DB first (the image's drift gate only CHECKS, doesn't apply):
 #   docker compose -p omnisight-dev ... run --rm --no-deps -w /app/backend backend-a python -m alembic upgrade heads
@@ -30,7 +35,11 @@ services:
     image: ${OMNISIGHT_REGISTRY:-sora.services:49160/omnisight/omnisight-productizer}/backend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG must be set}
     pull_policy: always
     ports:
-      - "${DEV_BACKEND_A_PORT:-8020}:8000"
+      # [OP-1700] Bind to loopback only. Dev runs OMNISIGHT_DEBUG=1 +
+      # OMNISIGHT_AUTH_MODE=open (see environment below), so publishing on
+      # 0.0.0.0 would expose an UNAUTHENTICATED admin surface on every host
+      # interface. 127.0.0.1 keeps the dev API reachable only from the host.
+      - "127.0.0.1:${DEV_BACKEND_A_PORT:-8020}:8000"
     volumes:
       - dev-data:/app/data
       - dev-artifacts:/app/.artifacts
