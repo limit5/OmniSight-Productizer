@@ -744,6 +744,16 @@ class Settings(BaseSettings):
     model_config = {
         "env_file": os.environ.get("OMNISIGHT_DOTENV_FILE", ".env"),
         "env_prefix": "OMNISIGHT_",
+        # Prod-runtime policy: reject any undeclared env / .env key. An
+        # unknown OMNISIGHT_* key in a prod deployment is almost always a
+        # typo or a stale knob, and we want that to fail loudly at boot
+        # rather than be silently ignored. This was the implicit
+        # pydantic-settings default; OP-1702 makes it explicit because the
+        # gate/promote tooling now deliberately relaxes it (see
+        # ``_ToolingSettings`` below) and the contrast must be obvious to
+        # a reader. DO NOT change this to 'ignore' — the human +2 on
+        # OP-1702 verifies that prod stays strict.
+        "extra": "forbid",
     }
 
     def get_model_name(self) -> str:
@@ -946,9 +956,69 @@ def _apply_env_overlay() -> None:
     _apply_secrets_overlay()
 
 
+# ─── OP-1702 (finding #26) — gate/promote tooling env tolerance ──────────
+#
+# The gate (``backend.agents.staging_gate``) and promote
+# (``backend.agents.auto_promote_main``) tooling run from operator shells
+# whose environment / ``.env`` carries keys unrelated to Settings
+# (``neo4j_*``, ``grafana_*``, ``omnisight_project_state_inject``, …).
+# Under the prod-runtime ``extra='forbid'`` policy those undeclared keys
+# raise ``extra_forbidden`` when ``Settings()`` is constructed. Because the
+# staging-gate audit-DB write imports ``backend.config`` lazily inside a
+# best-effort ``try/except`` (``staging_gate._write_audit``), that raise was
+# swallowed and the gate's audit row silently fail-opened — and operators
+# had to run the tooling under ``env -i`` to get a clean run.
+#
+# The tooling entrypoints export ``OMNISIGHT_TOOLING_TOLERATE_EXTRA_ENV``
+# BEFORE importing ``backend.config``; the process-wide ``settings``
+# singleton is then built from ``_ToolingSettings`` (``extra='ignore'``)
+# instead of ``Settings`` (``extra='forbid'``). The prod runtime
+# (``backend.main``) never sets the flag, so its Settings stays strict —
+# unknown env there is an intentional misconfiguration tripwire and MUST
+# remain so. Scoping is the security-sensitive part of OP-1702: a human +2
+# verifies the tolerance does not reach the prod-runtime path.
+TOOLING_EXTRA_ENV_FLAG = "OMNISIGHT_TOOLING_TOLERATE_EXTRA_ENV"
+
+
+def _tooling_env_tolerance_enabled() -> bool:
+    """True when the gate/promote tooling has opted into ``extra='ignore'``."""
+    return os.environ.get(TOOLING_EXTRA_ENV_FLAG, "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+class _ToolingSettings(Settings):
+    """``Settings`` variant scoped to the gate/promote tooling (OP-1702).
+
+    Identical to :class:`Settings` in every field — only ``extra`` is
+    relaxed to ``'ignore'`` so operator-shell env pollution does not raise
+    ``extra_forbidden``. It is selected for the process-wide singleton ONLY
+    when the tooling sets :data:`TOOLING_EXTRA_ENV_FLAG` before importing
+    this module; the prod runtime never does, so it never sees this class.
+    """
+
+    model_config = {**Settings.model_config, "extra": "ignore"}
+
+
+def _build_settings_singleton() -> Settings:
+    """Build the process-wide ``settings`` singleton.
+
+    Tolerant (``_ToolingSettings``) only in the gate/promote tooling path;
+    strict (``Settings``) everywhere else — notably the prod runtime.
+    """
+    if _tooling_env_tolerance_enabled():
+        _startup_logger.info(
+            "config: %s set — gate/promote tooling Settings tolerating "
+            "unknown env (extra='ignore'); prod-runtime Settings unaffected",
+            TOOLING_EXTRA_ENV_FLAG,
+        )
+        return _ToolingSettings()
+    return Settings()
+
+
 _apply_env_overlay()
 
-settings = Settings()
+settings = _build_settings_singleton()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
