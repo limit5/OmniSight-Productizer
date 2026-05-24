@@ -1,4 +1,4 @@
-"""WP.1.4 -- ``POST /shareable-objects`` permalink endpoint.
+"""WP.1.4 / WP.9 -- ``/shareable-objects`` permalink endpoints.
 
 The WP.1 ``<Block />`` primitive's share dialog calls
 ``POST /api/v1/shareable-objects`` to mint a WP.9 permalink slug for the
@@ -22,7 +22,9 @@ from the row returned by that insert, so the caller sees its own write.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import json
+from pathlib import Path
+from typing import Any, Mapping, Literal
 from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +33,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from backend import auth
 from backend import shareable_objects as _so
+from backend.agents import runbook_loader
 from backend.block_redaction import (
     BLOCK_SHARE_REGIONS,
     REDACTION_REASONS,
@@ -43,6 +46,25 @@ router = APIRouter(prefix="/shareable-objects", tags=["shareable-objects"])
 
 
 ShareableObjectVisibility = Literal["private", "team", "tenant", "public"]
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+_FETCH_ACTIVE_SHAREABLE_OBJECT_SQL = """
+SELECT share_id, object_kind, object_id, tenant_id, owner_user_id,
+       visibility, expires_at, redaction_applied, created_at
+FROM shareable_objects
+WHERE share_id = $1
+  AND (expires_at IS NULL OR expires_at > now())
+"""
+
+_FETCH_BLOCK_SHARE_PAYLOAD_SQL = """
+SELECT block_id, parent_id, tenant_id, user_id, project_id, session_id,
+       kind, status, title, payload, metadata, started_at, completed_at,
+       created_at
+FROM blocks
+WHERE block_id = $1
+  AND tenant_id = $2
+"""
 
 
 class CreateShareableObjectRequest(BaseModel):
@@ -189,6 +211,103 @@ def _build_redaction_applied(
     return {"mask": dict(mask)} if mask else {}
 
 
+def _json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    if value in (None, ""):
+        return {}
+    if isinstance(value, str):
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            return parsed
+    raise ValueError("share payload JSON fields must be objects")
+
+
+def _json_scalar(value: Any) -> Any:
+    return None if value is None else str(value)
+
+
+def _project_root() -> Path:
+    """Resolution hook so tests can monkey-patch the runbook root."""
+    return _PROJECT_ROOT
+
+
+def _runbook_to_share_payload(rb: runbook_loader.Runbook) -> dict[str, Any]:
+    return {
+        "name": rb.name,
+        "description": rb.description,
+        "tags": list(rb.tags),
+        "source_url": rb.source_url,
+        "scope": rb.scope,
+        "source_path": str(rb.source_path) if rb.source_path else None,
+        "params": [
+            {
+                "name": p.name,
+                "type": p.type,
+                "default": p.default,
+                "description": p.description,
+                "required": p.required,
+            }
+            for p in rb.params
+        ],
+        "steps": [
+            {"kind": s.kind, "title": s.title, "payload": dict(s.payload)}
+            for s in rb.steps
+        ],
+    }
+
+
+async def _load_shared_object_payload(
+    conn,
+    share: _so.ShareableObject,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Return the payload/metadata pair for object kinds share UI mints."""
+    if share.object_kind == "block":
+        row = await conn.fetchrow(
+            _FETCH_BLOCK_SHARE_PAYLOAD_SQL,
+            share.object_id,
+            share.tenant_id,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="shared object not found")
+        payload = _json_object(row["payload"])
+        metadata = _json_object(row["metadata"])
+        metadata.update({
+            "block_id": row["block_id"],
+            "parent_id": row["parent_id"],
+            "tenant_id": row["tenant_id"],
+            "user_id": row["user_id"],
+            "project_id": row["project_id"],
+            "session_id": row["session_id"],
+            "kind": row["kind"],
+            "status": row["status"],
+            "title": row["title"],
+            "started_at": _json_scalar(row["started_at"]),
+            "completed_at": _json_scalar(row["completed_at"]),
+            "created_at": _json_scalar(row["created_at"]),
+        })
+        return payload, metadata
+
+    if share.object_kind == "runbook":
+        registry = runbook_loader.load_default_scopes(_project_root())
+        rb = registry.get(share.object_id)
+        if rb is None:
+            raise HTTPException(status_code=404, detail="shared object not found")
+        return _runbook_to_share_payload(rb), {}
+
+    return {"object_id": share.object_id}, {}
+
+
+def _redaction_mask_for_share(share: _so.ShareableObject) -> Mapping[str, Any]:
+    redaction = share.redaction_applied
+    if not isinstance(redaction, Mapping):
+        return {}
+    mask = redaction.get("mask")
+    if isinstance(mask, Mapping):
+        return mask
+    return redaction
+
+
 @router.post("")
 async def create_shareable_object(
     req: CreateShareableObjectRequest,
@@ -268,3 +387,55 @@ async def create_shareable_object(
         body["permalink_url"] = permalink_url
 
     return JSONResponse(status_code=201, content=body)
+
+
+@router.get("/{share_id}")
+async def resolve_shareable_object(
+    share_id: str,
+    actor: auth.User = Depends(auth.require_viewer),
+) -> JSONResponse:
+    """Resolve a minted permalink through WP.9 ACL + redaction policy."""
+    if not _so.is_valid_share_slug(share_id):
+        raise HTTPException(status_code=404, detail="share not found")
+
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(_FETCH_ACTIVE_SHAREABLE_OBJECT_SQL, share_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="share not found")
+
+        share = _so._row_to_shareable_object(row)
+        allowed = await _so.user_can_access_shareable_object(
+            conn,
+            share,
+            caller_user_id=actor.id,
+            caller_role=actor.role,
+        )
+        if not allowed:
+            raise HTTPException(status_code=404, detail="share not found")
+
+        payload, metadata = await _load_shared_object_payload(conn, share)
+        body = {
+            "share_id": share.share_id,
+            "object_kind": share.object_kind,
+            "object_id": share.object_id,
+            "visibility": share.visibility,
+            "expires_at": (
+                None if share.expires_at is None else str(share.expires_at)
+            ),
+            "payload": payload,
+            "metadata": metadata,
+        }
+
+        redaction_share = {
+            **share.to_dict(),
+            "redaction_applied": _redaction_mask_for_share(share),
+        }
+        try:
+            redacted = _so.build_share_payload(redaction_share, body)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="share redaction mask could not be applied",
+            ) from exc
+
+    return JSONResponse(status_code=200, content=redacted)

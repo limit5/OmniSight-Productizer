@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import inspect
 import json
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from backend import auth
+from backend import shareable_objects as so_module
 from backend.routers import shareable_objects as router_module
 
 
@@ -64,6 +68,7 @@ def _viewer(tenant_id: str = "t-default", user_id: str = "u-1") -> auth.User:
 def _stub_share_row(
     *,
     share_id: str = "sh-stub_slug_____________",
+    object_kind: str = "block",
     object_id: str = "blk-1",
     tenant_id: str = "t-default",
     owner_user_id: str = "u-1",
@@ -72,7 +77,7 @@ def _stub_share_row(
 ) -> dict:
     return {
         "share_id": share_id,
-        "object_kind": "block",
+        "object_kind": object_kind,
         "object_id": object_id,
         "tenant_id": tenant_id,
         "owner_user_id": owner_user_id,
@@ -81,6 +86,39 @@ def _stub_share_row(
         "redaction_applied": redaction_applied or {},
         "created_at": "2026-05-19 00:00:00",
     }
+
+
+def _stub_block_row(
+    *,
+    block_id: str = "blk-1",
+    tenant_id: str = "t-default",
+    payload: dict | None = None,
+    metadata: dict | None = None,
+) -> dict:
+    return {
+        "block_id": block_id,
+        "parent_id": None,
+        "tenant_id": tenant_id,
+        "user_id": "u-1",
+        "project_id": "p-1",
+        "session_id": "s-1",
+        "kind": "command",
+        "status": "completed",
+        "title": "Probe target",
+        "payload": json.dumps(payload or {"command": "uname -a"}),
+        "metadata": json.dumps(metadata or {}),
+        "started_at": None,
+        "completed_at": None,
+        "created_at": "2026-05-19 00:00:00",
+    }
+
+
+def _client(monkeypatch, user: auth.User, conn) -> TestClient:
+    app = FastAPI()
+    app.include_router(router_module.router)
+    app.dependency_overrides[auth.require_viewer] = lambda: user
+    monkeypatch.setattr(router_module, "get_pool", lambda: _FakePool(conn))
+    return TestClient(app)
 
 
 def test_router_is_mounted_on_versioned_app() -> None:
@@ -96,7 +134,100 @@ def test_router_prefix_and_role() -> None:
     """The router uses the documented prefix and viewer-level gate."""
     assert router_module.router.prefix == "/shareable-objects"
     create_src = inspect.getsource(router_module.create_shareable_object)
+    resolve_src = inspect.getsource(router_module.resolve_shareable_object)
     assert "Depends(auth.require_viewer)" in create_src
+    assert "Depends(auth.require_viewer)" in resolve_src
+
+
+def test_get_team_share_denies_non_permitted_caller_over_http(monkeypatch) -> None:
+    conn = _FakeConn([
+        _stub_share_row(owner_user_id="u-owner", visibility="team"),
+        {"role": "viewer", "status": "active"},
+    ])
+    client = _client(monkeypatch, _viewer(user_id="u-other"), conn)
+
+    res = client.get("/shareable-objects/sh-stub_slug_____________")
+
+    assert res.status_code == 404
+    assert conn.calls[1] == (
+        so_module._FETCH_USER_TENANT_MEMBERSHIP_SQL,
+        ("u-other", "t-default"),
+    )
+
+
+def test_get_block_share_masks_redacted_region_on_wire(monkeypatch) -> None:
+    conn = _FakeConn([
+        _stub_share_row(
+            redaction_applied={"mask": {"payload.command": "secret"}},
+        ),
+        _stub_block_row(payload={
+            "command": "curl https://internal.example",
+            "stdout": "public output",
+        }),
+    ])
+    client = _client(monkeypatch, _viewer(), conn)
+
+    res = client.get("/shareable-objects/sh-stub_slug_____________")
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["share_id"] == "sh-stub_slug_____________"
+    assert body["object_kind"] == "block"
+    assert body["payload"] == {
+        "command": "[REDACTED:secret]",
+        "stdout": "public output",
+    }
+    assert body["metadata"]["block_id"] == "blk-1"
+
+
+def test_get_expired_share_returns_404_over_http(monkeypatch) -> None:
+    conn = _FakeConn([])
+    client = _client(monkeypatch, _viewer(), conn)
+
+    res = client.get("/shareable-objects/sh-stub_slug_____________")
+
+    assert res.status_code == 404
+    assert "expires_at > now()" in conn.calls[0][0]
+
+
+def test_get_runbook_share_serves_loaded_runbook_over_http(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    runbook_dir = tmp_path / ".omnisight" / "runbooks"
+    runbook_dir.mkdir(parents=True)
+    (runbook_dir / "demo.yaml").write_text(
+        "\n".join([
+            "name: demo",
+            "description: Shared runbook",
+            "tags: [bringup]",
+            "steps:",
+            "  - kind: command",
+            "    title: Probe",
+            "    command: uname -a",
+        ]),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(router_module, "_project_root", lambda: tmp_path)
+    conn = _FakeConn([
+        _stub_share_row(
+            object_kind="runbook",
+            object_id="demo",
+            redaction_applied={"mask": {"payload.steps.0.payload.command": "secret"}},
+        ),
+    ])
+    client = _client(monkeypatch, _viewer(), conn)
+
+    res = client.get("/shareable-objects/sh-stub_slug_____________")
+    body = res.json()
+
+    assert res.status_code == 200
+    assert body["object_kind"] == "runbook"
+    assert body["object_id"] == "demo"
+    assert body["payload"]["name"] == "demo"
+    assert body["payload"]["steps"][0]["payload"]["command"] == (
+        "[REDACTED:secret]"
+    )
 
 
 @pytest.mark.asyncio
