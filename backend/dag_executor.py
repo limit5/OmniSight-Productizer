@@ -1057,6 +1057,15 @@ class LocalTaskHandler:
 #: these is a no-op (re-transitioning out of them is illegal anyway).
 _TERMINAL_PLAN_STATUSES = frozenset({"completed", "failed"})
 
+#: Run-metadata marker stamped on every workflow_run the DAG executor
+#: finalizes (OP-1661). Executor runs newly surface as status='completed'
+#: once the executor lands; this marker is the signal
+#: :mod:`backend.finetune_export` uses to exclude them from the fine-tune
+#: corpus. ``finetune_export._EXECUTOR_RUN_MARKER`` MUST equal this string
+#: (a cross-module test asserts it) — they are kept as separate literals so
+#: the lightweight exporter need not import this module's heavy graph.
+EXECUTOR_RUN_METADATA_MARKER = "dag_executor_run"
+
 
 def dag_step_key(task_id: str) -> str:
     """The ``workflow_steps.idempotency_key`` for a task: ``dag-task:{id}``.
@@ -1218,6 +1227,10 @@ async def record_and_finalize_plan(
             break  # stop the serial walk at the first failure
 
     terminal = "completed" if all_ok else "failed"
+    # ── tag the run as executor-produced BEFORE finishing it, so the
+    #    'completed' row finetune_export sees already carries the marker
+    #    (OP-1661 — executor runs must not pollute the fine-tune corpus).
+    await _mark_executor_run(wf, run_id)
     # ── terminal wiring: plan status first, then finish the run ──
     await ds.set_status(plan.id, terminal)
     await wf.finish(run_id, terminal)
@@ -1233,6 +1246,39 @@ async def record_and_finalize_plan(
     return PlanTerminalResult(
         plan_id=plan.id, run_id=run_id, status=terminal,
         recorded=recorded, results=results,
+    )
+
+
+async def _mark_executor_run(workflow, run_id: str) -> None:
+    """Stamp :data:`EXECUTOR_RUN_METADATA_MARKER` into the run's metadata so
+    :mod:`backend.finetune_export` excludes it from the training corpus
+    (OP-1661).
+
+    Best-effort + idempotent: if the run already carries the marker we touch
+    nothing, and a transient optimistic-lock version race is re-read and
+    retried once. A failure here is logged but never blocks the terminal
+    wiring — the exporter's ``dag_task_id`` backstop keeps the run out of the
+    corpus even if this stamp is missed.
+    """
+    for _attempt in range(2):
+        run = await workflow.get_run(run_id)
+        if run is None:
+            return
+        md = getattr(run, "metadata", None) or {}
+        if md.get(EXECUTOR_RUN_METADATA_MARKER):
+            return  # already tagged (idempotent re-claim / prior attempt)
+        try:
+            await workflow.update_run_metadata(
+                run_id, run.version, {EXECUTOR_RUN_METADATA_MARKER: True},
+            )
+            return
+        except Exception as exc:  # VersionConflict or similar — re-read + retry
+            logger.debug(
+                "executor-run marker write retry for run=%s: %s", run_id, exc,
+            )
+    logger.warning(
+        "could not stamp executor-run marker on run=%s — relying on the "
+        "finetune_export dag_task_id backstop", run_id,
     )
 
 
@@ -1469,6 +1515,7 @@ __all__ = [
     "LocalTaskHandler",
     "LocalTaskResult",
     "PlanTerminalResult",
+    "EXECUTOR_RUN_METADATA_MARKER",
     "dag_step_key",
     "record_and_finalize_plan",
     "GERRIT_PUSH",

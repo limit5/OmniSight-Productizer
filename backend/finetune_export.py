@@ -78,6 +78,35 @@ class ExportStats:
 
 _KEY_ROOT_RE = re.compile(r"^([^/#]+)")
 
+#: Run-metadata key the DAG executor stamps on every run it finalizes
+#: (OP-1661). MUST equal ``dag_executor.EXECUTOR_RUN_METADATA_MARKER`` —
+#: a cross-module test pins the two together. Kept as a literal (not an
+#: import) so this lightweight, pure exporter never pulls in dag_executor's
+#: heavy import graph just to read one string.
+_EXECUTOR_RUN_MARKER = "dag_executor_run"
+
+
+def _is_executor_run(run: Any, steps: list[Any]) -> bool:
+    """True when ``run`` was produced by the DAG executor (OP-1661).
+
+    Executor runs newly surface as ``status='completed'`` once the executor
+    lands and must NOT enter the fine-tune corpus. Two independent signals,
+    either of which suffices:
+
+      * the run-metadata marker the executor stamps at finalize
+        (:data:`_EXECUTOR_RUN_MARKER`); and
+      * any step carrying a ``dag_task_id`` — the executor sets this on every
+        step it records, transactionally with the step, so it is the reliable
+        backstop should the metadata stamp ever be missed.
+
+    Only executor runs can carry either signal, so excluding them never
+    changes selection for ordinary completed runs (the ticket MUST-NOT).
+    """
+    md = getattr(run, "metadata", None) or {}
+    if md.get(_EXECUTOR_RUN_MARKER):
+        return True
+    return any(getattr(s, "dag_task_id", None) for s in steps)
+
 
 def _key_root(idempotency_key: str) -> str:
     """Strip ``/retry-N`` or ``#hash`` suffixes so we can identify
@@ -224,6 +253,11 @@ async def extract_for_run(run_id: str) -> tuple[GateReason, TrainingExample | No
     if run is None:
         return GateReason(run_id, False, "run_not_found"), None
     steps = await wf.list_steps(run_id)
+    # OP-1661: a run the DAG executor finalized surfaces as 'completed' but
+    # must never enter the corpus. Exclude it here — before the gate / scrub —
+    # so an executor trace is never even formatted.
+    if _is_executor_run(run, steps):
+        return GateReason(run_id, False, "executor_run"), None
     kept = shortest_path(steps)
     decisions = await _decisions_for_run(run_id)
 
@@ -296,6 +330,17 @@ async def export_jsonl(
     runs = await wf.list_runs(status="completed", limit=limit)
     if since is not None:
         runs = [r for r in runs if (r.completed_at or 0) >= since]
+
+    # OP-1661: drop executor-finalized runs up front via the cheap run-metadata
+    # marker (no per-run step fetch). extract_for_run still carries the
+    # dag_task_id backstop for any run whose marker stamp was missed.
+    kept_runs: list[Any] = []
+    for r in runs:
+        if (getattr(r, "metadata", None) or {}).get(_EXECUTOR_RUN_MARKER):
+            stats.bump_skip("executor_run")
+            continue
+        kept_runs.append(r)
+    runs = kept_runs
 
     # Open and write line-by-line so a crash leaves a partial-but-
     # still-valid JSONL file.
