@@ -36,6 +36,8 @@ def _make_repo(tmp_path: Path) -> Path:
       backend/tests/test_foo.py
       backend/tests/test_helper.py
       backend/tests/test_orchestra.py
+      backend/tests/test_deploy_base.py   (deploy/CI subset)
+      tests/test_gitlab_ci_smoke.py       (deploy/CI subset)
       docs/note.md
       app/page.tsx
     """
@@ -43,6 +45,7 @@ def _make_repo(tmp_path: Path) -> Path:
     (tmp_path / "backend" / "lib").mkdir(parents=True)
     (tmp_path / "backend" / "agents").mkdir(parents=True)
     (tmp_path / "backend" / "tests").mkdir(parents=True)
+    (tmp_path / "tests").mkdir()
     (tmp_path / "docs").mkdir()
     (tmp_path / "app").mkdir()
 
@@ -69,6 +72,14 @@ def _make_repo(tmp_path: Path) -> Path:
     )
     (tmp_path / "backend" / "tests" / "test_orchestra.py").write_text(
         "from backend.agents.orchestra import go\ndef test_x(): assert go() == 1\n"
+    )
+
+    # Deploy/CI behavioural subset — discovered by name convention.
+    (tmp_path / "backend" / "tests" / "test_deploy_base.py").write_text(
+        "def test_deploy(): assert True\n"
+    )
+    (tmp_path / "tests" / "test_gitlab_ci_smoke.py").write_text(
+        "def test_ci(): assert True\n"
     )
 
     (tmp_path / "docs" / "note.md").write_text("# note\n")
@@ -134,6 +145,35 @@ class TestImportGraph:
         assert impact._module_to_test_file("backend.absent", repo) is None
 
 
+# ── Deploy / CI subset discovery ─────────────────────────────────
+
+
+class TestDeployCiSubset:
+    def test_discovers_deploy_and_ci_tests_by_convention(self, tmp_path):
+        repo = _make_repo(tmp_path)
+        out = set(impact.deploy_ci_test_files(repo))
+        assert "backend/tests/test_deploy_base.py" in out
+        assert "tests/test_gitlab_ci_smoke.py" in out
+
+    def test_does_not_sweep_in_unrelated_suites(self, tmp_path):
+        # Anchored globs must not match false friends like the "ci"
+        # substring inside test_pricing / test_decision.
+        repo = _make_repo(tmp_path)
+        (repo / "backend" / "tests" / "test_pricing.py").write_text(
+            "def test_x(): assert True\n"
+        )
+        (repo / "backend" / "tests" / "test_decision_api.py").write_text(
+            "def test_x(): assert True\n"
+        )
+        out = set(impact.deploy_ci_test_files(repo))
+        assert "backend/tests/test_pricing.py" not in out
+        assert "backend/tests/test_decision_api.py" not in out
+
+    def test_empty_when_no_deploy_tests_present(self, tmp_path):
+        # Bare repo (no tests dirs) yields an empty subset.
+        assert impact.deploy_ci_test_files(tmp_path) == []
+
+
 # ── classify_changes (top-level entry) ──────────────────────────
 
 
@@ -161,11 +201,51 @@ class TestClassifyChanges:
         result = impact.classify_changes(["app/page.tsx"], repo)
         assert result.policy == "frontend-only"
 
-    def test_devops_only_is_lint_only(self, tmp_path):
+    def test_deploy_change_runs_deploy_ci_subset(self, tmp_path):
+        # OP-1706 / finding #28: a deploy/ change must run a real test
+        # subset, NOT lint-only.
         repo = _make_repo(tmp_path)
         result = impact.classify_changes(
             ["deploy/systemd/foo.service"], repo,
         )
+        assert result.policy == "affected"
+        files = set(result.test_files)
+        assert "backend/tests/test_deploy_base.py" in files
+        assert "tests/test_gitlab_ci_smoke.py" in files
+
+    def test_gitlab_ci_change_runs_deploy_ci_subset(self, tmp_path):
+        # .gitlab-ci.yml used to fall through to lint-only — it must now
+        # trigger the deploy/CI behavioural subset.
+        repo = _make_repo(tmp_path)
+        result = impact.classify_changes([".gitlab-ci.yml"], repo)
+        assert result.policy == "affected"
+        files = set(result.test_files)
+        assert "backend/tests/test_deploy_base.py" in files
+        assert "tests/test_gitlab_ci_smoke.py" in files
+
+    def test_deploy_plus_docs_still_runs_subset(self, tmp_path):
+        # Mixing in docs must not let the change collapse to skip/lint-only.
+        repo = _make_repo(tmp_path)
+        result = impact.classify_changes(
+            ["deploy/k8s/app.yaml", "docs/note.md"], repo,
+        )
+        assert result.policy == "affected"
+        assert result.test_files
+
+    def test_deploy_change_with_no_deploy_tests_falls_back_to_full(self, tmp_path):
+        # A deploy change must never silently green-light: with no deploy
+        # tests in the tree we fall back to full rather than lint-only/skip.
+        result = impact.classify_changes(
+            ["deploy/systemd/foo.service"], tmp_path,
+        )
+        assert result.policy == "full"
+        assert "no test mapping" in result.reason
+
+    def test_tooling_only_is_still_lint_only(self, tmp_path):
+        # Pure tooling changes (scripts/, tools/) keep lint-only — the
+        # impact-scoping carve-out is unchanged for non-deploy tooling.
+        repo = _make_repo(tmp_path)
+        result = impact.classify_changes(["tools/format_all.sh"], repo)
         assert result.policy == "lint-only"
 
     def test_high_fan_out_path_forces_full(self, tmp_path):
@@ -228,7 +308,8 @@ class TestAreaPolicyTable:
         ("docs", "skip"),
         ("frontend", "frontend-only"),
         ("backend", "affected"),
-        ("devops", "lint-only"),
+        # OP-1706 / finding #28: devops (deploy/CI) is no longer lint-only.
+        ("devops", "affected"),
         ("tests", "affected"),
         ("tooling", "lint-only"),
         ("security", "full"),
