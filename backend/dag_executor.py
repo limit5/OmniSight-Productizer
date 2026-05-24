@@ -46,9 +46,9 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
-from backend import worker
+from backend import dag_storage, worker
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,12 @@ DEFAULT_POLL_INTERVAL_S = 2.0
 # every 15 s, TTL 45 s (= 3x interval, so 2 missed pings == dead).
 DEFAULT_HEARTBEAT_INTERVAL_S = 15.0
 DEFAULT_HEARTBEAT_TTL_S = 45
+
+#: Default dag_plans lease lifetime. Tracks the heartbeat TTL so the
+#: lease a future executor phase holds expires on the same "2 missed
+#: pings == dead" budget as the operator-surface heartbeat key. The
+#: authoritative default lives in :mod:`backend.dag_storage`.
+DEFAULT_LEASE_TTL_S = dag_storage.DEFAULT_LEASE_TTL_S
 
 
 def is_enabled() -> bool:
@@ -208,6 +214,7 @@ class DagExecutorConfig:
     poll_interval_s: float = DEFAULT_POLL_INTERVAL_S
     heartbeat_interval_s: float = DEFAULT_HEARTBEAT_INTERVAL_S
     heartbeat_ttl_s: int = DEFAULT_HEARTBEAT_TTL_S
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S
     max_ticks: int | None = None  # tests / one-shot harness; None == forever
 
     def __post_init__(self) -> None:
@@ -304,8 +311,9 @@ class DagExecutor:
 
                 # ── SEAM ──────────────────────────────────────────
                 # A future phase claims one ready dag_task here and
-                # dispatches it. The Phase-1 skeleton deliberately does
-                # NOTHING: no claim, no agent run, no terminal transition.
+                # dispatches it — via :meth:`claim_plan` / renew / release
+                # (OP-1656). The Phase-1 skeleton deliberately does NOTHING:
+                # no claim, no agent run, no terminal transition.
                 self._ticks += 1
 
                 now = time.monotonic()
@@ -364,6 +372,54 @@ class DagExecutor:
             "ticks": self._ticks,
             "enabled": self._enabled,
         }
+
+    # ─── dag_plans lease (OP-1656) ───────────────────────────────
+    #
+    # Thin owner-scoped wrappers over the compare-and-set primitives in
+    # :mod:`backend.dag_storage`. The executor's ``instance_id`` (already
+    # forced into the ``dag-exec-*`` namespace) is the lease owner, so a
+    # claimed plan is attributable to the exact instance on the operator
+    # surface.
+    #
+    # IMPORTANT: these are deliberately NOT called from :meth:`run`'s loop.
+    # The Phase-1 executor stays inert — the SEAM in ``run()`` claims
+    # nothing. These methods ship in the backend image as the primitive a
+    # later (still-gated) phase will call at that seam; wiring them now lets
+    # the lease be exercised by tests without arming task execution.
+
+    async def claim_plan(
+        self, plan_id: int, *, conn=None,
+    ) -> Optional["dag_storage.PlanLease"]:
+        """Try to claim ``plan_id`` for this executor instance.
+
+        Returns the granted :class:`~backend.dag_storage.PlanLease`, or
+        ``None`` if another live owner holds it (or the plan is gone).
+        """
+        return await dag_storage.claim_plan(
+            plan_id, self.config.instance_id,
+            lease_ttl_s=self.config.lease_ttl_s, conn=conn,
+        )
+
+    async def renew_plan_lease(
+        self, lease: "dag_storage.PlanLease", *, conn=None,
+    ) -> Optional["dag_storage.PlanLease"]:
+        """Heartbeat-renew a lease this instance holds.
+
+        Returns the refreshed lease, or ``None`` if it was lost (lapsed or
+        reclaimed) — the cue to stop driving that plan.
+        """
+        return await dag_storage.renew_lease(
+            lease.plan_id, lease.owner, lease.token,
+            lease_ttl_s=self.config.lease_ttl_s, conn=conn,
+        )
+
+    async def release_plan_lease(
+        self, lease: "dag_storage.PlanLease", *, conn=None,
+    ) -> bool:
+        """Release a lease this instance holds (idempotent)."""
+        return await dag_storage.release_lease(
+            lease.plan_id, lease.owner, lease.token, conn=conn,
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -428,6 +484,7 @@ __all__ = [
     "DEFAULT_POLL_INTERVAL_S",
     "DEFAULT_HEARTBEAT_INTERVAL_S",
     "DEFAULT_HEARTBEAT_TTL_S",
+    "DEFAULT_LEASE_TTL_S",
     "DagExecHeartbeat",
     "DagExecutor",
     "DagExecutorConfig",

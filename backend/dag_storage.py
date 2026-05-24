@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -265,6 +266,271 @@ async def set_status(
         async with conn.transaction():
             await _set_status_impl(conn, plan_id, new_status, run_id)
     return await get_plan(plan_id, conn=conn)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Executor lease — compare-and-set claim over a dag_plans row (OP-1656)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# A single-writer lease so at most one executor drives a given plan at a
+# time. We copy the OP-977 fencing-token PATTERN — mint a unique token per
+# claim so a stale owner whose lease expired can never keep mutating the
+# row after a re-claim (its token no longer matches) — but in a dag_plans
+# *local* namespace. This deliberately does NOT import or touch
+# ``backend.agents.runner_coordination`` / the ``runner_claims`` table
+# (MUST-NOT per the ticket): the lease lives entirely in the four nullable
+# columns alembic 0248 added to ``dag_plans``
+# (``claim_owner`` / ``claim_token`` / ``claim_expires_at`` / ``heartbeat_at``).
+#
+# Why a conditional ``UPDATE ... RETURNING`` and not SELECT-then-UPDATE:
+# the CAS precondition lives in the WHERE clause, so the row lock PG takes
+# for the UPDATE also re-evaluates the predicate against the freshly
+# committed row (EvalPlanQual under READ COMMITTED). Two racing claimers
+# therefore serialise on the row lock; the loser re-checks the now-claimed
+# row, its WHERE fails, and it gets zero rows back — no double-grant, with
+# no explicit ``SELECT ... FOR UPDATE`` needed. (Contrast ``set_status``,
+# whose precondition — the legal-transition check — is computed in Python,
+# so it *does* need FOR UPDATE to serialise the read-then-write.)
+
+#: Fencing-token namespace — DISTINCT from runner_coordination's ``claim:``
+#: so a dag_plans lease token can never be confused with a runner claim.
+LEASE_TOKEN_PREFIX = "dag-plan-lease"
+
+#: Default lease lifetime (seconds). Mirrors the dag-exec heartbeat TTL
+#: (3x the 15 s heartbeat cadence → two missed renewals == reclaimable).
+DEFAULT_LEASE_TTL_S = 45.0
+
+
+@dataclass
+class PlanLease:
+    """Snapshot of the lease columns on a ``dag_plans`` row.
+
+    Returned by :func:`claim_plan` / :func:`renew_lease` on success and by
+    :func:`get_lease` for an actively-held row; ``None`` from those callers
+    means "not granted / not held".
+    """
+
+    plan_id: int
+    owner: str
+    token: str
+    claim_expires_at: float
+    heartbeat_at: float
+
+
+def _mint_lease_token(owner: str) -> str:
+    """dag_plans-local fencing token: ``dag-plan-lease:{owner}:{epoch_us}-{uuid}``.
+
+    Distinct namespace from OP-977 / runner_coordination's ``claim:`` prefix
+    so the two lease systems are never confused. Unique per attempt
+    (``epoch_us`` + uuid) so every (re-)claim mints a strictly fresh token —
+    that uniqueness is the fencing guarantee that lets a reclaim invalidate
+    a stale owner's in-flight renews.
+    """
+    epoch_us = int(time.time() * 1_000_000)
+    return f"{LEASE_TOKEN_PREFIX}:{owner}:{epoch_us}-{uuid.uuid4()}"
+
+
+def _row_to_lease(plan_id: int, row) -> PlanLease:
+    return PlanLease(
+        plan_id=plan_id,
+        owner=row["claim_owner"],
+        token=row["claim_token"],
+        claim_expires_at=row["claim_expires_at"],
+        heartbeat_at=row["heartbeat_at"],
+    )
+
+
+async def _claim_plan_impl(
+    conn, plan_id: int, owner: str, token: str, ttl_s: float, now: float,
+):
+    expires = now + ttl_s
+    # Grant when the row is unclaimed, already ours (refresh / re-claim), or
+    # the prior owner's lease has lapsed (stale reclaim). A live lease held
+    # by a *different* owner makes every OR-branch false → 0 rows → no grant.
+    return await conn.fetchrow(
+        "UPDATE dag_plans SET claim_owner = $1, claim_token = $2, "
+        "claim_expires_at = $3, heartbeat_at = $4 "
+        "WHERE id = $5 AND ("
+        "    claim_owner IS NULL "
+        "    OR claim_owner = $1 "
+        "    OR claim_expires_at IS NULL "
+        "    OR claim_expires_at <= $4"
+        ") "
+        "RETURNING claim_owner, claim_token, claim_expires_at, heartbeat_at",
+        owner, token, expires, now, plan_id,
+    )
+
+
+async def claim_plan(
+    plan_id: int, owner: str, *,
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
+    now: Optional[float] = None,
+    conn=None,
+) -> Optional[PlanLease]:
+    """Atomically claim the lease on ``plan_id`` for ``owner``.
+
+    Returns a :class:`PlanLease` (with a freshly minted fencing token) on
+    success, or ``None`` when the lease is held by a *different, live*
+    owner — or the plan row does not exist. The single conditional
+    ``UPDATE ... RETURNING`` is the compare-and-set: concurrent claimers
+    serialise on the PG row lock so exactly one wins (no double-grant), and
+    a lease whose ``claim_expires_at`` has passed is reclaimable.
+
+    ``now`` is injectable for deterministic expiry tests; production passes
+    ``None`` (wall clock).
+    """
+    if not owner:
+        raise ValueError("claim_plan requires a non-empty owner")
+    token = _mint_lease_token(owner)
+    ts = time.time() if now is None else now
+    if conn is None:
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                row = await _claim_plan_impl(
+                    owned, plan_id, owner, token, lease_ttl_s, ts,
+                )
+    else:
+        async with conn.transaction():
+            row = await _claim_plan_impl(
+                conn, plan_id, owner, token, lease_ttl_s, ts,
+            )
+    if row is None:
+        return None
+    logger.info(
+        "dag plan lease claimed plan=%s owner=%s expires_at=%.3f",
+        plan_id, owner, row["claim_expires_at"],
+    )
+    return _row_to_lease(plan_id, row)
+
+
+async def _renew_lease_impl(
+    conn, plan_id: int, owner: str, token: str, ttl_s: float, now: float,
+):
+    expires = now + ttl_s
+    # Renew only while the lease is still live AND held by this exact
+    # (owner, token). A lapsed expiry or a token that no longer matches
+    # (someone reclaimed) yields 0 rows — the fencing stop signal.
+    return await conn.fetchrow(
+        "UPDATE dag_plans SET heartbeat_at = $1, claim_expires_at = $2 "
+        "WHERE id = $3 AND claim_owner = $4 AND claim_token = $5 "
+        "AND claim_expires_at > $1 "
+        "RETURNING claim_owner, claim_token, claim_expires_at, heartbeat_at",
+        now, expires, plan_id, owner, token,
+    )
+
+
+async def renew_lease(
+    plan_id: int, owner: str, token: str, *,
+    lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
+    now: Optional[float] = None,
+    conn=None,
+) -> Optional[PlanLease]:
+    """Heartbeat-renew a held lease: bump ``heartbeat_at`` + extend
+    ``claim_expires_at`` by ``lease_ttl_s``.
+
+    Returns the refreshed :class:`PlanLease`, or ``None`` if the lease was
+    lost — i.e. it lapsed (``claim_expires_at`` already passed) or another
+    owner reclaimed it (token mismatch). A ``None`` return is the executor's
+    cue to stop touching the plan: it no longer holds the lease.
+    """
+    ts = time.time() if now is None else now
+    if conn is None:
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                row = await _renew_lease_impl(
+                    owned, plan_id, owner, token, lease_ttl_s, ts,
+                )
+    else:
+        async with conn.transaction():
+            row = await _renew_lease_impl(
+                conn, plan_id, owner, token, lease_ttl_s, ts,
+            )
+    return _row_to_lease(plan_id, row) if row is not None else None
+
+
+async def _release_lease_impl(conn, plan_id: int, owner: str, token: str):
+    return await conn.fetchrow(
+        "UPDATE dag_plans SET claim_owner = NULL, claim_token = NULL, "
+        "claim_expires_at = NULL, heartbeat_at = NULL "
+        "WHERE id = $1 AND claim_owner = $2 AND claim_token = $3 "
+        "RETURNING id",
+        plan_id, owner, token,
+    )
+
+
+async def release_lease(
+    plan_id: int, owner: str, token: str, *, conn=None,
+) -> bool:
+    """Release a held lease, clearing all four lease columns.
+
+    Returns ``True`` if this exact ``(owner, token)`` held the lease and it
+    was released, else ``False``. **Idempotent**: releasing a lease that was
+    never held, already released, or is owned by someone else (wrong owner /
+    stale token) is a no-op returning ``False`` — never steals another
+    owner's lease. Supports the "release in ``finally``" pattern.
+    """
+    if conn is None:
+        async with get_pool().acquire() as owned:
+            async with owned.transaction():
+                row = await _release_lease_impl(owned, plan_id, owner, token)
+    else:
+        async with conn.transaction():
+            row = await _release_lease_impl(conn, plan_id, owner, token)
+    released = row is not None
+    if released:
+        logger.info(
+            "dag plan lease released plan=%s owner=%s", plan_id, owner,
+        )
+    return released
+
+
+async def expire_stale_leases(
+    *, now: Optional[float] = None, conn=None,
+) -> int:
+    """Proactively clear every lease whose ``claim_expires_at`` has passed.
+
+    Returns the number of stale leases swept. This is the explicit
+    expire-stale sweeper (a periodic caller is the trigger); note that
+    :func:`claim_plan` *also* reclaims a stale lease lazily on contention, so
+    a sweeper is an optimisation, not a correctness requirement. Idempotent:
+    a second run finds the just-cleared rows already NULL and is a no-op.
+    """
+    ts = time.time() if now is None else now
+    sql = (
+        "UPDATE dag_plans SET claim_owner = NULL, claim_token = NULL, "
+        "claim_expires_at = NULL, heartbeat_at = NULL "
+        "WHERE claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL "
+        "AND claim_expires_at <= $1"
+    )
+    if conn is None:
+        async with get_pool().acquire() as owned:
+            tag = await owned.execute(sql, ts)
+    else:
+        tag = await conn.execute(sql, ts)
+    # asyncpg returns a command tag like "UPDATE 3"; trailing token is the count.
+    try:
+        return int(tag.split()[-1])
+    except (ValueError, IndexError, AttributeError):
+        return 0
+
+
+async def get_lease(plan_id: int, conn=None) -> Optional[PlanLease]:
+    """Read the current lease on ``plan_id``; ``None`` if unclaimed.
+
+    Operator / test read surface — does not take the lease, just reports it.
+    """
+    sql = (
+        "SELECT claim_owner, claim_token, claim_expires_at, heartbeat_at "
+        "FROM dag_plans WHERE id = $1"
+    )
+    if conn is None:
+        async with get_pool().acquire() as owned:
+            row = await owned.fetchrow(sql, plan_id)
+    else:
+        row = await conn.fetchrow(sql, plan_id)
+    if not row or row["claim_owner"] is None:
+        return None
+    return _row_to_lease(plan_id, row)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
