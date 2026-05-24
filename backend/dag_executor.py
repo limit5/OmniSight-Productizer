@@ -51,6 +51,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from backend import dag_storage, worker
 from backend.dag_schema import DAG, Task
+from backend.env_contract import _truthy, canonical_env
 
 logger = logging.getLogger(__name__)
 
@@ -1211,6 +1212,151 @@ def _import_workflow():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Fail-closed side-effect guard (OP-1660)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Design doc §7 Dim 6 + codex E8. Modelled on :mod:`backend.env_contract`'s
+# fail-closed style: a gate the (still-gated) NONLOCAL task handlers MUST
+# call *before* performing an irreversible / outward-facing side effect —
+# pushing to Gerrit, publishing to a registry, opening an SSH session,
+# flashing hardware, or writing a prod database.
+#
+# Fail-closed contract — the side effect is REFUSED unless BOTH:
+#   1. ``OMNISIGHT_ENV`` canonicalises to ``"prod"``
+#      (reusing :func:`backend.env_contract.canonical_env`), AND
+#   2. the explicit per-capability allow flag ``OMNISIGHT_ALLOW_<CAPABILITY>``
+#      is truthy (reusing the same ``1/true/yes/on`` semantics as the
+#      env-DB contract via :func:`backend.env_contract._truthy`).
+# Anything else — dev/staging/unset env, a missing/false allow flag, or an
+# unrecognised capability — raises :class:`SideEffectBlocked`, aborting the
+# task BEFORE any network/action call is made.
+#
+# Unlike the env-DB contract there is deliberately NO test/CI carveout: the
+# whole point of this guard is that fake creds present on a dev/staging host
+# (or inside a test) can NEVER push. Tests exercise the *allowed* path by
+# passing ``env="prod"`` + setting the allow flag, never by bypassing.
+
+#: The guarded side-effect capabilities. Each names an irreversible /
+#: outward-facing action a future nonlocal handler could take.
+GERRIT_PUSH = "gerrit_push"
+REGISTRY_PUBLISH = "registry_publish"
+SSH = "ssh"
+HARDWARE_FLASH = "hardware_flash"
+PROD_DB_WRITE = "prod_db_write"
+
+SIDE_EFFECT_CAPABILITIES: frozenset[str] = frozenset({
+    GERRIT_PUSH, REGISTRY_PUBLISH, SSH, HARDWARE_FLASH, PROD_DB_WRITE,
+})
+
+#: Prefix of the explicit per-capability allow-flag env var. The full var
+#: is ``OMNISIGHT_ALLOW_<CAPABILITY-UPPERCASED>`` (e.g.
+#: ``OMNISIGHT_ALLOW_GERRIT_PUSH``).
+SIDE_EFFECT_ALLOW_PREFIX = "OMNISIGHT_ALLOW_"
+
+
+def allow_flag_env(capability: str) -> str:
+    """The env var that must be truthy (in prod) to permit ``capability``."""
+    return f"{SIDE_EFFECT_ALLOW_PREFIX}{capability.upper()}"
+
+
+class SideEffectBlocked(RuntimeError):
+    """Raised (fail-closed) when a guarded side effect is refused.
+
+    A task-level abort, NOT a process exit (contrast
+    :class:`backend.env_contract.EnvContractViolation`, which exits 78): it
+    propagates out of the handler so the scheduler fails that one task while
+    the executor keeps running. ``capability`` / ``env`` / ``source`` are
+    preserved as attributes for structured handling and assertions.
+    """
+
+    def __init__(
+        self, capability: str, *, source: str, env: str | None, reason: str,
+    ) -> None:
+        self.capability = capability
+        self.source = source
+        self.env = env
+        self.reason = reason
+        super().__init__(
+            f"side-effect {capability!r} blocked "
+            f"(source={source}, env={env!r}): {reason}"
+        )
+        logger.critical(
+            "SideEffectBlocked: capability=%s source=%s env=%r — %s",
+            capability, source, env, reason,
+        )
+
+
+def guard_side_effect(
+    capability: str, *, source: str, env: str | None = None,
+) -> None:
+    """Fail closed unless ``OMNISIGHT_ENV=prod`` AND the per-capability flag.
+
+    Call this BEFORE any network/action call. Returns ``None`` when the side
+    effect is permitted; otherwise raises :class:`SideEffectBlocked` (so the
+    guarded action never runs). ``source`` is a short call-site label for the
+    error/log message; ``env`` overrides ``OMNISIGHT_ENV`` (used by tests).
+    """
+    canon = canonical_env(
+        env if env is not None else os.environ.get("OMNISIGHT_ENV")
+    )
+
+    # Unknown capability → refuse (fail-closed on an unrecognised gate; a
+    # typo'd capability must never silently fall through to "allowed").
+    if capability not in SIDE_EFFECT_CAPABILITIES:
+        raise SideEffectBlocked(
+            capability, source=source, env=canon,
+            reason=(
+                "unknown side-effect capability — the guarded set is "
+                f"{sorted(SIDE_EFFECT_CAPABILITIES)}"
+            ),
+        )
+
+    # Gate 1: only a prod process may EVER perform a guarded side effect.
+    if canon != "prod":
+        raise SideEffectBlocked(
+            capability, source=source, env=canon,
+            reason=(
+                f"refused outside prod (OMNISIGHT_ENV={canon!r}) — a guarded "
+                "side effect requires OMNISIGHT_ENV=prod"
+            ),
+        )
+
+    # Gate 2: prod still needs the explicit per-capability allow flag.
+    flag = allow_flag_env(capability)
+    if not _truthy(os.environ.get(flag)):
+        raise SideEffectBlocked(
+            capability, source=source, env=canon,
+            reason=(
+                f"prod env but allow flag {flag} is not set — set {flag}=1 to "
+                "explicitly permit this capability"
+            ),
+        )
+
+    logger.warning(
+        "side-effect %s PERMITTED (source=%s, env=prod, %s set) — proceeding",
+        capability, source, flag,
+    )
+
+
+def perform_side_effect(
+    capability: str,
+    action: Callable[[], Any],
+    *,
+    source: str,
+    env: str | None = None,
+) -> Any:
+    """Guard, then run ``action`` (the network/side-effecting call).
+
+    ``action`` is a zero-arg callable invoked ONLY after
+    :func:`guard_side_effect` passes, so a blocked capability aborts the task
+    BEFORE any network call. Returns whatever ``action`` returns. This is the
+    seam a nonlocal handler wraps its real push/publish/flash call in.
+    """
+    guard_side_effect(capability, source=source, env=env)
+    return action()
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  CLI entry-point
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -1293,6 +1439,17 @@ __all__ = [
     "PlanTerminalResult",
     "dag_step_key",
     "record_and_finalize_plan",
+    "GERRIT_PUSH",
+    "REGISTRY_PUBLISH",
+    "SSH",
+    "HARDWARE_FLASH",
+    "PROD_DB_WRITE",
+    "SIDE_EFFECT_CAPABILITIES",
+    "SIDE_EFFECT_ALLOW_PREFIX",
+    "allow_flag_env",
+    "guard_side_effect",
+    "perform_side_effect",
+    "SideEffectBlocked",
     "ensure_dag_exec_namespace",
     "is_enabled",
     "main",
