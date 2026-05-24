@@ -49,7 +49,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
 
-from backend import dag_storage, worker
+from backend import dag_storage, metrics, worker
 from backend.dag_schema import DAG, Task
 
 logger = logging.getLogger(__name__)
@@ -356,6 +356,26 @@ class DagExecutor:
                 "dag-executor %s heartbeat failed: %s",
                 self.config.instance_id, exc,
             )
+        # OP-1665: operator-surface heartbeat metrics. Kept INDEPENDENT of the
+        # store write above (and itself best-effort) so the liveness gauge still
+        # reflects a running executor through a Redis blip, and a metric error
+        # can never break the poll loop.
+        self._record_beat_metrics()
+
+    def _record_beat_metrics(self) -> None:
+        """Bump the Prometheus heartbeat surface for this instance (OP-1665)."""
+        iid = self.config.instance_id
+        try:
+            metrics.dag_executor_up.labels(instance_id=iid).set(1)
+            metrics.dag_executor_heartbeat_total.labels(instance_id=iid).inc()
+            metrics.dag_executor_last_heartbeat_timestamp_seconds.labels(
+                instance_id=iid,
+            ).set(time.time())
+        except Exception:  # the metric surface must never fault the loop
+            logger.debug(
+                "dag-executor %s heartbeat metric update failed", iid,
+                exc_info=True,
+            )
 
     def _clear(self) -> None:
         try:
@@ -364,6 +384,18 @@ class DagExecutor:
             logger.warning(
                 "dag-executor %s heartbeat clear failed: %s",
                 self.config.instance_id, exc,
+            )
+        # OP-1665: flip the liveness gauge to 0 on graceful stop — independent
+        # of the store clear above so a scrape never shows a stopped executor
+        # as still up.
+        try:
+            metrics.dag_executor_up.labels(
+                instance_id=self.config.instance_id,
+            ).set(0)
+        except Exception:
+            logger.debug(
+                "dag-executor %s heartbeat-down metric update failed",
+                self.config.instance_id, exc_info=True,
             )
 
     def _info(self, status: str) -> dict[str, Any]:
