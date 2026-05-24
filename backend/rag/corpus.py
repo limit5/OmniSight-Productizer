@@ -76,6 +76,7 @@ _DIR_DEFAULTS: list[tuple[str, str]] = [
     ("README.md", "public"),
 ]
 
+# NOTE: This is the R20 keyword (BM25-lite) retriever corpus — NOT the BP.Q pgvector store in backend/agents/rag.py (PgvectorStore); conflating the two has misled two audits.
 # WP.5.5: HD datasheets / sensor specs / errata are project-context
 # corpus inputs, not generic docs. The directory set is intentionally
 # conventional and markdown-only so vision-parse output can be ingested
