@@ -55,7 +55,7 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     "pending":   {"validated", "failed"},
     "validated": {"executing", "mutated", "exhausted"},
     "failed":    {"mutated", "exhausted"},
-    "executing": {"completed", "mutated", "exhausted"},
+    "executing": {"completed", "failed", "mutated", "exhausted"},
     "completed": set(),
     "mutated":   set(),
     "exhausted": set(),

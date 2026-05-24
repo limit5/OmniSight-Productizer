@@ -141,6 +141,31 @@ async def test_illegal_transition_rejected(fresh_db):
 
 
 @pytest.mark.asyncio
+async def test_executing_to_failed_transition(fresh_db):
+    """OP-1653 B1: executor-readiness — a plan in flight may record
+    task failure (executing → failed) alongside completed/mutated/
+    exhausted."""
+    from backend import dag_storage as ds
+    p = await ds.save_plan(_good_dag())
+    p = await ds.set_status(p.id, "validated")
+    p = await ds.set_status(p.id, "executing")
+    p = await ds.set_status(p.id, "failed")
+    assert p.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_executing_to_validated_still_rejected(fresh_db):
+    """OP-1653 B1: adding executing → failed must NOT loosen the rest of
+    the executing edge set — a backward hop stays illegal."""
+    from backend import dag_storage as ds
+    p = await ds.save_plan(_good_dag())
+    p = await ds.set_status(p.id, "validated")
+    p = await ds.set_status(p.id, "executing")
+    with pytest.raises(ValueError, match="illegal transition"):
+        await ds.set_status(p.id, "validated")
+
+
+@pytest.mark.asyncio
 async def test_terminal_status_is_terminal(fresh_db):
     from backend import dag_storage as ds
     p = await ds.save_plan(_good_dag())

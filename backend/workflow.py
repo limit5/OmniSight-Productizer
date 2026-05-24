@@ -76,6 +76,7 @@ class StepRecord:
     completed_at: Optional[float] = None
     output: Any = None
     error: Optional[str] = None
+    dag_task_id: Optional[str] = None
 
     @property
     def is_done(self) -> bool:
@@ -93,7 +94,7 @@ _RUN_COLS = (
 )
 _STEP_COLS = (
     "id, run_id, idempotency_key, started_at, completed_at, "
-    "output_json, error"
+    "output_json, error, dag_task_id"
 )
 
 
@@ -264,6 +265,7 @@ def _row_to_step(r) -> "StepRecord":
         started_at=r["started_at"], completed_at=r["completed_at"],
         output=json.loads(r["output_json"]) if r["output_json"] else None,
         error=r["error"],
+        dag_task_id=r["dag_task_id"],
     )
 
 
@@ -486,7 +488,8 @@ async def _get_step(run_id: str, idempotency_key: str) -> Optional[StepRecord]:
 
 
 async def _record_step(run_id: str, idempotency_key: str,
-                       output: Any, error: str | None) -> StepRecord:
+                       output: Any, error: str | None,
+                       dag_task_id: str | None = None) -> StepRecord:
     """Atomically insert a finished step. UNIQUE constraint catches a
     race with another writer — in which case we read back the existing
     record and return that (last writer wins on raw run, but for
@@ -504,7 +507,7 @@ async def _record_step(run_id: str, idempotency_key: str,
     step = StepRecord(
         id=_uid("step"), run_id=run_id, idempotency_key=idempotency_key,
         started_at=time.time(), completed_at=time.time(),
-        output=output, error=error,
+        output=output, error=error, dag_task_id=dag_task_id,
     )
     try:
         async with get_pool().acquire() as conn:
@@ -512,12 +515,12 @@ async def _record_step(run_id: str, idempotency_key: str,
                 await conn.execute(
                     "INSERT INTO workflow_steps "
                     "(id, run_id, idempotency_key, started_at, "
-                    " completed_at, output_json, error) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                    " completed_at, output_json, error, dag_task_id) "
+                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
                     step.id, step.run_id, step.idempotency_key,
                     step.started_at, step.completed_at,
                     json.dumps(output) if output is not None else None,
-                    error,
+                    error, dag_task_id,
                 )
                 await conn.execute(
                     "UPDATE workflow_runs SET last_step_id = $1 "
@@ -535,7 +538,8 @@ async def _record_step(run_id: str, idempotency_key: str,
         raise
 
 
-def step(run: WorkflowRun, idempotency_key: str):
+def step(run: WorkflowRun, idempotency_key: str,
+         dag_task_id: str | None = None):
     """Decorator: wrap an async callable so it only runs once per
     (run, key). On second call with the same key, returns the cached
     output without invoking the body.
@@ -555,9 +559,11 @@ def step(run: WorkflowRun, idempotency_key: str):
             except Exception as exc:
                 # Record the failure (so we can audit / inspect)
                 await _record_step(run.id, idempotency_key, output=None,
-                                   error=f"{type(exc).__name__}: {exc!s}"[:512])
+                                   error=f"{type(exc).__name__}: {exc!s}"[:512],
+                                   dag_task_id=dag_task_id)
                 raise
-            await _record_step(run.id, idempotency_key, output=result, error=None)
+            await _record_step(run.id, idempotency_key, output=result,
+                               error=None, dag_task_id=dag_task_id)
             return result
         return wrapper
     return decorator
