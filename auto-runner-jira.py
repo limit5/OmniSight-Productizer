@@ -59,6 +59,7 @@ from backend.agents import (
     jira_authority_check,
     gerrit_jira_bridge,
     live_state_check,
+    memory_tool_handler,
     memory_writeback,
     outcomes_consumer,
     outcomes_grader,
@@ -111,6 +112,15 @@ OPS_ONLY_DISABLED = (
 )
 RUNNER_BRANCH_SWEEP_DISABLED = (
     os.environ.get("OMNISIGHT_RUNNER_BRANCH_SWEEP_DISABLED", "0").strip() == "1"
+)
+# OP-1681 (F8) — opt-out for the Memory Tool write-back handler. Default
+# off: the runner injects a handler so a classified lesson is *persisted*
+# to /var/omnisight/memory/<fleet>/ rather than merely id-returned (the
+# memory_writeback memory_tool=None silent-skip branch). Set to "1" to
+# leave the handler intentionally unset (disabled/test fleets); the
+# helper logs an explicit "intentionally unset" line in that case.
+MEMORY_TOOL_DISABLED = (
+    os.environ.get("OMNISIGHT_RUNNER_MEMORY_TOOL_DISABLED", "0").strip() == "1"
 )
 PRE_PICKUP_CAP_GATE_ENV = "OMNISIGHT_PRE_PICKUP_CAP_GATE"
 PRE_PICKUP_CAP_BLOCKED_TAG = "[runner-capability-pre-pickup-blocked]"
@@ -1626,6 +1636,66 @@ def _finalize_successful_push(
         )
 
 
+# OP-1681 (F8) — memoized Memory Tool handler for the write-back inject.
+# Built lazily so module import stays side-effect-free (no /var/omnisight
+# mkdir at import time, and tests can pin OMNISIGHT_MEMORY_TOOL_ROOT before
+# the first call). ``_built`` distinguishes "not yet attempted" from
+# "attempted, resolved to None" so a degraded build memoizes the None too.
+_memory_tool_handler_singleton: "memory_tool_handler.MemoryToolHandler | None" = None
+_memory_tool_handler_built = False
+
+
+def _memory_tool_handler() -> "memory_tool_handler.MemoryToolHandler | None":
+    """Build (once, memoized) the Memory Tool handler injected into F8.
+
+    Inject-by-default so a classified lesson is *persisted* to disk under
+    ``/var/omnisight/memory/<fleet_id>/`` (fleet_id from ``INSTANCE_ID``,
+    default ``"default"``) — not merely id-returned via the
+    ``memory_tool=None`` silent-skip branch in
+    :mod:`backend.agents.memory_writeback` (the OP-1681 root cause).
+
+    Guarantees (OP-1681 ACs):
+
+    * **Guarded** — any build failure (e.g.
+      :class:`~backend.agents.memory_tool_handler.MemoryDirNotWritable`
+      when the fleet root isn't provisioned) is caught and degraded to a
+      logged ``None``. This helper NEVER raises, preserving the
+      write-back's fail-open contract end-to-end.
+    * **Memoized** — built at most once per process; the resolved value
+      (handler OR ``None``) is cached for the runner's lifetime.
+    * **Opt-out** — ``OMNISIGHT_RUNNER_MEMORY_TOOL_DISABLED=1`` short-
+      circuits to ``None`` and logs an explicit "intentionally unset"
+      line, leaving the ``memory_tool=None`` path intact for the
+      disabled/test fleet (the operator-owned DECISION on this ticket).
+    """
+    global _memory_tool_handler_built, _memory_tool_handler_singleton
+    if _memory_tool_handler_built:
+        return _memory_tool_handler_singleton
+    _memory_tool_handler_built = True
+    if MEMORY_TOOL_DISABLED:
+        print(
+            "[runner] memory_tool handler intentionally unset "
+            "(OMNISIGHT_RUNNER_MEMORY_TOOL_DISABLED=1); F8 write-back will "
+            "id-return classified lessons without persisting to disk",
+            file=sys.stderr,
+        )
+        _memory_tool_handler_singleton = None
+        return None
+    try:
+        _memory_tool_handler_singleton = (
+            memory_tool_handler.build_memory_tool_handler(fleet_id=INSTANCE_ID)
+        )
+    except Exception as exc:  # noqa: BLE001 — build MUST be fail-open (AC)
+        print(
+            f"[runner] memory_tool handler build failed "
+            f"({type(exc).__name__}: {exc}); degrading to logged-unset — "
+            f"F8 write-back falls back to id-return without persistence",
+            file=sys.stderr,
+        )
+        _memory_tool_handler_singleton = None
+    return _memory_tool_handler_singleton
+
+
 def _run_memory_writeback(
     client: "jira_dispatch.DispatchClient",
     ticket_key: str,
@@ -1656,7 +1726,9 @@ def _run_memory_writeback(
             area=area,
             runner_class=AGENT_CLASS,
         )
-        result = memory_writeback.MemoryWriteback().write(request)
+        result = memory_writeback.MemoryWriteback(
+            memory_tool=_memory_tool_handler(),
+        ).write(request)
     except Exception as exc:  # noqa: BLE001 — writeback is fail-open per AC #3
         print(
             f"[runner] memory_writeback unexpected error ticket={ticket_key} "
