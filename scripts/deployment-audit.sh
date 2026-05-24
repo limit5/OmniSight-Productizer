@@ -17,6 +17,10 @@
 #   scripts/deployment-audit.sh MANIFEST.tsv    # host-specific manifest file
 #   DEPLOYMENT_AUDIT_USER_SYSTEMD=0 scripts/deployment-audit.sh   # use system bus
 #   DEPLOYMENT_AUDIT_JSONL_LOG=/path/audit.jsonl scripts/deployment-audit.sh
+#   OMNISIGHT_DEPLOYED_TAG=v1.2.0 scripts/deployment-audit.sh     # pin the deployed
+#                      release ref for the alembic-head `auto` comparison (else the
+#                      develop trunk head is used; OMNISIGHT_AUDIT_DEPLOY_REF /
+#                      OMNISIGHT_AUDIT_DEVELOP_REF override the ref directly)
 #
 # Manifest format — tab-separated, `#` comments and blank lines ignored:
 #   <kind>  <name>  <expected>  <ticket>  [note]
@@ -27,7 +31,10 @@
 #                      checks the bound service's last Result + list-timers LAST
 #     container        name = docker name substring, or  substr@http://host:port/healthz
 #     env-var          name = VAR@unit.service   or   VAR@pgrep-pattern
-#     alembic-head     name = expected-revision   or   "auto" (compare vs `alembic heads`)
+#     alembic-head     name = expected-revision   or   "auto" (prod PG applied
+#                      revision vs the DEPLOYED release / develop head computed
+#                      from git — NEVER the local working tree; see
+#                      check_alembic_head / OP-1701)
 #   }
 #   expected ∈ { yes, gated, n-a }
 #     yes   → a red row makes this script exit 1
@@ -188,27 +195,84 @@ check_env_var() {  # name(VAR@unit-or-pgrep) expected ticket
   fi
 }
 
+# ── git-derived alembic head (OP-1701 / finding #21) ──────────────────────────
+# The audit can run from an arbitrary or stale working tree (e.g. a per-ticket
+# feature branch), so the prod-vs-DB comparison must NOT use the local checkout's
+# `alembic heads`. These helpers read the migration tree straight from a git ref
+# (the deployed release tag, or develop) and compute the single leaf revision,
+# tolerating mixed quote styles and the tuple `down_revision` of merge migrations.
+alembic_versions_at_ref() {  # ref -> emits `revision <id>` / `down <id>` tokens
+  local ref="$1" vdir="backend/alembic/versions"
+  have git || return 0
+  git -C "$REPO" rev-parse --verify --quiet "${ref}^{commit}" >/dev/null 2>&1 || return 0
+  git -C "$REPO" grep -hI -E '^(revision|down_revision)[[:space:]]*=' "$ref" -- "$vdir" 2>/dev/null \
+    | tr "'" '"' \
+    | awk '
+        { key=$1; rhs=$0; sub(/^[^=]*=[[:space:]]*/,"",rhs)
+          while (match(rhs, /"[^"]*"/)) {
+            v=substr(rhs, RSTART+1, RLENGTH-2)
+            print (key=="revision" ? "revision " : "down ") v
+            rhs=substr(rhs, RSTART+RLENGTH)
+          } }'
+}
+
 check_alembic_head() {  # name(expected-rev|"auto") expected ticket
   local want="$1" exp="$2" ticket="$3"
   local alembic_cmd="alembic"
   [ -x "$REPO/backend/.venv/bin/alembic" ] && alembic_cmd="$REPO/backend/.venv/bin/alembic"
   [ "$alembic_cmd" = "alembic" ] && [ -x "$HOME/.local/bin/alembic" ] && alembic_cmd="$HOME/.local/bin/alembic"
-  have "$alembic_cmd" || { record "WARN" "alembic-head" "$want" "$exp" "$ticket" "alembic absent — run from the backend venv on prod"; return; }
-  [ -r "$REPO/backend/alembic.ini" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "backend/alembic.ini missing"; return; }
   # Read PROD's live PG head first (the audit shell has no prod DSN, so a bare
   # `alembic current` reads the stale local sqlite and falsely reports drift).
-  # Fall back to local alembic only if the prod PG container is unreachable.
+  # This is the genuine live-artifact read — unchanged. Fall back to local alembic
+  # only if the prod PG container is unreachable.
   local pg_ctr="${OMNISIGHT_PROD_PG_CONTAINER:-omnisight-pg-primary}"
   local cur; cur="$(docker exec "$pg_ctr" psql -U "${OMNISIGHT_PROD_PG_USER:-omnisight}" -d "${OMNISIGHT_PROD_PG_DB:-omnisight}" -tA -c 'SELECT version_num FROM alembic_version' 2>/dev/null | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
-  [ -n "$cur" ] || cur="$( (cd "$REPO/backend" && "$alembic_cmd" current 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
+  [ -n "$cur" ] || cur="$( (cd "$REPO/backend" && have "$alembic_cmd" && "$alembic_cmd" current 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
   [ -n "$cur" ] || { record "RED" "alembic-head" "$want" "$exp" "$ticket" "prod PG ($pg_ctr) unreachable AND local alembic empty"; return; }
-  if [ "$want" = "auto" ]; then
-    local head; head="$( (cd "$REPO/backend" && "$alembic_cmd" heads 2>/dev/null) | grep -oE '^[0-9a-f]{4,}' | head -1 || true)"
-    if [ "$cur" = "$head" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "current=$cur == repo head"
-    else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "current=$cur != repo head=$head — un-applied migration; run \`alembic upgrade head\` on prod"; fi
+
+  # ── explicit expected revision wins ──────────────────────────────────────────
+  if [ "$want" != "auto" ]; then
+    if [ "$cur" = "$want" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "prod current=$cur"
+    else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "prod current=$cur != expected=$want"; fi
+    return
+  fi
+
+  # ── auto: compare prod's applied revision against the DEPLOYED RELEASE head (or
+  #    the develop trunk head) computed straight from git — NEVER the local working
+  #    tree (OP-1701 / finding #21). Comparing prod against an arbitrary checkout
+  #    falsely flagged "run upgrade on prod" whenever prod was simply ahead of that
+  #    stale tree. /readyz is the authoritative image-vs-DB drift gate (a prod
+  #    release tag legitimately lags develop), so this row is informational — only
+  #    an explicitly-pinned deployed release that prod has NOT caught up to is a
+  #    genuine RED.
+  local ref src pinned=no
+  if [ -n "${OMNISIGHT_AUDIT_DEPLOY_REF:-}" ]; then
+    ref="$OMNISIGHT_AUDIT_DEPLOY_REF"; src="deployed ref ($ref)"; pinned=yes
+  elif [ -n "${OMNISIGHT_DEPLOYED_TAG:-}" ]; then
+    ref="$OMNISIGHT_DEPLOYED_TAG";     src="deployed release ($ref)"; pinned=yes
   else
-    if [ "$cur" = "$want" ]; then record "OK"  "alembic-head" "$want" "$exp" "$ticket" "current=$cur"
-    else                          record "RED" "alembic-head" "$want" "$exp" "$ticket" "current=$cur != expected=$want"; fi
+    ref="${OMNISIGHT_AUDIT_DEVELOP_REF:-origin/develop}"; src="develop trunk ($ref)"
+  fi
+  local tree head cur_known=no
+  tree="$(alembic_versions_at_ref "$ref")"
+  head="$(printf '%s\n' "$tree" | awk '$1=="revision"{r[$2]=1} $1=="down"{d[$2]=1} END{n=0; for(x in r) if(!(x in d)){h=x; n++} if(n==1) print h}')"
+  printf '%s\n' "$tree" | awk '$1=="revision"{print $2}' | grep -qxF "$cur" && cur_known=yes
+
+  if [ -z "$head" ]; then
+    record "OK" "alembic-head" "$want" "$exp" "$ticket" "prod current=$cur; could not resolve $src head from git (ref/migrations unavailable) — informational, /readyz gates image-vs-DB drift"
+  elif [ "$cur" = "$head" ]; then
+    record "OK" "alembic-head" "$want" "$exp" "$ticket" "prod current=$cur == $src head"
+  elif [ "$cur_known" = "yes" ]; then
+    # prod's revision is in this ref's history (an ancestor) → prod lags the ref.
+    if [ "$pinned" = "yes" ]; then
+      record "RED" "alembic-head" "$want" "$exp" "$ticket" "prod current=$cur is behind the pinned $src head=$head — running release has un-applied migrations; run \`alembic upgrade head\` on prod"
+    else
+      record "OK" "alembic-head" "$want" "$exp" "$ticket" "prod current=$cur lags $src head=$head (prod runs a release tag behind develop by design) — informational"
+    fi
+  else
+    # cur not in this ref's history → prod is ahead of / divergent from the ref
+    # (the "correctly ahead" case against a stale develop). Never a RED.
+    record "OK" "alembic-head" "$want" "$exp" "$ticket" "prod current=$cur is ahead of / not contained in $src (head=$head) — prod likely on a newer release; /readyz is authoritative"
   fi
 }
 
@@ -265,7 +329,10 @@ builtin_manifest() {
 # kind            name                                                            expected  ticket    note
 systemd-timer     release-milestone-checker.timer                                 yes       OP-762    D1 milestone gate — was unenabled until 2026-05-12
 systemd-timer     auto-promote-develop.timer                                      n-a       OP-877    RETIRED by release-train (ADR-0040 / RT-01) — develop->main promote removed
-systemd-unit      auto-promote-main.service                                       n-a       OP-766    RETIRED by release-train (ADR-0040 / RT-01) — main being retired
+# RETIRED (OP-1701 / finding #30): auto-promote-main.service is permanently dead under
+# ADR-0040 (single-trunk release train — `main` is retired; no develop->main promotion).
+# Probing it as a systemd-unit always emitted a (non-fatal) false RED "unit not installed",
+# so the row is dropped. Was: systemd-unit  auto-promote-main.service  n-a  OP-766
 env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service             n-a       OP-964    auto-promote-develop retired (RT-01) — env-var no longer expected
 systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    REAL gap: control-plane stranded on main@rc1; re-point off main deferred to cutover
 systemd-unit      pipeline-coordinator.service                                    yes       OP-1547   coordinator daemon (ADR-0021) — must be live
@@ -274,7 +341,7 @@ systemd-unit      omnisight-slo-monitor.service                                 
 container         staging@http://localhost:8010/healthz                           yes       OP-927    AUDIT-19 staging stood up 2026-05-22 (project omnisight-staging, repo compose)
 systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
 systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
-alembic-head      auto                                                            n-a       OP-964    informational — reads PROD PG; /readyz authoritatively gates prod image-vs-DB drift (prod runs a release tag, behind develop by design)
+alembic-head      auto                                                            n-a       OP-964    informational — prod PG vs deployed-release/develop head from git, NOT the working tree (OP-1701); /readyz authoritatively gates image-vs-DB drift (prod release tag lags develop by design)
 EOF
 }
 
