@@ -135,7 +135,7 @@ OmniSight 的核心市場定位是**嵌入式 AI camera 開發 multi-agent 平�
 |----------|-------------|
 | Y6 Workspace | HD project = Y6 project 子型，dashboard 加 HD tile |
 | W14 Live Sandbox Preview | schematic / layout viewer + HIL session UI 全部塞進 W14 同一容器 |
-| R20 Phase 0 RAG | datasheet / errata / SoC reference manual 都進 R20 vector store |
+| R20 Phase 0 RAG | datasheet / errata / SoC reference manual 都進 R20 keyword（BM25-lite）retriever；非 vector store（pgvector 路徑見 OP-1679，另案、暫緩） |
 | BS Catalog | reference design + sensor KB spec card 用 BS 同一 catalog 模板 |
 | AS Token Vault | 客戶 schematic 加密用同一 per-tenant Fernet 策略 |
 | BP.B Guild | hd-parser-bot / hd-diff-bot / hd-sensor-swap-bot / hd-fw-sync-bot 進 Guild |
