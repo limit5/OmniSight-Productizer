@@ -30,9 +30,23 @@
 #                          omnisight-productizer project. Set to
 #                          `ghcr.io/<your-org>` for the cutover-window
 #                          fallback.
-#   OMNISIGHT_IMAGE_TAG  — REQUIRED. Image tag to deploy. Set per-release
-#                          (e.g. `v0.5.0`) in the operator shell before
-#                          `docker compose pull`; unset fails closed.
+#   OMNISIGHT_IMAGE_TAG  — REQUIRED (tag path). Image tag to deploy. Set
+#                          per-release (e.g. `v0.5.0`) in the operator shell
+#                          before `docker compose pull`; unset fails closed.
+#
+# OP-1696 (2026-05-25) — per-image DIGEST pin overrides the tag path.
+#   OMNISIGHT_BACKEND_IMAGE_REF  — optional. Full content-addressed ref for
+#                                  the backend image: `<reg>/backend@sha256:…`.
+#   OMNISIGHT_FRONTEND_IMAGE_REF — optional. Full ref for the frontend image:
+#                                  `<reg>/frontend@sha256:…`.
+# When set, each `image:` resolves to that ref and the `${OMNISIGHT_REGISTRY}`
+# + `${OMNISIGHT_IMAGE_TAG}` fallback (incl. their `:?` fail-closed checks) is
+# NOT evaluated — so a digest deploy needs neither. When UNSET (or empty) the
+# tag path below applies unchanged. The backend + frontend are SEPARATE images
+# with DISTINCT digests, so the pair needs TWO refs — a single digest var
+# cannot pin both. `scripts/deploy-prod.sh --backend-digest=… --frontend-digest=…`
+# writes both into `.env`; the tag path clears them so a later `--tag` deploy
+# is not silently pinned to a stale digest.
 #
 # To force a rebuild (e.g. after editing a Dockerfile locally):
 #   docker compose -f docker-compose.prod.yml build
@@ -149,7 +163,10 @@ services:
     # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
     # `:?` fails loudly when OMNISIGHT_REGISTRY is unset rather than
     # silently falling back to ghcr.io. See the file-header comment.
-    image: ${OMNISIGHT_REGISTRY:?registry required}/backend:${OMNISIGHT_IMAGE_TAG:?image tag required}
+    # OP-1696: a per-image digest ref (OMNISIGHT_BACKEND_IMAGE_REF), when set,
+    # pins this image by digest and short-circuits the registry/tag fallback
+    # (so its `:?` checks do not fire); unset/empty → the tag path applies.
+    image: ${OMNISIGHT_BACKEND_IMAGE_REF:-${OMNISIGHT_REGISTRY:?registry required}/backend:${OMNISIGHT_IMAGE_TAG:?image tag required}}
     pull_policy: always
     build:
       context: .
@@ -260,8 +277,10 @@ services:
 
   backend-b:
     # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
-    # Same shape as backend-a; see the file-header comment.
-    image: ${OMNISIGHT_REGISTRY:?registry required}/backend:${OMNISIGHT_IMAGE_TAG:?image tag required}
+    # Same shape as backend-a; see the file-header comment. OP-1696: same
+    # per-image digest override — backend-a and backend-b run the same image,
+    # so both consume OMNISIGHT_BACKEND_IMAGE_REF.
+    image: ${OMNISIGHT_BACKEND_IMAGE_REF:-${OMNISIGHT_REGISTRY:?registry required}/backend:${OMNISIGHT_IMAGE_TAG:?image tag required}}
     pull_policy: always
     build:
       context: .
@@ -413,7 +432,9 @@ services:
   frontend:
     # OP-1515: OMNISIGHT_REGISTRY abstraction (OP-1478 activation T2.1).
     # Same shape as the backend replicas; see the file-header comment.
-    image: ${OMNISIGHT_REGISTRY:?registry required}/frontend:${OMNISIGHT_IMAGE_TAG:?image tag required}
+    # OP-1696: the frontend is a SEPARATE image with its own digest, so it
+    # has its own per-image override (OMNISIGHT_FRONTEND_IMAGE_REF).
+    image: ${OMNISIGHT_FRONTEND_IMAGE_REF:-${OMNISIGHT_REGISTRY:?registry required}/frontend:${OMNISIGHT_IMAGE_TAG:?image tag required}}
     pull_policy: always
     build:
       context: .
