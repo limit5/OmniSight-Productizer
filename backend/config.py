@@ -619,6 +619,26 @@ class Settings(BaseSettings):
     runner_ps_cap: int = 8
     runner_ps_floor: int = 4
 
+    # AS.0.8 single-knob global rollback (OP-1727 lands the field the
+    # design doc reserved for "AS.3.1 PR"). Default True (AS active);
+    # flip OMNISIGHT_AS_ENABLED=false to disable the entire AS roadmap
+    # layer at runtime (Turnstile / honeypot / bot-challenge / OAuth /
+    # token-vault noop → pre-AS-1.0 behavior) WITHOUT touching schema or
+    # any other env knob — password / session / MFA / api-key paths are
+    # unaffected. The ~10 consumers already read this via
+    # ``getattr(settings, "as_enabled", True)``; declaring it here makes
+    # the documented 30-second emergency rollback (flip env + restart)
+    # actually live (it was silently ignored before — pydantic dropped
+    # the unknown prefixed env, so getattr always saw the True default).
+    # See docs/security/as_0_8_single_knob_rollback.md §2.1 for the full
+    # noop matrix and why this is a bool (binary active/disabled, no
+    # partial-AS state). Module-global state audit (per
+    # implement_phase_step.md Step 1, Answer #1): immutable Settings
+    # literal derived once at process boot from env / .env — every
+    # uvicorn worker computes the same value from the same source so
+    # cross-worker consistency is automatic.
+    as_enabled: bool = True
+
     # ─── Declared-only-to-satisfy-extra=forbid fields ────────────────
     # Phase-3-Runtime-v2 SP-3.1 (2026-04-20): these env vars are read
     # elsewhere in the codebase via ``os.environ.get(...)`` directly
