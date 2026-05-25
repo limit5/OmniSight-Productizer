@@ -28,14 +28,28 @@
 #
 # MUST NOT (hard guardrails, per the OP-1720 ticket): REPORT ONLY — never
 # remediate, never mutate compose/deploy behaviour (reads only), never create or
-# materialise stages, never touch release-train semantics. Forward-compat /
-# candidate-bundle preflight is PHASE 2 (the reserved JSONL `check_family`
-# value `candidate_compat`; this phase implements only `parity`).
+# materialise stages, never touch release-train semantics.
+#
+# PHASE 2 (OP-1721) — candidate forward-compat promotion-preflight. Pass
+# `--candidate-bundle bundle.json` to STATICALLY verify a candidate bundle is
+# deployable through the downstream stages BEFORE promotion, emitting
+# `check_family=candidate_compat` rows (the value OP-1720 reserved). Four static
+# checks: (1) bundle completeness (backend+frontend digests present + non-
+# placeholder), (2) env-contract delta (candidate-declared vars with no
+# downstream supplier), (3) migration compatibility (candidate alembic head is
+# descendant-reachable from the deployed head — a STATIC reachability walk reusing
+# scripts/check_migration_compat.py; NO live alembic run against ANY DB), and
+# (4) FE bundle-shape (the bundle's frontend-compat fields vs the V5
+# frontend_compat_check contract). STATIC ONLY — no live migration execution, no
+# release simulation, no live stage probe. A forward-compat break is RED (exit 1).
 #
 # Usage:
 #   scripts/deploy_line_parity.sh                  # built-in stage config, real repo
 #   scripts/deploy_line_parity.sh --live           # + best-effort live annotation
 #   scripts/deploy_line_parity.sh --config FILE --root DIR   # fixture-driven (tests)
+#   scripts/deploy_line_parity.sh --candidate-bundle bundle.json \
+#       --candidate-compose candidate-compose.yml --deployed-head <alembic-rev>
+#                                                  # OP-1721 candidate-compat preflight
 #   DEPLOY_PARITY_JSONL_LOG=/path/parity.jsonl scripts/deploy_line_parity.sh
 #
 # Config (TSV; `#` comments + blank lines ignored) — one row per stage:
@@ -94,6 +108,23 @@ def parse_args():
                     help="dir (under root) holding gate unit files")
     ap.add_argument("--live", action="store_true",
                     help="best-effort live annotation (/readyz, /api/version, systemctl)")
+    # ── OP-1721 phase 2: candidate forward-compat promotion-preflight ──────────
+    ap.add_argument("--candidate-bundle", default=None,
+                    help="candidate bundle.json — run the STATIC forward-compat "
+                         "promotion-preflight (emits check_family=candidate_compat)")
+    ap.add_argument("--candidate-compose", default=None,
+                    help="compose file the candidate declares its env in "
+                         "(env-contract delta source; reuses the OP-1720 extractor)")
+    ap.add_argument("--candidate-env", default=None,
+                    help="env file the candidate declares its env in "
+                         "(env-contract delta source)")
+    ap.add_argument("--deployed-head", default=None,
+                    help="currently-deployed alembic head revision — the base the "
+                         "candidate head must be descendant-reachable from "
+                         "(default $DEPLOY_PARITY_DEPLOYED_HEAD)")
+    ap.add_argument("--alembic-versions", default="backend/alembic/versions",
+                    help="dir (under root) of alembic migration files for the "
+                         "STATIC reachability check (default backend/alembic/versions)")
     return ap.parse_args()
 
 
@@ -277,13 +308,15 @@ class Rows:
         self.rows = []
         self.fatal = 0
 
-    def add(self, stage, dimension, status, direction, detail):
+    def add(self, stage, dimension, status, direction, detail, family="parity"):
+        # family defaults to `parity` (OP-1720); the OP-1721 candidate
+        # forward-compat preflight passes family="candidate_compat".
         self.rows.append({
             "stage": stage,
             "dimension": dimension,
             "status": status,
             "direction": direction,
-            "check_family": "parity",  # phase 2 reserves `candidate_compat`
+            "check_family": family,
             "detail": detail,
         })
         if status == "RED":
@@ -556,6 +589,173 @@ def systemctl_state(unit):
     return "unknown"
 
 
+# ── candidate forward-compat promotion-preflight (OP-1721 / phase 2) ──────────
+# STATIC-ONLY. Given a candidate bundle.json, verify it is deployable through the
+# downstream stages BEFORE promotion. Every check reads committed artefacts only:
+# NO live migration run against ANY DB, NO release simulation, NO live stage
+# probe. Emits check_family=candidate_compat rows; a forward-compat break is RED
+# (=> the gate exits non-zero alongside any parity violation).
+CAND = "candidate"
+CAND_FAM = "candidate_compat"
+_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+
+
+def _digest_state(d):
+    """Classify a bundle image digest → missing | malformed | placeholder | ok."""
+    if not d:
+        return "missing"
+    if not _DIGEST_RE.match(str(d)):
+        return "malformed"
+    if d == ZERO_DIGEST:
+        return "placeholder"  # all-zeros (deep-audit #23) is not deployable
+    return "ok"
+
+
+def stage_supply_keys(stages, root, min_rank=2):
+    """Union of env keys any DOWNSTREAM stage (staging/canary/prod) can supply.
+
+    Reuses the OP-1720 env-contract extractor (load_compose / norm_env +
+    load_env_file). A candidate-declared key absent from this set has no
+    downstream supplier.
+    """
+    keys = set()
+    for sc in stages:
+        if RANK.get(sc["stage"], 0) < min_rank:
+            continue
+        keys |= set(load_env_file(resolve(root, sc["env_file"])).keys())
+        compose = load_compose(resolve(root, sc["compose"]))
+        if compose:
+            for svc in compose["services"].values():
+                keys |= set(svc.get("env", {}).keys())
+    return keys
+
+
+def candidate_declared_keys(root, candidate_compose, candidate_env):
+    """Env keys the candidate declares (its compose `environment:` + .env)."""
+    keys = set()
+    if candidate_env:
+        keys |= set(load_env_file(resolve(root, candidate_env)).keys())
+    if candidate_compose:
+        compose = load_compose(resolve(root, candidate_compose))
+        if compose:
+            for svc in compose["services"].values():
+                keys |= set(svc.get("env", {}).keys())
+    return keys
+
+
+def evaluate_candidate_compat(rows, *, repo, root, bundle_path, stages,
+                              candidate_compose, candidate_env,
+                              deployed_head, versions_dir):
+    fam = CAND_FAM
+    rel = os.path.relpath(bundle_path, root) if bundle_path else "?"
+    bundle = load_lock(bundle_path)  # JSON loader (reused; reads, never writes)
+    if bundle is None:
+        rows.add(CAND, "bundle-completeness", "RED", "bundle must be readable JSON",
+                 f"candidate bundle {rel} missing or not valid JSON", family=fam)
+        return
+
+    # 1. bundle completeness — backend + frontend digests present + non-placeholder.
+    images = bundle.get("images") or {}
+    states = {n: _digest_state((images.get(n) or {}).get("digest"))
+              for n in ("backend", "frontend")}
+    bad = {n: s for n, s in states.items() if s != "ok"}
+    direction1 = "backend+frontend digests present + non-placeholder (deep-audit #23)"
+    if bad:
+        detail = "; ".join(f"{n} digest {s}" for n, s in sorted(bad.items()))
+        rows.add(CAND, "bundle-completeness", "RED", direction1,
+                 f"{detail} — an all-zeros/missing digest is not deployable", family=fam)
+    else:
+        rows.add(CAND, "bundle-completeness", "OK", direction1,
+                 "backend+frontend image digests present and non-placeholder", family=fam)
+
+    # 2. env-contract delta — candidate-declared keys with NO downstream supplier.
+    declared = candidate_declared_keys(root, candidate_compose, candidate_env)
+    direction2 = "every candidate-declared var must have a downstream supplier"
+    if not declared:
+        rows.add(CAND, "env-contract-delta", "INFO", direction2,
+                 "no candidate env source (--candidate-compose/--candidate-env) given — delta n/a",
+                 family=fam)
+    else:
+        supply = stage_supply_keys(stages, root)
+        orphan = sorted(declared - supply)
+        if orphan:
+            rows.add(CAND, "env-contract-delta", "RED", direction2,
+                     "declared by candidate, no matching stage key: " + ", ".join(orphan),
+                     family=fam)
+        else:
+            rows.add(CAND, "env-contract-delta", "OK", direction2,
+                     f"all {len(declared)} candidate-declared env keys are suppliable downstream",
+                     family=fam)
+
+    # 3. migration compatibility — candidate alembic head descendant-reachable from
+    #    the deployed head. STATIC reachability walk: reuse the migration-compat
+    #    checker's spec index + ancestry walk. NO live alembic run against ANY DB.
+    contracts = bundle.get("contracts") or {}
+    cand_head = contracts.get("db_migration_head")
+    direction3 = "candidate head descendant-reachable from deployed head (static)"
+    if not cand_head or cand_head in ("unknown", ""):
+        rows.add(CAND, "migration-compat", "RED", direction3,
+                 "candidate bundle declares no usable contracts.db_migration_head", family=fam)
+    elif not deployed_head:
+        rows.add(CAND, "migration-compat", "WARN", direction3,
+                 f"candidate head={cand_head} but no --deployed-head/$DEPLOY_PARITY_DEPLOYED_HEAD "
+                 "given — static reachability not checked", family=fam)
+    else:
+        try:
+            sys.path.insert(0, os.path.join(repo, "scripts"))
+            import check_migration_compat as mc  # static reuse: spec index + ancestry
+            from pathlib import Path as _Path
+            specs = mc._spec_index(_Path(versions_dir))
+            vrel = os.path.relpath(versions_dir, root)
+            if cand_head not in specs:
+                rows.add(CAND, "migration-compat", "RED", direction3,
+                         f"candidate head {cand_head} not found under {vrel} — "
+                         "cannot prove a forward migration path", family=fam)
+            elif deployed_head not in specs:
+                rows.add(CAND, "migration-compat", "WARN", direction3,
+                         f"deployed head {deployed_head} not found under {vrel} — "
+                         "cannot statically prove reachability", family=fam)
+            else:
+                reachable = mc._ancestry(cand_head, specs)
+                if deployed_head in reachable:
+                    rows.add(CAND, "migration-compat", "OK", direction3,
+                             f"deployed head {deployed_head} is an ancestor of candidate head "
+                             f"{cand_head} (forward-only migration path intact)", family=fam)
+                else:
+                    rows.add(CAND, "migration-compat", "RED", direction3,
+                             f"candidate head {cand_head} is NOT descendant-reachable from deployed "
+                             f"head {deployed_head} — promoting would diverge the migration line",
+                             family=fam)
+        except Exception as exc:  # pragma: no cover - defensive (never a live run)
+            rows.add(CAND, "migration-compat", "WARN", direction3,
+                     f"static reachability check unavailable: {exc}", family=fam)
+
+    # 4. FE bundle-shape — the candidate's frontend-compat fields vs the V5
+    #    frontend_compat_check contract (static shape check, NOT runtime traffic):
+    #    the API version the FE was built against must be in the backend's
+    #    api_supported set, else a V5 /readyz frontend_compat_check would FAIL.
+    direction4 = "frontend_built_against_api in api_supported (V5 frontend_compat_check)"
+    fe_api = contracts.get("frontend_built_against_api")
+    supported = contracts.get("api_supported")
+    missing_fields = [f for f in ("frontend_built_against_api", "api_supported", "api_required")
+                      if contracts.get(f) in (None, "")]
+    if missing_fields:
+        rows.add(CAND, "fe-bundle-shape", "RED", direction4,
+                 "candidate bundle missing frontend-compat contract field(s): "
+                 + ", ".join(missing_fields), family=fam)
+    elif not isinstance(supported, list):
+        rows.add(CAND, "fe-bundle-shape", "RED", direction4,
+                 f"contracts.api_supported must be a list (got {type(supported).__name__})",
+                 family=fam)
+    elif fe_api not in supported:
+        rows.add(CAND, "fe-bundle-shape", "RED", direction4,
+                 f"frontend_built_against_api={fe_api} not in api_supported={supported} — "
+                 "the V5 frontend_compat_check would FAIL post-deploy", family=fam)
+    else:
+        rows.add(CAND, "fe-bundle-shape", "OK", direction4,
+                 f"frontend_built_against_api={fe_api} in api_supported={supported}", family=fam)
+
+
 # ── report ────────────────────────────────────────────────────────────────────
 LIVE = False
 
@@ -607,7 +807,9 @@ def main():
     stages = read_config(args)
     configured = {s["stage"] for s in stages}
 
-    print("deploy-line-parity (OP-1720 / phase-1 declarative parity) — "
+    banner = "deploy-line-parity (OP-1720 declarative parity"
+    banner += " + OP-1721 candidate forward-compat preflight)" if args.candidate_bundle else ")"
+    print(f"{banner} — "
           f"host={socket.gethostname()} root={root} "
           f"mode={'static+live' if LIVE else 'static'} "
           f"date={datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}")
@@ -626,23 +828,43 @@ def main():
     rows.add("testing-env", "stage-presence", "INFO", "n/a",
              "testing-env=informational only (#20 — CI gates only, no distinct integration-test environment)")
 
+    # ── OP-1721 phase 2: candidate forward-compat promotion-preflight ──────────
+    if args.candidate_bundle:
+        deployed_head = args.deployed_head or os.environ.get("DEPLOY_PARITY_DEPLOYED_HEAD")
+        evaluate_candidate_compat(
+            rows,
+            repo=args.repo,
+            root=root,
+            bundle_path=resolve(root, args.candidate_bundle),
+            stages=stages,
+            candidate_compose=args.candidate_compose,
+            candidate_env=args.candidate_env,
+            deployed_head=deployed_head,
+            versions_dir=resolve(root, args.alembic_versions),
+        )
+
     render_table(rows.rows)
 
     counts = {"OK": 0, "RED": 0, "WARN": 0, "INFO": 0}
     for r in rows.rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
+    fam_note = ("check_family=parity + candidate_compat (OP-1721 phase-2 preflight)"
+                if args.candidate_bundle
+                else "check_family=parity; candidate_compat reserved for phase 2")
     print()
     print(f"summary: {counts['OK']} green · {counts['RED']} red · "
           f"{counts['WARN']} warn · {counts['INFO']} info "
-          f"(check_family=parity; candidate_compat reserved for phase 2)")
+          f"({fam_note})")
 
+    break_kind = ("wrong-direction parity / forward-compat violation(s)"
+                  if args.candidate_bundle else "wrong-direction parity violation(s)")
     if rows.fatal > 0:
         write_jsonl("FAIL", counts, rows.rows)
-        print(f"RESULT: FAIL — {rows.fatal} wrong-direction parity violation(s). "
-              "Fix the cross-stage drift before promotion (REPORT-ONLY: this tool does not remediate).")
+        print(f"RESULT: FAIL — {rows.fatal} {break_kind}. "
+              "Fix the drift before promotion (REPORT-ONLY: this tool does not remediate).")
         sys.exit(1)
     write_jsonl("PASS", counts, rows.rows)
-    print("RESULT: PASS — no wrong-direction parity violations (warn/info rows are advisory).")
+    print(f"RESULT: PASS — no {break_kind} (warn/info rows are advisory).")
     sys.exit(0)
 
 

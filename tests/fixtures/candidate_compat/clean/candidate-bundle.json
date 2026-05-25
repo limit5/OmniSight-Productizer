@@ -1,0 +1,19 @@
+{
+  "bundle_id": "v0.6.0-rc1+20260525.sha7a3b4c",
+  "git_ref": "refs/tags/v0.6.0-rc1",
+  "git_sha": "7a3b4c0000000000000000000000000000000000",
+  "build_time": "2026-05-25T10:00:00Z",
+  "images": {
+    "backend":  {"digest": "sha256:d3dd073187890a7d10e324912547d0408b396aeb9457a3d379622ed84ed3bd9d"},
+    "frontend": {"digest": "sha256:75bbaf9117c64348b067496bfc0eb4bbd2097c5e00e27e79d5ef549bae8a67e5"},
+    "bridge":   {"digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}
+  },
+  "contracts": {
+    "api_required": "v1",
+    "api_supported": ["v1", "v2"],
+    "openapi_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "db_migration_head": "0002child",
+    "frontend_built_against_api": "v1"
+  },
+  "signatures": []
+}

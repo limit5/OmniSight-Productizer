@@ -1,0 +1,19 @@
+{
+  "bundle_id": "develop-0000000000000000",
+  "git_ref": "refs/heads/feature/divergent",
+  "git_sha": "9999999999999999999999999999999999999999",
+  "build_time": "2026-05-25T10:00:00Z",
+  "images": {
+    "backend":  {"digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000"},
+    "frontend": {"digest": "sha256:75bbaf9117c64348b067496bfc0eb4bbd2097c5e00e27e79d5ef549bae8a67e5"},
+    "bridge":   {"digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"}
+  },
+  "contracts": {
+    "api_required": "v1",
+    "api_supported": ["v1", "v2"],
+    "openapi_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "db_migration_head": "0009divergent",
+    "frontend_built_against_api": "v3"
+  },
+  "signatures": []
+}

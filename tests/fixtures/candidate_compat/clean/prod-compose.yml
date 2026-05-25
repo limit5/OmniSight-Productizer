@@ -1,0 +1,20 @@
+# ALIGNED prod stage — GitLab CR, digest-pinned backend+frontend pair, strict
+# auth, PG DSN, overlay enforced. Direction-correct for the strictest rank.
+services:
+  backend-a:
+    image: sora.services:49160/omnisight/omnisight-productizer/backend@sha256:d3dd073187890a7d10e324912547d0408b396aeb9457a3d379622ed84ed3bd9d
+    environment:
+      - OMNISIGHT_ENV=production
+      - OMNISIGHT_DEBUG=false
+      - OMNISIGHT_AUTH_MODE=strict
+      - OMNISIGHT_REQUIRE_DEPLOY_OVERLAY=1
+      - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://omnisight@pg-primary:5432/omnisight
+    secrets:
+      - prod_token
+  frontend:
+    image: sora.services:49160/omnisight/omnisight-productizer/frontend@sha256:75bbaf9117c64348b067496bfc0eb4bbd2097c5e00e27e79d5ef549bae8a67e5
+    environment:
+      - NODE_ENV=production
+secrets:
+  prod_token:
+    file: /run/secrets/prod_token

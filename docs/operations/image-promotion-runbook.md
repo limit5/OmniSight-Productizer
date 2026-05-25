@@ -51,10 +51,53 @@ DEPLOY_PARITY_JSONL_LOG=audit/deploy_line_parity.jsonl \
 A non-zero exit means the line is internally inconsistent — **stop and fix the
 drift before promoting** (the audit is REPORT-ONLY; it never remediates). This
 is an on-demand + promotion-preflight invocation only; **no timer is installed**
-for it in this phase. (Candidate forward-compat preflight — migration/env/bundle
-deployability through downstream stages — is a separate phase-2 workstream that
-will fill the reserved `candidate_compat` JSONL `check_family`; this phase
-implements only `parity`.)
+for it in this phase.
+
+## Promotion preflight — candidate forward-compat (OP-1721)
+
+The cross-stage parity audit above answers *"is the deployed line internally
+consistent?"*. Phase 2 answers the complementary promote-time question: *"is
+**this candidate bundle** deployable through the downstream stages?"* — run it
+before promoting a freshly-built `bundle.json`. It is **STATIC ONLY**: it reads
+the candidate bundle, the downstream stage compose/env, and the
+`backend/alembic/versions` tree, and runs **no live migration**, **no release
+simulation**, and **no live stage probe**. Four checks, emitted as
+`check_family=candidate_compat` rows:
+
+1. **bundle completeness** — backend + frontend image digests present and
+   non-placeholder (an all-zeros digest is not deployable; deep-audit #23).
+2. **env-contract delta** — any env var the candidate declares (its compose /
+   `.env`) that **no** downstream stage (staging/canary/prod) can supply is
+   flagged `declared by candidate, no matching stage key` (reuses the OP-1720
+   env-contract extractor).
+3. **migration compatibility** — the candidate's `contracts.db_migration_head`
+   must be **descendant-reachable from the deployed head** (a static
+   reachability walk reusing `scripts/check_migration_compat.py`; **never** a
+   live `alembic upgrade/downgrade` against any DB).
+4. **FE bundle-shape** — the candidate's `contracts.frontend_built_against_api`
+   must be in its `contracts.api_supported` set, else the V5
+   `frontend_compat_check` (see [`release-image-pipeline.md`](release-image-pipeline.md)
+   §"Tie-in to V5 `frontend_compat_check`") would FAIL post-deploy.
+
+```bash
+# Static forward-compat preflight for a candidate bundle (exit non-zero on any
+# forward-compat break). --deployed-head is the alembic head prod is currently
+# on (the base the candidate must build forward from):
+scripts/deployment-audit.sh --cross-stage-parity \
+  --candidate-bundle bundle.json \
+  --candidate-compose docker-compose.prod.yml \
+  --deployed-head "$(OMNISIGHT_DEPLOYED_TAG=v0.5.0 \
+      git grep -hE '^revision' v0.5.0 -- backend/alembic/versions | …)"
+
+# Persist a JSONL row (candidate_compat rows land alongside the parity rows):
+DEPLOY_PARITY_JSONL_LOG=audit/deploy_line_parity.jsonl \
+  scripts/deployment-audit.sh --cross-stage-parity --candidate-bundle bundle.json
+```
+
+A non-zero exit means the candidate would break forward through the line —
+**do not promote** until the flagged digest/env/migration/FE-shape issue is
+resolved at build time. Like the parity audit this gate is REPORT-ONLY: it never
+touches the release-train, registry, tags, or promotion flow.
 
 ## Dry Run
 

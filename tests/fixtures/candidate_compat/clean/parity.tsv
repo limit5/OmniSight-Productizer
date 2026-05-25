@@ -1,0 +1,6 @@
+# OP-1721 CLEAN candidate-compat fixture — the downstream stages are the OP-1720
+# parity-clean prod+dev artefacts, and the candidate (candidate-bundle.json) is
+# forward-compat in all four static dimensions, so the preflight must PASS
+# (exit 0). Columns: stage  compose  env_file  lock  gate_units  live_url
+prod	prod-compose.yml	-	prod.lock.json	-	-
+dev	dev-compose.yml	-	-	-	-

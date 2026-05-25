@@ -1,0 +1,11 @@
+# OP-1721 FLAGGED candidate-compat fixture — the downstream prod stage is the
+# OP-1720 parity-clean artefact (so the FAIL is owned by the candidate, not by a
+# cross-stage parity drift), while the candidate (candidate-bundle.json +
+# candidate-compose.yml) breaks ALL FOUR static forward-compat checks:
+#   * bundle completeness — placeholder (all-zeros) backend digest (deep-audit #23)
+#   * env-contract delta   — declares OMNISIGHT_EXPERIMENTAL_FLAG, no downstream supplier
+#   * migration-compat     — head 0009divergent not reachable from deployed 0001base
+#   * FE bundle-shape       — frontend_built_against_api=v3 not in api_supported
+# so the preflight must FAIL (exit 1).
+# Columns: stage  compose  env_file  lock  gate_units  live_url
+prod	prod-compose.yml	-	prod.lock.json	-	-

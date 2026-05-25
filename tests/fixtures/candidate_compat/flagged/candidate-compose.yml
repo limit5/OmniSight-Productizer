@@ -1,0 +1,9 @@
+# FLAGGED candidate compose — declares OMNISIGHT_EXPERIMENTAL_FLAG, a var that no
+# downstream stage (the parity-clean prod-compose.yml) supplies, so the
+# env-contract delta flags "declared by candidate, no matching stage key".
+services:
+  backend-a:
+    image: sora.services:49160/omnisight/omnisight-productizer/backend@sha256:d3dd073187890a7d10e324912547d0408b396aeb9457a3d379622ed84ed3bd9d
+    environment:
+      - OMNISIGHT_ENV=production
+      - OMNISIGHT_EXPERIMENTAL_FLAG=on
