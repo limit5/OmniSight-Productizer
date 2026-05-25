@@ -5,10 +5,11 @@ The four prior L10 items each pin one precondition:
     #1 `.github/workflows/docker-publish.yml`  → tag push publishes
        `omnisight-{backend,frontend}` images to `ghcr.io` so they
        exist to be pulled.
-    #2 `docker-compose.prod.yml` image-first   → both services
-       declare `image: ghcr.io/...` + `pull_policy: missing` + keep
-       `build:` as fallback, so `docker compose up` pulls first and
-       only rebuilds when pull 404s.
+    #2 `docker-compose.prod.yml` registry pull → app services declare
+       `image: ${OMNISIGHT_REGISTRY...}/...` + `pull_policy: always`
+       (OP-1722 release-train contract; was `ghcr.io/...` + `missing`
+       pre-release-train) + keep `build:` as a local fallback, so
+       `docker compose up` pulls the pinned ref over the network.
     #3 Multi-arch build (amd64 + arm64)        → operators on
        Raspberry Pi / Apple-silicon CI resolve the same tag to an
        arm64 layer, not a forced rebuild.
@@ -129,8 +130,15 @@ def test_combined_image_budgets_fit_the_30s_envelope() -> None:
 
 # ---------------------------------------------------------------------------
 # Precondition: docker-compose.prod.yml actually uses the pull path.
-# Without `image:` + `pull_policy: missing`, compose skips the network and
-# goes straight to local build — the 30 s promise becomes unreachable.
+# Without an `image:` ref + a network-pull policy, compose skips the network
+# and goes straight to local build — the 30 s promise becomes unreachable.
+#
+# OP-1722: modernized to the release-train contract. The services are now the
+# G2 HA topology (`backend-a` + `backend-b` + `frontend`), the `image:` ref
+# resolves via `${OMNISIGHT_REGISTRY}` (OP-1515 / ADR-0042, not a hardcoded
+# `ghcr.io/...`), and `pull_policy` is `always` (RT-05b deploy-by-digest re-
+# pulls the pinned ref) rather than `missing`. The 30 s pull-budget arithmetic
+# above is unaffected — it bounds transferred bytes, not the pull policy.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
@@ -141,22 +149,23 @@ def compose_yaml() -> dict:
 
 def test_pull_path_reachable_via_compose_image_first(compose_yaml: dict) -> None:
     services = compose_yaml.get("services", {})
-    for svc_name in ("backend", "frontend"):
+    for svc_name in ("backend-a", "backend-b", "frontend"):
         svc = services.get(svc_name)
         assert svc is not None, f"compose missing required service: {svc_name}"
         image = svc.get("image", "")
-        assert image.startswith("ghcr.io/"), (
-            f"{svc_name} must declare `image: ghcr.io/...` — without it "
-            f"compose never pulls and the 30 s promise is unreachable "
-            f"(got: {image!r})"
+        assert "${OMNISIGHT_REGISTRY" in image and "ghcr.io" not in image, (
+            f"{svc_name} must declare `image: ${{OMNISIGHT_REGISTRY...}}/...` — "
+            f"without a registry-resolved ref compose never pulls and the 30 s "
+            f"promise is unreachable (got: {image!r})"
         )
-        # `pull_policy: missing` is the Compose default, but pinning it
-        # prevents a "let's always pull latest" PR from quietly breaking
-        # the 30 s promise (every run would re-pull) or a "let's always
-        # rebuild for reproducibility" PR from killing it entirely.
-        assert svc.get("pull_policy") == "missing", (
-            f"{svc_name} must set pull_policy=missing — drift to "
-            f"`always`/`build` defeats the 30 s first-deploy promise"
+        # `pull_policy: always` re-pulls the release-train-pinned ref on every
+        # `up` (RT-05b deploy-by-digest / ADR-0040 §5 digest promotion).
+        # Pinning it prevents a "let's only pull when missing" PR from serving
+        # a stale same-tag cache, or a "let's always rebuild for
+        # reproducibility" PR from killing the pull path entirely.
+        assert svc.get("pull_policy") == "always", (
+            f"{svc_name} must set pull_policy=always — drift to "
+            f"`missing`/`build` defeats deploy-by-digest of the pinned ref"
         )
 
 
