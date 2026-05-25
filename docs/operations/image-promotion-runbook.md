@@ -21,6 +21,41 @@ audit row.
 - The operator has approval references ready, for example
   `OP-1234,OP-5678`.
 
+## Promotion preflight — cross-stage parity (OP-1720)
+
+Before promoting between stages, run the **declarative cross-stage parity
+audit** as a preflight gate. It is the standing, re-runnable successor to the
+2026-05-25 deploy-line deep audit (OP-1709): it reads the committed deploy
+artefacts (compose / `.env` / env-lock / systemd unit files) **statically** and
+flags wrong-direction drift across `dev → staging → canary → prod` — e.g. a prod
+stage left on a mutable `latest` tag, a stage defaulting to the decommissioned
+GHCR registry (ADR-0042), a backend/frontend pair pinned inconsistently (RT-21),
+`AUTH_MODE` looser than the stage allows, or a non-PostgreSQL DSN where one is
+required. Direction matters: prod/canary are strictest, dev loosest, so a
+right-direction difference (dev `AUTH_MODE=open`) is OK while the same value at
+prod is a violation.
+
+```bash
+# Static preflight (exit non-zero on any wrong-direction parity violation):
+scripts/deployment-audit.sh --cross-stage-parity
+
+# Best-effort live annotation from /readyz + /api/version + systemctl
+# (unreachable targets are annotated live=unknown — never a hard failure):
+scripts/deployment-audit.sh --cross-stage-parity --live
+
+# Persist a JSONL row (mirrors the deployment-audit sink convention):
+DEPLOY_PARITY_JSONL_LOG=audit/deploy_line_parity.jsonl \
+  scripts/deployment-audit.sh --cross-stage-parity
+```
+
+A non-zero exit means the line is internally inconsistent — **stop and fix the
+drift before promoting** (the audit is REPORT-ONLY; it never remediates). This
+is an on-demand + promotion-preflight invocation only; **no timer is installed**
+for it in this phase. (Candidate forward-compat preflight — migration/env/bundle
+deployability through downstream stages — is a separate phase-2 workstream that
+will fill the reserved `candidate_compat` JSONL `check_family`; this phase
+implements only `parity`.)
+
 ## Dry Run
 
 ```bash

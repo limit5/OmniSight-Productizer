@@ -1,0 +1,6 @@
+# OP-1720 DRIFTED parity fixture — reproduces known deep-audit (OP-1709)
+# findings as wrong-direction violations, so the audit must FAIL (exit 1):
+#   * prod backend on a MUTABLE `:latest` tag      → deep-audit #13 (latest-tag)
+#   * prod backend defaults to ghcr.io             → ADR-0042 (GHCR decommission)
+# Columns: stage  compose  env_file  lock  gate_units  live_url
+prod	prod-compose.yml	-	-	-	-

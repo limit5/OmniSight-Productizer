@@ -1,0 +1,5 @@
+# OP-1720 ALIGNED parity fixture — every dimension is direction-correct, so the
+# audit must PASS (exit 0). Paths are resolved relative to this fixture dir
+# (passed as --root). Columns: stage  compose  env_file  lock  gate_units  live_url
+prod	prod-compose.yml	-	prod.lock.json	-	-
+dev	dev-compose.yml	-	-	-	-

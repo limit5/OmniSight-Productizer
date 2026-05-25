@@ -1,0 +1,20 @@
+{
+  "$schema_version": "1",
+  "env": "prod",
+  "bundle_id": "v0.6.0-abc1234def56",
+  "last_promoted_at": "2026-05-25T10:00:00Z",
+  "promoted_from": "canary",
+  "attestation_ref": "sigstore://rekor.local/api/v1/log/entries/aligned",
+  "images": {
+    "backend": {
+      "repository": "sora.services:49160/omnisight/omnisight-productizer/backend",
+      "digest": "sha256:d3dd073187890a7d10e324912547d0408b396aeb9457a3d379622ed84ed3bd9d",
+      "env_var": "OMNISIGHT_BACKEND_DIGEST"
+    },
+    "frontend": {
+      "repository": "sora.services:49160/omnisight/omnisight-productizer/frontend",
+      "digest": "sha256:75bbaf9117c64348b067496bfc0eb4bbd2097c5e00e27e79d5ef549bae8a67e5",
+      "env_var": "OMNISIGHT_FRONTEND_DIGEST"
+    }
+  }
+}

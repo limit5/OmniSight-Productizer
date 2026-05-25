@@ -1,0 +1,11 @@
+# ALIGNED dev stage — loosest rank. A mutable tag + AUTH_MODE=open + DEBUG=true
+# are RIGHT-DIRECTION differences for dev and must NOT be flagged.
+services:
+  backend-a:
+    image: sora.services:49160/omnisight/omnisight-productizer/backend:latest
+    environment:
+      - OMNISIGHT_ENV=dev
+      - OMNISIGHT_DEBUG=true
+      - OMNISIGHT_AUTH_MODE=open
+      - OMNISIGHT_REQUIRE_DEPLOY_OVERLAY=0
+      - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://omnisight_dev@postgres:5432/omnisight_dev

@@ -1,0 +1,18 @@
+# DRIFTED prod stage — wrong-direction at the strictest rank:
+#   * ghcr.io registry default (ADR-0042 decommissioned GHCR)
+#   * `:latest` mutable tag on a prod backend (deep-audit #13)
+# Everything else is left direction-correct so the test asserts on the two
+# intended findings, not incidental noise.
+services:
+  backend-a:
+    image: ghcr.io/your-org/omnisight-backend:latest
+    environment:
+      - OMNISIGHT_ENV=production
+      - OMNISIGHT_DEBUG=false
+      - OMNISIGHT_AUTH_MODE=strict
+      - OMNISIGHT_REQUIRE_DEPLOY_OVERLAY=1
+      - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://omnisight@pg-primary:5432/omnisight
+  frontend:
+    image: ghcr.io/your-org/omnisight-frontend:latest
+    environment:
+      - NODE_ENV=production

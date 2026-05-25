@@ -345,6 +345,20 @@ alembic-head      auto                                                          
 EOF
 }
 
+# ── cross-stage parity mode (OP-1720) ─────────────────────────────────────────
+# `--cross-stage-parity` is the standing, re-runnable declarative cross-stage
+# parity audit (the successor to the OP-1709 deep audit). It is a separate
+# check family from the shipped-vs-deployed manifest above, so it shells out to
+# the sibling engine scripts/deploy_line_parity.sh (single entrypoint here;
+# remaining flags such as --live are passed straight through). See that script's
+# header for the dimensions + direction-aware verdicts + JSONL/exit semantics.
+if [ "${1:-}" = "--cross-stage-parity" ]; then
+  shift
+  parity="$REPO/scripts/deploy_line_parity.sh"
+  [ -x "$parity" ] || err "cross-stage parity engine not found/executable: $parity"
+  exec "$parity" "$@"
+fi
+
 # ── main ──────────────────────────────────────────────────────────────────────
 main() {
   local manifest_src
