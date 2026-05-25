@@ -16,7 +16,7 @@ GA_DOC = PROJECT_ROOT / "docs" / "ops" / "ks_phase3_byog_proxy_ga.md"
 README = PROJECT_ROOT / "README.md"
 PROXY_DOCKERFILE = PROJECT_ROOT / "Dockerfile.omnisight-proxy"
 CI_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "ci.yml"
-PUBLISH_WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "docker-publish.yml"
+GITLAB_CI = PROJECT_ROOT / ".gitlab-ci.yml"  # A4/OP-1719: proxy publish re-homed
 PROXY_SERVER_TEST = PROJECT_ROOT / "omnisight-proxy" / "internal" / "server" / "server_test.go"
 PROXY_AUTH_TEST = PROJECT_ROOT / "omnisight-proxy" / "internal" / "auth" / "auth_test.go"
 SAAS_CLIENT = PROJECT_ROOT / "backend" / "byog_proxy_client.py"
@@ -55,7 +55,7 @@ def test_phase3_ga_evidence_doc_exists_and_defines_scope() -> None:
 def test_ga_doc_pins_proxy_image_size_and_publish_evidence() -> None:
     doc = _read(GA_DOC)
     dockerfile = _read(PROXY_DOCKERFILE)
-    publish = _read(PUBLISH_WORKFLOW)
+    publish = _read(GITLAB_CI)
 
     for phrase in [
         "Dockerfile.omnisight-proxy",
@@ -67,8 +67,9 @@ def test_ga_doc_pins_proxy_image_size_and_publish_evidence() -> None:
     assert "CGO_ENABLED=0" in dockerfile
     assert 'go build -trimpath -ldflags "-s -w -buildid="' in dockerfile
     assert "USER nonroot:nonroot" in dockerfile
-    assert "omnisight-proxy" in publish
+    assert "publish-proxy-ghcr" in publish
     assert "Dockerfile.omnisight-proxy" in publish
+    assert "ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}/omnisight-proxy" in publish
 
 
 def test_ga_doc_pins_latency_budget_and_ci_proxy_tests() -> None:

@@ -2,9 +2,11 @@
 
 The four prior L10 items each pin one precondition:
 
-    #1 `.github/workflows/docker-publish.yml`  → tag push publishes
-       `omnisight-{backend,frontend}` images to `ghcr.io` so they
-       exist to be pulled.
+    #1 `.gitlab-ci.yml` candidate build (+ `publish-proxy-ghcr`) →
+       `docker buildx build --push` publishes the backend/frontend
+       images to the GitLab CR (and the customer proxy to `ghcr.io`)
+       so they exist to be pulled. (The GHCR Actions `docker-publish.yml`
+       was retired by A4/OP-1719 per ADR-0042.)
     #2 `docker-compose.prod.yml` registry pull → app services declare
        `image: ${OMNISIGHT_REGISTRY...}/...` + `pull_policy: always`
        (OP-1722 release-train contract; was `ghcr.io/...` + `missing`
@@ -51,7 +53,7 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_PATH = REPO_ROOT / "docker-compose.prod.yml"
-WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "docker-publish.yml"
+GITLAB_CI_PATH = REPO_ROOT / ".gitlab-ci.yml"  # A4/OP-1719: proxy publish re-homed
 QUICK_START_PATH = REPO_ROOT / "scripts" / "quick-start.sh"
 
 
@@ -213,30 +215,19 @@ def test_quickstart_does_not_force_build_on_compose_up() -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(scope="module")
-def workflow_yaml() -> dict:
-    assert WORKFLOW_PATH.exists(), f"missing: {WORKFLOW_PATH}"
-    return yaml.safe_load(WORKFLOW_PATH.read_text())
+def gitlab_ci_text() -> str:
+    assert GITLAB_CI_PATH.exists(), f"missing: {GITLAB_CI_PATH}"
+    return GITLAB_CI_PATH.read_text()
 
 
-def test_workflow_actually_pushes_so_pull_is_possible(workflow_yaml: dict) -> None:
-    # Find a `docker/build-push-action` step anywhere in the workflow
-    # and assert `push: true`. A regression flipping `push: false` (for
-    # "let's test the workflow without publishing") would let CI stay
-    # green while silently breaking the 30 s promise in prod.
-    pushes_found = 0
-    for job_def in workflow_yaml.get("jobs", {}).values():
-        for step in job_def.get("steps", []) or []:
-            uses = step.get("uses", "") if isinstance(step, dict) else ""
-            if uses.startswith("docker/build-push-action"):
-                with_block = step.get("with", {}) or {}
-                push_flag = with_block.get("push")
-                # YAML booleans come through as Python True/False; a
-                # stringified "true" would be equally valid so accept both.
-                if push_flag is True or str(push_flag).lower() == "true":
-                    pushes_found += 1
-    assert pushes_found >= 1, (
-        "docker-publish.yml must have at least one build-push-action "
-        "step with `push: true` — without it, nothing reaches GHCR and "
+def test_pipeline_actually_pushes_so_pull_is_possible(gitlab_ci_text: str) -> None:
+    # A4/OP-1719: the GHCR Actions workflow was retired; the GitLab CI
+    # candidate build + the proxy publish use `docker buildx build --push`.
+    # A regression dropping `--push` would let CI stay green while silently
+    # breaking the 30 s pull promise (nothing reaches the registry).
+    assert "--push" in gitlab_ci_text, (
+        ".gitlab-ci.yml must `docker buildx build --push` (candidate image + "
+        "publish-proxy-ghcr) — without it nothing reaches the registry and "
         "the 30 s pull promise has no image to pull"
     )
 

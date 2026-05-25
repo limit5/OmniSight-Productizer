@@ -19,7 +19,7 @@ single control plane.
 
 ## 2. Shared Image Contract
 
-Both paths pull the exact image published by `.github/workflows/docker-publish.yml`:
+Both paths pull the exact image published by the `.gitlab-ci.yml` `publish-proxy-ghcr` job (-> `ghcr.io/<ns>/omnisight-proxy`):
 
 ```text
 ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-proxy:${OMNISIGHT_IMAGE_TAG:-latest}
@@ -140,7 +140,7 @@ proxy image as KS.3 BYOG SaaS tenants:
 
 - Canonical image: `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-proxy:${OMNISIGHT_IMAGE_TAG:-latest}`.
 - Canonical build source: `Dockerfile.omnisight-proxy`.
-- Canonical release path: `.github/workflows/docker-publish.yml` matrix
+- Canonical release path: `.gitlab-ci.yml` `publish-proxy-ghcr` job
   entry `image: omnisight-proxy`.
 - Self-hosted bundles may include `omnisight-proxy-${OMNISIGHT_IMAGE_TAG}.tar`
   or mirror it to a customer registry, but the digest evidence must

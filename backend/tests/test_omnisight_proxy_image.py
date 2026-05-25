@@ -20,7 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCKERFILE_PROXY = REPO_ROOT / "Dockerfile.omnisight-proxy"
 PROXY_ROOT = REPO_ROOT / "omnisight-proxy"
-WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "docker-publish.yml"
+GITLAB_CI_PATH = REPO_ROOT / ".gitlab-ci.yml"  # A4/OP-1719: proxy publish re-homed off docker-publish.yml
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 
 PROXY_BUDGET_MIB = 100
@@ -93,11 +93,14 @@ def test_proxy_env_reads_are_centralised_in_config() -> None:
 
 
 def test_publish_workflow_builds_proxy_image() -> None:
-    workflow = WORKFLOW_PATH.read_text()
-    assert "omnisight-proxy" in workflow, (
-        "Docker publish workflow must include the customer-side proxy image"
+    # A4/OP-1719: the customer-side proxy is published by the GitLab CI
+    # `publish-proxy-ghcr` job (to GHCR), not the retired GHCR Actions workflow.
+    ci = GITLAB_CI_PATH.read_text()
+    assert "publish-proxy-ghcr" in ci, (
+        "GitLab CI must publish the customer-side proxy image (A4/OP-1719)"
     )
-    assert "Dockerfile.omnisight-proxy" in workflow
+    assert "Dockerfile.omnisight-proxy" in ci
+    assert "ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}/omnisight-proxy" in ci
 
 
 def test_ci_runs_proxy_go_tests_for_latency_budget() -> None:

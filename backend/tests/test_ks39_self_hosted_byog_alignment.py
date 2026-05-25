@@ -16,7 +16,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SOP = PROJECT_ROOT / "docs" / "ops" / "self_hosted_byog_proxy_alignment.md"
 README = PROJECT_ROOT / "README.md"
-WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "docker-publish.yml"
+GITLAB_CI = PROJECT_ROOT / ".gitlab-ci.yml"  # A4/OP-1719: proxy publish re-homed
 PROXY_DOCKERFILE = PROJECT_ROOT / "Dockerfile.omnisight-proxy"
 KS38_RUNBOOK = PROJECT_ROOT / "docs" / "ops" / "tier2_to_tier3_byog_proxy_upgrade.md"
 
@@ -113,7 +113,7 @@ def test_hd215_shared_image_confirmation_is_explicit() -> None:
         "HD.21.5 self-hosted edition is confirmed",
         "Canonical image: `ghcr.io/${OMNISIGHT_GHCR_NAMESPACE:-your-org}/omnisight-proxy:${OMNISIGHT_IMAGE_TAG:-latest}`",
         "Canonical build source: `Dockerfile.omnisight-proxy`",
-        "Canonical release path: `.github/workflows/docker-publish.yml` matrix",
+        "Canonical release path: `.gitlab-ci.yml` `publish-proxy-ghcr` job",
         "omnisight-proxy-${OMNISIGHT_IMAGE_TAG}.tar",
         "There is no self-hosted-only proxy Dockerfile",
         "artifact-sharing confirmation only",
@@ -137,19 +137,14 @@ def test_alignment_sop_defines_mode_specific_rollback_boundary() -> None:
 
 
 def test_publish_workflow_and_sop_agree_on_proxy_image() -> None:
-    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
-    matrix = workflow["jobs"]["publish"]["strategy"]["matrix"]
-    proxy_entries = [
-        entry for entry in matrix["include"]
-        if entry.get("image") == "omnisight-proxy"
-    ]
-    assert proxy_entries == [
-        {
-            "name": "proxy",
-            "image": "omnisight-proxy",
-            "dockerfile": "Dockerfile.omnisight-proxy",
-        }
-    ]
+    # A4/OP-1719: the proxy publish path is the GitLab CI `publish-proxy-ghcr`
+    # job (-> GHCR), not the retired GHCR Actions matrix. The customer image
+    # ref (ghcr.io/<ns>/omnisight-proxy) is preserved.
+    ci = yaml.safe_load(GITLAB_CI.read_text(encoding="utf-8"))
+    job = ci["publish-proxy-ghcr"]
+    script = "\n".join(job["script"]) if isinstance(job["script"], list) else job["script"]
+    assert "Dockerfile.omnisight-proxy" in script
+    assert "ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}/omnisight-proxy" in script
     assert PROXY_DOCKERFILE.is_file()
     assert "omnisight-proxy:${OMNISIGHT_IMAGE_TAG:-latest}" in _read(SOP)
 
