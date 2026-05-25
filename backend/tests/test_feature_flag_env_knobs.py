@@ -44,8 +44,9 @@ def test_env_knob_manifest_covers_existing_ks_and_wp_knobs() -> None:
     assert ff.FEATURE_FLAG_ENV_KNOBS[BLOCK_MODEL_ENABLED_ENV].flag_name == (
         "wp.block_model.enabled"
     )
-    # WP.1 default-OFF: the advertised manifest default is opt-in so it
-    # matches the frontend knob (block.tsx isBlockModelEnabled()).
+    # WP.1 default-OFF: this BACKEND block-model knob is opt-in. (OP-1724:
+    # the FRONTEND block UI is gated independently on the public rollout
+    # flag ui.block_model.enabled, not on this env var.)
     assert ff.FEATURE_FLAG_ENV_KNOBS[BLOCK_MODEL_ENABLED_ENV].default_state == (
         FeatureFlagState.DISABLED
     )

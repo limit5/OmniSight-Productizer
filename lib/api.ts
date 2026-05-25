@@ -3289,6 +3289,7 @@ export async function patchFeatureFlag(
 export const PUBLIC_EFFECTIVE_FEATURE_FLAGS = [
   "ui.release_train.enabled",
   "ui.new_navigation.enabled",
+  "ui.block_model.enabled",
 ] as const
 export type PublicEffectiveFeatureFlag =
   typeof PUBLIC_EFFECTIVE_FEATURE_FLAGS[number]

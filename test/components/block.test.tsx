@@ -4,22 +4,33 @@
  * The primitive is intentionally presentational: it standardises the
  * outer addressable wrapper used by message / output / finding cards
  * while callers keep their existing inner layout and test ids.
+ *
+ * OP-1724: block addressability + Share/runbook affordances are now
+ * gated on the public UI rollout flag `ui.block_model.enabled`, resolved
+ * from the backend effective-flags contract through
+ * <FeatureFlagsProvider> (the old `process.env` knob was always-false in
+ * the browser bundle). Every render here therefore goes through
+ * `renderWithFlags`, which mounts the provider with the flag pre-seeded
+ * (and stubs the refresh-on-mount fetch to the same payload so the gate
+ * stays stable across async assertions). Default-OFF: no row -> dark.
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
-import type { ReactNode } from "react"
+import type { ReactElement, ReactNode } from "react"
 import { Activity } from "lucide-react"
 
-import { Block, isBlockModelEnabled } from "@/components/omnisight/block"
+import { Block } from "@/components/omnisight/block"
 import {
   BpFleetLanes,
   type FleetLaneDetail,
   type FleetLanesSnapshot,
 } from "@/components/omnisight/bp-fleet-lanes"
-import { createShareableObject } from "@/lib/api"
+import { FeatureFlagsProvider } from "@/lib/feature-flags-context"
+import { createShareableObject, normalizeEffectiveFeatureFlags } from "@/lib/api"
 import type {
   CreateShareableObjectRequest,
+  EffectiveFeatureFlags,
   ExecuteRunbookRequest,
   ExecuteRunbookResponse,
   RunbookSummary,
@@ -45,6 +56,38 @@ vi.mock("@/lib/api", async (importOriginal) => {
     executeRunbook: vi.fn(),
   }
 })
+
+// ─── OP-1724: gate the block model on the public UI rollout flag ─────
+//
+// `ui.block_model.enabled` governs block addressability + Share/runbook.
+// The other public flags stay dark; only the block flag varies per test.
+function blockFlagsPayload(blockModelEnabled: boolean) {
+  return {
+    flags: {
+      "ui.release_train.enabled": false,
+      "ui.new_navigation.enabled": false,
+      "ui.block_model.enabled": blockModelEnabled,
+    },
+  }
+}
+
+// Render under <FeatureFlagsProvider> with the block flag pre-seeded.
+// The provider refreshes on mount via fetch; we stub it to the SAME
+// payload so the steady state matches the SSR-bootstrapped state and the
+// gate doesn't flip mid-test during async assertions.
+function renderWithFlags(ui: ReactElement, blockModelEnabled = true) {
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(
+    new Response(JSON.stringify(blockFlagsPayload(blockModelEnabled)), {
+      status: 200,
+    }),
+  )
+  const initialFlags: EffectiveFeatureFlags = normalizeEffectiveFeatureFlags(
+    blockFlagsPayload(blockModelEnabled),
+  )
+  return render(
+    <FeatureFlagsProvider initialFlags={initialFlags}>{ui}</FeatureFlagsProvider>,
+  )
+}
 
 type SurfaceFixture = {
   surface: string
@@ -165,31 +208,17 @@ const bpDetail: FleetLaneDetail = {
 }
 
 afterEach(() => {
-  vi.unstubAllEnvs()
+  vi.restoreAllMocks()
   vi.clearAllMocks()
 })
 
-describe("isBlockModelEnabled() default", () => {
-  // WP.1 default-OFF: opt-in, not default-ON. This block intentionally
-  // installs no enable-stub so the unset env exercises the real default.
-  it("is disabled when OMNISIGHT_WP_BLOCK_MODEL_ENABLED is unset", () => {
-    expect(process.env.OMNISIGHT_WP_BLOCK_MODEL_ENABLED).toBeUndefined()
-    expect(isBlockModelEnabled()).toBe(false)
-  })
-
-  it("is enabled when OMNISIGHT_WP_BLOCK_MODEL_ENABLED=true (opt-in)", () => {
-    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "true")
-    expect(isBlockModelEnabled()).toBe(true)
-  })
-
-  it("is disabled when OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false", () => {
-    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
-    expect(isBlockModelEnabled()).toBe(false)
-  })
-
-  it("renders <Block/> without data-block-* attrs or Share menu by default", () => {
-    expect(process.env.OMNISIGHT_WP_BLOCK_MODEL_ENABLED).toBeUndefined()
-    render(
+describe("ui.block_model.enabled gate", () => {
+  // OP-1724 Exercised AC: with the public UI rollout flag OFF (no DB row
+  // -> dark default), <Block/> stays presentational; with a GA row it
+  // lights up addressability + the Share menu. This replaces the old
+  // OMNISIGHT_WP_BLOCK_MODEL_ENABLED env-default coverage.
+  it("renders dark by default (flag OFF): no data-block-* attrs or Share menu", () => {
+    renderWithFlags(
       <Block
         blockId="block-default-off"
         kind="turn.message"
@@ -198,6 +227,7 @@ describe("isBlockModelEnabled() default", () => {
       >
         default-off body
       </Block>,
+      false,
     )
 
     const card = screen.getByTestId("default-off-block")
@@ -209,20 +239,37 @@ describe("isBlockModelEnabled() default", () => {
     fireEvent.contextMenu(card)
     expect(screen.queryByText("Share")).not.toBeInTheDocument()
   })
+
+  it("renders addressable attrs + Share menu when the flag is GA (ON)", async () => {
+    renderWithFlags(
+      <Block
+        blockId="block-ga"
+        tenantId="tenant-1"
+        kind="turn.message"
+        status="completed"
+        data-testid="ga-block"
+      >
+        ga body
+      </Block>,
+      true,
+    )
+
+    const card = screen.getByTestId("ga-block")
+    expect(card).toHaveAttribute("data-block-id", "block-ga")
+    expect(card).toHaveAttribute("data-block-kind", "turn.message")
+    expect(card).toHaveAttribute("data-block-status", "completed")
+    fireEvent.contextMenu(card)
+    expect(await screen.findByText("Share")).toBeInTheDocument()
+  })
 })
 
 describe("<Block />", () => {
-  // WP.1 flipped the block model to default-OFF (opt-in). These tests
-  // assert the enabled-path behaviour (addressability + Share/runbook
-  // affordances), so they opt in explicitly here rather than relying on
-  // the old default-ON. Tests that exercise the rollback override this
-  // stub with "false" in their own body.
-  beforeEach(() => {
-    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "true")
-  })
+  // The block model defaults ON for this suite (flag enabled), so these
+  // tests assert the enabled-path behaviour (addressability + Share/runbook
+  // affordances). The rollback tests pass `false` to `renderWithFlags`.
 
   it("renders the addressable block attributes and header", () => {
-    render(
+    renderWithFlags(
       <Block
         title="QUEUE"
         titleRight={<span data-testid="block-title-right">4</span>}
@@ -245,7 +292,7 @@ describe("<Block />", () => {
 
   it("can render interactive card shells without changing the caller contract", () => {
     const onClick = vi.fn()
-    render(
+    renderWithFlags(
       <Block
         as="button"
         type="button"
@@ -271,7 +318,7 @@ describe("<Block />", () => {
     // loading-state disable reaches the rendered <button> (the fleet cards set
     // `disabled={loadingId === agent.id}`).
     const onClick = vi.fn()
-    render(
+    renderWithFlags(
       <Block
         as="button"
         type="button"
@@ -305,7 +352,7 @@ describe("<Block />", () => {
       }),
     )
 
-    render(
+    renderWithFlags(
       <Block
         blockId="block-1"
         tenantId="tenant-1"
@@ -338,7 +385,7 @@ describe("<Block />", () => {
   })
 
   it("keeps blocks without blockId presentational and without a share menu", () => {
-    render(
+    renderWithFlags(
       <Block kind="turn.message" data-testid="plain-block">
         body
       </Block>,
@@ -348,10 +395,8 @@ describe("<Block />", () => {
     expect(screen.queryByText("Share")).not.toBeInTheDocument()
   })
 
-  it("honours OMNISIGHT_WP_BLOCK_MODEL_ENABLED=false as the ad-hoc card rollback", () => {
-    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
-
-    render(
+  it("hides addressability + Share when ui.block_model.enabled is OFF (rollback)", () => {
+    renderWithFlags(
       <Block
         blockId="block-disabled"
         kind="turn.message"
@@ -360,9 +405,9 @@ describe("<Block />", () => {
       >
         ad-hoc body
       </Block>,
+      false,
     )
 
-    expect(isBlockModelEnabled()).toBe(false)
     const card = screen.getByTestId("rollback-card")
     expect(card).toHaveTextContent("ad-hoc body")
     expect(card).not.toHaveAttribute("data-block-id")
@@ -384,7 +429,7 @@ describe("<Block />", () => {
       }),
     )
 
-    render(
+    renderWithFlags(
       <Block
         blockId="block-2"
         redactionMask={{
@@ -426,7 +471,7 @@ describe("<Block />", () => {
       )
       legacy.unmount()
 
-      render(renderMigratedSurface(fixture))
+      renderWithFlags(renderMigratedSurface(fixture))
       const migrated = screen.getByTestId(fixture.migratedTestId)
 
       expect(semanticSurfaceSnapshot(migrated)).toEqual(legacySnapshot)
@@ -438,15 +483,13 @@ describe("<Block />", () => {
   it.each(SURFACE_FIXTURES.map((fixture) => [fixture.surface, fixture] as const))(
     "keeps the %s rollback UI snapshot equal to the legacy card",
     (_surface, fixture) => {
-      vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
-
       const legacy = render(renderLegacySurface(fixture))
       const legacySnapshot = semanticSurfaceSnapshot(
         screen.getByTestId(fixture.legacyTestId),
       )
       legacy.unmount()
 
-      render(renderMigratedSurface(fixture))
+      renderWithFlags(renderMigratedSurface(fixture), false)
       const migrated = screen.getByTestId(fixture.migratedTestId)
 
       expect(semanticSurfaceSnapshot(migrated)).toEqual(legacySnapshot)
@@ -458,7 +501,7 @@ describe("<Block />", () => {
   it("migrates the real BP dispatch board to Block lanes, cards, detail, and subtasks", async () => {
     const onLoadDetail = vi.fn().mockResolvedValue(bpDetail)
 
-    render(<BpFleetLanes snapshot={bpSnapshot} onLoadDetail={onLoadDetail} />)
+    renderWithFlags(<BpFleetLanes snapshot={bpSnapshot} onLoadDetail={onLoadDetail} />)
 
     const lane = screen.getByTestId("fleet-lane-active")
     expect(lane).toHaveAttribute("data-block-kind", "bp.lane")
@@ -496,12 +539,9 @@ describe("<Block />", () => {
     )
   })
 
-  it("keeps the real BP dispatch board raw when the Block model knob is disabled", () => {
-    vi.stubEnv("OMNISIGHT_WP_BLOCK_MODEL_ENABLED", "false")
+  it("keeps the real BP dispatch board raw when the Block model flag is OFF", () => {
+    renderWithFlags(<BpFleetLanes snapshot={bpSnapshot} />, false)
 
-    render(<BpFleetLanes snapshot={bpSnapshot} />)
-
-    expect(isBlockModelEnabled()).toBe(false)
     const lane = screen.getByTestId("fleet-lane-active")
     const card = screen.getByTestId("fleet-card-a-run")
     expect(lane).not.toHaveAttribute("data-block-kind")
@@ -561,7 +601,7 @@ describe("<Block />", () => {
       }),
     )
 
-    render(
+    renderWithFlags(
       <Block
         blockId="block-r1"
         tenantId="tenant-1"
@@ -617,7 +657,7 @@ describe("<Block />", () => {
 
   it("disables Save as Runbook when block lineage data is missing", async () => {
     const saveAsRunbook = vi.fn()
-    render(
+    renderWithFlags(
       <Block
         blockId="block-x"
         kind="command"

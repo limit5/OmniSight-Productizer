@@ -337,6 +337,7 @@ class FeatureFlagSDK:
 PUBLIC_FLAG_ALLOWLIST: frozenset[str] = frozenset({
     "ui.release_train.enabled",
     "ui.new_navigation.enabled",
+    "ui.block_model.enabled",
 })
 
 

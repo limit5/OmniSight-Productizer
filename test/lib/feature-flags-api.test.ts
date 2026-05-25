@@ -27,6 +27,7 @@ describe("feature flag API contracts", () => {
     ).toEqual({
       "ui.release_train.enabled": true,
       "ui.new_navigation.enabled": false,
+      "ui.block_model.enabled": false,
     })
 
     expect(normalizeEffectiveFeatureFlags(null)).toEqual(

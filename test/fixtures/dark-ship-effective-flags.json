@@ -2,6 +2,7 @@
   "_comment": "RT-15c (OP-1595) golden wire contract for GET /api/feature-flags/effective. SINGLE SOURCE OF TRUTH shared across the stack: backend/tests/test_feature_flags_dark_ship_e2e.py asserts the REAL endpoint emits these exact payloads, and test/lib/feature-flags-dark-ship-e2e.test.tsx asserts the REAL frontend normalizer/provider/SSR-bootstrap consumes them into the documented UI visibility. If the backend wire shape OR the frontend consumption drifts from these payloads, one side's test goes red. No production/API/provider code is exercised beyond what RT-15a/RT-15b already shipped.",
   "flag_under_test": "ui.release_train.enabled",
   "public_flags": [
+    "ui.block_model.enabled",
     "ui.new_navigation.enabled",
     "ui.release_train.enabled"
   ],
@@ -11,6 +12,7 @@
       "tenant": "t-anyone",
       "endpoint_payload": {
         "flags": {
+          "ui.block_model.enabled": false,
           "ui.new_navigation.enabled": false,
           "ui.release_train.enabled": false
         }
@@ -23,12 +25,14 @@
       "other_tenant": "t-control",
       "endpoint_payload_for_canary_tenant": {
         "flags": {
+          "ui.block_model.enabled": false,
           "ui.new_navigation.enabled": false,
           "ui.release_train.enabled": true
         }
       },
       "endpoint_payload_for_other_tenant": {
         "flags": {
+          "ui.block_model.enabled": false,
           "ui.new_navigation.enabled": false,
           "ui.release_train.enabled": false
         }
@@ -39,6 +43,7 @@
       "tenant": "t-anyone",
       "endpoint_payload": {
         "flags": {
+          "ui.block_model.enabled": false,
           "ui.new_navigation.enabled": false,
           "ui.release_train.enabled": true
         }
@@ -50,6 +55,7 @@
       "tenant": "t-anyone",
       "endpoint_payload": {
         "flags": {
+          "ui.block_model.enabled": false,
           "ui.new_navigation.enabled": false,
           "ui.release_train.enabled": false
         }
@@ -68,6 +74,7 @@
       }
     },
     "normalized": {
+      "ui.block_model.enabled": false,
       "ui.new_navigation.enabled": false,
       "ui.release_train.enabled": true
     }

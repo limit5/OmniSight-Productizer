@@ -11,11 +11,13 @@ import type { EffectiveFeatureFlags } from "@/lib/api"
 const enabledReleaseTrain: EffectiveFeatureFlags = {
   "ui.release_train.enabled": true,
   "ui.new_navigation.enabled": false,
+  "ui.block_model.enabled": false,
 }
 
 const disabledReleaseTrain: EffectiveFeatureFlags = {
   "ui.release_train.enabled": false,
   "ui.new_navigation.enabled": false,
+  "ui.block_model.enabled": false,
 }
 
 beforeEach(() => {

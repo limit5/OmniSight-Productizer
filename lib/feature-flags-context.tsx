@@ -82,6 +82,19 @@ export function useFeatureFlag(name: PublicEffectiveFeatureFlag): boolean {
   return useFeatureFlags().isEnabled(name)
 }
 
+// OP-1724: a non-throwing variant for ubiquitous low-level primitives
+// (e.g. <Block/>) that may be rendered in isolation outside the app's
+// <FeatureFlagsProvider> (unit tests, isolated stories). When no provider
+// is mounted it resolves to the all-dark DEFAULT_EFFECTIVE_FEATURE_FLAGS
+// posture (fail-closed / default-OFF) instead of crashing the subtree.
+// Top-level feature gates should keep using useFeatureFlag / FeatureGate,
+// which throw to flag a missing provider.
+export function useFeatureFlagOrDark(name: PublicEffectiveFeatureFlag): boolean {
+  const value = useContext(FeatureFlagsContext)
+  if (!value) return DEFAULT_EFFECTIVE_FEATURE_FLAGS[name] === true
+  return value.isEnabled(name)
+}
+
 export interface FeatureGateProps {
   flag: PublicEffectiveFeatureFlag
   children: React.ReactNode

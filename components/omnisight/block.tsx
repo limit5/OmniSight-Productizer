@@ -33,6 +33,7 @@ import {
   type SaveBlockAsRunbookResponse,
 } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { useFeatureFlagOrDark } from "@/lib/feature-flags-context"
 
 type BlockElement = "div" | "section" | "article" | "aside" | "li" | "button" | "figure"
 type BlockTone = "neutral" | "info" | "success" | "warning" | "danger"
@@ -49,9 +50,6 @@ const SHARE_REGIONS: Array<{ id: BlockShareRegion; label: string }> = [
   { id: "metadata", label: "Metadata" },
   { id: "screenshots", label: "Screenshots" },
 ]
-
-const BLOCK_MODEL_ENABLED_ENV = "OMNISIGHT_WP_BLOCK_MODEL_ENABLED"
-const BLOCK_MODEL_ENV_FALSE_VALUES = new Set(["0", "false", "no", "off"])
 
 const TONE_CLASS: Record<BlockTone, string> = {
   neutral: "border-[var(--neural-border,rgba(148,163,184,0.25))] bg-white/[0.02]",
@@ -99,16 +97,6 @@ export interface BlockProps extends Omit<HTMLAttributes<HTMLElement>, "title"> {
   ) => Promise<ExecuteRunbookResponse>
 }
 
-export function isBlockModelEnabled(): boolean {
-  const raw = process.env[BLOCK_MODEL_ENABLED_ENV]
-  // WP.1 default-OFF: the block model is opt-in. With the env unset the
-  // first prod deploy must NOT light up block addressability + Share for
-  // every <Block/> consumer, so the undefined default is disabled and the
-  // feature is enabled explicitly via OMNISIGHT_WP_BLOCK_MODEL_ENABLED=true.
-  if (raw === undefined) return false
-  return !BLOCK_MODEL_ENV_FALSE_VALUES.has(raw.trim().toLowerCase())
-}
-
 export function Block({
   as = "div",
   title,
@@ -135,7 +123,17 @@ export function Block({
   children,
   ...props
 }: BlockProps) {
-  const blockModelEnabled = isBlockModelEnabled()
+  // OP-1724: gate block addressability + Share/runbook affordances on the
+  // public UI rollout flag, resolved from the backend effective-flags
+  // contract via <FeatureFlagsProvider>. This replaces the dead
+  // process.env path (env vars inlined at build time are always-false in
+  // the browser bundle), so the operator now flips this at runtime via the
+  // feature-flag registry. Default-OFF: no DB row -> dark. <Block/> is a
+  // ubiquitous primitive that is sometimes rendered in isolation (unit
+  // tests, stories) outside the app-root provider, so it reads via the
+  // non-throwing useFeatureFlagOrDark (dark when no provider) rather than
+  // crashing that subtree.
+  const blockModelEnabled = useFeatureFlagOrDark("ui.block_model.enabled")
   const hasHeader = Boolean(title || titleRight || Icon)
   const Element = as
   const enabledRegions = useMemo(
