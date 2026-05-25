@@ -26,6 +26,17 @@
                     {"dial": "backend-b:8001"}
                   ]
                 }
+              ],
+              "terminal": true
+            },
+            {
+              "handle": [
+                {
+                  "handler": "reverse_proxy",
+                  "upstreams": [
+                    {"dial": "frontend:3000"}
+                  ]
+                }
               ]
             }
           ]

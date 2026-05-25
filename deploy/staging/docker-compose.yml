@@ -133,6 +133,17 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # [OP-1725] `backend` network alias. The released frontend image bakes its
+    # Next.js /api rewrite to the Dockerfile.frontend default http://backend:8000
+    # (staging pulls a prebuilt image via pull_policy: always, so the compose
+    # build-arg BACKEND_URL=http://caddy never applies to the running container).
+    # Aliasing backend-a as `backend` makes that baked SSR-rewrite host resolve
+    # without a CI rebuild. Browser /api traffic does NOT use this path — it goes
+    # browser → caddy(:18080) → backend-a/backend-b.
+    networks:
+      default:
+        aliases:
+          - backend
     mem_limit: 2g
     mem_reservation: 512m
     healthcheck:
@@ -204,6 +215,12 @@ services:
   caddy:
     image: caddy:2-alpine
     restart: always
+    # [OP-1725] Canonical staging URL is same-origin http://<host>:18080
+    # (STAGING_HTTP_PORT → :80). caddy.json routes /api,/audit,/readyz,/healthz,
+    # /health to backend-a/backend-b and everything else (the UI) to frontend:3000,
+    # so the host is fully browsable on this one port. NOTE: staging caddy must
+    # NOT bind host :443 — prod's caddy owns it; the :443 publish below maps to a
+    # high host port (STAGING_HTTPS_PORT, default 8443), never the host's 443.
     ports:
       - "${STAGING_HTTP_PORT:-18080}:80"
       - "${STAGING_HTTPS_PORT:-8443}:443"
@@ -248,14 +265,26 @@ services:
       dockerfile: Dockerfile.frontend
       args:
         BACKEND_URL: http://caddy
-        NEXT_PUBLIC_API_URL: https://staging.sora.services/api/v1
-        VITE_API_BASE: https://staging.sora.services/api
+        # [OP-1725] Do NOT bake an absolute API host. The client bundle
+        # (lib/api.ts) falls back to relative /api/v1 when NEXT_PUBLIC_API_URL
+        # is unset, which is what same-origin staging wants (browser → caddy
+        # → backend). Re-hardcoding staging.sora.services here would break the
+        # SSR flag bootstrap (lib/feature-flags-ssr.ts) since that host does
+        # not resolve in this env. Left empty intentionally.
+        NEXT_PUBLIC_API_URL: ""
+        VITE_API_BASE: ""
     ports:
       - "${STAGING_FRONTEND_PORT:-3010}:3000"
     environment:
       - BACKEND_URL=http://caddy
-      - NEXT_PUBLIC_API_URL=https://staging.sora.services/api/v1
-      - VITE_API_BASE=https://staging.sora.services/api
+      # [OP-1725] Same-origin staging. Empty NEXT_PUBLIC_API_URL so SSR
+      # (lib/feature-flags-ssr.ts resolveServerApiBase) uses the request Host
+      # header instead of an unresolvable absolute host, and the client uses
+      # the relative /api/v1 baked into lib/api.ts. Browser path is
+      # browser → caddy(:18080) → backend; the Next /api rewrite is only the
+      # SSR fallback (resolved via the `backend` alias on backend-a below).
+      - NEXT_PUBLIC_API_URL=
+      - VITE_API_BASE=
       - NODE_ENV=production
       - HOSTNAME=0.0.0.0
       - NODE_OPTIONS=--max-old-space-size=1024
