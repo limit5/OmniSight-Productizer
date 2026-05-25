@@ -1248,6 +1248,47 @@ export async function listAgentParties() {
   return request<AgentPartyDto[]>("/agents/parties")
 }
 
+// ─── BP Fleet dispatch board (OP-1504 WP.10 backend; OP-1729 FE wiring) ───
+// Read-only contract mirrored from `backend/routers/bp_fleet_lanes.py`:
+//   GET  /bp/fleet/lanes            → FleetLanesSnapshot (4-lane board)
+//   GET  /bp/fleet/agents/{id}      → FleetLaneDetail (detail panel)
+//   POST /bp/fleet/agents/{id}/revoke → revoke (Active/Ambient only)
+// The response shapes are owned by the renderer; re-export its types so
+// the page and the client stay in lock-step (no duplicate definitions).
+import type {
+  FleetLanesSnapshot as _BpFleetLanesSnapshot,
+  FleetLaneDetail as _BpFleetLaneDetail,
+} from "@/components/omnisight/bp-fleet-lanes"
+
+export type FleetLanesSnapshot = _BpFleetLanesSnapshot
+export type FleetLaneDetail = _BpFleetLaneDetail
+
+/** Full 4-lane snapshot for the dispatch board (GET /bp/fleet/lanes). */
+export async function getFleetLanes() {
+  return request<FleetLanesSnapshot>("/bp/fleet/lanes")
+}
+
+/** Detail-panel envelope for one agent (GET /bp/fleet/agents/:id). */
+export async function getFleetAgentDetail(agentId: string) {
+  return request<FleetLaneDetail>(
+    `/bp/fleet/agents/${encodeURIComponent(agentId)}`,
+  )
+}
+
+/**
+ * Operator-initiated revoke (POST /bp/fleet/agents/:id/revoke).
+ *
+ * The backend returns a `{id, prev_lane, new_lane, status}` ack, but the
+ * BpFleetLanes `onRevoke` contract is `Promise<void>` (it optimistically
+ * flips the panel itself), so we await and discard the body.
+ */
+export async function revokeFleetAgent(agentId: string): Promise<void> {
+  await request<{ id: string; prev_lane: string; new_lane: string; status: string }>(
+    `/bp/fleet/agents/${encodeURIComponent(agentId)}/revoke`,
+    { method: "POST" },
+  )
+}
+
 export async function getAgent(id: string) {
   return request<ApiAgent>(`/agents/${id}`)
 }

@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react"
 import Link from "next/link"
 import { useTranslations } from "next-intl"
-import { Users } from "lucide-react"
+import { LayoutGrid, Users } from "lucide-react"
 import { useI18n as _useI18n, type Locale } from "@/lib/i18n/context"
 import { EmergencyStop } from "./emergency-stop"
 import { LanguageToggle } from "./language-toggle"
@@ -17,6 +17,14 @@ const AGENT_ROSTER_LABEL: Record<Locale, string> = {
   "zh-TW": "Agent 名冊",
   "zh-CN": "Agent 名册",
   ja: "エージェント名簿",
+}
+
+// OP-1729 — nav entry to the BP fleet dispatch board (/bp/fleet).
+const BP_FLEET_LABEL: Record<Locale, string> = {
+  en: "Blueprint Fleet",
+  "zh-TW": "Blueprint 機隊",
+  "zh-CN": "Blueprint 机队",
+  ja: "Blueprint フリート",
 }
 
 function useHeaderLocale(): Locale {
@@ -55,6 +63,7 @@ export function GlobalStatusHeader({
   const tStatus = useTranslations("globalStatus")
   const locale = useHeaderLocale()
   const agentRosterLabel = AGENT_ROSTER_LABEL[locale]
+  const bpFleetLabel = BP_FLEET_LABEL[locale]
   const [time, setTime] = useState("")
   
   useEffect(() => {
@@ -296,6 +305,16 @@ export function GlobalStatusHeader({
             className="p-1.5 rounded-sm text-[var(--muted-foreground,#94a3b8)] hover:text-[var(--neural-cyan,#67e8f9)] hover:bg-white/5 transition-colors"
           >
             <Users className="w-4 h-4" aria-hidden />
+          </Link>
+
+          {/* Blueprint Fleet — OP-1729 navigation entry to /bp/fleet */}
+          <Link
+            href="/bp/fleet"
+            aria-label={bpFleetLabel}
+            title={bpFleetLabel}
+            className="p-1.5 rounded-sm text-[var(--muted-foreground,#94a3b8)] hover:text-[var(--neural-cyan,#67e8f9)] hover:bg-white/5 transition-colors"
+          >
+            <LayoutGrid className="w-4 h-4" aria-hidden />
           </Link>
 
           {/* Language Toggle */}
