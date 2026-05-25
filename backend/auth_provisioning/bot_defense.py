@@ -159,6 +159,27 @@ def list_bot_defense_forms() -> list[str]:
     return [form for form, _, _ in _DEFAULT_FORM_ITEMS]
 
 
+def site_key_env_for(provider: bot_challenge.Provider) -> Optional[str]:
+    """Return the public ``NEXT_PUBLIC_*`` site-key env name for *provider*.
+
+    OP-1726: the runtime ``GET /auth/bot-challenge-config`` endpoint maps
+    the active provider to its public site-key env via this accessor, then
+    reads the env value at request time so one release image can run
+    bot-challenge ON in prod (env set) and OFF in internal staging (env
+    unset) without a per-env rebuild.
+
+    Pure lookup over :data:`_SITE_KEY_ENVS` — no env read happens here (the
+    caller owns the runtime read), so the module-global state audit above
+    still holds. Returns ``None`` for a provider with no mapped site-key
+    env (defensive; every :class:`bot_challenge.Provider` member is mapped
+    today).
+    """
+    for prov, env in _SITE_KEY_ENVS:
+        if prov is provider:
+            return env
+    return None
+
+
 def render_bot_defense_scaffold(
     options: BotDefenseScaffoldOptions | None = None,
 ) -> BotDefenseScaffoldResult:
@@ -585,4 +606,5 @@ __all__ = [
     "list_bot_defense_forms",
     "list_bot_defense_providers",
     "render_bot_defense_scaffold",
+    "site_key_env_for",
 ]

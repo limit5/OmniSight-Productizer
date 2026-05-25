@@ -13,10 +13,12 @@
  *   - `<OAuthEnergySphere>` × 5 primary (Google / GitHub / Microsoft
  *     / Apple / Discord) + `More` toggle revealing 6 secondary
  *     vendors behind a row of smaller spheres
- *   - `<AuthTurnstileWidget>` widget — rendered when
- *     `NEXT_PUBLIC_TURNSTILE_SITE_KEY` env is set; otherwise the
- *     widget is a noop and the AS.6.3 backend Phase-1 fail-open
- *     contract carries the request
+ *   - `<AuthTurnstileWidget>` widget — OP-1726 runtime-driven: it
+ *     fetches `/auth/bot-challenge-config` on mount and renders only
+ *     when the backend serves a site key (prod ON / staging OFF);
+ *     otherwise the widget is a noop and the AS.6.3 backend Phase-1
+ *     fail-open contract carries the request. When a key is served the
+ *     submit is gated until a token is solved.
  *   - `<AuthHoneypotField>` — hidden field with the rotating AS.6.4
  *     name backed by Web Crypto SHA-256
  *   - `<AccountLockedOverlay>` — blue tint + frozen overlay shown
@@ -42,7 +44,7 @@
  * change vs. existing auth-context behaviour.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useTranslations } from "next-intl"
 import {
@@ -230,9 +232,6 @@ function MfaChallengeForm({ onCompleted }: { onCompleted: () => void }) {
 // Login form — composed inside the AS.7.0 glass card.
 // ─────────────────────────────────────────────────────────────────
 
-const TURNSTILE_SITE_KEY: string | null =
-  process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? null
-
 function LoginForm() {
   const router = useRouter()
   const search = useSearchParams()
@@ -249,6 +248,13 @@ function LoginForm() {
   const [showSecondary, setShowSecondary] = useState(false)
   const [bloomKey, setBloomKey] = useState(0)
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
+  // OP-1726 — the Turnstile widget resolves its config at runtime and
+  // reports back whether a token is required (prod ON / staging OFF).
+  const [turnstileRequired, setTurnstileRequired] = useState(false)
+  const handleTurnstileConfig = useCallback(
+    (cfg: { enabled: boolean }) => setTurnstileRequired(cfg.enabled),
+    [],
+  )
   const honeypotFieldRef = useRef<string | null>(null)
 
   // Q.1 UI follow-up — security-event session revocation banner.
@@ -339,6 +345,8 @@ function LoginForm() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy) return
+    // OP-1726 — when the runtime config served a key, require a token.
+    if (turnstileRequired && !turnstileToken) return
     setBusy(true)
     try {
       const extras: Record<string, string> = {}
@@ -469,19 +477,20 @@ function LoginForm() {
           }}
         />
 
-        {/* AS.6.3 Turnstile — only mounts when the env var is set.
-            The widget's onToken callback feeds turnstileToken which
-            the submit handler threads as `turnstile_token`. */}
-        {TURNSTILE_SITE_KEY ? (
-          <div className="flex justify-center">
-            <AuthTurnstileWidget
-              siteKey={TURNSTILE_SITE_KEY}
-              onToken={(token) => setTurnstileToken(token)}
-              onExpired={() => setTurnstileToken(null)}
-              onError={() => setTurnstileToken(null)}
-            />
-          </div>
-        ) : null}
+        {/* AS.6.3 / OP-1726 Turnstile — fetches its config at runtime and
+            mounts only when the backend serves a site key (prod ON /
+            staging OFF). The widget's onToken callback feeds
+            turnstileToken which the submit handler threads as
+            `turnstile_token`; onConfigResolved tells us whether a token
+            is required so the submit can be gated. */}
+        <div className="flex justify-center">
+          <AuthTurnstileWidget
+            onConfigResolved={handleTurnstileConfig}
+            onToken={(token) => setTurnstileToken(token)}
+            onExpired={() => setTurnstileToken(null)}
+            onError={() => setTurnstileToken(null)}
+          />
+        </div>
 
         {auth.error && !accountLocked && (
           <div
@@ -496,7 +505,13 @@ function LoginForm() {
 
         <button
           type="submit"
-          disabled={busy || !email || !password || accountLocked}
+          disabled={
+            busy ||
+            !email ||
+            !password ||
+            accountLocked ||
+            (turnstileRequired && !turnstileToken)
+          }
           className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           {busy ? <Loader2 size={14} className="animate-spin" /> : null}

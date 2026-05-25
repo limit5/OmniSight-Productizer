@@ -27,7 +27,7 @@
  * change vs. existing auth-context behaviour.
  */
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { useTranslations } from "next-intl"
 import {
@@ -53,9 +53,6 @@ import {
   passwordResetHoneypotFieldName,
   requestResetSubmitBlockedReason,
 } from "@/lib/auth/password-reset-helpers"
-
-const TURNSTILE_SITE_KEY: string | null =
-  process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY ?? null
 
 // ─────────────────────────────────────────────────────────────────
 // Terminal "check your inbox" card.
@@ -121,6 +118,12 @@ function ForgotPasswordForm() {
   const [errorKey, setErrorKey] = useState(0)
   const [bloomKey, setBloomKey] = useState(0)
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
+  // OP-1726 — runtime-resolved Turnstile requirement (prod ON / staging OFF).
+  const [turnstileRequired, setTurnstileRequired] = useState(false)
+  const handleTurnstileConfig = useCallback(
+    (cfg: { enabled: boolean }) => setTurnstileRequired(cfg.enabled),
+    [],
+  )
   const [linkSent, setLinkSent] = useState<string | null>(null)
   const honeypotFieldRef = useRef<string | null>(null)
   const honeypotResolvedRef = useRef<boolean>(false)
@@ -165,6 +168,8 @@ function ForgotPasswordForm() {
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (busy || submitBlockedReason !== null) return
+    // OP-1726 — require a token when the runtime config served a key.
+    if (turnstileRequired && !turnstileToken) return
     setBusy(true)
     try {
       const extras: Record<string, string> = {}
@@ -235,17 +240,16 @@ function ForgotPasswordForm() {
         }}
       />
 
-      {TURNSTILE_SITE_KEY ? (
-        <div className="flex justify-center">
-          <AuthTurnstileWidget
-            siteKey={TURNSTILE_SITE_KEY}
-            action="password_reset"
-            onToken={(token) => setTurnstileToken(token)}
-            onExpired={() => setTurnstileToken(null)}
-            onError={() => setTurnstileToken(null)}
-          />
-        </div>
-      ) : null}
+      {/* OP-1726 — runtime-driven Turnstile (prod ON / staging OFF). */}
+      <div className="flex justify-center">
+        <AuthTurnstileWidget
+          action="password_reset"
+          onConfigResolved={handleTurnstileConfig}
+          onToken={(token) => setTurnstileToken(token)}
+          onExpired={() => setTurnstileToken(null)}
+          onError={() => setTurnstileToken(null)}
+        />
+      </div>
 
       {hasError && errorOutcome ? (
         <div
@@ -261,7 +265,7 @@ function ForgotPasswordForm() {
       <button
         type="submit"
         data-testid="as7-forgot-submit"
-        disabled={submitDisabled}
+        disabled={submitDisabled || (turnstileRequired && !turnstileToken)}
         data-as7-block-reason={submitBlockedReason ?? "ok"}
         className="flex items-center justify-center gap-2 px-3 py-2 rounded bg-[var(--artifact-purple)] text-white font-mono text-sm font-semibold hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
       >

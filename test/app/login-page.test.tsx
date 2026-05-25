@@ -75,6 +75,19 @@ vi.mock("@/hooks/use-effective-motion-level", () => ({
   usePrefersReducedMotion: () => false,
 }))
 
+// OP-1726 — the Turnstile widget fetches its config at runtime. Pin it
+// "off" (no key) by default so the page renders the disabled widget and
+// the submit flow works without a token, like internal staging.
+const mockBotChallengeConfig = vi.fn().mockResolvedValue({
+  provider: null,
+  siteKey: null,
+  enabled: false,
+})
+vi.mock("@/lib/api", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/api")>()
+  return { ...actual, fetchBotChallengeConfig: () => mockBotChallengeConfig() }
+})
+
 import LoginPage from "@/app/login/page"
 
 beforeEach(() => {
@@ -169,11 +182,48 @@ describe("AS.7.1 LoginPage — composition", () => {
     expect(field).toBeInTheDocument()
   })
 
-  it("Turnstile widget surface renders only when env site key is set", () => {
-    // The page reads NEXT_PUBLIC_TURNSTILE_SITE_KEY at module init.
-    // In the vitest env it's unset, so the widget shouldn't mount.
+  it("Turnstile surface stays disabled when the runtime config serves no key", async () => {
+    // OP-1726 — the widget always mounts but resolves to the disabled
+    // surface when the backend serves no site key (internal staging).
     render(<LoginPage />)
-    expect(screen.queryByTestId("as7-turnstile-widget")).toBeNull()
+    await waitFor(() => expect(mockBotChallengeConfig).toHaveBeenCalled())
+    expect(
+      screen.getByTestId("as7-turnstile-widget"),
+    ).toHaveAttribute("data-as7-turnstile", "disabled")
+  })
+
+  it("Turnstile mounts + submit requires a token when the runtime config serves a key", async () => {
+    mockBotChallengeConfig.mockResolvedValueOnce({
+      provider: "turnstile",
+      siteKey: "runtime-key",
+      enabled: true,
+    })
+    mockState.login = vi.fn().mockResolvedValue(true)
+    render(<LoginPage />)
+
+    const emailInput = screen.getByLabelText("EMAIL") as HTMLInputElement
+    const passwordInput = screen.getByLabelText("PASSWORD") as HTMLInputElement
+    await userEvent.type(emailInput, "ops@example.com")
+    await userEvent.type(passwordInput, "hunter2pw")
+
+    // The widget upgrades out of the disabled surface once the key lands.
+    await waitFor(() =>
+      expect(["loading", "ready"]).toContain(
+        screen
+          .getByTestId("as7-turnstile-widget")
+          .getAttribute("data-as7-turnstile"),
+      ),
+    )
+
+    // No turnstile token yet → the submit button is gated.
+    const submitBtn = screen
+      .getByText("Sign in")
+      .closest("button") as HTMLButtonElement
+    expect(submitBtn.disabled).toBe(true)
+
+    // Submitting the form anyway must not call auth.login (token required).
+    fireEvent.submit(screen.getByTestId("as7-login-form"))
+    expect(mockState.login).not.toHaveBeenCalled()
   })
 })
 

@@ -3332,6 +3332,67 @@ export async function fetchEffectiveFeatureFlags(): Promise<EffectiveFeatureFlag
   }
 }
 
+// ─── Bot-challenge runtime config (OP-1726 public auth-page contract) ───
+//
+// Mirrors the effective-feature-flags pattern above: the auth pages and
+// the <AuthTurnstileWidget> fetch this at RUNTIME instead of reading a
+// build-baked NEXT_PUBLIC_TURNSTILE_SITE_KEY, so one release image runs
+// the widget ON in prod (backend serves the site key) and OFF in
+// internal staging (backend serves none). The secret stays server-side;
+// only the public site key + enabled flag cross the wire.
+
+export interface BotChallengeConfig {
+  provider: string | null
+  siteKey: string | null
+  enabled: boolean
+}
+
+export const DEFAULT_BOT_CHALLENGE_CONFIG: BotChallengeConfig = Object.freeze({
+  provider: null,
+  siteKey: null,
+  enabled: false,
+})
+
+export interface BotChallengeConfigResponse {
+  provider?: string | null
+  site_key?: string | null
+  enabled?: boolean
+}
+
+export function normalizeBotChallengeConfig(
+  payload: BotChallengeConfigResponse | null | undefined,
+): BotChallengeConfig {
+  const siteKey =
+    typeof payload?.site_key === "string" && payload.site_key.length > 0
+      ? payload.site_key
+      : null
+  // enabled is only meaningful when a key is actually served — fold the
+  // two so a stray `enabled:true` with no key can never render a widget
+  // that has nothing to mount.
+  const enabled = payload?.enabled === true && siteKey !== null
+  const provider =
+    typeof payload?.provider === "string" && payload.provider.length > 0
+      ? payload.provider
+      : null
+  return { provider, siteKey, enabled }
+}
+
+export async function fetchBotChallengeConfig(): Promise<BotChallengeConfig> {
+  try {
+    const res = await request<BotChallengeConfigResponse>(
+      "/auth/bot-challenge-config",
+      { cache: "no-store" },
+    )
+    return normalizeBotChallengeConfig(res)
+  } catch (exc) {
+    // Fail-closed: a backend/network error resolves to "off" so the auth
+    // pages stay usable (no widget, no required token) rather than wedging
+    // login behind a challenge that never loads.
+    console.warn("[api] bot-challenge config failed closed", exc)
+    return { ...DEFAULT_BOT_CHALLENGE_CONFIG }
+  }
+}
+
 // ─── Batch-merge candidate dashboard (OP-735 R5) ─────────────────
 
 export interface BatchMergeCandidateRow {

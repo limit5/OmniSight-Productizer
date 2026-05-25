@@ -3,12 +3,18 @@
 /**
  * AS.7.1 — Cloudflare Turnstile widget loader.
  *
- * Mounts the official Turnstile widget when `NEXT_PUBLIC_TURNSTILE_SITE_KEY`
- * is set; gracefully renders nothing when the site key is missing
- * so dev / test / unconfigured environments still work (the
- * backend AS.6.3 verify is fail-open in Phase 1, so a missing
- * widget is allowed; Phase 3 will require the token, but rolling
- * the env knob is the operator's signal to add the site key).
+ * OP-1726: the site key is now RUNTIME-driven. When no `siteKey` prop is
+ * passed, the widget fetches `GET /auth/bot-challenge-config` on mount
+ * and mounts the official Turnstile widget only when the backend serves a
+ * key (prod ON / internal staging OFF — one release image, no build-baked
+ * `NEXT_PUBLIC_TURNSTILE_SITE_KEY`). It gracefully renders nothing when
+ * the runtime config has no key so dev / test / unconfigured environments
+ * still work (the backend AS.6.3 verify is fail-open in Phase 1, so a
+ * missing widget is allowed). Host pages learn whether a token will be
+ * required via the `onConfigResolved` callback so they can gate submit.
+ *
+ * An explicit `siteKey` prop (including `null`) short-circuits the fetch
+ * and is used directly — handy for unit tests / storybook isolation.
  *
  * The widget loads its script lazily on the first render — once
  * loaded, `window.turnstile.render(container, {...})` mounts the
@@ -33,6 +39,12 @@
  */
 
 import { useEffect, useRef, useState } from "react"
+
+import {
+  DEFAULT_BOT_CHALLENGE_CONFIG,
+  fetchBotChallengeConfig,
+  type BotChallengeConfig,
+} from "@/lib/api"
 
 const TURNSTILE_SCRIPT_URL =
   "https://challenges.cloudflare.com/turnstile/v0/api.js"
@@ -63,10 +75,18 @@ interface TurnstileWindow extends Window {
 }
 
 interface AuthTurnstileWidgetProps {
+  /** Optional override. When provided (including `null`), the widget uses
+   *  this site key directly and SKIPS the OP-1726 runtime config fetch —
+   *  used by unit tests / storybook. When omitted, the widget fetches the
+   *  runtime `/auth/bot-challenge-config`. */
   siteKey?: string | null
   onToken: (token: string) => void
   onExpired?: () => void
   onError?: () => void
+  /** OP-1726 — fires once the runtime config resolves (and on the seed
+   *  default before the fetch lands) so the host page knows whether a
+   *  token will be required on submit. */
+  onConfigResolved?: (config: BotChallengeConfig) => void
   /** Forwarded to the Turnstile `action` parameter for the AS.6.3
    *  per-form-action audit dimension. Default: `"login"`. */
   action?: string
@@ -77,16 +97,60 @@ interface AuthTurnstileWidgetProps {
 }
 
 export function AuthTurnstileWidget({
-  siteKey,
+  siteKey: siteKeyOverride,
   onToken,
   onExpired,
   onError,
+  onConfigResolved,
   action = "login",
   theme = "dark",
 }: AuthTurnstileWidgetProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const widgetIdRef = useRef<string | null>(null)
   const [scriptReady, setScriptReady] = useState<boolean>(false)
+
+  // OP-1726 — runtime config. An explicit `siteKey` prop (override / unit
+  // tests) skips the fetch entirely; otherwise we fetch the backend
+  // `/auth/bot-challenge-config` once on mount.
+  const hasOverride = siteKeyOverride !== undefined
+  const [fetchedConfig, setFetchedConfig] = useState<BotChallengeConfig>(
+    DEFAULT_BOT_CHALLENGE_CONFIG,
+  )
+
+  useEffect(() => {
+    if (hasOverride) return
+    let active = true
+    void fetchBotChallengeConfig().then((cfg) => {
+      if (active) setFetchedConfig(cfg)
+    })
+    return () => {
+      active = false
+    }
+  }, [hasOverride])
+
+  // The effective key: the override when supplied, else the runtime key
+  // (only when the backend reported enabled — a key with enabled=false is
+  // already folded out in normalizeBotChallengeConfig, belt-and-braces).
+  const siteKey = hasOverride
+    ? siteKeyOverride ?? null
+    : fetchedConfig.enabled
+      ? fetchedConfig.siteKey
+      : null
+
+  // Report the resolved config up so the host page can require a token on
+  // submit exactly when a widget is mounted.
+  useEffect(() => {
+    if (!onConfigResolved) return
+    onConfigResolved(
+      hasOverride
+        ? {
+            provider: null,
+            siteKey: siteKeyOverride ?? null,
+            enabled: Boolean(siteKeyOverride),
+          }
+        : fetchedConfig,
+    )
+  }, [hasOverride, siteKeyOverride, fetchedConfig, onConfigResolved])
 
   // ── Lazily inject the Turnstile script ──
   useEffect(() => {

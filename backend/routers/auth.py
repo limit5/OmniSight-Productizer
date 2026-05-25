@@ -532,6 +532,46 @@ async def whoami(request: Request,
     }
 
 
+@router.get("/auth/bot-challenge-config")
+async def bot_challenge_config(request: Request) -> JSONResponse:
+    """OP-1726 — public runtime bot-challenge config for the auth pages.
+
+    Returns ``{provider, site_key, enabled}`` derived at REQUEST time so a
+    single release image can run the bot-challenge ON in prod (the public
+    ``NEXT_PUBLIC_<PROVIDER>_SITE_KEY`` env is set) and OFF in internal
+    staging (env unset), replacing the build-baked ``NEXT_PUBLIC`` read
+    the frontend used to do (same one-image pattern as OP-1724's
+    backend-driven block flag).
+
+    Unauthenticated by design — the login / signup / password-reset pages
+    fetch this before any session exists. Only the PUBLIC site key plus an
+    ``enabled`` flag are exposed; the per-provider secret stays server-side
+    (the verify path reads it via
+    :func:`turnstile_form_verifier.resolve_provider_secret`).
+
+    ``enabled`` is ``True`` only when a non-empty public site key is
+    configured for the active provider AND the AS feature family is on
+    (:func:`turnstile_form_verifier.is_enabled`). When ``enabled`` is
+    ``False`` no site key is returned, so the frontend skips the widget
+    and does not require a token on submit.
+    """
+    from backend.security import turnstile_form_verifier as _tv
+    from backend.auth_provisioning import bot_defense as _bd
+
+    provider = _tv.pick_form_provider(request)
+    site_key_env = _bd.site_key_env_for(provider)
+    site_key = (os.environ.get(site_key_env) or "").strip() if site_key_env else ""
+    enabled = bool(site_key) and _tv.is_enabled()
+    return JSONResponse(
+        status_code=200,
+        content={
+            "provider": provider.value,
+            "site_key": site_key if enabled else None,
+            "enabled": enabled,
+        },
+    )
+
+
 @router.get("/auth/tenants")
 async def user_tenants(user: auth.User = Depends(auth.current_user)) -> list[dict]:
     """I7: Return tenants accessible to the current user.
