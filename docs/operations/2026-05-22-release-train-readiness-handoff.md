@@ -33,7 +33,14 @@ Prereqs: a green `develop` SHA; `COSIGN_KEY`/`COSIGN_PASSWORD` exported (see §6
 4. **Deploy to staging** (§4) on `OMNISIGHT_IMAGE_TAG=sha-<sha>` → verify `/readyz`=200 + `/api/version` overlay shows the real digest.
 5. **Run the staging gate** (smoke) → green JSONL evidence over the candidate digests (`scripts/staging_gate.py`).
 6. **Promote**: `python3 scripts/promote_image_bundle.py --bundle <sealed> --from staging --to vX.Y.Z --actor <you> --approval-refs <JIRA> --registry sora.services:49160/omnisight/omnisight-productizer --staging-evidence <green.json>` → retags the digest to `vX.Y.Z` + cosign-attests + writes the release_train row. (Verify: `vX.Y.Z` resolves to the candidate digest.)
-7. **Deploy prod** by the promoted tag/digest (the existing prod deploy SOP `[[reference_prod_deploy_sop]]`).
+   - ⚠ **Promote from the ephemeral worktree writes the human-readable LEDGER into `/tmp/rel-<sha>/audit/`, which is destroyed on cleanup** — see step 6b. The registry cosign attestation is the source of truth and is always safe; this caveat is only about the git ledger (OP-1732).
+   - To keep the ledger off the doomed `/tmp` checkout from the start, point the promote at a PERSISTENT, committable location: `--audit-log <persist>/image_promotion_audit.jsonl --predicate-out-dir <persist>/promotion-predicates` (the audit-write hard gate is unchanged — a failed write still aborts the promote).
+7. **Commit the LEDGER to develop (MANDATORY, OP-1732)** — the promote's `audit/image_promotion_audit.jsonl` row + the new `audit/promotion-predicates/*.json` ARE the release record and MUST land on develop. From the canonical repo checkout (NOT the ephemeral worktree):
+   `python3 scripts/commit_promotion_ledger.py --from-dir <persist-or-/tmp/rel-<sha>/audit>` → idempotently merges the row + copies the predicates into the canonical `audit/` paths and `git add`s them. Then review and push for Gerrit review (AI +1 / human +2 — never auto-push):
+   `git commit -m "[OP-XXXX] Land vX.Y.Z promotion ledger on develop"` then `git push origin HEAD:refs/for/develop`.
+   - The helper is safe to re-run (already-present rows / byte-identical predicates are skipped; a predicate name collision with different content is a hard error, never a silent overwrite).
+   - If the `/tmp` worktree was already torn down, recover the ledger from wherever it was preserved (e.g. `/home/user/backups/promote-records/vX.Y.Z/`) and pass that as `--from-dir`. The v0.6.2 record was the first application of this step.
+8. **Deploy prod** by the promoted tag/digest (the existing prod deploy SOP `[[reference_prod_deploy_sop]]`).
 
 ## 4. RUNBOOK — operate staging
 - **Authority compose**: `deploy/staging/docker-compose.yml` (PG-backed, GitLab CR). Env: `deploy/staging/.env` (gitignored, staging-only secrets; `OMNISIGHT_REGISTRY`=49160, `OMNISIGHT_IMAGE_TAG`=the candidate, `OMNISIGHT_ADMIN_PASSWORD`/`DECISION_BEARER`, `OMNISIGHT_LLM_PROVIDER=ollama`).
