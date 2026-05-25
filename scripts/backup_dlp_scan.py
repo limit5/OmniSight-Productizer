@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from dataclasses import asdict, dataclass
@@ -301,6 +302,41 @@ def _sanitize_pg_url(url: str) -> str:
     return re.sub(r"://[^@/]*@", "://***@", url)
 
 
+def build_tmp_db_url(database_url: str, tmp_db: str) -> str:
+    """Build the libpq connection URL for the throwaway-DB DLP scan.
+
+    Takes the live ``OMNISIGHT_DATABASE_URL`` (the SQLAlchemy/asyncpg DSN the
+    backend uses, e.g.
+    ``postgresql+asyncpg://omnisight:***@pg-primary:5432/omnisight``) and
+    returns the SAME connection target with ONLY the database name swapped to
+    *tmp_db*, preserving scheme / user / password / host / port / query.
+
+    OP-1731: the throwaway-DB URL used to be assembled by a host/shell
+    ``rsplit('/')`` one-liner. In a develop-tip worktree / ephemeral
+    ``docker compose run`` context that could yield a HOSTLESS DSN, and
+    psycopg2 silently falls back to ``127.0.0.1`` — so the scan hit a
+    connection-refused against localhost and the plaintext dump was shredded
+    even though pg-primary was healthy. Parsing the URL properly (urlsplit)
+    and refusing a hostless result keeps the scan pointed at the real host
+    (pg-primary) regardless of cwd / COMPOSE_PROJECT_NAME, and turns a missing
+    host into an explicit hard error rather than a misleading localhost
+    connection failure.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    # psycopg2 speaks plain libpq; drop any SQLAlchemy driver suffix.
+    cleaned = database_url.replace("+asyncpg", "").replace("+psycopg2", "")
+    parts = urlsplit(cleaned)
+    if not parts.hostname:
+        raise ValueError(
+            "OMNISIGHT_DATABASE_URL has no host; refusing to build a DLP scan "
+            "DSN that would default to psycopg2's 127.0.0.1 (OP-1731). Got: "
+            + _sanitize_pg_url(database_url)
+        )
+    path = "/" + tmp_db.lstrip("/")
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
 def scan_postgres_db(database_url: str) -> BackupDLPReport:
     """Scan a PostgreSQL database for plaintext secret-shaped values.
 
@@ -385,15 +421,41 @@ def _main(argv: list[str] | None = None) -> int:
         "--postgres-url",
         help="PostgreSQL URL to scan (e.g. a throwaway DB restored from pg_dump).",
     )
+    parser.add_argument(
+        "--postgres-tmp-db",
+        help=(
+            "Name of the throwaway DB (restored from pg_dump) to scan. The "
+            "connection URL is derived from OMNISIGHT_DATABASE_URL with the host "
+            "preserved and only the database name swapped to this value — so the "
+            "scan reaches pg-primary regardless of cwd/worktree instead of "
+            "defaulting to 127.0.0.1 (OP-1731)."
+        ),
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
 
-    if args.postgres_url:
+    if args.postgres_tmp_db:
+        base = os.environ.get("OMNISIGHT_DATABASE_URL", "")
+        if not base:
+            report = BackupDLPReport(
+                "<OMNISIGHT_DATABASE_URL>",
+                0,
+                [],
+                error="OMNISIGHT_DATABASE_URL is not set; cannot derive DLP scan DSN",
+            )
+        else:
+            try:
+                url = build_tmp_db_url(base, args.postgres_tmp_db)
+            except ValueError as exc:
+                report = BackupDLPReport("<OMNISIGHT_DATABASE_URL>", 0, [], error=str(exc))
+            else:
+                report = scan_postgres_db(url)
+    elif args.postgres_url:
         report = scan_postgres_db(args.postgres_url)
     elif args.db_path:
         report = scan_backup_db(args.db_path)
     else:
-        parser.error("provide a SQLite db_path or --postgres-url")
+        parser.error("provide a SQLite db_path, --postgres-url, or --postgres-tmp-db")
     if args.json:
         print(json.dumps(report.to_dict(), sort_keys=True))
     elif report.passed:

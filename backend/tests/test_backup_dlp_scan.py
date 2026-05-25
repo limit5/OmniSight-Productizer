@@ -305,3 +305,125 @@ def test_blocking_labels_drops_high_entropy_and_reviewed_tuples() -> None:
     # the same labels still block on OTHER columns / other labels survive
     assert f("creds", "field", ["api_key_assignment"]) == ["api_key_assignment"]
     assert f("x", "y", ["high_entropy_token", "openai"]) == ["openai"]
+
+
+# ── OP-1731: the throwaway-DB DLP scan DSN must keep OMNISIGHT_DATABASE_URL's
+# host (pg-primary), NOT silently fall back to psycopg2's 127.0.0.1 default. ──
+
+
+def test_tmp_db_url_preserves_pg_primary_host() -> None:
+    """The DLP scan DSN is derived from OMNISIGHT_DATABASE_URL's host
+    (pg-primary), with only the database name swapped to the throwaway DB."""
+    base = "postgresql+asyncpg://omnisight:s3cr3t@pg-primary:5432/omnisight"
+    url = backup_dlp_scan.build_tmp_db_url(base, "omnisight_backup_dlp_tmp")
+
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    assert parts.hostname == "pg-primary"
+    assert parts.port == 5432
+    assert parts.username == "omnisight"
+    assert parts.password == "s3cr3t"
+    # database name swapped to the throwaway DB, host untouched
+    assert parts.path == "/omnisight_backup_dlp_tmp"
+    # the SQLAlchemy/asyncpg driver suffix is stripped for libpq/psycopg2
+    assert parts.scheme == "postgresql"
+    # the bug signature must never appear
+    assert "127.0.0.1" not in url
+    assert "localhost" not in url
+
+
+def test_tmp_db_url_preserves_query_params() -> None:
+    base = "postgresql+asyncpg://u:p@pg-primary:5432/omnisight?sslmode=require"
+    url = backup_dlp_scan.build_tmp_db_url(base, "tmp_db")
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    assert parts.hostname == "pg-primary"
+    assert parts.path == "/tmp_db"
+    assert parts.query == "sslmode=require"
+
+
+def test_tmp_db_url_rejects_hostless_url() -> None:
+    """A hostless URL must hard-fail rather than silently produce a DSN that
+    psycopg2 resolves to 127.0.0.1 (the OP-1731 shred-the-dump bug)."""
+    import pytest
+
+    with pytest.raises(ValueError, match="no host"):
+        backup_dlp_scan.build_tmp_db_url("postgresql+asyncpg:///omnisight", "tmp_db")
+
+
+def test_postgres_tmp_db_cli_derives_host_not_localhost(tmp_path: Path) -> None:
+    """End-to-end CLI: --postgres-tmp-db reads OMNISIGHT_DATABASE_URL and
+    connects to its host (pg-primary), NOT 127.0.0.1. There is no PG server in
+    the test env, so the scan fails closed (exit 1) — and the connect error
+    must name pg-primary, proving the host was derived correctly."""
+    import os
+
+    env = dict(os.environ)
+    env["OMNISIGHT_DATABASE_URL"] = (
+        "postgresql+asyncpg://omnisight:pw@pg-primary:5432/omnisight"
+    )
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--postgres-tmp-db",
+            "omnisight_backup_dlp_tmp",
+            "--json",
+        ],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    payload = json.loads(proc.stdout)
+    # hard fail (no live PG) — never a silent pass
+    assert proc.returncode == 1
+    assert payload["passed"] is False
+    # the connection target was pg-primary, NOT the 127.0.0.1 default
+    assert "pg-primary" in payload["error"]
+    assert "127.0.0.1" not in payload["error"]
+    # credentials never surface in the error report
+    assert "pw" not in proc.stdout
+
+
+def test_postgres_tmp_db_cli_fails_closed_without_database_url() -> None:
+    """If OMNISIGHT_DATABASE_URL is missing, the scan must fail closed (exit 1),
+    never pass — a missing DSN must not green-light keeping plaintext."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if k != "OMNISIGHT_DATABASE_URL"}
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(SCRIPT_PATH),
+            "--postgres-tmp-db",
+            "tmp_db",
+            "--json",
+        ],
+        cwd=PROJECT_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 1
+    assert payload["passed"] is False
+    assert "OMNISIGHT_DATABASE_URL" in payload["error"]
+
+
+def test_backup_prod_db_pg_scan_uses_tmp_db_flag_not_rsplit() -> None:
+    """The PG-mode scan must invoke the scanner with --postgres-tmp-db (host
+    derived inside the scanner), not the old fragile host-side rsplit one-liner
+    that produced a hostless 127.0.0.1 DSN (OP-1731)."""
+    text = (PROJECT_ROOT / "scripts" / "backup_prod_db.sh").read_text()
+    code_only = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "--postgres-tmp-db" in code_only
+    # the fragile rsplit-based URL build must be gone from executable code
+    assert "rsplit" not in code_only
+    assert "OMNISIGHT_DLP_TMP_DB" not in code_only

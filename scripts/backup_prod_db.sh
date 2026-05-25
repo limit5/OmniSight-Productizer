@@ -190,14 +190,22 @@ if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>
   docker exec "$PG_CONTAINER" createdb -U "$PG_USER" "$TMP_DB" || die "DLP temp DB create failed"
   docker exec -i "$PG_CONTAINER" pg_restore -U "$PG_USER" -d "$TMP_DB" \
       --no-owner --no-privileges < "$PLAIN" || die "DLP temp DB restore failed"
-  # Scan via backend-a; build the temp-DB URL INSIDE the container from its own
-  # OMNISIGHT_DATABASE_URL so the password never appears in host process argv.
+  # Scan via backend-a. OP-1731: the scanner derives the temp-DB connection
+  # URL from the container's own OMNISIGHT_DATABASE_URL (host = pg-primary,
+  # preserved; only the DB name swapped to $TMP_DB) — see
+  # backup_dlp_scan.build_tmp_db_url. This replaces a fragile host/shell
+  # `rsplit('/')` that produced a HOSTLESS DSN in a develop-tip worktree /
+  # ephemeral `compose run` context, where psycopg2 silently fell back to
+  # 127.0.0.1 → connection-refused → the plaintext pg_dump was shredded.
+  # `docker compose run` inherits backend-a's service networks (including the
+  # external db_ha / postgres-ha_pg-ha net), so pg-primary resolves regardless
+  # of cwd / COMPOSE_PROJECT_NAME / worktree. The password never appears in
+  # host process argv (URL stays inside the container). A connect/query error
+  # still returns a non-zero exit → hard fail → shred (never a silent pass).
   if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
         --volume "$DLP_SCANNER:/app/scripts/backup_dlp_scan.py:ro" \
-        -e OMNISIGHT_DLP_TMP_DB="$TMP_DB" \
-        --entrypoint sh backend-a -c '
-          url="$(python3 -c "import os; b=os.environ[\"OMNISIGHT_DATABASE_URL\"].rsplit(chr(47),1)[0]; print(b+chr(47)+os.environ[\"OMNISIGHT_DLP_TMP_DB\"])")"
-          exec python3 /app/scripts/backup_dlp_scan.py --postgres-url "$url"'; then
+        --entrypoint python3 backend-a \
+        /app/scripts/backup_dlp_scan.py --postgres-tmp-db "$TMP_DB"; then
     _cleanup_tmp_db; trap - EXIT
     shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
     die "backup DLP scan failed; plaintext pg_dump shredded"
