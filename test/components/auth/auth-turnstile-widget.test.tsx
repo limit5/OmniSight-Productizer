@@ -1,16 +1,41 @@
 /**
- * AS.7.1 — `<AuthTurnstileWidget>` component tests.
+ * AS.7.1 / OP-1726 — `<AuthTurnstileWidget>` component tests.
  *
  * Pins:
- *   - Missing siteKey → renders disabled-state surface (no script load)
+ *   - Explicit siteKey override → used directly, no runtime fetch
+ *   - Missing siteKey override → fetches the runtime config (OP-1726)
+ *     and skips the widget when no key is served / mounts when one is
  *   - Provided siteKey → injects the Turnstile script tag
  *   - Cleanup removes the widget on unmount when turnstile is loaded
  */
 
-import { afterEach, describe, expect, it, vi } from "vitest"
-import { render, screen, cleanup } from "@testing-library/react"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { render, screen, cleanup, waitFor } from "@testing-library/react"
 
 import { AuthTurnstileWidget } from "@/components/omnisight/auth/auth-turnstile-widget"
+
+// OP-1726 — mock the runtime config fetch so the no-override path is
+// deterministic (the override path below passes an explicit siteKey and
+// never reaches the fetch). A full mock keeps the 261KB lib/api module
+// out of the jsdom run.
+const mockFetchBotChallengeConfig = vi.fn()
+vi.mock("@/lib/api", () => ({
+  DEFAULT_BOT_CHALLENGE_CONFIG: {
+    provider: null,
+    siteKey: null,
+    enabled: false,
+  },
+  fetchBotChallengeConfig: () => mockFetchBotChallengeConfig(),
+}))
+
+beforeEach(() => {
+  // Default: no key served (staging / unconfigured posture).
+  mockFetchBotChallengeConfig.mockResolvedValue({
+    provider: null,
+    siteKey: null,
+    enabled: false,
+  })
+})
 
 afterEach(() => {
   cleanup()
@@ -20,6 +45,7 @@ afterEach(() => {
     .forEach((s) => s.remove())
   delete (window as { turnstile?: unknown }).turnstile
   delete (window as { __as7TurnstileReady?: () => void }).__as7TurnstileReady
+  mockFetchBotChallengeConfig.mockReset()
 })
 
 describe("AS.7.1 AuthTurnstileWidget", () => {
@@ -29,7 +55,9 @@ describe("AS.7.1 AuthTurnstileWidget", () => {
     expect(widget).toHaveAttribute("data-as7-turnstile", "disabled")
   })
 
-  it("renders the disabled-state surface when siteKey is undefined", () => {
+  it("renders the disabled-state surface before the runtime config resolves", () => {
+    // No override → the widget seeds from the DEFAULT (disabled) config
+    // and renders disabled until the runtime fetch lands.
     render(<AuthTurnstileWidget onToken={() => undefined} />)
     const widget = screen.getByTestId("as7-turnstile-widget")
     expect(widget).toHaveAttribute("data-as7-turnstile", "disabled")
@@ -69,6 +97,75 @@ describe("AS.7.1 AuthTurnstileWidget", () => {
       'script[data-as7-turnstile-loaded]',
     )
     expect(scripts.length).toBe(1)
+  })
+
+  // ── OP-1726: runtime-driven config (no siteKey override) ──
+
+  it("skips the widget when the runtime config serves no key", async () => {
+    mockFetchBotChallengeConfig.mockResolvedValue({
+      provider: null,
+      siteKey: null,
+      enabled: false,
+    })
+    render(<AuthTurnstileWidget onToken={() => undefined} />)
+
+    // Disabled before AND after the fetch resolves; no script injected.
+    await waitFor(() =>
+      expect(mockFetchBotChallengeConfig).toHaveBeenCalled(),
+    )
+    const widget = screen.getByTestId("as7-turnstile-widget")
+    expect(widget).toHaveAttribute("data-as7-turnstile", "disabled")
+    expect(
+      document.querySelectorAll("script[data-as7-turnstile-loaded]").length,
+    ).toBe(0)
+  })
+
+  it("mounts the widget when the runtime config serves a key", async () => {
+    mockFetchBotChallengeConfig.mockResolvedValue({
+      provider: "turnstile",
+      siteKey: "runtime-key",
+      enabled: true,
+    })
+    render(<AuthTurnstileWidget onToken={() => undefined} />)
+
+    await waitFor(() => {
+      const widget = screen.getByTestId("as7-turnstile-widget")
+      expect(["loading", "ready"]).toContain(
+        widget.getAttribute("data-as7-turnstile"),
+      )
+    })
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll("script[data-as7-turnstile-loaded]").length,
+      ).toBe(1),
+    )
+  })
+
+  it("reports the resolved config to onConfigResolved", async () => {
+    mockFetchBotChallengeConfig.mockResolvedValue({
+      provider: "turnstile",
+      siteKey: "runtime-key",
+      enabled: true,
+    })
+    const onConfigResolved = vi.fn()
+    render(
+      <AuthTurnstileWidget
+        onToken={() => undefined}
+        onConfigResolved={onConfigResolved}
+      />,
+    )
+    await waitFor(() =>
+      expect(onConfigResolved).toHaveBeenCalledWith(
+        expect.objectContaining({ enabled: true, siteKey: "runtime-key" }),
+      ),
+    )
+  })
+
+  it("does NOT fetch the runtime config when a siteKey override is passed", () => {
+    render(
+      <AuthTurnstileWidget siteKey="explicit-key" onToken={() => undefined} />,
+    )
+    expect(mockFetchBotChallengeConfig).not.toHaveBeenCalled()
   })
 
   it("calls turnstile.render() once script becomes ready", async () => {

@@ -35,6 +35,7 @@ from backend.auth_provisioning.bot_defense import (
     list_bot_defense_forms,
     list_bot_defense_providers,
     render_bot_defense_scaffold,
+    site_key_env_for,
 )
 from backend.auth_provisioning.account_linking import (
     AccountLinkingProviderStackItem,
@@ -156,4 +157,5 @@ __all__ = [
     "render_outbound_oauth_flow_scaffold",
     "render_vendor_oauth_app_config_plan",
     "render_self_hosted_auth_scaffold",
+    "site_key_env_for",
 ]

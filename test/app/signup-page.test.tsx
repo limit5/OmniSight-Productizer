@@ -79,6 +79,18 @@ vi.mock("@/hooks/use-effective-motion-level", () => ({
   usePrefersReducedMotion: () => false,
 }))
 
+// OP-1726 — pin the runtime Turnstile config "off" (no key) so the page
+// renders the disabled widget surface, like internal staging.
+const mockBotChallengeConfig = vi.fn().mockResolvedValue({
+  provider: null,
+  siteKey: null,
+  enabled: false,
+})
+vi.mock("@/lib/api", async (importActual) => {
+  const actual = await importActual<typeof import("@/lib/api")>()
+  return { ...actual, fetchBotChallengeConfig: () => mockBotChallengeConfig() }
+})
+
 import SignupPage from "@/app/signup/page"
 
 beforeEach(() => {
@@ -146,9 +158,12 @@ describe("AS.7.2 SignupPage — composition", () => {
     })
   })
 
-  it("Turnstile widget only renders when NEXT_PUBLIC_TURNSTILE_SITE_KEY is set", () => {
+  it("Turnstile surface stays disabled when the runtime config serves no key (OP-1726)", async () => {
     render(<SignupPage />)
-    expect(screen.queryByTestId("as7-turnstile-widget")).toBeNull()
+    await waitFor(() => expect(mockBotChallengeConfig).toHaveBeenCalled())
+    expect(
+      screen.getByTestId("as7-turnstile-widget"),
+    ).toHaveAttribute("data-as7-turnstile", "disabled")
   })
 
   it("auto-fills a generated password on first mount", () => {
