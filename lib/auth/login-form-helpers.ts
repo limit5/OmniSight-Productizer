@@ -129,11 +129,24 @@ export function currentEpoch(nowMs?: number): number {
   return Math.floor(ms / 1000 / HONEYPOT_ROTATION_PERIOD_SECONDS)
 }
 
+/** Whether the Web Crypto `subtle` instance is reachable in this
+ *  runtime. `crypto.subtle` is **undefined outside a secure context**
+ *  (HTTPS or localhost), so on a plain-HTTP / bare-IP origin this
+ *  returns `false` and the caller must take the OP-1730 backend-endpoint
+ *  fallback (`fetchHoneypotFieldConfig` in `lib/api.ts`) to obtain the
+ *  server-derived honeypot field name. Pure predicate, no throw. */
+export function isSubtleCryptoAvailable(): boolean {
+  const c = (globalThis as { crypto?: Crypto }).crypto
+  return Boolean(c && c.subtle)
+}
+
 /** Resolve the Web Crypto `subtle` instance, throwing a clear error
  *  when neither browser nor Node 16+ runtime is available. Done
  *  lazily so the module imports cleanly even in environments where
  *  the API is missing — only callers that *use* the honeypot path
- *  see the error surface. */
+ *  see the error surface. Note: this throws on a non-secure-context
+ *  origin (plain HTTP / bare IP); callers that need a graceful fallback
+ *  should gate on `isSubtleCryptoAvailable()` first (OP-1730). */
 function _resolveSubtle(): SubtleCrypto {
   const c = (globalThis as { crypto?: Crypto }).crypto
   if (!c || !c.subtle) {

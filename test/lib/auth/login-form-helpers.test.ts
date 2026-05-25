@@ -12,7 +12,7 @@
  *   - bumpShakeKey
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it } from "vitest"
 
 import {
   ANONYMOUS_TENANT_ID,
@@ -30,6 +30,7 @@ import {
   currentEpoch,
   expectedFieldNames,
   honeypotFieldName,
+  isSubtleCryptoAvailable,
   loginHoneypotFieldName,
   parseRetryAfter,
 } from "@/lib/auth/login-form-helpers"
@@ -334,5 +335,32 @@ describe("AS.7.1 login-form-helpers — Web Crypto fallback", () => {
     await expect(
       honeypotFieldName(FORM_PATH_LOGIN, "_anonymous", 0),
     ).rejects.toThrow(/SubtleCrypto unavailable/)
+  })
+
+  // OP-1730 — the predicate the honeypot field component branches on to
+  // decide between the Web Crypto fast path and the backend-endpoint
+  // fallback (crypto.subtle is undefined outside a secure context).
+  it("isSubtleCryptoAvailable is true when crypto.subtle is present", () => {
+    expect(isSubtleCryptoAvailable()).toBe(true)
+  })
+
+  it("isSubtleCryptoAvailable is false (no throw) when crypto is absent", () => {
+    Object.defineProperty(globalThis, "crypto", {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    })
+    expect(isSubtleCryptoAvailable()).toBe(false)
+  })
+
+  it("isSubtleCryptoAvailable is false when crypto exists but subtle is missing", () => {
+    // The exact non-secure-context shape: `window.crypto` is present
+    // (getRandomValues works) but `crypto.subtle` is undefined.
+    Object.defineProperty(globalThis, "crypto", {
+      value: { getRandomValues: () => new Uint8Array(0) },
+      configurable: true,
+      writable: true,
+    })
+    expect(isSubtleCryptoAvailable()).toBe(false)
   })
 })

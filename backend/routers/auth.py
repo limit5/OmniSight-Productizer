@@ -572,6 +572,62 @@ async def bot_challenge_config(request: Request) -> JSONResponse:
     )
 
 
+@router.get("/auth/honeypot-field-config")
+async def honeypot_field_config(request: Request, form: str = "login") -> JSONResponse:
+    """OP-1730 — public runtime honeypot field-name config for the auth pages.
+
+    The AS.6.4 honeypot field NAME rotates per ``(form_path, tenant_id,
+    30-day epoch)`` and is derived client-side via Web Crypto
+    (``crypto.subtle.digest``). ``crypto.subtle`` is **undefined outside a
+    secure context** (HTTPS or localhost), so on a plain-HTTP / bare-IP
+    origin (self-hosted customers + internal staging at ``http://<ip>:port``)
+    the client derivation throws, the hidden field never renders, and the
+    backend rejects the submit with ``field_missing_in_form`` →
+    ``bot_challenge_failed`` — login is impossible there. This endpoint is
+    the non-secure-context fallback: the auth pages fetch it when
+    ``crypto.subtle`` is missing and render the server-derived field name.
+
+    Returns the current AND previous-epoch field names (the 30-day boundary
+    1-request grace per AS.0.7 §2.1 — the backend ``validate_honeypot``
+    accepts either, so a page fetched at an epoch boundary still round-trips).
+
+    Unauthenticated by design — the login / signup / password-reset pages
+    fetch this before any session exists, with the anonymous-tenant sentinel
+    as the field-name seed (same constant the frontend uses on the Web Crypto
+    fast path). The field name is NOT a secret: it is SHA-256 over
+    ``"<tenant>:<epoch>"``, so exposing it is safe and does not weaken the
+    honeypot for secure-context users (the value-must-be-empty check is what
+    catches bots, and that is unchanged).
+
+    ``form`` selects which self-form's field name to derive (``login`` /
+    ``signup`` / ``pwreset`` / ``contact``); an unknown value falls back to
+    ``login``. ``enabled`` mirrors the AS.0.8 single-knob state for parity
+    with ``/auth/bot-challenge-config`` (the name is still returned when the
+    knob is off — the backend bypasses honeypot entirely in that case, so the
+    rendered field is simply ignored).
+    """
+    from backend.security import honeypot as _hp
+    from backend.security import honeypot_form_verifier as _hpv
+
+    try:
+        form_path = _hpv.form_path_for_action(form)
+    except ValueError:
+        form_path = _hpv.FORM_PATH_LOGIN
+
+    name_now, name_prev = _hp.expected_field_names(
+        form_path, _hpv.ANONYMOUS_TENANT_ID
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            "form_path": form_path,
+            "field_name": name_now,
+            "field_names": [name_now, name_prev],
+            "enabled": _hp.is_enabled(),
+        },
+    )
+
+
 @router.get("/auth/tenants")
 async def user_tenants(user: auth.User = Depends(auth.current_user)) -> list[dict]:
     """I7: Return tenants accessible to the current user.

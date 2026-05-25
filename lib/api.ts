@@ -3393,6 +3393,78 @@ export async function fetchBotChallengeConfig(): Promise<BotChallengeConfig> {
   }
 }
 
+// ─── Honeypot field-name runtime config (OP-1730 non-secure-context fallback) ───
+//
+// The AS.6.4 honeypot field NAME rotates per (form_path, tenant_id, 30-day
+// epoch) and is normally derived client-side via Web Crypto
+// (`crypto.subtle.digest`). But `crypto.subtle` is UNDEFINED outside a secure
+// context (HTTPS or localhost), so on a plain-HTTP / bare-IP origin the client
+// derivation throws → the hidden field never renders → the backend rejects the
+// submit (`field_missing_in_form` → `bot_challenge_failed`) and login is
+// impossible. This fetches the server-derived field name(s) as the fallback.
+// The name is NOT a secret (SHA-256 over "<tenant>:<epoch>"); the secure-context
+// Web Crypto fast path is untouched.
+
+export interface HoneypotFieldConfig {
+  formPath: string | null
+  /** Current-epoch field name — the one the form should render. */
+  fieldName: string | null
+  /** `[current, previous]` epoch names — both accepted by the backend
+   *  (30-day boundary 1-request grace per AS.0.7 §2.1). */
+  fieldNames: string[]
+  enabled: boolean
+}
+
+export const DEFAULT_HONEYPOT_FIELD_CONFIG: HoneypotFieldConfig = Object.freeze({
+  formPath: null,
+  fieldName: null,
+  fieldNames: [],
+  enabled: false,
+})
+
+export interface HoneypotFieldConfigResponse {
+  form_path?: string | null
+  field_name?: string | null
+  field_names?: string[] | null
+  enabled?: boolean
+}
+
+export function normalizeHoneypotFieldConfig(
+  payload: HoneypotFieldConfigResponse | null | undefined,
+): HoneypotFieldConfig {
+  const fieldName =
+    typeof payload?.field_name === "string" && payload.field_name.length > 0
+      ? payload.field_name
+      : null
+  const fieldNames = Array.isArray(payload?.field_names)
+    ? payload.field_names.filter(
+        (n): n is string => typeof n === "string" && n.length > 0,
+      )
+    : []
+  const formPath =
+    typeof payload?.form_path === "string" && payload.form_path.length > 0
+      ? payload.form_path
+      : null
+  return { formPath, fieldName, fieldNames, enabled: payload?.enabled === true }
+}
+
+export async function fetchHoneypotFieldConfig(
+  formAction = "login",
+): Promise<HoneypotFieldConfig> {
+  try {
+    const res = await request<HoneypotFieldConfigResponse>(
+      `/auth/honeypot-field-config?form=${encodeURIComponent(formAction)}`,
+      { cache: "no-store" },
+    )
+    return normalizeHoneypotFieldConfig(res)
+  } catch (exc) {
+    // The caller (the honeypot field component) keeps the field unrendered
+    // on a null name, same as the pre-OP-1730 Web-Crypto-throw behaviour.
+    console.warn("[api] honeypot field config fetch failed", exc)
+    return { ...DEFAULT_HONEYPOT_FIELD_CONFIG }
+  }
+}
+
 // ─── Batch-merge candidate dashboard (OP-735 R5) ─────────────────
 
 export interface BatchMergeCandidateRow {
