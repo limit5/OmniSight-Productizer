@@ -379,3 +379,67 @@ candidate-attest-image:
     paths:
       - "candidate-attestation-${IMAGE_NAME}.json"
     expire_in: 90 days
+
+# ─────────────────────────────────────────────────────────────────────────
+# A4 (OP-1719) — omnisight-proxy (BYOG Tier-3) GHCR publisher.
+#
+# The customer-side omnisight-proxy image KEEPS its public contract on GHCR
+# (`ghcr.io/<ns>/omnisight-proxy:<tag>` — pinned by docs/ops/self_hosted_byog_
+# proxy_alignment.md + the KS BYOG contract tests). Its old publisher,
+# .github/workflows/docker-publish.yml, was disabled on GitHub by A1 (OP-1710)
+# to stop the GHCR re-arm, and its `on: tags: v*` trigger never fires under the
+# release train (RT-20: no v* git tag). This job re-homes the publish onto
+# GitLab CI while keeping the GHCR image ref customers pull UNCHANGED — only
+# the publisher moves. Scoped to the proxy ONLY; backend/frontend stay on the
+# internal GitLab CR.
+#
+# DORMANT until the operator provisions the GHCR push credential as a MASKED
+# CI variable — the rule gates on $OMNISIGHT_GHCR_PUBLISH_TOKEN, so the job is
+# simply not created (zero pipeline impact) until it exists. Required CI vars
+# (masked/protected): OMNISIGHT_GHCR_PUBLISH_TOKEN (GHCR PAT, write:packages),
+# OMNISIGHT_GHCR_NAMESPACE (e.g. `limit5`); optional OMNISIGHT_GHCR_USERNAME
+# (defaults to the namespace), PROXY_BUILD_PLATFORMS (defaults amd64+arm64).
+#
+# Tags: every candidate publishes the immutable :sha-<CANDIDATE_SHA>. The
+# customer-facing :latest + :<version> move ONLY when a release/promote passes
+# OMNISIGHT_PROXY_RELEASE_TAG, so :latest tracks releases, never dev merges.
+# Retiring docker-publish.yml + its 6 coupled contract tests is the FOLLOW-UP
+# after this path is verified publishing (ADR-0042 sequencing).
+publish-proxy-ghcr:
+  extends:
+    - .docker_job
+  stage: build
+  resource_group: candidate-image-pipeline
+  rules:
+    - if: '$CANDIDATE_SHA =~ /^[0-9a-f]{40}$/ && ($CI_PIPELINE_SOURCE == "api" || $CI_PIPELINE_SOURCE == "web") && $OMNISIGHT_GHCR_PUBLISH_TOKEN != ""'
+    - when: never
+  script:
+    - test -n "${CANDIDATE_SHA:-}" && test "${#CANDIDATE_SHA}" = "40"
+    - test -n "${OMNISIGHT_GHCR_NAMESPACE:-}"   # required: GHCR owner/namespace
+    - git fetch --no-tags --unshallow origin develop || git fetch --no-tags origin develop
+    - git cat-file -e "${CANDIDATE_SHA}^{commit}"
+    - git merge-base --is-ancestor "$CANDIDATE_SHA" origin/develop
+    - git checkout --detach "$CANDIDATE_SHA"
+    # GHCR login with the operator-provisioned PAT — NEVER inlined (masked var).
+    - echo "$OMNISIGHT_GHCR_PUBLISH_TOKEN" | docker login ghcr.io --username "${OMNISIGHT_GHCR_USERNAME:-$OMNISIGHT_GHCR_NAMESPACE}" --password-stdin
+    - IMAGE_BASE="ghcr.io/${OMNISIGHT_GHCR_NAMESPACE}/omnisight-proxy"
+    # Multi-arch (amd64 + arm64) to match the retired workflow's customer reach.
+    - docker run --privileged --rm tonistiigi/binfmt --install arm64 || true
+    - docker buildx create --use --name "omnisight-proxy-${CI_PIPELINE_ID}"
+    - docker buildx inspect --bootstrap
+    # Immutable per-candidate tag always; :latest + :<version> only on release.
+    # POSIX-sh-safe: build a space-separated flag string (image refs have no
+    # spaces), word-split unquoted into buildx — the `docker` image shell is
+    # not bash, so no arrays.
+    - TAG_FLAGS="--tag ${IMAGE_BASE}:sha-${CANDIDATE_SHA}"
+    - if [ -n "${OMNISIGHT_PROXY_RELEASE_TAG:-}" ]; then TAG_FLAGS="$TAG_FLAGS --tag ${IMAGE_BASE}:${OMNISIGHT_PROXY_RELEASE_TAG} --tag ${IMAGE_BASE}:latest"; fi
+    - |
+      docker buildx build \
+        --platform "${PROXY_BUILD_PLATFORMS:-linux/amd64,linux/arm64}" \
+        --push \
+        --file Dockerfile.omnisight-proxy \
+        --label "org.opencontainers.image.source=${CI_PROJECT_URL}" \
+        --label "org.opencontainers.image.revision=${CANDIDATE_SHA}" \
+        --label "org.opencontainers.image.created=${CI_PIPELINE_CREATED_AT}" \
+        $TAG_FLAGS \
+        .
