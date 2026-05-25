@@ -646,3 +646,50 @@ def test_settings_as_enabled_field_default_true_when_present():
         f"as_enabled default must be True (AS active by default for "
         f"new deploys), got {field.default} (AS.0.8 §2.1 violation)."
     )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  AS.0.9 rollback-knob — OMNISIGHT_AS_ENABLED env wiring is LIVE
+#  (the core OP-1727 fix: the env knob was silently dropped before
+#   the Settings field existed, so the documented 30s emergency
+#   rollback path was dead. This test pins that flipping the env both
+#   ways now actually moves settings.as_enabled AND the consumers'
+#   is_enabled() gates.)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@pytest.mark.parametrize(
+    "env_value, expected",
+    [("false", False), ("0", False), ("true", True), ("1", True)],
+)
+def test_rollback_knob_tracks_env_both_ways(monkeypatch, env_value, expected):
+    """OP-1727 / AS.0.8 §2.1 — ``OMNISIGHT_AS_ENABLED`` must drive
+    ``Settings.as_enabled`` (and therefore every consumer's
+    ``is_enabled()`` gate) in BOTH directions.
+
+    Before OP-1727 the field did not exist, so pydantic-settings'
+    ``extra='forbid'`` silently dropped the prefixed env var and
+    ``getattr(settings, "as_enabled", True)`` always returned the True
+    default — the 30-second emergency rollback (flip env + restart) was
+    a no-op. This asserts the wiring is now live: a fresh Settings
+    built with the env var set reflects it, and the bot_challenge /
+    honeypot consumers track that value when it is the active singleton.
+    """
+    from backend import config
+    from backend.security import bot_challenge, honeypot
+
+    # 1. Env wiring: a fresh Settings instance must reflect the env var
+    #    (proves extra='forbid' now accepts the declared key and the
+    #    value flows through both ways).
+    monkeypatch.setenv("OMNISIGHT_AS_ENABLED", env_value)
+    fresh = config.Settings()
+    assert fresh.as_enabled is expected, (
+        f"OMNISIGHT_AS_ENABLED={env_value!r} must yield "
+        f"settings.as_enabled={expected} (OP-1727 env-wiring contract)."
+    )
+
+    # 2. Consumer gates: with that instance as the active singleton, the
+    #    is_enabled() hooks must track it (noop-on-false behavior live).
+    monkeypatch.setattr(config, "settings", fresh)
+    assert bot_challenge.is_enabled() is expected
+    assert honeypot.is_enabled() is expected
