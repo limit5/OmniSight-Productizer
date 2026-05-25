@@ -104,6 +104,13 @@ services:
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=staging
       - OMNISIGHT_INSTANCE_ID=staging-backend-a
+      # B1b (OP-1711): the actual running backend image digest, exported by
+      # scripts/staging_deploy.sh after post-pull digest verification, so the
+      # /readyz overlay-digest gate compares running-vs-lock SUBSTANCE (not just
+      # shape). Empty (legacy/no-candidate-bundle path) => gate skips (fail-open),
+      # matching the digest-verify + lock-write skips. Enforcement stays gated by
+      # OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH (B1a, still default-OFF — soak first).
+      - OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND=${OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND:-}
       - OMNISIGHT_STAGING_AUDIT_VERIFY_TOKEN_FILE=/run/secrets/staging_audit_verify_token
       - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}
@@ -160,6 +167,9 @@ services:
       - OMNISIGHT_AUTH_MODE=strict
       - OMNISIGHT_ENV=staging
       - OMNISIGHT_INSTANCE_ID=staging-backend-b
+      # B1b (OP-1711): see backend-a — the running backend digest the /readyz
+      # overlay-digest gate compares against the RT-08 lock. Empty => gate skips.
+      - OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND=${OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND:-}
       - OMNISIGHT_STAGING_AUDIT_VERIFY_TOKEN_FILE=/run/secrets/staging_audit_verify_token
       - OMNISIGHT_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-omnisight}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-omnisight_staging}

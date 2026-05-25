@@ -402,6 +402,21 @@ deploy_color() {
 		alert StagingDigestMismatch "post-pull digest != candidate bundle for tag $image_tag; refusing to start $color"
 		return 1
 	fi
+	# B1b (OP-1711): advertise the ACTUAL running backend digest to the /readyz
+	# overlay-digest gate. verify_pulled_digests above proved the pulled backend
+	# image digest == the candidate bundle's backend digest, so that bundle digest
+	# IS what backend-a/backend-b will run. Export it BEFORE `compose up` so both
+	# backends receive OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND and the gate can
+	# compare running-vs-lock SUBSTANCE (not just lock shape). No bundle (legacy
+	# webhook path) => empty => gate skips (fail-open), matching the digest-verify
+	# + lock-write skips. This only WIRES the signal; enforcement stays gated by
+	# OMNISIGHT_ENFORCE_OVERLAY_DIGEST_MATCH (B1a, still default-OFF — soak first).
+	export OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND=""
+	if [[ -n "$CANDIDATE_BUNDLE" ]]; then
+		OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND="$(bundle_image_digest "$CANDIDATE_BUNDLE" backend)" \
+			|| OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND=""
+		log "deploy-overlay: B1b running backend digest = ${OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND:-<unknown>} for $color"
+	fi
 	# RT-08: populate the deployment-identity lock BEFORE bringing $color up so
 	# the backend reads a complete lock at startup (a write failure aborts the
 	# deploy — fail-closed).
