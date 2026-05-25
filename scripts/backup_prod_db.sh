@@ -284,9 +284,9 @@ upload_offsite_immutable "$FINAL"
 
 # Prune — keep newest $PRUNE, delete older. Applies to any backup file
 # matching our label prefix (both short-lived .db and final .db.gpg).
-KEEP_DIR_COUNT="$(ls -1t "$BKP_DIR"/${LABEL}-*.db* 2>/dev/null | wc -l)"
+KEEP_DIR_COUNT="$( { ls -1t "$BKP_DIR"/${LABEL}-*.db* "$BKP_DIR"/${LABEL}-*.dump* 2>/dev/null || true; } | wc -l )"
 if (( KEEP_DIR_COUNT > PRUNE )); then
-  ls -1t "$BKP_DIR"/${LABEL}-*.db* | tail -n +$((PRUNE + 1)) | while read -r f; do
+  ls -1t "$BKP_DIR"/${LABEL}-*.db* "$BKP_DIR"/${LABEL}-*.dump* 2>/dev/null | tail -n +$((PRUNE + 1)) | while read -r f; do
     shred -u "$f" 2>/dev/null || rm -f "$f"
   done
   ok "pruned backups older than the newest $PRUNE"
