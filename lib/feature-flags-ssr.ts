@@ -9,7 +9,14 @@ interface HeaderReader {
   get(name: string): string | null
 }
 
-function resolveServerApiBase(headersList: HeaderReader): string | null {
+export function resolveServerApiBase(headersList: HeaderReader): string | null {
+  // Server-only internal base first: inside the frontend container the public
+  // host:port (from the host header) has no listener, so deriving the API base
+  // from it fails ECONNREFUSED. BACKEND_URL (e.g. http://caddy, injected at
+  // runtime by deploy compose per OP-1725) is reachable from this container.
+  // BACKEND_URL is server-only and must never be exposed to the browser.
+  const internal = process.env.BACKEND_URL
+  if (internal) return `${internal.replace(/\/+$/, "")}/api/v1`
   const configured = process.env.NEXT_PUBLIC_API_URL
   if (configured) return `${configured.replace(/\/+$/, "")}/api/v1`
   const host = headersList.get("host")
