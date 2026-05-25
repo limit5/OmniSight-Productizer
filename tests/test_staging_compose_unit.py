@@ -290,5 +290,56 @@ def test_runbook_covers_lifecycle_and_error_codes():
         assert needle in text, f"runbook must document {needle!r}"
 
 
+# ─────────────────────────────────────────────────────────────────────
+# B1b (OP-1711): overlay-digest gate wiring — the deploy script must export
+# the actual running backend digest, and the compose must pass it into BOTH
+# backends, so the /readyz overlay-digest gate compares SUBSTANCE not shape.
+# ─────────────────────────────────────────────────────────────────────
+
+STAGING_COMPOSE = REPO_ROOT / STAGING_COMPOSE_REL
+STAGING_DEPLOY = REPO_ROOT / "scripts" / "staging_deploy.sh"
+RUNNING_DIGEST_ENV = "OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND"
+
+
+def _compose_service_env(compose_text: str, service: str) -> list[str]:
+    """Return the `environment:` list entries for a top-level compose service."""
+    # Grab the service block (from `  <service>:` to the next 2-space key).
+    m = re.search(rf"^  {re.escape(service)}:\n(.*?)(?=^  \S|\Z)", compose_text, re.S | re.M)
+    assert m, f"compose is missing service {service!r}"
+    block = m.group(1)
+    env_m = re.search(r"^    environment:\n(.*?)(?=^    \S|\Z)", block, re.S | re.M)
+    assert env_m, f"service {service!r} has no environment block"
+    return re.findall(r"^      - (.+?)\s*$", env_m.group(1), re.M)
+
+
+@pytest.mark.parametrize("service", ["backend-a", "backend-b"])
+def test_b1b_compose_passes_running_digest_to_both_backends(service):
+    text = STAGING_COMPOSE.read_text()
+    entries = _compose_service_env(text, service)
+    matches = [e for e in entries if e.startswith(f"{RUNNING_DIGEST_ENV}=")]
+    assert matches, (
+        f"{service} env must pass {RUNNING_DIGEST_ENV} so the /readyz overlay-digest "
+        f"gate (B1a) has a running-digest to compare; got {entries!r}"
+    )
+    # Must default-empty (fail-OPEN on the legacy/no-bundle path), never hard-fail bring-up.
+    assert matches[0].endswith(":-}") or matches[0].endswith("=${%s:-}" % RUNNING_DIGEST_ENV), (
+        f"{service} {RUNNING_DIGEST_ENV} must use an empty default (${{{RUNNING_DIGEST_ENV}:-}}) "
+        f"so an un-injected deploy can't brick readiness; got {matches[0]!r}"
+    )
+
+
+def test_b1b_deploy_script_exports_running_digest_from_bundle():
+    text = STAGING_DEPLOY.read_text()
+    assert f"export {RUNNING_DIGEST_ENV}=" in text, (
+        f"staging_deploy.sh must export {RUNNING_DIGEST_ENV} before `compose up`"
+    )
+    # The exported value must come from the verified candidate bundle's backend
+    # digest (the digest verify_pulled_digests proved equal to what was pulled),
+    # not a re-stated tag — that is what makes the gate compare real substance.
+    assert "bundle_image_digest" in text and 'bundle_image_digest "$CANDIDATE_BUNDLE" backend' in text, (
+        f"{RUNNING_DIGEST_ENV} must be sourced from the candidate bundle's backend digest"
+    )
+
+
 if __name__ == "__main__":  # pragma: no cover
     pytest.main([__file__, "-v"])
