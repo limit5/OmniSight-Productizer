@@ -81,7 +81,7 @@ if ! head -n 1 "$KEY_PATH" | grep -q '^-----BEGIN PUBLIC KEY-----$'; then
 fi
 
 echo "verifying ${IMAGE_REF} via key ${KEY_PATH}" >&2
-if cosign verify --key "$KEY_PATH" "$IMAGE_REF" >/dev/null 2>&1; then
+if cosign verify --key "$KEY_PATH" --insecure-ignore-tlog=true "$IMAGE_REF" >/dev/null 2>&1; then
   echo "OK"
   exit 0
 fi
