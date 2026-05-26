@@ -2857,6 +2857,7 @@ def _shadow_acquire_claim(
         return None
     try:
         refs = {"source": "jira_dispatch.claim_ticket_atomic"}
+        refs.update(_bridge_external_refs_for_claim(key))
         if label_fencing_token is not None:
             refs["label_fencing_token"] = label_fencing_token
         return runner_coordination.acquire_claim(
@@ -3187,13 +3188,15 @@ def _claim_ticket_atomic_table_only(
     our_claim_token = f"{instance_id}:{_mint_claim_token(time.time_ns() // 1000)}"
 
     try:
+        refs = {"source": "claim_ticket_atomic_table_only"}
+        refs.update(_bridge_external_refs_for_claim(key))
         lease = runner_coordination.acquire_claim(
             ticket_key=key,
             resource_key=_coordination_resource_key(key),
             owner_agent_class=getattr(client, "agent_class", "unknown"),
             owner_instance_id=instance_id,
             phase="pickup",
-            external_refs={"source": "claim_ticket_atomic_table_only"},
+            external_refs=refs,
         )
     except runner_coordination.ClaimBlocked as exc:
         existing = exc.existing_lease
@@ -3632,11 +3635,14 @@ def parse_prerequisites(description: str) -> dict[str, list]:
 MUTEX_HOLDING_STATUSES = ("In Progress", "Under Review")
 BRIDGE_DEGRADED_AFTER_SECONDS = 300
 BRIDGE_STALE_AFTER_SECONDS = 900
+BRIDGE_GATE_GLOBAL_ENV = "OMNISIGHT_RUNNER_BRIDGE_GATE_GLOBAL"
+BRIDGE_STALE_AT_ACQUIRE = "stale-at-acquire"
 BRIDGE_REVIEW_YIELDING_LABELS = frozenset({
     "runner-batch-merge-candidate",
     "runner-glance-required",
     "class:subscription-codex-batch-merge",
 })
+_BRIDGE_STATE_AT_ACQUIRE_BY_TICKET: dict[str, str] = {}
 
 
 def find_mutex_holders(
@@ -3817,17 +3823,17 @@ def _bridge_health_pickup_reason(
 ) -> str | None:
     """Return a bridge-health refusal reason, or ``None`` when pickup may proceed.
 
-    OP-1113 / v2-X-4bc narrows the old fleet-wide bridge gate to the
-    Gerrit-finalizing capability bucket. Tickets without ``gerrit_push``
-    bypass the bridge-health gate entirely; review-yielding tickets with
-    explicit batch/glance labels may proceed during a stale window and
-    finalization is handled later by the runner/bridge lease path.
+    OP-1758 / family10 §8 grades the old fleet-wide bridge gate by the
+    resolved capability set. Stale bridge state hard-blocks only
+    ``gerrit_push`` pickups; non-push pickups proceed and carry
+    ``external_refs.bridge_state = "stale-at-acquire"`` into the
+    coordination claim. Operators can restore the old global gate with
+    ``OMNISIGHT_RUNNER_BRIDGE_GATE_GLOBAL=1``.
     """
+    _BRIDGE_STATE_AT_ACQUIRE_BY_TICKET.pop(snapshot.key, None)
     if enabled_capabilities is None:
         return None
     caps = frozenset(enabled_capabilities)
-    if "gerrit_push" not in caps:
-        return None
 
     if bridge_health_check is None:
         from backend.agents.gerrit_jira_bridge import check_bridge_heartbeat
@@ -3835,11 +3841,14 @@ def _bridge_health_pickup_reason(
         bridge_health_check = check_bridge_heartbeat
 
     _is_fresh, age_sec, path = bridge_health_check()
-    if age_sec <= BRIDGE_DEGRADED_AFTER_SECONDS:
-        return None
-    if set(snapshot.labels or ()) & BRIDGE_REVIEW_YIELDING_LABELS:
-        return None
     if age_sec <= BRIDGE_STALE_AFTER_SECONDS:
+        return None
+
+    _BRIDGE_STATE_AT_ACQUIRE_BY_TICKET[snapshot.key] = BRIDGE_STALE_AT_ACQUIRE
+    global_gate = os.environ.get(BRIDGE_GATE_GLOBAL_ENV, "").strip().lower() not in (
+        "", "0", "false", "no", "off",
+    )
+    if "gerrit_push" not in caps and not global_gate:
         return None
 
     age_repr = "missing" if age_sec == float("inf") else f"{age_sec:.0f}s"
@@ -3847,6 +3856,14 @@ def _bridge_health_pickup_reason(
         "bridge_health_stale: Gerrit-finalizing pickup requires a fresh "
         f"bridge heartbeat; heartbeat at {path} age={age_repr}"
     )
+
+
+def _bridge_external_refs_for_claim(key: str) -> dict[str, str]:
+    """Return pickup-time bridge metadata for coordination claim refs."""
+    bridge_state = _BRIDGE_STATE_AT_ACQUIRE_BY_TICKET.get(key)
+    if bridge_state is None:
+        return {}
+    return {"bridge_state": bridge_state}
 
 
 def _provider_task_for_pickup(

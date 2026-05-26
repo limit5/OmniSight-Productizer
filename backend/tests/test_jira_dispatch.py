@@ -1061,7 +1061,7 @@ def test_pre_pickup_ok_allows_code_only_ticket_when_bridge_stale(
 
     assert ok is True
     assert reason == "pre-pickup checks passed"
-    assert calls == [], "code-only pickups bypass bridge-health probing"
+    assert calls == ["bridge"]
 
 
 def test_pre_pickup_ok_blocks_gerrit_finalizing_ticket_when_bridge_stale(
@@ -1083,7 +1083,7 @@ def test_pre_pickup_ok_blocks_gerrit_finalizing_ticket_when_bridge_stale(
     assert "age=1200s" in reason
 
 
-def test_pre_pickup_ok_allows_review_yielding_ticket_when_bridge_stale(
+def test_pre_pickup_ok_blocks_review_yielding_gerrit_ticket_when_bridge_stale(
     monkeypatch, tmp_path
 ) -> None:
     _allow_pre_pickup_common(monkeypatch)
@@ -1101,8 +1101,8 @@ def test_pre_pickup_ok_allows_review_yielding_ticket_when_bridge_stale(
         bridge_health_check=stale_bridge,
     )
 
-    assert ok is True
-    assert reason == "pre-pickup checks passed"
+    assert ok is False
+    assert reason.startswith("bridge_health_stale:")
 
 
 def test_pre_pickup_ok_blocks_provider_quota_before_description(monkeypatch) -> None:
