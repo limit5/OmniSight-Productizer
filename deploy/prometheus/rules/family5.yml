@@ -1,0 +1,84 @@
+# OP-1759 — v2-⑤-AlertRule — Family 5 stale backend image rule.
+#
+# Canonical-form rule file per the v2-AlertBridge contract. The `__bridge`
+# block on each rule is framework metadata consumed by
+# `scripts/promote-alert-rule.py` and stripped before Prometheus parses the
+# file.
+#
+# Pre-flight (per ticket OP-1759):
+#   $ grep -rc 'OmniSightStaleImage' deploy/
+#     0
+#   $ grep -n 'result_state=.*STALE_IMAGE' scripts/deployment-audit.sh
+#     scripts/deployment-audit.sh:420: result_state=WARN_STALE_IMAGE ... severity=warn ... age_seconds=$age
+#     scripts/deployment-audit.sh:422: result_state=PAGE_STALE_IMAGE ... severity=page ... age_seconds=$age
+#
+# Producer metric consumed:
+#   - omnisight_deployment_audit_stale_image_age_seconds{result_state,image_repo,instance}
+#     gauge, seconds; emitted from the deployment-audit stale-image
+#     result_state / age_seconds signal shipped by OP-1753.
+#
+# WARN_STALE_IMAGE must route as warn. PAGE_STALE_IMAGE must route as page.
+# Do not collapse these into a single page rule: WARN-level findings are the
+# normal redeploy-in-flight grace window and must not wake on-call.
+
+groups:
+  - name: omnisight-family5-stale-image
+    interval: 30s
+    rules:
+      # ── OmniSightStaleImage / WARN_STALE_IMAGE ────────────────────────
+      - alert: OmniSightStaleImage
+        expr: |
+          max by (instance, image_repo) (
+            omnisight_deployment_audit_stale_image_age_seconds{result_state="WARN_STALE_IMAGE"} > 0
+          )
+        for: 5m
+        labels:
+          severity: warn
+          area: deployment
+          family: "5"
+          defense_dimension: D1
+        annotations:
+          summary: "Running backend image is stale but inside the deploy grace window"
+          description: |
+            instance={{ $labels.instance }} image_repo={{ $labels.image_repo }}
+            reports WARN_STALE_IMAGE from deployment-audit. The running
+            backend image SHA differs from the registry :latest digest, but
+            the registry digest age is still inside the 24 hour deploy grace
+            window (current age {{ $value | humanizeDuration }}). Consult the
+            latest deployment-audit evidence before taking manual action.
+          runbook_url: "https://docs.sora.services/runbooks/omnisight-stale-image"
+          remediation_hint: "Confirm whether a deploy is in flight. If not, run scripts/auto-redeploy.sh on the prod host to pull and recreate the backend container; if the autoredeploy timer should have caught this, check journalctl --user -u omnisight-auto-redeploy.service."
+        __bridge:
+          critical_labels: [instance, image_repo]
+          cardinality_caps:
+            instance: 10
+            image_repo: 5
+
+      # ── OmniSightStaleImage / PAGE_STALE_IMAGE ────────────────────────
+      - alert: OmniSightStaleImage
+        expr: |
+          max by (instance, image_repo) (
+            omnisight_deployment_audit_stale_image_age_seconds{result_state="PAGE_STALE_IMAGE"} >= 86400
+          )
+        for: 5m
+        labels:
+          severity: page
+          area: deployment
+          family: "5"
+          defense_dimension: D1
+        annotations:
+          summary: "Running backend image is stale beyond the deploy grace window"
+          description: |
+            instance={{ $labels.instance }} image_repo={{ $labels.image_repo }}
+            reports PAGE_STALE_IMAGE from deployment-audit. The running
+            backend image SHA differs from the registry :latest digest and
+            the latest digest is at least 24 hours old (current age
+            {{ $value | humanizeDuration }}), so the normal deploy grace
+            window has expired.
+          runbook_url: "https://docs.sora.services/runbooks/omnisight-stale-image"
+          remediation_hint: "Page owner: run scripts/auto-redeploy.sh on the prod host to pull and recreate the backend container, then rerun scripts/deployment-audit.sh and verify the stale-image result clears."
+        __bridge:
+          critical_labels: [instance, image_repo]
+          cardinality_caps:
+            instance: 10
+            image_repo: 5
