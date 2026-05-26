@@ -36,6 +36,11 @@
 #                      checks the bound service's last Result + list-timers LAST
 #     container        name = docker name substring, or  substr@http://host:port/healthz
 #     env-var          name = VAR@unit.service   or   VAR@pgrep-pattern
+#     image-sha        name = backend image identity join: T1 /version image_sha
+#                      vs T2 :latest registry digest, plus T4 manifest image_sha
+#                      integrity check. Configure with OMNISIGHT_AUDIT_VERSION_URL,
+#                      OMNISIGHT_AUDIT_IMAGE_REF, OMNISIGHT_AUDIT_BACKEND_CONTAINER,
+#                      or test override envs documented in check_image_sha.
 #     alembic-head     name = expected-revision   or   "auto" (prod PG applied
 #                      revision vs the DEPLOYED release / develop head computed
 #                      from git — NEVER the local working tree; see
@@ -97,6 +102,35 @@ try:
 except OSError:
     pass
 print(tag)
+PY
+}
+
+backend_latest_ref_from_ledger() {
+  local ledger="$REPO/audit/image_promotion_audit.jsonl"
+  [ -r "$ledger" ] || return 0
+  have python3 || return 0
+  python3 - "$ledger" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+repo = ""
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            for image in rec.get("images", []):
+                if image.get("name") == "backend" and image.get("repository"):
+                    repo = str(image["repository"])
+except OSError:
+    pass
+if repo:
+    print(repo + ":latest")
 PY
 }
 
@@ -234,6 +268,164 @@ check_env_var() {  # name(VAR@unit-or-pgrep) expected ticket
     record "RED" "env-var" "$spec" "$exp" "$ticket" "$var=$val (PID $pid) — looks like a dev/default value, not the prod target"
   else
     record "OK" "env-var" "$spec" "$exp" "$ticket" "$var set in PID $pid (=${val%%:*}...)"
+  fi
+}
+
+json_field() {
+  local field="$1" payload
+  payload="$(cat)"
+  have python3 || return 1
+  python3 - "$field" "$payload" <<'PY' 2>/dev/null
+import json
+import sys
+
+try:
+    payload = json.loads(sys.argv[2])
+except Exception:
+    sys.exit(1)
+
+value = payload
+for part in sys.argv[1].split("."):
+    if isinstance(value, dict) and part in value:
+        value = value[part]
+    else:
+        sys.exit(1)
+if value is None:
+    sys.exit(1)
+print(value)
+PY
+}
+
+iso_epoch() {
+  local value="$1"
+  [ -n "$value" ] || return 1
+  have python3 || return 1
+  python3 - "$value" <<'PY' 2>/dev/null
+from datetime import datetime, timezone
+import sys
+
+value = sys.argv[1].strip()
+try:
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    print(int(dt.timestamp()))
+except Exception:
+    sys.exit(1)
+PY
+}
+
+now_epoch() {
+  if [ -n "${OMNISIGHT_AUDIT_NOW:-}" ]; then
+    iso_epoch "$OMNISIGHT_AUDIT_NOW"
+    return
+  fi
+  date -u +%s
+}
+
+read_t1_version_json() {
+  if [ -n "${OMNISIGHT_AUDIT_T1_VERSION_JSON:-}" ]; then
+    printf '%s\n' "$OMNISIGHT_AUDIT_T1_VERSION_JSON"
+    return 0
+  fi
+  have curl || return 1
+  curl -fsS -m "${OMNISIGHT_AUDIT_HTTP_TIMEOUT:-5}" "${OMNISIGHT_AUDIT_VERSION_URL:-http://localhost:8000/version}"
+}
+
+read_t2_registry() {  # emits digest|pushed_at|ref
+  local ref="${OMNISIGHT_AUDIT_IMAGE_REF:-}"
+  [ -n "$ref" ] || ref="$(backend_latest_ref_from_ledger)"
+  [ -n "$ref" ] || ref="ghcr.io/omnisight/omnisight-backend:latest"
+
+  if [ -n "${OMNISIGHT_AUDIT_T2_DIGEST:-}" ]; then
+    printf '%s|%s|%s\n' "$OMNISIGHT_AUDIT_T2_DIGEST" "${OMNISIGHT_AUDIT_T2_PUSHED_AT:-}" "$ref"
+    return 0
+  fi
+
+  have docker || return 1
+  local out digest pushed_at
+  out="$(docker buildx imagetools inspect "$ref" 2>/dev/null)" || return 1
+  digest="$(printf '%s\n' "$out" | awk '/Digest:[[:space:]]*sha256:/ {print $2; exit}')"
+  pushed_at="$(printf '%s\n' "$out" | awk '/Created:[[:space:]]*/ {sub(/^[[:space:]]*Created:[[:space:]]*/, ""); print; exit}')"
+  [ -n "$digest" ] || return 1
+  printf '%s|%s|%s\n' "$digest" "$pushed_at" "$ref"
+}
+
+read_t4_manifest_json() {
+  if [ -n "${OMNISIGHT_AUDIT_T4_MANIFEST_JSON:-}" ]; then
+    printf '%s\n' "$OMNISIGHT_AUDIT_T4_MANIFEST_JSON"
+    return 0
+  fi
+  if [ -n "${OMNISIGHT_AUDIT_T4_IMAGE_SHA:-}" ]; then
+    printf '{"image_sha":"%s"}\n' "$OMNISIGHT_AUDIT_T4_IMAGE_SHA"
+    return 0
+  fi
+  have docker || return 1
+  docker exec "${OMNISIGHT_AUDIT_BACKEND_CONTAINER:-omnisight-backend}" cat "${OMNISIGHT_AUDIT_MANIFEST_PATH:-/app/MANIFEST.json}" 2>/dev/null
+}
+
+check_image_sha() {  # name expected ticket
+  local name="$1" exp="$2" ticket="$3"
+  local t1_json t1_sha t2_line t2_sha t2_pushed_at t2_ref t4_json t4_sha errors=()
+
+  # Test overrides:
+  #   OMNISIGHT_AUDIT_T1_VERSION_JSON, OMNISIGHT_AUDIT_T2_DIGEST,
+  #   OMNISIGHT_AUDIT_T2_PUSHED_AT, OMNISIGHT_AUDIT_T4_IMAGE_SHA,
+  #   OMNISIGHT_AUDIT_NOW.
+  if ! t1_json="$(read_t1_version_json)"; then
+    errors+=("T1_running_version.error=/version unreadable")
+  else
+    t1_sha="$(printf '%s\n' "$t1_json" | json_field image_sha || true)"
+    [ -n "$t1_sha" ] || errors+=("T1_running_version.error=image_sha missing")
+  fi
+
+  if ! t2_line="$(read_t2_registry)"; then
+    errors+=("T2_registry_latest.error=:latest digest unreadable")
+  else
+    IFS='|' read -r t2_sha t2_pushed_at t2_ref <<<"$t2_line"
+    [ -n "$t2_sha" ] || errors+=("T2_registry_latest.error=digest missing")
+  fi
+
+  if ! t4_json="$(read_t4_manifest_json)"; then
+    errors+=("T4_image_manifest.error=MANIFEST.json unreadable")
+  else
+    t4_sha="$(printf '%s\n' "$t4_json" | json_field image_sha || true)"
+    [ -n "$t4_sha" ] || errors+=("T4_image_manifest.error=image_sha missing")
+  fi
+
+  if [ "${#errors[@]}" -gt 0 ]; then
+    record "WARN" "image-sha" "$name" "$exp" "$ticket" "result_state=INCOMPLETE; metric=omnisight_deployment_audit_incomplete value=1; ${errors[*]}"
+    return
+  fi
+
+  local findings=0
+  if [ "$t1_sha" != "$t4_sha" ]; then
+    record "RED" "image-sha" "$name" "$exp" "$ticket" "result_state=PAGE_INTEGRITY; alert=OmniSightImageIntegrity; T1.image_sha=$t1_sha != T4.manifest.image_sha=$t4_sha"
+    findings=$((findings + 1))
+  fi
+
+  if [ "$t1_sha" != "$t2_sha" ]; then
+    local now pushed_epoch age
+    pushed_epoch="$(iso_epoch "$t2_pushed_at" || true)"
+    if [ -z "$pushed_epoch" ]; then
+      record "WARN" "image-sha" "$name" "$exp" "$ticket" "result_state=INCOMPLETE; metric=omnisight_deployment_audit_incomplete value=1; T2_registry_latest.error=pushed_at missing/invalid; T1.image_sha=$t1_sha T2.digest=$t2_sha ref=$t2_ref"
+      return
+    fi
+    now="$(now_epoch)"
+    age=$((now - pushed_epoch))
+    [ "$age" -lt 0 ] && age=0
+    if [ "$age" -lt "${OMNISIGHT_AUDIT_STALE_SECONDS:-86400}" ]; then
+      record "WARN" "image-sha" "$name" "$exp" "$ticket" "result_state=WARN_STALE_IMAGE; alert=OmniSightStaleImage severity=warn; T1.image_sha=$t1_sha != T2.digest=$t2_sha ref=$t2_ref age_seconds=$age"
+    else
+      record "RED" "image-sha" "$name" "$exp" "$ticket" "result_state=PAGE_STALE_IMAGE; alert=OmniSightStaleImage severity=page; T1.image_sha=$t1_sha != T2.digest=$t2_sha ref=$t2_ref age_seconds=$age"
+    fi
+    findings=$((findings + 1))
+  fi
+
+  if [ "$findings" -eq 0 ]; then
+    record "OK" "image-sha" "$name" "$exp" "$ticket" "result_state=OK; T1.image_sha == T2.digest == T4.manifest.image_sha ($t1_sha)"
   fi
 }
 
@@ -383,6 +575,7 @@ systemd-unit      omnisight-slo-monitor.service                                 
 container         staging@http://localhost:8010/healthz                           yes       OP-927    AUDIT-19 staging stood up 2026-05-22 (project omnisight-staging, repo compose)
 systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
 systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
+image-sha         backend                                                         yes       OP-1753   Family ⑤ image-SHA state machine — T1 /version image_sha vs T2 registry :latest digest plus T4 MANIFEST.json image_sha integrity. Detect/report only; emits omnisight_deployment_audit_incomplete on partial reads
 alembic-head      auto                                                            yes       OP-1738   pinned-release assertion — prod PG applied head vs the DEPLOYED release head from git (OMNISIGHT_DEPLOYED_TAG, defaulted from the promotion ledger; OP-1701 git-ref logic, NOT the working tree). RED only when prod LAGS a resolvable pinned tag; if no tag is set/resolvable it falls back to origin/develop = informational (never RED). /readyz remains the authoritative image-vs-DB drift gate
 EOF
 }
@@ -442,6 +635,7 @@ main() {
       systemd-timer) check_systemd_timer "$name" "$expected" "$ticket" ;;
       container)     check_container     "$name" "$expected" "$ticket" ;;
       env-var)       check_env_var       "$name" "$expected" "$ticket" ;;
+      image-sha)     check_image_sha     "$name" "$expected" "$ticket" ;;
       alembic-head)  check_alembic_head  "$name" "$expected" "$ticket" ;;
       *)             record "WARN" "$kind" "$name" "$expected" "$ticket" "unknown kind" ;;
     esac
