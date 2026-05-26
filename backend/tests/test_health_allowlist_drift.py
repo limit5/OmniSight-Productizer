@@ -3,8 +3,8 @@
 This module is the Family ⑦ *gate*: it (1) statically audits every
 path-gating middleware in ``backend/main.py`` and ``backend/auth_baseline.py``
 — enumerating ≥5 and discovering any 6th — and (2) reproduces the
-2026-05-14 ``/health → 401`` drift as an ``xfail`` that flips to passing
-the moment the single-source refactor (``v2-⑦-2bc``) lands.
+2026-05-14 ``/health → 401`` drift. The single-source refactor (OP-1752)
+landed, so the reproduction is now a HARD pass (de-xfailed in OP-1760).
 
 Spec: ``docs/sprint-s12/2026-05-16-v2-family7-allowlist-contract.md``
   * §1   — the drift-class definition this test pins down.
@@ -15,7 +15,8 @@ Spec: ``docs/sprint-s12/2026-05-16-v2-family7-allowlist-contract.md``
   * §7   — the drift contract / 6th-middleware discovery (here as a
            pre-fix snapshot; ``v2-⑦-ContractTest`` turns it into the
            permanent static-AST CI guard).
-  * §8.1 — the xfail-now / pass-after-2bc transition contract.
+  * §8.1 — the transition contract (xfail-now → pass-after-fix); now
+           resolved to a hard pass.
 
 READ-ONLY MANDATE (ticket MUST NOT): this test only *reads* the
 middlewares and their ``*_EXEMPT`` / ``ALLOWLIST`` sets — via static
@@ -318,7 +319,8 @@ def test_v2_health_normalizes_to_public_health_path():
 
 
 # ───────────────────────────────────────────────────────────────────────
-#  §8.1 — the 401 reproduction: xfail-now, pass-after-2bc
+#  §8.1 — the 401 reproduction: now a HARD pass (fix landed via OP-1752,
+#  marker de-xfailed in OP-1760)
 # ───────────────────────────────────────────────────────────────────────
 def _make_enforce_app() -> FastAPI:
     """A bare app whose ONLY middleware is ``auth_baseline`` — so any 401
@@ -338,26 +340,16 @@ def _make_enforce_app() -> FastAPI:
     return app
 
 
-@pytest.mark.xfail(
-    reason=(
-        "v2-⑦-Reproduce-401: AUTH_BASELINE_ALLOWLIST matches the raw path "
-        "and enumerates only /api/v1/health, so /api/v2/health is 401'd "
-        "under enforce mode while the four main.py gates (which normalise "
-        "via _api_relative_path) exempt it. Flips to passing when "
-        "v2-⑦-2bc routes auth_baseline through is_public() "
-        "(spec §8.1). Non-strict so CI stays green through the transition; "
-        "v2-⑦-2bc removes this marker."
-    ),
-    strict=False,
-)
 async def test_v2_health_401_drift_reproduction(monkeypatch):
     """Reproduces the 2026-05-14 ``/health → 401`` drift class on the live
     ``/api/v2/health`` probe surface.
 
     Asserts the *correct* (post-fix) behaviour: an unauthenticated probe
     of a health endpoint under ``enforce`` mode must NOT be rejected with
-    401. Today it IS (the drift) → ``xfail``. After ``v2-⑦-2bc`` the
-    single ``is_public()`` source normalises the prefix → 200 → ``xpass``.
+    401. The fix landed via OP-1752 — ``auth_baseline`` now routes through
+    the single ``is_public()`` source, which normalises the ``/api/v2``
+    prefix → 200. This is a HARD pass (the ``xfail`` marker was removed in
+    OP-1760 once the reproduction reliably xpassed on develop-tip).
     """
     monkeypatch.setenv("OMNISIGHT_AUTH_BASELINE_MODE", "enforce")
 

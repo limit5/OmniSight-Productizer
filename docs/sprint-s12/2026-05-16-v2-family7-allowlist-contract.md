@@ -318,6 +318,15 @@ Two reasons:
 
 `v2-⑦-FixHealth`'s AC must reference §6.1, §6.2, and §6.3 of this doc by anchor and pick one of (a)/(b)/(c) with an operator-facing migration note. The decision lands in this spec as a v1.1 amendment (§13 changelog).
 
+### §6.5 Decision record — **option (a)** *(v2-⑦-FixHealth / OP-1760, 2026-05-27)*
+
+Per the hand-off in §6.4, `v2-⑦-FixHealth` selects **option (a): keep `/health` public in `PUBLIC_PATH_ALLOWLIST` as a no-cost alias for `/livez`.**
+
+- **Anchored rationale (per §6.1–§6.3).** §6.2 already named (a) the *likely outcome* — the parent spec §3 Family ⑦ (line 507) and the OP-1131 probe-policy lock both treat `/health` as a permanent, cheap process-pulse alias for `/livez`. The single-source contract (§4) is option-agnostic, so (a) carries zero contract risk: `/health` simply stays in the seed (§4.3) and is exempted uniformly by every consumer (§5) via `is_public()`.
+- **Why not (b)/(c).** (b) Removing `/health` is an operator-facing breaking change for Caddy's upstream health check and older external uptime monitors that probe `/health` by default — no operator demand for that churn exists, and the §6.3 evidence base (external-probe inventory) surfaced no probe that would *break* if `/health` stayed. (c) The deprecation-header two-step only makes sense as a precursor to (b); with (b) declined, (c) is pure overhead.
+- **No code/seed change required.** `/health` is already present (`backend/middleware_allowlist.py:101`) and the four `/health`, `/healthz`, `/livez`, `/readyz` probes are exempted uniformly through `auth_baseline`'s `is_public()` routing (OP-1752). This ticket only *records* the decision and de-xfails the OP-1744 reproduction (`backend/tests/test_health_allowlist_drift.py::test_v2_health_401_drift_reproduction`), which now hard-passes.
+- **Operator-facing migration note.** **No action required.** `/health` remains a public, unauthenticated liveness alias for `/livez`; existing external monitors and the Caddy upstream check continue to work unchanged. `/readyz` remains the deep readiness gate. No deprecation timeline is set for `/health`.
+
 ---
 
 ## §7. Drift contract (the CI test that prevents recurrence)
@@ -499,6 +508,7 @@ secrets_touched: []
 | Version | Date | Author | Change |
 |---|---|---|---|
 | v1 | 2026-05-16 | claude-bot (OP-1146) | Initial spec. Path C locked per operator 2026-05-14 Q2. |
+| v1.1 | 2026-05-27 | claude-bot (OP-1760) | §6.5 amendment: `/health` resolved to **option (a)** (keep public as a `/livez` alias; no code/seed change, no operator action). De-xfailed the OP-1744 `/health-401` reproduction test → hard pass. |
 
 ---
 
