@@ -1400,6 +1400,11 @@ _include_versioned_router(health.router)
 # at the server root so systemd / docker-compose / k8s / CF health
 # checks don't need to know about the API prefix.
 app.include_router(health.probe_router)
+# Family ⑤ §3 (OP-1745): public, root-mounted, no-auth image-surfacing
+# endpoint. Mounted here (NOT via _include_versioned_router) so it answers
+# on bare ``/version`` — operators + deployment-audit.sh curl it without an
+# API prefix or a session, the same way the liveness probes are exposed.
+app.include_router(system.version_router)
 from backend.routers import a2a_inbound as _a2a_inbound_router  # BP.A2A.2
 app.include_router(_a2a_inbound_router.router)
 _include_versioned_router(agents.router)

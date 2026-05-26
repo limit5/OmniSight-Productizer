@@ -19,6 +19,13 @@ PUBLIC_PATH_ALLOWLIST: Final[frozenset[str]] = frozenset(
         # /health membership decided in v2-7-FixHealth, NOT here per
         # section 6 of contract spec.
         "/metrics",
+        # Image-surfacing /version (Family ⑤ §3, OP-1745). Public,
+        # root-mounted, no-auth per §3.1; the live enforcement gate is
+        # backend/auth_baseline.py's AUTH_BASELINE_ALLOWLIST, but this
+        # seed list is kept in sync per the Family ⑦ allowlist contract
+        # (2026-05-16-v2-family7-allowlist-contract.md §4) so the future
+        # unified allowlist already carries /version.
+        "/version",
         "/openapi.json",
         "/docs",
         "/redoc",
