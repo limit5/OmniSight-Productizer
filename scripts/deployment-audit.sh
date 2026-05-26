@@ -143,6 +143,30 @@ record() {      # record <STATUS> <kind> <name> <expected> <ticket> <detail>
   if [ "$status" = "RED" ] && [ "$exp" = "yes" ]; then FAIL=$((FAIL + 1)); fi
 }
 
+# ── family ⑤ §6 forensic-evidence capture (OP-1761; ADDITIVE) ─────────────────
+# These globals snapshot the raw truth-sources the OP-1753 image-SHA state
+# machine reads (T1 /version, T2 GHCR :latest digest, T4 baked MANIFEST.json),
+# so emit_evidence_file() can write the §6.2-schema evidence JSON without
+# re-querying any external source (forensic-replay requirement, §6.3). They are
+# populated by check_image_sha purely as a side-channel — they do NOT influence
+# the OP-1753 classification (which still flows through record() unchanged).
+EV_HAVE_IMAGE_SHA=0
+EV_T1_JSON="";  EV_T1_FETCHED_AT="";  EV_T1_LATENCY_MS="";  EV_T1_ERROR=""
+EV_T2_DIGEST=""; EV_T2_PUSHED_AT=""; EV_T2_REF=""; EV_T2_FETCHED_AT=""; EV_T2_LATENCY_MS=""; EV_T2_ERROR=""; EV_T2_FROM_OVERRIDE=0
+EV_T4_JSON="";  EV_T4_FETCHED_AT="";  EV_T4_LATENCY_MS="";  EV_T4_ERROR=""
+
+epoch_ms() {
+  local ms; ms="$(date +%s%3N 2>/dev/null || true)"
+  case "$ms" in
+    ''|*N*) python3 -c 'import time; print(int(time.time()*1000))' 2>/dev/null || echo 0 ;;
+    *)      printf '%s\n' "$ms" ;;
+  esac
+}
+
+iso_now() {  # deterministic in tests via OMNISIGHT_AUDIT_NOW
+  if [ -n "${OMNISIGHT_AUDIT_NOW:-}" ]; then printf '%s\n' "$OMNISIGHT_AUDIT_NOW"; else date -u +%Y-%m-%dT%H:%M:%SZ; fi
+}
+
 # ── prerequisite: linger (all --user units die at logout without it) ──────────
 check_linger() {
   [ "$USE_USER_BUS" = "1" ] || return 0
@@ -369,31 +393,49 @@ read_t4_manifest_json() {
 check_image_sha() {  # name expected ticket
   local name="$1" exp="$2" ticket="$3"
   local t1_json t1_sha t2_line t2_sha t2_pushed_at t2_ref t4_json t4_sha errors=()
+  local _t0  # evidence-capture timing (OP-1761; side-channel only)
+
+  # OP-1761: flag that this run exercised the image-SHA state machine so
+  # emit_evidence_file() knows to write a §6 forensic file for it.
+  EV_HAVE_IMAGE_SHA=1
+  [ -n "${OMNISIGHT_AUDIT_T2_DIGEST:-}" ] && EV_T2_FROM_OVERRIDE=1
 
   # Test overrides:
   #   OMNISIGHT_AUDIT_T1_VERSION_JSON, OMNISIGHT_AUDIT_T2_DIGEST,
   #   OMNISIGHT_AUDIT_T2_PUSHED_AT, OMNISIGHT_AUDIT_T4_IMAGE_SHA,
   #   OMNISIGHT_AUDIT_NOW.
+  _t0="$(epoch_ms)"
   if ! t1_json="$(read_t1_version_json)"; then
     errors+=("T1_running_version.error=/version unreadable")
+    EV_T1_ERROR="/version unreadable"
   else
     t1_sha="$(printf '%s\n' "$t1_json" | json_field image_sha || true)"
-    [ -n "$t1_sha" ] || errors+=("T1_running_version.error=image_sha missing")
+    [ -n "$t1_sha" ] || { errors+=("T1_running_version.error=image_sha missing"); EV_T1_ERROR="image_sha missing"; }
+    EV_T1_JSON="$t1_json"
   fi
+  EV_T1_LATENCY_MS=$(( $(epoch_ms) - _t0 )); EV_T1_FETCHED_AT="$(iso_now)"
 
+  _t0="$(epoch_ms)"
   if ! t2_line="$(read_t2_registry)"; then
     errors+=("T2_registry_latest.error=:latest digest unreadable")
+    EV_T2_ERROR=":latest digest unreadable"
   else
     IFS='|' read -r t2_sha t2_pushed_at t2_ref <<<"$t2_line"
-    [ -n "$t2_sha" ] || errors+=("T2_registry_latest.error=digest missing")
+    [ -n "$t2_sha" ] || { errors+=("T2_registry_latest.error=digest missing"); EV_T2_ERROR="digest missing"; }
+    EV_T2_DIGEST="$t2_sha"; EV_T2_PUSHED_AT="$t2_pushed_at"; EV_T2_REF="$t2_ref"
   fi
+  EV_T2_LATENCY_MS=$(( $(epoch_ms) - _t0 )); EV_T2_FETCHED_AT="$(iso_now)"
 
+  _t0="$(epoch_ms)"
   if ! t4_json="$(read_t4_manifest_json)"; then
     errors+=("T4_image_manifest.error=MANIFEST.json unreadable")
+    EV_T4_ERROR="MANIFEST.json unreadable"
   else
     t4_sha="$(printf '%s\n' "$t4_json" | json_field image_sha || true)"
-    [ -n "$t4_sha" ] || errors+=("T4_image_manifest.error=image_sha missing")
+    [ -n "$t4_sha" ] || { errors+=("T4_image_manifest.error=image_sha missing"); EV_T4_ERROR="image_sha missing"; }
+    EV_T4_JSON="$t4_json"
   fi
+  EV_T4_LATENCY_MS=$(( $(epoch_ms) - _t0 )); EV_T4_FETCHED_AT="$(iso_now)"
 
   if [ "${#errors[@]}" -gt 0 ]; then
     record "WARN" "image-sha" "$name" "$exp" "$ticket" "result_state=INCOMPLETE; metric=omnisight_deployment_audit_incomplete value=1; ${errors[*]}"
@@ -555,6 +597,299 @@ with open(log, "a", encoding="utf-8") as fh:
 '
 }
 
+# ── family ⑤ §6 evidence-file writer (OP-1761 / v2-⑤-2bc-Timer) ───────────────
+# Writes the per-day forensic JSON described in
+# docs/sprint-s12/2026-05-16-v2-family5-image-surfacing-contract.md §6: a §6.2-
+# schema record (truth_sources / comparisons / ghcr_query_evidence), the
+# latest.json symlink (§6.5), and the index.json of non-OK runs (§6.5). It is a
+# pure side-channel emitter — it re-uses the values the OP-1753 state machine
+# already recorded (result_state parsed straight out of ROWS) and the raw
+# truth-sources captured during check_image_sha, so it NEVER re-classifies and
+# NEVER re-queries an external source. Only runs when the image-SHA row ran.
+#
+# Note on the truth-source labels: §2.1 of the contract labels T4 "image alembic
+# heads", but the OP-1753 state machine reuses T4 as the baked MANIFEST.json
+# image_sha integrity source (T1 vs T4 = PAGE_INTEGRITY); the evidence records it
+# under T4_image_manifest accordingly. T3 (DB alembic head) is only populated
+# when an alembic-head row ran in the same audit — the image-SHA audit does not
+# query the DB itself (the DB axis is Family ⑥ / out of area for OP-1761).
+EVIDENCE_DIR="${OMNISIGHT_AUDIT_EVIDENCE_DIR:-$REPO/docs/audit/AUDIT-deployment}"
+EVIDENCE_RESULT_STATE=""
+EVIDENCE_PATH=""
+
+emit_evidence_file() {
+  [ "$EV_HAVE_IMAGE_SHA" = "1" ] || return 0   # only the image-SHA family writes §6 evidence
+  have python3 || { echo "deployment-audit: python3 absent — skipping §6 evidence file" >&2; return 0; }
+
+  local img_details="" alembic_detail="" row status kind name exp ticket detail
+  for row in "${ROWS[@]}"; do
+    IFS='|' read -r status kind name exp ticket detail <<<"$row"
+    case "$kind" in
+      image-sha)    img_details="${img_details}${detail}"$'\n' ;;
+      alembic-head) alembic_detail="$detail" ;;
+    esac
+  done
+
+  local self_sha; self_sha="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+  local out
+  out="$(
+    EV_IMAGE_DETAILS="$img_details" \
+    EV_ALEMBIC_DETAIL="$alembic_detail" \
+    EV_AUDIT_RUN_AT="$(iso_now)" \
+    EV_AUDIT_HOST="$(hostname 2>/dev/null || echo unknown)" \
+    EV_AUDIT_SCRIPT_VERSION="scripts/deployment-audit.sh@${self_sha}" \
+    EV_EVIDENCE_DIR="$EVIDENCE_DIR" \
+    EV_T1_JSON="$EV_T1_JSON" EV_T1_FETCHED_AT="$EV_T1_FETCHED_AT" EV_T1_LATENCY_MS="$EV_T1_LATENCY_MS" EV_T1_ERROR="$EV_T1_ERROR" \
+    EV_T2_DIGEST="$EV_T2_DIGEST" EV_T2_PUSHED_AT="$EV_T2_PUSHED_AT" EV_T2_REF="$EV_T2_REF" \
+    EV_T2_FETCHED_AT="$EV_T2_FETCHED_AT" EV_T2_LATENCY_MS="$EV_T2_LATENCY_MS" EV_T2_ERROR="$EV_T2_ERROR" EV_T2_FROM_OVERRIDE="$EV_T2_FROM_OVERRIDE" \
+    EV_T4_JSON="$EV_T4_JSON" EV_T4_FETCHED_AT="$EV_T4_FETCHED_AT" EV_T4_LATENCY_MS="$EV_T4_LATENCY_MS" EV_T4_ERROR="$EV_T4_ERROR" \
+    python3 - <<'PY'
+import json
+import os
+import re
+from datetime import datetime, timezone
+
+
+def env(k):
+    return os.environ.get(k, "")
+
+
+def parse_iso(v):
+    v = (v or "").strip()
+    if not v:
+        return None
+    if v.endswith("Z"):
+        v = v[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+
+def jload(v):
+    v = (v or "").strip()
+    if not v:
+        return {}
+    try:
+        d = json.loads(v)
+    except ValueError:
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def num(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def match(a, b):
+    if not a or not b:
+        return None
+    return a == b
+
+
+img = env("EV_IMAGE_DETAILS")
+# Headline result_state = the most severe finding the OP-1753 machine recorded.
+rank = {"OK": 0, "WARN_STALE_IMAGE": 2, "PAGE_STALE_IMAGE": 3, "PAGE_INTEGRITY": 4, "INCOMPLETE": 5}
+states = re.findall(r"result_state=([A-Z_]+)", img)
+result_state = max(states, key=lambda s: rank.get(s, 1)) if states else "OK"
+
+alerts, seen = [], set()
+for m in re.finditer(r"alert=([A-Za-z]+)(?:\s+severity=([a-z]+))?", img):
+    name, sev = m.group(1), m.group(2)
+    if (name, sev) in seen:
+        continue
+    seen.add((name, sev))
+    a = {"alert": name}
+    if sev:
+        a["severity"] = sev
+    alerts.append(a)
+if result_state == "INCOMPLETE":
+    # §6.4: an INCOMPLETE run fires OmniSightAuditIncomplete (warn), NEVER a
+    # stale-image alert (false-positive avoidance). Strip any stale alert and
+    # surface the incomplete gauge instead.
+    alerts = [a for a in alerts if a["alert"] != "OmniSightStaleImage"]
+    if not any(a["alert"] == "OmniSightAuditIncomplete" for a in alerts):
+        alerts.append({"alert": "OmniSightAuditIncomplete", "severity": "warn"})
+
+t1 = jload(env("EV_T1_JSON"))
+t4 = jload(env("EV_T4_JSON"))
+t3_head = ""
+m = re.search(r"prod current=([0-9a-f]{4,})", env("EV_ALEMBIC_DETAIL"))
+if m:
+    t3_head = m.group(1)
+
+run_at = env("EV_AUDIT_RUN_AT")
+run_dt = parse_iso(run_at) or datetime.now(timezone.utc)
+
+T1 = {
+    "image_sha": t1.get("image_sha"),
+    "build_time": t1.get("build_time"),
+    "git_ref": t1.get("git_ref"),
+    "alembic_head_in_image": t1.get("alembic_head_in_image"),
+    "manifest_path": t1.get("manifest_path"),
+    "fetched_at": env("EV_T1_FETCHED_AT") or None,
+    "fetch_latency_ms": num(env("EV_T1_LATENCY_MS")),
+}
+if env("EV_T1_ERROR"):
+    T1["error"] = env("EV_T1_ERROR")
+
+ref = env("EV_T2_REF")
+registry, tag = ref, "latest"
+if ref and ":" in ref.rsplit("/", 1)[-1]:
+    registry, tag = ref.rsplit(":", 1)
+T2 = {
+    "digest": env("EV_T2_DIGEST") or None,
+    "pushed_at": env("EV_T2_PUSHED_AT") or None,
+    "registry": registry or None,
+    "tag": tag,
+    "fetched_at": env("EV_T2_FETCHED_AT") or None,
+    "fetch_latency_ms": num(env("EV_T2_LATENCY_MS")),
+}
+if env("EV_T2_ERROR"):
+    T2["error"] = env("EV_T2_ERROR")
+
+if t3_head:
+    T3 = {
+        "head": t3_head,
+        "source": "deployment-audit.sh alembic-head row (prod PG)",
+        "fetched_at": run_at or None,
+    }
+else:
+    T3 = {
+        "head": None,
+        "note": "not read by the image-SHA audit (no alembic-head row this run); "
+                "the DB axis is Family 6 / out of area for OP-1761",
+    }
+
+T4 = {
+    "image_sha": t4.get("image_sha"),
+    "source": t1.get("manifest_path") or "/app/MANIFEST.json",
+    "fetched_at": env("EV_T4_FETCHED_AT") or None,
+    "fetch_latency_ms": num(env("EV_T4_LATENCY_MS")),
+}
+if env("EV_T4_ERROR"):
+    T4["error"] = env("EV_T4_ERROR")
+
+t1_sha, t2_dig, t4_sha = t1.get("image_sha"), env("EV_T2_DIGEST"), t4.get("image_sha")
+age = None
+pushed = parse_iso(env("EV_T2_PUSHED_AT"))
+if pushed:
+    age = int((run_dt - pushed).total_seconds())
+    age = max(age, 0)
+comparisons = {
+    "T1_vs_T2_image_sha_match": match(t1_sha, t2_dig),
+    "T1_vs_T2_age_seconds": age,
+    "T1_alembic_vs_T3_match": (match(t1.get("alembic_head_in_image"), t3_head) if t3_head else None),
+    "T1_image_sha_vs_T4_integrity": match(t1_sha, t4_sha),
+}
+
+if env("EV_T2_FROM_OVERRIDE") == "1":
+    method, status = "env-override OMNISIGHT_AUDIT_T2_DIGEST", None
+elif ref:
+    method, status = "docker buildx imagetools inspect %s" % ref, (200 if t2_dig else None)
+else:
+    method, status = None, None
+ghcr = {"method": method, "status_code": status, "response_digest_header": (t2_dig or None)}
+
+record = {
+    "schema_version": 1,
+    "audit_run_at": run_at or run_dt.isoformat().replace("+00:00", "Z"),
+    "audit_host": env("EV_AUDIT_HOST") or None,
+    "audit_script_version": env("EV_AUDIT_SCRIPT_VERSION") or None,
+    "result_state": result_state,
+    "truth_sources": {
+        "T1_running_version": T1,
+        "T2_ghcr_latest": T2,
+        "T3_db_alembic_version": T3,
+        "T4_image_manifest": T4,
+    },
+    "comparisons": comparisons,
+    "alerts_emitted": alerts,
+    "ghcr_query_evidence": ghcr,
+}
+
+evdir = env("EV_EVIDENCE_DIR")
+os.makedirs(evdir, exist_ok=True)
+date = run_dt.strftime("%Y-%m-%d")
+path = os.path.join(evdir, date + ".json")
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(record, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+os.chmod(path, 0o644)
+
+# latest.json — atomic symlink swap (§6.5); fall back to a copy if symlinks unsupported.
+latest = os.path.join(evdir, "latest.json")
+tmp = latest + ".tmp"
+try:
+    if os.path.islink(tmp) or os.path.exists(tmp):
+        os.remove(tmp)
+    os.symlink(date + ".json", tmp)
+    os.replace(tmp, latest)
+except OSError:
+    import shutil
+    shutil.copyfile(path, latest)
+
+# index.json — running list of non-OK runs for quick incident scanning (§6.5).
+index = os.path.join(evdir, "index.json")
+entries = {}
+if os.path.exists(index):
+    try:
+        with open(index, encoding="utf-8") as fh:
+            data = json.load(fh)
+        for e in data.get("non_ok_runs", []):
+            entries[e["date"]] = e
+    except (OSError, ValueError, KeyError, TypeError):
+        entries = {}
+if result_state != "OK":
+    entries[date] = {"date": date, "result_state": result_state, "alerts": [a["alert"] for a in alerts]}
+else:
+    entries.pop(date, None)
+with open(index, "w", encoding="utf-8") as fh:
+    json.dump(
+        {"schema_version": 1, "updated_at": run_at, "non_ok_runs": [entries[k] for k in sorted(entries)]},
+        fh, indent=2, sort_keys=True,
+    )
+    fh.write("\n")
+os.chmod(index, 0o644)
+
+print("EVIDENCE\t%s\t%s" % (path, result_state))
+PY
+  )" || { echo "deployment-audit: §6 evidence writer failed" >&2; return 0; }
+
+  EVIDENCE_PATH="$(printf '%s\n' "$out" | awk -F'\t' '$1=="EVIDENCE"{print $2; exit}')"
+  EVIDENCE_RESULT_STATE="$(printf '%s\n' "$out" | awk -F'\t' '$1=="EVIDENCE"{print $3; exit}')"
+  [ -n "$EVIDENCE_PATH" ] && echo "deployment-audit: §6 evidence written → $EVIDENCE_PATH (result_state=$EVIDENCE_RESULT_STATE)"
+}
+
+# ── family ⑤ §8.4 Discord gate (OP-1761) ──────────────────────────────────────
+# §8.4: the Discord post on drift is OWNED by 31.C-Integration-external; this
+# timer MUST consume the 31.C-provided client and MUST NOT add a sibling webhook
+# config of its own. Until 31.C ships, the step is gated OFF by default
+# (OMNISIGHT_FAMILY5_DISCORD_ENABLED=0). The script is detect+report only (§5.4):
+# it never redeploys, and an INCOMPLETE/OK run never posts.
+maybe_post_discord() {  # result_state evidence_path
+  local state="$1" path="$2"
+  if [ "${OMNISIGHT_FAMILY5_DISCORD_ENABLED:-0}" != "1" ]; then
+    echo "deployment-audit: Discord gate disabled (OMNISIGHT_FAMILY5_DISCORD_ENABLED=0, §8.4) — not posting" >&2
+    return 0
+  fi
+  case "$state" in
+    WARN_STALE_IMAGE|PAGE_STALE_IMAGE|PAGE_INTEGRITY) : ;;
+    *) echo "deployment-audit: Discord enabled but result_state=$state is not a drift state — nothing to post (§5.4/§6.4)" >&2; return 0 ;;
+  esac
+  local client="${OMNISIGHT_FAMILY5_DISCORD_CLIENT:-}"
+  if [ -z "$client" ] || ! have "$client"; then
+    echo "deployment-audit: Discord enabled but 31.C client (OMNISIGHT_FAMILY5_DISCORD_CLIENT) unavailable — skipping; no sibling webhook is created here (§8.4)" >&2
+    return 0
+  fi
+  "$client" --evidence "$path" --state "$state" \
+    || echo "deployment-audit: 31.C Discord client exited non-zero (detect+report only, ignoring)" >&2
+}
+
 # ── built-in expected-live manifest (AUDIT-23 §3 rows that should be live) ────
 # Override by passing a manifest path as $1. Edit per host (the bridge units
 # live on the sora-bridge host, not the prod host).
@@ -662,6 +997,13 @@ main() {
   red=$( printf '%s\n' "${ROWS[@]}" | grep -c '^RED|'  || true)
   warn=$(printf '%s\n' "${ROWS[@]}" | grep -c '^WARN|' || true)
   echo "summary: ${ok} green · ${red} red · ${warn} warn · ${FAIL} red-with-expected=yes (fatal)"
+
+  # OP-1761: write the family ⑤ §6 forensic evidence file for the image-SHA
+  # state machine, then run the §8.4 Discord gate (off by default). Additive —
+  # does not change the exit semantics below.
+  emit_evidence_file
+  [ "$EV_HAVE_IMAGE_SHA" = "1" ] && maybe_post_discord "$EVIDENCE_RESULT_STATE" "$EVIDENCE_PATH"
+
   if [ "$FAIL" -gt 0 ]; then
     append_jsonl "FAIL" "$ok" "$red" "$warn"
     echo "RESULT: FAIL — $FAIL expected-live artefact(s) not deployed. See DETAIL column; remediation in docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md §5."
