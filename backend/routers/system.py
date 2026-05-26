@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 import yaml
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from backend import auth as _auth
@@ -61,6 +62,19 @@ router = APIRouter(
     tags=["runtime"],
     dependencies=[Depends(_auth.current_user)],
 )
+
+# Public image-surfacing router (Family ⑤ §3 — v2-⑤-1bc / OP-1745).
+#
+# DELIBERATELY separate from ``router`` above: ``GET /version`` is a
+# PUBLIC, no-auth, root-mounted surface per the §3.1 contract
+# (docs/sprint-s12/2026-05-16-v2-family5-image-surfacing-contract.md).
+# It cannot live on the ``/runtime`` router because that router carries
+# a ``prefix="/runtime"`` (→ ``/api/v1/runtime/...``) AND a router-level
+# ``Depends(_auth.current_user)`` gate — both of which would break the
+# "operator curls /version" + "no auth/session" requirements. Mounted at
+# the server root in backend.main next to the health probe_router, the
+# same way ``/livez`` / ``/healthz`` are exposed.
+version_router = APIRouter(tags=["version"])
 
 # Reusable admin gate for mutating / privileged endpoints.
 _REQUIRE_ADMIN = [Depends(_auth.require_role("admin"))]
@@ -642,6 +656,67 @@ def _load_image_manifest_version_fields(path: Path | None = None) -> dict[str, s
         key: value
         for key in _IMAGE_MANIFEST_VERSION_FIELDS
         if isinstance((value := raw.get(key)), str)
+    }
+
+
+_MANIFEST_UNAVAILABLE_REMEDIATION = (
+    "Image was built without MANIFEST.json. Rebuild via "
+    "scripts/bake-image-manifest.sh as part of Dockerfile.backend; see "
+    "docs/sprint-s12/2026-05-16-v2-family5-image-surfacing-contract.md §4."
+)
+_MANIFEST_INVALID_REMEDIATION = (
+    "MANIFEST.json is present but missing one or more required image "
+    "identity fields. Re-bake via scripts/bake-image-manifest.sh so the "
+    "manifest carries the full §4.2 schema; see "
+    "docs/sprint-s12/2026-05-16-v2-family5-image-surfacing-contract.md §4."
+)
+
+
+@version_router.get("/version")
+async def get_version():
+    """Public image-surfacing endpoint (Family ⑤ §3.2 / §3.3).
+
+    Returns the immutable image identity baked into ``/app/MANIFEST.json``
+    so external auditors (deployment-audit.sh, the Family ⑩ runner) can
+    reconcile "what is running now" against GHCR + the DB. PUBLIC by
+    contract (§3.1): no session, no token — the read is reachable even
+    under ``OMNISIGHT_AUTH_BASELINE_MODE=enforce`` via the allowlist.
+
+    503 ``manifest_unavailable`` when the manifest is missing or
+    unparseable (§3.3); 503 ``manifest_invalid`` when it parses but is
+    missing a required field (§3.5 case 4). Reuses the existing
+    ``_load_image_manifest_version_fields`` reader unchanged.
+    """
+    fields = _load_image_manifest_version_fields()
+    if not fields:
+        # Missing file, unreadable, malformed JSON, or non-object — all
+        # collapse to {} in the reader. A missing manifest is a
+        # build-time defect, surfaced as 503 so the audit script flags
+        # it rather than silently comparing empty identity fields.
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "manifest_unavailable",
+                "remediation": _MANIFEST_UNAVAILABLE_REMEDIATION,
+            },
+        )
+    missing = [f for f in _IMAGE_MANIFEST_VERSION_FIELDS if f not in fields]
+    if missing:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "manifest_invalid",
+                "remediation": _MANIFEST_INVALID_REMEDIATION,
+            },
+        )
+    # §3.2 wire contract: exactly the four baked identity fields plus the
+    # literal manifest_path. No extra fields.
+    return {
+        "image_sha": fields["image_sha"],
+        "build_time": fields["build_time"],
+        "git_ref": fields["git_ref"],
+        "alembic_head_in_image": fields["alembic_head_in_image"],
+        "manifest_path": str(_IMAGE_MANIFEST_PATH),
     }
 
 

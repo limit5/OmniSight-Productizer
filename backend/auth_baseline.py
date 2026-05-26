@@ -98,6 +98,16 @@ AUTH_BASELINE_ALLOWLIST: Final[tuple[str, ...]] = (
     "/api/v1/healthz",
     "/api/v1/health",           # legacy alias for /livez
 
+    # ─── Image-surfacing /version (Family ⑤ §3, OP-1745) ──────
+    # Public by contract: external auditors (deployment-audit.sh, a
+    # future Watchtower-style sidecar, the Family ⑩ runner) read the
+    # baked image identity from OUTSIDE the trust boundary, with no
+    # session. Leaking the running image_sha / build_time / git_ref is
+    # not a secret worth gating — it is the whole point of the endpoint.
+    # Root-mounted only (system.version_router), so the bare prefix
+    # suffices; no /api/v1 alias exists.
+    "/version",
+
     # ─── Prometheus exposition ────────────────────────────────
     # Secondary gate exists: M7 bearer-token check fires if
     # OMNISIGHT_METRICS_TOKEN is set. Also not externally
