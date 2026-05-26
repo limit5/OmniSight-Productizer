@@ -36,6 +36,7 @@ from typing import Callable, Iterable, Optional
 
 from backend.config import settings
 from backend.agents import (
+    capability_registry,
     feature_dup_detector,
     model_deconfliction,
     provider_orchestrator,
@@ -394,6 +395,22 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
         refused, refusal_label = _runner_refuses_pickup(labels)
         if refused:
             _emit_runner_refusal_audit(ticket_key, refusal_label)
+            continue
+
+        quota_denial = capability_registry.quota_health_denial_from_labels(labels)
+        if quota_denial is not None:
+            log.info(
+                "runner_quota_health_refusal %s",
+                json.dumps(
+                    {
+                        "event": "runner_quota_health_refusal",
+                        "ticket_key": ticket_key,
+                        "reason": quota_denial,
+                        "runner_instance": _instance_id_from_env(),
+                    },
+                    sort_keys=True,
+                ),
+            )
             continue
 
         decision = model_deconfliction.should_pickup_after_prior_failure(
@@ -3958,6 +3975,10 @@ def pre_pickup_ok(
     )
     if bridge_reason is not None:
         return False, bridge_reason
+
+    quota_denial = capability_registry.quota_health_denial_from_labels(snapshot.labels)
+    if quota_denial is not None:
+        return False, quota_denial
 
     provider_decision = provider_orchestrator.pre_pickup_provider_decision(
         _provider_task_for_pickup(snapshot, client.agent_class)

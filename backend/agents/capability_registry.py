@@ -5,13 +5,15 @@ import inspect
 import json
 import logging
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
-from backend.agents import capability_matrix
+from backend.agents import capability_matrix, provider_quota_tracker
+from backend.agents.provider_quota_tracker import QuotaState
 
 
 LOG = logging.getLogger(__name__)
 
+QUOTA_EXHAUSTED_HEALTH_STATE = "quota-exhausted"
 TIER_ORDER: Mapping[str, int] = {"S": 0, "M": 1, "L": 2, "X": 3}
 AGENT_CLASS_PROFILE: Mapping[str, tuple[str, str]] = {
     "subscription-codex": ("openai-subscription", "<unknown>"),
@@ -121,6 +123,58 @@ def profile_from_row(row: Mapping[str, Any] | Any) -> CapabilityProfile:
     )
 
 
+def effective_health_state(
+    profile: CapabilityProfile,
+    *,
+    quota_state_getter: Callable[[str], QuotaState] | None = None,
+) -> str:
+    """Return profile health with provider quota exhaustion folded in."""
+    if profile.health_state in {"down", QUOTA_EXHAUSTED_HEALTH_STATE}:
+        return profile.health_state
+    if quota_state_getter is None:
+        quota_state_getter = provider_quota_tracker.get_quota_state
+    try:
+        quota_state = quota_state_getter(profile.provider)
+    except Exception as exc:  # noqa: BLE001 - quota telemetry must fail open
+        LOG.warning(
+            "capability_registry.quota_state_unavailable provider=%s model=%s err=%s",
+            profile.provider,
+            profile.model,
+            exc,
+        )
+        return profile.health_state
+    if provider_quota_tracker.quota_state_exhausted(quota_state):
+        return QUOTA_EXHAUSTED_HEALTH_STATE
+    return profile.health_state
+
+
+def quota_health_denial_from_labels(
+    labels: Iterable[str],
+    *,
+    quota_state_getter: Callable[[str], QuotaState] | None = None,
+) -> str | None:
+    """Return a pickup denial reason when legacy class labels map to exhausted quota."""
+    profile_key = profile_key_from_labels(labels)
+    if profile_key is None:
+        return None
+    provider, model = profile_key
+    profile = CapabilityProfile(
+        profile_id=f"{provider}:{model}",
+        provider=provider,
+        model=model,
+        tools=frozenset(),
+        max_tier="X",
+        cost_mode="unknown",
+        health_state="healthy",
+    )
+    if (
+        effective_health_state(profile, quota_state_getter=quota_state_getter)
+        != QUOTA_EXHAUSTED_HEALTH_STATE
+    ):
+        return None
+    return f"capability_profile.health:{QUOTA_EXHAUSTED_HEALTH_STATE}:{provider}"
+
+
 async def resolve(
     matrix: capability_matrix.CapabilityMatrix,
     *,
@@ -193,14 +247,22 @@ def _enforce_profile(profile: CapabilityProfile, tier: str) -> None:
             profile_id=profile.profile_id,
             reason=f"tier {tier!r} exceeds max_tier {profile.max_tier!r}",
         )
-    if profile.health_state == "down":
+    health_state = effective_health_state(profile)
+    if health_state == "down":
         raise CapabilityRegistryDenied(
             provider=profile.provider,
             model=profile.model,
             profile_id=profile.profile_id,
             reason="health_state is down",
         )
-    if profile.health_state == "degraded":
+    if health_state == QUOTA_EXHAUSTED_HEALTH_STATE:
+        raise CapabilityRegistryDenied(
+            provider=profile.provider,
+            model=profile.model,
+            profile_id=profile.profile_id,
+            reason=f"health_state is {QUOTA_EXHAUSTED_HEALTH_STATE}",
+        )
+    if health_state == "degraded":
         LOG.warning(
             "capability_registry.degraded_profile provider=%s model=%s profile_id=%s",
             profile.provider,
@@ -228,8 +290,11 @@ __all__ = [
     "CapabilityRegistryDBError",
     "CapabilityRegistryDenied",
     "CapabilityRegistryError",
+    "QUOTA_EXHAUSTED_HEALTH_STATE",
+    "effective_health_state",
     "lookup_active_profile",
     "profile_from_row",
     "profile_key_from_labels",
+    "quota_health_denial_from_labels",
     "resolve",
 ]
