@@ -47,6 +47,15 @@ DRY_RUN=false
 ALEMBIC_MODE="${OMNISIGHT_ALEMBIC_MODE:-apply}"
 HEALTH_RETRIES=30
 HEALTH_INTERVAL=3
+# OP-1740: the pre-deploy backup is fail-CLOSED — a missing/non-exec backup
+# helper aborts the deploy. --skip-backup is the only sanctioned override.
+SKIP_BACKUP=false
+# OP-1740 (F6-residual): the backup passphrase (OMNISIGHT_BACKUP_PASSPHRASE)
+# is NOT in .env — it lives in this DR env file that the backup timers source.
+# deploy-prod.sh sources it (if present) before the backup step so an
+# interactive operator deploy doesn't hit "passphrase required" and have to
+# hunt for it (hit live during v0.6.2). Path is overridable for tests.
+BACKUP_DR_ENV="${OMNISIGHT_BACKUP_DR_ENV:-/etc/omnisight/backup-dr.env}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -63,11 +72,13 @@ for arg in "$@"; do
         --backend-digest=*) BACKEND_DIGEST="${arg#*=}" ;;
         --frontend-digest=*) FRONTEND_DIGEST="${arg#*=}" ;;
         --skip-build) SKIP_BUILD=true ;;
+        --skip-backup) SKIP_BACKUP=true ;;
         --dry-run) DRY_RUN=true ;;
         --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
         --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
         --help|-h)
-            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--skip-build] [--dry-run] [--alembic-mode=apply|pg-clone]"
+            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--skip-build] [--skip-backup] [--dry-run] [--alembic-mode=apply|pg-clone]"
+            echo "       (--skip-backup deploys WITHOUT a pre-deploy backup — NOT recommended; the backup is otherwise fail-closed.)"
             echo "       (--digest=sha256:<64hex> is a back-compat alias for --backend-digest; pass both --backend-digest and --frontend-digest to pin both images by digest)"
             echo "       RT-20 (image-tag-only): --tag/v* git-tag deploys are retired — deploy the promoted image's validated digest instead (the line above)."
             exit 0 ;;
@@ -361,15 +372,43 @@ fi
 # H2 audit (2026-04-19): rolling deploys can still roll BACKWARDS in
 # data integrity if a migration blows up or a code change panics on
 # existing rows. The `scripts/backup_prod_db.sh` helper takes a WAL-
-# safe online snapshot + optional AES-256-GCM encryption (when
-# OMNISIGHT_BACKUP_PASSPHRASE is set). Skipped in --dry-run.
+# safe online snapshot + mandatory AES-256 encryption (it fails closed
+# when OMNISIGHT_BACKUP_PASSPHRASE is unset). Skipped in --dry-run.
+#
+# OP-1740: this step is fail-CLOSED. Two prior failure modes are fixed:
+#   F6-residual — the passphrase lives in $BACKUP_DR_ENV (the backup
+#     timers source it), NOT in .env, so an interactive operator deploy
+#     hit "passphrase required" and had to hunt for it (live during
+#     v0.6.2). Source that file (if present) here so the passphrase is
+#     available; we NEVER print/echo it.
+#   F15 — the missing/non-exec backup-script branch used to warn and
+#     proceed WITHOUT a backup, so the "pg_dump first" rule could be
+#     silently skipped. It now aborts (err) unless the operator passes
+#     an explicit --skip-backup.
 if [ "$DRY_RUN" = false ]; then
     step "Step 1b: Pre-deploy backup"
-    if [ -x scripts/backup_prod_db.sh ]; then
-        scripts/backup_prod_db.sh --label pre-deploy --prune 20 || \
-            err "pre-deploy backup failed — aborting to protect data. Re-run after investigating."
+    if [ "$SKIP_BACKUP" = true ]; then
+        warn "--skip-backup passed — SKIPPING pre-deploy backup (operator override; NOT recommended)"
     else
-        warn "scripts/backup_prod_db.sh missing — proceeding WITHOUT backup"
+        # F6-residual: make the backup passphrase available without the
+        # operator hunting for it. Export sourced vars so they reach the
+        # backup helper (a child process), then restore allexport state.
+        if [ -f "$BACKUP_DR_ENV" ]; then
+            set -a
+            # shellcheck disable=SC1090
+            . "$BACKUP_DR_ENV"
+            set +a
+            log "Sourced backup env from $BACKUP_DR_ENV (passphrase available if defined there; never printed)"
+        else
+            warn "backup env $BACKUP_DR_ENV not found; relying on OMNISIGHT_BACKUP_PASSPHRASE already in the shell"
+        fi
+        # F15: fail CLOSED when the backup helper is missing/non-executable.
+        if [ -x scripts/backup_prod_db.sh ]; then
+            scripts/backup_prod_db.sh --label pre-deploy --prune 20 || \
+                err "pre-deploy backup failed — aborting to protect data. Re-run after investigating."
+        else
+            err "scripts/backup_prod_db.sh missing or non-executable — aborting (fail-closed, OP-1740). Restore the backup helper, or pass --skip-backup to deploy WITHOUT a pre-deploy backup (NOT recommended)."
+        fi
     fi
 fi
 

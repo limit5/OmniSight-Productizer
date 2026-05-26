@@ -63,6 +63,39 @@ the backend image against the clone, then drops the clone.
 Use `--dry-run --alembic-mode=pg-clone` to print the clone plan without
 creating or dropping any database.
 
+## Pre-deploy Backup (fail-closed)
+
+Before any replica restarts, `deploy-prod.sh` takes a WAL-safe online
+backup via `scripts/backup_prod_db.sh` (Step 1b). This step is
+**fail-closed (OP-1740)**: if the backup helper is missing or
+non-executable, or the backup itself fails, the deploy **aborts** — it
+no longer warns and proceeds without a backup. Skipped only in
+`--dry-run`.
+
+### Backup passphrase source
+
+`backup_prod_db.sh` encrypts the dump with AES-256 and **requires**
+`OMNISIGHT_BACKUP_PASSPHRASE` (it fails closed when unset). That
+passphrase is **not** in `.env` — it lives in
+`/etc/omnisight/backup-dr.env` on the prod DB host, the same file the
+backup systemd timers source (see
+`docs/operations/backup-dr-runbook.md` §2). `deploy-prod.sh` sources
+that file (if present) before the backup step, so an interactive
+operator deploy gets the passphrase without hunting for it. The
+passphrase is never printed or echoed.
+
+Override the path for testing/non-standard hosts with
+`OMNISIGHT_BACKUP_DR_ENV=/path/to/env`. If the file is absent the deploy
+falls back to whatever `OMNISIGHT_BACKUP_PASSPHRASE` is already exported
+in the operator shell.
+
+### Skipping the backup
+
+`--skip-backup` is the only sanctioned way to deploy without a
+pre-deploy backup. It is logged loudly and is **not recommended** —
+reserve it for situations where a backup is provably redundant (e.g. an
+immediately-prior manual snapshot).
+
 ## Image Tag Propagation
 
 `OMNISIGHT_IMAGE_TAG` must be visible to Docker Compose and the SLO
