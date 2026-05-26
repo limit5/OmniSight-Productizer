@@ -18,9 +18,14 @@
 #   DEPLOYMENT_AUDIT_USER_SYSTEMD=0 scripts/deployment-audit.sh   # use system bus
 #   DEPLOYMENT_AUDIT_JSONL_LOG=/path/audit.jsonl scripts/deployment-audit.sh
 #   OMNISIGHT_DEPLOYED_TAG=v1.2.0 scripts/deployment-audit.sh     # pin the deployed
-#                      release ref for the alembic-head `auto` comparison (else the
-#                      develop trunk head is used; OMNISIGHT_AUDIT_DEPLOY_REF /
-#                      OMNISIGHT_AUDIT_DEVELOP_REF override the ref directly)
+#                      release ref for the alembic-head `auto` comparison. When unset
+#                      it now DEFAULTS to the last promoted release recorded in the
+#                      committed promotion ledger (audit/image_promotion_audit.jsonl,
+#                      OP-1738) so the alembic row is a real pinned-release assertion
+#                      rather than the informational develop-trunk fallback. If neither
+#                      a tag nor a ledger is resolvable the develop trunk head is used
+#                      (informational only); OMNISIGHT_AUDIT_DEPLOY_REF /
+#                      OMNISIGHT_AUDIT_DEVELOP_REF still override the ref directly.
 #
 # Manifest format — tab-separated, `#` comments and blank lines ignored:
 #   <kind>  <name>  <expected>  <ticket>  [note]
@@ -56,6 +61,43 @@ have() { command -v "$1" >/dev/null 2>&1; }
 looks_prod_value() {
   local val="$1"
   [ -n "$val" ] && ! echo "$val" | grep -qiE 'sqlite|localhost|127\.0\.0\.1|placeholder|changeme'
+}
+
+# ── deployed-release pin from the promotion ledger (OP-1738) ──────────────────
+# The alembic-head `auto` check asserts prod's applied migration against the
+# DEPLOYED release head computed from git. Historically OMNISIGHT_DEPLOYED_TAG
+# was never set in the audit env, so the check always fell back to origin/develop
+# = informational and NEVER asserted prod was actually at the promoted release.
+# Default it from the last `image_bundle_promoted` row of the committed promotion
+# ledger (OP-1732 landed that ledger on develop) so the audit pins against the
+# real shipped tag. An explicit env value — or OMNISIGHT_AUDIT_DEPLOY_REF — still
+# wins, and an absent/empty ledger leaves the develop fallback (informational,
+# never RED) untouched per OP-1701.
+deployed_tag_from_ledger() {
+  local ledger="$REPO/audit/image_promotion_audit.jsonl"
+  [ -r "$ledger" ] || return 0
+  have python3 || return 0
+  python3 - "$ledger" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+tag = ""
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("event") == "image_bundle_promoted" and rec.get("version"):
+                tag = str(rec["version"])  # last promote wins (ledger is append-only)
+except OSError:
+    pass
+print(tag)
+PY
 }
 
 # ── results accumulator ───────────────────────────────────────────────────────
@@ -334,14 +376,14 @@ systemd-timer     auto-promote-develop.timer                                    
 # Probing it as a systemd-unit always emitted a (non-fatal) false RED "unit not installed",
 # so the row is dropped. Was: systemd-unit  auto-promote-main.service  n-a  OP-766
 env-var           OMNISIGHT_DATABASE_URL@auto-promote-develop.service             n-a       OP-964    auto-promote-develop retired (RT-01) — env-var no longer expected
-systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    REAL gap: control-plane stranded on main@rc1; re-point off main deferred to cutover
+systemd-timer     sora-bridge-sync.timer                                          yes       OP-798    keeps the sora-bridge control-plane checkout fast-forwarded to origin/develop (re-pointed off main@rc1 per OP-1608, landed 2026-05-22)
 systemd-unit      pipeline-coordinator.service                                    yes       OP-1547   coordinator daemon (ADR-0021) — must be live
 systemd-unit      pipeline-coordinator-watchdog.service                           yes       OP-1547   coordinator liveness watchdog — must be live
 systemd-unit      omnisight-slo-monitor.service                                   yes       OP-1636   SLO auto-rollback monitor (OP-883) — activated 2026-05-23 (F4); migration-safe rollback (OP-1641, fail-closed)
 container         staging@http://localhost:8010/healthz                           yes       OP-927    AUDIT-19 staging stood up 2026-05-22 (project omnisight-staging, repo compose)
 systemd-timer     staging-gate-canary.timer                                       gated     OP-965    AUDIT-17 — active (green) since staging stood up
 systemd-timer     staging-gate-smoke.timer                                        gated     OP-965    AUDIT-17 — red until bucket-D digest-resolution lands (OP-1607)
-alembic-head      auto                                                            n-a       OP-964    informational — prod PG vs deployed-release/develop head from git, NOT the working tree (OP-1701); /readyz authoritatively gates image-vs-DB drift (prod release tag lags develop by design)
+alembic-head      auto                                                            yes       OP-1738   pinned-release assertion — prod PG applied head vs the DEPLOYED release head from git (OMNISIGHT_DEPLOYED_TAG, defaulted from the promotion ledger; OP-1701 git-ref logic, NOT the working tree). RED only when prod LAGS a resolvable pinned tag; if no tag is set/resolvable it falls back to origin/develop = informational (never RED). /readyz remains the authoritative image-vs-DB drift gate
 EOF
 }
 
@@ -369,7 +411,21 @@ main() {
     manifest_src="$(builtin_manifest)"
   fi
 
+  # Default the deployed-release pin from the committed promotion ledger so the
+  # alembic-head `auto` row asserts against the real shipped tag (OP-1738). An
+  # explicit OMNISIGHT_DEPLOYED_TAG / OMNISIGHT_AUDIT_DEPLOY_REF always wins.
+  if [ -z "${OMNISIGHT_DEPLOYED_TAG:-}" ] && [ -z "${OMNISIGHT_AUDIT_DEPLOY_REF:-}" ]; then
+    local ledger_tag; ledger_tag="$(deployed_tag_from_ledger)"
+    [ -n "$ledger_tag" ] && export OMNISIGHT_DEPLOYED_TAG="$ledger_tag"
+  fi
+
   echo "deployment-audit (OP-976 / AUDIT-23) — host=$(hostname) user=$USER bus=$([ "$USE_USER_BUS" = 1 ] && echo --user || echo system) date=$(date -u +%FT%TZ)"
+  # Self-identify the running copy + its git ref so a run from the STALE main
+  # checkout (vs the canonical develop-tip sora-bridge copy the service runs) is
+  # immediately visible instead of a silent foot-gun (OP-1738). One canonical
+  # copy is expected; remove/symlink any stale main checkout to it.
+  local self_ref; self_ref="$(git -C "$REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo '?')"
+  echo "running: ${BASH_SOURCE[0]} (repo=$REPO ref=$self_ref deployed_tag=${OMNISIGHT_DEPLOYED_TAG:-<none>})"
   echo
 
   check_linger
