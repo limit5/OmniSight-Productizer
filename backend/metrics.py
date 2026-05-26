@@ -776,6 +776,24 @@ if _AVAILABLE:
         "Alembic drift probe collection failures",
         registry=REGISTRY,
     )
+    # Family ⑥ §4.2 — UNKNOWN is its own gauge, not a fourth value of
+    # omnisight_alembic_drift, so `omnisight_alembic_drift == 2` PromQL
+    # stays clean. 1 = drift could not be computed (MANIFEST missing,
+    # alembic CLI absent, or DB unreachable from the collector); 0 otherwise.
+    alembic_drift_unknown = Gauge(
+        "omnisight_alembic_drift_unknown",
+        "1 when image-vs-DB alembic drift cannot be computed, 0 otherwise",
+        registry=REGISTRY,
+    )
+    # Family ⑥ §4.4 — freshness: unix timestamp of the last *successful*
+    # collection. The AlertBridge freshness rule fires on
+    # `now() - last_collection_ts > 5m`, decoupling "drift state" from
+    # "we know the drift state". Not updated on a failed collection.
+    alembic_drift_last_collection_ts = Gauge(
+        "omnisight_alembic_drift_last_collection_ts",
+        "Unix timestamp of the last successful alembic drift collection",
+        registry=REGISTRY,
+    )
 
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics.
     # Cardinality is bucketed via ``backend.metrics_labels.bucket_*``
@@ -991,6 +1009,8 @@ else:
     readyz_migrations_pending = _NoOp()  # type: ignore
     alembic_drift = _NoOp()  # type: ignore
     alembic_drift_probe_errors_total = _NoOp()  # type: ignore
+    alembic_drift_unknown = _NoOp()  # type: ignore
+    alembic_drift_last_collection_ts = _NoOp()  # type: ignore
     # Y9 #285 row 4 — billing metrics with (tenant, project, product_line)
     billing_llm_calls_total = _NoOp()  # type: ignore
     billing_llm_input_tokens_total = _NoOp()  # type: ignore
@@ -1502,6 +1522,7 @@ def reset_for_tests() -> None:
     global rolling_deploy_5xx_rate, replica_lag_seconds, readyz_latency_seconds
     global readyz_migrations_pending
     global alembic_drift, alembic_drift_probe_errors_total
+    global alembic_drift_unknown, alembic_drift_last_collection_ts
     backend_instance_up = Gauge(
         "omnisight_backend_instance_up",
         "1 when this backend replica is serving traffic, 0 when draining/down",
@@ -1543,6 +1564,16 @@ def reset_for_tests() -> None:
     alembic_drift_probe_errors_total = Counter(
         "omnisight_alembic_drift_probe_errors_total",
         "Alembic drift probe collection failures",
+        registry=REGISTRY,
+    )
+    alembic_drift_unknown = Gauge(
+        "omnisight_alembic_drift_unknown",
+        "1 when image-vs-DB alembic drift cannot be computed, 0 otherwise",
+        registry=REGISTRY,
+    )
+    alembic_drift_last_collection_ts = Gauge(
+        "omnisight_alembic_drift_last_collection_ts",
+        "Unix timestamp of the last successful alembic drift collection",
         registry=REGISTRY,
     )
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics
