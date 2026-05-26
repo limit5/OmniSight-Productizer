@@ -1,4 +1,9 @@
-"""OP-1160 — periodic ai-core availability probe."""
+"""OP-1160 — periodic ai-core availability probe.
+
+OP-1749 (Family ⑨ §2.3/§3.4): adds the ``AUX_SERVICE_AVAILABLE`` per-service
+availability dict and replaces the consecutive-count flap damper with a
+3-of-5 sliding-window flap that boots fail-closed (unavailable until proven).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +11,7 @@ import logging
 import os
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 
 import httpx
@@ -15,11 +21,17 @@ from backend import metrics
 DEFAULT_PROBE_URL = "http://ai-core:8080/health"
 DEFAULT_INTERVAL_S = 60.0
 DEFAULT_TIMEOUT_S = 5.0
+DEFAULT_FLAP_WINDOW = 5
 DEFAULT_FLAP_THRESHOLD = 3
 LONG_OUTAGE_S = 24 * 60 * 60
 SERVICE_LABEL = "ai_core"
 
+# Fail-closed bootstrap (§3.4): every aux service starts unavailable until a
+# probe accumulates enough agreeing observations to flip it up. The scalar
+# ``AI_CORE_AVAILABLE`` is retained for the ⑨-2bc llm fallback-chain consumer;
+# ``AUX_SERVICE_AVAILABLE`` is the per-service view keyed by metric label.
 AI_CORE_AVAILABLE = False
+AUX_SERVICE_AVAILABLE: dict[str, bool] = {SERVICE_LABEL: False}
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +68,7 @@ class AiCoreProbe:
         probe_url: str | None = None,
         interval_s: float | None = None,
         timeout_s: float = DEFAULT_TIMEOUT_S,
+        flap_window: int = DEFAULT_FLAP_WINDOW,
         flap_threshold: int = DEFAULT_FLAP_THRESHOLD,
         http_get: HttpGet | None = None,
         clock: Clock | None = None,
@@ -72,13 +85,16 @@ class AiCoreProbe:
             else interval_s
         )
         self.timeout_s = timeout_s
-        self.flap_threshold = max(1, int(flap_threshold))
+        self.flap_window = max(1, int(flap_window))
+        self.flap_threshold = min(self.flap_window, max(1, int(flap_threshold)))
         self._http_get = http_get or _default_http_get
         self._clock = clock or time.time
         self._sleeper = sleeper or time.sleep
         self._available = bool(initial_available)
-        self._candidate: bool | None = None
-        self._candidate_count = 0
+        # 3-of-5 sliding window (§3.4): a flip requires ``flap_threshold``
+        # observations of the opposing state within the last ``flap_window``
+        # probes, so a single transient blip cannot move the stable flag.
+        self._window: deque[bool] = deque(maxlen=self.flap_window)
         self._unavailable_since: float | None = None
         self._long_outage_logged = False
         self._publish_state()
@@ -109,31 +125,23 @@ class AiCoreProbe:
         return status_code == 200
 
     def _apply_observation(self, observed_available: bool) -> None:
-        if observed_available == self._available:
-            self._candidate = None
-            self._candidate_count = 0
-            self._track_unavailability()
-            return
-
-        if observed_available == self._candidate:
-            self._candidate_count += 1
-        else:
-            self._candidate = observed_available
-            self._candidate_count = 1
-
-        if self._candidate_count >= self.flap_threshold:
+        self._window.append(observed_available)
+        opposing = not self._available
+        agreeing = sum(1 for observed in self._window if observed == opposing)
+        if agreeing >= self.flap_threshold:
             previous = self._available
-            self._available = observed_available
-            self._candidate = None
-            self._candidate_count = 0
+            self._available = opposing
+            # Reset the window on flip so the freshly-adopted state must
+            # re-accumulate evidence before it can be reversed again.
+            self._window.clear()
             self._set_global(self._available)
-            self._track_unavailability()
             logger.info(
                 "aux_service.state_change service=%s previous=%s current=%s",
                 SERVICE_LABEL,
                 previous,
                 self._available,
             )
+        self._track_unavailability()
 
     def _track_unavailability(self) -> None:
         if self._available:
@@ -165,13 +173,16 @@ class AiCoreProbe:
     def _set_global(value: bool) -> None:
         global AI_CORE_AVAILABLE
         AI_CORE_AVAILABLE = bool(value)
+        AUX_SERVICE_AVAILABLE[SERVICE_LABEL] = bool(value)
 
 
 __all__ = [
     "AI_CORE_AVAILABLE",
+    "AUX_SERVICE_AVAILABLE",
     "AiCoreProbe",
     "DEFAULT_PROBE_URL",
     "DEFAULT_INTERVAL_S",
     "DEFAULT_TIMEOUT_S",
+    "DEFAULT_FLAP_WINDOW",
     "DEFAULT_FLAP_THRESHOLD",
 ]
