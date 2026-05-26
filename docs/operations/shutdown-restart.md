@@ -244,6 +244,13 @@ Before relying on this flow in prod, confirm:
 
 ## 7. Related
 
+- `docs/operations/post-reboot-runbook.md` — what to do **after** a
+  reboot you did not drive (Windows-side forced shutdown). Covers the
+  ~10 s WSL2 `RB_POWER_OFF` limit, the mandatory Event Viewer
+  (Event ID 1074/1076/6008) check — the productizer cannot detect a
+  forced shutdown from inside WSL2 — and the Family ⑤/⑥ post-reboot
+  alert checklist. The graceful flow in this document only applies to
+  *cooperative* shutdowns; a Windows reboot bypasses it.
 - `docs/operations/deployment.md` — full install / first-boot guide.
 - `docs/ops/blue_green_runbook.md` — blue-green cutover deep dive.
 - `scripts/deploy.sh` — rolling + blue-green + rollback primitives.
