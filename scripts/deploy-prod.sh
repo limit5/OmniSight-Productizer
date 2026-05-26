@@ -425,13 +425,56 @@ fi
 # OP-772: expose current/previous image tags to the persistent SLO monitor
 # before any replica is restarted. The monitor uses the previous tag as
 # its rollback target if three consecutive 30 s SLO windows breach.
-CURRENT_IMAGE_TAG="${OMNISIGHT_IMAGE_TAG:-${TAG:-${BACKEND_DIGEST:-$FRONTEND_DIGEST}}}"
-PREVIOUS_IMAGE_TAG="$(grep -E '^OMNISIGHT_IMAGE_TAG=' .env 2>/dev/null | tail -1 | cut -d= -f2- || true)"
-if [ -n "${PREVIOUS_IMAGE_TAG:-}" ] && [ "$PREVIOUS_IMAGE_TAG" != "$CURRENT_IMAGE_TAG" ]; then
-    _upsert_env "OMNISIGHT_PREVIOUS_IMAGE_TAG" "$PREVIOUS_IMAGE_TAG"
+#
+# OP-1742 (HIGH): OMNISIGHT_IMAGE_TAG must stay TAG-SHAPED in .env. The real
+# deploy identity of a digest deploy is already pinned above via
+# OMNISIGHT_{BACKEND,FRONTEND}_IMAGE_REF (= <registry>/<image>@sha256:<digest>),
+# which docker-compose.prod.yml consumes; OMNISIGHT_IMAGE_TAG is only the
+# mutable :tag fallback the compose uses for an un-pinned image. The OP-1717
+# ExecStartPre boot-guard on omnisight-compose-prod.service rejects
+# ^OMNISIGHT_IMAGE_TAG=(sha256:|@) (added to catch the v0.6.2 digest-as-tag
+# landmine), so a digest written into OMNISIGHT_IMAGE_TAG fail-CLOSES the NEXT
+# reboot → prod won't auto-start. The pre-OP-1742 derivation
+# (${OMNISIGHT_IMAGE_TAG:-${TAG:-${BACKEND_DIGEST:-$FRONTEND_DIGEST}}}) did
+# exactly that on a digest deploy. So we NEVER derive the tag from the digest:
+# on a digest deploy we keep the prior (tag-shaped) .env value; on the retired
+# --tag path the tag IS the identity and is used directly. The digest stays
+# where it belongs — in IMAGE_REF — so the deploy is still pinned by digest.
+PRIOR_ENV_IMAGE_TAG="$(_env_file_value OMNISIGHT_IMAGE_TAG)"
+if [ "$DIGEST_DEPLOY" = true ]; then
+    case "$PRIOR_ENV_IMAGE_TAG" in
+        sha256:*|@*)
+            # Legacy bad state: the prior .env already carries a digest-as-tag
+            # (a pre-OP-1742 deploy, or the un-fixed v0.6.2 landmine). Do NOT
+            # propagate it — that would re-arm the boot-guard trap. Leave it for
+            # an operator to set tag-shaped; the deploy still pins by digest via
+            # IMAGE_REF, so identity is unaffected.
+            CURRENT_IMAGE_TAG=""
+            warn "OP-1742: prior .env OMNISIGHT_IMAGE_TAG is digest-shaped ('$PRIOR_ENV_IMAGE_TAG') — refusing to re-write a digest-as-tag (it would trip the OP-1717 boot-guard on the next reboot). Set OMNISIGHT_IMAGE_TAG to a tag (e.g. the promoted release tag) in .env; the deploy still pins images by digest via IMAGE_REF."
+            ;;
+        *)
+            # Keep the prior tag-shaped value (the boot-guard-safe fallback tag).
+            CURRENT_IMAGE_TAG="$PRIOR_ENV_IMAGE_TAG"
+            ;;
+    esac
+else
+    # Retired --tag path (a --tag invocation already exited at the RT-20 gate
+    # above, so this is dead under RT-20): the tag IS the deploy identity.
+    CURRENT_IMAGE_TAG="${OMNISIGHT_IMAGE_TAG:-$TAG}"
 fi
-_upsert_env "OMNISIGHT_IMAGE_TAG" "$CURRENT_IMAGE_TAG"
-log "SLO monitor image tags: current=$CURRENT_IMAGE_TAG previous=${PREVIOUS_IMAGE_TAG:-unknown}"
+PREVIOUS_IMAGE_TAG="$PRIOR_ENV_IMAGE_TAG"
+if [ -n "${PREVIOUS_IMAGE_TAG:-}" ] && [ "$PREVIOUS_IMAGE_TAG" != "$CURRENT_IMAGE_TAG" ]; then
+    case "$PREVIOUS_IMAGE_TAG" in
+        # OP-1742: never record a digest as the previous TAG either — keep
+        # OMNISIGHT_PREVIOUS_IMAGE_TAG semantics tag-shaped for the SLO monitor.
+        sha256:*|@*) : ;;
+        *) _upsert_env "OMNISIGHT_PREVIOUS_IMAGE_TAG" "$PREVIOUS_IMAGE_TAG" ;;
+    esac
+fi
+if [ -n "$CURRENT_IMAGE_TAG" ]; then
+    _upsert_env "OMNISIGHT_IMAGE_TAG" "$CURRENT_IMAGE_TAG"
+fi
+log "SLO monitor image tags: current=${CURRENT_IMAGE_TAG:-unset} previous=${PREVIOUS_IMAGE_TAG:-unknown}"
 
 if [ "$DRY_RUN" = false ]; then
     if systemctl --user list-unit-files omnisight-slo-monitor.service >/dev/null 2>&1; then
