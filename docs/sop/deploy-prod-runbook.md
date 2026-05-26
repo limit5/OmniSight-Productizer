@@ -9,6 +9,50 @@ already built and cosign-verified at that digest, so there is **no git
 fetch / checkout and no source build** — the deploy never touches the
 git working tree.
 
+## Run From — and Advance — the Release-SHA-Pinned Prod Checkout (OP-1741)
+
+OP-1717 moved the prod compose stack onto a **dedicated, release-SHA-pinned
+checkout** at `/home/user/omnisight-prod`
+(`omnisight-compose-prod.service` `WorkingDirectory`, pinned `@ v0.6.2/ecde4787`
+at cutover). Staging boots from `/home/user/sora-bridge` (develop-tip). So a
+production deploy **must run from `/home/user/omnisight-prod`** — never from
+the develop-tip staging tree and never from a throwaway `git worktree add`
+checkout under `/tmp`.
+
+When a new release ships, the prod pin must **advance** to the release SHA so
+the compose context (`docker-compose.prod.yml` + `scripts/`) matches the
+deployed release. Two equivalent ways:
+
+```bash
+cd /home/user/omnisight-prod
+
+# (A) one command — deploy-prod.sh advances the pin first, then deploys:
+./scripts/deploy-prod.sh \
+  --release-sha=<release-sha> \
+  --backend-digest=sha256:<64hex> \
+  --frontend-digest=sha256:<64hex>
+
+# (B) two steps — advance the checkout, then deploy from it:
+./scripts/advance_prod_checkout.sh --release-sha=<release-sha>
+./scripts/deploy-prod.sh \
+  --backend-digest=sha256:<64hex> \
+  --frontend-digest=sha256:<64hex>
+```
+
+`--release-sha` (or `advance_prod_checkout.sh`) does a `git fetch` +
+`git checkout --detach <release-sha>` and **fails closed if the working tree
+is dirty** — unreviewed compose/script edits must not ship. With `--release-sha`,
+`deploy-prod.sh` re-execs itself from the freshly-pinned tree so the rest of the
+deploy runs at the release SHA.
+
+**The SHA only moves the compose-file pin — it is NOT the deploy identity.**
+The deploy is still by `--backend-digest`/`--frontend-digest` (RT-20, below);
+the SHA never changes the digest-deploy contract. Omitting `--release-sha`
+(e.g. redeploying / rolling the same release) still runs a canonical-checkout
+assertion: a plain redeploy aborts on a dirty tree or a throwaway worktree, and
+warns if run from a path other than the canonical pinned checkout. Override the
+canonical path on non-standard hosts / in tests with `OMNISIGHT_PROD_CHECKOUT`.
+
 ## Deploy Identity (RT-20 — image-tag-only)
 
 A production deploy identity is a cosign-verified image **digest**. The
