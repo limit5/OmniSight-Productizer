@@ -56,6 +56,12 @@ SKIP_BACKUP=false
 # interactive operator deploy doesn't hit "passphrase required" and have to
 # hunt for it (hit live during v0.6.2). Path is overridable for tests.
 BACKUP_DR_ENV="${OMNISIGHT_BACKUP_DR_ENV:-/etc/omnisight/backup-dr.env}"
+# OP-1741: the prod compose stack boots from a dedicated, release-SHA-pinned
+# checkout (OP-1717). --release-sha advances that pin to the new release SHA
+# before the deploy; PROD_CHECKOUT is the canonical path this deploy must run
+# from (override OMNISIGHT_PROD_CHECKOUT for tests / non-standard hosts).
+RELEASE_SHA=""
+PROD_CHECKOUT="${OMNISIGHT_PROD_CHECKOUT:-/home/user/omnisight-prod}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -64,6 +70,35 @@ warn() { echo -e "${YELLOW}⚠️${NC}  $*"; }
 err()  { echo -e "${RED}❌${NC} $*"; exit 1; }
 step() { echo -e "\n${CYAN}${BOLD}━━━ $* ━━━${NC}\n"; }
 
+# OP-1741: canonical-checkout assertion — a prod deploy MUST run from the
+# canonical pinned prod checkout ($PROD_CHECKOUT), never a throwaway /tmp
+# worktree, and never on a dirty tree. Mirrors advance_prod_checkout.sh so a
+# plain redeploy (no --release-sha) is gated even when that helper is absent.
+_assert_canonical_checkout() {
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        warn "not inside a git work tree; skipping canonical-checkout assertion"
+        return 0
+    fi
+    local toplevel gitdir
+    toplevel="$(git rev-parse --show-toplevel)"
+    gitdir="$(git rev-parse --git-dir)"
+    # A linked worktree (the `worktree add` throwaway the ticket warns about,
+    # often under /tmp) has its git-dir under <main>/.git/worktrees/<name>.
+    # Deploying from one means the compose context is NOT the canonical pinned
+    # checkout — fail closed.
+    case "$gitdir" in
+        */worktrees/*)
+            err "running from a throwaway linked worktree (git-dir=$gitdir) — deploy from the canonical pinned prod checkout $PROD_CHECKOUT (OP-1717/OP-1741), not a worktree" ;;
+    esac
+    if [ "$toplevel" != "$PROD_CHECKOUT" ]; then
+        warn "running from $toplevel, not the canonical pinned prod checkout $PROD_CHECKOUT — proceeding (set OMNISIGHT_PROD_CHECKOUT if this host pins elsewhere)"
+    fi
+    if [ -n "$(git status --porcelain)" ]; then
+        err "working tree at $toplevel is dirty — refusing to deploy from a dirty checkout (fail-closed, OP-1741). Commit, stash, or clean it, then re-run."
+    fi
+    log "Canonical-checkout assertion passed: $toplevel (clean working tree)"
+}
+
 # ── CLI Args ──
 for arg in "$@"; do
     case "$arg" in
@@ -71,13 +106,15 @@ for arg in "$@"; do
         --digest=*) BACKEND_DIGEST="${arg#*=}" ;;            # OP-1696: back-compat alias for --backend-digest
         --backend-digest=*) BACKEND_DIGEST="${arg#*=}" ;;
         --frontend-digest=*) FRONTEND_DIGEST="${arg#*=}" ;;
+        --release-sha=*) RELEASE_SHA="${arg#*=}" ;;        # OP-1741: advance the release-SHA-pinned prod checkout (compose context only; NOT the deploy identity)
         --skip-build) SKIP_BUILD=true ;;
         --skip-backup) SKIP_BACKUP=true ;;
         --dry-run) DRY_RUN=true ;;
         --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
         --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
         --help|-h)
-            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--skip-build] [--skip-backup] [--dry-run] [--alembic-mode=apply|pg-clone]"
+            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--release-sha=<git-sha>] [--skip-build] [--skip-backup] [--dry-run] [--alembic-mode=apply|pg-clone]"
+            echo "       (--release-sha advances the release-SHA-pinned prod compose checkout ($PROD_CHECKOUT) BEFORE the deploy by delegating to scripts/advance_prod_checkout.sh — fail-closed on a dirty tree. It only moves the compose-file pin; the deploy identity is still the image digest. See docs/sop/deploy-prod-runbook.md.)"
             echo "       (--skip-backup deploys WITHOUT a pre-deploy backup — NOT recommended; the backup is otherwise fail-closed.)"
             echo "       (--digest=sha256:<64hex> is a back-compat alias for --backend-digest; pass both --backend-digest and --frontend-digest to pin both images by digest)"
             echo "       RT-20 (image-tag-only): --tag/v* git-tag deploys are retired — deploy the promoted image's validated digest instead (the line above)."
@@ -271,6 +308,45 @@ _run_alembic_pg_clone() {
         warn "PG clone '$clone_db' cleanup failed; drop it manually after inspection."
     log "Alembic PG clone dry-validation 完成（live DB 未修改）"
 }
+
+# ── Step 0: Advance / assert the release-SHA-pinned prod checkout (OP-1741) ──
+# OP-1717 moved the prod compose stack onto a dedicated, release-SHA-pinned
+# checkout ($PROD_CHECKOUT). A prod deploy must run FROM that checkout and,
+# when shipping a new release, ADVANCE its pin to the release SHA so the
+# compose context (docker-compose.prod.yml + scripts/) matches the deployed
+# release. This only moves the compose-file pin — the deploy identity is
+# STILL the cosign-verified image digest (RT-20); the SHA never changes the
+# digest-deploy contract (OP-1741 MUST NOT).
+if [ -n "$RELEASE_SHA" ]; then
+    if [ "${_OMNISIGHT_CHECKOUT_ADVANCED:-}" = "$RELEASE_SHA" ]; then
+        # We already advanced + re-exec'd; this run IS the pinned tree.
+        log "Prod checkout already advanced to $RELEASE_SHA (running pinned via re-exec)"
+    elif [ "$DRY_RUN" = true ]; then
+        step "Step 0: Advance pinned prod checkout → $RELEASE_SHA (dry-run)"
+        _run_cmd scripts/advance_prod_checkout.sh --release-sha="$RELEASE_SHA" --dry-run
+    else
+        step "Step 0: Advance pinned prod checkout → $RELEASE_SHA"
+        [ -x scripts/advance_prod_checkout.sh ] || \
+            err "scripts/advance_prod_checkout.sh missing or non-executable — cannot advance the pinned prod checkout to $RELEASE_SHA (fail-closed, OP-1741). Restore the helper, or advance the checkout to $RELEASE_SHA manually from $PROD_CHECKOUT before re-running."
+        scripts/advance_prod_checkout.sh --release-sha="$RELEASE_SHA" || \
+            err "advancing the pinned prod checkout to $RELEASE_SHA failed — aborting before any stack change (no replica was touched)."
+        # The checkout now holds the release SHA's docker-compose.prod.yml +
+        # scripts/. Re-exec so the REST of this deploy (compose, helpers, this
+        # very script) runs from the freshly-pinned tree — not the version the
+        # operator happened to invoke. The guard env prevents an advance loop.
+        export _OMNISIGHT_CHECKOUT_ADVANCED="$RELEASE_SHA"
+        log "Re-exec deploy-prod.sh from the advanced checkout ($RELEASE_SHA)"
+        exec bash scripts/deploy-prod.sh "$@"
+    fi
+elif [ "$DRY_RUN" = false ]; then
+    # No --release-sha (e.g. redeploying / rolling the same release): still
+    # assert this deploy runs from the canonical pinned checkout on a clean
+    # tree — never a throwaway worktree, never dirty (OP-1741). Skipped in
+    # --dry-run, which is a no-op preview (same posture as the Step 1b backup).
+    _assert_canonical_checkout
+else
+    echo "  [dry-run] canonical-checkout assertion (fail-closed on dirty / worktree at real deploy)"
+fi
 
 step "OmniSight Production 零停機部署"
 echo "Compose: $COMPOSE_FILE"
