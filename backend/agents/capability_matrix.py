@@ -60,6 +60,7 @@ CAPABILITIES: frozenset[str] = frozenset({
 LABEL_ENABLE_PREFIX = "capability:enable="
 LABEL_DISABLE_PREFIX = "capability:disable="
 STRICT_FALLBACK_ENV = "OMNISIGHT_CAPABILITY_FALLBACK_STRICT"
+REGISTERED_AUX_SERVICES: frozenset[str] = frozenset({"ai_core"})
 _EXPECTED_LABEL_VALUE_LIMIT = 10
 _ExpectedTriple = tuple[str, str, str]
 
@@ -454,6 +455,26 @@ def apply_label_overrides(
     return (frozenset(base) | enable) - disable
 
 
+def build_aux_service_capability_inventory(
+    aux_service_available: Mapping[str, bool] | None = None,
+) -> frozenset[str]:
+    """Return ``capability:enable=<service>`` labels for available auxiliaries."""
+    from backend.agents import ai_core_probe
+
+    available = (
+        ai_core_probe.AUX_SERVICE_AVAILABLE
+        if aux_service_available is None
+        else aux_service_available
+    )
+    labels: set[str] = set()
+    for service in sorted(REGISTERED_AUX_SERVICES):
+        if ai_core_probe.aux_service_disabled(service):
+            continue
+        if available.get(service, False) is True:
+            labels.add(f"{LABEL_ENABLE_PREFIX}{service}")
+    return frozenset(labels)
+
+
 def require_capability(enabled: Iterable[str], requested: str) -> None:
     """Raise :exc:`CapabilityNotPermitted` if ``requested`` isn't enabled."""
     enabled_set = frozenset(enabled)
@@ -590,8 +611,10 @@ __all__ = [
     "DEFAULT_MATRIX_PATH",
     "LABEL_DISABLE_PREFIX",
     "LABEL_ENABLE_PREFIX",
+    "REGISTERED_AUX_SERVICES",
     "STRICT_FALLBACK_ENV",
     "apply_label_overrides",
+    "build_aux_service_capability_inventory",
     "canonical_issuetype",
     "load_capability_matrix",
     "parse_label_overrides",

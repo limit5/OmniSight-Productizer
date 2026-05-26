@@ -406,3 +406,42 @@ def test_canonical_capabilities_match_ac_list() -> None:
         "mcp_search", "memory_recall", "run_migration", "deploy_action",
         "run_outcomes_grader",
     })
+
+
+def test_aux_service_inventory_carries_ai_core_when_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OMNISIGHT_AUX_SERVICE_DISABLE", raising=False)
+
+    labels = capability_matrix.build_aux_service_capability_inventory({
+        "ai_core": True,
+    })
+
+    assert labels == frozenset({"capability:enable=ai_core"})
+
+
+def test_aux_service_inventory_omits_ai_core_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("OMNISIGHT_AUX_SERVICE_DISABLE", raising=False)
+
+    labels = capability_matrix.build_aux_service_capability_inventory({
+        "ai_core": False,
+    })
+
+    assert "capability:enable=ai_core" not in labels
+    assert "capability:disable=ai_core" not in labels
+    assert "capability:enable=ai_core=false" not in labels
+    assert labels == frozenset()
+
+
+def test_aux_service_inventory_honours_disable_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_AUX_SERVICE_DISABLE", "ai_core")
+
+    labels = capability_matrix.build_aux_service_capability_inventory({
+        "ai_core": True,
+    })
+
+    assert labels == frozenset()

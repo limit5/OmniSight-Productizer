@@ -497,6 +497,25 @@ async def lifespan(app: FastAPI):
     # H1: whole-host ring buffer (60 × 5s snapshots = 5 min history).
     # Feeds the AIMD capacity planner + the GET /host/metrics endpoint.
     host_ringbuf_task = asyncio.create_task(_hm.run_host_sampling_loop())
+    # OP-1757 / Family ⑨: ai-core is an optional auxiliary service. Probe
+    # availability in the background so fallback-chain and capability-inventory
+    # builders can quietly skip it when absent.
+    from backend.agents import ai_core_probe as _ai_core_probe
+    ai_core_probe_stop_event = None
+    ai_core_probe_task = None
+    if _ai_core_probe.aux_service_disabled(_ai_core_probe.SERVICE_LABEL):
+        _log.info(
+            "ai_core_probe.disabled env=%s service=%s",
+            _ai_core_probe.AUX_SERVICE_DISABLE_ENV,
+            _ai_core_probe.SERVICE_LABEL,
+        )
+    else:
+        import threading
+        ai_core_probe_stop_event = threading.Event()
+        ai_core_probe = _ai_core_probe.AiCoreProbe()
+        ai_core_probe_task = asyncio.create_task(
+            asyncio.to_thread(ai_core_probe.run_forever, ai_core_probe_stop_event)
+        )
     # BP.R.6: per-worker RTK install health gauge. The Dockerfile
     # hard-fails missing RTK, but this keeps the running image visible
     # to Prometheus after deploy.
@@ -522,11 +541,14 @@ async def lifespan(app: FastAPI):
         _log.info("[lifecycle] graceful_shutdown result: %s", result)
     except Exception as exc:
         _log.warning("[lifecycle] graceful_shutdown raised: %s", exc)
+    if ai_core_probe_stop_event is not None:
+        ai_core_probe_stop_event.set()
     for t in (
         pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task,
         iq_task, ft_task, md_task, balance_task, subscription_monitor_task,
         cmek_revoke_task, drf_task, quota_task, drafts_gc_task,
         workspace_gc_task, host_metrics_task, host_ringbuf_task,
+        *((ai_core_probe_task,) if ai_core_probe_task is not None else ()),
     ):
         t.cancel()
         try:
