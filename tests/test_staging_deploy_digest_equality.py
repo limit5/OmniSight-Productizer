@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -32,6 +33,8 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STAGING_DEPLOY = REPO_ROOT / "scripts" / "staging_deploy.sh"
 SYNC_STAGING = REPO_ROOT / "scripts" / "sync_staging_to_develop.sh"
+PROMOTE = REPO_ROOT / "scripts" / "promote_image_bundle.py"
+STAGING_COMPOSE = REPO_ROOT / "deploy" / "staging" / "docker-compose.yml"
 
 REGISTRY = "reg.example/ns"
 BACKEND_DIGEST = "sha256:" + "1" * 64
@@ -315,3 +318,66 @@ def test_sync_does_not_digest_check_rollback():
     text = SYNC_STAGING.read_text()
     assert 'deploy_tag "$prev"' in text
     assert 'deploy_tag "$tip" "$bundle"' in text
+
+
+# ── [OP-1737] default-registry reconciliation ──────────────────────────────
+# staging_deploy.sh's OMNISIGHT_REGISTRY default must match promote
+# (scripts/promote_image_bundle.py) and the staging compose image refs, so a
+# deploy with no explicit OMNISIGHT_REGISTRY override inspects the SAME
+# registry/case the candidate was promoted to — no spurious StagingDigestMismatch.
+
+EXPECTED_REGISTRY = "sora.services:49160/omnisight/omnisight-productizer"
+
+
+def _staging_deploy_default_registry() -> str:
+    """Resolve staging_deploy.sh's OMNISIGHT_REGISTRY default by sourcing the
+    script with NO override and echoing the resolved $REGISTRY."""
+    proc = subprocess.run(
+        ["bash", "-c", f'source "{STAGING_DEPLOY}"; printf "%s" "$REGISTRY"'],
+        capture_output=True, text=True,
+        env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+        timeout=60,
+    )
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    return proc.stdout.strip()
+
+
+def _promote_default_registry() -> str:
+    m = re.search(
+        r'^DEFAULT_REGISTRY\s*=\s*"([^"]+)"', PROMOTE.read_text(), re.MULTILINE
+    )
+    assert m, "could not locate DEFAULT_REGISTRY in promote_image_bundle.py"
+    return m.group(1)
+
+
+def _compose_default_registry() -> str:
+    refs = set(
+        re.findall(
+            r"\$\{OMNISIGHT_REGISTRY:-([^}]+)\}", STAGING_COMPOSE.read_text()
+        )
+    )
+    assert refs, "no OMNISIGHT_REGISTRY default found in staging compose"
+    assert len(refs) == 1, f"staging compose registry defaults diverge: {refs}"
+    return refs.pop()
+
+
+def test_staging_deploy_default_registry_is_49160_lowercase():
+    """OP-1737: the stale 49154/CapCase default must be gone."""
+    default = _staging_deploy_default_registry()
+    assert default == EXPECTED_REGISTRY, (
+        f"staging_deploy.sh default registry is {default!r}, "
+        f"expected {EXPECTED_REGISTRY!r}"
+    )
+    assert "49154" not in default and "OmniSight-Productizer" not in default
+
+
+def test_staging_deploy_default_matches_promote_and_compose():
+    """The deploy default == promote default == compose image-ref default, so a
+    no-override staging deploy resolves the registry promote published to."""
+    deploy_default = _staging_deploy_default_registry()
+    assert deploy_default == _promote_default_registry(), (
+        "staging_deploy.sh default must equal promote_image_bundle.DEFAULT_REGISTRY"
+    )
+    assert deploy_default == _compose_default_registry(), (
+        "staging_deploy.sh default must equal the staging compose OMNISIGHT_REGISTRY default"
+    )

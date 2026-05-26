@@ -31,7 +31,7 @@ COMPOSE_FILE="${OMNISIGHT_STAGING_COMPOSE_FILE:-$ROOT/deploy/staging/docker-comp
 ENV_FILE="${OMNISIGHT_STAGING_ENV_FILE:-$ROOT/deploy/staging/.env}"
 # Registry default mirrors deploy/staging/docker-compose.yml's image refs so
 # the digest verification inspects exactly what compose pulled.
-REGISTRY="${OMNISIGHT_REGISTRY:-sora.services:49154/omnisight/OmniSight-Productizer}"
+REGISTRY="${OMNISIGHT_REGISTRY:-sora.services:49160/omnisight/omnisight-productizer}"
 DOCKER_BIN="${DOCKER_BIN:-docker}"
 # Candidate bundle (OP-1513 bundle.json) used for post-pull digest equality;
 # overridable via --bundle. Empty => digest verification skipped (legacy path).
