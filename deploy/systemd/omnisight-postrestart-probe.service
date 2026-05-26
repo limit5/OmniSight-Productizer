@@ -1,0 +1,33 @@
+# /etc/systemd/system/omnisight-postrestart-probe.service
+; OmniSight post-restart health probe — OP-1756 / v2-⑧-3a (family8 §7).
+; Runs ONCE after the prod compose stack comes up (ordered After= the compose unit).
+; Within the 60s RTO it verifies pg_isready + alembic_version integrity + backend /readyz,
+; and SURFACES (non-fatally) any image-vs-DB alembic-head drift (Family ⑥ owns rescue).
+; ADVISORY: a probe FAIL (exit 1) marks THIS unit failed (visible via `systemctl status`)
+; but Requires/After only orders it after the stack — nothing Requires this probe, so a
+; failed probe never blocks the boot target or touches the running stack.
+;
+; Install (operator):
+;   sudo install -m 644 deploy/systemd/omnisight-postrestart-probe.service /etc/systemd/system/
+;   sudo systemctl daemon-reload && sudo systemctl enable omnisight-postrestart-probe.service
+;   # (runs automatically after the compose stack on the next boot; or `start` to exercise now)
+[Unit]
+Description=OmniSight post-restart health probe (pg_isready + alembic_version + /readyz + drift surface)
+Documentation=file:///home/user/omnisight-prod/docs/sprint-s12/2026-05-16-v2-family8-graceful-shutdown-contract.md
+After=omnisight-compose-prod.service network-online.target
+Requires=omnisight-compose-prod.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=user
+Group=docker
+WorkingDirectory=/home/user/omnisight-prod
+Environment=OMNISIGHT_POSTRESTART_RTO=60
+; let the stack settle a moment before the probe's own 60s RTO retry loop begins
+ExecStartPre=/bin/sleep 5
+ExecStart=/home/user/omnisight-prod/scripts/postrestart-probe.sh
+
+[Install]
+WantedBy=multi-user.target
