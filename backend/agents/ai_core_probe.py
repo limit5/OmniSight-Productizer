@@ -12,7 +12,7 @@ import os
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import httpx
 
@@ -25,6 +25,9 @@ DEFAULT_FLAP_WINDOW = 5
 DEFAULT_FLAP_THRESHOLD = 3
 LONG_OUTAGE_S = 24 * 60 * 60
 SERVICE_LABEL = "ai_core"
+AUX_SERVICE_DISABLE_ENV = "OMNISIGHT_AUX_SERVICE_DISABLE"
+PROBE_URL_ENV = "OMNISIGHT_AI_CORE_PROBE_URL"
+LEGACY_HEALTH_URL_ENV = "OMNISIGHT_AI_CORE_HEALTH_URL"
 
 # Fail-closed bootstrap (§3.4): every aux service starts unavailable until a
 # probe accumulates enough agreeing observations to flip it up. The scalar
@@ -59,6 +62,33 @@ def _default_http_get(url: str, timeout_s: float) -> int:
     return response.status_code
 
 
+def aux_service_disabled(
+    service: str = SERVICE_LABEL,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> bool:
+    """Return whether an optional auxiliary service is operator-disabled."""
+    source = os.environ if env is None else env
+    raw = source.get(AUX_SERVICE_DISABLE_ENV, "")
+    disabled = {
+        item.strip().lower()
+        for item in raw.split(",")
+        if item.strip()
+    }
+    service_name = service.strip().lower()
+    return "*" in disabled or "all" in disabled or service_name in disabled
+
+
+def ai_core_probe_url(*, env: Mapping[str, str] | None = None) -> str:
+    """Resolve the ai-core health probe URL from the current environment."""
+    source = os.environ if env is None else env
+    return (
+        source.get(PROBE_URL_ENV)
+        or source.get(LEGACY_HEALTH_URL_ENV)
+        or DEFAULT_PROBE_URL
+    )
+
+
 class AiCoreProbe:
     """Probe ai-core health and expose stable availability state."""
 
@@ -75,10 +105,7 @@ class AiCoreProbe:
         sleeper: Sleeper | None = None,
         initial_available: bool = False,
     ) -> None:
-        self.probe_url = probe_url or os.getenv(
-            "OMNISIGHT_AI_CORE_HEALTH_URL",
-            DEFAULT_PROBE_URL,
-        )
+        self.probe_url = probe_url or ai_core_probe_url()
         self.interval_s = (
             _env_float("OMNISIGHT_AI_CORE_PROBE_INTERVAL_S", DEFAULT_INTERVAL_S)
             if interval_s is None
@@ -102,6 +129,11 @@ class AiCoreProbe:
 
     def probe_once(self) -> bool:
         """Run one health check and return the stable availability flag."""
+        if aux_service_disabled(SERVICE_LABEL):
+            self._apply_observation(False)
+            self._publish_state()
+            self._maybe_log_long_outage()
+            return self._available
         observed_available = self._observe_available()
         self._apply_observation(observed_available)
         self._publish_state()
@@ -179,10 +211,16 @@ class AiCoreProbe:
 __all__ = [
     "AI_CORE_AVAILABLE",
     "AUX_SERVICE_AVAILABLE",
+    "AUX_SERVICE_DISABLE_ENV",
     "AiCoreProbe",
     "DEFAULT_PROBE_URL",
     "DEFAULT_INTERVAL_S",
     "DEFAULT_TIMEOUT_S",
     "DEFAULT_FLAP_WINDOW",
     "DEFAULT_FLAP_THRESHOLD",
+    "LEGACY_HEALTH_URL_ENV",
+    "PROBE_URL_ENV",
+    "SERVICE_LABEL",
+    "ai_core_probe_url",
+    "aux_service_disabled",
 ]

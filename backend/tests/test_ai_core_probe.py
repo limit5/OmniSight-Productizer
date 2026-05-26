@@ -224,3 +224,85 @@ def test_aux_dict_tracks_flip_up_and_down() -> None:
     for _ in range(3):
         probe.probe_once()
     assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is False
+
+
+def test_probe_url_prefers_new_env_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(probe_mod.LEGACY_HEALTH_URL_ENV, "http://legacy/health")
+    monkeypatch.setenv(probe_mod.PROBE_URL_ENV, "http://probe/health")
+
+    probe = AiCoreProbe(http_get=lambda _url, _timeout: 200)
+
+    assert probe.probe_url == "http://probe/health"
+
+
+def test_disable_env_forces_unavailable_without_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(probe_mod.AUX_SERVICE_DISABLE_ENV, "vision_core,ai_core")
+    calls = 0
+
+    def _http_get(_url: str, _timeout_s: float) -> int:
+        nonlocal calls
+        calls += 1
+        return 200
+
+    probe = AiCoreProbe(
+        flap_threshold=1,
+        initial_available=True,
+        http_get=_http_get,
+    )
+
+    assert probe.probe_once() is False
+    assert calls == 0
+    assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is False
+
+
+def test_chaos_up_down_up_cycle_logs_transition_and_flips_gauge(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """OP-1757 AC: controllable up→down→up samples flip log + gauge."""
+    probe = AiCoreProbe(
+        flap_window=5,
+        flap_threshold=3,
+        initial_available=False,
+        http_get=_http_from([
+            True, True, True,
+            False, False, False,
+            True, True, True,
+        ]),
+    )
+
+    with caplog.at_level("INFO", logger=probe_mod.__name__):
+        for _ in range(3):
+            probe.probe_once()
+        assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is True
+        assert (
+            'omnisight_aux_service_available{service="ai_core"} 1.0'
+            in _metric_text()
+        )
+
+        for _ in range(3):
+            probe.probe_once()
+        assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is False
+        assert (
+            'omnisight_aux_service_available{service="ai_core"} 0.0'
+            in _metric_text()
+        )
+
+        for _ in range(3):
+            probe.probe_once()
+        assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is True
+        assert (
+            'omnisight_aux_service_available{service="ai_core"} 1.0'
+            in _metric_text()
+        )
+
+    transitions = [
+        record.message
+        for record in caplog.records
+        if "aux_service.state_change service=ai_core" in record.message
+    ]
+    assert len(transitions) == 3
+    assert "previous=False current=True" in transitions[0]
+    assert "previous=True current=False" in transitions[1]
+    assert "previous=False current=True" in transitions[2]
