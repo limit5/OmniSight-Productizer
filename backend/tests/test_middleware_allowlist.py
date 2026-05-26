@@ -205,31 +205,57 @@ def test_prefix_entries_end_with_slash():
 # ─── superset-of-union (no-regression) assertion — §4.4 strict-superset
 
 
+# Frozen snapshot of the historical (pre-v2-⑦-2bc) main.py sibling
+# allowlists. v2-⑦-2bc (OP-1752) deleted the private ``main._*_EXEMPT``
+# constants and routed all five gates through is_public()/is_static_asset(),
+# so the union can no longer be read off live module attributes. Pinning
+# the historical values here keeps the §4.4 strict-superset no-regression
+# guard meaningful: every path that WAS exempt at any gate before the
+# refactor must still resolve public. ``AUTH_BASELINE_ALLOWLIST`` is read
+# live (it is retained in auth_baseline.py for the out-of-area tooling
+# auditor) so a future edit there is still cross-checked.
+_HISTORICAL_MAIN_PUBLIC_UNION: frozenset[str] = frozenset({
+    # _RATE_LIMIT_EXEMPT
+    "/health", "/healthz", "/livez", "/readyz", "/auth/login", "/auth/logout",
+    # _PASSWORD_CHANGE_EXEMPT
+    "/auth/change-password", "/auth/whoami",
+    # _BOOTSTRAP_EXEMPT_REL
+    "/version",
+    # _BOOTSTRAP_EXEMPT_REL_PREFIXES
+    "/cloudflare/",
+    # _BOOTSTRAP_EXEMPT_RAW
+    "/", "/docs", "/openapi.json", "/redoc", "/favicon.ico", "/robots.txt",
+    # _bootstrap_path_is_exempt special-cases
+    "/api/version", "/bootstrap",
+})
+_HISTORICAL_STATIC_ASSET_PREFIXES: tuple[str, ...] = (
+    "/_next/", "/static/", "/assets/", "/public/",
+)
+_HISTORICAL_STATIC_ASSET_SUFFIXES: tuple[str, ...] = (
+    ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg",
+    ".gif", ".svg", ".webp", ".woff", ".woff2", ".ttf", ".eot",
+)
+
+
 def test_superset_of_live_sibling_union():
-    """Every entry in the five LIVE sibling allowlists must still be
-    resolved public by the new single source — dropping any one is a
-    §4.4 strict-superset violation. Imports the real constants so this
-    fails if a sibling list grows an entry the seed forgot to mirror.
+    """Every entry in the historical five sibling allowlists must still be
+    resolved public by the single source — dropping any one is a §4.4
+    strict-superset violation. Reads ``AUTH_BASELINE_ALLOWLIST`` live (so a
+    new entry there is still cross-checked) and the frozen historical main.py
+    union (deleted in v2-⑦-2bc; see snapshot above).
     """
-    from backend import auth_baseline, main
+    from backend import auth_baseline
 
     # Entries whose membership is answered by is_public().
     public_union: set[str] = set()
     public_union.update(auth_baseline.AUTH_BASELINE_ALLOWLIST)
-    public_union.update(main._RATE_LIMIT_EXEMPT)
-    public_union.update(main._PASSWORD_CHANGE_EXEMPT)
-    public_union.update(main._GRACEFUL_SHUTDOWN_EXEMPT_RAW)
-    public_union.update(main._BOOTSTRAP_EXEMPT_REL)
-    public_union.update(main._BOOTSTRAP_EXEMPT_REL_PREFIXES)
-    public_union.update(main._BOOTSTRAP_EXEMPT_RAW)
-    # _bootstrap_path_is_exempt special-cases that are not in any set.
-    public_union.update({"/api/version", "/bootstrap"})
+    public_union.update(_HISTORICAL_MAIN_PUBLIC_UNION)
 
     missing = sorted(p for p in public_union if not is_public(p))
     assert not missing, f"union entries no longer public: {missing}"
 
     # Static-asset prefixes/suffixes are answered by is_static_asset().
-    for prefix in main._BOOTSTRAP_EXEMPT_RAW_PREFIXES:
+    for prefix in _HISTORICAL_STATIC_ASSET_PREFIXES:
         assert is_static_asset(prefix + "x"), prefix
-    for suffix in main._BOOTSTRAP_STATIC_SUFFIXES:
+    for suffix in _HISTORICAL_STATIC_ASSET_SUFFIXES:
         assert is_static_asset("/asset" + suffix), suffix
