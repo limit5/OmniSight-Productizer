@@ -5,6 +5,17 @@
 ; Any fatal red row makes the script exit non-zero, which triggers
 ; deployment-audit-alert.service through OnFailure.
 ;
+; CANONICAL COPY (OP-1738): the ONLY copy that should run is the develop-tip
+; sora-bridge checkout below (WorkingDirectory + ExecStart). The script now
+; self-identifies its repo + git ref in its banner, so an accidental run from a
+; stale `main` checkout is visible at a glance. Remove or symlink any stale main
+; checkout copy to this one — do not keep two divergent copies.
+;
+; OMNISIGHT_DEPLOYED_TAG (OP-1738): no longer required here — the script defaults
+; it from the committed promotion ledger (audit/image_promotion_audit.jsonl) so
+; the alembic-head `auto` row asserts prod is at the promoted release. Set it (or
+; OMNISIGHT_AUDIT_DEPLOY_REF) in release-audit.env only to override that default.
+;
 ; Install (user-level):
 ;   mkdir -p ~/.config/systemd/user
 ;   cp deploy/systemd/deployment-audit.{service,timer} ~/.config/systemd/user/
