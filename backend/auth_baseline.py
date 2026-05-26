@@ -55,6 +55,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp
 
+from backend.middleware_allowlist import is_public
+
 logger = logging.getLogger(__name__)
 
 
@@ -70,7 +72,17 @@ logger = logging.getLogger(__name__)
 # justification comment. If you're tempted to add a prefix "just to
 # stop the noise", STOP and either (a) add auth to that handler or
 # (b) write the justification honestly.
-
+#
+# ⚠ NOT the runtime source of truth anymore (v2-⑦-2bc / OP-1752).
+# ``_path_allowed`` now delegates to
+# ``backend.middleware_allowlist.is_public`` — the single-source Family ⑦
+# allowlist. This literal is RETAINED only because the out-of-area CI
+# auditor ``scripts/check_auth_coverage.py`` (area: tooling, blocked for
+# OP-1752) AST-loads it by name. Per Family ⑦ contract §5.2 this constant
+# is slated for deletion once that tooling consumer is migrated to read
+# ``PUBLIC_PATH_ALLOWLIST`` (discovered-dependency follow-up — see the
+# OP-1752 ticket comment). Editing entries here no longer changes
+# request-time gating; edit ``middleware_allowlist.py`` instead.
 AUTH_BASELINE_ALLOWLIST: Final[tuple[str, ...]] = (
     # ─── Liveness + readiness probes ──────────────────────────
     # Called by docker healthcheck + Caddy + /metrics/healthz
@@ -235,11 +247,21 @@ _mode = auth_baseline_mode
 
 def _path_allowed(path: str) -> bool:
     """Allowlist match. Kept as a module function so the unit test can
-    call it directly without spinning up the Starlette app."""
-    for prefix in AUTH_BASELINE_ALLOWLIST:
-        if path.startswith(prefix):
-            return True
-    return False
+    call it directly without spinning up the Starlette app.
+
+    v2-⑦-2bc (OP-1752): the allowlist decision is now delegated to the
+    single-source :func:`backend.middleware_allowlist.is_public`
+    (Family ⑦ contract §4/§5). This is the change that FIXES the
+    ``/api/v2/health`` → 401 drift: ``is_public`` normalises the
+    API-version prefix (``/api/v1`` AND ``/api/v2``) before matching, so
+    the four ``main.py`` gates and this auth floor can no longer disagree
+    on what counts as public. The historical ``AUTH_BASELINE_ALLOWLIST``
+    literal below is no longer consulted at request time — its justified
+    entries were migrated (with comments) into
+    :data:`backend.middleware_allowlist.PUBLIC_PATH_ALLOWLIST` /
+    ``PUBLIC_PATH_PREFIXES``.
+    """
+    return is_public(path)
 
 
 async def _has_valid_cookie_session(request: Request) -> bool:

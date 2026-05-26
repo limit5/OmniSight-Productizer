@@ -19,6 +19,7 @@ from backend.routers import agents, artifacts, chat, events, health, host as _ho
 from backend import db
 from backend import lifecycle as _lifecycle
 from backend import api_versioning as _api_versioning
+from backend.middleware_allowlist import is_public, is_static_asset
 
 # OP-797 refactor (2026-05-08): URL-versioned routers and middleware live in
 # backend.api_versioning. Re-exports preserve test/import contracts.
@@ -722,17 +723,12 @@ async def _collect_response_body(response) -> bytes:
     return b"".join([chunk async for chunk in response.body_iterator])
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  K1 — force password change middleware
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_PASSWORD_CHANGE_EXEMPT = {
-    "/auth/change-password", "/auth/login", "/auth/logout",
-    "/auth/whoami", "/health", "/healthz", "/livez", "/readyz",
-}
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  I9 — Per-IP / per-user / per-tenant rate limiting
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_RATE_LIMIT_EXEMPT = {"/health", "/healthz", "/livez", "/readyz", "/auth/login", "/auth/logout"}
+# Public-path exemption is answered by the single-source allowlist
+# (backend.middleware_allowlist.is_public) per Family ⑦ contract §4/§5;
+# the former private rate-limit exempt set was deleted in v2-⑦-2bc
+# (OP-1752) so this gate can no longer drift from its siblings.
 
 
 @app.middleware("http")
@@ -745,8 +741,7 @@ async def _rate_limit_gate(request, call_next):
     """
     from starlette.responses import JSONResponse as StarletteJSON
 
-    rel = _api_relative_path(request.url.path)
-    if rel in _RATE_LIMIT_EXEMPT:
+    if is_public(request.url.path):
         return await call_next(request)
 
     from backend.rate_limit import get_limiter
@@ -1112,8 +1107,7 @@ async def _project_header_gate(request, call_next):
 async def _must_change_password_gate(request, call_next):
     from starlette.responses import JSONResponse as StarletteJSON
     path = request.url.path
-    rel = _api_relative_path(path)
-    if rel in _PASSWORD_CHANGE_EXEMPT or path in ("/", "/docs", "/openapi.json", "/redoc"):
+    if is_public(path):
         return await call_next(request)
     from backend import auth as _auth
     if _auth.auth_mode() == "open":
@@ -1157,47 +1151,21 @@ async def _must_change_password_gate(request, call_next):
 # rate-limit / api-key / tenant / password-change gates do any work
 # during a fresh install (when they'd otherwise 401/429 on an unconfigured
 # system).
-_BOOTSTRAP_EXEMPT_REL = {
-    "/auth/login", "/auth/logout", "/auth/change-password",
-    "/healthz", "/health", "/livez", "/readyz", "/version",
-}
-# ``/cloudflare/*`` is exempt for L4 Step 3 — the wizard's Cloudflare
-# tunnel embed (B12 wizard) calls these endpoints before login. The
-# router itself still enforces operator RBAC once bootstrap has
-# finalized; this exemption only waives the redirect during install.
-_BOOTSTRAP_EXEMPT_REL_PREFIXES = (
-    "/cloudflare/",
-)
-_BOOTSTRAP_EXEMPT_RAW = {
-    "/", "/healthz", "/livez", "/readyz", "/docs", "/openapi.json", "/redoc",
-    "/favicon.ico", "/robots.txt",
-}
-_BOOTSTRAP_EXEMPT_RAW_PREFIXES = (
-    "/_next/", "/static/", "/assets/", "/public/",
-)
-_BOOTSTRAP_STATIC_SUFFIXES = (
-    ".css", ".js", ".map", ".ico", ".png", ".jpg", ".jpeg",
-    ".gif", ".svg", ".webp", ".woff", ".woff2", ".ttf", ".eot",
-)
-
-
 def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
-    """Return True if *path* bypasses the bootstrap wizard gate."""
-    if path == "/api/version":
-        return True
-    if path == "/bootstrap" or path.startswith("/bootstrap/"):
-        return True
-    if rel == "/bootstrap" or rel.startswith("/bootstrap/"):
-        return True
-    if rel in _BOOTSTRAP_EXEMPT_REL or path in _BOOTSTRAP_EXEMPT_RAW:
-        return True
-    if any(rel.startswith(p) for p in _BOOTSTRAP_EXEMPT_REL_PREFIXES):
-        return True
-    if any(path.startswith(p) for p in _BOOTSTRAP_EXEMPT_RAW_PREFIXES):
-        return True
-    if path.endswith(_BOOTSTRAP_STATIC_SUFFIXES):
-        return True
-    return False
+    """Return True if *path* bypasses the bootstrap wizard gate.
+
+    Public-path + static-asset exemption is answered by the single-source
+    allowlist (backend.middleware_allowlist) per Family ⑦ contract §4/§5.
+    The former private bootstrap exempt / static-suffix sets were
+    deleted in v2-⑦-2bc (OP-1752) and folded into
+    :data:`PUBLIC_PATH_ALLOWLIST` / :func:`is_static_asset` — including the
+    former special-cases ``/api/version`` and ``/bootstrap`` (now exact
+    allowlist entries) and the ``/cloudflare/`` redirect waiver (now a
+    public prefix). ``rel`` is retained in the signature for the unit-test
+    contract; :func:`is_public` / :func:`is_static_asset` normalise the
+    API-version prefix internally.
+    """
+    return is_public(path) or is_static_asset(path)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1210,24 +1178,22 @@ def _bootstrap_path_is_exempt(path: str, rel: str) -> bool:
 # (so it becomes the outermost layer) — we want to count even requests
 # that the bootstrap gate would otherwise redirect, AND we want 503s
 # to short-circuit before any other middleware does real work.
-_GRACEFUL_SHUTDOWN_EXEMPT_RAW = {"/healthz", "/health", "/livez", "/readyz"}
-
-
 @app.middleware("http")
 async def _graceful_shutdown_gate(request, call_next):
     """G1 — refuse new traffic while draining + count in-flight."""
     from starlette.responses import JSONResponse as StarletteJSON
 
     path = request.url.path
-    rel = _api_relative_path(path)
     # Liveness probes must keep working while we drain so the
     # orchestrator can still tell the process is alive (just not
     # ready).  Readiness endpoints should start failing — that is
     # G1 bullet #2, handled by the /readyz router itself.
-    exempt = (
-        path in _GRACEFUL_SHUTDOWN_EXEMPT_RAW
-        or rel in _GRACEFUL_SHUTDOWN_EXEMPT_RAW
-    )
+    #
+    # Public-path exemption is answered by the single-source allowlist
+    # (backend.middleware_allowlist.is_public) per Family ⑦ contract §4/§5;
+    # the former private graceful-shutdown exempt set was deleted
+    # in v2-⑦-2bc (OP-1752).
+    exempt = is_public(path)
     if _lifecycle.coordinator.shutting_down and not exempt:
         return StarletteJSON(
             status_code=503,

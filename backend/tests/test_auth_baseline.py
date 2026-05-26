@@ -63,27 +63,34 @@ def test_path_allowed_true(path):
     [
         "/api/v1/agents",
         "/api/v1/chat",
-        "/api/v1/auth/logout",          # logout is deliberately NOT on the list
-        "/api/v1/auth/change-password",
         "/api/v1/chatops/mirror",       # only /chatops/webhook/ is allowlisted
-        # near-miss: prefix `/metrics` must not swallow `/metricsx`
-        # (startswith does match, so verify the lookalike IS caught —
-        # this is the intentional lax semantics; documenting it via test.)
+        # NB (v2-⑦-2bc / OP-1752): `/api/v1/auth/logout` and
+        # `/api/v1/auth/change-password` USED to be rejected by this floor
+        # but are now public — _path_allowed delegates to is_public(), the
+        # single-source UNION of the five gates, and those paths are union
+        # members (the rate-limit gate exempts logout to clear a
+        # compromised session; the K1 gate exempts change-password so the
+        # user can reach the forced-change form). Their handlers still
+        # enforce their own auth. See test_path_allowed_true.
     ],
 )
 def test_path_allowed_false(path):
     assert auth_baseline._path_allowed(path) is False
 
 
-def test_path_allowed_near_miss_documents_startswith_semantics():
-    """`startswith` means `/metricsx` matches `/metrics`. That's the
-    chosen semantic — entries in the allowlist are crafted as the
-    longest safe deterministic prefix. This test pins the behaviour
-    so a future refactor to exact-match doesn't silently change it."""
-    assert auth_baseline._path_allowed("/metricsxyz") is True
-    # adding a trailing slash in the allowlist where we want strict
-    # sub-path scoping (e.g. `/api/v1/bootstrap/`) is how we get
-    # exact-ish matching today.
+def test_path_allowed_exact_match_semantics():
+    """v2-⑦-2bc (OP-1752): `_path_allowed` now delegates to
+    `is_public`, which uses per-entry exact-vs-prefix matching (Family ⑦
+    contract §4.4) instead of the historical blanket `startswith`. The
+    de-ambiguation is intentional: `/metricsxyz` no longer rides the
+    `/metrics` entry (exact-match), and `/api/v1/bootstrapxyz` still
+    misses the `/api/v1/bootstrap/` prefix (slash-scoped). This pins the
+    new semantic so a regression back to blanket-startswith is caught."""
+    # Exact entry — lookalike no longer swallowed (was True pre-2bc).
+    assert auth_baseline._path_allowed("/metricsxyz") is False
+    assert auth_baseline._path_allowed("/metrics") is True
+    # Slash-scoped prefix — sub-path matches, lookalike does not.
+    assert auth_baseline._path_allowed("/api/v1/bootstrap/status") is True
     assert auth_baseline._path_allowed("/api/v1/bootstrapxyz") is False
 
 

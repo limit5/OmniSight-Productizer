@@ -53,8 +53,18 @@ Other audited surfaces
   ``backend/main.py`` for ``/docs``, ``/redoc``, and ``/openapi.json`` plus
   API-prefixed variants in the auth-baseline allowlist.
 
-The assertion below is expected to FLIP from ``assert 401`` to ``assert 200``
-once v2-7-2bc + v2-7-FixHealth merge.
+Post-v2-⑦-2bc state (OP-1752)
+-----------------------------
+v2-⑦-2bc routed ``auth_baseline._path_allowed`` through the single-source
+``backend.middleware_allowlist.is_public``. The historical drift could only
+exist because the auth floor read its OWN ``AUTH_BASELINE_ALLOWLIST`` literal;
+now it does not. This test therefore FLIPS: mutating the (now-defunct)
+``AUTH_BASELINE_ALLOWLIST`` literal can no longer reintroduce the 401 — the
+drift class is dissolved. ``GET /health`` is no longer 401'd by the baseline.
+(It returns 404 here because no bare ``/health`` ROUTE is mounted in the test
+app; whether root ``/health`` becomes a 200 public alias is the separate
+v2-⑦-FixHealth decision, NOT this ticket. The invariant 2bc pins is the
+absence of the auth-floor 401.)
 """
 
 from __future__ import annotations
@@ -65,11 +75,16 @@ from backend import auth_baseline
 
 
 @pytest.mark.asyncio
-async def test_health_without_auth_reproduces_historical_401_when_baseline_drifted(
+async def test_health_drift_dissolved_baseline_literal_no_longer_gates(
     client,
     monkeypatch,
 ):
     monkeypatch.setenv("OMNISIGHT_AUTH_BASELINE_MODE", "enforce")
+    # Remove "/health" from the historical literal to reproduce the
+    # PRE-2bc drift trigger. Post-2bc this literal is no longer consulted
+    # by _path_allowed (it delegates to is_public), so the mutation must
+    # have NO effect on gating — the single source still treats /health as
+    # public.
     monkeypatch.setattr(
         auth_baseline,
         "AUTH_BASELINE_ALLOWLIST",
@@ -82,5 +97,9 @@ async def test_health_without_auth_reproduces_historical_401_when_baseline_drift
 
     response = await client.get("/health", follow_redirects=False)
 
-    # expected to FLIP from `assert 401` to `assert 200` once v2-7-2bc + v2-7-FixHealth merge
-    assert response.status_code == 401
+    # FLIPPED from `assert 401` (pre-2bc) — the auth-baseline floor no
+    # longer 401s /health regardless of the defunct literal. 404 = no bare
+    # /health route mounted (v2-⑦-FixHealth territory); the point is it is
+    # NOT the historical 401.
+    assert response.status_code != 401
+    assert response.status_code == 404

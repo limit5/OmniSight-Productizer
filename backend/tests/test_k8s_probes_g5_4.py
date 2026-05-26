@@ -343,60 +343,91 @@ class TestG1HealthTestCoverage:
 # force-password-change / draining.
 # ---------------------------------------------------------------------------
 class TestMiddlewareExemptionsCoverLivez:
+    """/livez must bypass every path-gating middleware.
+
+    Pre-v2-⑦-2bc each gate carried its own private ``*_EXEMPT`` set and
+    this class regex-matched ``"/livez"`` inside each literal. v2-⑦-2bc
+    (OP-1752) deleted those sets and routed all five gates through the
+    single source ``backend.middleware_allowlist.is_public`` — so the
+    contract is now: ``is_public("/livez")`` (and the API-prefixed forms)
+    is True, and each gate's body calls ``is_public``. That is strictly
+    stronger than the old per-set check: a single source guarantees the
+    gates can't disagree.
+    """
+
     @pytest.fixture(scope="class")
     def main_source(self) -> str:
         assert MAIN.is_file()
         return MAIN.read_text(encoding="utf-8")
 
-    def test_rate_limit_exempt_includes_livez(self, main_source: str) -> None:
+    def test_livez_is_public_in_single_source(self) -> None:
+        # /livez (raw + API-prefixed) must resolve public so no gate 503s
+        # the K8s liveness probe under pressure / bootstrap / drain / K1.
+        from backend.middleware_allowlist import is_public
+
+        for path in ("/livez", "/api/v1/livez", "/api/v2/livez"):
+            assert is_public(path) is True, path
+
+    def test_rate_limit_gate_routes_through_is_public(
+        self, main_source: str
+    ) -> None:
         # Rate-limit exemption is the same reason we exempt /readyz:
         # probes must not be denied when the backend is under pressure.
-        assert "_RATE_LIMIT_EXEMPT" in main_source
-        # Locate the specific set literal.
         import re
 
-        match = re.search(
-            r"_RATE_LIMIT_EXEMPT\s*=\s*\{[^}]*\}", main_source, re.DOTALL
+        body = re.search(
+            r"async def _rate_limit_gate\(.*?\n(?=@app\.middleware|\Z)",
+            main_source,
+            re.DOTALL,
         )
-        assert match is not None
-        assert '"/livez"' in match.group(0)
+        assert body is not None
+        assert "is_public(" in body.group(0)
 
-    def test_bootstrap_exempt_includes_livez(self, main_source: str) -> None:
+    def test_bootstrap_gate_routes_through_is_public(
+        self, main_source: str
+    ) -> None:
         # The bootstrap redirect would otherwise 307 /livez into the
-        # wizard and the probe would fail.
+        # wizard and the probe would fail; _bootstrap_path_is_exempt now
+        # delegates to is_public()/is_static_asset().
         import re
 
-        match = re.search(
-            r"_BOOTSTRAP_EXEMPT_REL\s*=\s*\{[^}]*\}", main_source, re.DOTALL
+        body = re.search(
+            r"def _bootstrap_path_is_exempt\(.*?\n(?=\n\S|\Z)",
+            main_source,
+            re.DOTALL,
         )
-        assert match is not None
-        assert '"/livez"' in match.group(0)
+        assert body is not None
+        assert "is_public(" in body.group(0)
 
-    def test_graceful_shutdown_exempt_includes_livez(
+    def test_graceful_shutdown_gate_routes_through_is_public(
         self, main_source: str
     ) -> None:
         # Liveness must keep answering 200 during graceful shutdown —
         # if it falls into the 503 gate, K8s restarts a draining pod.
         import re
 
-        match = re.search(
-            r"_GRACEFUL_SHUTDOWN_EXEMPT_RAW\s*=\s*\{[^}]*\}", main_source
+        body = re.search(
+            r"async def _graceful_shutdown_gate\(.*?\n(?=@app\.middleware|\Z)",
+            main_source,
+            re.DOTALL,
         )
-        assert match is not None
-        assert '"/livez"' in match.group(0)
+        assert body is not None
+        assert "is_public(" in body.group(0)
 
-    def test_password_change_exempt_includes_livez(
+    def test_password_change_gate_routes_through_is_public(
         self, main_source: str
     ) -> None:
         # Consistent with /healthz / /readyz — no forced-password
         # redirect on probe endpoints.
         import re
 
-        match = re.search(
-            r"_PASSWORD_CHANGE_EXEMPT\s*=\s*\{[^}]*\}", main_source, re.DOTALL
+        body = re.search(
+            r"async def _must_change_password_gate\(.*?\n(?=@app\.middleware|\Z)",
+            main_source,
+            re.DOTALL,
         )
-        assert match is not None
-        assert '"/livez"' in match.group(0)
+        assert body is not None
+        assert "is_public(" in body.group(0)
 
 
 # ---------------------------------------------------------------------------
