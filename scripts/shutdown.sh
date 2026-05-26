@@ -83,6 +83,16 @@ declare -A GRACE_PERIODS=(
 )
 DEFAULT_GRACE=10
 PG_WAL_SAFETY_TIMEOUT=25
+# Post-stop verification budget (family8 §3.4). The verification loop polls
+# until every in-scope service has left the `running`/`active` state, up to
+# this many seconds, before declaring failure. Overridable for tests.
+VERIFY_TIMEOUT="${OMNISIGHT_SHUTDOWN_VERIFY_TIMEOUT:-30}"
+
+# Per-service stop timing, populated by record_elapsed() as each service is
+# stopped. Feeds the §3.4 structured verification evidence line (the §11 RTO
+# histogram reads per-service wall-clock from these, not from docker/systemd).
+declare -A STOP_ELAPSED=()
+declare -a STOP_ORDER=()
 
 log() { printf '\033[36m[shutdown]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[shutdown]\033[0m %s\n' "$*" >&2; }
@@ -180,6 +190,47 @@ service_grace() {
   echo "${GRACE_PERIODS[$service]:-$DEFAULT_GRACE}"
 }
 
+# Print the four §3.2 service-class grace budgets. Each concrete service in
+# GRACE_PERIODS maps to exactly one class; we read the representative member
+# of each class so this stays in lock-step with the map above (rather than
+# re-hardcoding the numbers). --dry-run surfaces this so an operator can
+# confirm the wire-up before a live stop (family8 §3.2; OP-1748 AC).
+print_class_budgets() {
+  local pg backend stateless
+  pg=$(service_grace postgres)        # PG class    (postgres / pg-primary)
+  backend=$(service_grace backend)    # backend     (backend / backend-a/-b)
+  stateless=$(service_grace caddy)    # stateless   (caddy / frontend / cloudflared)
+  log "service-class grace budgets (family8 §3.2): PG=${pg}s backend=${backend}s stateless=${stateless}s other=${DEFAULT_GRACE}s"
+}
+
+# Record how long a single service took to stop (wall-clock seconds, from the
+# script's own timer). Order-preserving so the evidence line reads in stop
+# order. Called once per handled service from the stop_* functions.
+record_elapsed() {
+  local service="$1" t0="$2" now
+  now=$(date +%s)
+  STOP_ELAPSED[$service]=$(( now - t0 ))
+  STOP_ORDER+=("$service")
+}
+
+# Emit the single structured key=value verification-evidence line mandated by
+# §3.4: the mode + timeout used, the resulting exit code, the services that
+# reached inactive/exited (in stop order) with per-service wall-clock, and any
+# service still up. One line so log aggregation can extract the RTO histogram.
+emit_verification_evidence() {
+  local mode="$1" exit_code="$2" still_running="$3"
+  local s down_list elapsed_kv
+  local parts=()
+  down_list=$(IFS=,; echo "${STOP_ORDER[*]:-}")
+  for s in "${STOP_ORDER[@]:-}"; do
+    [[ -z "$s" ]] && continue
+    parts+=("${s}:${STOP_ELAPSED[$s]:-0}s")
+  done
+  elapsed_kv=$(IFS=,; echo "${parts[*]:-}")
+  printf '[shutdown] verify mode=%s timeout=%s exit=%s down=%s elapsed=%s still_running=%s\n' \
+    "$mode" "$TIMEOUT" "$exit_code" "${down_list:-none}" "${elapsed_kv:-none}" "${still_running:-none}"
+}
+
 # ── systemd shutdown ──────────────────────────────────────────────
 list_worker_units() {
   # Enumerate every enabled/running omnisight-worker@N instance. We
@@ -191,7 +242,8 @@ list_worker_units() {
 }
 
 stop_unit() {
-  local unit="$1"
+  local unit="$1" t0
+  t0=$(date +%s)
   if ! systemctl list-unit-files 2>/dev/null | grep -q "^${unit%@*}"; then
     if (( FORCE )); then
       warn "unit not installed: $unit — skipping (--force)"
@@ -202,17 +254,20 @@ stop_unit() {
   fi
   if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
     log "already inactive: $unit"
+    record_elapsed "$unit" "$t0"
     return 0
   fi
   log "stopping $unit …"
   if ! run sudo systemctl stop "$unit"; then
     if (( FORCE )); then
       warn "systemctl stop $unit failed — continuing (--force)"
+      record_elapsed "$unit" "$t0"
       return 0
     fi
     err "systemctl stop $unit failed"
     return 1
   fi
+  record_elapsed "$unit" "$t0"
 }
 
 shutdown_systemd() {
@@ -264,17 +319,20 @@ verify_systemd_down() {
     units+=("$u")
   done < <(list_worker_units || true)
 
-  local bad=0
+  local bad=0 still=""
   for u in "${units[@]}"; do
     if systemctl is-active --quiet "$u" 2>/dev/null; then
       err "$u is still active — drain may have exceeded its grace period"
+      still+="${still:+ }$u"
       bad=1
     fi
   done
   if (( bad )); then
+    emit_verification_evidence systemd 1 "$still"
     err "one or more services did not stop cleanly"
     return 1
   fi
+  emit_verification_evidence systemd 0 ""
   log "all systemd services reported inactive"
 }
 
@@ -337,7 +395,11 @@ shutdown_compose() {
     stop_compose_service "$file" "$cc" "$svc" --profile observability || return 1
   done
 
-  # 8. verify
+  # 8. idempotency: clear any Exited residue from a prior hard-failed run so a
+  #    rerun converges to a clean stack (§3.3).
+  cleanup_compose_residue "$file" "$cc"
+
+  # 9. verify
   verify_compose_down "$file" "$cc"
 }
 
@@ -378,12 +440,14 @@ stop_compose_service() {
     return 0
   fi
 
-  local container grace
+  local container grace t0
+  t0=$(date +%s)
   container=$(compose_service_container "$file" "$cc" "$service" "$@")
   grace=$(service_grace "$service")
   if [[ -z "$container" ]] || ! container_running "$container"; then
     log "already exited: $service"
     jsonl_stop_result "$service" "$grace" SIGTERM already_exited
+    record_elapsed "$service" "$t0"
     return 0
   fi
 
@@ -393,12 +457,14 @@ stop_compose_service() {
   if (( DRY_RUN )); then
     run docker kill --signal=TERM "$container"
     jsonl_stop_result "$service" "$grace" SIGTERM stopped
+    record_elapsed "$service" "$t0"
     return 0
   fi
 
   docker kill --signal=TERM "$container" >/dev/null
   if wait_container_exit "$container" "$grace"; then
     jsonl_stop_result "$service" "$grace" SIGTERM stopped
+    record_elapsed "$service" "$t0"
     return 0
   fi
 
@@ -406,6 +472,7 @@ stop_compose_service() {
   docker kill --signal=KILL "$container" >/dev/null
   if wait_container_exit "$container" 1; then
     jsonl_stop_result "$service" "$grace" SIGKILL stopped
+    record_elapsed "$service" "$t0"
     return 0
   fi
 
@@ -442,18 +509,54 @@ wait_pg_wal_safe() {
   done
 }
 
+# Idempotency residue cleanup (family8 §3.3). A prior invocation that had to
+# SIGKILL a hung service leaves an `Exited` container behind. A rerun must
+# converge to a clean stack, so we remove that residue with `rm -f -s` (stop
+# if needed, then remove). Safe to call when there is nothing to remove — the
+# exited list is simply empty.
+cleanup_compose_residue() {
+  local file="$1" cc="$2"
+  local exited svc
+  exited=$($cc -f "$file" ps --all --services --filter status=exited 2>/dev/null || true)
+  [[ -z "$exited" ]] && return 0
+  while IFS= read -r svc; do
+    [[ -z "$svc" ]] && continue
+    log "removing exited residue: $svc (rerun-idempotency, §3.3)"
+    run $cc -f "$file" rm -f -s "$svc" >/dev/null 2>&1 || true
+  done <<< "$exited"
+}
+
 verify_compose_down() {
   local file="$1" cc="$2"
-  # Any service with State=running that isn't explicitly exempted is a
-  # failure.  `ps --format json` isn't portable across compose v1/v2, so
-  # fall back to plain `ps` and parse STATE column.
-  local running
-  running=$($cc -f "$file" ps --all --services --filter status=running 2>/dev/null || true)
-  if [[ -n "$running" ]] && (( SKIP_INGRESS == 0 )); then
-    err "services still running: $running"
-    return 1
-  fi
-  log "compose stack is down"
+  # §3.4 verification loop: poll until every in-scope service has left the
+  # `running` state, up to VERIFY_TIMEOUT, then emit a single structured
+  # evidence line. Any service still running when the budget expires is a
+  # failure (exit 1). `ps --format json` isn't portable across compose v1/v2,
+  # so we parse `ps --services --filter status=running`.
+  local start deadline running
+  start=$(date +%s)
+  deadline=$(( start + VERIFY_TIMEOUT ))
+  while :; do
+    running=$($cc -f "$file" ps --all --services --filter status=running 2>/dev/null || true)
+    if (( SKIP_INGRESS == 1 )); then
+      # ingress is intentionally left up (rolling-restart flows); exclude it
+      # before judging instead of skipping verification wholesale.
+      running=$(printf '%s\n' "$running" | grep -vE '^(caddy|cloudflared)$' || true)
+    fi
+    running=$(printf '%s' "$running" | tr -s '[:space:]' ' ' | sed 's/^ *//;s/ *$//')
+    if [[ -z "$running" ]]; then
+      emit_verification_evidence compose 0 ""
+      log "compose stack is down"
+      return 0
+    fi
+    if (( $(date +%s) >= deadline )); then
+      break
+    fi
+    sleep 2
+  done
+  emit_verification_evidence compose 1 "$running"
+  err "verification timeout — still running: $running"
+  return 1
 }
 
 # ── DB backup (best-effort) ───────────────────────────────────────
@@ -481,6 +584,11 @@ backup_db_best_effort() {
 # ── main ──────────────────────────────────────────────────────────
 main() {
   local resolved
+  # --dry-run surfaces the per-service-class grace budgets up front so an
+  # operator can confirm the §3.2 wire-up without a live stop (OP-1748 AC).
+  if (( DRY_RUN )); then
+    print_class_budgets
+  fi
   resolved=$(detect_mode)
   case "$resolved" in
     systemd)
