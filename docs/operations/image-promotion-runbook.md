@@ -14,7 +14,12 @@ audit row.
 - `docker buildx` can read and write the target registry.
 - `cosign` can verify the build signature and create keyless
   attestations via the same GitHub Actions OIDC/Fulcio path used by
-  the image build.
+  the image build. The inline verify (`scripts/verify_image_signature.sh`)
+  self-locates cosign — it honours `$COSIGN_BIN`, else probes `~/bin` /
+  `/usr/local/bin` / `~/go/bin` (OP-1736). Run promote from your normal
+  shell (not `env -i`, which strips a `~/bin` cosign and aborts the
+  promote mid-retag); use `OMNISIGHT_TOOLING_TOLERATE_EXTRA_ENV=1` if the
+  gate trips pydantic on a polluted shell.
 - The bundle manifest exists as `artifacts/bundle-<bundle-id>.json`,
   `bundles/<bundle-id>/bundle.json`, or an explicit path passed to
   `--bundle`.

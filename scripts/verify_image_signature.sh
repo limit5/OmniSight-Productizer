@@ -58,8 +58,33 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# OP-1736 — self-locate cosign before the `command -v` check. A clean /
+# minimal PATH (e.g. a promote run that was historically wrapped in
+# `env -i PATH=/usr/bin:/bin:/usr/local/bin`) drops a cosign installed in a
+# user bindir such as ~/bin, which silently aborted the promote mid-retag.
+# Honour an explicit $COSIGN_BIN, else probe the common install dirs and
+# prepend the first hit to PATH. We still fail-closed if cosign is truly
+# absent — verification is NEVER skipped when the tool is missing.
+COSIGN_SEARCH_DIRS=("${HOME:-}/bin" "/usr/local/bin" "${HOME:-}/go/bin")
+
+if [ -n "${COSIGN_BIN:-}" ]; then
+  if [ ! -x "$COSIGN_BIN" ]; then
+    echo "FAIL: COSIGN_BIN is set to '${COSIGN_BIN}' but it is not an executable file" >&2
+    exit 2
+  fi
+  PATH="$(dirname "$COSIGN_BIN"):$PATH"
+elif ! command -v cosign >/dev/null 2>&1; then
+  for _cosign_dir in "${COSIGN_SEARCH_DIRS[@]}"; do
+    if [ -x "${_cosign_dir}/cosign" ]; then
+      PATH="${_cosign_dir}:$PATH"
+      break
+    fi
+  done
+fi
+export PATH
+
 if ! command -v cosign >/dev/null 2>&1; then
-  echo "FAIL: cosign not installed (https://docs.sigstore.dev/cosign/installation/)" >&2
+  echo "FAIL: cosign not found in PATH or ${COSIGN_SEARCH_DIRS[*]}; set COSIGN_BIN to its path (https://docs.sigstore.dev/cosign/installation/)" >&2
   exit 2
 fi
 
