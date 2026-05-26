@@ -400,3 +400,26 @@ roll-up is the artifact G5 cites when proposing to remove the
 A reset is not punitive — it just means the dual-publish path has not
 yet demonstrated stability. Document the reset on OP-1488 with the
 INCIDENT link and restart the count from the next clean cut.
+
+## 12. Build the promote bundle from the cut (OP-1735)
+
+The cut produces signed images; promotion (`promote_image_bundle.py`)
+needs a bundle manifest naming their validated backend+frontend digests.
+Do **not** reconstruct that manifest by hand — the CI seal artifact is
+unfetchable (`claude-bot` 404s on GitLab pipeline-read, and widening that
+permission is out of scope) and the baked `/app/bundle.json` is
+zero-digest by design. Build it from the cut's image refs:
+
+```bash
+python3 scripts/build_promote_bundle.py \
+  --candidate-tag vX.Y.Z \
+  --out artifacts/bundle-vX.Y.Z.json
+```
+
+This LOCAL-inspect-only helper resolves the real digests with `docker
+buildx imagetools inspect`, reads `bundle_id`/`git_sha`/`git_ref` from
+the image OCI labels, and emits exactly the RT-21 `{backend, frontend}`
+pair (bridge auto-omitted). Hand the result straight to
+`--bundle` — see
+[`image-promotion-runbook.md`](image-promotion-runbook.md)
+§"Building the promote bundle from image refs (OP-1735)".

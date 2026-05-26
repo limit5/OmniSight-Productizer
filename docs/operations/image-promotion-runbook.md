@@ -17,9 +17,63 @@ audit row.
   the image build.
 - The bundle manifest exists as `artifacts/bundle-<bundle-id>.json`,
   `bundles/<bundle-id>/bundle.json`, or an explicit path passed to
-  `--bundle`.
+  `--bundle`. If you do **not** already have one (the common case at
+  promote time — see below), build it from the candidate image refs with
+  `scripts/build_promote_bundle.py` rather than reconstructing it by hand.
 - The operator has approval references ready, for example
   `OP-1234,OP-5678`.
+
+## Building the promote bundle from image refs (OP-1735)
+
+`promote_image_bundle.py` needs a bundle manifest naming the validated
+backend+frontend digests (the RT-21 pair). At promote time **neither**
+of the usual sources is available:
+
+- the GitLab CI `audit-emit` seal artifact is unfetchable — `claude-bot`
+  404s on the GitLab pipeline-read API, and widening that permission is
+  **out of scope** (security tradeoff, OP-1735 MUST NOT); and
+- the `/app/bundle.json` baked into the image is **zero-digest by
+  design** (digests are not known until after the image is sealed), so
+  it cannot name the real content.
+
+Before OP-1735 the operator reconstructed the bundle by hand —
+`imagetools inspect` each image, paste the digests into a skeleton,
+delete the `bridge` entry, fix up `bundle_id`. That dance is fragile and
+fat-finger-prone (it bit us live during v0.6.2). Use the helper instead:
+
+```bash
+# Derive refs from the candidate tag + the default GitLab CR registry:
+python3 scripts/build_promote_bundle.py \
+  --candidate-tag v0.6.2-rc1 \
+  --out artifacts/bundle-v0.6.2-rc1.json
+
+# …or pin explicit refs (e.g. by @digest):
+python3 scripts/build_promote_bundle.py \
+  --backend-ref  sora.services:49160/omnisight/omnisight-productizer/backend:v0.6.2-rc1 \
+  --frontend-ref sora.services:49160/omnisight/omnisight-productizer/frontend:v0.6.2-rc1 \
+  --out artifacts/bundle-v0.6.2-rc1.json
+```
+
+The helper is **LOCAL inspect only** — it runs `docker buildx imagetools
+inspect` (a pure registry read, never a build, never a CI-artifact
+fetch). For each of backend and frontend it resolves the real manifest
+digest and reads `bundle_id` / `git_sha` / `git_ref` from the OCI labels
+(`org.opencontainers.image.bundle.id`, `…revision`, `…ref.name`). It
+emits **exactly the RT-21 `{backend, frontend}` pair** — `bridge` is a
+host control-plane daemon, not a prod container, so it is auto-omitted
+(a bundle that carries it is rejected by promote per RT-21).
+
+The output is consumed unchanged by `promote_image_bundle.py`; the
+helper does not change promote's validation contract. Hand the file
+straight to `--bundle`:
+
+```bash
+python3 scripts/promote_image_bundle.py \
+  --bundle artifacts/bundle-v0.6.2-rc1.json \
+  --from staging --to canary \
+  --actor sora --approval-refs OP-1234 \
+  --no-dry-run
+```
 
 ## Promotion preflight — cross-stage parity (OP-1720)
 
