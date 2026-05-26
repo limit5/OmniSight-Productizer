@@ -32,6 +32,17 @@ def _metric_text() -> str:
 def setup_function() -> None:
     metrics.reset_for_tests()
     probe_mod.AI_CORE_AVAILABLE = False
+    probe_mod.AUX_SERVICE_AVAILABLE[probe_mod.SERVICE_LABEL] = False
+
+
+def _http_from(observations: list[bool]) -> probe_mod.HttpGet:
+    """Build an http_get returning 200 for True and 503 for False, in order."""
+    it = iter(observations)
+
+    def _get(_url: str, _timeout_s: float) -> int:
+        return 200 if next(it) else 503
+
+    return _get
 
 
 def test_probe_returns_available_when_health_200() -> None:
@@ -131,3 +142,85 @@ def test_long_outage_log_emitted_after_24h(caplog: pytest.LogCaptureFixture) -> 
         probe.probe_once()
 
     assert any("aux_service.long_outage" in record.message for record in caplog.records)
+
+
+# ── OP-1749 §3.6 cases ──────────────────────────────────────────────────────
+
+
+def test_three_of_five_flip_non_consecutive() -> None:
+    """§3.6 #5: 3 down-observations within a 5-probe window flip down even when
+    they are interleaved with up-observations (non-consecutive)."""
+    # available=True, observe: down, up, down, up, down → 3 downs in last 5.
+    probe = AiCoreProbe(
+        flap_window=5,
+        flap_threshold=3,
+        initial_available=True,
+        http_get=_http_from([False, True, False, True, False]),
+    )
+
+    results = [probe.probe_once() for _ in range(5)]
+
+    assert results == [True, True, True, True, False]
+    assert probe_mod.AI_CORE_AVAILABLE is False
+    assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is False
+
+
+def test_single_down_observation_is_suppressed() -> None:
+    """§3.6 #6: a lone down-blip surrounded by ups never reaches the 3-of-5
+    threshold, so the stable flag stays available."""
+    probe = AiCoreProbe(
+        flap_window=5,
+        flap_threshold=3,
+        initial_available=True,
+        http_get=_http_from([True, False, True, True, True]),
+    )
+
+    for _ in range(5):
+        assert probe.probe_once() is True
+
+    assert probe_mod.AI_CORE_AVAILABLE is True
+    assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is True
+
+
+def test_gauge_initialises_to_zero_on_construction() -> None:
+    """§3.6 #8: constructing the probe publishes the gauge as 0.0 (fail-closed),
+    not the pre-probe NaN sentinel."""
+    AiCoreProbe(
+        flap_window=5,
+        flap_threshold=3,
+        http_get=lambda _url, _timeout: 200,
+    )
+
+    assert 'omnisight_aux_service_available{service="ai_core"} 0.0' in _metric_text()
+
+
+def test_bootstrap_state_is_fail_closed_false() -> None:
+    """§3.6 #10: with no observations yet, the probe and the AUX dict both report
+    unavailable (fail-closed bootstrap)."""
+    probe = AiCoreProbe(
+        flap_window=5,
+        flap_threshold=3,
+        http_get=lambda _url, _timeout: 200,
+    )
+
+    assert probe._available is False  # constructed but not yet probed
+    assert probe_mod.AI_CORE_AVAILABLE is False
+    assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is False
+
+
+def test_aux_dict_tracks_flip_up_and_down() -> None:
+    """AUX_SERVICE_AVAILABLE mirrors the stable flag across a full up→down cycle."""
+    probe = AiCoreProbe(
+        flap_window=5,
+        flap_threshold=3,
+        initial_available=False,
+        http_get=_http_from([True, True, True, False, False, False]),
+    )
+
+    for _ in range(3):
+        probe.probe_once()
+    assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is True
+
+    for _ in range(3):
+        probe.probe_once()
+    assert probe_mod.AUX_SERVICE_AVAILABLE["ai_core"] is False
