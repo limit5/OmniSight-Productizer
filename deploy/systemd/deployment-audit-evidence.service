@@ -1,0 +1,44 @@
+; [OP-1761] Family ⑤ §6 deployment-audit evidence-file run.
+;
+; Runs scripts/deployment-audit.sh on the family ⑤ cadence and writes the §6
+; forensic evidence JSON (docs/audit/AUDIT-deployment/YYYY-MM-DD.json +
+; latest.json symlink + index.json) per
+; docs/sprint-s12/2026-05-16-v2-family5-image-surfacing-contract.md §6.
+;
+; This is SEPARATE from the generic OP-1016 deployment-audit.{service,timer}
+; (which runs daily at 07:00 for the shipped-vs-deployed baseline). This unit
+; owns the family ⑤ image-surfacing forensic record and runs at 02:00 to match
+; the §6.2 forensic example. It is detect+report only (§5.4): it never
+; redeploys. The §8.4 Discord post is gated OFF by default
+; (OMNISIGHT_FAMILY5_DISCORD_ENABLED=0); 31.C-Integration-external owns the
+; webhook/client and operators flip it on once 31.C ships.
+;
+; ACTIVATION (operator action; tracked by the OP-1761 activation child per SOP
+; §6.5 — see the ticket comment): this unit is shipped but NOT auto-enabled.
+;
+; Install (user-level):
+;   mkdir -p ~/.config/systemd/user
+;   cp deploy/systemd/deployment-audit-evidence.{service,timer} ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now deployment-audit-evidence.timer
+
+[Unit]
+Description=OmniSight family 5 deployment-audit evidence file (OP-1761)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/sora-bridge
+EnvironmentFile=-/home/user/sora-bridge/.env
+EnvironmentFile=-/home/user/.config/omnisight/audit-db.env
+EnvironmentFile=-/home/user/.config/omnisight/release-audit.env
+Environment=OMNISIGHT_AUDIT_EVIDENCE_DIR=/home/user/sora-bridge/docs/audit/AUDIT-deployment
+Environment=OMNISIGHT_FAMILY5_DISCORD_ENABLED=0
+ExecStart=/usr/bin/bash /home/user/sora-bridge/scripts/deployment-audit.sh
+StandardOutput=append:/home/user/work/sora/logs/deployment-audit/evidence.log
+StandardError=append:/home/user/work/sora/logs/deployment-audit/evidence.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

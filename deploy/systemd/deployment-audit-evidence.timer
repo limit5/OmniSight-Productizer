@@ -1,0 +1,19 @@
+; [OP-1761] Daily 02:00 family ⑤ deployment-audit evidence trigger.
+;
+; Fires deployment-audit-evidence.service once a day at 02:00 (the §6.2
+; forensic-example hour), distinct from the OP-1016 deployment-audit.timer that
+; runs the generic shipped-vs-deployed baseline at 07:00. Persistent=true so a
+; missed run (host asleep) fires on next boot — the evidence file is the daily
+; snapshot, so a catch-up run simply rewrites that day's record.
+
+[Unit]
+Description=Daily 02:00 trigger for deployment-audit-evidence.service (OP-1761)
+
+[Timer]
+Unit=deployment-audit-evidence.service
+OnCalendar=*-*-* 02:00:00
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
