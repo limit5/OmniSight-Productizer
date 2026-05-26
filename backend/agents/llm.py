@@ -1100,6 +1100,40 @@ def _split_provider_chain(raw: str) -> list[str]:
     return chain
 
 
+def build_active_fallback_chain() -> list[str]:
+    """Return the *active* provider failover chain (v2-⑨-2bc).
+
+    The *declared* chain is ``settings.llm_fallback_chain`` (operator
+    config). The *active* chain is the declared chain with any provider
+    whose backing optional auxiliary service is currently unavailable
+    removed. Today the only such provider is ``ollama`` — the Local-LLM
+    provider surfaced by the optional ``ai-core`` auxiliary service.
+
+    Per the Family ⑨ contract
+    (``docs/sprint-s12/2026-05-16-v2-family9-aux-service-contract.md``
+    §3.5; operator decision Q3 "available-then-use, unavailable-then-
+    skip"): when ai-core is unavailable — *including* the conservative
+    startup state before the probe has confirmed availability, per the
+    §2.2 / §3.4 "fail closed" guarantee — ``ollama`` is dropped so
+    failover never routes to a provider we cannot confirm is up.
+
+    The function is pure (reads two in-process values, no I/O),
+    idempotent, and MUST NOT mutate ``settings.llm_fallback_chain`` —
+    the operator's declared intent is preserved across probe-state
+    transitions.
+    """
+
+    # Lazy import keeps the chain builder free of any module-load
+    # ordering coupling to the probe (mirrors the routing_policy import
+    # pattern below) and reads the *live* probe flag, not a snapshot.
+    from backend.agents import ai_core_probe
+
+    chain = _split_provider_chain(settings.llm_fallback_chain)
+    if not ai_core_probe.AI_CORE_AVAILABLE:
+        chain = [provider for provider in chain if provider != "ollama"]
+    return chain
+
+
 def _guild_model_override(guild: str | None) -> tuple[str | None, str | None]:
     """Resolve BP.F's ``provider:model`` mapping for one Guild.
 
@@ -1135,7 +1169,10 @@ def _fallback_chain_for_guild(
 ) -> list[str]:
     """Build the provider failover order for a Guild-scoped LLM call."""
 
-    global_chain = _split_provider_chain(settings.llm_fallback_chain)
+    # v2-⑨-2bc: failover walks the *active* chain (declared chain minus
+    # currently-unavailable optional auxiliaries such as ai-core's
+    # ``ollama``), never the raw declared chain.
+    global_chain = build_active_fallback_chain()
     preferred = (guild_provider or "").strip().lower()
     chain: list[str] = []
     seen = {primary_provider.strip().lower()}
