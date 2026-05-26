@@ -57,11 +57,16 @@ class AlembicDriftProbe:
             code, payload = self._comparator(db_url, self._script_dir_resolver())
         except Exception:
             metrics.alembic_drift_probe_errors_total.inc()
+            # §4.2 — comparison could not be computed; flag UNKNOWN. Per
+            # §4.4 the last-collection freshness gauge is left untouched so
+            # AlertBridge's staleness rule can fire if errors persist.
+            metrics.alembic_drift_unknown.set(1.0)
             logger.exception("alembic_drift_probe.collection_failed")
             return "error"
 
         if code == 2:
             metrics.alembic_drift_probe_errors_total.inc()
+            metrics.alembic_drift_unknown.set(1.0)
             logger.warning(
                 "alembic_drift_probe.collection_failed reason=%s",
                 payload.get("reason"),
@@ -70,6 +75,10 @@ class AlembicDriftProbe:
 
         direction = self._direction_from_payload(code, payload)
         self._publish(direction)
+        # §4.2 — a value was computed: drift state is known.
+        # §4.4 — record the successful-collection timestamp for freshness.
+        metrics.alembic_drift_unknown.set(0.0)
+        metrics.alembic_drift_last_collection_ts.set(time.time())
         return direction
 
     def run_forever(self, stop_event: threading.Event | None = None) -> None:
