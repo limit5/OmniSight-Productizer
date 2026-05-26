@@ -1,0 +1,34 @@
+{
+  "linux/amd64": {
+    "created": "2026-05-20T12:34:56Z",
+    "architecture": "amd64",
+    "os": "linux",
+    "config": {
+      "Env": ["PATH=/usr/local/bin:/usr/bin:/bin"],
+      "Entrypoint": ["/app/entrypoint.sh"],
+      "Labels": {
+        "org.opencontainers.image.bundle.id": "v0.6.2-rc1+20260520.sha7a3b4c5",
+        "org.opencontainers.image.bundle.sha": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org.opencontainers.image.revision": "7a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b",
+        "org.opencontainers.image.ref.name": "refs/tags/v0.6.2-rc1"
+      }
+    },
+    "rootfs": {"type": "layers", "diff_ids": ["sha256:1111111111111111111111111111111111111111111111111111111111111111"]}
+  },
+  "linux/arm64": {
+    "created": "2026-05-20T12:34:56Z",
+    "architecture": "arm64",
+    "os": "linux",
+    "config": {
+      "Env": ["PATH=/usr/local/bin:/usr/bin:/bin"],
+      "Entrypoint": ["/app/entrypoint.sh"],
+      "Labels": {
+        "org.opencontainers.image.bundle.id": "v0.6.2-rc1+20260520.sha7a3b4c5",
+        "org.opencontainers.image.bundle.sha": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org.opencontainers.image.revision": "7a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b",
+        "org.opencontainers.image.ref.name": "refs/tags/v0.6.2-rc1"
+      }
+    },
+    "rootfs": {"type": "layers", "diff_ids": ["sha256:2222222222222222222222222222222222222222222222222222222222222222"]}
+  }
+}
