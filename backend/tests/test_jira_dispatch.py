@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
 from backend.agents import jira_dispatch as jd
+from backend.agents.provider_quota_tracker import QuotaState
 
 JIRA_CREDS_PRESENT = (Path("~/.config/omnisight/jira-claude-token").expanduser()).is_file()
 
@@ -81,6 +83,54 @@ def _fake_issue(
             "issuetype": {"name": "ストーリー"},
         },
     }
+
+
+def _quota_state(
+    provider: str,
+    *,
+    rolling_5h_tokens: int = 0,
+    weekly_tokens: int = 0,
+    circuit_state: str = "closed",
+) -> QuotaState:
+    return QuotaState(
+        provider=provider,
+        rolling_5h_tokens=rolling_5h_tokens,
+        weekly_tokens=weekly_tokens,
+        last_reset_at=None,
+        last_cap_hit_at=datetime.now(timezone.utc),
+        circuit_state=circuit_state,
+    )
+
+
+def test_fetch_pickable_tickets_excludes_quota_exhausted_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-1762: exhausted provider quota excludes the ticket before pickup."""
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+    monkeypatch.setattr(
+        jd.capability_registry.provider_quota_tracker,
+        "get_quota_state",
+        lambda provider: _quota_state(provider, rolling_5h_tokens=100),
+    )
+    monkeypatch.setattr(
+        jd.model_deconfliction,
+        "should_pickup_after_prior_failure",
+        lambda **kwargs: pytest.fail("quota exclusion must run before deconfliction"),
+    )
+    monkeypatch.setattr(
+        jd,
+        "_request",
+        lambda *args, **kwargs: {
+            "issues": [
+                _fake_issue(
+                    key="OP-1762",
+                    labels=("class:subscription-codex", "tier:M", "area:backend"),
+                )
+            ]
+        },
+    )
+
+    assert jd.fetch_pickable_tickets(_fake_dispatch_client()) == []
 
 
 def test_to_snapshot_picks_priority_label_as_component() -> None:

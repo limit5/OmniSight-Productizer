@@ -1,12 +1,15 @@
 """OP-1115 capability profile overlay tests."""
 from __future__ import annotations
 
+import importlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from backend.agents import capability_matrix, capability_registry
+from backend.agents.provider_quota_tracker import QuotaState
 
 
 def _write_minimal_matrix(path: Path) -> None:
@@ -74,11 +77,37 @@ def _profile_row(*, tools: list[str], max_tier: str = "L", health: str = "health
     }
 
 
+def _quota_state(
+    provider: str = "openai-subscription",
+    *,
+    rolling_5h_tokens: int = 0,
+    weekly_tokens: int = 0,
+    circuit_state: str = "closed",
+) -> QuotaState:
+    return QuotaState(
+        provider=provider,
+        rolling_5h_tokens=rolling_5h_tokens,
+        weekly_tokens=weekly_tokens,
+        last_reset_at=None,
+        last_cap_hit_at=datetime.now(timezone.utc),
+        circuit_state=circuit_state,
+    )
+
+
 @pytest.fixture()
 def matrix(tmp_path: Path) -> capability_matrix.CapabilityMatrix:
     p = tmp_path / "matrix.yaml"
     _write_minimal_matrix(p)
     return capability_matrix.load_capability_matrix(p)
+
+
+@pytest.fixture(autouse=True)
+def healthy_quota(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        capability_registry.provider_quota_tracker,
+        "get_quota_state",
+        lambda provider: _quota_state(provider),
+    )
 
 
 def test_profile_key_from_legacy_class_labels() -> None:
@@ -88,6 +117,15 @@ def test_profile_key_from_legacy_class_labels() -> None:
     assert capability_registry.profile_key_from_labels(
         ["class:subscription-claude"]
     ) == ("anthropic-subscription", "<unknown>")
+
+
+def test_op1762_quota_pickup_modules_import_cleanly() -> None:
+    for module_name in (
+        "backend.agents.capability_registry",
+        "backend.agents.jira_dispatch",
+        "backend.agents.provider_quota_tracker",
+    ):
+        assert importlib.import_module(module_name)
 
 
 @pytest.mark.parametrize(
@@ -230,3 +268,46 @@ async def test_profile_max_tier_and_health_down_deny_pickup(
             labels=["class:subscription-codex"],
         )
     assert "health_state is down" in str(health_exc.value)
+
+
+@pytest.mark.asyncio
+async def test_quota_exhausted_provider_effectively_denies_profile_health(
+    matrix: capability_matrix.CapabilityMatrix,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+    monkeypatch.setattr(
+        capability_registry.provider_quota_tracker,
+        "get_quota_state",
+        lambda provider: _quota_state(provider, rolling_5h_tokens=100),
+    )
+
+    conn = FakeConn(_profile_row(tools=["code_edit", "run_tests"]))
+
+    with pytest.raises(capability_registry.CapabilityRegistryDenied) as excinfo:
+        await capability_registry.resolve(
+            matrix,
+            conn=conn,
+            ticket_type="Story",
+            areas=["backend"],
+            tier="S",
+            labels=["class:subscription-codex"],
+        )
+
+    assert "health_state is quota-exhausted" in str(excinfo.value)
+
+
+def test_quota_health_denial_from_labels_uses_legacy_profile_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+
+    reason = capability_registry.quota_health_denial_from_labels(
+        ["area:backend", "class:subscription-codex"],
+        quota_state_getter=lambda provider: _quota_state(
+            provider,
+            rolling_5h_tokens=100,
+        ),
+    )
+
+    assert reason == "capability_profile.health:quota-exhausted:openai-subscription"

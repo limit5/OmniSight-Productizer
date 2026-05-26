@@ -96,6 +96,15 @@ def get_quota_state(provider: str) -> QuotaState:
     return _with_ratelimit_fallback(state)
 
 
+def quota_state_exhausted(state: QuotaState) -> bool:
+    """Return whether a quota state has no remaining pickup budget."""
+    if state.circuit_state == "open":
+        return True
+    if state.rolling_5h_tokens >= _cap_for(state.provider, "5h"):
+        return True
+    return state.weekly_tokens >= _cap_for(state.provider, "weekly")
+
+
 def is_at_cap(provider: str, scope: QuotaScope) -> bool:
     """Return whether the provider is at the configured cap for *scope*."""
     if scope not in ("5h", "weekly"):
@@ -510,6 +519,7 @@ __all__ = [
     "QuotaState",
     "get_quota_state",
     "is_at_cap",
+    "quota_state_exhausted",
     "record_usage",
     "reset_window",
 ]

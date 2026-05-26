@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from backend.agents import jira_dispatch as jd
 from backend.agents import runner_coordination as rc
+from backend.agents.provider_quota_tracker import QuotaState
 from backend.agents.scheduler import TicketSnapshot
 
 
@@ -130,6 +132,23 @@ def _allow_later_pre_pickup_gates(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+def _quota_state(
+    provider: str,
+    *,
+    rolling_5h_tokens: int = 0,
+    weekly_tokens: int = 0,
+    circuit_state: str = "closed",
+) -> QuotaState:
+    return QuotaState(
+        provider=provider,
+        rolling_5h_tokens=rolling_5h_tokens,
+        weekly_tokens=weekly_tokens,
+        last_reset_at=None,
+        last_cap_hit_at=datetime.now(timezone.utc),
+        circuit_state=circuit_state,
+    )
+
+
 def _stale_bridge(tmp_path: Path):
     def check() -> tuple[bool, float, Path]:
         return False, 1200.0, tmp_path / "bridge-heartbeat.json"
@@ -160,6 +179,38 @@ def test_stale_bridge_code_only_pickup_proceeds_and_records_external_ref(
     assert claim.ok is True
     holders = rc.find_active_holders(resource_keys=["ticket:OP-1758"])
     assert holders[0].external_refs["bridge_state"] == "stale-at-acquire"
+
+
+def test_quota_exhaustion_blocks_before_runner_claim_acquire(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _allow_later_pre_pickup_gates(monkeypatch)
+    _bootstrap_runner_claims_db(tmp_path, monkeypatch)
+    monkeypatch.setenv("OMNISIGHT_PROVIDER_CAP_OPENAI_SUBSCRIPTION_5H", "100")
+    monkeypatch.setattr(
+        jd.capability_registry.provider_quota_tracker,
+        "get_quota_state",
+        lambda provider: _quota_state(provider, rolling_5h_tokens=100),
+    )
+    monkeypatch.setattr(
+        jd,
+        "fetch_description",
+        lambda c, k: pytest.fail("description fetch must not run after quota block"),
+    )
+
+    ok, reason = jd.pre_pickup_ok(
+        _client(),
+        _snapshot(
+            key="OP-1762",
+            labels=("tier:M", "area:backend", "class:subscription-codex"),
+        ),
+        enabled_capabilities={"code_edit", "run_tests", "jira_update"},
+    )
+
+    assert ok is False
+    assert reason == "capability_profile.health:quota-exhausted:openai-subscription"
+    assert rc.find_active_holders(resource_keys=["ticket:OP-1762"]) == []
 
 
 def test_stale_bridge_gerrit_push_pickup_hard_blocks(
