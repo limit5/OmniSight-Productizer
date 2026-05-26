@@ -20,6 +20,10 @@
 #   - runner_claim_heartbeat_age_seconds{owner_instance_id, resource_key}   (gauge, seconds)
 #   - runner_claim_acquire_total{outcome, owner_instance_id}                (counter; outcome ∈ {won, lost, api-error})
 #   - runner_state_drift_count{kind}                                        (gauge; kind ∈ {table_only, jira_only})
+#   - omnisight_bridge_staleness_seconds                                    (gauge, seconds)
+#   - runner_claims_active{state, instance_id}                              (gauge)
+#   - runner_audit_events_total{action}                                     (counter)
+#   - runner_state_authority_precedence_total                               (counter)
 #
 # Sprint reference: §3 Family ⑩ §4 ticket row 16
 # (docs/sprint-s12/sprint-s12g-A-v2-runtime-defense-contract-spec.md).
@@ -118,3 +122,103 @@ groups:
           critical_labels: [kind]
           cardinality_caps:
             kind: 2
+
+      # -- runner_bridge_stale --------------------------------------------
+      # WARN: the Gerrit/JIRA bridge heartbeat is older than the pickup gate
+      # budget. This is the contract-named C9 signal for SP-B-X-META.
+      - alert: runner_bridge_stale
+        expr: omnisight_bridge_staleness_seconds > 300
+        for: 5m
+        labels:
+          severity: warn
+          area: runner
+          family: "10"
+          defense_dimension: D1
+          instance: gerrit_jira_bridge
+        annotations:
+          summary: "Runner bridge heartbeat stale > 5 min"
+          description: |
+            The Gerrit/JIRA bridge heartbeat is {{ $value | humanizeDuration }}
+            old, exceeding the 5 minute pickup-gate budget. Runner pickup
+            decisions may be based on stale bridge state until the bridge
+            daemon writes a fresh heartbeat.
+          runbook_url: "https://docs.sora.services/runbooks/runner-bridge-stale"
+          remediation_hint: "Check the Gerrit/JIRA bridge daemon, restart it if the heartbeat is not advancing, then verify omnisight_bridge_staleness_seconds falls below 300 before resuming runner pickup."
+        __bridge:
+          critical_labels: [instance]
+          cardinality_caps:
+            instance: 1
+
+      # -- runner_instance_drift ------------------------------------------
+      # PAGE: more than one active runner_claims row shares an instance_id.
+      # This is the contract-named C10 signal for SP-B-X-META.
+      - alert: runner_instance_drift
+        expr: count by (instance_id) (runner_claims_active{state="active"}) > 1
+        for: 1m
+        labels:
+          severity: page
+          area: runner
+          family: "10"
+          defense_dimension: D1
+        annotations:
+          summary: "Runner instance has multiple active claims"
+          description: |
+            instance_id={{ $labels.instance_id }} has {{ $value }} active
+            runner_claims rows. The runner instance uniqueness invariant is
+            violated; two active leases appear to share the same instance_id.
+          runbook_url: "https://docs.sora.services/runbooks/runner-instance-drift"
+          remediation_hint: "Run `omnisight runner-rescue dump --instance {{ $labels.instance_id }}` and release the duplicate active lease before allowing new pickup for that instance_id."
+        __bridge:
+          critical_labels: [instance_id]
+          cardinality_caps:
+            instance_id: 10
+
+      # -- runner_human_authority_yield -----------------------------------
+      # WARN: an operator rescue release happened in the last day. This is
+      # the contract-named C11 signal for SP-B-X-META.
+      - alert: runner_human_authority_yield
+        expr: rate(runner_audit_events_total{action="rescue.release"}[24h]) > 0
+        for: 0m
+        labels:
+          severity: warn
+          area: runner
+          family: "10"
+          defense_dimension: D2
+        annotations:
+          summary: "Runner yielded to human authority"
+          description: |
+            runner_audit_events_total recorded an operator rescue.release
+            event during the last 24 hours. Human intervention was required
+            to release a runner claim, so the runner fleet is not operating
+            without manual authority override.
+          runbook_url: "https://docs.sora.services/runbooks/runner-human-authority-yield"
+          remediation_hint: "Review the latest runner audit event for action=rescue.release, confirm the human override was intentional, and reconcile the released claim before requeueing affected work."
+        __bridge:
+          critical_labels: [action]
+          cardinality_caps:
+            action: 1
+
+      # -- runner_state_authority_precedence ------------------------------
+      # WARN: the state-authority resolver observed a bot/human precedence
+      # conflict. This is the contract-named C12 signal for SP-B-X-META.
+      - alert: runner_state_authority_precedence
+        expr: rate(runner_state_authority_precedence_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warn
+          area: runner
+          family: "10"
+          defense_dimension: D2
+          authority: jira
+        annotations:
+          summary: "Runner state authority precedence conflict"
+          description: |
+            The state-authority resolver observed a bot/human concurrent edit
+            in the last hour. JIRA labels or workflow state changed while the
+            runner was acting, so human-visible authority must take precedence.
+          runbook_url: "https://docs.sora.services/runbooks/runner-state-authority-precedence"
+          remediation_hint: "Inspect the state-authority resolver audit row, confirm the human-visible JIRA state is authoritative, and let the runner reacquire only after the conflict is resolved."
+        __bridge:
+          critical_labels: [authority]
+          cardinality_caps:
+            authority: 1
