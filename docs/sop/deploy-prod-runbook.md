@@ -1,26 +1,41 @@
 # Deploy Prod Runbook
 
-`scripts/deploy-prod.sh` is the rolling production deploy entrypoint. It
-fetches the deploy ref, verifies it with `scripts/check_deploy_ref.sh`,
-builds or reuses images, handles Alembic, then restarts backend replicas
-one at a time.
+`scripts/deploy-prod.sh` is the rolling production deploy entrypoint.
+Under the single-trunk release train (RT-20, image-tag-only) the only
+deploy identity it accepts is a cosign-verified **image digest**:
+`scripts/check_deploy_ref.sh` gates the digest, Alembic migrations are
+applied, then backend replicas restart one at a time. The image is
+already built and cosign-verified at that digest, so there is **no git
+fetch / checkout and no source build** — the deploy never touches the
+git working tree.
 
-## Git Source
+## Deploy Identity (RT-20 — image-tag-only)
 
-Production deploys must fetch from Gerrit, not a stale GitHub mirror.
-The script auto-detects the source in this order:
-
-1. `--gerrit-source=<remote>` or `OMNISIGHT_GERRIT_SOURCE=<remote>`.
-2. A remote named `gerrit`.
-3. Any configured remote whose URL looks like Gerrit (`gerrit`,
-   `sora.services`, or SSH port `29418`).
-
-If no Gerrit source is found, the deploy refuses to continue. To force a
-known-good remote:
+A production deploy identity is a cosign-verified image **digest**. The
+backend and frontend are SEPARATE images with distinct digests, so a
+fully digest-pinned deploy pins BOTH:
 
 ```bash
-./scripts/deploy-prod.sh --gerrit-source=gerrit
+./scripts/deploy-prod.sh \
+  --backend-digest=sha256:<64hex> \
+  --frontend-digest=sha256:<64hex>
 ```
+
+`--digest=sha256:<64hex>` is a back-compat alias for `--backend-digest`;
+on its own it pins only the backend (the frontend then falls back to the
+mutable `:${OMNISIGHT_IMAGE_TAG}` tag path — not a content-addressed
+deploy), so pass both flags for a fully cosign-verified deploy.
+
+**`--tag` / `v*` git-tag deploys are retired (OP-1734).** No `v*` git tag
+is ever created — one would trip the `^v` CI build rule and rebuild a
+*different* digest, breaking "validated digest == shipped digest". A
+`--tag` invocation is rejected by `check_deploy_ref.sh` with an
+actionable pointer back to the digest command above; there is no
+`--gerrit-source` / git-fetch step to reach. Deploy the promoted image's
+validated digest instead.
+
+Rollback follows the same form: redeploy the previous release's validated
+backend + frontend digests.
 
 ## Alembic Modes
 
@@ -52,8 +67,8 @@ creating or dropping any database.
 
 `OMNISIGHT_IMAGE_TAG` must be visible to Docker Compose and the SLO
 monitor. `deploy-prod.sh` computes the current image tag from
-`OMNISIGHT_IMAGE_TAG`, `--tag`, or the current commit, then writes these
-values into `.env` before restarting services:
+`OMNISIGHT_IMAGE_TAG` (else the pinned backend/frontend digest), then
+writes these values into `.env` before restarting services:
 
 - `OMNISIGHT_IMAGE_TAG`
 - `OMNISIGHT_PREVIOUS_IMAGE_TAG` when the tag changes

@@ -307,3 +307,108 @@ def test_verifier_kind_value_is_validated() -> None:
     )
     assert proc.returncode != 0
     assert "digest" in proc.stderr
+
+
+# ─── OP-1734 — the dead --tag path is reconciled to the digest form ──
+#
+# Before OP-1734, `deploy-prod.sh` advertised `--tag=vX.Y.Z` as the
+# primary deploy/rollback path in its usage header, examples, rollback
+# hint, and the runbook — yet `check_deploy_ref.sh` rejects `--kind tag`
+# unconditionally (RT-20, image-tag-only), so `--tag` ALWAYS errored. Worse,
+# the tag path ran gerrit-source detection + `git fetch --tags` BEFORE
+# reaching that always-failing gate (an operator hit this live during
+# v0.6.2). These guards pin the reconciliation: `--tag` now fails fast with
+# an ACTIONABLE pointer at the digest deploy command, the usage/rollback
+# text shows the digest form, and the dead git-fetch machinery is gone.
+
+
+def _deploy_sh_text() -> str:
+    return DEPLOY_SH.read_text(encoding="utf-8")
+
+
+def _deploy_sh_code() -> str:
+    """deploy-prod.sh with full-line `#` comments stripped.
+
+    The reconciliation comments deliberately NAME the removed `git fetch
+    --tags` / `git checkout` machinery to explain why it is gone, so the
+    no-fetch assertion must look at executable lines only (same pattern as
+    test_deploy_sh_rollback.py)."""
+    return "\n".join(
+        ln for ln in _deploy_sh_text().splitlines() if not ln.lstrip().startswith("#")
+    )
+
+
+def test_deploy_tag_path_errors_with_digest_pointer() -> None:
+    """`deploy-prod.sh --tag=vX` must hard-error with a message that NAMES
+    the digest deploy flags — not an opaque arg error or a stale-mirror
+    fetch failure. This is the operator-facing fix for OP-1734."""
+    proc = _run_deploy("--tag=v0.6.2")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    # The RT-20 gate still owns the rejection (MUST NOT weaken it)…
+    assert "git-tag deploys are not permitted" in out
+    assert "image-tag-only" in out
+    # …and it is now actionable: it names BOTH per-image digest flags.
+    assert "--backend-digest=sha256:" in out
+    assert "--frontend-digest=sha256:" in out
+
+
+def test_deploy_tag_path_does_not_fetch_before_rejecting() -> None:
+    """F7: the dead tag path's gerrit-source detection + `git fetch --tags`
+    + `git checkout` only ever ran to feed a deploy identity the gate then
+    rejected. They must be gone so `--tag` cannot fetch from a stale mirror
+    before erroring, and a digest deploy never touches the git tree."""
+    code = _deploy_sh_code()
+    assert "git fetch" not in code, (
+        "OP-1734/F7 regression: deploy-prod.sh still runs `git fetch` — the "
+        "dead tag path's fetch must be removed (digest deploys pull a "
+        "pre-built image and do no git checkout)."
+    )
+    assert "git checkout" not in code, (
+        "OP-1734/F7 regression: deploy-prod.sh still runs `git checkout`."
+    )
+    assert "_detect_gerrit_source" not in code and "--gerrit-source" not in code, (
+        "OP-1734/F7 regression: deploy-prod.sh still carries the gerrit-source "
+        "detection/flag that only the removed tag path used."
+    )
+
+
+def test_deploy_usage_and_help_show_digest_form() -> None:
+    """The advertised primary path must be the digest form. `--help` prints
+    the digest invocation; the usage header no longer presents `--tag` as a
+    deploy example."""
+    proc = _run_deploy("--help")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "--backend-digest=sha256:<64hex>" in out
+    assert "--frontend-digest=sha256:<64hex>" in out
+    # The usage header (script source) must not advertise a `--tag=` deploy
+    # example any more — that was the trap.
+    text = _deploy_sh_text()
+    assert "deploy-prod.sh --tag=v" not in text, (
+        "OP-1734 regression: deploy-prod.sh usage still shows a "
+        "`deploy-prod.sh --tag=v...` example as a deploy path."
+    )
+
+
+def test_rollback_hint_is_digest_only() -> None:
+    """The end-of-run rollback hint must point at the digest form, not the
+    retired `--tag=<previous>` redeploy (OP-1734)."""
+    text = _deploy_sh_text()
+    # The rollback section must offer the per-image digest redeploy…
+    assert "--backend-digest=sha256:<prev-64hex>" in text
+    # …and must NOT instruct a --tag rollback redeploy.
+    assert "--tag=<previous" not in text, (
+        "OP-1734 regression: rollback hint still suggests `--tag=<previous>`."
+    )
+
+
+def test_verifier_tag_rejection_is_actionable() -> None:
+    """`check_deploy_ref.sh --kind tag` must reject (RT-20 gate intact) AND
+    point at the digest deploy command (OP-1734)."""
+    proc = _run_verifier(kind="tag", ref="v0.6.2", extra=["--allowlist-only"])
+    assert proc.returncode != 0
+    assert "git-tag deploys are not permitted" in proc.stderr
+    assert "image-tag-only" in proc.stderr
+    assert "--backend-digest=sha256:" in proc.stderr
+    assert "--frontend-digest=sha256:" in proc.stderr

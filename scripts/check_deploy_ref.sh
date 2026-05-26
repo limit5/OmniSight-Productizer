@@ -78,7 +78,9 @@ case "$KIND" in
         err "branch deploys are not permitted under the single-trunk release train (RT-07a/RT-20). A production deploy identity is an image digest (sha256:<64hex>). Requested 'branch:$REF' rejected."
         ;;
     tag)
-        err "git-tag deploys are not permitted under the single-trunk release train (RT-20, image-tag-only): no v* git tag is ever created — a release is a promoted image tag that resolves to a validated digest. Deploy by image digest (sha256:<64hex>), not 'tag:$REF'."
+        err "git-tag deploys are not permitted under the single-trunk release train (RT-20, image-tag-only): no v* git tag is ever created — a release is a promoted image tag that resolves to a validated digest. Deploy the promoted image's validated DIGEST instead, e.g.:
+    scripts/deploy-prod.sh --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex>
+(rejected 'tag:$REF' — a git tag is never a production deploy identity)."
         ;;
     digest)
         if [[ ! "$REF" =~ $DIGEST_RE ]]; then

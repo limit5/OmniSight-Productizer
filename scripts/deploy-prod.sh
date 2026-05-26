@@ -5,10 +5,13 @@
 # 在 Ubuntu-24.04 (Production WSL) 上執行
 # 實現 G2 rolling restart：一次只重啟一個 backend replica
 #
-# 使用方式（RT-07a — 單一主幹 release train）：
-# 一次部署只接受「最終發行身分」：final tag (vX.Y.Z) 或 image digest。
-# 不再有 branch 部署、不再 default 到 main。
-#   ./scripts/deploy-prod.sh --tag=v1.2.0            # 部署 final release tag
+# 使用方式（RT-20 — 單一主幹 release train，IMAGE-TAG-ONLY）：
+# 一次 production 部署只接受「最終發行身分」：cosign 驗證過的 image DIGEST。
+# 不再有 branch 部署、不再 default 到 main，也不再有 v* git tag 部署 ——
+# 一個 v* git tag 會觸發既有的 ^v CI build rule 重建出「不同的」digest，
+# 破壞「validated digest == shipped digest」(RT-20, ADR-0040)。所以 --tag
+# 被 scripts/check_deploy_ref.sh 直接拒絕（並指回下面的 digest 指令）；
+# 改用 promote pipeline 產出的 image digest 部署：
 #   # Digest deploy pins BOTH images — backend + frontend are SEPARATE
 #   # images, each with its own digest, so one digest cannot pin the pair
 #   # (OP-1696). Pass per-image digests:
@@ -17,17 +20,17 @@
 #   # (--digest=sha256:<64hex> is kept as a back-compat alias for
 #   #  --backend-digest; on its own it pins ONLY the backend — pass
 #   #  --frontend-digest too for a fully digest-pinned deploy.)
-#   ./scripts/deploy-prod.sh --tag=v1.2.0 --skip-build
-#                                                    # 跳過 build（image 已存在）
-#   ./scripts/deploy-prod.sh --tag=v1.2.0 --dry-run  # 只印步驟不執行
-#   ./scripts/deploy-prod.sh --tag=v1.2.0 --gerrit-source=gerrit
-#                                                    # 從 Gerrit remote fetch（預設自動偵測）
-#   ./scripts/deploy-prod.sh --tag=v1.2.0 --alembic-mode=pg-clone
+#   ./scripts/deploy-prod.sh --backend-digest=sha256:<64hex> \
+#                            --frontend-digest=sha256:<64hex> --dry-run
+#                                                    # 只印步驟不執行
+#   ./scripts/deploy-prod.sh --backend-digest=sha256:<64hex> \
+#                            --frontend-digest=sha256:<64hex> --alembic-mode=pg-clone
 #                                                    # 在 PG clone 上 dry-validate migrations
+#   # (digest 部署本就 --skip-build：image 已建好並 cosign 驗證過，
+#   #  沒有 git ref 要 fetch/checkout、沒有 source 要 build。)
 #
-# 沒有 --insecure-skip-verify escape hatch（RT-07a 移除）：授權新 ref 的
-# 唯一稽核途徑是 PR 修改 allowlist + 簽署 final tag，或部署 cosign 驗證過
-# 的 image digest。
+# 沒有 --insecure-skip-verify escape hatch（RT-07a 移除）：授權新發行身分的
+# 唯一稽核途徑，是部署 promote pipeline 產出、cosign 驗證過的 image digest。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 set -euo pipefail
@@ -41,7 +44,6 @@ BACKEND_DIGEST=""
 FRONTEND_DIGEST=""
 SKIP_BUILD=false
 DRY_RUN=false
-GERRIT_SOURCE="${OMNISIGHT_GERRIT_SOURCE:-}"
 ALEMBIC_MODE="${OMNISIGHT_ALEMBIC_MODE:-apply}"
 HEALTH_RETRIES=30
 HEALTH_INTERVAL=3
@@ -62,20 +64,25 @@ for arg in "$@"; do
         --frontend-digest=*) FRONTEND_DIGEST="${arg#*=}" ;;
         --skip-build) SKIP_BUILD=true ;;
         --dry-run) DRY_RUN=true ;;
-        --gerrit-source=*) GERRIT_SOURCE="${arg#*=}" ;;
         --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
         --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
         --help|-h)
-            echo "Usage: $0 (--tag=vX.Y.Z | --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex>) [--skip-build] [--dry-run] [--gerrit-source=REMOTE] [--alembic-mode=apply|pg-clone]"
+            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--skip-build] [--dry-run] [--alembic-mode=apply|pg-clone]"
             echo "       (--digest=sha256:<64hex> is a back-compat alias for --backend-digest; pass both --backend-digest and --frontend-digest to pin both images by digest)"
+            echo "       RT-20 (image-tag-only): --tag/v* git-tag deploys are retired — deploy the promoted image's validated digest instead (the line above)."
             exit 0 ;;
         *) err "Unknown argument: $arg" ;;
     esac
 done
 
-# RT-07a: a production deploy identity is a FINAL tag (vX.Y.Z) or an
-# image digest — never a branch, and never an implicit default. Require
-# exactly one. The shape of each value is enforced by check_deploy_ref.sh.
+# RT-20 (image-tag-only): the SOLE production deploy identity is a
+# cosign-verified image DIGEST. A v* git tag is never a deploy identity
+# (no v* git tag is created — it would trip the ^v CI build rule and
+# rebuild a DIFFERENT digest), and branch deploys + the implicit main
+# default were removed in RT-07a. --tag is still parsed (below) only so an
+# accidental tag deploy gets a clear, actionable digest pointer instead of
+# an opaque arg error. The shape of each digest is enforced by
+# check_deploy_ref.sh.
 # OP-1696: a digest deploy is requested when either per-image digest is
 # given. The backend + frontend are SEPARATE images with distinct digests,
 # so a single digest cannot pin the PAIR — the fully digest-pinned (cosign-
@@ -92,7 +99,21 @@ if [ -n "$TAG" ] && [ "$DIGEST_DEPLOY" = true ]; then
     err "--tag and --digest/--backend-digest/--frontend-digest are mutually exclusive — a deploy has exactly one final identity"
 fi
 if [ -z "$TAG" ] && [ "$DIGEST_DEPLOY" = false ]; then
-    err "release-train: a final deploy identity is required — pass --tag=vX.Y.Z, or a digest deploy pinning BOTH images: --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex>. Branch deploys (and the implicit main default) were removed in RT-07a."
+    err "release-train (RT-20, image-tag-only): a final deploy identity is required — pass a digest deploy pinning BOTH images: --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex>. (--tag/v* git-tag deploys are retired; branch deploys and the implicit main default were removed in RT-07a.)"
+fi
+
+# RT-20 (image-tag-only): --tag is NOT a production deploy identity. No v*
+# git tag is ever created, and check_deploy_ref.sh rejects --kind tag
+# unconditionally — so deploy-prod.sh once advertised --tag as the primary
+# path while it ALWAYS errored (an operator hit this live during v0.6.2,
+# OP-1734). Reject it up-front via the same RT-20 gate, which now prints an
+# actionable pointer to the digest deploy command. Doing it here — before
+# the deploy banner, the pre-deploy backup, and the build — means the dead
+# tag path's `git fetch --tags` / `git checkout` are never reached (F7):
+# under RT-20 the only live deploy is the digest path below, which pulls a
+# pre-built, cosign-verified image and does no git checkout at all.
+if [ -n "$TAG" ]; then
+    scripts/check_deploy_ref.sh --kind tag --ref "$TAG"   # always exits non-zero (RT-20)
 fi
 
 # Single human-readable identity for the banner / summary / SLO-monitor record.
@@ -124,33 +145,6 @@ _run_cmd() {
     else
         "$@"
     fi
-}
-
-_detect_gerrit_source() {
-    if [ -n "$GERRIT_SOURCE" ]; then
-        git remote get-url "$GERRIT_SOURCE" >/dev/null 2>&1 || \
-            err "--gerrit-source=$GERRIT_SOURCE is not a configured git remote"
-        printf '%s\n' "$GERRIT_SOURCE"
-        return 0
-    fi
-
-    if git remote get-url gerrit >/dev/null 2>&1; then
-        printf 'gerrit\n'
-        return 0
-    fi
-
-    local remote
-    while IFS= read -r remote; do
-        local url
-        url="$(git remote get-url "$remote" 2>/dev/null || true)"
-        case "$url" in
-            *gerrit*|*sora.services*|*29418*)
-                printf '%s\n' "$remote"
-                return 0 ;;
-        esac
-    done < <(git remote)
-
-    err "No Gerrit git remote found. Add a 'gerrit' remote or pass --gerrit-source=<remote>; refusing to fetch from a possibly stale mirror."
 }
 
 _upsert_env() {
@@ -332,22 +326,14 @@ if [ "$DIGEST_DEPLOY" = true ]; then
     if [ -z "$BACKEND_DIGEST" ] || [ -z "$FRONTEND_DIGEST" ]; then
         warn "OP-1696: only one image is pinned by digest ($DEPLOY_ID); the other deploys via the mutable :\${OMNISIGHT_IMAGE_TAG} tag path. For a fully digest-pinned (cosign-verified) deploy, pass BOTH --backend-digest and --frontend-digest."
     fi
-    log "Digest deploy: $DEPLOY_ID (skip-build；不做 git checkout)"
-else
-    GERRIT_SOURCE="$(_detect_gerrit_source)"
-    echo "Git source: $GERRIT_SOURCE"
-    _run_cmd git fetch "$GERRIT_SOURCE" --tags
-    scripts/check_deploy_ref.sh --kind tag --ref "$TAG" "${verify_args[@]}"
-    _run_cmd git checkout "$TAG"
-    # OP-1696: clear any per-image digest refs left in .env by a previous
-    # digest deploy so compose falls back to the :${OMNISIGHT_IMAGE_TAG} tag
-    # path for THIS deploy. Empty values trigger compose's `:-` fallback the
-    # same as unset, so an empty assignment is enough; otherwise a stale
-    # @sha256 ref would pin the old image and silently ignore --tag.
-    _upsert_env "OMNISIGHT_BACKEND_IMAGE_REF" ""
-    _upsert_env "OMNISIGHT_FRONTEND_IMAGE_REF" ""
-    log "Code 更新完成：$(git log --oneline -1)"
+    log "Digest deploy: $DEPLOY_ID (skip-build；不碰 git 工作樹)"
 fi
+# NOTE (OP-1734): there is no `else` git-deploy branch any more. RT-20 is
+# image-tag-only, so the only live deploy identity is the digest path
+# above (DIGEST_DEPLOY is always true here — a --tag invocation already
+# exited at the RT-20 gate). The retired tag path's gerrit-source detect,
+# `git fetch --tags`, and `git checkout` are gone (F7); a digest deploy
+# pulls a pre-built, cosign-verified image and never touches the git tree.
 
 # OP-772: expose current/previous image tags to the persistent SLO monitor
 # before any replica is restarted. The monitor uses the previous tag as
@@ -536,6 +522,7 @@ echo "  Frontend: :3000"
 echo "  Caddy:    :443 → round-robin"
 echo "  Status:   $(curl -sf http://localhost:8000/api/v1/health 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo 'checking...')"
 echo ""
-echo -e "${BOLD}Rollback（release-train — redeploy the previous final identity）：${NC}"
-echo "  $0 --tag=<previous-vX.Y.Z> --skip-build"
-echo "  $0 --backend-digest=<prev-sha256:...> --frontend-digest=<prev-sha256:...>"
+echo -e "${BOLD}Rollback（release-train RT-20 — redeploy the previous validated digest）：${NC}"
+echo "  $0 --backend-digest=sha256:<prev-64hex> --frontend-digest=sha256:<prev-64hex>"
+echo "  # (--tag rollback is retired under RT-20 image-tag-only; redeploy the"
+echo "  #  previous release's validated backend + frontend image digests.)"
