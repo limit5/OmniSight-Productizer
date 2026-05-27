@@ -82,6 +82,8 @@ def test_candidate_build_pushes_only_full_sha_tag_without_latest_or_release_tag(
     assert "cp bundle.json /tmp/candidate-bundle.json" in flat
     assert 'git checkout --detach "$CANDIDATE_SHA"' in flat
     assert "cp /tmp/candidate-bundle.json bundle.json" in flat
+    assert '--build-arg "GITHUB_SHA=${CANDIDATE_SHA}"' in flat
+    assert '--build-arg "GITHUB_REF_NAME=${CANDIDATE_SHA}"' in flat
     assert '--label "org.opencontainers.image.revision=${CANDIDATE_SHA}"' in flat
     assert '--tag "${IMAGE_BASE}:${CANDIDATE_IMAGE_TAG}"' in flat
     assert "sha-${CI_COMMIT_SHORT_SHA}" not in flat

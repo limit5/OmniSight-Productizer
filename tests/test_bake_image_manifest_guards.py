@@ -43,6 +43,21 @@ def _check(*, git_ref: str, heads: str) -> subprocess.CompletedProcess:
     )
 
 
+def _bake(*, git_ref: str) -> subprocess.CompletedProcess:
+    """Invoke the normal bake path far enough to exercise git_ref guards."""
+    env = os.environ.copy()
+    env["GITHUB_SHA"] = VALID_SHA
+    env["GITHUB_REF_NAME"] = git_ref
+    return subprocess.run(
+        ["bash", str(SCRIPT)],
+        cwd=REPO_ROOT,
+        env=env,
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+
 def test_check_mode_passes_for_single_head_and_40char_ref() -> None:
     result = _check(git_ref=VALID_SHA, heads="0237_runner_audit_events")
     assert result.returncode == 0, result.stderr
@@ -88,5 +103,11 @@ def test_non_hex_40char_git_ref_fails_exit_91() -> None:
 def test_git_ref_checked_before_head_count() -> None:
     # A bad git_ref short-circuits to 91 even when the head list is also bad.
     result = _check(git_ref="develop", heads="head_one\nhead_two")
+    assert result.returncode == 91, result.stderr
+    assert json.loads(result.stderr)["event"] == "git_ref_not_40_char"
+
+
+def test_normal_bake_path_unknown_git_ref_fails_exit_91_before_alembic() -> None:
+    result = _bake(git_ref="unknown")
     assert result.returncode == 91, result.stderr
     assert json.loads(result.stderr)["event"] == "git_ref_not_40_char"

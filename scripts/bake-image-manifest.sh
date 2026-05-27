@@ -92,6 +92,7 @@ fi
 image_sha="$(resolve_image_sha)"
 git_ref="$(resolve_git_ref)"
 build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+assert_git_ref_40 "${git_ref}"
 heads="$(alembic_heads | awk 'NF {print $1}')"
 assert_single_head "${heads}"
 

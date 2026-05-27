@@ -235,6 +235,8 @@ candidate-build-image:
         --platform "${BUILD_PLATFORMS:-linux/amd64}" \
         --push \
         --file "${DOCKERFILE}" \
+        --build-arg "GITHUB_SHA=${CANDIDATE_SHA}" \
+        --build-arg "GITHUB_REF_NAME=${CANDIDATE_SHA}" \
         --build-arg "BUNDLE_ID=${BUNDLE_ID}" \
         --build-arg "BUNDLE_SHA=${BUNDLE_SHA}" \
         --label "org.opencontainers.image.source=${CI_PROJECT_URL}" \
