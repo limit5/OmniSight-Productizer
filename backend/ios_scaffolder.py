@@ -37,13 +37,13 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
-
-import jinja2
+from typing import Any
 
 from backend import platform_profile as _platform
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 
 logger = logging.getLogger(__name__)
@@ -55,8 +55,6 @@ _SKILL_DIR = (
 _SCAFFOLDS_DIR = _SKILL_DIR / "scaffolds"
 
 _PACKAGE_MANAGER_CHOICES = ("spm", "cocoapods", "both")
-
-_TEMPLATE_SUFFIX = ".j2"
 
 _PLATFORM_PROFILE_ID = "ios-arm64"
 
@@ -95,8 +93,15 @@ _COMPLIANCE_GATED: frozenset[str] = frozenset({
 
 
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-IOS knobs — extends the shared base with iOS fields.
+
+    ``project_name`` (+ its non-empty check) is inherited from
+    :class:`backend.scaffolder_base.ScaffoldOptions`; :meth:`validate`
+    calls ``super().validate()`` then layers the Xcode product /
+    package-manager / bundle-id rules on top.
+    """
+
     bundle_id: str = ""
     package_manager: str = "spm"   # spm | cocoapods | both
     push: bool = True
@@ -104,8 +109,7 @@ class ScaffoldOptions:
     compliance: bool = True
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         # Apple bundle IDs / Xcode product names allow letters / digits /
         # hyphens / underscores only.
         clean = self.project_name.strip()
@@ -135,24 +139,6 @@ class ScaffoldOptions:
         return ".".join(self.resolved_bundle_id().split(".")[:-1]) or "com.example"
 
 
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    profile_binding: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "profile_binding": dict(self.profile_binding),
-        }
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Internals
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -170,81 +156,81 @@ def _looks_like_bundle_id(bundle_id: str) -> bool:
     return True
 
 
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
+class _IosScaffolder(ScaffolderBase):
+    """SKILL-IOS scaffolder — supplies the gating + context hooks.
 
+    The render loop, Jinja env, and byte-level writes live in
+    :class:`backend.scaffolder_base.ScaffolderBase`; this subclass only
+    declares what is iOS-specific.
+    """
 
-def _should_skip(rel_path: str, opts: ScaffoldOptions) -> bool:
-    # Push-gated
-    if rel_path in _PUSH_ONLY_FILES and not opts.push:
-        return True
-    # StoreKit-gated
-    if rel_path in _STOREKIT_ONLY_FILES and not opts.storekit:
-        return True
-    # Package manager-gated
-    for marker, required in _PACKAGE_MANAGER_GATED.items():
-        if rel_path == marker:
-            if opts.package_manager not in (required, "both"):
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        if rel_path in _PUSH_ONLY_FILES and not options.push:
+            return True
+        if rel_path in _STOREKIT_ONLY_FILES and not options.storekit:
+            return True
+        for marker, required in _PACKAGE_MANAGER_GATED.items():
+            if (
+                rel_path == marker
+                and options.package_manager not in (required, "both")
+            ):
                 return True
-    # Compliance-gated
-    if not opts.compliance and rel_path in _COMPLIANCE_GATED:
-        return True
-    return False
+        if not options.compliance and rel_path in _COMPLIANCE_GATED:
+            return True
+        return False
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
+            "project_name": options.project_name,
+            "bundle_id": options.resolved_bundle_id(),
+            "bundle_prefix": options.bundle_prefix(),
+            "package_manager": options.package_manager,
+            "push": options.push,
+            "storekit": options.storekit,
+            "compliance": options.compliance,
+        }
+
+        # Resolve P0 platform profile so deployment target / SDK version
+        # come from configs/platforms/ios-arm64.yaml — not duplicated in
+        # the scaffold templates.
+        min_os_version = "16.0"
+        sdk_version = "17.5"
+        target_os_version = "17.5"
+        try:
+            raw = _platform.load_raw_profile(_PLATFORM_PROFILE_ID)
+            min_os_version = str(raw.get("min_os_version") or min_os_version)
+            sdk_version = str(raw.get("sdk_version") or sdk_version)
+            target_os_version = str(raw.get("target_os_version") or target_os_version)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to load %s profile, falling back to defaults: %s",
+                _PLATFORM_PROFILE_ID,
+                exc,
+            )
+
+        ctx["min_os_version"] = min_os_version
+        ctx["sdk_version"] = sdk_version
+        ctx["target_os_version"] = target_os_version
+        return ctx
+
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        outcome.profile_binding = {
+            "platform_profile": _PLATFORM_PROFILE_ID,
+            "min_os_version": context["min_os_version"],
+            "sdk_version": context["sdk_version"],
+            "target_os_version": context["target_os_version"],
+        }
+        return outcome
 
 
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _IosScaffolder(_SCAFFOLDS_DIR, skill_label="SKILL-IOS")
 
 
 def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
-    ctx: dict[str, Any] = {
-        "project_name": opts.project_name,
-        "bundle_id": opts.resolved_bundle_id(),
-        "bundle_prefix": opts.bundle_prefix(),
-        "package_manager": opts.package_manager,
-        "push": opts.push,
-        "storekit": opts.storekit,
-        "compliance": opts.compliance,
-    }
-
-    # Resolve P0 platform profile so deployment target / SDK version
-    # come from configs/platforms/ios-arm64.yaml — not duplicated in
-    # the scaffold templates.
-    min_os_version = "16.0"
-    sdk_version = "17.5"
-    target_os_version = "17.5"
-    try:
-        raw = _platform.load_raw_profile(_PLATFORM_PROFILE_ID)
-        min_os_version = str(raw.get("min_os_version") or min_os_version)
-        sdk_version = str(raw.get("sdk_version") or sdk_version)
-        target_os_version = str(raw.get("target_os_version") or target_os_version)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "failed to load %s profile, falling back to defaults: %s",
-            _PLATFORM_PROFILE_ID,
-            exc,
-        )
-
-    ctx["min_os_version"] = min_os_version
-    ctx["sdk_version"] = sdk_version
-    ctx["target_os_version"] = target_os_version
-    return ctx
-
-
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
+    """SKILL-IOS Jinja render context (delegates to the scaffolder)."""
+    return _SCAFFOLDER.build_context(opts)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -272,51 +258,7 @@ def render_project(
         surface are overwritten. Files OUTSIDE the scaffold surface
         are never touched.
     """
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(out_dir=out_dir)
-    outcome.profile_binding = {
-        "platform_profile": _PLATFORM_PROFILE_ID,
-        "min_os_version": ctx["min_os_version"],
-        "sdk_version": ctx["sdk_version"],
-        "target_os_version": ctx["target_os_version"],
-    }
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        if _should_skip(rel, options):
-            continue
-
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            out_rel = rel[: -len(_TEMPLATE_SUFFIX)]
-            dest = out_dir / out_rel
-            if dest.exists() and not overwrite:
-                outcome.warnings.append(f"skipped existing: {out_rel}")
-                continue
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-            outcome.bytes_written += _write_file(dest, rendered)
-        else:
-            dest = out_dir / rel
-            if dest.exists() and not overwrite:
-                outcome.warnings.append(f"skipped existing: {rel}")
-                continue
-            outcome.bytes_written += _write_file(dest, src.read_bytes())
-        outcome.files_written.append(dest)
-
-    logger.info(
-        "SKILL-IOS rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def pilot_report(
