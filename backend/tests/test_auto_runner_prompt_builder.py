@@ -581,3 +581,131 @@ def test_both_lesson_blocks_off_by_default(runner, fake_client, monkeypatch):
     prompt = runner._build_prompt(fake_client, "OP-1024-default", "body")
     assert _LESSON_HEADER not in prompt
     assert _ANTIPATTERN_HEADER not in prompt
+
+
+# ── OP-1780 (1A.3): strip OmniSight context from customer-tenant prompts ──
+#
+# Lessons / anti-patterns / CLAUDE.md L1 doc-rules read OmniSight's own
+# docs/sop/* SOP corpus regardless of tenant. For a non-`omnisight-self`
+# tenant the assembled prompt must contain NONE of them (closes L8-prompt +
+# the Wire-1 info-disclosure); for the internal tenant the prompt is
+# unchanged. The bound tenant comes from db_context (OP-1778 set_tenant_id)
+# with a fallback to the ticket's own `tenant:<tid>` label.
+
+from backend import db_context  # noqa: E402
+from backend.agents import runner_tenant  # noqa: E402
+
+_DOCRULES_HEADER = "# Documentation rules (per CLAUDE.md L1"
+# Strings that only ever appear in OmniSight's own SOP / process context.
+_OMNISIGHT_SOP_STRINGS = (
+    _LESSON_HEADER,
+    _ANTIPATTERN_HEADER,
+    _DOCRULES_HEADER,
+    "HANDOFF.md",
+    "docs/sop/lessons-learned.md",
+)
+
+
+def _enable_lesson_and_antipattern_flags(monkeypatch):
+    """Turn ON both OmniSight-SOP injection flags so the strip is observable.
+
+    With the flags off the blocks are absent anyway; the customer-strip
+    assertion is only meaningful when the blocks WOULD otherwise be emitted.
+    A fake lesson retriever supplies a deterministic, OmniSight-flavoured
+    lesson so the self-tenant control case actually renders the block.
+    """
+    monkeypatch.setenv("OMNISIGHT_COGNEE_RECALL", "1")
+    monkeypatch.setenv("OMNISIGHT_ANTIPATTERN_INJECT", "1")
+    fake_lessons = (
+        LessonSearchResult(
+            path=Path("docs/sop/lessons/L-OP-729-runner-bot-identity.md"),
+            text="**Situation**: OmniSight SOP lesson body. **Fix**: do the thing.",
+            score=2.0,
+        ),
+    )
+    monkeypatch.setattr(_ci, "retrieve_lessons_via_cognee", lambda *a, **kw: fake_lessons)
+
+
+def test_customer_tenant_prompt_is_free_of_omnisight_sop(
+    runner, fake_client, monkeypatch
+):
+    """A `tenant:<tid>` ticket gets NONE of OmniSight's lessons / anti-patterns
+    / CLAUDE.md doc-rules — even with both injection flags ON."""
+    _patch_issue(
+        monkeypatch,
+        labels=["area:db", "tier:M", "tenant:t-acme"],
+        summary="customer migration ticket scope",
+    )
+    _enable_lesson_and_antipattern_flags(monkeypatch)
+    # No tenant bound in context → resolution falls back to the label.
+    monkeypatch.setattr(db_context, "current_tenant_id", lambda: None)
+
+    prompt = runner._build_prompt(
+        fake_client, "OP-1780-cust", "synthetic migration ticket touching alembic schema"
+    )
+
+    for needle in _OMNISIGHT_SOP_STRINGS:
+        assert needle not in prompt, f"OmniSight SOP leaked to customer prompt: {needle!r}"
+    # The prompt must still build with the runner scaffolding intact.
+    assert "OP-1780-cust" in prompt
+    assert "# Acceptance Criteria verification" in prompt
+
+
+def test_customer_tenant_via_bound_context_strips_sop(
+    runner, fake_client, monkeypatch
+):
+    """The strip is driven by the bound DB/FS tenant context (OP-1778),
+    not only by the label — a context-bound customer with no label still
+    strips."""
+    _patch_issue(monkeypatch, labels=["area:db", "tier:M"], summary="ctx-bound customer")
+    _enable_lesson_and_antipattern_flags(monkeypatch)
+    monkeypatch.setattr(db_context, "current_tenant_id", lambda: "t-bravo")
+
+    prompt = runner._build_prompt(fake_client, "OP-1780-ctx", "body")
+
+    for needle in _OMNISIGHT_SOP_STRINGS:
+        assert needle not in prompt, f"context-bound customer leaked: {needle!r}"
+
+
+def test_self_tenant_prompt_retains_omnisight_sop(
+    runner, fake_client, monkeypatch, capsys
+):
+    """Back-compat: an `omnisight-self` (label-less / internal) ticket is
+    UNCHANGED — it still receives lessons + anti-patterns + CLAUDE.md
+    doc-rules."""
+    _patch_issue(
+        monkeypatch,
+        labels=["area:db", "tier:M"],
+        summary="internal migration ticket scope",
+    )
+    _enable_lesson_and_antipattern_flags(monkeypatch)
+    monkeypatch.setattr(db_context, "current_tenant_id", lambda: None)
+
+    prompt = runner._build_prompt(
+        fake_client, "OP-1780-self", "synthetic migration ticket touching alembic schema"
+    )
+
+    # All three OmniSight context blocks present for the internal tenant.
+    assert _LESSON_HEADER in prompt
+    assert _ANTIPATTERN_HEADER in prompt
+    assert _DOCRULES_HEADER in prompt
+    assert "docs/sop/lessons-learned.md" in prompt
+    # No strip log line on the self path.
+    assert "tenant_context_strip" not in capsys.readouterr().err
+
+
+def test_explicit_self_tenant_label_retains_sop(runner, fake_client, monkeypatch):
+    """An explicit `tenant:omnisight-self` label resolves to the internal
+    tenant and keeps the OmniSight context (mirrors runner_tenant)."""
+    _patch_issue(
+        monkeypatch,
+        labels=["area:db", "tier:M", f"tenant:{runner_tenant.OMNISIGHT_SELF_TENANT}"],
+        summary="explicit self ticket",
+    )
+    _enable_lesson_and_antipattern_flags(monkeypatch)
+    monkeypatch.setattr(db_context, "current_tenant_id", lambda: None)
+
+    prompt = runner._build_prompt(fake_client, "OP-1780-self2", "body")
+
+    assert _DOCRULES_HEADER in prompt
+    assert _LESSON_HEADER in prompt
