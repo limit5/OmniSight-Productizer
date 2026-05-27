@@ -29,7 +29,7 @@ PG_USER="${OMNISIGHT_PG_USER:-omnisight}"
 PG_DB="${OMNISIGHT_PG_DB:-omnisight}"
 BACKEND_CONTAINER="${OMNISIGHT_BACKEND_CONTAINER:-omnisight-productizer-backend-a-1}"
 READYZ_PATH="${OMNISIGHT_READYZ_PATH:-http://localhost:8000/readyz}"
-VERSION_PATH="${OMNISIGHT_VERSION_PATH:-http://localhost:8000/api/v1/version}"
+VERSION_PATH="${OMNISIGHT_VERSION_PATH:-http://localhost:8000/version}"
 
 log()  { printf '\033[36m[postrestart-probe]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[postrestart-probe]\033[0m %s\n' "$*" >&2; }
