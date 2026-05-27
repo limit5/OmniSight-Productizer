@@ -50,7 +50,7 @@ import platform
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -354,6 +354,7 @@ def _build_bubblewrap_argv(
     network: bool,
     bwrap_bin: str,
     env: Mapping[str, str],
+    dep_cache_mounts: Sequence[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Compose the bubblewrap argv prefix for ``cmd``.
 
@@ -365,6 +366,13 @@ def _build_bubblewrap_argv(
     allowlisted ``env`` is then re-projected one ``--setenv`` at a time
     (OP-1777, L1). HOME / TMPDIR are pinned to the jail paths below rather
     than carried over from the host.
+
+    ``dep_cache_mounts`` (OP-1781, 1A.4) are ``(host_src, jail_dst)`` pairs
+    RO-bound *after* the worktree bind so the pre-warmed per-tenant
+    dependency cache layers on top of the worktree HOME at the package
+    manager's default location. RO so the jailed build can read but never
+    mutate the shared-per-tenant cache, and the cache buys offline
+    resolution while ``--unshare-net`` stays the default.
     """
     worktree_abs = str(worktree_path.resolve())
     tmp_dir = str(_tmp_dir_for(ticket_key))
@@ -389,6 +397,13 @@ def _build_bubblewrap_argv(
     for git_dir in _git_metadata_mounts(worktree_path):
         git_dir_abs = str(git_dir)
         argv += ["--bind", git_dir_abs, git_dir_abs]
+
+    # OP-1781 (1A.4): RO-bind the pre-warmed per-tenant dependency cache on
+    # top of the worktree HOME so the package manager finds it offline. After
+    # the worktree --bind so it layers correctly; RO so the build can't mutate
+    # the shared cache from inside the jail.
+    for src, dst in dep_cache_mounts or ():
+        argv += ["--ro-bind", src, dst]
 
     # Re-project the scrubbed allowlist into the cleared jail env. HOME and
     # TMPDIR are pinned to jail paths below, so skip any host-inherited
@@ -450,6 +465,7 @@ def wrap_in_bubblewrap(
     ticket_key: str = "default",
     network: bool = False,
     env: Mapping[str, str] | None = None,
+    dep_cache_mounts: Sequence[tuple[str, str]] | None = None,
 ) -> list[str]:
     """Return ``cmd`` prefixed with a sandbox-runner argv.
 
@@ -486,6 +502,14 @@ def wrap_in_bubblewrap(
             before projecting into the jail. Defaults to ``os.environ``.
             The same allowlist gates the caller's ``Popen(env=…)`` so the
             jail and the (degraded/macOS) raw spawn see identical vars.
+        dep_cache_mounts: OP-1781 (1A.4) ``(host_src, jail_dst)`` pairs for
+            the pre-warmed per-tenant dependency cache. Each is RO-bound into
+            the Linux jail at ``jail_dst`` (the package manager's default
+            HOME-relative cache location), so a build resolves offline while
+            ``--unshare-net`` stays the default. Ignored on macOS — seatbelt
+            permits file-read everywhere already and cannot bind-relocate a
+            path, so the customer-serving (Linux/bubblewrap) fleet is where
+            the offline cache is enforced.
 
     Returns:
         The full argv to spawn. On a missing binary with ENFORCE=0, this is
@@ -512,6 +536,7 @@ def wrap_in_bubblewrap(
             network=effective_network,
             bwrap_bin=bwrap,
             env=scrub_src,
+            dep_cache_mounts=dep_cache_mounts,
         )
         logger.info(
             "[%s] ticket=%s argv0=%s network=%s worktree=%s",

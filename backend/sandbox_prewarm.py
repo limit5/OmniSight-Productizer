@@ -39,9 +39,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Mapping, Optional, Sequence
 
 from backend.dag_schema import DAG, Task
 
@@ -516,3 +517,201 @@ def snapshot_by_tenant() -> dict[str, dict[str, str]]:
         bucket: {tid: slot.agent_id for tid, slot in slots.items()}
         for bucket, slots in _prewarmed_by_tenant.items()
     }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  OP-1781 (1A.4) — pre-warmed per-tenant dependency cache
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The decided alternative to a live egress proxy (design §12): keep the
+# runner jail ``--unshare-net`` deny-by-default and let builds resolve their
+# dependencies *offline* from a per-tenant cache that was warmed ahead of
+# time. Two halves:
+#
+#   1. **Warm (online, OUTSIDE the jail).** ``refresh_dep_cache`` runs the
+#      package managers with their cache redirected into the tenant's cache
+#      root so the cache is populated while the network is still available.
+#   2. **Build (offline, INSIDE the jail).** The runner RO-binds the tenant
+#      cache subdirs at their conventional HOME-relative locations
+#      (``runner_sandbox`` consumes :func:`dep_cache_mounts`). The jail pins
+#      HOME to the worktree, so a package manager run with ``--unshare-net``
+#      finds its cache at e.g. ``~/.npm`` and resolves purely from it.
+#
+# Per-tenant isolation rides on :mod:`backend.tenant_fs`: each cache root is
+# ``data/tenants/<tid>/depcache``, so tenant A's cache is never on tenant B's
+# path (the 1A.4 isolation contract). Mounts are RO so a build can never
+# mutate (or poison) the shared-per-tenant cache from inside the jail.
+
+_DEP_CACHE_DIRNAME = "depcache"
+
+
+@dataclass(frozen=True)
+class DepEcosystem:
+    """One package-manager cache ecosystem.
+
+    * ``name`` — subdir under the tenant ``depcache`` root that holds this
+      ecosystem's cache.
+    * ``jail_mount_rel`` — HOME-relative path the subdir is RO-bound at inside
+      the jail, i.e. where the package manager looks by default (HOME is
+      pinned to the worktree by ``runner_sandbox``). No in-jail env var is
+      needed because the location is the tool's default — and the runner's
+      env allowlist would scrub a cache-redirect var anyway.
+    * ``warm_env`` — env var that redirects the cache during the *online*
+      warm step (which runs outside the jail, so the var is honoured).
+    """
+
+    name: str
+    jail_mount_rel: str
+    warm_env: str
+
+
+# npm     -> ~/.npm           (npm config get cache)
+# pip     -> ~/.cache/pip     (pip's default cache dir)
+# gradle  -> ~/.gradle        (GRADLE_USER_HOME; deps cache under caches/)
+DEP_CACHE_ECOSYSTEMS: tuple[DepEcosystem, ...] = (
+    DepEcosystem("npm", ".npm", "npm_config_cache"),
+    DepEcosystem("pip", ".cache/pip", "PIP_CACHE_DIR"),
+    DepEcosystem("gradle", ".gradle", "GRADLE_USER_HOME"),
+)
+
+
+def tenant_dep_cache_root(tenant_id: Optional[str] = None) -> Path:
+    """Per-tenant dependency-cache root: ``data/tenants/<tid>/depcache``.
+
+    Resolved through :func:`backend.tenant_fs.tenant_data_root`, so the cache
+    lives inside the same physically isolated tenant namespace as the tenant's
+    workspace/artifacts — tenant A's cache can never resolve onto tenant B's
+    path. Created on first use.
+    """
+    from backend import tenant_fs
+    root = tenant_fs.tenant_data_root(tenant_id) / _DEP_CACHE_DIRNAME
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def ensure_dep_cache_dirs(tenant_id: Optional[str] = None) -> Path:
+    """Create the per-ecosystem cache subdirs and return the cache root."""
+    root = tenant_dep_cache_root(tenant_id)
+    for eco in DEP_CACHE_ECOSYSTEMS:
+        (root / eco.name).mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def dep_cache_mounts(
+    tenant_id: Optional[str], *, home: Path | str,
+) -> list[tuple[str, str]]:
+    """RO-bind ``(src, dst)`` pairs for the tenant's populated dep ecosystems.
+
+    ``src`` is the tenant cache subdir; ``dst`` is ``<home>/<jail_mount_rel>``
+    — the location the package manager looks by default inside the jail (HOME
+    is pinned to the worktree). Only subdirs that **exist** are returned:
+    bubblewrap fails the whole jail if a ``--ro-bind`` source is missing, so an
+    un-warmed ecosystem is simply skipped rather than aborting the run.
+
+    Returns an empty list when ``tenant_id`` is falsy (no tenant bound).
+    """
+    if not tenant_id:
+        return []
+    root = tenant_dep_cache_root(tenant_id)
+    home_path = Path(home)
+    mounts: list[tuple[str, str]] = []
+    for eco in DEP_CACHE_ECOSYSTEMS:
+        src = root / eco.name
+        if src.is_dir():
+            mounts.append((str(src), str(home_path / eco.jail_mount_rel)))
+    return mounts
+
+
+def warm_env(tenant_id: Optional[str], *, base: Mapping[str, str] | None = None,
+             ) -> dict[str, str]:
+    """Return an env mapping that redirects each ecosystem cache into the
+    tenant cache root, for the *online* warm step (run outside the jail).
+
+    ``base`` defaults to ``os.environ``; the returned dict is a fresh copy
+    with the per-ecosystem cache vars set to the tenant subdir paths.
+    """
+    env = dict(os.environ if base is None else base)
+    root = tenant_dep_cache_root(tenant_id)
+    for eco in DEP_CACHE_ECOSYSTEMS:
+        env[eco.warm_env] = str(root / eco.name)
+    return env
+
+
+# Default warm commands per ecosystem. {cache} is substituted with the
+# tenant cache subdir. These run ONLINE (network available) from the tenant
+# workspace, so the later --unshare-net jailed build resolves offline. They
+# are intentionally overridable: real projects pin versions via lockfiles and
+# site tooling, and tests inject a recording runner instead of touching the
+# network.
+DEFAULT_WARM_COMMANDS: dict[str, list[str]] = {
+    "npm": ["npm", "ci", "--cache", "{cache}"],
+    "pip": ["pip", "download", "--dest", "{cache}", "-r", "requirements.txt"],
+    "gradle": ["gradle", "--project-cache-dir", "{cache}", "dependencies"],
+}
+
+
+def refresh_dep_cache(
+    tenant_id: Optional[str],
+    *,
+    workspace: Path | str,
+    ecosystems: Sequence[str] | None = None,
+    commands: Mapping[str, list[str]] | None = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> dict[str, str]:
+    """Build/refresh the tenant dependency cache (the ONLINE pre-warm step).
+
+    For each requested ecosystem, runs its warm command from *workspace* with
+    the cache redirected into the tenant cache subdir (via :func:`warm_env`),
+    so afterwards the jailed offline build can resolve from it. This is the
+    only place that *needs* the network; the jailed build never does.
+
+    Best-effort per ecosystem: a failure (missing manifest, tool absent,
+    fetch error) is logged and recorded as ``"error: ..."`` without aborting
+    the others — pre-warm is an optimisation, not a correctness gate.
+
+    Args:
+        tenant_id: owning tenant; ``None``/empty is a no-op (returns ``{}``).
+        workspace: cwd to run the warm commands in (the tenant workspace).
+        ecosystems: subset of ecosystem names to warm; default = all known.
+        commands: override warm commands; default :data:`DEFAULT_WARM_COMMANDS`.
+        runner: injectable ``subprocess.run`` for tests.
+
+    Returns:
+        ``{ecosystem: "ok" | "skipped" | "error: <msg>"}``.
+    """
+    if not tenant_id:
+        return {}
+    ensure_dep_cache_dirs(tenant_id)
+    root = tenant_dep_cache_root(tenant_id)
+    cmd_map = dict(DEFAULT_WARM_COMMANDS if commands is None else commands)
+    want = set(ecosystems) if ecosystems is not None else {
+        e.name for e in DEP_CACHE_ECOSYSTEMS
+    }
+    env = warm_env(tenant_id)
+    results: dict[str, str] = {}
+    for eco in DEP_CACHE_ECOSYSTEMS:
+        if eco.name not in want:
+            continue
+        template = cmd_map.get(eco.name)
+        if not template:
+            results[eco.name] = "skipped"
+            continue
+        cache_dir = str(root / eco.name)
+        argv = [tok.replace("{cache}", cache_dir) for tok in template]
+        try:
+            runner(
+                argv, cwd=str(workspace), env=env,
+                check=True, capture_output=True, text=True,
+            )
+            results[eco.name] = "ok"
+            logger.info(
+                "depcache: warmed %s for tenant=%s (cache=%s)",
+                eco.name, tenant_id, cache_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort per ecosystem
+            results[eco.name] = f"error: {exc}"
+            logger.warning(
+                "depcache: warm %s for tenant=%s failed: %s",
+                eco.name, tenant_id, exc,
+            )
+    return results

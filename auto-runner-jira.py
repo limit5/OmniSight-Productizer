@@ -74,7 +74,7 @@ from backend.agents import (
     runner_workspace_safety,
     scheduler,
 )
-from backend import db_context
+from backend import db_context, sandbox_prewarm
 from backend.agents.pipeline_coordinator_capacity import (
     append_runner_quota_emit,
     load_capacity_snapshot_from_jsonl,
@@ -1416,6 +1416,7 @@ def _invoke_cli(
     *,
     ticket_key: str = "default",
     worktree_path: Path | None = None,
+    tenant_id: str | None = None,
 ) -> int:
     """Invoke the underlying CLI for this agent_class. Returns exit code.
 
@@ -1465,10 +1466,35 @@ def _invoke_cli(
     # pass an explicit worktree_path override; otherwise we use the
     # per-class default chosen above.
     effective_worktree = worktree_path or sandbox_worktree
+
+    # OP-1781 (1A.4): RO-mount the pre-warmed per-tenant dependency cache so
+    # the build resolves deps offline while the jail keeps --unshare-net.
+    # Mount points are HOME-relative and the jail pins HOME to the worktree,
+    # so compute them against effective_worktree. Best-effort: a missing
+    # tenant binding or cache just yields no mounts (deny-by-default network
+    # is unchanged either way).
+    effective_tenant = tenant_id or db_context.current_tenant_id()
+    dep_cache_mounts = None
+    try:
+        dep_cache_mounts = sandbox_prewarm.dep_cache_mounts(
+            effective_tenant, home=effective_worktree,
+        )
+    except Exception as e:  # pragma: no cover - defensive; never block the run
+        print(
+            f"[runner] dep-cache mount resolve failed for "
+            f"tenant={effective_tenant!r}: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+    if dep_cache_mounts:
+        print(
+            f"[runner] dep-cache RO-mounts ({effective_tenant}): "
+            f"{len(dep_cache_mounts)} ecosystem(s)"
+        )
+
     try:
         wrapped_cmd = runner_sandbox.wrap_in_bubblewrap(
             cmd, worktree_path=effective_worktree, ticket_key=ticket_key,
-            env=scrubbed_env,
+            env=scrubbed_env, dep_cache_mounts=dep_cache_mounts,
         )
     except (
         runner_sandbox.SandboxBinaryMissing,
@@ -3027,6 +3053,7 @@ def _main_impl() -> int:
     rc = _invoke_cli(
         AGENT_CLASS, prompt,
         ticket_key=snapshot.key, worktree_path=worktree_path,
+        tenant_id=tenant_id,
     )
 
     # OP-836 post-CLI verify — abort the Gerrit-push pipeline if the CLI
