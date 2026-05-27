@@ -32,7 +32,7 @@ from base64 import b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from backend.config import settings
 from backend.agents import (
@@ -670,6 +670,238 @@ def _bot_email_for(agent_class: str, instance_id: str | None = None) -> str:
     except ValueError:
         bot_user, _ = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
     return f"rt3628+{bot_user}@gmail.com"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Per-tenant push identity (OP-1779 / 1A.2 — closes L6)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# design §7 (per-tenant credential row), §8 (JIRA/project-namespace), §3 (L6).
+#
+# The shared on-disk bot SSH key + the fixed OmniSight Gerrit project
+# (``GERRIT_PROJECT_PATH``) are reserved for the internal ``omnisight-self``
+# tenant. Any customer tenant MUST push via a credential resolved from its
+# OWN ``git_accounts`` row (``git_credentials.get_credential_registry_async``)
+# scoped to the tenant's own Gerrit project. If no such row exists the push
+# fails closed rather than silently borrowing the bot key (L6): a customer run
+# can never push to OmniSight's — or another tenant's — project.
+#
+# Scope note: this covers the *push* identity (the ``git push`` to
+# ``refs/for/<target>`` and the recovery query / mergeability self-fix that
+# hang off a push). The develop-baseline *fetch* in the 1A.1 sync pipeline is
+# a separate concern and is intentionally left untouched here.
+
+
+class TenantPushIdentityError(RuntimeError):
+    """No tenant-scoped Gerrit push credential could be resolved.
+
+    Raised (and caught) inside :func:`push_to_gerrit_for_review` for any
+    non-``omnisight-self`` tenant when the per-tenant credential registry
+    yields no usable Gerrit account, or yields one that would breach the L6
+    isolation contract (shared bot key / OmniSight project / another tenant's
+    row). The push is refused — never downgraded to the bot identity.
+    """
+
+
+@dataclass(frozen=True)
+class GerritPushIdentity:
+    """Resolved ``(user, key, host, port, project)`` used to push one change.
+
+    ``is_bot`` marks the legacy internal identity (``omnisight-self``): the
+    shared bot account + the OmniSight project. For a customer tenant every
+    field comes from that tenant's own ``git_accounts`` row.
+    """
+
+    tenant_id: str
+    ssh_user: str
+    ssh_key: Path
+    ssh_host: str
+    ssh_port: int
+    project: str
+    is_bot: bool
+
+    @property
+    def ssh_url(self) -> str:
+        return f"ssh://{self.ssh_user}@{self.ssh_host}:{self.ssh_port}/{self.project}"
+
+
+def _shared_bot_key_paths() -> set[Path]:
+    """Resolved paths of every shared default-instance bot SSH key."""
+    return {
+        Path(key_path).expanduser().resolve(strict=False)
+        for _user, key_path in _GERRIT_AUTH_BY_CLASS.values()
+    }
+
+
+def _is_shared_bot_key(ssh_key: Path) -> bool:
+    """True if *ssh_key* is (or looks like) a shared bot key under CRED_DIR.
+
+    Matches both the static default-instance table and the per-instance
+    ``gerrit-(claude|codex)-bot*`` naming convention so a customer credential
+    row can never smuggle the shared bot key in by path.
+    """
+    resolved = ssh_key.expanduser().resolve(strict=False)
+    if resolved in _shared_bot_key_paths():
+        return True
+    cred_dir = CRED_DIR.resolve(strict=False)
+    name = resolved.name
+    return resolved.parent == cred_dir and (
+        name.startswith("gerrit-claude-bot") or name.startswith("gerrit-codex-bot")
+    )
+
+
+def _run_coro(coro: Any) -> Any:
+    """Drive an async coroutine to completion from this sync push path.
+
+    :func:`push_to_gerrit_for_review` is sync but the canonical credential
+    registry read (``get_credential_registry_async``) is async. Mirrors the
+    bridge in :mod:`backend.agents.cognee_integration`: run inline when no
+    loop is active, else hand off to a private loop in a worker thread.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    import threading
+
+    box: dict[str, Any] = {}
+
+    def _runner() -> None:
+        try:
+            box["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 — re-raised below
+            box["exc"] = exc
+
+    t = threading.Thread(target=_runner, daemon=True)
+    t.start()
+    t.join()
+    if "exc" in box:
+        raise box["exc"]
+    return box.get("value")
+
+
+def _resolve_tenant_gerrit_account(tenant_id: str) -> Optional[dict]:
+    """Return the customer tenant's OWN enabled Gerrit ``git_accounts`` row.
+
+    Reads the canonical per-tenant registry. Only rows that genuinely belong
+    to *tenant_id* are eligible — the legacy ``_build_registry`` shim fallback
+    (which synthesises an OmniSight-global ``default-gerrit`` row tagged
+    ``tenant_id="t-default"``) is deliberately excluded, so a customer tenant
+    with no real row resolves to ``None`` and the push fails closed. Prefers an
+    ``is_default`` row, else the first enabled Gerrit row (registry order).
+    """
+    from backend import git_credentials
+
+    registry = _run_coro(
+        git_credentials.get_credential_registry_async(tenant_id)
+    ) or []
+    candidates = [
+        e
+        for e in registry
+        if e.get("platform") == "gerrit"
+        and e.get("enabled", True)
+        and e.get("tenant_id") == tenant_id
+    ]
+    for entry in candidates:
+        if entry.get("is_default"):
+            return entry
+    return candidates[0] if candidates else None
+
+
+def resolve_gerrit_push_identity(
+    agent_class: str,
+    instance_id: str | None = None,
+    *,
+    tenant_id: str | None = None,
+) -> GerritPushIdentity:
+    """Resolve the Gerrit push identity for the current tenant (L6).
+
+    * ``omnisight-self`` (and the no-tenant-bound back-compat default) keep the
+      existing per-agent-class bot account + the OmniSight project, so internal
+      pushes behave exactly as before.
+    * Any customer tenant pushes via its own ``git_accounts`` Gerrit row, scoped
+      to that tenant's project. The shared bot key and the OmniSight project are
+      refused (raising :class:`TenantPushIdentityError`); there is no silent
+      fallback to the bot identity.
+
+    *tenant_id* defaults to the tenant bound into the DB/FS context at pickup
+    (``db_context.set_tenant_id`` in 1A.1); explicit callers may override it.
+    """
+    from backend import db_context
+    from backend.agents import runner_tenant
+
+    tid = (
+        tenant_id
+        or db_context.current_tenant_id()
+        or runner_tenant.OMNISIGHT_SELF_TENANT
+    )
+
+    if runner_tenant.is_self_tenant(tid):
+        bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+        return GerritPushIdentity(
+            tenant_id=tid,
+            ssh_user=bot_username,
+            ssh_key=ssh_key,
+            ssh_host=GERRIT_SSH_HOST,
+            ssh_port=GERRIT_SSH_PORT,
+            project=GERRIT_PROJECT_PATH,
+            is_bot=True,
+        )
+
+    account = _resolve_tenant_gerrit_account(tid)
+    if account is None:
+        raise TenantPushIdentityError(
+            f"tenant {tid!r} has no enabled Gerrit credential of its own in the "
+            "registry; refusing to push with the shared bot key (L6 / design §3)."
+        )
+
+    raw_key = str(account.get("ssh_key") or "").strip()
+    project = str(account.get("project") or "").strip()
+    ssh_host = str(account.get("ssh_host") or "").strip()
+    ssh_user = str(account.get("username") or "").strip()
+    ssh_port = int(account.get("ssh_port") or 0) or GERRIT_SSH_PORT
+
+    if not raw_key:
+        raise TenantPushIdentityError(
+            f"tenant {tid!r} Gerrit credential has no ssh_key configured."
+        )
+    ssh_key = Path(raw_key).expanduser()
+    if _is_shared_bot_key(ssh_key):
+        raise TenantPushIdentityError(
+            f"tenant {tid!r} Gerrit credential resolves to the shared bot key "
+            f"{ssh_key}; refused (L6)."
+        )
+    if not project:
+        raise TenantPushIdentityError(
+            f"tenant {tid!r} Gerrit credential has no project namespace; a "
+            "customer push must be scoped to the tenant's own project."
+        )
+    if project == GERRIT_PROJECT_PATH:
+        raise TenantPushIdentityError(
+            f"tenant {tid!r} Gerrit credential points at the OmniSight project "
+            f"{project!r}; a customer run cannot push to OmniSight's project (L6)."
+        )
+    if not ssh_host:
+        raise TenantPushIdentityError(
+            f"tenant {tid!r} Gerrit credential has no ssh_host."
+        )
+    if not ssh_user:
+        raise TenantPushIdentityError(
+            f"tenant {tid!r} Gerrit credential has no username."
+        )
+
+    return GerritPushIdentity(
+        tenant_id=tid,
+        ssh_user=ssh_user,
+        ssh_key=ssh_key,
+        ssh_host=ssh_host,
+        ssh_port=ssh_port,
+        project=project,
+        is_bot=False,
+    )
 
 
 def assert_worktree_config_enabled(repo_root: Path) -> None:
@@ -1354,13 +1586,21 @@ def query_gerrit_change_by_change_id(
     change_id: str,
     agent_class: str = "subscription-codex",
     instance_id: str | None = None,
+    *,
+    identity: "GerritPushIdentity | None" = None,
 ) -> GerritChangeInfo | None:
-    """Return Gerrit change metadata for ``change:<Change-Id>``, if present."""
+    """Return Gerrit change metadata for ``change:<Change-Id>``, if present.
 
-    bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    *identity* lets a caller (the push recovery path) pin the query to the
+    SAME tenant identity that performed the push, so a customer-tenant
+    recovery query never reaches Gerrit over the shared bot key (L6). When
+    omitted it is resolved from the current tenant context.
+    """
+    if identity is None:
+        identity = resolve_gerrit_push_identity(agent_class, instance_id)
     cmd = [
-        "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
-        f"{bot_username}@{GERRIT_SSH_HOST}",
+        "ssh", "-i", str(identity.ssh_key), "-p", str(identity.ssh_port),
+        f"{identity.ssh_user}@{identity.ssh_host}",
         "gerrit", "query", "--format=JSON", f"change:{change_id}",
     ]
     result = BREAKERS["gerrit_ssh"].call(
@@ -1382,7 +1622,7 @@ def query_gerrit_change_by_change_id(
             continue
         url = str(
             change.get("url")
-            or f"https://{GERRIT_SSH_HOST}:29420/c/{GERRIT_PROJECT_PATH}/+/{number}"
+            or f"https://{identity.ssh_host}:29420/c/{identity.project}/+/{number}"
         )
         return GerritChangeInfo(
             change_number=number,
@@ -1397,6 +1637,7 @@ def push_to_gerrit_for_review(
     agent_class: str,
     target: str = "develop",
     instance_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> GerritPushResult:
     """Push worktree HEAD to ``gerrit:refs/for/<target>``.
 
@@ -1404,12 +1645,24 @@ def push_to_gerrit_for_review(
     failure. Caller is responsible for having installed the commit-msg
     hook + ensured all commits have Change-Id footers (use
     :func:`install_commit_msg_hook` and :func:`ensure_change_ids` first).
+
+    OP-1779 (1A.2 / L6): the push identity (SSH user + key + host + project)
+    is resolved per-tenant via :func:`resolve_gerrit_push_identity`. The
+    internal ``omnisight-self`` tenant keeps the bot identity + OmniSight
+    project unchanged; a customer tenant pushes only via its own credential,
+    and the push is refused (returned as a hard failure) rather than ever
+    falling back to the shared bot key. *tenant_id* defaults to the tenant
+    bound into the context at pickup.
     """
     import subprocess
     try:
-        bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
-    except ValueError as exc:
+        identity = resolve_gerrit_push_identity(
+            agent_class, instance_id, tenant_id=tenant_id
+        )
+    except (ValueError, TenantPushIdentityError) as exc:
         return GerritPushResult(False, None, None, str(exc))
+    bot_username = identity.ssh_user
+    ssh_key = identity.ssh_key
     if not ssh_key.exists():
         return GerritPushResult(False, None, None, f"SSH key not found at {ssh_key}")
 
@@ -1435,7 +1688,7 @@ def push_to_gerrit_for_review(
         # incident set (2026-05-13).
         result = BREAKERS["gerrit_ssh"].call(
             subprocess.run,
-            ["git", "push", "--no-thin", _gerrit_ssh_url(agent_class, instance_id), f"HEAD:refs/for/{target}"],
+            ["git", "push", "--no-thin", identity.ssh_url, f"HEAD:refs/for/{target}"],
             cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
         )
         blob = (result.stderr + "\n" + result.stdout).strip()
@@ -1462,7 +1715,9 @@ def push_to_gerrit_for_review(
             detail = "\n".join([*retry_notes, detail])
         if change_id and retry_notes:
             try:
-                change = query_gerrit_change_by_change_id(change_id, agent_class, instance_id)
+                change = query_gerrit_change_by_change_id(
+                    change_id, agent_class, instance_id, identity=identity
+                )
             except Exception as exc:  # noqa: BLE001 - preserve original push failure path
                 return GerritPushResult(
                     False,
@@ -1497,7 +1752,7 @@ def push_to_gerrit_for_review(
         self_fix = pre_review_self_fix.self_fix_mergeability(
             worktree_path=worktree_path,
             change_number=change_number,
-            gerrit_ssh_url=_gerrit_ssh_url(agent_class, instance_id),
+            gerrit_ssh_url=identity.ssh_url,
             rest_base_url=GERRIT_HOOK_URL.rsplit("/tools/", 1)[0],
             username=bot_username,
             http_password=auto_rebase.load_owner_http_password(bot_username),
