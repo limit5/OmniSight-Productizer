@@ -114,22 +114,52 @@ def _filter_tasks(
 
 
 def _resolve_dependencies(tasks: list[dict]) -> list[dict]:
-    """Topological sort (Kahn's algorithm) + prune dangling deps.
+    """Topological sort (Kahn's algorithm) + surface dangling deps.
 
     If a task depends on another task that was filtered out by
-    conditions, the dependency is silently removed (the driver it
-    depended on isn't needed). Raises ValueError on cycles.
+    conditions, the dependency is removed so the DAG remains valid, but
+    the missing edge is logged as structured ``unmet_deps`` for pack
+    composition diagnostics. Raises ValueError on cycles.
     """
     task_ids = {t["task_id"] for t in tasks}
     by_id = {t["task_id"]: t for t in tasks}
+    produced_outputs = {t["expected_output"] for t in tasks}
+    unmet_deps: list[dict[str, str]] = []
 
     for t in tasks:
-        t["depends_on"] = [d for d in (t.get("depends_on") or []) if d in task_ids]
+        depends_on = t.get("depends_on") or []
+        t["depends_on"] = [d for d in depends_on if d in task_ids]
+        for dep in depends_on:
+            if dep not in task_ids:
+                unmet_deps.append({
+                    "task_id": t["task_id"],
+                    "field": "depends_on",
+                    "missing": dep,
+                })
+
+        inputs = t.get("inputs") or []
         t["inputs"] = [
-            inp for inp in (t.get("inputs") or [])
+            inp for inp in inputs
             if inp.startswith("external:") or inp.startswith("user:")
-            or any(inp == by_id[tid]["expected_output"] for tid in task_ids if tid in by_id)
+            or inp in produced_outputs
         ]
+        for inp in inputs:
+            if (
+                not inp.startswith("external:")
+                and not inp.startswith("user:")
+                and inp not in produced_outputs
+            ):
+                unmet_deps.append({
+                    "task_id": t["task_id"],
+                    "field": "inputs",
+                    "missing": inp,
+                })
+
+    if unmet_deps:
+        logger.warning(
+            "embedded planner found unmet dependencies",
+            extra={"unmet_deps": unmet_deps},
+        )
 
     indeg: dict[str, int] = {t["task_id"]: 0 for t in tasks}
     children: dict[str, list[str]] = {t["task_id"]: [] for t in tasks}

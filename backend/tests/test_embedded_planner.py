@@ -195,12 +195,50 @@ class TestDependencyResolution:
         assert ids.index("a") < ids.index("b")
         assert ids.index("b") < ids.index("c")
 
-    def test_dangling_dep_pruned(self):
+    def test_dangling_dep_surfaced(self, caplog):
         tasks = [
             {"task_id": "a", "depends_on": ["removed"], "inputs": [], "expected_output": "a.bin"},
         ]
-        ordered = _resolve_dependencies(tasks)
+        with caplog.at_level("WARNING", logger="backend.embedded_planner"):
+            ordered = _resolve_dependencies(tasks)
         assert ordered[0]["depends_on"] == []
+        records = [
+            record for record in caplog.records
+            if hasattr(record, "unmet_deps")
+        ]
+        assert records
+        assert records[0].unmet_deps == [
+            {
+                "task_id": "a",
+                "field": "depends_on",
+                "missing": "removed",
+            }
+        ]
+
+    def test_missing_input_surfaced(self, caplog):
+        tasks = [
+            {
+                "task_id": "a",
+                "depends_on": [],
+                "inputs": ["missing.bin", "external:sdk"],
+                "expected_output": "a.bin",
+            },
+        ]
+        with caplog.at_level("WARNING", logger="backend.embedded_planner"):
+            ordered = _resolve_dependencies(tasks)
+        assert ordered[0]["inputs"] == ["external:sdk"]
+        records = [
+            record for record in caplog.records
+            if hasattr(record, "unmet_deps")
+        ]
+        assert records
+        assert records[0].unmet_deps == [
+            {
+                "task_id": "a",
+                "field": "inputs",
+                "missing": "missing.bin",
+            }
+        ]
 
     def test_cycle_detection(self):
         tasks = [
