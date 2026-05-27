@@ -262,7 +262,15 @@ def test_compatibility_partition_is_documented():
     # tasks.yaml was migrated from the legacy id/name/artifacts schema to
     # the embedded task_id/expected_output schema (schema-only; the pack is
     # still `stubbed`). It is the first migration of the ~23 broken packs.
-    assert parsed_ok == ["_embedded_base", "connectivity", "imaging"], (
+    # ``barcode_scanner`` joined in OP-1801 (Track B, B-2 1D-rest) via the
+    # same schema-only migration (still a stub). This pin is descriptive —
+    # update it in the same change that migrates a pack (see docstring).
+    assert parsed_ok == [
+        "_embedded_base",
+        "barcode_scanner",
+        "connectivity",
+        "imaging",
+    ], (
         "embedded-compatible pack set changed — if a pack was migrated to "
         "the embedded schema this is expected; update the expectation."
     )
