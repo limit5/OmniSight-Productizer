@@ -1,0 +1,72 @@
+# OP-1799 (Track B / B-1) — Case-1 Android RTSP/ONVIF CLIENT pack skeleton.
+#
+# ⚠️ NAMING TRAP (audited per the B-1 spec-ref): the existing `ipcam` and
+# `uvc` packs are device-SIDE (the box *serves*/exposes a stream as a
+# gadget). This pack is the missing CLIENT side — an Android app that
+# *consumes* IP-camera RTSP streams and discovers cameras over ONVIF.
+#
+# This is a SKELETON only. The pack ships no scaffolder of its own: the
+# dispatcher (scripts/scaffold.py) routes it to the existing
+# backend.android_scaffolder via the explicit override in
+# backend/skill_registry.py (_SCAFFOLDER_MODULE_OVERRIDES). Rendering this
+# pack therefore produces the standard Android app skeleton; the
+# ONVIF-discovery and RTSP-playback client scaffolds + domain code are
+# sequenced FOLLOW-ON tickets in this same pack.
+#
+# Safe-local internal dev — authored under omnisight-self, NOT a customer
+# run. Needs no platform/sandbox.
+
+schema_version: 1
+name: android-rtsp-onvif-client
+description: >
+  Case-1 Android RTSP/ONVIF CLIENT app pack — an Android application that
+  consumes IP-camera streams (RTSP playback) and discovers cameras on the
+  LAN over ONVIF/WS-Discovery. This is the CLIENT counterpart to the
+  device-side `ipcam`/`uvc` packs (which expose a stream as a gadget).
+  SKELETON pickup: reuses the `android` scaffolder (on ScaffolderBase) via
+  the dispatcher to render the base Android app project — NO new
+  scaffolder. ONVIF-discovery + RTSP-playback client scaffolds and domain
+  code are sequenced follow-on tickets in this pack.
+version: "0.1.0"
+author: "OmniSight"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+# Reuses the android scaffolder; declared so the dependency on the
+# skill-android pack (templates + scaffolder module) is explicit.
+depends_on_skills:
+  - skill-android
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - android
+  - rtsp
+  - onvif
+  - ws-discovery
+  - ip-camera
+  - camera-client
+  - video-client
+  - streaming-client
+  - client
+  - case-1
+  - skeleton
