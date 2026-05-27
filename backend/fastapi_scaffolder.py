@@ -44,12 +44,11 @@ Public API
 from __future__ import annotations
 
 import logging
+import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
-import jinja2
+from typing import Any, Optional
 
 from backend import platform_profile as _platform
 from backend.build_adapters import (
@@ -57,6 +56,8 @@ from backend.build_adapters import (
     DockerImageAdapter,
     HelmChartAdapter,
 )
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 from backend.software_compliance import run_all as run_compliance_all
 
@@ -72,8 +73,6 @@ _SCAFFOLD_PACKAGE_DIR = "src/app"
 _DATABASE_CHOICES = ("postgres", "sqlite")
 _AUTH_CHOICES = ("jwt", "oauth2", "none")
 _DEPLOY_CHOICES = ("docker", "helm", "both")
-
-_TEMPLATE_SUFFIX = ".j2"
 
 # Scaffold paths gated on knobs — matched on the RENAMED relative path
 # (i.e. after ``src/app/`` has been rewritten to ``src/<pkg>/``). Auth
@@ -103,8 +102,9 @@ _PKG_LEADING_DIGIT_RE = re.compile(r"^[0-9]")
 
 
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-FASTAPI knobs — extends the shared base with FastAPI fields."""
+
     package_name: Optional[str] = None  # defaults to slug(project_name)
     database: str = "postgres"          # postgres | sqlite
     auth: str = "jwt"                   # jwt | oauth2 | none
@@ -113,8 +113,7 @@ class ScaffoldOptions:
     platform_profile: str = "linux-x86_64-native"
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         if self.database not in _DATABASE_CHOICES:
             raise ValueError(
                 f"database must be one of {_DATABASE_CHOICES}, got {self.database!r}"
@@ -140,26 +139,6 @@ class ScaffoldOptions:
         return self.deploy in ("helm", "both")
 
 
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    package_name: str = ""
-    profile_binding: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "package_name": self.package_name,
-            "profile_binding": self.profile_binding,
-        }
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Internals
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -180,12 +159,6 @@ def _derive_package_name(project_name: str) -> str:
     if _PKG_LEADING_DIGIT_RE.match(slug):
         slug = f"app_{slug}"
     return slug
-
-
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
 
 
 def _rewrite_package_path(rel: str, package_name: str) -> str:
@@ -219,45 +192,143 @@ def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
     return False
 
 
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
+class _FastApiScaffolder(ScaffolderBase):
+    """SKILL-FASTAPI scaffolder — supplies package rewrite + context hooks."""
+
+    @staticmethod
+    def _iter_scaffold_files(root: Path):
+        files: list[Path] = []
+        for dirpath, _, filenames in os.walk(root):
+            base = Path(dirpath)
+            files.extend(base / filename for filename in filenames)
+        yield from sorted(files)
+
+    def _rendered_rel_path(self, rel_path: str, package_name: str) -> tuple[str, bool]:
+        suffix = self.template_suffix
+        if rel_path.endswith(suffix):
+            rendered_rel_raw = rel_path[: -len(suffix)]
+            is_template = True
+        else:
+            rendered_rel_raw = rel_path
+            is_template = False
+        return _rewrite_package_path(rendered_rel_raw, package_name), is_template
+
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        rendered_rel, _ = self._rendered_rel_path(
+            rel_path,
+            options.resolved_package_name(),
+        )
+        return _should_skip(rendered_rel, options)
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
+            "project_name": options.project_name,
+            "package_name": options.resolved_package_name(),
+            "database": options.database,
+            "auth": options.auth,
+            "deploy": options.deploy,
+            "compliance": options.compliance,
+        }
+        # Resolve X0 profile so the Dockerfile tag / helm image stays
+        # aligned with the platform the skill targets.
+        try:
+            raw = _platform.load_raw_profile(options.platform_profile)
+            ctx["platform_profile"] = options.platform_profile
+            ctx["platform_packaging"] = raw.get("packaging", "")
+            ctx["platform_runtime"] = raw.get("software_runtime", "")
+        except Exception:  # noqa: BLE001 — fall through to defaults
+            ctx["platform_profile"] = options.platform_profile
+            ctx["platform_packaging"] = ""
+            ctx["platform_runtime"] = ""
+        return ctx
+
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        outcome.package_name = context["package_name"]  # type: ignore[attr-defined]
+        outcome.profile_binding = context["platform_profile"]  # type: ignore[assignment]
+        return outcome
+
+    def _render_env_example(self, context: dict[str, Any]) -> str:
+        package_name = context["package_name"]
+        if context["database"] == "postgres":
+            database_url = (
+                "postgresql+asyncpg://"
+                f"{package_name}:{package_name}@localhost:5432/{package_name}"
+            )
+        else:
+            database_url = "sqlite+aiosqlite:///./data/app.db"
+        return (
+            f"APP_NAME={context['project_name']}\n"
+            "ENVIRONMENT=local\n"
+            f"DATABASE_URL={database_url}\n"
+            f"AUTH_MODE={context['auth']}\n"
+            "LOG_LEVEL=INFO\n"
+        )
+
+    def render_project(
+        self,
+        out_dir: Path,
+        options: ScaffoldOptions,
+        *,
+        overwrite: bool = True,
+    ) -> RenderOutcome:
+        """Render with FastAPI's ``src/app`` → ``src/<package>`` path rewrite."""
+        options.validate()
+        out_dir = Path(out_dir)
+        if not self.scaffolds_dir.is_dir():
+            raise FileNotFoundError(
+                f"scaffolds directory missing: {self.scaffolds_dir}"
+            )
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        env = self._build_jinja_env()
+        ctx = self.build_context(options)
+        outcome = self.make_outcome(out_dir, ctx)
+
+        for src in self._iter_scaffold_files(self.scaffolds_dir):
+            rel = src.relative_to(self.scaffolds_dir).as_posix()
+            rendered_rel, is_template = self._rendered_rel_path(
+                rel,
+                ctx["package_name"],
+            )
+
+            if self.should_skip(rel, options):
+                continue
+
+            dest = out_dir / rendered_rel
+            if dest.exists() and not overwrite:
+                outcome.warnings.append(f"skipped existing: {rendered_rel}")
+                continue
+
+            if is_template:
+                template = env.get_template(rel)
+                rendered = template.render(**ctx)
+                outcome.bytes_written += self._write_file(dest, rendered)
+            else:
+                outcome.bytes_written += self._write_file(dest, src.read_bytes())
+            outcome.files_written.append(dest)
+
+        env_example = out_dir / ".env.example"
+        if env_example.exists() and not overwrite:
+            outcome.warnings.append("skipped existing: .env.example")
+        else:
+            rendered = self._render_env_example(ctx)
+            outcome.bytes_written += self._write_file(env_example, rendered)
+            outcome.files_written.append(env_example)
+
+        logger.info(
+            "%s rendered %d files (%d bytes) into %s",
+            self.skill_label,
+            len(outcome.files_written),
+            outcome.bytes_written,
+            out_dir,
+        )
+        return outcome
 
 
-def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
-    ctx: dict[str, Any] = {
-        "project_name": opts.project_name,
-        "package_name": opts.resolved_package_name(),
-        "database": opts.database,
-        "auth": opts.auth,
-        "deploy": opts.deploy,
-        "compliance": opts.compliance,
-    }
-    # Resolve X0 profile so the Dockerfile tag / helm image stays
-    # aligned with the platform the skill targets.
-    try:
-        raw = _platform.load_raw_profile(opts.platform_profile)
-        ctx["platform_profile"] = opts.platform_profile
-        ctx["platform_packaging"] = raw.get("packaging", "")
-        ctx["platform_runtime"] = raw.get("software_runtime", "")
-    except Exception:  # noqa: BLE001 — fall through to defaults
-        ctx["platform_profile"] = opts.platform_profile
-        ctx["platform_packaging"] = ""
-        ctx["platform_runtime"] = ""
-    return ctx
-
-
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _FastApiScaffolder(_SCAFFOLDS_DIR, skill_label="SKILL-FASTAPI")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -273,6 +344,9 @@ def render_project(
 ) -> RenderOutcome:
     """Render the SKILL-FASTAPI scaffold into ``out_dir``.
 
+    Thin façade over :data:`_SCAFFOLDER`; the shared render primitives
+    live in :class:`backend.scaffolder_base.ScaffolderBase`.
+
     Parameters
     ----------
     out_dir : Path
@@ -285,54 +359,7 @@ def render_project(
         are overwritten. Files outside the scaffold surface are never
         touched.
     """
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(
-        out_dir=out_dir,
-        package_name=ctx["package_name"],
-        profile_binding=ctx["platform_profile"],
-    )
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        # Compute the rendered-project relative path (post-rename + strip .j2).
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            rendered_rel_raw = rel[: -len(_TEMPLATE_SUFFIX)]
-            is_template = True
-        else:
-            rendered_rel_raw = rel
-            is_template = False
-        rendered_rel = _rewrite_package_path(rendered_rel_raw, ctx["package_name"])
-
-        if _should_skip(rendered_rel, options):
-            continue
-
-        dest = out_dir / rendered_rel
-        if dest.exists() and not overwrite:
-            outcome.warnings.append(f"skipped existing: {rendered_rel}")
-            continue
-
-        if is_template:
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-            outcome.bytes_written += _write_file(dest, rendered)
-        else:
-            outcome.bytes_written += _write_file(dest, src.read_bytes())
-        outcome.files_written.append(dest)
-
-    logger.info(
-        "SKILL-FASTAPI rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def dry_run_build(
