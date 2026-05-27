@@ -1492,9 +1492,14 @@ def _invoke_cli(
         )
 
     try:
+        # OP-1803 (§2c, v1): the agent CLI is network-allowed (blanket-allow
+        # for v1) so claude/codex can reach the model API + git remote from
+        # inside the jail. INERT until bwrap is re-enabled — with bwrap absent
+        # (current fleet state) wrap_in_bubblewrap returns the raw cmd.
         wrapped_cmd = runner_sandbox.wrap_in_bubblewrap(
             cmd, worktree_path=effective_worktree, ticket_key=ticket_key,
             env=scrubbed_env, dep_cache_mounts=dep_cache_mounts,
+            network=True,
         )
     except (
         runner_sandbox.SandboxBinaryMissing,

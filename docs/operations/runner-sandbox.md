@@ -187,6 +187,35 @@ strace -f -c -ttt bwrap --die-with-parent --new-session true 2>&1 | head -20
 * Restart the runner. Verify next ticket pickup logs `sandbox=wrapped`
   on the bootstrap line + `[sandbox-wrapped]` on the CLI invocation.
 
+## Agent-CLI toolchain + config binding (OP-1803 / OP-1783 P1)
+
+Wrapping the *agent* CLI (`claude` / `codex`) needs more than the system
+RO-mounts: the interpreter and the CLI shims live under nvm, and the CLIs
+read their config from `CLAUDE_CONFIG_DIR` / `CODEX_HOME`. P1 binds these so
+the jailed CLI can `execvp` and read its config (fixing the execvp failure):
+
+* **Toolchain (§2a)** — `_build_bubblewrap_argv` resolves the live node via
+  `which node` (falling back to `$NVM_DIR`'s default-aliased version) and
+  RO-binds the **specific** `~/.nvm/versions/node/<ver>/` subtree (node +
+  the `claude`/`codex` shims + their `node_modules`). It does **not** bind
+  all of `~/.nvm`. A distro `/usr/bin/node` needs no extra mount — it's
+  under the existing `/usr` RO-bind.
+* **CLI config (§2b, Option B)** — `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are
+  in `ENV_ALLOWLIST` (so the degraded/raw spawn forwards them too) and are
+  RO-bound at their host path + `--setenv`'d to that bound path. The CLI
+  must **not** resolve config relative to the jail's HOME (pinned to the
+  worktree), hence the explicit bind+setenv rather than a HOME-relative dir.
+* **Egress (§2c, v1)** — the agent-CLI wrap in `auto-runner-jira.py` passes
+  `network=True` (blanket-allow for v1) so the jailed CLI reaches the model
+  API + git remote. This is the one call site that opts out of the
+  deny-by-default network policy; the env-var override path is unchanged.
+
+> ⚠️ **INERT until bwrap is re-enabled.** This shipped while bwrap is
+> disabled (`/usr/bin/bwrap.disabled-*`), so `wrap_in_bubblewrap` returns
+> the raw cmd and nothing above takes effect at runtime. Re-enabling bwrap
+> fleet-wide + the live canary (one `claude` + one `codex` pickup) is a
+> **separate operator step**, not part of OP-1803.
+
 ## Lineage
 
 * OP-836 — sentinel detection (the L2 layer this complements).
