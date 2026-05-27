@@ -258,7 +258,48 @@ def test_compatibility_partition_is_documented():
     assert not (set(parsed_ok) & set(incompatible))
 
     # The embedded-native packs that the planner can consume today.
-    assert parsed_ok == ["_embedded_base", "connectivity"], (
+    # ``imaging`` joined this set in OP-1786 (W2-3, 1D-pilot) — its
+    # tasks.yaml was migrated from the legacy id/name/artifacts schema to
+    # the embedded task_id/expected_output schema (schema-only; the pack is
+    # still `stubbed`). It is the first migration of the ~23 broken packs.
+    assert parsed_ok == ["_embedded_base", "connectivity", "imaging"], (
         "embedded-compatible pack set changed — if a pack was migrated to "
         "the embedded schema this is expected; update the expectation."
     )
+
+
+def test_imaging_pack_is_planner_parseable():
+    """OP-1786 (W2-3, 1D-pilot) regression: the migrated ``imaging`` pack is
+    consumed by the embedded planner end-to-end with no KeyError, and every
+    task carries the embedded schema keys (``task_id`` + ``expected_output``).
+
+    This pins the migration outcome directly (rather than only via the
+    dynamic sweep) so a regression that reverted ``imaging`` to the legacy
+    id/name/artifacts schema fails loudly and by name.
+    """
+    assert "imaging" in _SKILL_PACKS
+
+    templates = _load_pack_templates("imaging")
+    assert templates, "imaging pack has no tasks"
+    assert _meets_embedded_contract(templates), (
+        "imaging tasks must each carry task_id + expected_output"
+    )
+
+    # Schema-only migration: intent-bearing structure is preserved.
+    by_id = {t["task_id"]: t for t in templates}
+    assert "imaging_integration_test" in by_id
+    assert by_id["imaging_integration_test"]["depends_on"] == [
+        "imaging_quality_test",
+        "imaging_driver_test",
+    ]
+
+    # The W1-T1 sweep classifies the pack as parsed_ok at both granularities.
+    assert _expected_outcome("imaging") == PARSED_OK
+    reload_tasks_cache()
+    assert _observed_full_plan_outcome("imaging") == PARSED_OK
+    assert _observed_template_outcome("imaging") == PARSED_OK
+
+    # And the planner actually emits a DAG covering every imaging task.
+    reload_tasks_cache()
+    dag = plan_embedded_product(_SPEC, _FULL_HW, "imaging", dag_id="compat-imaging")
+    assert {t.task_id for t in dag.tasks} == set(by_id)

@@ -1,82 +1,79 @@
+# Imaging skill pack — task template.
+#
+# OP-1786 (W2-3, 1D-pilot): migrated from the legacy id/name/artifacts schema
+# to the embedded planner schema (task_id + expected_output) so the embedded
+# planner can consume it without a KeyError. This is a SCHEMA-ONLY migration:
+# task content/intent, depends_on edges, and the stub maturity are unchanged.
+# The pack is still `stubbed` (see docs/product/skill-pack-maturity-matrix.md);
+# making these tasks real is a separate, later track.
 schema_version: 1
 tasks:
-  - id: imaging_isp_config
+  - task_id: imaging_isp_config
     name: "Configure Scanner ISP Pipeline"
     description: "Select sensor type, color mode, ISP stages, calibration data"
     depends_on: []
-    artifacts:
-      - isp_pipeline_config
-      - calibration_data
+    expected_output: build/imaging/isp_pipeline_config.json
     estimated_minutes: 30
 
-  - id: imaging_isp_calibration
+  - task_id: imaging_isp_calibration
     name: "Sensor Calibration"
     description: "Capture dark frame + white reference, store calibration data"
     depends_on: [imaging_isp_config]
-    artifacts:
-      - calibration_data
+    expected_output: build/imaging/calibration_data.bin
     estimated_minutes: 60
 
-  - id: imaging_ocr_setup
+  - task_id: imaging_ocr_setup
     name: "OCR Engine Setup"
     description: "Select OCR engine, install language packs, configure preprocessing"
     depends_on: [imaging_isp_config]
-    artifacts:
-      - ocr_engine_config
+    expected_output: build/imaging/ocr_engine_config.json
     estimated_minutes: 30
 
-  - id: imaging_twain_driver
+  - task_id: imaging_twain_driver
     name: "Generate TWAIN Driver"
     description: "Generate TWAIN data source for Windows scanner integration"
     depends_on: [imaging_isp_config]
-    artifacts:
-      - twain_driver_source
+    expected_output: build/imaging/twain_driver_source.tar.gz
     estimated_minutes: 45
 
-  - id: imaging_sane_backend
+  - task_id: imaging_sane_backend
     name: "Generate SANE Backend"
     description: "Generate SANE backend for Linux scanner integration"
     depends_on: [imaging_isp_config]
-    artifacts:
-      - sane_backend_source
+    expected_output: build/imaging/sane_backend_source.tar.gz
     estimated_minutes: 45
 
-  - id: imaging_icc_profiling
+  - task_id: imaging_icc_profiling
     name: "ICC Profile Creation"
     description: "Create or select ICC color profiles for scanner output"
     depends_on: [imaging_isp_config]
-    artifacts:
-      - icc_profile_binary
+    expected_output: build/imaging/icc_profile.icc
     estimated_minutes: 30
 
-  - id: imaging_icc_embed
+  - task_id: imaging_icc_embed
     name: "ICC Profile Embedding"
     description: "Embed ICC profiles into output images (TIFF/JPEG/PNG/PDF)"
     depends_on: [imaging_icc_profiling]
-    artifacts:
-      - icc_profile_binary
+    expected_output: build/imaging/icc_embedded_images.tar.gz
     estimated_minutes: 20
 
-  - id: imaging_quality_test
+  - task_id: imaging_quality_test
     name: "Scan Quality Verification"
     description: "Run ISP pipeline quality tests and generate report"
     depends_on: [imaging_isp_calibration, imaging_ocr_setup, imaging_icc_embed]
-    artifacts:
-      - scan_test_report
+    expected_output: build/imaging/scan_quality_report.xml
     estimated_minutes: 60
 
-  - id: imaging_driver_test
+  - task_id: imaging_driver_test
     name: "Driver Integration Test"
     description: "Test TWAIN and SANE driver templates with mock scanner"
     depends_on: [imaging_twain_driver, imaging_sane_backend]
-    artifacts:
-      - scan_test_report
+    expected_output: build/imaging/driver_integration_report.xml
     estimated_minutes: 45
 
-  - id: imaging_integration_test
+  - task_id: imaging_integration_test
     name: "Full Pipeline Integration Test"
     description: "End-to-end: scan → ISP → OCR → ICC embed → output"
     depends_on: [imaging_quality_test, imaging_driver_test]
-    artifacts:
-      - scan_test_report
+    expected_output: build/imaging/pipeline_integration_report.xml
     estimated_minutes: 90
