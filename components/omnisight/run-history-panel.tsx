@@ -30,6 +30,9 @@ type StatusFilter = "all" | "running" | "completed" | "failed" | "halted"
 
 const STATUS_TONE: Record<string, { color: string; Icon: typeof CheckCircle2 }> = {
   running:   { color: "var(--neural-cyan,#67e8f9)",     Icon: Loader2 },
+  executing: { color: "var(--neural-cyan,#67e8f9)",     Icon: Loader2 },
+  validated: { color: "var(--fui-orange,#f59e0b)",      Icon: Clock3 },
+  submitted: { color: "var(--fui-orange,#f59e0b)",      Icon: Clock3 },
   completed: { color: "var(--validation-emerald,#10b981)", Icon: CheckCircle2 },
   failed:    { color: "var(--destructive)",              Icon: XCircle },
   halted:    { color: "var(--fui-orange,#f59e0b)",       Icon: Pause },
@@ -40,6 +43,28 @@ function tone(status: string) {
   return STATUS_TONE[status] ?? {
     color: "var(--muted-foreground,#94a3b8)", Icon: AlertCircle,
   }
+}
+
+function isExecutingStatus(status: string): boolean {
+  return status === "running" || status === "executing"
+}
+
+function statusLabel(status: string): string {
+  if (isExecutingStatus(status)) return "executing"
+  if (status === "validated" || status === "submitted" || status === "pending") {
+    return "submitted (not executing)"
+  }
+  return status
+}
+
+function statusTitle(status: string): string {
+  if (isExecutingStatus(status)) {
+    return "Execution is active for this run."
+  }
+  if (status === "validated" || status === "submitted" || status === "pending") {
+    return "The run was persisted, but no executor is active yet."
+  }
+  return `status ${status}`
 }
 
 function ageString(ts: number | null): string {
@@ -346,12 +371,12 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
                               role="button"
                               tabIndex={0}
                               aria-expanded={childOpen}
-                              aria-label={`run ${c.id} status ${c.status}`}
+                              aria-label={`run ${c.id} status ${statusLabel(c.status)}`}
                             >
                               <ChildChevron size={10} className="text-[var(--muted-foreground)] shrink-0" aria-hidden />
                               <Icon
                                 size={14}
-                                className={c.status === "running" ? "animate-spin shrink-0" : "shrink-0"}
+                                className={isExecutingStatus(c.status) ? "animate-spin shrink-0" : "shrink-0"}
                                 style={{ color: t.color }}
                                 aria-hidden
                               />
@@ -359,8 +384,12 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
                                 <span className="font-mono text-[11px] text-[var(--foreground)] truncate" title={c.id}>
                                   {c.id}
                                 </span>
-                                <span className="font-mono text-[10px] uppercase tracking-wider tabular-nums" style={{ color: t.color }}>
-                                  {c.status}
+                                <span
+                                  className="font-mono text-[10px] uppercase tracking-wider tabular-nums"
+                                  style={{ color: t.color }}
+                                  title={statusTitle(c.status)}
+                                >
+                                  {statusLabel(c.status)}
                                 </span>
                                 <span className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums" title={`started ${c.started_at}`}>
                                   {durationString(c.started_at, c.completed_at)} · {ageString(c.started_at)}
@@ -402,12 +431,12 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
                   role="button"
                   tabIndex={0}
                   aria-expanded={open}
-                  aria-label={`run ${r.id} status ${r.status}`}
+                  aria-label={`run ${r.id} status ${statusLabel(r.status)}`}
                 >
                   <Chevron size={10} className="text-[var(--muted-foreground)] shrink-0" aria-hidden />
                   <Icon
                     size={14}
-                    className={r.status === "running" ? "animate-spin shrink-0" : "shrink-0"}
+                    className={isExecutingStatus(r.status) ? "animate-spin shrink-0" : "shrink-0"}
                     style={{ color: t.color }}
                     aria-hidden
                   />
@@ -421,8 +450,9 @@ export function RunHistoryPanel({ projectId }: { projectId?: string }) {
                     <span
                       className="font-mono text-[10px] uppercase tracking-wider tabular-nums"
                       style={{ color: t.color }}
+                      title={statusTitle(r.status)}
                     >
-                      {r.status}
+                      {statusLabel(r.status)}
                     </span>
                     <span
                       className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums"
