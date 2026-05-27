@@ -11,6 +11,13 @@ The public API is deliberately identical in shape to
 orchestration glue — the same swap the W6 SKILL-NEXTJS /
 ``backend.nextjs_scaffolder`` line set up for the web vertical when
 SKILL-NUXT + SKILL-ASTRO came in.
+
+The render machinery (``ScaffoldOptions`` / ``RenderOutcome`` /
+``render_project`` / Jinja env / byte-level writes) lives in
+:class:`backend.scaffolder_base.ScaffolderBase`; this module subclasses
+it and declares only the RN-specific knobs, gating, and dual-rail
+(iOS + Android) context — the W3 (1C) migration that brings the last of
+the 12 scaffolders onto the shared base. Rendered output is unchanged.
 """
 
 from __future__ import annotations
@@ -18,13 +25,13 @@ from __future__ import annotations
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
-
-import jinja2
+from typing import Any
 
 from backend import platform_profile as _platform
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 
 logger = logging.getLogger(__name__)
@@ -34,8 +41,6 @@ _SKILL_DIR = (
     / "configs" / "skills" / "skill-rn"
 )
 _SCAFFOLDS_DIR = _SKILL_DIR / "scaffolds"
-
-_TEMPLATE_SUFFIX = ".j2"
 
 _IOS_PROFILE_ID = "ios-arm64"
 _ANDROID_PROFILE_ID = "android-arm64-v8a"
@@ -74,17 +79,28 @@ _COMPLIANCE_GATED: frozenset[str] = frozenset({
 })
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Data models
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-RN knobs — extends the shared base with RN fields.
+
+    ``project_name`` (+ its non-empty check) is inherited from
+    :class:`backend.scaffolder_base.ScaffoldOptions`; :meth:`validate`
+    calls ``super().validate()`` then layers the JS-identifier /
+    reverse-DNS rules on top.
+    """
+
     package_id: str = ""
     push: bool = True
     payments: bool = True
     compliance: bool = True
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         clean = self.project_name.strip()
         if not all(c.isalnum() or c == "_" for c in clean):
             raise ValueError(
@@ -111,103 +127,100 @@ class ScaffoldOptions:
         return ".".join(self.resolved_package_id().split(".")[:-1]) or "com.example"
 
 
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    profile_binding: dict[str, Any] = field(default_factory=dict)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Scaffolder
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "profile_binding": dict(self.profile_binding),
+
+class _RnScaffolder(ScaffolderBase):
+    """SKILL-RN scaffolder — supplies the gating + context hooks.
+
+    The render loop, Jinja env, and byte-level writes live in
+    :class:`backend.scaffolder_base.ScaffolderBase`; this subclass only
+    declares what is React-Native-specific, including the dual-rail
+    (iOS + Android) profile binding.
+    """
+
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        if rel_path in _PUSH_ONLY_FILES and not options.push:
+            return True
+        if rel_path in _PAYMENTS_ONLY_FILES and not options.payments:
+            return True
+        if rel_path in _COMPLIANCE_GATED and not options.compliance:
+            return True
+        return False
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
+            "project_name": options.project_name,
+            "package_id": options.resolved_package_id(),
+            "package_prefix": options.package_prefix(),
+            "push": options.push,
+            "payments": options.payments,
+            "compliance": options.compliance,
         }
 
+        min_os_ios = _DEFAULT_IOS_MIN
+        sdk_ios = _DEFAULT_IOS_SDK
+        target_ios = _DEFAULT_IOS_SDK
+        try:
+            raw_ios = _platform.load_raw_profile(_IOS_PROFILE_ID)
+            min_os_ios = str(raw_ios.get("min_os_version") or min_os_ios)
+            sdk_ios = str(raw_ios.get("sdk_version") or sdk_ios)
+            target_ios = str(raw_ios.get("target_os_version") or target_ios)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to load %s profile, falling back to defaults: %s",
+                _IOS_PROFILE_ID, exc,
+            )
 
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
+        min_os_android = _DEFAULT_ANDROID_MIN
+        sdk_android = _DEFAULT_ANDROID_SDK
+        target_android = _DEFAULT_ANDROID_SDK
+        try:
+            raw_android = _platform.load_raw_profile(_ANDROID_PROFILE_ID)
+            min_os_android = str(raw_android.get("min_os_version") or min_os_android)
+            sdk_android = str(raw_android.get("sdk_version") or sdk_android)
+            target_android = str(raw_android.get("target_os_version") or target_android)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "failed to load %s profile, falling back to defaults: %s",
+                _ANDROID_PROFILE_ID, exc,
+            )
+
+        ctx["min_os_version_ios"] = min_os_ios
+        ctx["sdk_version_ios"] = sdk_ios
+        ctx["target_os_version_ios"] = target_ios
+        ctx["min_os_version_android"] = min_os_android
+        ctx["sdk_version_android"] = sdk_android
+        ctx["target_os_version_android"] = target_android
+        return ctx
+
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        outcome.profile_binding = {
+            "ios_profile": _IOS_PROFILE_ID,
+            "android_profile": _ANDROID_PROFILE_ID,
+            "min_os_version_ios": context["min_os_version_ios"],
+            "sdk_version_ios": context["sdk_version_ios"],
+            "min_os_version_android": context["min_os_version_android"],
+            "sdk_version_android": context["sdk_version_android"],
+        }
+        return outcome
 
 
-def _should_skip(rel_path: str, opts: ScaffoldOptions) -> bool:
-    if rel_path in _PUSH_ONLY_FILES and not opts.push:
-        return True
-    if rel_path in _PAYMENTS_ONLY_FILES and not opts.payments:
-        return True
-    if rel_path in _COMPLIANCE_GATED and not opts.compliance:
-        return True
-    return False
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _RnScaffolder(_SCAFFOLDS_DIR, skill_label="SKILL-RN")
 
 
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Public API
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
-    ctx: dict[str, Any] = {
-        "project_name": opts.project_name,
-        "package_id": opts.resolved_package_id(),
-        "package_prefix": opts.package_prefix(),
-        "push": opts.push,
-        "payments": opts.payments,
-        "compliance": opts.compliance,
-    }
-
-    min_os_ios = _DEFAULT_IOS_MIN
-    sdk_ios = _DEFAULT_IOS_SDK
-    target_ios = _DEFAULT_IOS_SDK
-    try:
-        raw_ios = _platform.load_raw_profile(_IOS_PROFILE_ID)
-        min_os_ios = str(raw_ios.get("min_os_version") or min_os_ios)
-        sdk_ios = str(raw_ios.get("sdk_version") or sdk_ios)
-        target_ios = str(raw_ios.get("target_os_version") or target_ios)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "failed to load %s profile, falling back to defaults: %s",
-            _IOS_PROFILE_ID, exc,
-        )
-
-    min_os_android = _DEFAULT_ANDROID_MIN
-    sdk_android = _DEFAULT_ANDROID_SDK
-    target_android = _DEFAULT_ANDROID_SDK
-    try:
-        raw_android = _platform.load_raw_profile(_ANDROID_PROFILE_ID)
-        min_os_android = str(raw_android.get("min_os_version") or min_os_android)
-        sdk_android = str(raw_android.get("sdk_version") or sdk_android)
-        target_android = str(raw_android.get("target_os_version") or target_android)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "failed to load %s profile, falling back to defaults: %s",
-            _ANDROID_PROFILE_ID, exc,
-        )
-
-    ctx["min_os_version_ios"] = min_os_ios
-    ctx["sdk_version_ios"] = sdk_ios
-    ctx["target_os_version_ios"] = target_ios
-    ctx["min_os_version_android"] = min_os_android
-    ctx["sdk_version_android"] = sdk_android
-    ctx["target_os_version_android"] = target_android
-    return ctx
-
-
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
+    """SKILL-RN Jinja render context (delegates to the scaffolder)."""
+    return _SCAFFOLDER.build_context(opts)
 
 
 def render_project(
@@ -218,56 +231,11 @@ def render_project(
 ) -> RenderOutcome:
     """Render the SKILL-RN scaffold into ``out_dir``.
 
-    Same idempotency / overwrite semantics as the other mobile
-    scaffolders.
+    Thin façade over :data:`_SCAFFOLDER`; the render machinery lives in
+    :class:`backend.scaffolder_base.ScaffolderBase`. Same idempotency /
+    overwrite semantics as the other mobile scaffolders.
     """
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(out_dir=out_dir)
-    outcome.profile_binding = {
-        "ios_profile": _IOS_PROFILE_ID,
-        "android_profile": _ANDROID_PROFILE_ID,
-        "min_os_version_ios": ctx["min_os_version_ios"],
-        "sdk_version_ios": ctx["sdk_version_ios"],
-        "min_os_version_android": ctx["min_os_version_android"],
-        "sdk_version_android": ctx["sdk_version_android"],
-    }
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        if _should_skip(rel, options):
-            continue
-
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            out_rel = rel[: -len(_TEMPLATE_SUFFIX)]
-            dest = out_dir / out_rel
-            if dest.exists() and not overwrite:
-                outcome.warnings.append(f"skipped existing: {out_rel}")
-                continue
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-            outcome.bytes_written += _write_file(dest, rendered)
-        else:
-            dest = out_dir / rel
-            if dest.exists() and not overwrite:
-                outcome.warnings.append(f"skipped existing: {rel}")
-                continue
-            outcome.bytes_written += _write_file(dest, src.read_bytes())
-        outcome.files_written.append(dest)
-
-    logger.info(
-        "SKILL-RN rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def pilot_report(
