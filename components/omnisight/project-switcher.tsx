@@ -1,7 +1,8 @@
 "use client"
 
+import Link from "next/link"
 import { useEffect, useRef, useState } from "react"
-import { ChevronDown, FolderKanban } from "lucide-react"
+import { ChevronDown, ExternalLink, FolderKanban } from "lucide-react"
 import { useAuth } from "@/lib/auth-context"
 import { useTenant } from "@/lib/tenant-context"
 import { useProject } from "@/lib/project-context"
@@ -66,13 +67,16 @@ export function ProjectSwitcher() {
   if (projects.length === 1) {
     const only = projects[0]
     return (
-      <div
-        className="inline-flex items-center gap-1 px-2 py-1 rounded font-mono text-[10px] text-[var(--muted-foreground)] bg-[var(--secondary)]/40"
+      <Link
+        href={`/projects/${encodeURIComponent(only.project_id)}`}
+        aria-label={`Open progress for ${only.name}`}
+        className="inline-flex items-center gap-1 px-2 py-1 rounded font-mono text-[10px] text-[var(--muted-foreground)] bg-[var(--secondary)]/40 hover:text-[var(--foreground)]"
         data-testid="project-switcher-static"
+        title="Open project progress"
       >
         <FolderKanban size={10} />
         <span className="truncate max-w-[100px]">{only.name}</span>
-      </div>
+      </Link>
     )
   }
 
@@ -88,7 +92,7 @@ export function ProjectSwitcher() {
   }
 
   return (
-    <div ref={ref} className="relative inline-flex">
+    <div ref={ref} className="relative inline-flex items-center gap-1">
       <button
         type="button"
         onClick={() => setOpen(v => !v)}
@@ -104,6 +108,17 @@ export function ProjectSwitcher() {
         </span>
         <ChevronDown size={10} />
       </button>
+      {currentProjectId && (
+        <Link
+          href={`/projects/${encodeURIComponent(currentProjectId)}`}
+          aria-label="Open current project progress"
+          className="inline-flex items-center rounded px-1 py-1 text-[var(--muted-foreground)] hover:bg-[var(--neural-blue)]/10 hover:text-[var(--foreground)]"
+          data-testid="project-progress-link"
+          title="Open project progress"
+        >
+          <ExternalLink size={10} />
+        </Link>
+      )}
       {open && (
         <div
           role="listbox"
