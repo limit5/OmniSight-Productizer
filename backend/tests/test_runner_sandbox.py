@@ -516,3 +516,138 @@ def test_sandbox_permission_denied_error_carries_path():
     e = rs.SandboxPermissionDenied("/etc/passwd")
     assert e.path == "/etc/passwd"
     assert "/etc/passwd" in str(e)
+
+
+# ─── OP-1777 env-scrub allowlist ────────────────────────────────────
+
+
+def test_build_allowlisted_env_drops_omnisight_secrets(monkeypatch):
+    """The scrubbed env keeps allowlisted vars and DROPS every OMNISIGHT_*
+    infra secret (JIRA token, project-state token, canary key, ...)."""
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("HOME", "/home/bot")
+    monkeypatch.setenv("TMPDIR", "/tmp")
+    monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -i /k")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("OMNISIGHT_JIRA_TOKEN", "super-secret-token")
+    monkeypatch.setenv("OMNISIGHT_PROJECT_STATE_API_TOKEN", "ps-secret")
+    monkeypatch.setenv("OMNISIGHT_FLEET_HEALTH_CANARY_KEY", "OP-canary")
+
+    env = rs.build_allowlisted_env()
+
+    assert env["PATH"] == "/usr/bin"
+    assert env["HOME"] == "/home/bot"
+    assert env["GIT_SSH_COMMAND"] == "ssh -i /k"
+    assert env["ANTHROPIC_API_KEY"] == "sk-ant-test"
+    # No OMNISIGHT_* secret survives, and nothing outside the allowlist leaks.
+    assert all(not k.startswith("OMNISIGHT_") for k in env)
+    assert set(env).issubset(set(rs.ENV_ALLOWLIST))
+
+
+def test_build_allowlisted_env_applies_extra_over_scrubbed_base():
+    """``extra`` (e.g. the git call sites' GIT_SSH_COMMAND) is injected on
+    top of the scrubbed base; OMNISIGHT_* in base is still dropped."""
+    base = {"PATH": "/p", "HOME": "/h", "OMNISIGHT_X": "leak"}
+    env = rs.build_allowlisted_env(
+        base=base, extra={"GIT_SSH_COMMAND": "ssh -i /key"}
+    )
+    assert env == {"PATH": "/p", "HOME": "/h", "GIT_SSH_COMMAND": "ssh -i /key"}
+    assert "OMNISIGHT_X" not in env
+
+
+def test_argv_linux_clearenv_and_allowlisted_setenv(tmp_path, monkeypatch):
+    """bwrap argv carries --clearenv (before any --setenv) and re-projects
+    ONLY the allowlist; HOME/TMPDIR are pinned to jail paths, not host."""
+    _force_platform(monkeypatch, rs.PLATFORM_LINUX)
+    _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    base = {
+        "PATH": "/usr/bin",
+        "HOME": "/home/host",          # must NOT survive — jail pins HOME
+        "TMPDIR": "/host/tmp",         # must NOT survive — jail pins TMPDIR
+        "ANTHROPIC_API_KEY": "sk-ant-test",
+        "GIT_SSH_COMMAND": "ssh -i /k",
+        "OMNISIGHT_JIRA_TOKEN": "super-secret-token",
+    }
+    argv = rs.wrap_in_bubblewrap(
+        ["claude"], worktree_path=worktree, ticket_key="OP-T", env=base,
+    )
+
+    assert "--clearenv" in argv
+    assert argv.index("--clearenv") < argv.index("--setenv")
+
+    setenv: dict[str, str] = {}
+    for i, tok in enumerate(argv):
+        if tok == "--setenv":
+            setenv[argv[i + 1]] = argv[i + 2]
+
+    assert setenv["PATH"] == "/usr/bin"
+    assert setenv["ANTHROPIC_API_KEY"] == "sk-ant-test"
+    assert setenv["GIT_SSH_COMMAND"] == "ssh -i /k"
+    # HOME / TMPDIR pinned to the jail, not the host values.
+    assert setenv["HOME"] == str(worktree.resolve())
+    assert setenv["HOME"] != "/home/host"
+    assert setenv["TMPDIR"] != "/host/tmp"
+    # The OMNISIGHT_* infra secret is never projected into the jail.
+    assert all(not k.startswith("OMNISIGHT_") for k in setenv)
+    assert "super-secret-token" not in argv
+
+
+def test_unsupported_platform_fail_closed_under_enforce(tmp_path, monkeypatch):
+    """L5 fail-closed: unsupported platform + ENFORCE=1 → raise, never raw."""
+    _force_platform(monkeypatch, "freebsd")
+    monkeypatch.setenv(rs.ENV_ENFORCE, "1")
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    with pytest.raises(rs.SandboxUnsupportedPlatform) as ei:
+        rs.wrap_in_bubblewrap(
+            ["claude"], worktree_path=worktree, ticket_key="OP-T",
+        )
+    assert ei.value.platform == "freebsd"
+
+
+def test_unsupported_platform_degrades_when_enforce_off(tmp_path, monkeypatch):
+    """ENFORCE off keeps the dev-friendly degrade path (identity)."""
+    _force_platform(monkeypatch, "freebsd")
+    monkeypatch.delenv(rs.ENV_ENFORCE, raising=False)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    argv = rs.wrap_in_bubblewrap(
+        ["claude"], worktree_path=worktree, ticket_key="OP-T",
+    )
+    assert argv == ["claude"]
+
+
+# ─── OP-1777 customer-serving-fleet startup gate ────────────────────
+
+
+def test_fleet_assertion_noop_when_not_serving(monkeypatch):
+    monkeypatch.delenv(rs.ENV_FLEET_SERVING, raising=False)
+    monkeypatch.delenv(rs.ENV_ENFORCE, raising=False)
+    rs.assert_sandbox_enforced_for_fleet()  # no raise
+
+
+def test_fleet_assertion_raises_when_serving_without_enforce(monkeypatch):
+    monkeypatch.setenv(rs.ENV_FLEET_SERVING, "1")
+    monkeypatch.delenv(rs.ENV_ENFORCE, raising=False)
+    with pytest.raises(rs.SandboxNotEnforced):
+        rs.assert_sandbox_enforced_for_fleet()
+
+
+def test_fleet_assertion_raises_when_enforced_but_binary_missing(monkeypatch):
+    monkeypatch.setenv(rs.ENV_FLEET_SERVING, "1")
+    monkeypatch.setenv(rs.ENV_ENFORCE, "1")
+    _force_platform(monkeypatch, rs.PLATFORM_LINUX)
+    _force_which(monkeypatch, {"bwrap": None})
+    with pytest.raises(rs.SandboxNotEnforced):
+        rs.assert_sandbox_enforced_for_fleet()
+
+
+def test_fleet_assertion_passes_when_serving_enforced_and_available(monkeypatch):
+    monkeypatch.setenv(rs.ENV_FLEET_SERVING, "1")
+    monkeypatch.setenv(rs.ENV_ENFORCE, "1")
+    _force_platform(monkeypatch, rs.PLATFORM_LINUX)
+    _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
+    rs.assert_sandbox_enforced_for_fleet()  # no raise

@@ -50,13 +50,91 @@ import platform
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Mapping
 
 logger = logging.getLogger(__name__)
 
 
 ENV_ENFORCE = "OMNISIGHT_RUNNER_SANDBOX_ENFORCE"
-"""When set to truthy (1/true/yes/on), missing sandbox binary becomes a hard
-abort instead of a degraded raw invocation."""
+"""When set to truthy (1/true/yes/on), a missing *or unsupported* sandbox
+becomes a hard abort instead of a degraded raw invocation. Fail-closed:
+the runner never spawns the agent CLI raw when this is on (OP-1777, L5)."""
+
+
+ENV_FLEET_SERVING = "OMNISIGHT_RUNNER_FLEET_SERVING"
+"""Marks this process as part of the customer-serving runner fleet. When
+truthy, :func:`assert_sandbox_enforced_for_fleet` requires the sandbox to be
+both enforced (``ENV_ENFORCE``) *and* available at startup, aborting the
+process before any ticket is processed. Dev workstations leave it unset so a
+laptop without bubblewrap still runs (OP-1777)."""
+
+
+# ─── Env-scrub allowlist (OP-1777) ──────────────────────────────────
+#
+# SINGLE SOURCE OF TRUTH for the runner's environment allowlist. Reused
+# across all three env-injecting call sites so they cannot drift:
+#
+#   1. the bubblewrap jail (``--clearenv`` + ``--setenv`` per name) — here;
+#   2. the CLI ``subprocess.Popen(env=…)`` — ``auto-runner-jira.py``;
+#   3. the git child ``subprocess.run(env=…)`` — ``jira_dispatch.py``.
+#
+# Closes design leaks L1 (no ``--clearenv``), L2 (Popen with no ``env=``) and
+# L3 (git ``os.environ.copy()``): the agent CLI + its git children inherit
+# ONLY these variables — never the runner's ``OMNISIGHT_*`` infra secrets
+# (JIRA tokens, project-state API tokens, fleet-health canary keys, …).
+ENV_ALLOWLIST: tuple[str, ...] = (
+    # --- process runtime ---
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "USER",
+    "LOGNAME",
+    "TERM",
+    "TZ",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    # --- git / ssh transport (gerrit fetch + push) ---
+    "GIT_SSH_COMMAND",
+    "SSH_AUTH_SOCK",
+    # --- agent CLI credentials + model selection (the "bot creds") ---
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_MODEL",
+    "CLAUDE_MODEL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    # --- agent CLI config / cache dirs ---
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+)
+"""Names of the only env vars projected into the agent CLI + its git
+children. Anything not listed here (notably every ``OMNISIGHT_*`` infra
+secret) is scrubbed. Edit in ONE place; all three call sites reuse it."""
+
+
+def build_allowlisted_env(
+    base: Mapping[str, str] | None = None,
+    *,
+    extra: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return a scrubbed env containing only :data:`ENV_ALLOWLIST` names.
+
+    Args:
+        base: source mapping to scrub. Defaults to ``os.environ``.
+        extra: variables to set/override *after* scrubbing — e.g. the git
+            call sites inject a freshly-computed ``GIT_SSH_COMMAND``. Only
+            non-None values are applied.
+
+    Returns:
+        A fresh dict holding each allowlisted key present in ``base`` (plus
+        any ``extra``). The runner's ``OMNISIGHT_*`` secrets never appear.
+    """
+    src = os.environ if base is None else base
+    env = {name: src[name] for name in ENV_ALLOWLIST if name in src}
+    if extra:
+        env.update({k: v for k, v in extra.items() if v is not None})
+    return env
 
 
 ENV_NETWORK_ALLOW = "OMNISIGHT_RUNNER_SANDBOX_NETWORK_ALLOW"
@@ -152,6 +230,42 @@ class SandboxBinaryMissing(RuntimeError):
         )
 
 
+class SandboxUnsupportedPlatform(RuntimeError):
+    """Raised when ENFORCE=1 and the OS has no supported sandbox backend.
+
+    Fail-closed counterpart of :class:`SandboxBinaryMissing` for the L5 leak
+    (sandbox degrades to raw exec). With ENFORCE on, an unsupported platform
+    (neither Linux/bubblewrap nor macOS/seatbelt) must abort the pickup
+    rather than spawning the agent CLI unsandboxed.
+    """
+
+    def __init__(self, platform_name: str) -> None:
+        self.platform = platform_name
+        super().__init__(
+            f"no supported sandbox backend for platform {platform_name!r}; "
+            f"the runner is configured fail-closed ({ENV_ENFORCE}=1) so it "
+            f"refuses to spawn the agent CLI raw — unset {ENV_ENFORCE} only "
+            f"on a trusted dev host to permit a degraded run"
+        )
+
+
+class SandboxNotEnforced(RuntimeError):
+    """Raised at startup when the customer-serving fleet is not fail-closed.
+
+    The serving fleet (``OMNISIGHT_RUNNER_FLEET_SERVING`` truthy) MUST have
+    the sandbox enforced *and* available before processing any ticket. If
+    ENFORCE is off, or the platform's sandbox binary is missing, this aborts
+    startup so a misconfigured fleet node never serves customer pickups with
+    an env-leaking, unsandboxed CLI (OP-1777).
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            f"customer-serving fleet requires an enforced sandbox: {reason}"
+        )
+
+
 class SandboxNetworkPolicyOverride(RuntimeError):
     """Informational: a network-deny default was overridden for this ticket.
 
@@ -239,17 +353,27 @@ def _build_bubblewrap_argv(
     ticket_key: str,
     network: bool,
     bwrap_bin: str,
+    env: Mapping[str, str],
 ) -> list[str]:
     """Compose the bubblewrap argv prefix for ``cmd``.
 
     The argv shape is asserted in tests — keep flag order stable so test
     regressions point at real changes (mount surface drift) rather than
     cosmetic re-orderings.
+
+    ``--clearenv`` wipes the inherited environment inside the jail; the
+    allowlisted ``env`` is then re-projected one ``--setenv`` at a time
+    (OP-1777, L1). HOME / TMPDIR are pinned to the jail paths below rather
+    than carried over from the host.
     """
     worktree_abs = str(worktree_path.resolve())
     tmp_dir = str(_tmp_dir_for(ticket_key))
 
-    argv: list[str] = [bwrap_bin, "--die-with-parent", "--new-session"]
+    # --clearenv must precede every --setenv: bwrap applies flags in order,
+    # so clearing first then re-setting yields exactly the allowlist.
+    argv: list[str] = [
+        bwrap_bin, "--die-with-parent", "--new-session", "--clearenv",
+    ]
 
     if not network:
         argv.append("--unshare-net")
@@ -265,6 +389,14 @@ def _build_bubblewrap_argv(
     for git_dir in _git_metadata_mounts(worktree_path):
         git_dir_abs = str(git_dir)
         argv += ["--bind", git_dir_abs, git_dir_abs]
+
+    # Re-project the scrubbed allowlist into the cleared jail env. HOME and
+    # TMPDIR are pinned to jail paths below, so skip any host-inherited
+    # values for them here (the jail paths always win).
+    for name, value in build_allowlisted_env(env).items():
+        if name in ("HOME", "TMPDIR"):
+            continue
+        argv += ["--setenv", name, value]
 
     # Pin HOME / TMPDIR / cwd inside the jail so the CLI doesn't probe
     # for a writable $HOME outside the worktree.
@@ -317,6 +449,7 @@ def wrap_in_bubblewrap(
     worktree_path: Path,
     ticket_key: str = "default",
     network: bool = False,
+    env: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Return ``cmd`` prefixed with a sandbox-runner argv.
 
@@ -349,6 +482,10 @@ def wrap_in_bubblewrap(
             ad-hoc invocations) still get a consistent layout.
         network: ``False`` (deny, the default) or ``True`` (allow). The env
             override flips the default to allow when set.
+        env: source environment to scrub through :data:`ENV_ALLOWLIST`
+            before projecting into the jail. Defaults to ``os.environ``.
+            The same allowlist gates the caller's ``Popen(env=…)`` so the
+            jail and the (degraded/macOS) raw spawn see identical vars.
 
     Returns:
         The full argv to spawn. On a missing binary with ENFORCE=0, this is
@@ -357,8 +494,11 @@ def wrap_in_bubblewrap(
     Raises:
         SandboxBinaryMissing: when ENFORCE=1 and the platform binary is
             absent. Caller is expected to operator-alert + abort.
+        SandboxUnsupportedPlatform: when ENFORCE=1 on a platform with no
+            supported sandbox backend (L5 fail-closed) — never returns raw.
     """
     effective_network = _resolve_network(ticket_key, network)
+    scrub_src = os.environ if env is None else env
     plat = detect_platform()
 
     if plat == PLATFORM_LINUX:
@@ -371,6 +511,7 @@ def wrap_in_bubblewrap(
             ticket_key=ticket_key,
             network=effective_network,
             bwrap_bin=bwrap,
+            env=scrub_src,
         )
         logger.info(
             "[%s] ticket=%s argv0=%s network=%s worktree=%s",
@@ -397,6 +538,10 @@ def wrap_in_bubblewrap(
         )
         return argv
 
+    # Unsupported platform. Fail-closed under ENFORCE (L5): never spawn the
+    # agent CLI raw when the operator demanded a sandbox.
+    if _enforce_enabled():
+        raise SandboxUnsupportedPlatform(plat)
     logger.warning(
         "[sandbox-unsupported-platform] platform=%s; %s — invoking raw cmd",
         plat, LOG_SANDBOX_DISABLED,
@@ -431,9 +576,43 @@ def sandbox_available() -> bool:
     return _which(binary) is not None
 
 
+def _fleet_serving() -> bool:
+    val = os.environ.get(ENV_FLEET_SERVING, "").strip().lower()
+    return val in {"1", "true", "yes", "on"}
+
+
+def assert_sandbox_enforced_for_fleet() -> None:
+    """Startup gate (OP-1777): customer-serving fleet must be fail-closed.
+
+    No-op unless ``OMNISIGHT_RUNNER_FLEET_SERVING`` is truthy. On the serving
+    fleet, requires BOTH ``OMNISIGHT_RUNNER_SANDBOX_ENFORCE`` enabled AND the
+    platform sandbox binary present — otherwise raises
+    :class:`SandboxNotEnforced` so the node aborts before serving any pickup
+    with an env-leaking, unsandboxed CLI.
+
+    Raises:
+        SandboxNotEnforced: serving fleet with ENFORCE off or sandbox absent.
+    """
+    if not _fleet_serving():
+        return
+    if not _enforce_enabled():
+        raise SandboxNotEnforced(
+            f"{ENV_FLEET_SERVING} is set but {ENV_ENFORCE} is not enabled"
+        )
+    if not sandbox_available():
+        plat = detect_platform()
+        binary = _platform_binary(plat) or "<none>"
+        raise SandboxNotEnforced(
+            f"{ENV_ENFORCE} is enabled but sandbox binary {binary!r} is "
+            f"absent on platform {plat!r}"
+        )
+
+
 __all__ = [
     "ENV_ENFORCE",
+    "ENV_FLEET_SERVING",
     "ENV_NETWORK_ALLOW",
+    "ENV_ALLOWLIST",
     "LINUX_BINARY",
     "MACOS_BINARY",
     "LINUX_READONLY_MOUNTS",
@@ -441,8 +620,12 @@ __all__ = [
     "LOG_SANDBOX_DEGRADED",
     "LOG_SANDBOX_DISABLED",
     "SandboxBinaryMissing",
+    "SandboxUnsupportedPlatform",
+    "SandboxNotEnforced",
     "SandboxNetworkPolicyOverride",
     "SandboxPermissionDenied",
+    "build_allowlisted_env",
+    "assert_sandbox_enforced_for_fleet",
     "detect_platform",
     "sandbox_available",
     "wrap_in_bubblewrap",

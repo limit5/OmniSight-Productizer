@@ -1403,6 +1403,12 @@ def _invoke_cli(
         print(f"[runner] unknown agent_class: {agent_class}", file=sys.stderr)
         return 2
 
+    # OP-1777: build the scrubbed env allowlist ONCE and feed it to both the
+    # sandbox wrapper (jail --clearenv + --setenv) and the Popen below, so the
+    # CLI inherits ONLY the allowlist (PATH/HOME/TMPDIR/GIT_SSH_COMMAND/bot
+    # creds) — never the runner's OMNISIGHT_* infra secrets (L1/L2).
+    scrubbed_env = runner_sandbox.build_allowlisted_env()
+
     # OP-845: wrap the CLI argv in the platform sandbox jail. Caller can
     # pass an explicit worktree_path override; otherwise we use the
     # per-class default chosen above.
@@ -1410,12 +1416,17 @@ def _invoke_cli(
     try:
         wrapped_cmd = runner_sandbox.wrap_in_bubblewrap(
             cmd, worktree_path=effective_worktree, ticket_key=ticket_key,
+            env=scrubbed_env,
         )
-    except runner_sandbox.SandboxBinaryMissing as e:
-        # ENFORCE=1 + binary missing → abort. We surface a distinct exit
-        # code so the caller can operator-alert + revert the ticket
-        # rather than treating it like a generic CLI failure.
-        print(f"[runner] sandbox binary missing (ENFORCE=1): {e}", file=sys.stderr)
+    except (
+        runner_sandbox.SandboxBinaryMissing,
+        runner_sandbox.SandboxUnsupportedPlatform,
+    ) as e:
+        # ENFORCE=1 + missing/unsupported sandbox → fail-closed abort (L5).
+        # We surface a distinct exit code so the caller can operator-alert +
+        # revert the ticket rather than treating it like a generic CLI
+        # failure, and NEVER spawn the agent CLI raw.
+        print(f"[runner] sandbox unavailable (ENFORCE=1): {e}", file=sys.stderr)
         return 126
 
     if DRY_RUN:
@@ -1427,6 +1438,7 @@ def _invoke_cli(
         proc = subprocess.Popen(
             wrapped_cmd,
             cwd=cwd,
+            env=scrubbed_env,
             stdin=subprocess.PIPE if cmd[0] == "codex" else None,
             stdout=sys.stdout,
             stderr=sys.stderr,
@@ -2510,6 +2522,15 @@ def _main_impl() -> int:
         f"[runner] {_sandbox_status} platform={runner_sandbox.detect_platform()} "
         f"enforce={_sandbox_enforce}"
     )
+    # OP-1777: on the customer-serving fleet the sandbox MUST be enforced +
+    # available. Abort startup fail-closed before processing any ticket
+    # rather than serving customer pickups with an env-leaking, unsandboxed
+    # CLI. No-op on dev workstations (OMNISIGHT_RUNNER_FLEET_SERVING unset).
+    try:
+        runner_sandbox.assert_sandbox_enforced_for_fleet()
+    except runner_sandbox.SandboxNotEnforced as e:
+        print(f"[runner] FATAL: {e}", file=sys.stderr)
+        return 78  # EX_CONFIG — operator must fix sandbox config before serving
     open_services = circuit_breaker.open_services()
     if open_services:
         print(f"[runner] paused - {open_services} unreachable")

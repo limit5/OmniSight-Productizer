@@ -42,6 +42,7 @@ from backend.agents import (
     provider_orchestrator,
     runner_coordination,
     runner_progress,
+    runner_sandbox,
 )
 from backend.agents.circuit_breaker import BREAKERS
 from backend.agents.idempotency import DEFAULT_STORE
@@ -896,12 +897,15 @@ def sync_to_gerrit_develop(
 
     Raises CalledProcessError if any git op fails.
     """
-    import os
     import subprocess
     _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
 
-    env = os.environ.copy()
-    env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
+    # OP-1777 (L3): git children get a minimal allowlisted env, NOT a full
+    # os.environ.copy() that would leak OMNISIGHT_* infra secrets to the
+    # subprocess. GIT_SSH_COMMAND (the per-bot gerrit key) is injected on top.
+    env = runner_sandbox.build_allowlisted_env(
+        extra={"GIT_SSH_COMMAND": f"ssh -i {ssh_key}"}
+    )
 
     if ephemeral:
         # Treat ``worktree_path`` as the main repo and add a fresh worktree.
@@ -1401,7 +1405,6 @@ def push_to_gerrit_for_review(
     hook + ensured all commits have Change-Id footers (use
     :func:`install_commit_msg_hook` and :func:`ensure_change_ids` first).
     """
-    import os
     import subprocess
     try:
         bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
@@ -1410,8 +1413,12 @@ def push_to_gerrit_for_review(
     if not ssh_key.exists():
         return GerritPushResult(False, None, None, f"SSH key not found at {ssh_key}")
 
-    env = os.environ.copy()
-    env["GIT_SSH_COMMAND"] = f"ssh -i {ssh_key}"
+    # OP-1777 (L3): git children get a minimal allowlisted env, NOT a full
+    # os.environ.copy() that would leak OMNISIGHT_* infra secrets to the
+    # subprocess. GIT_SSH_COMMAND (the per-bot gerrit key) is injected on top.
+    env = runner_sandbox.build_allowlisted_env(
+        extra={"GIT_SSH_COMMAND": f"ssh -i {ssh_key}"}
+    )
 
     change_id = _head_change_id(worktree_path)
     retry_notes: list[str] = []
