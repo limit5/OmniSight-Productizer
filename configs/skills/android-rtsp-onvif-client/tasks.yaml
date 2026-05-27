@@ -1,0 +1,52 @@
+# OP-1799 (Track B / B-1) — Case-1 Android RTSP/ONVIF CLIENT app DAG.
+#
+# Describes the client-app build. Only the skeleton task is active in this
+# pickup; it routes to backend.android_scaffolder via the dispatcher (NO
+# new scaffolder). The ONVIF-discovery and RTSP-playback tasks are the
+# sequenced FOLLOW-ON tickets in this same pack — declared here so the
+# intended client-app build DAG is visible, with `status: follow-on` so a
+# runner does not attempt to execute them in the skeleton pickup.
+
+tasks:
+  - id: android-rtsp-onvif-scaffold-init
+    name: "Scaffold Android client app skeleton"
+    description: >
+      Render the base Android (Jetpack Compose + Gradle 8 + Kotlin 2.0)
+      app project by dispatching to the existing `android` scaffolder
+      (backend.android_scaffolder via scripts/scaffold.py — NO new
+      scaffolder). This is the CLIENT app shell that the ONVIF discovery
+      and RTSP playback layers below build on. Idempotent: re-renders
+      without clobbering files outside the scaffold surface.
+    depends_on: []
+    artifacts: [android_skeleton]
+    estimated_hours: 1
+    framework_gate: p0-platform-profile
+    status: active
+
+  - id: android-onvif-discovery
+    name: "ONVIF / WS-Discovery camera discovery (FOLLOW-ON)"
+    description: >
+      FOLLOW-ON ticket (not in this skeleton pickup). Add the ONVIF
+      WS-Discovery probe + device-service client so the app enumerates
+      IP cameras on the LAN and resolves each camera's RTSP stream URI
+      (GetProfiles → GetStreamUri). Domain code + a dedicated scaffold
+      land in a sequenced follow-on within this same pack.
+    depends_on: [android-rtsp-onvif-scaffold-init]
+    artifacts: [android_onvif]
+    estimated_hours: 3
+    framework_gate: p0-platform-profile
+    status: follow-on
+
+  - id: android-rtsp-playback
+    name: "RTSP stream playback client (FOLLOW-ON)"
+    description: >
+      FOLLOW-ON ticket (not in this skeleton pickup). Add the RTSP
+      playback surface (ExoPlayer/Media3 RTSP source) that plays a stream
+      URI discovered via ONVIF, including a Compose player screen and
+      lifecycle-correct connect/teardown. Domain code + a dedicated
+      scaffold land in a sequenced follow-on within this same pack.
+    depends_on: [android-onvif-discovery]
+    artifacts: [android_rtsp_playback]
+    estimated_hours: 4
+    framework_gate: p4-role-android-kotlin
+    status: follow-on

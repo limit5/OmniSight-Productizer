@@ -511,6 +511,14 @@ _SCAFFOLDER_MODULE_OVERRIDES: dict[str, str] = {
     # skill-desktop-tauri ships as backend/tauri_scaffolder.py — the
     # module predates the skill-<stack> naming and was not renamed.
     "skill-desktop-tauri": "backend.tauri_scaffolder",
+    # OP-1799 (Case-1, Track B): the Android RTSP/ONVIF *client* app pack
+    # deliberately ships NO scaffolder of its own — it reuses the existing
+    # backend.android_scaffolder to render the Android app skeleton. The
+    # convention would point it at backend.android_rtsp_onvif_client_scaffolder
+    # (which does not exist), so the binding is made explicit here. ONVIF
+    # discovery + RTSP playback client scaffolds are sequenced follow-ons
+    # in the same pack (see configs/skills/android-rtsp-onvif-client).
+    "android-rtsp-onvif-client": "backend.android_scaffolder",
 }
 
 #: Public entry-point attribute names every scaffolder module exposes
