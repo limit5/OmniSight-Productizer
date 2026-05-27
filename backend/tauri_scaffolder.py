@@ -54,14 +54,14 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
-import jinja2
+from typing import Any, Optional
 
 from backend import platform_profile as _platform
 from backend.build_adapters import BuildSource, CargoDistAdapter
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 from backend.software_compliance import run_all as run_compliance_all
 from backend.software_compliance.licenses import detect_ecosystem
@@ -75,8 +75,6 @@ _SKILL_DIR = (
 _SCAFFOLDS_DIR = _SKILL_DIR / "scaffolds"
 
 _FRONTEND_CHOICES = ("react", "vue")
-
-_TEMPLATE_SUFFIX = ".j2"
 
 # Cargo crate name — [a-z0-9_], underscores only (no hyphens) per
 # Cargo identifier rules. bin_name is looser and allows hyphens
@@ -96,8 +94,9 @@ _REVERSE_DNS_RE = re.compile(r"^[a-z][a-z0-9-]*(\.[a-z][a-z0-9-]*)+$")
 
 
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-DESKTOP-TAURI knobs — extends the shared base with Tauri fields."""
+
     app_name: Optional[str] = None            # display name; defaults to humanised project_name
     bin_name: Optional[str] = None            # binary name; defaults to slugified project_name
     crate_name: Optional[str] = None          # cargo crate name; defaults to _underscorify(bin_name)
@@ -108,8 +107,7 @@ class ScaffoldOptions:
     platform_profile: str = "linux-x86_64-native"
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         if self.frontend not in _FRONTEND_CHOICES:
             raise ValueError(
                 f"frontend must be one of {_FRONTEND_CHOICES}, got {self.frontend!r}"
@@ -151,34 +149,6 @@ class ScaffoldOptions:
         # We deliberately use slug_name (kebab) over crate_name
         # (underscore) — reverse-DNS labels reject `_`.
         return f"com.example.{self.resolved_slug_name()}"
-
-
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    bin_name: str = ""
-    crate_name: str = ""
-    app_name: str = ""
-    identifier: str = ""
-    frontend: str = ""
-    profile_binding: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "bin_name": self.bin_name,
-            "crate_name": self.crate_name,
-            "app_name": self.app_name,
-            "identifier": self.identifier,
-            "frontend": self.frontend,
-            "profile_binding": self.profile_binding,
-        }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -228,12 +198,6 @@ def _humanise(project_name: str) -> str:
     return " ".join(p.capitalize() for p in parts if p)
 
 
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
-
-
 def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
     # Compliance-gated files.
     if rendered_rel == "spdx.allowlist.json" and not opts.compliance:
@@ -258,15 +222,6 @@ def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
         return True
 
     return False
-
-
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
 
 
 def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
@@ -296,13 +251,51 @@ def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
     return ctx
 
 
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
+class _TauriScaffolder(ScaffolderBase):
+    """SKILL-DESKTOP-TAURI scaffolder — supplies gating + context hooks."""
+
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        suffix = self.template_suffix
+        if rel_path.endswith(suffix):
+            rendered_rel = rel_path[: -len(suffix)]
+        else:
+            rendered_rel = rel_path
+        return _should_skip(rendered_rel, options)
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        return _render_context(options)
+
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        outcome.bin_name = context["bin_name"]  # type: ignore[attr-defined]
+        outcome.crate_name = context["crate_name"]  # type: ignore[attr-defined]
+        outcome.app_name = context["app_name"]  # type: ignore[attr-defined]
+        outcome.identifier = context["identifier"]  # type: ignore[attr-defined]
+        outcome.frontend = context["frontend"]  # type: ignore[attr-defined]
+        outcome.profile_binding = context["platform_profile"]  # type: ignore[assignment]
+        return outcome
+
+    def render_project(
+        self,
+        out_dir: Path,
+        options: ScaffoldOptions,
+        *,
+        overwrite: bool = True,
+    ) -> RenderOutcome:
+        outcome = super().render_project(out_dir, options, overwrite=overwrite)
+
+        # check_cov.sh must be executable — the Makefile runs it directly.
+        cov_script = Path(out_dir) / "scripts" / "check_cov.sh"
+        if cov_script.exists():
+            cov_script.chmod(0o755)
+        return outcome
+
+
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _TauriScaffolder(
+    _SCAFFOLDS_DIR,
+    skill_label="SKILL-DESKTOP-TAURI",
+)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -316,63 +309,12 @@ def render_project(
     *,
     overwrite: bool = True,
 ) -> RenderOutcome:
-    """Render the SKILL-DESKTOP-TAURI scaffold into ``out_dir``."""
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
+    """Render the SKILL-DESKTOP-TAURI scaffold into ``out_dir``.
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(
-        out_dir=out_dir,
-        bin_name=ctx["bin_name"],
-        crate_name=ctx["crate_name"],
-        app_name=ctx["app_name"],
-        identifier=ctx["identifier"],
-        frontend=ctx["frontend"],
-        profile_binding=ctx["platform_profile"],
-    )
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            rendered_rel = rel[: -len(_TEMPLATE_SUFFIX)]
-            is_template = True
-        else:
-            rendered_rel = rel
-            is_template = False
-
-        if _should_skip(rendered_rel, options):
-            continue
-
-        dest = out_dir / rendered_rel
-        if dest.exists() and not overwrite:
-            outcome.warnings.append(f"skipped existing: {rendered_rel}")
-            continue
-
-        if is_template:
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-        else:
-            rendered = src.read_bytes()
-
-        outcome.bytes_written += _write_file(dest, rendered)
-        outcome.files_written.append(dest)
-
-    # check_cov.sh must be executable — the Makefile runs it directly.
-    cov_script = out_dir / "scripts" / "check_cov.sh"
-    if cov_script.exists():
-        cov_script.chmod(0o755)
-
-    logger.info(
-        "SKILL-DESKTOP-TAURI rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    Thin façade over :data:`_SCAFFOLDER`; the render machinery lives in
+    :class:`backend.scaffolder_base.ScaffolderBase`.
+    """
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def dry_run_build(
