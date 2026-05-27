@@ -21,6 +21,12 @@ import { RunHistoryPanel } from "@/components/omnisight/run-history-panel"
 import { AuditPanel } from "@/components/omnisight/audit-panel"
 import { PepLiveFeed } from "@/components/omnisight/pep-live-feed"
 import { ChatOpsMirror } from "@/components/omnisight/chatops-mirror"
+// OP-1772 (W1-T3): mount the four orphaned delivery UI surfaces (audit
+// doc §2C) into the command-center panel registry. Import + route only.
+import { SoftwareReleaseDashboard } from "@/components/omnisight/software-release-dashboard"
+import { StoreSubmissionDashboard } from "@/components/omnisight/store-submission-dashboard"
+import { ProjectReportPanel } from "@/components/omnisight/project-report-panel"
+import { TestCoverageViewer } from "@/components/omnisight/test-coverage-viewer"
 import type { ParsedSpec } from "@/lib/api"
 import { UserMenu } from "@/components/omnisight/user-menu"
 import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
@@ -63,7 +69,16 @@ const VALID_PANELS: ReadonlySet<PanelId> = new Set([
   "host", "spec", "agents", "orchestrator", "tasks", "source", "npi", "vitals",
   "decisions", "budget", "timeline", "rules", "forecast", "dag", "intent", "history", "audit",
   "pep", "chatops",
+  // OP-1772 (W1-T3): the four formerly-orphaned delivery surfaces.
+  "release", "store", "report", "coverage",
 ])
+
+// OP-1772 (W1-T3): the delivery surfaces (release / store) are
+// workspace-SSE-scoped via a session id. The command-center mount is not
+// bound to a per-workspace session, so we pin a stable id; events that
+// don't match it are dropped and the surfaces render their idle empty
+// state — exactly the reachable, no-crash contract the ticket requires.
+const DELIVERY_SESSION_ID = "command-center"
 
 function readPanelFromUrl(): PanelId | null {
   if (typeof window === "undefined") return null
@@ -600,6 +615,18 @@ export default function Home() {
         return <PepLiveFeed />
       case "chatops":
         return <ChatOpsMirror />
+      // OP-1772 (W1-T3): the four formerly-orphaned delivery surfaces.
+      // Each subscribes to the shared SSE stream (lib/api subscribeEvents)
+      // scoped to `sessionId`; with no matching events they render their
+      // idle empty state. See DELIVERY_SESSION_ID above.
+      case "release":
+        return <SoftwareReleaseDashboard sessionId={DELIVERY_SESSION_ID} />
+      case "store":
+        return <StoreSubmissionDashboard sessionId={DELIVERY_SESSION_ID} target="app-store" />
+      case "report":
+        return <ProjectReportPanel />
+      case "coverage":
+        return <TestCoverageViewer report={null} />
       case "intent":
         return (
           <SpecTemplateEditor

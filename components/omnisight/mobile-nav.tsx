@@ -21,16 +21,23 @@ import {
   Shield,
   X,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  Package,
+  Store,
+  FileText,
+  ClipboardCheck
 } from "lucide-react"
 
 // 48-Fix B: added decisions + budget so mobile users can reach the
 // Autonomous Decision panels (previously desktop-only in the right aside).
 // 50A: + timeline. 50B: + rules.
+// OP-1772 (W1-T3): + release / store / report / coverage — mount the four
+// orphaned delivery UI surfaces (audit doc §2C) into navigation.
 export type PanelId =
   | "host" | "spec" | "agents" | "orchestrator" | "tasks" | "source" | "npi" | "vitals"
   | "decisions" | "budget" | "timeline" | "rules" | "forecast" | "dag" | "intent" | "history" | "audit"
   | "pep" | "chatops"
+  | "release" | "store" | "report" | "coverage"
 
 interface MobileNavProps {
   activePanel: PanelId
@@ -57,6 +64,11 @@ const panels: { id: PanelId; label: string; shortLabel: string; icon: React.Elem
   { id: "audit", label: "Audit Log", shortLabel: "Audit", icon: Shield, color: "var(--neural-cyan, #67e8f9)" },
   { id: "pep", label: "PEP Live Feed", shortLabel: "PEP", icon: Shield, color: "var(--neural-cyan, #67e8f9)" },
   { id: "chatops", label: "ChatOps Mirror", shortLabel: "Chat", icon: Bot, color: "var(--neural-cyan, #67e8f9)" },
+  // OP-1772 (W1-T3): the four formerly-orphaned delivery surfaces.
+  { id: "release", label: "Software Release", shortLabel: "Release", icon: Package, color: "var(--validation-emerald)" },
+  { id: "store", label: "Store Submission", shortLabel: "Store", icon: Store, color: "var(--artifact-purple)" },
+  { id: "report", label: "Project Report", shortLabel: "Report", icon: FileText, color: "var(--neural-blue)" },
+  { id: "coverage", label: "Test Coverage", shortLabel: "Coverage", icon: ClipboardCheck, color: "var(--hardware-orange)" },
 ]
 
 export function MobileNav({ activePanel, onPanelChange }: MobileNavProps) {
