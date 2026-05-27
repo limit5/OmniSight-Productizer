@@ -288,6 +288,31 @@ const TEMPLATES: Template[] = [
 
 const VALIDATE_DEBOUNCE_MS = 500
 
+function isExecutingPlanStatus(status: string): boolean {
+  const normalized = status.toLowerCase()
+  return normalized === "executing" || normalized === "running"
+}
+
+function planExecutionLabel(status: string): string {
+  const normalized = status.toLowerCase()
+  if (isExecutingPlanStatus(normalized)) return "executing"
+  if (normalized === "validated" || normalized === "submitted" || normalized === "pending") {
+    return "submitted (not executing)"
+  }
+  return status
+}
+
+function planExecutionDescription(status: string): string {
+  const normalized = status.toLowerCase()
+  if (isExecutingPlanStatus(normalized)) {
+    return "The backend reports this plan as actively executing."
+  }
+  if (normalized === "validated" || normalized === "submitted" || normalized === "pending") {
+    return "The backend accepted and persisted the plan, but execution is not active."
+  }
+  return `Backend plan status: ${status}.`
+}
+
 export function DagEditor() {
   const [text, setText] = useState<string>(() => JSON.stringify(TEMPLATES[0].body, null, 2))
   const [validation, setValidation] = useState<DAGValidateResponse | null>(null)
@@ -296,6 +321,7 @@ export function DagEditor() {
   const [submitMessage, setSubmitMessage] = useState<string | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
+  const [submittedPlanStatus, setSubmittedPlanStatus] = useState<string | null>(null)
   const [mutate, setMutate] = useState(false)
   const [parseError, setParseError] = useState<string | null>(null)
   // Phase 56-DAG-F: tab state. `text` stays canonical — the form view
@@ -462,6 +488,7 @@ export function DagEditor() {
     setText(JSON.stringify(tpl.body, null, 2))
     setSubmitMessage(null)
     setSubmitError(null)
+    setSubmittedPlanStatus(null)
   }
 
   const formatJson = () => {
@@ -496,13 +523,15 @@ export function DagEditor() {
     setSubmitError(null)
     setSubmitMessage(null)
     setSubmittedRunId(null)
+    setSubmittedPlanStatus(null)
     try {
       const res = await submitDag(parsed, {
         mutate,
         targetPlatform: seedTargetPlatform || undefined,
       })
+      setSubmittedPlanStatus(res.status)
       setSubmitMessage(
-        `✓ Submitted — run ${res.run_id}, plan ${res.plan_id ?? "?"} (${res.status})` +
+        `✓ Submitted — run ${res.run_id}, plan ${res.plan_id ?? "?"} (${planExecutionLabel(res.status)})` +
           (seedTargetPlatform ? ` · target=${seedTargetPlatform}` : "") +
           (res.mutation_rounds ? ` · mutation rounds: ${res.mutation_rounds}` : "") + ".",
       )
@@ -755,17 +784,34 @@ export function DagEditor() {
 
       {/* Submit result */}
       {submitMessage && (
-        <div className="flex items-center justify-between gap-2">
-          <div className="text-xs font-mono text-[var(--artifact-purple)]">{submitMessage}</div>
-          {submittedRunId && (
-            <button
-              type="button"
-              onClick={jumpToTimeline}
-              className="text-xs font-mono px-2 py-0.5 rounded border border-[var(--artifact-purple)] text-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)] hover:text-white transition-colors flex items-center gap-1 shrink-0"
-              title={`View run ${submittedRunId} in Pipeline Timeline`}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-xs font-mono text-[var(--artifact-purple)]">{submitMessage}</div>
+            {submittedRunId && (
+              <button
+                type="button"
+                onClick={jumpToTimeline}
+                className="text-xs font-mono px-2 py-0.5 rounded border border-[var(--artifact-purple)] text-[var(--artifact-purple)] hover:bg-[var(--artifact-purple)] hover:text-white transition-colors flex items-center gap-1 shrink-0"
+                title={`View run ${submittedRunId} in Pipeline Timeline`}
+              >
+                View in Timeline <ArrowRight size={10} />
+              </button>
+            )}
+          </div>
+          {submittedPlanStatus && (
+            <div
+              className={
+                "text-xs font-mono rounded border px-2 py-1 " +
+                (isExecutingPlanStatus(submittedPlanStatus)
+                  ? "border-[var(--neural-cyan,#67e8f9)]/40 bg-[var(--neural-cyan,#67e8f9)]/10 text-[var(--neural-cyan,#67e8f9)]"
+                  : "border-[var(--fui-orange,#f59e0b)]/40 bg-[var(--fui-orange,#f59e0b)]/10 text-[var(--fui-orange,#f59e0b)]")
+              }
+              role="status"
+              data-plan-status={submittedPlanStatus}
+              data-execution-state={isExecutingPlanStatus(submittedPlanStatus) ? "executing" : "not-executing"}
             >
-              View in Timeline <ArrowRight size={10} />
-            </button>
+              Plan status: {planExecutionLabel(submittedPlanStatus)}. {planExecutionDescription(submittedPlanStatus)}
+            </div>
           )}
         </div>
       )}
