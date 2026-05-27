@@ -70,9 +70,11 @@ from backend.agents import (
     runner_failure_classifier,
     runner_progress,
     runner_sandbox,
+    runner_tenant,
     runner_workspace_safety,
     scheduler,
 )
+from backend import db_context
 from backend.agents.pipeline_coordinator_capacity import (
     append_runner_quota_emit,
     load_capacity_snapshot_from_jsonl,
@@ -1013,7 +1015,15 @@ def _build_reflection_rag_block(key: str, summary: str, description: str) -> str
             _build_store_from_env,
         )
 
-        tenant_id = os.environ.get("OMNISIGHT_RAG_TENANT_ID", DEFAULT_TENANT_ID)
+        # OP-1778: source the RAG tenant from the ticket's bound tenant
+        # context (set_tenant_id at pickup) rather than the global
+        # OMNISIGHT_RAG_TENANT_ID default. Falls back to the env/default only
+        # when no tenant has been bound (e.g. unit tests calling this helper
+        # directly), preserving the prior behaviour in that case.
+        tenant_id = (
+            db_context.current_tenant_id()
+            or os.environ.get("OMNISIGHT_RAG_TENANT_ID", DEFAULT_TENANT_ID)
+        )
         embedder = _build_embedder_from_env()
         store, closeable = await _build_store_from_env()
         try:
@@ -2599,6 +2609,31 @@ def _main_impl() -> int:
     print(f"[runner] selected: {snapshot.key} (component={snapshot.component})")
     print(_runner_active_marker(snapshot.key, "selected"))
 
+    # OP-1778 (1A.1): resolve the ticket's tenant:<tid> label and BIND the
+    # tenant into the DB/FS context BEFORE any tenant-scoped DB/FS/git/CLI op
+    # below (worktree sync, RAG retrieval, prompt build, CLI launch). A
+    # label-less internal ticket defaults to omnisight-self and behaves
+    # exactly as today (§13 back-compat); no internal ticket can inherit a
+    # customer-tenant default.
+    try:
+        tenant_id = runner_tenant.resolve_tenant_id(getattr(snapshot, "labels", ()))
+    except runner_tenant.TenantLabelError as e:
+        print(f"[runner] bad tenant label on {snapshot.key}: {e}", file=sys.stderr)
+        if not DRY_RUN:
+            jira_dispatch.add_comment(
+                client, snapshot.key,
+                f"[runner-bad-tenant-label]\n\n{e}\n\n"
+                f"Operator: a ticket may carry at most one well-formed "
+                f"`tenant:<tid>` label; correct it then re-launch.",
+            )
+            jira_dispatch.transition_back_to_todo(
+                client, snapshot.key,
+                f"[runner-bad-tenant-label] {e}",
+            )
+        return 1
+    db_context.set_tenant_id(tenant_id)
+    print(f"[runner] tenant bound: {tenant_id} (ticket {snapshot.key})")
+
     merged_info = already_merged_in_gerrit(snapshot.key)
     if merged_info:
         change_number, change_url = merged_info
@@ -2629,6 +2664,37 @@ def _main_impl() -> int:
     if DRY_RUN:
         print(f"[runner] DRY_RUN: would sync worktree {worktree_path}")
     else:
+        # OP-1778 (1A.1): allocate the per-tenant workspace. omnisight-self
+        # keeps the legacy sibling worktree (back-compat); a customer tenant
+        # gets a freshly cloned workspace under tenant_fs with its own git dir
+        # and an independent object store (no shared-object-store bind, L8-fs).
+        # The downstream sync/push pipeline fetches develop from Gerrit by SSH
+        # URL (not a named remote), so it operates correctly on the clone.
+        if not runner_tenant.is_self_tenant(tenant_id):
+            try:
+                worktree_path = runner_tenant.allocate_tenant_workspace(
+                    tenant_id, source_repo=REPO, self_workspace=worktree_path,
+                )
+                print(f"[runner] per-tenant workspace ({tenant_id}): {worktree_path}")
+            except (runner_tenant.TenantWorkspaceError, subprocess.CalledProcessError) as e:
+                print(
+                    f"[runner] tenant workspace alloc failed for {snapshot.key}: "
+                    f"{type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
+                jira_dispatch.add_comment(
+                    client, snapshot.key,
+                    f"[runner-tenant-workspace-fail] Could not allocate the "
+                    f"per-tenant workspace for {tenant_id}:\n"
+                    f"{type(e).__name__}: {e}\n\n"
+                    f"Operator: ensure tenant_fs is writable + the clone source "
+                    f"is reachable, then re-launch.",
+                )
+                jira_dispatch.transition_back_to_todo(
+                    client, snapshot.key,
+                    f"[runner-tenant-workspace-fail] {type(e).__name__}: {e}",
+                )
+                return 1
         try:
             print(f"[runner] preparing worktree {worktree_path}...")
             jira_dispatch.set_bot_identity_in_worktree(
@@ -2792,8 +2858,24 @@ def _main_impl() -> int:
     # writable to the launching user (would let the CLI commit into the wrong
     # tree, the OP-811/813/832/835 wedge family). No-op unless
     # OMNISIGHT_RUNNER_CWD_ENFORCE is set so dev environments aren't broken.
+    #
+    # OP-1778: this guard models the sibling-worktree topology — a linked
+    # worktree sharing a common git dir with a separate, unwritable main repo.
+    # A customer tenant's per-tenant workspace is instead a fully independent
+    # clone (own git dir, no shared object store, verified at allocation by
+    # runner_tenant.assert_isolated_git_dir): the clone IS the correct commit
+    # target, there is no shared main repo to leak into, and the guard's
+    # ``worktree == main_repo`` branch would falsely refuse it. The
+    # cross-tree-leak risk the guard defends against cannot exist for an
+    # isolated clone, so the guard only applies to the legacy self-tenant path.
+    if not runner_tenant.is_self_tenant(tenant_id):
+        print(
+            f"[runner] cwd-unsafe guard skipped for {snapshot.key}: isolated "
+            f"per-tenant clone ({tenant_id}) is its own commit target"
+        )
     try:
-        runner_workspace_safety.assert_main_repo_unwritable_for_cli(worktree_path)
+        if runner_tenant.is_self_tenant(tenant_id):
+            runner_workspace_safety.assert_main_repo_unwritable_for_cli(worktree_path)
     except runner_workspace_safety.MainRepoWritableInLaunchEnvError as e:
         print(f"[runner] cwd-unsafe for {snapshot.key}: {e}", file=sys.stderr)
         jira_dispatch.add_comment(
