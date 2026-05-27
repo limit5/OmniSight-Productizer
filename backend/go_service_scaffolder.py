@@ -48,11 +48,9 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
-import jinja2
+from typing import Any, Optional
 
 from backend import platform_profile as _platform
 from backend.build_adapters import (
@@ -61,6 +59,8 @@ from backend.build_adapters import (
     GoreleaserAdapter,
     HelmChartAdapter,
 )
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 from backend.software_compliance import run_all as run_compliance_all
 
@@ -76,8 +76,6 @@ _FRAMEWORK_CHOICES = ("gin", "fiber")
 _DATABASE_CHOICES = ("postgres", "sqlite", "none")
 _DEPLOY_CHOICES = ("docker", "helm", "both")
 
-_TEMPLATE_SUFFIX = ".j2"
-
 # Module-path slug — go modules allow lowercase letters, digits,
 # hyphens, and dots. Leading digits are legal (unlike Python), so we
 # don't prefix like _derive_package_name does.
@@ -90,8 +88,9 @@ _MODULE_SLUG_RE = re.compile(r"[^a-z0-9.\-]+")
 
 
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-GO-SERVICE knobs — extends the shared base with Go fields."""
+
     module_path: Optional[str] = None     # defaults to github.com/example/<slug>
     framework: str = "gin"                # gin | fiber
     database: str = "postgres"            # postgres | sqlite | none
@@ -100,8 +99,7 @@ class ScaffoldOptions:
     platform_profile: str = "linux-x86_64-native"
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         if self.framework not in _FRAMEWORK_CHOICES:
             raise ValueError(
                 f"framework must be one of {_FRAMEWORK_CHOICES}, got {self.framework!r}"
@@ -127,26 +125,6 @@ class ScaffoldOptions:
         return self.deploy in ("helm", "both")
 
 
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    module_path: str = ""
-    profile_binding: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "module_path": self.module_path,
-            "profile_binding": self.profile_binding,
-        }
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Internals
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -164,12 +142,6 @@ def _slugify_module(project_name: str) -> str:
     return slug
 
 
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
-
-
 def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
     # Deploy-gated files.
     if rendered_rel in ("Dockerfile", "docker-compose.yml") and not opts.builds_docker():
@@ -182,46 +154,64 @@ def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
     return False
 
 
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
+class _GoServiceScaffolder(ScaffolderBase):
+    """SKILL-GO-SERVICE scaffolder — supplies the Go context + knob gating."""
+
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        suffix = self.template_suffix
+        if rel_path.endswith(suffix):
+            rendered_rel = rel_path[: -len(suffix)]
+        else:
+            rendered_rel = rel_path
+        return _should_skip(rendered_rel, options)
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
+            "project_name": options.project_name,
+            "module_path": options.resolved_module_path(),
+            "framework": options.framework,
+            "database": options.database,
+            "deploy": options.deploy,
+            "compliance": options.compliance,
+        }
+        # Resolve X0 profile so the Dockerfile tag / helm image stays
+        # aligned with the platform the skill targets. On failure we fall
+        # through to defaults — same pattern as fastapi_scaffolder.
+        try:
+            raw = _platform.load_raw_profile(options.platform_profile)
+            ctx["platform_profile"] = options.platform_profile
+            ctx["platform_packaging"] = raw.get("packaging", "")
+            ctx["platform_runtime"] = raw.get("software_runtime", "")
+        except Exception:  # noqa: BLE001
+            ctx["platform_profile"] = options.platform_profile
+            ctx["platform_packaging"] = ""
+            ctx["platform_runtime"] = ""
+        return ctx
+
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        outcome.module_path = context["module_path"]  # type: ignore[attr-defined]
+        outcome.profile_binding = context["platform_profile"]  # type: ignore[assignment]
+        return outcome
+
+    def render_project(
+        self,
+        out_dir: Path,
+        options: ScaffoldOptions,
+        *,
+        overwrite: bool = True,
+    ) -> RenderOutcome:
+        """Render, then make ``scripts/check_cov.sh`` executable."""
+        outcome = super().render_project(out_dir, options, overwrite=overwrite)
+        # check_cov.sh must be executable — the Makefile runs it directly.
+        cov_script = Path(out_dir) / "scripts" / "check_cov.sh"
+        if cov_script.exists():
+            cov_script.chmod(0o755)
+        return outcome
 
 
-def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
-    ctx: dict[str, Any] = {
-        "project_name": opts.project_name,
-        "module_path": opts.resolved_module_path(),
-        "framework": opts.framework,
-        "database": opts.database,
-        "deploy": opts.deploy,
-        "compliance": opts.compliance,
-    }
-    # Resolve X0 profile so the Dockerfile tag / helm image stays
-    # aligned with the platform the skill targets. On failure we fall
-    # through to defaults — same pattern as fastapi_scaffolder.
-    try:
-        raw = _platform.load_raw_profile(opts.platform_profile)
-        ctx["platform_profile"] = opts.platform_profile
-        ctx["platform_packaging"] = raw.get("packaging", "")
-        ctx["platform_runtime"] = raw.get("software_runtime", "")
-    except Exception:  # noqa: BLE001
-        ctx["platform_profile"] = opts.platform_profile
-        ctx["platform_packaging"] = ""
-        ctx["platform_runtime"] = ""
-    return ctx
-
-
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _GoServiceScaffolder(_SCAFFOLDS_DIR, skill_label="SKILL-GO-SERVICE")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -237,6 +227,9 @@ def render_project(
 ) -> RenderOutcome:
     """Render the SKILL-GO-SERVICE scaffold into ``out_dir``.
 
+    Thin façade over :data:`_SCAFFOLDER`; the shared render primitives
+    live in :class:`backend.scaffolder_base.ScaffolderBase`.
+
     Parameters
     ----------
     out_dir : Path
@@ -249,57 +242,7 @@ def render_project(
         are overwritten. Files outside the scaffold surface are never
         touched.
     """
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(
-        out_dir=out_dir,
-        module_path=ctx["module_path"],
-        profile_binding=ctx["platform_profile"],
-    )
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            rendered_rel = rel[: -len(_TEMPLATE_SUFFIX)]
-            is_template = True
-        else:
-            rendered_rel = rel
-            is_template = False
-
-        if _should_skip(rendered_rel, options):
-            continue
-
-        dest = out_dir / rendered_rel
-        if dest.exists() and not overwrite:
-            outcome.warnings.append(f"skipped existing: {rendered_rel}")
-            continue
-
-        if is_template:
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-            outcome.bytes_written += _write_file(dest, rendered)
-        else:
-            outcome.bytes_written += _write_file(dest, src.read_bytes())
-        outcome.files_written.append(dest)
-
-    # check_cov.sh must be executable — the Makefile runs it directly.
-    cov_script = out_dir / "scripts" / "check_cov.sh"
-    if cov_script.exists():
-        cov_script.chmod(0o755)
-
-    logger.info(
-        "SKILL-GO-SERVICE rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def dry_run_build(
