@@ -25,13 +25,14 @@ Lifecycle hooks
 
 from __future__ import annotations
 
+import importlib
 import logging
 import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import yaml
 
@@ -480,3 +481,184 @@ def enumerate_skill(name: str, skills_dir: Optional[Path] = None) -> dict:
                 result["enumerate_error"] = str(exc)
 
     return result
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  W3 (1C) #1787 — skill name → scaffolder dispatch
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# ``scaffold_reference.py:13,23`` documents a *future unified
+# ``scripts/scaffold.py`` dispatcher* whose job is to turn a skill name
+# into the right ``backend/<stack>_scaffolder.py`` entry point. Until
+# now ``skill.yaml`` was decorative for that path — every scaffolder
+# hard-codes its own skill directory and nothing read the manifest to
+# decide *whether* a pack is scaffoldable. :func:`resolve_scaffolder`
+# closes that gap: it reads ``skill.yaml`` (via :func:`get_skill`),
+# refuses to dispatch unless the manifest declares a ``scaffolds``
+# artifact, then binds to the existing scaffolder module. No scaffolder
+# is modified — this is a pure additive read-side over the registry.
+
+#: Scaffolder modules follow the convention
+#: ``skill-<stack>`` → ``backend.<stack>_scaffolder`` (hyphens become
+#: underscores). The handful of packs whose Python module name diverges
+#: from the skill name are listed here; everything else is derived by
+#: :func:`_default_scaffolder_module`. Keeping the override table small
+#: (rather than a full name→module map) means a new conventionally-named
+#: pack is dispatchable the moment its directory + manifest land — no
+#: registry edit required, which is the "add a skill pack is a real
+#: entry point" property #1787 is after.
+_SCAFFOLDER_MODULE_OVERRIDES: dict[str, str] = {
+    # skill-desktop-tauri ships as backend/tauri_scaffolder.py — the
+    # module predates the skill-<stack> naming and was not renamed.
+    "skill-desktop-tauri": "backend.tauri_scaffolder",
+}
+
+#: Public entry-point attribute names every scaffolder module exposes
+#: (see backend/<stack>_scaffolder.py "Public API" docstrings).
+_SCAFFOLDER_RENDER_ATTR = "render_project"
+_SCAFFOLDER_OPTIONS_ATTR = "ScaffoldOptions"
+
+
+class ScaffolderResolutionError(RuntimeError):
+    """Raised when a skill name cannot be bound to a scaffolder.
+
+    Distinguishes the failure modes the dispatcher cares about via the
+    message — the skill directory is missing, the manifest is absent or
+    does not declare a ``scaffolds`` artifact, the conventional module
+    does not import, or the module is missing its public entry points.
+    Callers (``scripts/scaffold.py``) surface the message verbatim and
+    exit non-zero rather than retrying.
+    """
+
+
+@dataclass
+class ScaffolderHandle:
+    """A resolved binding from a skill name to its scaffolder.
+
+    ``render`` and ``options_cls`` are the two public entry points every
+    ``backend/<stack>_scaffolder.py`` exposes (``render_project`` and
+    ``ScaffoldOptions``). The dispatcher builds an options instance from
+    CLI flags via ``options_cls`` and hands it to ``render``.
+    """
+
+    skill_name: str
+    module_name: str
+    options_cls: type
+    render: Callable[..., object]
+
+
+def scaffolder_module_name(skill_name: str) -> str:
+    """Return the import path of the scaffolder module for ``skill_name``.
+
+    Override table wins; otherwise the ``skill-<stack>`` →
+    ``backend.<stack>_scaffolder`` convention applies. This is a pure
+    string transform — it does not check that the module imports.
+    """
+    if skill_name in _SCAFFOLDER_MODULE_OVERRIDES:
+        return _SCAFFOLDER_MODULE_OVERRIDES[skill_name]
+    stem = skill_name
+    if stem.startswith("skill-"):
+        stem = stem[len("skill-"):]
+    stem = stem.replace("-", "_")
+    return f"backend.{stem}_scaffolder"
+
+
+def resolve_scaffolder(
+    skill_name: str,
+    skills_dir: Optional[Path] = None,
+) -> ScaffolderHandle:
+    """Bind ``skill_name`` to its scaffolder, gated on ``skill.yaml``.
+
+    Flow::
+
+        get_skill(skill_name)            # reads skill.yaml
+            └── None                     → ScaffolderResolutionError
+            └── no manifest              → ScaffolderResolutionError
+            └── no "scaffolds" artifact  → ScaffolderResolutionError
+            └── ok → import scaffolder_module_name(skill_name)
+                       └── expose render_project + ScaffoldOptions
+
+    The ``scaffolds`` artifact gate is what makes ``skill.yaml``
+    load-bearing: a pack with no declared scaffold surface is not
+    dispatchable even if a matching module happens to exist on disk.
+
+    Raises
+    ------
+    ScaffolderResolutionError
+        On any of the failure modes above. The message names the cause.
+    """
+    info = get_skill(skill_name, skills_dir)
+    if info is None:
+        raise ScaffolderResolutionError(
+            f"skill {skill_name!r} not found in registry "
+            f"({(skills_dir or _SKILLS_DIR)})"
+        )
+    if not info.has_manifest:
+        raise ScaffolderResolutionError(
+            f"skill {skill_name!r} has no skill.yaml manifest — cannot "
+            "resolve a scaffolder without a declared artifact surface"
+        )
+    if "scaffolds" not in info.artifact_kinds:
+        raise ScaffolderResolutionError(
+            f"skill {skill_name!r} manifest does not declare a 'scaffolds' "
+            f"artifact (declares: {sorted(info.artifact_kinds)}) — not "
+            "scaffoldable"
+        )
+
+    module_name = scaffolder_module_name(skill_name)
+    try:
+        module = importlib.import_module(module_name)
+    except ImportError as exc:
+        raise ScaffolderResolutionError(
+            f"skill {skill_name!r} resolves to module {module_name!r} which "
+            f"failed to import: {exc}"
+        ) from exc
+
+    render = getattr(module, _SCAFFOLDER_RENDER_ATTR, None)
+    options_cls = getattr(module, _SCAFFOLDER_OPTIONS_ATTR, None)
+    if render is None or options_cls is None:
+        missing = [
+            attr
+            for attr, val in (
+                (_SCAFFOLDER_RENDER_ATTR, render),
+                (_SCAFFOLDER_OPTIONS_ATTR, options_cls),
+            )
+            if val is None
+        ]
+        raise ScaffolderResolutionError(
+            f"scaffolder module {module_name!r} is missing public entry "
+            f"point(s): {missing}"
+        )
+    if not callable(render):
+        raise ScaffolderResolutionError(
+            f"scaffolder module {module_name!r} exposes a non-callable "
+            f"{_SCAFFOLDER_RENDER_ATTR!r}"
+        )
+
+    return ScaffolderHandle(
+        skill_name=skill_name,
+        module_name=module_name,
+        options_cls=options_cls,
+        render=render,
+    )
+
+
+def list_scaffoldable_skills(skills_dir: Optional[Path] = None) -> list[str]:
+    """Return the names of installed packs that declare a scaffolder.
+
+    A pack is scaffoldable when its ``skill.yaml`` declares a
+    ``scaffolds`` artifact *and* :func:`resolve_scaffolder` can bind it
+    to an importable module with the public entry points. Used by
+    ``scripts/scaffold.py --list``; never raises — packs that fail to
+    resolve are simply omitted.
+    """
+    names: list[str] = []
+    for info in list_skills(skills_dir):
+        if not info.has_manifest or "scaffolds" not in info.artifact_kinds:
+            continue
+        try:
+            resolve_scaffolder(info.name, skills_dir)
+        except ScaffolderResolutionError:
+            continue
+        names.append(info.name)
+    return names
