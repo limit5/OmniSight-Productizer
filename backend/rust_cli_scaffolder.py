@@ -43,20 +43,17 @@ Public API
 
 from __future__ import annotations
 
-import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
-import jinja2
+from typing import Any, Callable, Optional
 
 from backend import platform_profile as _platform
 from backend.build_adapters import BuildSource, CargoDistAdapter
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 from backend.software_compliance import run_all as run_compliance_all
-
-logger = logging.getLogger(__name__)
 
 _SKILL_DIR = (
     Path(__file__).resolve().parent.parent
@@ -65,8 +62,6 @@ _SKILL_DIR = (
 _SCAFFOLDS_DIR = _SKILL_DIR / "scaffolds"
 
 _RUNTIME_CHOICES = ("tokio", "sync")
-
-_TEMPLATE_SUFFIX = ".j2"
 
 # Rust crate name — [a-z0-9_], underscores only (no hyphens) per
 # Cargo identifier rules. bin_name is looser and allows hyphens
@@ -81,8 +76,9 @@ _BIN_SLUG_RE = re.compile(r"[^a-z0-9._\-]+")
 
 
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-RUST-CLI knobs — extends the shared base with Rust fields."""
+
     bin_name: Optional[str] = None            # defaults to slugified project_name
     crate_name: Optional[str] = None          # defaults to _underscorify(bin_name)
     runtime: str = "tokio"                    # tokio | sync
@@ -91,8 +87,7 @@ class ScaffoldOptions:
     platform_profile: str = "linux-x86_64-native"
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         if self.runtime not in _RUNTIME_CHOICES:
             raise ValueError(
                 f"runtime must be one of {_RUNTIME_CHOICES}, got {self.runtime!r}"
@@ -107,28 +102,6 @@ class ScaffoldOptions:
         if self.crate_name:
             return _slugify_crate(self.crate_name)
         return _slugify_crate(self.resolved_bin_name())
-
-
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    bin_name: str = ""
-    crate_name: str = ""
-    profile_binding: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "bin_name": self.bin_name,
-            "crate_name": self.crate_name,
-            "profile_binding": self.profile_binding,
-        }
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -163,12 +136,6 @@ def _slugify_crate(name: str) -> str:
     return slug
 
 
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
-
-
 def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
     # Compliance-gated files.
     if rendered_rel in ("spdx.allowlist.json", "deny.toml") and not opts.compliance:
@@ -183,15 +150,6 @@ def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
     ):
         return True
     return False
-
-
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
 
 
 def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
@@ -220,15 +178,6 @@ def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
         ctx["platform_packaging"] = ""
         ctx["platform_runtime"] = ""
     return ctx
-
-
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
 
 
 def _patch_cli_for_no_completions(text: str) -> str:
@@ -275,6 +224,105 @@ def _patch_cargo_for_sync(text: str) -> str:
     return text
 
 
+def _render_env_example(opts: ScaffoldOptions) -> str:
+    env_prefix = opts.resolved_bin_name().upper().replace("-", "_")
+    return f"{env_prefix}_INPUT=-\nRUST_LOG=info\n"
+
+
+class _RustCliScaffolder(ScaffolderBase):
+    """SKILL-RUST-CLI scaffolder — supplies Rust context + post-render hooks."""
+
+    def _rendered_rel_path(self, rel_path: str) -> str:
+        suffix = self.template_suffix
+        if rel_path.endswith(suffix):
+            return rel_path[: -len(suffix)]
+        return rel_path
+
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        return _should_skip(self._rendered_rel_path(rel_path), options)
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        return _render_context(options)
+
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        outcome.bin_name = context["bin_name"]  # type: ignore[attr-defined]
+        outcome.crate_name = context["crate_name"]  # type: ignore[attr-defined]
+        outcome.profile_binding = context["platform_profile"]  # type: ignore[assignment]
+        return outcome
+
+    def _patch_written_file(
+        self,
+        path: Path,
+        patcher: Callable[[str], str],
+        outcome: RenderOutcome,
+    ) -> None:
+        if path not in outcome.files_written or not path.exists():
+            return
+        before = path.read_text(encoding="utf-8")
+        after = patcher(before)
+        if after == before:
+            return
+        path.write_text(after, encoding="utf-8")
+        outcome.bytes_written += len(after.encode("utf-8")) - len(
+            before.encode("utf-8")
+        )
+
+    def render_project(
+        self,
+        out_dir: Path,
+        options: ScaffoldOptions,
+        *,
+        overwrite: bool = True,
+    ) -> RenderOutcome:
+        outcome = super().render_project(out_dir, options, overwrite=overwrite)
+
+        # When completions=off, strip references from the cli/main/commands
+        # module trees. We do it post-render so the Jinja templates stay
+        # simple (they don't need per-file {% if %} around every import).
+        if not options.completions:
+            root = Path(out_dir)
+            self._patch_written_file(
+                root / "src" / "cli.rs",
+                _patch_cli_for_no_completions,
+                outcome,
+            )
+            self._patch_written_file(
+                root / "src" / "main.rs",
+                _patch_main_for_no_completions,
+                outcome,
+            )
+            self._patch_written_file(
+                root / "src" / "commands" / "mod.rs",
+                _patch_commands_mod_for_no_completions,
+                outcome,
+            )
+            self._patch_written_file(
+                root / "Cargo.toml",
+                _patch_cargo_for_no_completions,
+                outcome,
+            )
+
+        env_example = Path(out_dir) / ".env.example"
+        if env_example.exists() and not overwrite:
+            outcome.warnings.append("skipped existing: .env.example")
+        else:
+            rendered = _render_env_example(options)
+            outcome.bytes_written += self._write_file(env_example, rendered)
+            outcome.files_written.append(env_example)
+
+        # check_cov.sh must be executable — the Makefile runs it directly.
+        cov_script = Path(out_dir) / "scripts" / "check_cov.sh"
+        if cov_script.exists():
+            cov_script.chmod(0o755)
+
+        return outcome
+
+
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _RustCliScaffolder(_SCAFFOLDS_DIR, skill_label="SKILL-RUST-CLI")
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -286,73 +334,12 @@ def render_project(
     *,
     overwrite: bool = True,
 ) -> RenderOutcome:
-    """Render the SKILL-RUST-CLI scaffold into ``out_dir``."""
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
+    """Render the SKILL-RUST-CLI scaffold into ``out_dir``.
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(
-        out_dir=out_dir,
-        bin_name=ctx["bin_name"],
-        crate_name=ctx["crate_name"],
-        profile_binding=ctx["platform_profile"],
-    )
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            rendered_rel = rel[: -len(_TEMPLATE_SUFFIX)]
-            is_template = True
-        else:
-            rendered_rel = rel
-            is_template = False
-
-        if _should_skip(rendered_rel, options):
-            continue
-
-        dest = out_dir / rendered_rel
-        if dest.exists() and not overwrite:
-            outcome.warnings.append(f"skipped existing: {rendered_rel}")
-            continue
-
-        if is_template:
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-        else:
-            rendered = src.read_bytes()
-
-        # When completions=off, strip references from the cli/main/commands
-        # module trees. We do it post-render so the Jinja templates stay
-        # simple (they don't need per-file {% if %} around every import).
-        if not options.completions and isinstance(rendered, str):
-            if rendered_rel == "src/cli.rs":
-                rendered = _patch_cli_for_no_completions(rendered)
-            elif rendered_rel == "src/main.rs":
-                rendered = _patch_main_for_no_completions(rendered)
-            elif rendered_rel == "src/commands/mod.rs":
-                rendered = _patch_commands_mod_for_no_completions(rendered)
-            elif rendered_rel == "Cargo.toml":
-                rendered = _patch_cargo_for_no_completions(rendered)
-
-        outcome.bytes_written += _write_file(dest, rendered)
-        outcome.files_written.append(dest)
-
-    # check_cov.sh must be executable — the Makefile runs it directly.
-    cov_script = out_dir / "scripts" / "check_cov.sh"
-    if cov_script.exists():
-        cov_script.chmod(0o755)
-
-    logger.info(
-        "SKILL-RUST-CLI rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    Thin façade over :data:`_SCAFFOLDER`; the shared render primitives
+    live in :class:`backend.scaffolder_base.ScaffolderBase`.
+    """
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def dry_run_build(
