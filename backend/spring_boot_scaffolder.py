@@ -50,11 +50,9 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
-import jinja2
+from typing import Any, Optional
 
 from backend import platform_profile as _platform
 from backend.build_adapters import (
@@ -64,6 +62,8 @@ from backend.build_adapters import (
     HelmChartAdapter,
     MavenAdapter,
 )
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 from backend.software_compliance import run_all as run_compliance_all
 
@@ -79,7 +79,6 @@ _BUILD_TOOL_CHOICES = ("maven", "gradle")
 _DATABASE_CHOICES = ("postgres", "h2", "none")
 _DEPLOY_CHOICES = ("docker", "helm", "both")
 
-_TEMPLATE_SUFFIX = ".j2"
 _PACKAGE_PLACEHOLDER = "__pkg__"
 
 # Artifact-id slug — Maven coordinates allow lowercase letters,
@@ -103,8 +102,15 @@ _PKG_SEGMENT_RE = re.compile(r"[^a-z0-9_]+")
 
 
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-SPRING-BOOT knobs — extends the shared base with JVM fields.
+
+    ``project_name`` (+ its non-empty check) is inherited from
+    :class:`backend.scaffolder_base.ScaffoldOptions`; :meth:`validate`
+    calls ``super().validate()`` then layers the build-tool / database /
+    deploy / reverse-DNS group-id rules on top.
+    """
+
     group_id: str = "com.example"
     artifact_id: Optional[str] = None     # defaults to slug(project_name)
     build_tool: str = "maven"             # maven | gradle
@@ -114,8 +120,7 @@ class ScaffoldOptions:
     platform_profile: str = "linux-x86_64-native"
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         if self.build_tool not in _BUILD_TOOL_CHOICES:
             raise ValueError(
                 f"build_tool must be one of {_BUILD_TOOL_CHOICES}, got {self.build_tool!r}"
@@ -162,28 +167,6 @@ class ScaffoldOptions:
         return self.deploy in ("helm", "both")
 
 
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    artifact_id: str = ""
-    base_package: str = ""
-    profile_binding: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "artifact_id": self.artifact_id,
-            "base_package": self.base_package,
-            "profile_binding": self.profile_binding,
-        }
-
-
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Slug helpers
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -221,12 +204,6 @@ def _slugify_package_segment(artifact_id: str) -> str:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Internals
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
 
 
 def _rewrite_package_path(rel: str, pkg_path: str) -> str:
@@ -289,49 +266,127 @@ def _should_skip(rendered_rel: str, opts: ScaffoldOptions) -> bool:
     return False
 
 
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
+class _SpringBootScaffolder(ScaffolderBase):
+    """SKILL-SPRING-BOOT scaffolder — supplies the ``__pkg__`` path
+    rewrite + gating + context hooks.
+
+    The render loop, Jinja env, and byte-level writes live in
+    :class:`backend.scaffolder_base.ScaffolderBase`; this subclass
+    overrides :meth:`render_project` only to apply the ``__pkg__`` →
+    package-path rewrite to each destination (the base loop writes
+    scaffold-relative paths verbatim) and to mark ``gradlew`` executable
+    after the render.
+    """
+
+    def _rendered_rel_path(self, rel_path: str, pkg_path: str) -> tuple[str, bool]:
+        suffix = self.template_suffix
+        if rel_path.endswith(suffix):
+            rendered_rel_raw = rel_path[: -len(suffix)]
+            is_template = True
+        else:
+            rendered_rel_raw = rel_path
+            is_template = False
+        return _rewrite_package_path(rendered_rel_raw, pkg_path), is_template
+
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        rendered_rel, _ = self._rendered_rel_path(
+            rel_path,
+            options.resolved_package_path(),
+        )
+        return _should_skip(rendered_rel, options)
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
+            "project_name": options.project_name,
+            "group_id": options.group_id,
+            "artifact_id": options.resolved_artifact_id(),
+            "base_package": options.resolved_base_package(),
+            "build_tool": options.build_tool,
+            "database": options.database,
+            "deploy": options.deploy,
+            "compliance": options.compliance,
+        }
+        # Resolve X0 profile so the Dockerfile runtime tag / values.yaml
+        # stay aligned with the platform the skill targets. Fail-soft —
+        # profile load failures make the context carry empty strings and
+        # the render proceeds (same rule as fastapi / go / rust / tauri).
+        try:
+            raw = _platform.load_raw_profile(options.platform_profile)
+            ctx["platform_profile"] = options.platform_profile
+            ctx["platform_packaging"] = raw.get("packaging", "")
+            ctx["platform_runtime"] = raw.get("software_runtime", "")
+        except Exception:  # noqa: BLE001
+            ctx["platform_profile"] = options.platform_profile
+            ctx["platform_packaging"] = ""
+            ctx["platform_runtime"] = ""
+        return ctx
+
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        outcome.profile_binding = context["platform_profile"]  # type: ignore[assignment]
+        return outcome
+
+    def render_project(
+        self,
+        out_dir: Path,
+        options: ScaffoldOptions,
+        *,
+        overwrite: bool = True,
+    ) -> RenderOutcome:
+        """Render with the ``__pkg__`` → resolved-package-path rewrite."""
+        options.validate()
+        out_dir = Path(out_dir)
+        if not self.scaffolds_dir.is_dir():
+            raise FileNotFoundError(
+                f"scaffolds directory missing: {self.scaffolds_dir}"
+            )
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        env = self._build_jinja_env()
+        ctx = self.build_context(options)
+        outcome = self.make_outcome(out_dir, ctx)
+
+        pkg_path = options.resolved_package_path()
+
+        for src in self._iter_scaffold_files(self.scaffolds_dir):
+            rel = src.relative_to(self.scaffolds_dir).as_posix()
+            rendered_rel, is_template = self._rendered_rel_path(rel, pkg_path)
+
+            if self.should_skip(rel, options):
+                continue
+
+            dest = out_dir / rendered_rel
+            if dest.exists() and not overwrite:
+                outcome.warnings.append(f"skipped existing: {rendered_rel}")
+                continue
+
+            if is_template:
+                template = env.get_template(rel)
+                rendered = template.render(**ctx)
+                outcome.bytes_written += self._write_file(dest, rendered)
+            else:
+                outcome.bytes_written += self._write_file(dest, src.read_bytes())
+            outcome.files_written.append(dest)
+
+        # `gradlew` must be executable — the Dockerfile builder stage
+        # and Makefile both assume it is.
+        gradlew = out_dir / "gradlew"
+        if gradlew.exists():
+            gradlew.chmod(0o755)
+
+        logger.info(
+            "%s rendered %d files (%d bytes) into %s",
+            self.skill_label,
+            len(outcome.files_written),
+            outcome.bytes_written,
+            out_dir,
+        )
+        return outcome
 
 
-def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
-    ctx: dict[str, Any] = {
-        "project_name": opts.project_name,
-        "group_id": opts.group_id,
-        "artifact_id": opts.resolved_artifact_id(),
-        "base_package": opts.resolved_base_package(),
-        "build_tool": opts.build_tool,
-        "database": opts.database,
-        "deploy": opts.deploy,
-        "compliance": opts.compliance,
-    }
-    # Resolve X0 profile so the Dockerfile runtime tag / values.yaml
-    # stay aligned with the platform the skill targets. Fail-soft —
-    # profile load failures make the context carry empty strings and
-    # the render proceeds (same rule as fastapi / go / rust / tauri).
-    try:
-        raw = _platform.load_raw_profile(opts.platform_profile)
-        ctx["platform_profile"] = opts.platform_profile
-        ctx["platform_packaging"] = raw.get("packaging", "")
-        ctx["platform_runtime"] = raw.get("software_runtime", "")
-    except Exception:  # noqa: BLE001
-        ctx["platform_profile"] = opts.platform_profile
-        ctx["platform_packaging"] = ""
-        ctx["platform_runtime"] = ""
-    return ctx
-
-
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _SpringBootScaffolder(_SCAFFOLDS_DIR, skill_label="SKILL-SPRING-BOOT")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -347,6 +402,9 @@ def render_project(
 ) -> RenderOutcome:
     """Render the SKILL-SPRING-BOOT scaffold into ``out_dir``.
 
+    Thin façade over :data:`_SCAFFOLDER`; the shared render primitives
+    live in :class:`backend.scaffolder_base.ScaffolderBase`.
+
     Parameters
     ----------
     out_dir : Path
@@ -359,63 +417,7 @@ def render_project(
         surface are overwritten. Files outside the scaffold surface
         are never touched.
     """
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(
-        out_dir=out_dir,
-        artifact_id=ctx["artifact_id"],
-        base_package=ctx["base_package"],
-        profile_binding=ctx["platform_profile"],
-    )
-
-    pkg_path = options.resolved_package_path()
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            rendered_rel_raw = rel[: -len(_TEMPLATE_SUFFIX)]
-            is_template = True
-        else:
-            rendered_rel_raw = rel
-            is_template = False
-
-        rendered_rel = _rewrite_package_path(rendered_rel_raw, pkg_path)
-
-        if _should_skip(rendered_rel, options):
-            continue
-
-        dest = out_dir / rendered_rel
-        if dest.exists() and not overwrite:
-            outcome.warnings.append(f"skipped existing: {rendered_rel}")
-            continue
-
-        if is_template:
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-            outcome.bytes_written += _write_file(dest, rendered)
-        else:
-            outcome.bytes_written += _write_file(dest, src.read_bytes())
-        outcome.files_written.append(dest)
-
-    # `gradlew` must be executable — the Dockerfile builder stage
-    # and Makefile both assume it is.
-    gradlew = out_dir / "gradlew"
-    if gradlew.exists():
-        gradlew.chmod(0o755)
-
-    logger.info(
-        "SKILL-SPRING-BOOT rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def dry_run_build(
