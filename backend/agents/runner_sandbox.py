@@ -107,6 +107,11 @@ ENV_ALLOWLIST: tuple[str, ...] = (
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
+    # --- agent CLI config dirs (OP-1803 §2b, Option B): forwarded so the
+    # degraded/raw spawn still finds the bot's config when bwrap is absent,
+    # AND --setenv'd to a bound RO path inside the jail (not HOME-relative).
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
 )
 """Names of the only env vars projected into the agent CLI + its git
 children. Anything not listed here (notably every ``OMNISIGHT_*`` infra
@@ -205,6 +210,98 @@ def _git_metadata_mounts(worktree_path: Path) -> tuple[Path, ...]:
         if path not in mounts:
             mounts.append(path)
     return tuple(mounts)
+
+
+def _nvm_version_dir_of(node_path: Path) -> Path | None:
+    """Return the ``.../versions/node/<ver>/`` dir containing ``node_path``.
+
+    The nvm layout is ``<NVM_DIR>/versions/node/<ver>/bin/node``; the subtree
+    we want to RO-bind is ``<ver>/`` (it holds ``bin/node`` plus the globally
+    installed ``claude`` / ``codex`` shims under ``bin/`` and their
+    ``lib/node_modules``). Returns None when ``node_path`` is not under an nvm
+    versions tree (e.g. a distro ``/usr/bin/node``, already covered by the
+    ``/usr`` RO-bind).
+    """
+    for parent in node_path.parents:
+        gp = parent.parent
+        if gp.name == "node" and gp.parent.name == "versions":
+            return parent if parent.is_dir() else None
+    return None
+
+
+def _nvm_default_version_dir(nvm_dir: Path) -> Path | None:
+    """Resolve ``$NVM_DIR``'s active node version dir without a live ``node``.
+
+    Prefers the ``alias/default`` pin (matched by exact name or version
+    prefix); falls back to the lexically-greatest installed version. Best
+    effort — returns None when ``$NVM_DIR/versions/node`` has no entries.
+    """
+    versions = nvm_dir / "versions" / "node"
+    if not versions.is_dir():
+        return None
+    installed = sorted(
+        (d for d in versions.iterdir() if d.is_dir()), reverse=True
+    )
+    if not installed:
+        return None
+    alias = nvm_dir / "alias" / "default"
+    if alias.is_file():
+        try:
+            want = alias.read_text().strip().lstrip("v")
+        except OSError:
+            want = ""
+        if want:
+            for cand in installed:
+                if cand.name.lstrip("v").startswith(want):
+                    return cand
+    return installed[0]
+
+
+def _nvm_node_toolchain_subtree(env: Mapping[str, str]) -> Path | None:
+    """Resolve the node-version subtree to RO-bind into the jail (OP-1803 §2a).
+
+    Resolves the live interpreter via ``which node`` (using the jail's PATH so
+    it matches what will run) and returns the enclosing
+    ``~/.nvm/versions/node/<ver>/`` directory — node + the ``claude`` / ``codex``
+    CLIs + their ``node_modules`` — NOT all of ``~/.nvm``. Falls back to
+    ``$NVM_DIR``'s default-aliased version when ``node`` isn't on PATH. Returns
+    None when no nvm-managed toolchain is found (distro node lives under the
+    already-bound ``/usr``).
+    """
+    node = shutil.which("node", path=env.get("PATH"))
+    if node:
+        subtree = _nvm_version_dir_of(Path(node).resolve())
+        if subtree is not None:
+            return subtree
+    nvm_dir = env.get("NVM_DIR")
+    if nvm_dir:
+        return _nvm_default_version_dir(Path(nvm_dir))
+    return None
+
+
+# Agent-CLI config dirs (OP-1803 §2b, Option B): (ENV_NAME, ~-relative default).
+# We do NOT rely on the jail's HOME (pinned to the worktree) — each dir is
+# resolved against the *host* HOME (or the bot's explicit override), RO-bound
+# at its absolute path, and the var --setenv'd to that path inside the jail.
+_CLI_CONFIG_DIRS: tuple[tuple[str, str], ...] = (
+    ("CLAUDE_CONFIG_DIR", ".claude"),
+    ("CODEX_HOME", ".codex"),
+)
+
+
+def _cli_config_dirs(env: Mapping[str, str]) -> tuple[tuple[str, Path], ...]:
+    """Resolve ``(ENV_NAME, host_path)`` for each agent-CLI config dir (§2b).
+
+    Uses the bot's explicit ``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` when set,
+    else the conventional ``~/.claude`` / ``~/.codex`` under the *host* HOME
+    (``env['HOME']`` before the jail pins it to the worktree).
+    """
+    home = env.get("HOME") or os.path.expanduser("~")
+    pairs: list[tuple[str, Path]] = []
+    for name, default_rel in _CLI_CONFIG_DIRS:
+        raw = env.get(name) or os.path.join(home, default_rel)
+        pairs.append((name, Path(raw)))
+    return tuple(pairs)
 
 
 LOG_SANDBOX_WRAPPED = "sandbox=wrapped"
@@ -373,6 +470,14 @@ def _build_bubblewrap_argv(
     manager's default location. RO so the jailed build can read but never
     mutate the shared-per-tenant cache, and the cache buys offline
     resolution while ``--unshare-net`` stays the default.
+
+    OP-1803 (§2a/§2b): the resolved nvm node-version subtree (node + the
+    ``claude`` / ``codex`` CLIs + ``node_modules``) and the CLI config dirs
+    (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME``) are RO-bound so the jailed CLI
+    can actually ``execvp`` and read its config. The config vars are
+    ``--setenv``'d to the bound absolute path (Option B — not HOME-relative,
+    since HOME is pinned to the worktree below), so they are skipped in the
+    generic allowlist projection and re-set explicitly here.
     """
     worktree_abs = str(worktree_path.resolve())
     tmp_dir = str(_tmp_dir_for(ticket_key))
@@ -392,6 +497,24 @@ def _build_bubblewrap_argv(
         if Path(ro).exists():
             argv += ["--ro-bind", ro, ro]
 
+    # OP-1803 (§2a): RO-bind the resolved nvm node-version subtree so the jail
+    # can execvp the agent CLI. We bind the specific <ver>/ dir (node + the
+    # claude/codex shims + node_modules), NOT all of ~/.nvm.
+    toolchain = _nvm_node_toolchain_subtree(env)
+    if toolchain is not None and toolchain.exists():
+        tc_abs = str(toolchain)
+        argv += ["--ro-bind", tc_abs, tc_abs]
+
+    # OP-1803 (§2b, Option B): RO-bind each CLI config dir at its host absolute
+    # path and remember it so we can --setenv the var to that path below — the
+    # CLI must NOT resolve config relative to the jail's (worktree) HOME.
+    config_setenv: dict[str, str] = {}
+    for name, path in _cli_config_dirs(env):
+        if path.exists():
+            p_abs = str(path)
+            argv += ["--ro-bind", p_abs, p_abs]
+            config_setenv[name] = p_abs
+
     argv += ["--bind", worktree_abs, worktree_abs]
     argv += ["--bind", tmp_dir, tmp_dir]
     for git_dir in _git_metadata_mounts(worktree_path):
@@ -406,10 +529,12 @@ def _build_bubblewrap_argv(
         argv += ["--ro-bind", src, dst]
 
     # Re-project the scrubbed allowlist into the cleared jail env. HOME and
-    # TMPDIR are pinned to jail paths below, so skip any host-inherited
-    # values for them here (the jail paths always win).
+    # TMPDIR are pinned to jail paths below; CLAUDE_CONFIG_DIR / CODEX_HOME are
+    # pinned to the bound RO config paths (OP-1803 §2b) — so skip any
+    # host-inherited values for all four here (the explicit values always win).
+    pinned = {"HOME", "TMPDIR", *config_setenv}
     for name, value in build_allowlisted_env(env).items():
-        if name in ("HOME", "TMPDIR"):
+        if name in pinned:
             continue
         argv += ["--setenv", name, value]
 
@@ -417,6 +542,9 @@ def _build_bubblewrap_argv(
     # for a writable $HOME outside the worktree.
     argv += ["--setenv", "HOME", worktree_abs]
     argv += ["--setenv", "TMPDIR", tmp_dir]
+    # OP-1803 (§2b): point the CLI config vars at their bound RO paths.
+    for name, value in config_setenv.items():
+        argv += ["--setenv", name, value]
     argv += ["--chdir", worktree_abs]
 
     argv += ["--"]
