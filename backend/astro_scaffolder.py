@@ -31,6 +31,16 @@ exactly what lets the W0-W5 layers claim "framework" rather than
 "pilot plus two copies". The per-skill knobs vary; the envelope does
 not.
 
+Shared base (OP-1791, W3 1C)
+----------------------------
+The render loop, Jinja env, and byte-level writes live in
+:class:`backend.scaffolder_base.ScaffolderBase`; this module only
+declares what is Astro-specific (knob gating, render context, profile
+binding) plus the W15.5 vite-plugin bootstrap write that runs after the
+loop. ``ScaffoldOptions`` subclasses the shared base; ``RenderOutcome``
+is re-exported from the base unchanged. Mirrors the OP-1784 ``android``
+and OP-1788/1789/1790 (ios/nextjs/fastapi) migrations exactly.
+
 Public API
 ----------
 ``ScaffoldOptions``   — knobs that parameterise the render.
@@ -44,14 +54,14 @@ Public API
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
-
-import jinja2
+from typing import Any, Optional
 
 from backend import platform_profile as _platform
 from backend.deploy.base import BuildArtifact
+from backend.scaffolder_base import RenderOutcome, ScaffolderBase
+from backend.scaffolder_base import ScaffoldOptions as _ScaffoldOptionsBase
 from backend.skill_registry import get_skill, validate_skill
 from backend.web.vite_config_injection import (
     OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH,
@@ -74,8 +84,6 @@ _SCAFFOLDS_DIR = _SKILL_DIR / "scaffolds"
 _ISLAND_CHOICES = ("react", "vue", "svelte", "none")
 _CMS_CHOICES = ("sanity", "contentful", "none")
 _TARGET_CHOICES = ("static", "node", "vercel", "cloudflare", "all")
-
-_TEMPLATE_SUFFIX = ".j2"
 
 # Default `ASTRO_TARGET` pinned into astro.config.mjs. A single-target
 # render defaults to that target's value; `all` defaults to `static`
@@ -151,8 +159,15 @@ _COMPLIANCE_PATHS: tuple[str, ...] = (
 
 
 @dataclass
-class ScaffoldOptions:
-    project_name: str
+class ScaffoldOptions(_ScaffoldOptionsBase):
+    """SKILL-ASTRO knobs — extends the shared base with content fields.
+
+    ``project_name`` (+ its non-empty check) is inherited from
+    :class:`backend.scaffolder_base.ScaffoldOptions`; :meth:`validate`
+    calls ``super().validate()`` then layers the islands / cms / target
+    enum rules on top.
+    """
+
     islands: str = "react"          # react | vue | svelte | none
     cms: str = "none"               # sanity | contentful | none
     target: str = "static"          # static | node | vercel | cloudflare | all
@@ -165,8 +180,7 @@ class ScaffoldOptions:
     backend_url: str = "http://localhost:8000"
 
     def validate(self) -> None:
-        if not self.project_name or not self.project_name.strip():
-            raise ValueError("project_name must be non-empty")
+        super().validate()
         if self.islands not in _ISLAND_CHOICES:
             raise ValueError(f"islands must be one of {_ISLAND_CHOICES}, got {self.islands!r}")
         if self.cms not in _CMS_CHOICES:
@@ -183,157 +197,174 @@ class ScaffoldOptions:
         return _TARGET_DEFAULT[self.target]
 
 
-@dataclass
-class RenderOutcome:
-    out_dir: Path
-    files_written: list[Path] = field(default_factory=list)
-    bytes_written: int = 0
-    warnings: list[str] = field(default_factory=list)
-    profile_bindings: dict[str, int] = field(default_factory=dict)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Scaffolder
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-    def to_dict(self) -> dict:
-        return {
-            "out_dir": str(self.out_dir),
-            "files_written": [str(p) for p in self.files_written],
-            "bytes_written": self.bytes_written,
-            "warnings": list(self.warnings),
-            "profile_bindings": dict(self.profile_bindings),
+
+class _AstroScaffolder(ScaffolderBase):
+    """SKILL-ASTRO scaffolder — supplies the gating + context hooks.
+
+    The render loop, Jinja env, and byte-level writes live in
+    :class:`backend.scaffolder_base.ScaffolderBase`; this subclass only
+    declares what is Astro-specific. :meth:`render_project` is
+    overridden to append the W15.5 vite-plugin bootstrap write after the
+    shared loop completes (the base loop has no post-render hook).
+    """
+
+    def should_skip(self, rel_path: str, options: ScaffoldOptions) -> bool:
+        # Islands-gated files — only the matching framework's component
+        # ships; `islands=none` ships none of them.
+        for marker, required in _ISLANDS_ONLY_FILES.items():
+            if rel_path == marker and options.islands != required:
+                return True
+        # CMS-gated adapter + webhook files
+        for marker, required in _CMS_ONLY_FILES.items():
+            if rel_path == marker and options.cms != required:
+                return True
+        # CMS unit test only when a CMS is wired
+        if rel_path in _CMS_TESTS_FILES and options.cms == "none":
+            return True
+        # Target-gated build configs
+        for marker, wanted in _TARGET_ONLY_FILES.items():
+            if rel_path == marker and options.target not in wanted:
+                return True
+        # Compliance-gated files
+        if not options.compliance and rel_path in _COMPLIANCE_PATHS:
+            return True
+        return False
+
+    def build_context(self, options: ScaffoldOptions) -> dict[str, Any]:
+        ctx: dict[str, Any] = {
+            "project_name": options.project_name,
+            "islands": options.islands,
+            "island_ext": _ISLAND_EXT[options.islands],
+            "cms": options.cms,
+            "target": options.target,
+            "compliance": options.compliance,
+            "auth": options.auth,
+            "backend_url": options.backend_url,
+            "default_target": options.default_target(),
         }
 
+        # Resolve the W1 profile budgets. For "all" targets we want the
+        # TIGHTEST bundle budget (Cloudflare 1 MiB wins over web-static's
+        # 500 KiB? No — 500 KiB is tighter. So web-static wins for the
+        # budget context, and web-edge-cloudflare wins when static is not
+        # in the mix). The tightest-wins rule carries over from the W7
+        # scaffolder — the intent is that the W2 bundle gate fires on the
+        # most restrictive target the render supports.
+        bundle_budget: Optional[str] = None
+        tightest_bytes: Optional[int] = None
+        vercel_memory_limit: Optional[int] = None
+        node_memory_limit: Optional[int] = None
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Internals
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        for profile_id in options.resolved_profiles():
+            try:
+                raw = _platform.load_raw_profile(profile_id)
+            except Exception:  # noqa: BLE001 — fall through to defaults
+                continue
 
+            b = raw.get("bundle_size_budget")
+            if b:
+                parsed = parse_budget(b, fallback=5 * 1024 * 1024)
+                if tightest_bytes is None or parsed < tightest_bytes:
+                    tightest_bytes = parsed
+                    bundle_budget = b
 
-def _iter_scaffold_files(root: Path) -> Iterable[Path]:
-    for path in sorted(root.rglob("*")):
-        if path.is_file():
-            yield path
+            if profile_id == "web-vercel":
+                vercel_memory_limit = raw.get("memory_limit_mb")
+            elif profile_id == "web-ssr-node":
+                node_memory_limit = raw.get("memory_limit_mb")
 
+        ctx["bundle_size_budget"] = bundle_budget or "500KiB"
+        ctx["bundle_budget_bytes"] = tightest_bytes or 500 * 1024
+        ctx["vercel_memory_limit_mb"] = vercel_memory_limit or 1024
+        ctx["node_memory_limit_mb"] = node_memory_limit or 512
+        return ctx
 
-def _should_skip(rel_path: str, opts: ScaffoldOptions) -> bool:
-    # Islands-gated files — only the matching framework's component
-    # ships; `islands=none` ships none of them.
-    for marker, required in _ISLANDS_ONLY_FILES.items():
-        if rel_path == marker and opts.islands != required:
-            return True
-    # CMS-gated adapter + webhook files
-    for marker, required in _CMS_ONLY_FILES.items():
-        if rel_path == marker and opts.cms != required:
-            return True
-    # CMS unit test only when a CMS is wired
-    if rel_path in _CMS_TESTS_FILES and opts.cms == "none":
-        return True
-    # Target-gated build configs
-    for marker, wanted in _TARGET_ONLY_FILES.items():
-        if rel_path == marker and opts.target not in wanted:
-            return True
-    # Compliance-gated files
-    if not opts.compliance and rel_path in _COMPLIANCE_PATHS:
-        return True
-    return False
+    def make_outcome(self, out_dir: Path, context: dict[str, Any]) -> RenderOutcome:
+        outcome = RenderOutcome(out_dir=out_dir)
+        # One entry per bound W1 profile → its resolved bundle budget.
+        outcome.profile_binding = {
+            profile_id: context["bundle_budget_bytes"]
+            for profile_id in _profiles_for_context(context)
+        }
+        return outcome
 
+    def render_project(
+        self,
+        out_dir: Path,
+        options: ScaffoldOptions,
+        *,
+        overwrite: bool = True,
+    ) -> RenderOutcome:
+        outcome = super().render_project(out_dir, options, overwrite=overwrite)
 
-def _build_jinja_env() -> jinja2.Environment:
-    return jinja2.Environment(
-        loader=jinja2.FileSystemLoader(str(_SCAFFOLDS_DIR)),
-        undefined=jinja2.StrictUndefined,
-        keep_trailing_newline=True,
-        autoescape=False,
-    )
+        # W15.5 — write the omnisight-vite-plugin bootstrap module so the
+        # rendered astro.config.mjs's `./scripts/omnisight-vite-plugin.mjs`
+        # import resolves.  Idempotent: re-rendering with overwrite=True
+        # rewrites the file from the central template so a future bump
+        # propagates on the next render; overwrite=False preserves any
+        # operator edits that happened to land at the same relative path.
+        bootstrap_result, bootstrap_dest = self._write_omnisight_vite_plugin_bootstrap(
+            Path(out_dir), overwrite=overwrite,
+        )
+        if bootstrap_result is not None and bootstrap_dest is not None:
+            outcome.bytes_written += bootstrap_result.bootstrap_bytes
+            outcome.files_written.append(bootstrap_dest)
+        elif bootstrap_dest is not None:
+            outcome.warnings.append(
+                f"skipped existing: {OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH}"
+            )
+        return outcome
 
+    def _write_omnisight_vite_plugin_bootstrap(
+        self, out_dir: Path, *, overwrite: bool,
+    ) -> tuple[Optional[ViteConfigInjectionResult], Optional[Path]]:
+        """W15.5 — write the omnisight-vite-plugin bootstrap module into
+        ``<out_dir>/scripts/omnisight-vite-plugin.mjs``.
 
-def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
-    ctx: dict[str, Any] = {
-        "project_name": opts.project_name,
-        "islands": opts.islands,
-        "island_ext": _ISLAND_EXT[opts.islands],
-        "cms": opts.cms,
-        "target": opts.target,
-        "compliance": opts.compliance,
-        "auth": opts.auth,
-        "backend_url": opts.backend_url,
-        "default_target": opts.default_target(),
-    }
-
-    # Resolve the W1 profile budgets. For "all" targets we want the
-    # TIGHTEST bundle budget (Cloudflare 1 MiB wins over web-static's
-    # 500 KiB? No — 500 KiB is tighter. So web-static wins for the
-    # budget context, and web-edge-cloudflare wins when static is not
-    # in the mix). The tightest-wins rule carries over from the W7
-    # scaffolder — the intent is that the W2 bundle gate fires on the
-    # most restrictive target the render supports.
-    bundle_budget: Optional[str] = None
-    tightest_bytes: Optional[int] = None
-    vercel_memory_limit: Optional[int] = None
-    node_memory_limit: Optional[int] = None
-
-    for profile_id in opts.resolved_profiles():
-        try:
-            raw = _platform.load_raw_profile(profile_id)
-        except Exception:  # noqa: BLE001 — fall through to defaults
-            continue
-
-        b = raw.get("bundle_size_budget")
-        if b:
-            parsed = parse_budget(b, fallback=5 * 1024 * 1024)
-            if tightest_bytes is None or parsed < tightest_bytes:
-                tightest_bytes = parsed
-                bundle_budget = b
-
-        if profile_id == "web-vercel":
-            vercel_memory_limit = raw.get("memory_limit_mb")
-        elif profile_id == "web-ssr-node":
-            node_memory_limit = raw.get("memory_limit_mb")
-
-    ctx["bundle_size_budget"] = bundle_budget or "500KiB"
-    ctx["bundle_budget_bytes"] = tightest_bytes or 500 * 1024
-    ctx["vercel_memory_limit_mb"] = vercel_memory_limit or 1024
-    ctx["node_memory_limit_mb"] = node_memory_limit or 512
-    return ctx
-
-
-def _write_file(dest: Path, content: bytes | str) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if isinstance(content, str):
-        dest.write_text(content, encoding="utf-8")
-        return len(content.encode("utf-8"))
-    dest.write_bytes(content)
-    return len(content)
+        Returns a ``(result, dest_path)`` tuple where ``result`` describes
+        what landed (``None`` when skipped because the file existed and
+        ``overwrite=False``).  The bootstrap is sourced from
+        :func:`backend.web.vite_config_injection.render_omnisight_plugin_bootstrap_module`
+        so the W6/W7/W8 scaffolders all write byte-identical content.
+        """
+        bootstrap_dest = out_dir / OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH
+        if bootstrap_dest.exists() and not overwrite:
+            return None, bootstrap_dest
+        bootstrap_text = render_omnisight_plugin_bootstrap_module()
+        written = self._write_file(bootstrap_dest, bootstrap_text)
+        return (
+            ViteConfigInjectionResult(
+                bootstrap_relative_path=OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH,
+                bootstrap_bytes=written,
+                package_name=OMNISIGHT_VITE_PLUGIN_PACKAGE,
+                package_version=OMNISIGHT_VITE_PLUGIN_PACKAGE_VERSION,
+            ),
+            bootstrap_dest,
+        )
 
 
-def _write_omnisight_vite_plugin_bootstrap(
-    out_dir: Path, *, overwrite: bool,
-) -> tuple[Optional[ViteConfigInjectionResult], Optional[Path]]:
-    """W15.5 — write the omnisight-vite-plugin bootstrap module into
-    ``<out_dir>/scripts/omnisight-vite-plugin.mjs``.
+def _profiles_for_context(context: dict[str, Any]) -> list[str]:
+    """Profiles bound by a render context — mirrors
+    :meth:`ScaffoldOptions.resolved_profiles` off the resolved ``target``."""
+    return list(_TARGET_PROFILES[context.get("target", "static")])
 
-    Returns a ``(result, dest_path)`` tuple where ``result`` describes
-    what landed (``None`` when skipped because the file existed and
-    ``overwrite=False``).  The bootstrap is sourced from
-    :func:`backend.web.vite_config_injection.render_omnisight_plugin_bootstrap_module`
-    so the W6/W7/W8 scaffolders all write byte-identical content.
-    """
-    bootstrap_dest = out_dir / OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH
-    if bootstrap_dest.exists() and not overwrite:
-        return None, bootstrap_dest
-    bootstrap_text = render_omnisight_plugin_bootstrap_module()
-    written = _write_file(bootstrap_dest, bootstrap_text)
-    return (
-        ViteConfigInjectionResult(
-            bootstrap_relative_path=OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH,
-            bootstrap_bytes=written,
-            package_name=OMNISIGHT_VITE_PLUGIN_PACKAGE,
-            package_version=OMNISIGHT_VITE_PLUGIN_PACKAGE_VERSION,
-        ),
-        bootstrap_dest,
-    )
+
+#: Module-level singleton — the scaffold dir is fixed per skill pack.
+_SCAFFOLDER = _AstroScaffolder(_SCAFFOLDS_DIR, skill_label="SKILL-ASTRO")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _render_context(opts: ScaffoldOptions) -> dict[str, Any]:
+    """SKILL-ASTRO Jinja render context (delegates to the scaffolder)."""
+    return _SCAFFOLDER.build_context(opts)
 
 
 def render_project(
@@ -343,6 +374,9 @@ def render_project(
     overwrite: bool = True,
 ) -> RenderOutcome:
     """Render the SKILL-ASTRO scaffold into ``out_dir``.
+
+    Thin façade over :data:`_SCAFFOLDER`; the render machinery lives in
+    :class:`backend.scaffolder_base.ScaffolderBase`.
 
     Parameters
     ----------
@@ -356,64 +390,7 @@ def render_project(
         surface are overwritten. Files OUTSIDE the scaffold surface
         are never touched.
     """
-    options.validate()
-    out_dir = Path(out_dir)
-    if not _SCAFFOLDS_DIR.is_dir():
-        raise FileNotFoundError(f"scaffolds directory missing: {_SCAFFOLDS_DIR}")
-
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    env = _build_jinja_env()
-    ctx = _render_context(options)
-
-    outcome = RenderOutcome(out_dir=out_dir)
-    for profile_id in options.resolved_profiles():
-        outcome.profile_bindings[profile_id] = ctx["bundle_budget_bytes"]
-
-    for src in _iter_scaffold_files(_SCAFFOLDS_DIR):
-        rel = src.relative_to(_SCAFFOLDS_DIR).as_posix()
-        if _should_skip(rel, options):
-            continue
-
-        if rel.endswith(_TEMPLATE_SUFFIX):
-            out_rel = rel[: -len(_TEMPLATE_SUFFIX)]
-            dest = out_dir / out_rel
-            if dest.exists() and not overwrite:
-                outcome.warnings.append(f"skipped existing: {out_rel}")
-                continue
-            template = env.get_template(rel)
-            rendered = template.render(**ctx)
-            outcome.bytes_written += _write_file(dest, rendered)
-        else:
-            dest = out_dir / rel
-            if dest.exists() and not overwrite:
-                outcome.warnings.append(f"skipped existing: {rel}")
-                continue
-            outcome.bytes_written += _write_file(dest, src.read_bytes())
-        outcome.files_written.append(dest)
-
-    # W15.5 — write the omnisight-vite-plugin bootstrap module so the
-    # rendered astro.config.mjs's `./scripts/omnisight-vite-plugin.mjs`
-    # import resolves.  Idempotent: re-rendering with overwrite=True
-    # rewrites the file from the central template so a future bump
-    # propagates on the next render; overwrite=False preserves any
-    # operator edits that happened to land at the same relative path.
-    bootstrap_result, bootstrap_dest = _write_omnisight_vite_plugin_bootstrap(
-        out_dir, overwrite=overwrite,
-    )
-    if bootstrap_result is not None and bootstrap_dest is not None:
-        outcome.bytes_written += bootstrap_result.bootstrap_bytes
-        outcome.files_written.append(bootstrap_dest)
-    elif bootstrap_dest is not None:
-        outcome.warnings.append(
-            f"skipped existing: {OMNISIGHT_VITE_PLUGIN_BOOTSTRAP_RELATIVE_PATH}"
-        )
-
-    logger.info(
-        "SKILL-ASTRO rendered %d files (%d bytes) into %s",
-        len(outcome.files_written), outcome.bytes_written, out_dir,
-    )
-    return outcome
+    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
 
 
 def dry_run_deploy(
@@ -551,4 +528,7 @@ __all__ = [
     "dry_run_deploy",
     "pilot_report",
     "validate_pack",
+    "_render_context",
+    "_SCAFFOLDS_DIR",
+    "_SKILL_DIR",
 ]
