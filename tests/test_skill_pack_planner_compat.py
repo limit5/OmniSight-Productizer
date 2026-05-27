@@ -261,15 +261,21 @@ def test_compatibility_partition_is_documented():
     # ``imaging`` joined this set in OP-1786 (W2-3, 1D-pilot) — its
     # tasks.yaml was migrated from the legacy id/name/artifacts schema to
     # the embedded task_id/expected_output schema (schema-only; the pack is
-    # still `stubbed`). It is the first migration of the ~23 broken packs.
-    # ``barcode_scanner`` joined in OP-1801 (Track B, B-2 1D-rest) via the
-    # same schema-only migration (still a stub). This pin is descriptive —
-    # update it in the same change that migrates a pack (see docstring).
+    # still `stubbed`). Packs join this set as their tasks.yaml is migrated
+    # to the embedded schema (B-2 1D-rest): imaging (OP-1786), barcode_scanner
+    # (OP-1801), payment/ota/printing/ipcam (batch), depth_sensing (OP-1805) —
+    # all schema-only (still stubs). NOTE: this exact-set pin conflicts on every
+    # parallel migration; tracked for conversion to a dynamic check.
     assert parsed_ok == [
         "_embedded_base",
         "barcode_scanner",
         "connectivity",
+        "depth_sensing",
         "imaging",
+        "ipcam",
+        "ota",
+        "payment",
+        "printing",
     ], (
         "embedded-compatible pack set changed — if a pack was migrated to "
         "the embedded schema this is expected; update the expectation."

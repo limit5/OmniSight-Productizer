@@ -1,57 +1,76 @@
+# Depth-sensing skill pack — task template.
+#
+# OP-1805 (B2, 1D-rest): migrated from the legacy id/name/artifacts schema
+# to the embedded planner schema (task_id + expected_output) so the embedded
+# planner can consume it without a KeyError. This is a SCHEMA-ONLY migration:
+# task ordering/intent and depends_on edges are unchanged. The pack is still
+# `stubbed` (see docs/product/skill-pack-maturity-matrix.md); making these
+# tasks real is a separate, later track. Follows the proven imaging/OP-1786
+# pattern: each task carries a distinct build/<pack>/ expected_output and a
+# short description (required by dag_schema.Task).
+schema_version: 1
 tasks:
-  - id: tof_sensor_interface
+  - task_id: tof_sensor_interface
     name: "ToF Sensor Driver Abstraction"
+    description: "Define the Time-of-Flight sensor driver abstraction interface"
     depends_on: []
-    artifacts:
-      - backend/depth_sensing.py
+    expected_output: build/depth_sensing/tof_sensor_interface.py
+    estimated_minutes: 45
 
-  - id: tof_sensor_adapters
+  - task_id: tof_sensor_adapters
     name: "ToF Vendor Adapters (Sony IMX556 / Melexis MLX75027)"
+    description: "Implement ToF vendor adapters for Sony IMX556 and Melexis MLX75027"
     depends_on:
       - tof_sensor_interface
-    artifacts:
-      - backend/depth_sensing.py
+    expected_output: build/depth_sensing/tof_sensor_adapters.py
+    estimated_minutes: 60
 
-  - id: structured_light
+  - task_id: structured_light
     name: "Structured Light Capture + Decoder"
+    description: "Structured light capture path and pattern decoder"
     depends_on:
       - tof_sensor_interface
-    artifacts:
-      - backend/depth_sensing.py
+    expected_output: build/depth_sensing/structured_light.py
+    estimated_minutes: 60
 
-  - id: stereo_pipeline
+  - task_id: stereo_pipeline
     name: "Stereo Rectification + Disparity (SGBM)"
+    description: "Stereo rectification and SGBM disparity pipeline"
     depends_on:
       - tof_sensor_interface
-    artifacts:
-      - backend/depth_sensing.py
+    expected_output: build/depth_sensing/stereo_pipeline.py
+    estimated_minutes: 60
 
-  - id: point_cloud
+  - task_id: point_cloud
     name: "Point Cloud: PCL + Open3D Wrappers"
+    description: "Point cloud generation via PCL and Open3D wrappers"
     depends_on:
       - tof_sensor_adapters
       - structured_light
       - stereo_pipeline
-    artifacts:
-      - backend/depth_sensing.py
+    expected_output: build/depth_sensing/point_cloud.py
+    estimated_minutes: 60
 
-  - id: registration_slam
+  - task_id: registration_slam
     name: "ICP Registration + SLAM Hooks"
+    description: "ICP point-cloud registration with SLAM integration hooks"
     depends_on:
       - point_cloud
-    artifacts:
-      - backend/depth_sensing.py
+    expected_output: build/depth_sensing/registration_slam.py
+    estimated_minutes: 60
 
-  - id: rest_endpoints
+  - task_id: rest_endpoints
     name: "REST API Endpoints"
+    description: "REST API endpoints exposing the depth sensing pipeline"
     depends_on:
       - registration_slam
-    artifacts:
-      - backend/routers/depth_sensing.py
+    expected_output: build/depth_sensing/routers_depth_sensing.py
+    estimated_minutes: 45
 
-  - id: unit_tests
+  - task_id: unit_tests
     name: "Unit Tests"
+    description: "Unit tests for the depth sensing modules"
     depends_on:
       - rest_endpoints
-    artifacts:
-      - backend/tests/test_depth_sensing.py
+    expected_output: build/depth_sensing/test_depth_sensing.py
+    estimated_minutes: 45
