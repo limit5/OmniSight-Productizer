@@ -1211,17 +1211,66 @@ def _build_prompt(
             "your behalf when the CLI exits cleanly with no commits.\n"
         )
 
+    # OP-1780 (1A.3) — resolve the bound tenant so a customer-tenant pickup
+    # never inherits OmniSight's own SOP corpus or process rules. The tenant
+    # is bound into the DB/FS context at pickup (OP-1778 set_tenant_id); we
+    # read it from there and fall back to resolving the ticket's own
+    # ``tenant:<tid>`` label when no context is bound (e.g. unit tests that
+    # call _build_prompt directly). A malformed/conflicting label is surfaced
+    # loudly by main()'s pickup path; here we fail safe to "strip" (treat as a
+    # customer tenant) rather than risk leaking OmniSight context on an
+    # unresolvable label.
+    try:
+        tenant_id = db_context.current_tenant_id() or runner_tenant.resolve_tenant_id(labels)
+    except runner_tenant.TenantLabelError:
+        tenant_id = None
+    is_omnisight_self = bool(tenant_id) and runner_tenant.is_self_tenant(tenant_id)
+
     # AUDIT-29b-6 (OP-1024) — the lesson-surface meta-mechanism: feed the
     # most relevant prior lessons + the architecture anti-patterns matching
     # this ticket's area into the pickup prompt. Both are flag-gated (default
     # off) and degrade to an empty string when the KG / cookbook is offline.
     # They sit before the Documentation-rules / AC-verification sections so
     # the CLI reads the context before it is told what to satisfy.
+    #
+    # OP-1780 (1A.3): the lessons (docs/sop/lessons) and anti-patterns
+    # (docs/sop/architecture-anti-patterns.md) blocks read OmniSight's own
+    # repo SOP corpus regardless of tenant — they are OmniSight context and
+    # MUST NOT reach a customer-tenant prompt. They are emitted only for the
+    # internal `omnisight-self` tenant (closes L8-prompt + Wire-1
+    # info-disclosure). The reflection-RAG block is already tenant-sourced
+    # (OP-1778 passes the bound tenant_id), so for a customer tenant it draws
+    # from that tenant's own reflection store, never OmniSight's.
     reflection_block = _build_reflection_rag_block(key, summary, description)
-    lessons_block = _build_lesson_recall_block(key, summary, description)
-    antipattern_block = _build_antipattern_block(
-        key, summary, description, declared_areas,
-    )
+    if is_omnisight_self:
+        lessons_block = _build_lesson_recall_block(key, summary, description)
+        antipattern_block = _build_antipattern_block(
+            key, summary, description, declared_areas,
+        )
+    else:
+        lessons_block = ""
+        antipattern_block = ""
+        print(
+            f"[runner] tenant_context_strip key={key} tenant={tenant_id} "
+            f"stripped=lessons,antipatterns,claude_md_docrules",
+            file=sys.stderr,
+        )
+
+    # OP-1780 (1A.3): the CLAUDE.md L1 "Documentation rules" are OmniSight's
+    # own internal process (HANDOFF.md freeze, docs/sop/lessons-learned.md).
+    # A customer tenant must never receive them — its own repo's CLAUDE.md is
+    # picked up by the CLI from the cloned tenant workspace instead.
+    docrules_block = ""
+    if is_omnisight_self:
+        docrules_block = (
+            "# Documentation rules (per CLAUDE.md L1, amended 2026-05-06)\n"
+            "\n"
+            "DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.\n"
+            "Future per-ticket resolution notes go into JIRA ticket comments, not\n"
+            "HANDOFF.md. If a generalisable lesson emerged, append a new entry to\n"
+            "docs/sop/lessons-learned.md instead.\n"
+            "\n"
+        )
 
     return f"""You are working on JIRA ticket {key}.
 
@@ -1238,14 +1287,7 @@ If you find that completing this ticket requires touching an out-of-area
 domain, halt, comment on the ticket, and transition back to TODO with
 a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
 {capabilities_block}{fg_block}{ps_block}{ops_only_block}{reflection_block}{lessons_block}{antipattern_block}
-# Documentation rules (per CLAUDE.md L1, amended 2026-05-06)
-
-DO NOT append to HANDOFF.md — that file is FROZEN as of 2026-05-06.
-Future per-ticket resolution notes go into JIRA ticket comments, not
-HANDOFF.md. If a generalisable lesson emerged, append a new entry to
-docs/sop/lessons-learned.md instead.
-
-# Acceptance Criteria verification (REQUIRED before exit)
+{docrules_block}# Acceptance Criteria verification (REQUIRED before exit)
 
 Before you finish, post ONE final JIRA comment to ticket {key} listing
 each Acceptance Criteria item from the description with ✓ (verified)
