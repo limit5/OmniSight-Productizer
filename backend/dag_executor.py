@@ -1453,6 +1453,46 @@ def _step_output(result: "LocalTaskResult") -> dict[str, Any]:
     }
 
 
+def _skipped_step_output(task: Task) -> dict[str, Any]:
+    """The step payload for a task skip-cascaded by an upstream continue-failure.
+
+    Carries ``status="skipped"`` as the durable truth — the task never ran
+    because a (transitive) ``depends_on`` upstream failed under
+    ``on_failure="continue"`` and its output is gone (OP-1832). Recorded
+    WITHOUT an ``error`` so the step reads as :attr:`StepRecord.is_done`: a
+    re-claim treats it as already-accounted-for, not as a fresh failure.
+    """
+    return {
+        "toolchain": task.toolchain,
+        "rc": None,
+        "artifact": None,
+        "status": "skipped",
+    }
+
+
+def _transitive_dependents(dag: DAG, task_id: str) -> set[str]:
+    """All task_ids that (transitively) depend on ``task_id`` (excludes it).
+
+    Follows ``depends_on`` edges FORWARD: every task reachable downstream of
+    ``task_id`` has lost a (transitive) input, so when ``task_id`` fails under
+    ``on_failure="continue"`` the whole set is skip-cascaded (OP-1832).
+    """
+    children: dict[str, list[str]] = {t.task_id: [] for t in dag.tasks}
+    for t in dag.tasks:
+        for d in t.depends_on:
+            if d in children:
+                children[d].append(t.task_id)
+    out: set[str] = set()
+    stack = list(children.get(task_id, []))
+    while stack:
+        n = stack.pop()
+        if n in out:
+            continue
+        out.add(n)
+        stack.extend(children.get(n, []))
+    return out
+
+
 def _cleanup_plan_workspaces(
     handler: "LocalTaskHandler", results: list["LocalTaskResult"],
 ) -> None:
@@ -1527,9 +1567,18 @@ async def record_and_finalize_plan(
     The tasks are walked in :func:`topological_order` and run SERIALLY through
     ``handler`` (OP-1658's local toolchain handler). For each task a single
     idempotent ``workflow.record_dag_step`` is written carrying its
-    ``dag_task_id``. On the first failure the walk stops, the plan + run land
-    ``failed``; otherwise both land ``completed``. Workspace cleanup runs LAST,
-    after every step is durably recorded.
+    ``dag_task_id``. A task failure branches on ``task.on_failure`` (OP-1832):
+
+      * ``"abort"`` (default): the walk stops, the plan + run land ``failed`` —
+        unchanged from OP-1659, so existing plans are unaffected.
+      * ``"continue"``: the failure is recorded, the failed task's TRANSITIVE
+        dependents are recorded ``skipped`` (their upstream output is gone), and
+        the walk CONTINUES with the tasks outside that subtree.
+
+    The plan lands ``failed`` iff an ``abort``-failure occurred; otherwise it
+    ``completed`` — continue-failures and their skipped dependents are carried
+    by the per-task step records, not the terminal status. Workspace cleanup
+    runs LAST, after every step is durably recorded.
 
     Idempotent re-claim: if ``plan`` is already terminal nothing runs (no-op);
     if it is still ``executing`` (a mid-flight crash) already-done tasks are
@@ -1567,14 +1616,38 @@ async def record_and_finalize_plan(
     order = topological_order(dag)
     results: list[LocalTaskResult] = []
     recorded: list[str] = []
-    all_ok = True
+    # Tasks transitively downstream of an ``on_failure="continue"`` failure:
+    # their upstream output is gone, so they are recorded ``skipped`` and never
+    # run (OP-1832). Populated lazily as continue-failures are observed; because
+    # the walk is topological, a task is always added here BEFORE it is reached.
+    skipped: set[str] = set()
+    # The plan only lands ``failed`` when an ``on_failure="abort"`` task failed.
+    # A continue-failure (and its skip-cascade) is recorded per-task but leaves
+    # the plan free to complete — the step records carry the truth.
+    abort_failed = False
     for task in order:
         key = dag_step_key(task.task_id)
         prior = await wf.get_step(run_id, key)
+
+        if task.task_id in skipped:
+            # Skip-cascaded by an upstream continue-failure: record the skip
+            # once (idempotent on re-claim) and move on — never run the handler.
+            if prior is None:
+                await wf.record_dag_step(
+                    run_id, key, dag_task_id=task.task_id,
+                    output=_skipped_step_output(task),
+                )
+            recorded.append(task.task_id)
+            logger.info(
+                "dag finalize: plan=%s task=%s skipped — upstream "
+                "continue-failure", plan.id, task.task_id,
+            )
+            continue
+
         if prior is not None:
             # Resume: this task already has a recorded outcome — honour it
-            # without re-running (no retry). Done == ok-skip; not-done == a
-            # prior failure that fails the whole plan.
+            # without re-running (no retry). Done == ok/skip; not-done == a
+            # prior failure, whose effect now depends on ``on_failure``.
             recorded.append(task.task_id)
             if prior.is_done:
                 logger.info(
@@ -1582,11 +1655,19 @@ async def record_and_finalize_plan(
                     plan.id, task.task_id,
                 )
                 continue
+            if task.on_failure == "continue":
+                logger.info(
+                    "dag finalize: plan=%s task=%s prior failed step — "
+                    "continue (skip-cascade dependents)",
+                    plan.id, task.task_id,
+                )
+                skipped |= _transitive_dependents(dag, task.task_id)
+                continue
             logger.info(
                 "dag finalize: plan=%s task=%s has a prior failed step — "
                 "plan fails (no retry)", plan.id, task.task_id,
             )
-            all_ok = False
+            abort_failed = True
             break
 
         result = await handler.run(plan.id, task)
@@ -1607,10 +1688,20 @@ async def record_and_finalize_plan(
                 error=(result.reason or "task failed")[:512],
             )
             recorded.append(task.task_id)
-            all_ok = False
-            break  # stop the serial walk at the first failure
+            if task.on_failure == "continue":
+                # Non-critical subsystem: record the failure, skip the tasks
+                # downstream of it, and keep executing the rest of the walk.
+                logger.info(
+                    "dag finalize: plan=%s task=%s failed (on_failure=continue)"
+                    " — skip-cascade dependents, continue walk",
+                    plan.id, task.task_id,
+                )
+                skipped |= _transitive_dependents(dag, task.task_id)
+                continue
+            abort_failed = True
+            break  # on_failure=abort (default): stop the walk at this failure
 
-    terminal = "completed" if all_ok else "failed"
+    terminal = "failed" if abort_failed else "completed"
     # ── tag the run as executor-produced BEFORE finishing it, so the
     #    'completed' row finetune_export sees already carries the marker
     #    (OP-1661 — executor runs must not pollute the fine-tune corpus).
