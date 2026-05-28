@@ -160,6 +160,7 @@ class TestSSESchemaExport:
             "agent_update", "task_update", "tool_progress", "pipeline",
             "workspace", "container", "invoke", "token_warning",
             "provider.quota.updated",
+            "provider.allocation.preview",
             "simulation", "debug_finding", "notification",
             "artifact_created", "heartbeat",
             # Phase 47 Autonomous Decision Engine
