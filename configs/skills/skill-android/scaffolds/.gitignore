@@ -18,6 +18,8 @@ local.properties
 # Kotlin
 *.class
 *.jar
+# ...but the Gradle wrapper jar MUST be committed (it bootstraps ./gradlew).
+!gradle/wrapper/gradle-wrapper.jar
 
 # Fastlane
 fastlane/report.xml

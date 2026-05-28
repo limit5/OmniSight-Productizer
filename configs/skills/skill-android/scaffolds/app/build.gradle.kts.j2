@@ -115,10 +115,21 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.0")
+    // Required by HomeScreen's collectAsStateWithLifecycle() (base scaffold uses it).
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+
+    // Media3 / ExoPlayer — RTSP/H.264 + general video playback for camera/vision
+    // client apps. TODO: make pack-conditional via a scaffolder dep-injection hook
+    // (only RTSP/camera packs strictly need it); base for now since OmniSight's
+    // product domain is camera/vision and most client apps play video.
+    implementation("androidx.media3:media3-exoplayer:1.3.1")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.3.1")
+    implementation("androidx.media3:media3-ui:1.3.1")
+    implementation("androidx.media3:media3-common:1.3.1")
 {% if push %}
 
     // FCM — push notification support.
