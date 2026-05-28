@@ -45,6 +45,12 @@ from backend.agents import (
     runner_sandbox,
 )
 from backend.agents.circuit_breaker import BREAKERS
+from backend.agents.delivery_target import (
+    DeliveryTarget,
+    DeliveryTargetError,
+    resolve_delivery_credential,
+    resolve_delivery_target,
+)
 from backend.agents.idempotency import DEFAULT_STORE
 from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import (
@@ -1632,12 +1638,71 @@ def query_gerrit_change_by_change_id(
     return None
 
 
+def _push_to_delivery_target(
+    worktree_path: Path,
+    delivery: DeliveryTarget,
+    *,
+    tenant_id: str | None = None,
+) -> GerritPushResult:
+    """Push worktree HEAD to a configured per-project delivery target.
+
+    OP-1837 (1B v1). The push credential is resolved from the tenant's
+    ``git_accounts`` row referenced by ``delivery.git_account_ref`` (the
+    existing git_accounts model) — never inlined, never logged. If it can't
+    be resolved the push fails closed: it never falls back to the shared
+    OmniSight bot key.
+
+    The OmniSight Gerrit-review post-processing (Change-URL parse, pre-review
+    mergeability self-fix, transient-retry recovery query) is intentionally
+    NOT run here — a customer delivery repo is not the OmniSight review
+    queue. Richer per-target delivery semantics (retries, review-queue
+    detection) are a follow-on.
+    """
+    import subprocess
+
+    try:
+        cred = _run_coro(
+            resolve_delivery_credential(delivery, tenant_id=tenant_id)
+        )
+    except DeliveryTargetError as exc:
+        return GerritPushResult(False, None, None, str(exc))
+
+    raw_key = str(cred.get("ssh_key") or "").strip()
+    if not raw_key:
+        return GerritPushResult(
+            False, None, None,
+            f"delivery target for project {delivery.project_key!r}: "
+            "git_accounts credential has no ssh_key",
+        )
+    ssh_key = Path(raw_key).expanduser()
+    if not ssh_key.exists():
+        return GerritPushResult(False, None, None, f"SSH key not found at {ssh_key}")
+
+    # OP-1777 (L3): minimal allowlisted env + the resolved per-target key;
+    # never an os.environ.copy() that would leak OMNISIGHT_* infra secrets.
+    env = runner_sandbox.build_allowlisted_env(
+        extra={"GIT_SSH_COMMAND": f"ssh -i {ssh_key}"}
+    )
+    result = BREAKERS["gerrit_ssh"].call(
+        subprocess.run,
+        ["git", "push", "--no-thin", delivery.repo_url, f"HEAD:{delivery.ref_spec}"],
+        cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
+    )
+    blob = (result.stderr + "\n" + result.stdout).strip()
+    if result.returncode != 0:
+        return GerritPushResult(False, None, None, blob[-1500:])
+    return GerritPushResult(
+        success=True, change_number=None, change_url=None, detail=blob[-1500:]
+    )
+
+
 def push_to_gerrit_for_review(
     worktree_path: Path,
     agent_class: str,
     target: str = "develop",
     instance_id: str | None = None,
     tenant_id: str | None = None,
+    project_key: str | None = None,
 ) -> GerritPushResult:
     """Push worktree HEAD to ``gerrit:refs/for/<target>``.
 
@@ -1653,8 +1718,22 @@ def push_to_gerrit_for_review(
     and the push is refused (returned as a hard failure) rather than ever
     falling back to the shared bot key. *tenant_id* defaults to the tenant
     bound into the context at pickup.
+
+    OP-1837 (1B v1): the delivery destination is resolved per-JIRA-project
+    via :func:`resolve_delivery_target`. When *project_key* maps to a
+    configured per-project target (``settings.delivery_targets``), the push
+    is delivered to that target's repo/ref using the credential referenced by
+    its ``git_account_ref`` (resolved via the git_accounts model). A project
+    with no configured target — and every existing caller, which passes no
+    *project_key* — resolves to the OmniSight default and takes the unchanged
+    push path below (byte-identical back-compat).
     """
     import subprocess
+    delivery = resolve_delivery_target(project_key, target=target)
+    if not delivery.is_default:
+        return _push_to_delivery_target(
+            worktree_path, delivery, tenant_id=tenant_id
+        )
     try:
         identity = resolve_gerrit_push_identity(
             agent_class, instance_id, tenant_id=tenant_id

@@ -89,6 +89,20 @@ class Settings(BaseSettings):
     github_token_map: str = ""      # JSON: {"github.com": "ghp_...", "github.enterprise.com": "ghp_..."}
     gitlab_token_map: str = ""      # JSON: {"gitlab.com": "glpat-...", "gitlab.internal.com": "glpat-..."}
 
+    # ── Per-project delivery targets (OP-1837 / 1B v1) ──
+    # JSON object mapping a JIRA project key → its delivery destination:
+    #   {"ACME": {"repo_url": "ssh://acme-ci@gerrit.acme.example:29418/acme/widgets",
+    #             "ref_spec": "refs/for/main", "git_account_ref": "acme-gerrit"}}
+    # ``git_account_ref`` names the git_accounts row that carries the push
+    # credential (reused — NOT a new secret store; only a reference is held
+    # here). A project with no entry falls back to the OmniSight Gerrit
+    # default, byte-identical to the pre-OP-1837 hardcoded push. Resolved by
+    # ``backend.agents.delivery_target.resolve_delivery_target``. This is a
+    # *destination* map (a reference + repo/ref), not a credential, so it is
+    # deliberately NOT in LEGACY_CREDENTIAL_FIELDS — mirrors the rationale for
+    # ``gerrit_replication_targets``.
+    delivery_targets: str = ""
+
     # ── Token Budget & Resilience ──
     token_budget_daily: float = 0.0  # USD per day (0 = unlimited)
     # L1-06: hourly burn-rate kill-switch. A daily budget catches slow
