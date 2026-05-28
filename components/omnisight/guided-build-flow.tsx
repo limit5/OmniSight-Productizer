@@ -6,6 +6,7 @@ import {
   Loader2, Play, Sparkles, Workflow,
 } from "lucide-react"
 import {
+  listScaffoldableSkills,
   submitDag,
   validateDag,
   type DAGValidateResponse,
@@ -174,6 +175,59 @@ function chooseTemplate(spec: ParsedSpec): Template {
   return TEMPLATES.find((tpl) => tpl.id === pickId) || TEMPLATES[0]
 }
 
+function labelForSkillPack(name: string): string {
+  return name
+    .split("-")
+    .map((part) => {
+      const upper = part.toUpperCase()
+      if (["AR", "IOS", "ONVIF", "RTSP", "UVC"].includes(upper)) return upper
+      return part.charAt(0).toUpperCase() + part.slice(1)
+    })
+    .join(" ")
+}
+
+function scaffoldTemplateForSkill(name: string): Template {
+  const taskId = `scaffold_${name.replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "")}`
+  return {
+    id: `skill:${name}`,
+    label: labelForSkillPack(name),
+    description: `Scaffold from the ${name} skill pack.`,
+    body: {
+      schema_version: 1,
+      dag_id: `SCAFFOLD-${name}`,
+      tasks: [
+        {
+          task_id: taskId || "scaffold_skill",
+          description: `Render a project scaffold using ${name}`,
+          required_tier: "t1",
+          toolchain: "python3",
+          inputs: [`external:skill:${name}`, "user:project_spec"],
+          expected_output: `artifacts/scaffolds/${name}.tar.gz`,
+          depends_on: [],
+        },
+      ],
+    },
+  }
+}
+
+function chooseScaffoldableTemplate(spec: ParsedSpec, templates: Template[]): Template | null {
+  const haystack = [
+    spec.raw_text,
+    spec.project_type?.value,
+    spec.runtime_model?.value,
+    spec.framework?.value,
+    spec.target_os?.value,
+  ].join(" ").toLowerCase()
+  return (
+    templates.find((tpl) => haystack.includes(tpl.id.slice("skill:".length).toLowerCase())) ||
+    templates.find((tpl) => {
+      const name = tpl.id.slice("skill:".length)
+      return name.split("-").every((part) => haystack.includes(part.toLowerCase()))
+    }) ||
+    null
+  )
+}
+
 function targetPlatformFromSpec(spec: ParsedSpec): string | null {
   const arch = spec.target_arch?.value
   const hw = spec.hardware_required?.value
@@ -211,7 +265,28 @@ interface Props {
 }
 
 export function GuidedBuildFlow({ spec, onOpenEditor }: Props) {
-  const template = useMemo(() => chooseTemplate(spec), [spec])
+  const staticTemplate = useMemo(() => chooseTemplate(spec), [spec])
+  const [scaffoldableSkills, setScaffoldableSkills] = useState<string[]>([])
+  const [skillsLoading, setSkillsLoading] = useState(true)
+  const [skillsError, setSkillsError] = useState<string | null>(null)
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null)
+  const scaffoldTemplates = useMemo(
+    () => scaffoldableSkills.map(scaffoldTemplateForSkill),
+    [scaffoldableSkills],
+  )
+  const defaultTemplate = useMemo(
+    () => chooseScaffoldableTemplate(spec, scaffoldTemplates) || staticTemplate,
+    [scaffoldTemplates, spec, staticTemplate],
+  )
+  const template = useMemo(
+    () => {
+      const registryTemplate = scaffoldTemplates.find((tpl) => tpl.id === selectedTemplateId)
+      if (registryTemplate) return registryTemplate
+      if (selectedTemplateId === staticTemplate.id) return staticTemplate
+      return defaultTemplate
+    },
+    [defaultTemplate, scaffoldTemplates, selectedTemplateId, staticTemplate],
+  )
   const targetPlatform = useMemo(() => targetPlatformFromSpec(spec), [spec])
   const [validation, setValidation] = useState<DAGValidateResponse | null>(null)
   const [validating, setValidating] = useState(false)
@@ -221,6 +296,26 @@ export function GuidedBuildFlow({ spec, onOpenEditor }: Props) {
   const [submittedRunId, setSubmittedRunId] = useState<string | null>(null)
   const [submittedPlanStatus, setSubmittedPlanStatus] = useState<string | null>(null)
   const inflight = useRef<AbortController | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    listScaffoldableSkills()
+      .then((res) => {
+        if (!cancelled) setScaffoldableSkills(res.items)
+      })
+      .catch((exc) => {
+        if (!cancelled) {
+          setScaffoldableSkills([])
+          setSkillsError(exc instanceof Error ? exc.message : String(exc))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setSkillsLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     inflight.current?.abort()
@@ -273,6 +368,7 @@ export function GuidedBuildFlow({ spec, onOpenEditor }: Props) {
         metadata: {
           source: "guided-build-flow",
           template_id: template.id,
+          scaffold_skill: template.id.startsWith("skill:") ? template.id.slice("skill:".length) : undefined,
           spec_project_type: spec.project_type?.value,
           spec_runtime_model: spec.runtime_model?.value,
         },
@@ -359,6 +455,53 @@ export function GuidedBuildFlow({ spec, onOpenEditor }: Props) {
             </li>
           ))}
         </ol>
+      </div>
+
+      <div className="rounded border border-[var(--border)] p-3 bg-[var(--background)]">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-xs font-mono font-semibold text-[var(--foreground)]">
+            Scaffoldable packs
+          </div>
+          <div className="text-[10px] font-mono uppercase tracking-wide text-[var(--muted-foreground)]">
+            {skillsLoading ? "loading" : `${scaffoldTemplates.length} available`}
+          </div>
+        </div>
+        {scaffoldTemplates.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {scaffoldTemplates.map((tpl) => {
+              const selected = template.id === tpl.id
+              return (
+                <button
+                  key={tpl.id}
+                  type="button"
+                  onClick={() => setSelectedTemplateId(tpl.id)}
+                  className={
+                    "text-xs font-mono px-2 py-1 rounded border transition-colors " +
+                    (selected
+                      ? "border-[var(--artifact-purple)] bg-[var(--artifact-purple)] text-white"
+                      : "border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]")
+                  }
+                >
+                  {tpl.label}
+                </button>
+              )
+            })}
+            {template.id.startsWith("skill:") && (
+              <button
+                type="button"
+                onClick={() => setSelectedTemplateId(staticTemplate.id)}
+                className="text-xs font-mono px-2 py-1 rounded border border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+              >
+                Use DAG template
+              </button>
+            )}
+          </div>
+        )}
+        {skillsError && (
+          <div className="mt-2 text-xs font-mono text-[var(--destructive)] break-words">
+            {skillsError}
+          </div>
+        )}
       </div>
 
       {validating && (

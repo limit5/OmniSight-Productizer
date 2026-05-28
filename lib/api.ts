@@ -1074,6 +1074,15 @@ export async function listEffectiveSkills(): Promise<EffectiveSkillsResponse> {
   return request<EffectiveSkillsResponse>("/skills/effective")
 }
 
+export interface ScaffoldableSkillsResponse {
+  items: string[]
+  count: number
+}
+
+export async function listScaffoldableSkills(): Promise<ScaffoldableSkillsResponse> {
+  return request<ScaffoldableSkillsResponse>("/skills/scaffoldable")
+}
+
 export type AutoSkillStatus = "draft" | "reviewed" | "promoted"
 
 export interface AutoSkillItem {
