@@ -5,9 +5,11 @@ operator re-enables bwrap:
 
 * §2a — ``_build_bubblewrap_argv`` RO-binds the resolved nvm node-version
   subtree (node + claude/codex + node_modules), NOT all of ``~/.nvm``.
-* §2b (Option B) — ``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` are added to
-  ``ENV_ALLOWLIST``, RO-bound at their host path, and ``--setenv``'d to that
-  bound path (not HOME-relative — HOME is pinned to the worktree).
+* §2b — ``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` are added to ``ENV_ALLOWLIST``.
+  NOTE: the original §2b RO-bind-at-host-path was SUPERSEDED by OP-1834 — the
+  CLI must WRITE its session/cache/state, so the config dirs are now seeded
+  into a writable per-ticket cli-home and the vars point there (RO-bind →
+  EROFS at init). The two §2b argv tests below assert the OP-1834 redirect.
 * §2c (v1) — the agent-CLI wrap in ``auto-runner-jira.py`` passes
   ``network=True`` (blanket-allow for v1).
 
@@ -132,9 +134,10 @@ def test_env_allowlist_includes_cli_config_dirs():
     assert "CODEX_HOME" in rs.ENV_ALLOWLIST
 
 
-def test_argv_binds_and_setenvs_default_cli_config_dirs(tmp_path, monkeypatch):
-    """§2b: ``~/.claude`` / ``~/.codex`` (host HOME) are RO-bound + the vars
-    --setenv'd to those bound paths — NOT relative to the jail's HOME."""
+def test_argv_redirects_cli_config_dirs_into_writable_cli_home(tmp_path, monkeypatch):
+    """§2b SUPERSEDED by OP-1834: the host ``~/.claude`` / ``~/.codex`` are
+    NOT bound (RW or RO); instead CLAUDE_CONFIG_DIR / CODEX_HOME / HOME are
+    --setenv'd into the writable per-ticket cli-home."""
     _force_platform(monkeypatch, rs.PLATFORM_LINUX)
     _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
     monkeypatch.setattr(rs, "_nvm_node_toolchain_subtree", lambda env: None)
@@ -147,33 +150,36 @@ def test_argv_binds_and_setenvs_default_cli_config_dirs(tmp_path, monkeypatch):
     codex_cfg.mkdir()
 
     base = {"PATH": "/usr/bin", "HOME": str(host_home)}
-    argv = rs.wrap_in_bubblewrap(
-        ["claude"], worktree_path=worktree, ticket_key="OP-1803", env=base,
-    )
+    try:
+        argv = rs.wrap_in_bubblewrap(
+            ["claude"], worktree_path=worktree, ticket_key="OP-1834T1", env=base,
+        )
 
-    for cfg in (claude_cfg, codex_cfg):
-        c = str(cfg)
-        idx = argv.index(c)
-        assert argv[idx - 1] == "--ro-bind"
-        assert argv[idx + 1] == c
+        # The shared host config dirs are NEVER bound (no RW-, no RO-bind).
+        assert str(claude_cfg) not in argv
+        assert str(codex_cfg) not in argv
 
-    setenv = _setenv_map(argv)
-    assert setenv["CLAUDE_CONFIG_DIR"] == str(claude_cfg)
-    assert setenv["CODEX_HOME"] == str(codex_cfg)
-    # Pinned to the bound path, never the jail's (worktree) HOME.
-    assert setenv["CLAUDE_CONFIG_DIR"] != setenv["HOME"]
-    # Set exactly once — skipped in the generic allowlist projection.
-    assert sum(
-        1 for i, t in enumerate(argv)
-        if t == "--setenv" and argv[i + 1] == "CLAUDE_CONFIG_DIR"
-    ) == 1
+        cli_home = rs.cli_home_for("OP-1834T1")
+        setenv = _setenv_map(argv)
+        assert setenv["HOME"] == str(cli_home)
+        assert setenv["CLAUDE_CONFIG_DIR"] == str(cli_home / ".claude")
+        assert setenv["CODEX_HOME"] == str(cli_home / ".codex")
+        # The CLI config var resolves under the (writable) HOME, not apart.
+        assert setenv["CLAUDE_CONFIG_DIR"].startswith(setenv["HOME"])
+        # Each set exactly once — skipped in the generic allowlist projection.
+        for var in ("HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+            assert sum(
+                1 for i, t in enumerate(argv)
+                if t == "--setenv" and argv[i + 1] == var
+            ) == 1
+    finally:
+        rs.cleanup_cli_home("OP-1834T1")
 
 
-def test_argv_respects_explicit_config_override_without_double_set(
-    tmp_path, monkeypatch,
-):
-    """An explicit ``CLAUDE_CONFIG_DIR`` in the env is honored (bound +
-    setenv to that path) and not double-projected via the allowlist loop."""
+def test_argv_explicit_config_override_seeds_into_cli_home(tmp_path, monkeypatch):
+    """An explicit ``CLAUDE_CONFIG_DIR`` is the seed SOURCE (its contents are
+    copied into the cli-home), but the in-jail var points at the writable
+    per-ticket cli-home — never the host path, which is not bound (OP-1834)."""
     _force_platform(monkeypatch, rs.PLATFORM_LINUX)
     _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
     monkeypatch.setattr(rs, "_nvm_node_toolchain_subtree", lambda env: None)
@@ -181,26 +187,37 @@ def test_argv_respects_explicit_config_override_without_double_set(
     worktree.mkdir()
     custom = tmp_path / "custom-claude"
     custom.mkdir()
+    (custom / "auth.json").write_text("SEED")
 
     base = {
         "PATH": "/usr/bin",
-        "HOME": str(tmp_path / "home"),  # default ~/.codex absent → not bound
+        "HOME": str(tmp_path / "home"),  # default ~/.codex absent on host
         "CLAUDE_CONFIG_DIR": str(custom),
     }
-    argv = rs.wrap_in_bubblewrap(
-        ["claude"], worktree_path=worktree, ticket_key="OP-1803", env=base,
-    )
+    try:
+        # Seeding is the runner's explicit step (keeps the argv builder pure).
+        rs.prepare_cli_home("OP-1834T2", env=base)
+        argv = rs.wrap_in_bubblewrap(
+            ["claude"], worktree_path=worktree, ticket_key="OP-1834T2", env=base,
+        )
 
-    setenv = _setenv_map(argv)
-    assert setenv["CLAUDE_CONFIG_DIR"] == str(custom)
-    assert sum(
-        1 for i, t in enumerate(argv)
-        if t == "--setenv" and argv[i + 1] == "CLAUDE_CONFIG_DIR"
-    ) == 1
-    idx = argv.index(str(custom))
-    assert argv[idx - 1] == "--ro-bind"
-    # Default ~/.codex doesn't exist → not bound / set.
-    assert "CODEX_HOME" not in setenv
+        cli_home = rs.cli_home_for("OP-1834T2")
+        setenv = _setenv_map(argv)
+        # Var points into the writable cli-home, not the custom host path.
+        assert setenv["CLAUDE_CONFIG_DIR"] == str(cli_home / ".claude")
+        assert str(custom) not in argv
+        assert sum(
+            1 for i, t in enumerate(argv)
+            if t == "--setenv" and argv[i + 1] == "CLAUDE_CONFIG_DIR"
+        ) == 1
+        # The explicit override's contents are seeded in + readable.
+        assert (cli_home / ".claude" / "auth.json").read_text() == "SEED"
+        # CODEX_HOME is still redirected (the writable dir is created empty even
+        # though the host ~/.codex was absent — no longer skipped).
+        assert setenv["CODEX_HOME"] == str(cli_home / ".codex")
+        assert (cli_home / ".codex").is_dir()
+    finally:
+        rs.cleanup_cli_home("OP-1834T2")
 
 
 # ─── §2c: agent-CLI wrap is network-allowed ─────────────────────────

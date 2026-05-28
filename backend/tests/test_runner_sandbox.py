@@ -586,10 +586,14 @@ def test_argv_linux_clearenv_and_allowlisted_setenv(tmp_path, monkeypatch):
     assert setenv["PATH"] == "/usr/bin"
     assert setenv["ANTHROPIC_API_KEY"] == "sk-ant-test"
     assert setenv["GIT_SSH_COMMAND"] == "ssh -i /k"
-    # HOME / TMPDIR pinned to the jail, not the host values.
-    assert setenv["HOME"] == str(worktree.resolve())
+    # HOME / TMPDIR pinned to the jail, not the host values. OP-1834: HOME is
+    # the writable per-ticket cli-home (under /tmp/runner-<ticket>), NOT the
+    # worktree — so the wrapped CLI can write its session/cache/state there.
+    assert setenv["HOME"] == str(rs.cli_home_for("OP-T"))
     assert setenv["HOME"] != "/home/host"
+    assert setenv["HOME"] != str(worktree.resolve())
     assert setenv["TMPDIR"] != "/host/tmp"
+    rs.cleanup_cli_home("OP-T")
     # The OMNISIGHT_* infra secret is never projected into the jail.
     assert all(not k.startswith("OMNISIGHT_") for k in setenv)
     assert "super-secret-token" not in argv

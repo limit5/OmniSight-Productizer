@@ -103,13 +103,15 @@ ENV_ALLOWLIST: tuple[str, ...] = (
     "CLAUDE_MODEL",
     "CLAUDE_CODE_OAUTH_TOKEN",
     "OPENAI_API_KEY",
-    # --- agent CLI config / cache dirs ---
+    # --- agent CLI config / cache / state dirs ---
     "XDG_CONFIG_HOME",
     "XDG_CACHE_HOME",
     "XDG_DATA_HOME",
-    # --- agent CLI config dirs (OP-1803 §2b, Option B): forwarded so the
-    # degraded/raw spawn still finds the bot's config when bwrap is absent,
-    # AND --setenv'd to a bound RO path inside the jail (not HOME-relative).
+    "XDG_STATE_HOME",
+    # --- agent CLI config dirs: forwarded so the degraded/raw spawn still
+    # finds the bot's config when bwrap is absent. On the bwrap path they are
+    # --setenv'd to the writable per-ticket cli-home instead (OP-1834,
+    # superseding the OP-1803 §2b RO config bind that broke session init).
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
 )
@@ -279,29 +281,111 @@ def _nvm_node_toolchain_subtree(env: Mapping[str, str]) -> Path | None:
     return None
 
 
-# Agent-CLI config dirs (OP-1803 §2b, Option B): (ENV_NAME, ~-relative default).
-# We do NOT rely on the jail's HOME (pinned to the worktree) — each dir is
-# resolved against the *host* HOME (or the bot's explicit override), RO-bound
-# at its absolute path, and the var --setenv'd to that path inside the jail.
+# Writable per-ticket CLI home (OP-1834). The wrapped CLI must WRITE its
+# session / cache / state, so we give it a HOME under the already-RW
+# /tmp/runner-<ticket> scratch, seed it with the host auth/config (so the CLI
+# still authenticates), and redirect HOME + the CLI/XDG dirs there. RW-binding
+# the *shared* host config dir would break tenant isolation, so we copy instead.
+_CLI_HOME_DIRNAME = "cli-home"
+
+
+# Agent-CLI config dirs (OP-1834): (ENV_NAME, relative subdir). The relative
+# name is BOTH the conventional host default (``~/.claude`` / ``~/.codex``) and
+# the subdir created inside the writable CLI home that the host contents are
+# seeded into + the var is pointed at.
 _CLI_CONFIG_DIRS: tuple[tuple[str, str], ...] = (
     ("CLAUDE_CONFIG_DIR", ".claude"),
     ("CODEX_HOME", ".codex"),
 )
 
 
-def _cli_config_dirs(env: Mapping[str, str]) -> tuple[tuple[str, Path], ...]:
-    """Resolve ``(ENV_NAME, host_path)`` for each agent-CLI config dir (§2b).
+# XDG base dirs projected inside the writable CLI home (OP-1834). The CLI may
+# write to each, so they are redirected off any RO/absent host path into the
+# per-ticket writable home. ``HOME`` itself is the cli-home root.
+_CLI_HOME_XDG_DIRS: tuple[tuple[str, str], ...] = (
+    ("XDG_CONFIG_HOME", ".config"),
+    ("XDG_CACHE_HOME", ".cache"),
+    ("XDG_DATA_HOME", ".local/share"),
+    ("XDG_STATE_HOME", ".local/state"),
+)
 
-    Uses the bot's explicit ``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` when set,
-    else the conventional ``~/.claude`` / ``~/.codex`` under the *host* HOME
-    (``env['HOME']`` before the jail pins it to the worktree).
+
+def _cli_home_redirect_env(ticket_key: str) -> dict[str, str]:
+    """Return the ``{HOME, CLAUDE_CONFIG_DIR, CODEX_HOME, XDG_*}`` → in-jail
+    path mapping for the per-ticket CLI home (OP-1834).
+
+    Pure: derived from :func:`cli_home_for` only — no host values, no FS
+    writes. Used by the argv builder to ``--setenv`` the vars and by
+    :func:`prepare_cli_home` to know where to create/seed. Keeping it pure is
+    what lets the argv builder stay side-effect-free (the actual seeding is the
+    runner's explicit :func:`prepare_cli_home` step).
     """
-    home = env.get("HOME") or os.path.expanduser("~")
-    pairs: list[tuple[str, Path]] = []
-    for name, default_rel in _CLI_CONFIG_DIRS:
-        raw = env.get(name) or os.path.join(home, default_rel)
-        pairs.append((name, Path(raw)))
-    return tuple(pairs)
+    cli_home = cli_home_for(ticket_key)
+    env: dict[str, str] = {"HOME": str(cli_home)}
+    for name, rel in _CLI_CONFIG_DIRS:
+        env[name] = str(cli_home / rel)
+    for name, rel in _CLI_HOME_XDG_DIRS:
+        env[name] = str(cli_home / rel)
+    return env
+
+
+def prepare_cli_home(
+    ticket_key: str, env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Create + seed the writable per-ticket CLI home (OP-1834).
+
+    The jailed CLI must WRITE its session/cache/state, but RW-binding the
+    shared host ``CODEX_HOME`` / ``CLAUDE_CONFIG_DIR`` would break tenant
+    isolation. So the runner calls this once, before spawning the wrapped CLI,
+    to:
+
+    * create ``cli_home`` (a subdir of the RW ``/tmp/runner-<ticket>`` scratch);
+    * COPY each host CLI config dir's CONTENTS into ``cli_home/<rel>`` so the
+      bot's auth is seeded + readable AND the CLI writes its session/cache to
+      the SAME writable dir (the host dir is never bound, so writes never leak
+      back to the shared config — isolation preserved);
+    * create the XDG base dirs inside ``cli_home``.
+
+    Deliberately SEPARATE from :func:`wrap_in_bubblewrap` so building the wrap
+    argv has no filesystem side effects, and so the degraded fleet (no bwrap)
+    never copies the bot's creds into ``/tmp`` — the runner only calls this when
+    :func:`sandbox_available` is true, keeping the fix INERT until re-enabled.
+
+    The copy is best-effort per host dir: an unreadable/special file (e.g. a
+    cache pack with restrictive perms) is logged and skipped rather than
+    aborting the seed — the auth files copy first and are what the CLI needs.
+
+    Returns the same redirect mapping as :func:`_cli_home_redirect_env`.
+    """
+    src_env = os.environ if env is None else env
+    cli_home = cli_home_for(ticket_key)
+    cli_home.mkdir(parents=True, exist_ok=True)
+    host_home = src_env.get("HOME") or os.path.expanduser("~")
+
+    for name, rel in _CLI_CONFIG_DIRS:
+        host_raw = src_env.get(name) or os.path.join(host_home, rel)
+        host_path = Path(host_raw)
+        dest = cli_home / rel
+        if host_path.is_dir():
+            try:
+                shutil.copytree(
+                    host_path, dest, dirs_exist_ok=True,
+                    ignore_dangling_symlinks=True,
+                )
+            except (shutil.Error, OSError) as exc:
+                # copytree copies everything it can and raises at the end with
+                # the unreadable files; the auth/config we need is already in.
+                logger.warning(
+                    "[cli-home-seed] partial copy of %s for %s: %s",
+                    host_path, ticket_key, exc,
+                )
+        else:
+            dest.mkdir(parents=True, exist_ok=True)
+
+    for _, rel in _CLI_HOME_XDG_DIRS:
+        (cli_home / rel).mkdir(parents=True, exist_ok=True)
+
+    return _cli_home_redirect_env(ticket_key)
 
 
 LOG_SANDBOX_WRAPPED = "sandbox=wrapped"
@@ -418,12 +502,39 @@ def _which(binary: str) -> str | None:
     return shutil.which(binary)
 
 
+def _safe_ticket(ticket_key: str) -> str:
+    """Sanitise a ticket key for use as a ``/tmp/runner-*`` path component."""
+    return ticket_key.replace("/", "_").replace("..", "_")
+
+
 def _tmp_dir_for(ticket_key: str) -> Path:
     """Return the ``/tmp/runner-<ticket_key>`` path, creating it if absent."""
-    safe = ticket_key.replace("/", "_").replace("..", "_")
-    tmp = Path("/tmp") / f"runner-{safe}"
+    tmp = Path("/tmp") / f"runner-{_safe_ticket(ticket_key)}"
     tmp.mkdir(parents=True, exist_ok=True)
     return tmp
+
+
+def cli_home_for(ticket_key: str) -> Path:
+    """Return the writable per-ticket CLI-home path (OP-1834).
+
+    A subdir of the already-RW per-ticket scratch (``/tmp/runner-<ticket>``)
+    that the jail uses as the wrapped CLI's ``HOME`` + state/config/cache base.
+    Pure path computation — does NOT create the dir (the runner seeds it via
+    :func:`prepare_cli_home`; callers resolving HOME-relative mounts only need
+    the path).
+    """
+    return Path("/tmp") / f"runner-{_safe_ticket(ticket_key)}" / _CLI_HOME_DIRNAME
+
+
+def cleanup_cli_home(ticket_key: str) -> None:
+    """Remove the seeded per-ticket CLI home so creds never outlive the run.
+
+    The jail seeds the CLI's auth/config into :func:`cli_home_for` (OP-1834),
+    so once the wrapped CLI exits we must wipe it — otherwise the bot's
+    credentials linger in ``/tmp`` past the pickup. Best-effort: a missing dir
+    (degraded/raw spawn never seeds one) is a silent no-op.
+    """
+    shutil.rmtree(cli_home_for(ticket_key), ignore_errors=True)
 
 
 def _resolve_network(ticket_key: str, network: bool) -> bool:
@@ -471,13 +582,19 @@ def _build_bubblewrap_argv(
     mutate the shared-per-tenant cache, and the cache buys offline
     resolution while ``--unshare-net`` stays the default.
 
-    OP-1803 (§2a/§2b): the resolved nvm node-version subtree (node + the
-    ``claude`` / ``codex`` CLIs + ``node_modules``) and the CLI config dirs
-    (``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME``) are RO-bound so the jailed CLI
-    can actually ``execvp`` and read its config. The config vars are
-    ``--setenv``'d to the bound absolute path (Option B — not HOME-relative,
-    since HOME is pinned to the worktree below), so they are skipped in the
-    generic allowlist projection and re-set explicitly here.
+    OP-1803 (§2a): the resolved nvm node-version subtree (node + the
+    ``claude`` / ``codex`` CLIs + ``node_modules``) is RO-bound so the jailed
+    CLI can actually ``execvp``.
+
+    OP-1834: the wrapped CLI gets a WRITABLE per-ticket home under the RW
+    ``/tmp/runner-<ticket>`` scratch (``cli-home``), RW-bound here, with
+    ``HOME`` + ``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME`` / ``XDG_*`` ``--setenv``'d
+    there so session/cache/state writes succeed (the OP-1803 RO config bind
+    made them fail with ``EROFS``). The dir's CONTENTS are seeded with the host
+    auth/config by the runner's :func:`prepare_cli_home` BEFORE spawn (kept out
+    of this builder so it has no filesystem side effects); the shared host
+    config dir is NEVER bound, so tenant isolation holds. These pinned vars are
+    skipped in the generic allowlist projection and set explicitly below.
     """
     worktree_abs = str(worktree_path.resolve())
     tmp_dir = str(_tmp_dir_for(ticket_key))
@@ -505,45 +622,47 @@ def _build_bubblewrap_argv(
         tc_abs = str(toolchain)
         argv += ["--ro-bind", tc_abs, tc_abs]
 
-    # OP-1803 (§2b, Option B): RO-bind each CLI config dir at its host absolute
-    # path and remember it so we can --setenv the var to that path below — the
-    # CLI must NOT resolve config relative to the jail's (worktree) HOME.
-    config_setenv: dict[str, str] = {}
-    for name, path in _cli_config_dirs(env):
-        if path.exists():
-            p_abs = str(path)
-            argv += ["--ro-bind", p_abs, p_abs]
-            config_setenv[name] = p_abs
-
     argv += ["--bind", worktree_abs, worktree_abs]
     argv += ["--bind", tmp_dir, tmp_dir]
+
+    # OP-1834: RW-bind the writable per-ticket CLI home under the RW scratch so
+    # the CLI can write session/cache/state. The dir's CONTENTS are seeded with
+    # the host auth/config by the runner's prepare_cli_home() before spawn (NOT
+    # here — the argv builder stays side-effect-free; the shared host config dir
+    # is never bound). ``cli_env`` maps HOME + CLAUDE_CONFIG_DIR / CODEX_HOME /
+    # XDG_* to paths inside it; they are --setenv'd below (and skipped in the
+    # generic allowlist projection so host values never override them).
+    cli_home_abs = str(cli_home_for(ticket_key))
+    cli_env = _cli_home_redirect_env(ticket_key)
+    argv += ["--bind", cli_home_abs, cli_home_abs]
+
     for git_dir in _git_metadata_mounts(worktree_path):
         git_dir_abs = str(git_dir)
         argv += ["--bind", git_dir_abs, git_dir_abs]
 
-    # OP-1781 (1A.4): RO-bind the pre-warmed per-tenant dependency cache on
-    # top of the worktree HOME so the package manager finds it offline. After
-    # the worktree --bind so it layers correctly; RO so the build can't mutate
-    # the shared cache from inside the jail.
+    # OP-1781 (1A.4): RO-bind the pre-warmed per-tenant dependency cache at the
+    # package manager's default HOME-relative location so the build finds it
+    # offline. Bound after the RW homes so it layers correctly; RO so the build
+    # can't mutate the shared cache. The caller computes the dst against the
+    # jail's HOME — the writable per-ticket cli-home as of OP-1834.
     for src, dst in dep_cache_mounts or ():
         argv += ["--ro-bind", src, dst]
 
-    # Re-project the scrubbed allowlist into the cleared jail env. HOME and
-    # TMPDIR are pinned to jail paths below; CLAUDE_CONFIG_DIR / CODEX_HOME are
-    # pinned to the bound RO config paths (OP-1803 §2b) — so skip any
-    # host-inherited values for all four here (the explicit values always win).
-    pinned = {"HOME", "TMPDIR", *config_setenv}
+    # Re-project the scrubbed allowlist into the cleared jail env. TMPDIR is
+    # pinned to the jail path below; HOME + CLAUDE_CONFIG_DIR / CODEX_HOME /
+    # XDG_* are pinned to the writable per-ticket CLI home (OP-1834) — so skip
+    # any host-inherited values for all of them here (the explicit values win).
+    pinned = {"TMPDIR", *cli_env}
     for name, value in build_allowlisted_env(env).items():
         if name in pinned:
             continue
         argv += ["--setenv", name, value]
 
-    # Pin HOME / TMPDIR / cwd inside the jail so the CLI doesn't probe
-    # for a writable $HOME outside the worktree.
-    argv += ["--setenv", "HOME", worktree_abs]
+    # Pin TMPDIR inside the jail; point HOME + the CLI/XDG dirs at the writable
+    # per-ticket cli-home (OP-1834) so session/cache/state writes succeed. cwd
+    # stays the worktree — the CLI works on the code there, HOME lives apart.
     argv += ["--setenv", "TMPDIR", tmp_dir]
-    # OP-1803 (§2b): point the CLI config vars at their bound RO paths.
-    for name, value in config_setenv.items():
+    for name, value in cli_env.items():
         argv += ["--setenv", name, value]
     argv += ["--chdir", worktree_abs]
 
@@ -779,6 +898,9 @@ __all__ = [
     "SandboxPermissionDenied",
     "build_allowlisted_env",
     "assert_sandbox_enforced_for_fleet",
+    "cli_home_for",
+    "cleanup_cli_home",
+    "prepare_cli_home",
     "detect_platform",
     "sandbox_available",
     "wrap_in_bubblewrap",
