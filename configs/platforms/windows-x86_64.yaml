@@ -1,0 +1,49 @@
+# OmniSight Platform Profile: Windows x86_64 Native Desktop — X0 #296
+#
+# Pure-software target for Windows x86_64 desktop apps shipped through
+# the X8 SKILL-DESKTOP-TAURI vertical (Tauri 2.x + WebView2). This is the
+# Windows sibling of the `linux-x86_64-native` / `macos-x64-native`
+# desktop profiles: it describes the HOST shape a Tauri desktop bundle is
+# produced and run on, dispatching through the X-series software track
+# (`target_kind: software`).
+#
+# Relationship to `windows-msvc-x64`:
+#   * `windows-msvc-x64` is the general MSVC build-tools profile (cl.exe /
+#     MSBuild / WiX), oriented at native C/C++ + .NET service/CLI builds
+#     on the `windows-2022` runner pool.
+#   * THIS profile is the desktop-native binding the desktop-tauri-derived
+#     packs target — it follows the `<os>-<arch>` desktop naming the other
+#     native desktop profiles use so a reuse pack (e.g. windows-uvc-host)
+#     can pin a Windows desktop target without inheriting an MSVC
+#     service/CLI framing it does not want.
+#   Both resolve through `_resolve_software` (kind=software); they differ
+#   only in framing + packaging defaults, not in target_kind.
+#
+# Toolchain note:
+#   Tauri on Windows links against the MSVC toolchain + WebView2 runtime
+#   and bundles `.msi` (WiX) / `.exe` (NSIS) installers. Signing material
+#   (Authenticode) is injected at build time from the P3 secret_store the
+#   same way the MSVC profile encodes shape-not-material.
+#
+# Consumed by:
+#   * backend/platform_profile.py::resolve_build_toolchain → kind=software
+#   * scripts/simulate.sh software track              [X1 #297]
+#   * X3 build & package adapters (.msi / NSIS)       [X3 #299]
+#   * X4 license scan / CVE / SBOM                    [X4 #300]
+#   * X8 SKILL-DESKTOP-TAURI Windows desktop variant  [X8 #304]
+
+platform: windows-x86_64
+label: "Windows x86_64 — Native Desktop (Tauri 2.x / WebView2)"
+target_kind: software
+
+software_runtime: native
+# Tauri's Windows bundler default. NSIS (.exe) is a per-project override
+# emitted by the X3 adapter through the same path.
+packaging: msi
+# Generic fallback shown in X1 diagnostics when language autodetection
+# cannot pick a per-language runner; the Tauri pack drives the real
+# build through `tauri build` / cargo on the windows runner pool.
+build_cmd: "cargo build --release"
+
+host_arch: x86_64
+host_os: windows

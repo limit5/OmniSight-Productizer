@@ -9,6 +9,7 @@ dependency on other skills/core modules, and lifecycle hook commands.
 
 from __future__ import annotations
 
+from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -66,6 +67,21 @@ class SkillManifest(BaseModel):
     )
     hooks: LifecycleHooks = Field(default_factory=LifecycleHooks)
     keywords: list[str] = Field(default_factory=list)
+
+    # Optional scaffolder platform_profile pin. When set, the dispatcher
+    # (via skill_registry.resolve_scaffolder) overrides the resolved
+    # scaffolder's default platform_profile for this pack only — without
+    # mutating the shared scaffolder default. The intended consumer is a
+    # reuse pack whose target OS differs from the borrowed scaffolder's
+    # default profile (e.g. windows-uvc-host borrows the desktop-tauri
+    # scaffolder, which defaults to linux-x86_64-native, but must render a
+    # Windows target).
+    platform_profile: Optional[str] = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_.-]+$",
+        description="Scaffolder platform_profile id to pin for this pack",
+    )
 
     @field_validator("schema_version")
     @classmethod

@@ -25,8 +25,10 @@ Lifecycle hooks
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import importlib
+import inspect
 import logging
 import shlex
 import shutil
@@ -681,10 +683,24 @@ def resolve_scaffolder(
     # full project — base skeleton + overlay — with no CLI change. When
     # there is no overlay, ``render`` is the scaffolder's own entry point
     # unchanged (``is`` identity preserved for the conventional case).
+    #
+    # A manifest ``platform_profile`` pin is bound the same way: pre-bound
+    # onto ``render`` as a keyword so the dispatcher overrides the
+    # scaffolder's default profile for this pack only. ``options_cls`` is
+    # left untouched (its field defaults stay the scaffolder's), so the
+    # dispatcher still builds the shared options class — no other pack
+    # bound to the same scaffolder is affected. The pin is applied at
+    # render time, so for a pinned pack it is authoritative over the
+    # ``platform_profile`` knob value the dispatcher resolves.
     overlay_dirs = _resolve_overlay_dirs(info, module)
-    bound_render = render
+    partial_kwargs: dict[str, object] = {}
     if overlay_dirs:
-        bound_render = functools.partial(render, overlay_dirs=overlay_dirs)
+        partial_kwargs["overlay_dirs"] = overlay_dirs
+    profile_pin = _resolve_profile_pin(info, options_cls, render)
+    if profile_pin is not None:
+        partial_kwargs["platform_profile_override"] = profile_pin
+
+    bound_render = functools.partial(render, **partial_kwargs) if partial_kwargs else render
 
     return ScaffolderHandle(
         skill_name=skill_name,
@@ -718,6 +734,34 @@ def _resolve_overlay_dirs(info: SkillInfo, module: object) -> list[Path]:
     except OSError:
         return []
     return [pack_scaffolds]
+
+
+def _resolve_profile_pin(
+    info: SkillInfo, options_cls: type, render: Callable[..., object]
+) -> Optional[str]:
+    """Return the manifest ``platform_profile`` pin to bind, or ``None``.
+
+    A pin is honoured only when it is actually applicable: the manifest
+    declares one, the scaffolder's options expose a ``platform_profile``
+    field, and the bound ``render`` accepts a ``platform_profile_override``
+    keyword. Any miss returns ``None`` so a pack pinning a profile against
+    a scaffolder that has no profile seam is a silent no-op rather than a
+    render-time crash — the binding stays strictly opt-in.
+    """
+    manifest = info.manifest
+    pin = getattr(manifest, "platform_profile", None) if manifest else None
+    if not pin:
+        return None
+    field_names = {f.name for f in dataclasses.fields(options_cls)}
+    if "platform_profile" not in field_names:
+        return None
+    try:
+        params = inspect.signature(render).parameters
+    except (TypeError, ValueError):
+        return None
+    if "platform_profile_override" not in params:
+        return None
+    return pin
 
 
 def list_scaffoldable_skills(skills_dir: Optional[Path] = None) -> list[str]:
