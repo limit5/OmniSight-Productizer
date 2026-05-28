@@ -1,3 +1,15 @@
+# Compliance-audit skill pack — task template.
+#
+# OP-1812 (B2, 1D-rest): completed the embedded planner schema migration by
+# adding the missing `expected_output` key to each task (the pack already
+# carried `task_id`). With both keys present the embedded planner consumes
+# this pack without a KeyError. This is a SCHEMA-ONLY migration: task
+# content/intent, phase/matrix/standard metadata, depends_on edges, inputs,
+# the legacy `outputs` advisory tag, and `requires_human_signoff` are all
+# unchanged. The pack remains advisory/stubbed; making these audits real is a
+# separate, later track. Follows the proven imaging/OP-1786 pattern: each task
+# carries a distinct build/compliance-audit/ expected_output artefact.
+# (This is the LAST B-2 pack — 1D-rest complete after this.)
 schema_version: 1
 skill: compliance-audit
 tasks:
@@ -10,6 +22,7 @@ tasks:
     depends_on: []
     inputs: [requirements, bdd_specs, code_diff, test_report, release_evidence]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/audit_iec62304_traceability_auxiliary.json
     requires_human_signoff: true
 
   - task_id: scan_phi_data_leakage_auxiliary
@@ -21,6 +34,7 @@ tasks:
     depends_on: []
     inputs: [logs, exports, screenshots, fixtures, reports]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/scan_phi_data_leakage_auxiliary.json
     requires_human_signoff: true
 
   - task_id: audit_iso13485_design_controls_auxiliary
@@ -32,6 +46,7 @@ tasks:
     depends_on: []
     inputs: [design_inputs, design_outputs, verification_report, validation_report, change_log]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/audit_iso13485_design_controls_auxiliary.json
     requires_human_signoff: true
 
   - task_id: scan_misra_c_strict_auxiliary
@@ -43,6 +58,7 @@ tasks:
     depends_on: []
     inputs: [source_diff, static_analysis_report, deviation_record]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/scan_misra_c_strict_auxiliary.json
     requires_human_signoff: true
 
   - task_id: verify_asil_d_redundancy_auxiliary
@@ -54,6 +70,7 @@ tasks:
     depends_on: []
     inputs: [safety_goal, architecture_diagram, diagnostic_report, fault_injection_report]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/verify_asil_d_redundancy_auxiliary.json
     requires_human_signoff: true
 
   - task_id: audit_autosar_interface_contract_auxiliary
@@ -65,6 +82,7 @@ tasks:
     depends_on: []
     inputs: [arxml, interface_control_document, generated_artifact_diff]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/audit_autosar_interface_contract_auxiliary.json
     requires_human_signoff: true
 
   - task_id: analyze_state_machine_deadlocks_auxiliary
@@ -76,6 +94,7 @@ tasks:
     depends_on: []
     inputs: [state_diagram, transition_table, fault_injection_report]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/analyze_state_machine_deadlocks_auxiliary.json
     requires_human_signoff: true
 
   - task_id: verify_watchdog_pet_timing_auxiliary
@@ -87,6 +106,7 @@ tasks:
     depends_on: []
     inputs: [watchdog_config, timing_trace, fault_injection_report]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/verify_watchdog_pet_timing_auxiliary.json
     requires_human_signoff: true
 
   - task_id: audit_sil_claim_evidence_auxiliary
@@ -98,6 +118,7 @@ tasks:
     depends_on: []
     inputs: [hazard_analysis, sil_assignment, diagnostic_coverage, validation_report]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/audit_sil_claim_evidence_auxiliary.json
     requires_human_signoff: true
 
   - task_id: verify_mcdc_100_percent_auxiliary
@@ -109,6 +130,7 @@ tasks:
     depends_on: []
     inputs: [coverage_report, test_vectors, source_diff]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/verify_mcdc_100_percent_auxiliary.json
     requires_human_signoff: true
 
   - task_id: run_formal_verification_proof_auxiliary
@@ -120,6 +142,7 @@ tasks:
     depends_on: []
     inputs: [proof_artifacts, solver_log, assumptions, requirement_mapping]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/run_formal_verification_proof_auxiliary.json
     requires_human_signoff: true
 
   - task_id: audit_mil_std_882e_hazard_log_auxiliary
@@ -131,4 +154,5 @@ tasks:
     depends_on: []
     inputs: [hazard_log, mitigation_plan, residual_risk_acceptance]
     outputs: [advisory_audit_report]
+    expected_output: build/compliance-audit/audit_mil_std_882e_hazard_log_auxiliary.json
     requires_human_signoff: true
