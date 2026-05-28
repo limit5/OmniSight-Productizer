@@ -257,5 +257,66 @@ class TestOverwriteSemantics:
         assert custom.read_text() == "do not clobber\n"
 
 
+class TestOverlayRendering:
+    """OP-1814 — overlay_dirs layered on top of the base scaffold root.
+
+    The seam a pack uses when it reuses another pack's scaffolder but
+    ships its own templates (android-rtsp-onvif-client → android).
+    """
+
+    def _overlay_tree(self, root: Path) -> None:
+        (root / "src").mkdir(parents=True, exist_ok=True)
+        # A brand-new file the base does not have ...
+        (root / "src" / "extra.txt.j2").write_text(
+            "extra for {{ project_name }}\n", encoding="utf-8"
+        )
+        # ... and a static overlay file.
+        (root / "OVERLAY.txt").write_text("layered\n", encoding="utf-8")
+
+    def test_overlay_adds_new_files(self, scaffold_dir, out_dir, tmp_path):
+        overlay = tmp_path / "overlay"
+        self._overlay_tree(overlay)
+        scaffolder = _DemoScaffolder(scaffold_dir)
+        scaffolder.render_project(
+            out_dir, _Opts(project_name="MyApp"), overlay_dirs=[overlay]
+        )
+        # Base files still rendered ...
+        assert (out_dir / "README.md").read_text() == "# MyApp\n"
+        # ... plus the overlay's, with the same shared context.
+        assert (out_dir / "src" / "extra.txt").read_text() == "extra for MyApp\n"
+        assert (out_dir / "OVERLAY.txt").read_text() == "layered\n"
+
+    def test_overlay_overrides_base_file(self, scaffold_dir, out_dir, tmp_path):
+        overlay = tmp_path / "overlay"
+        overlay.mkdir()
+        # Same relative path as a base template → overlay wins (rendered
+        # after the base under overwrite=True).
+        (overlay / "README.md.j2").write_text(
+            "# overridden {{ project_name }}\n", encoding="utf-8"
+        )
+        scaffolder = _DemoScaffolder(scaffold_dir)
+        scaffolder.render_project(
+            out_dir, _Opts(project_name="MyApp"), overlay_dirs=[overlay]
+        )
+        assert (out_dir / "README.md").read_text() == "# overridden MyApp\n"
+
+    def test_missing_overlay_dir_raises(self, scaffold_dir, out_dir, tmp_path):
+        scaffolder = _DemoScaffolder(scaffold_dir)
+        with pytest.raises(FileNotFoundError, match="overlay scaffolds"):
+            scaffolder.render_project(
+                out_dir,
+                _Opts(project_name="MyApp"),
+                overlay_dirs=[tmp_path / "does-not-exist"],
+            )
+
+    def test_no_overlay_is_unchanged(self, scaffold_dir, out_dir):
+        # overlay_dirs=None must render exactly the base surface.
+        scaffolder = _DemoScaffolder(scaffold_dir)
+        scaffolder.render_project(out_dir, _Opts(project_name="MyApp"))
+        files = sorted(p.relative_to(out_dir).as_posix()
+                       for p in out_dir.rglob("*") if p.is_file())
+        assert files == ["README.md", "logo.bin", "src/feature.txt", "static.txt"]
+
+
 def test_template_suffix_constant():
     assert TEMPLATE_SUFFIX == ".j2"

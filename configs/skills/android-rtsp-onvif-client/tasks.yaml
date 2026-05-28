@@ -1,11 +1,13 @@
-# OP-1799 (Track B / B-1) — Case-1 Android RTSP/ONVIF CLIENT app DAG.
+# OP-1799 (skeleton) + OP-1814 (B-1 content) — Case-1 Android RTSP/ONVIF
+# CLIENT app DAG.
 #
-# Describes the client-app build. Only the skeleton task is active in this
-# pickup; it routes to backend.android_scaffolder via the dispatcher (NO
-# new scaffolder). The ONVIF-discovery and RTSP-playback tasks are the
-# sequenced FOLLOW-ON tickets in this same pack — declared here so the
-# intended client-app build DAG is visible, with `status: follow-on` so a
-# runner does not attempt to execute them in the skeleton pickup.
+# Describes the client-app build. All three tasks route through the
+# dispatcher (scripts/scaffold.py) to backend.android_scaffolder — NO new
+# scaffolder. The ONVIF-discovery + RTSP-playback client templates now
+# ship in this pack's scaffolds/ overlay (OP-1814); the dispatcher layers
+# them on top of the borrowed Android skeleton, so one render produces the
+# full client project (skeleton + ONVIF + RTSP). The two layer tasks are
+# `status: active` and carry the same DAG ordering they always had.
 
 tasks:
   - id: android-rtsp-onvif-scaffold-init
@@ -24,29 +26,34 @@ tasks:
     status: active
 
   - id: android-onvif-discovery
-    name: "ONVIF / WS-Discovery camera discovery (FOLLOW-ON)"
+    name: "ONVIF / WS-Discovery camera discovery"
     description: >
-      FOLLOW-ON ticket (not in this skeleton pickup). Add the ONVIF
-      WS-Discovery probe + device-service client so the app enumerates
-      IP cameras on the LAN and resolves each camera's RTSP stream URI
-      (GetProfiles → GetStreamUri). Domain code + a dedicated scaffold
-      land in a sequenced follow-on within this same pack.
+      Render the ONVIF discovery layer onto the skeleton: the
+      WS-Discovery multicast probe (WsDiscoveryClient) that enumerates IP
+      cameras on the LAN, plus the Device/Media SOAP client
+      (OnvifMediaClient) that resolves each camera's RTSP stream URI
+      (GetProfiles → GetStreamUri, WS-Security UsernameToken digest auth).
+      Templates live in this pack's scaffolds/ overlay (com.omnisight.
+      pilot.onvif); the dispatcher renders them on top of the borrowed
+      Android skeleton — no new scaffolder.
     depends_on: [android-rtsp-onvif-scaffold-init]
     artifacts: [android_onvif]
     estimated_hours: 3
     framework_gate: p0-platform-profile
-    status: follow-on
+    status: active
 
   - id: android-rtsp-playback
-    name: "RTSP stream playback client (FOLLOW-ON)"
+    name: "RTSP stream playback client"
     description: >
-      FOLLOW-ON ticket (not in this skeleton pickup). Add the RTSP
-      playback surface (ExoPlayer/Media3 RTSP source) that plays a stream
-      URI discovered via ONVIF, including a Compose player screen and
-      lifecycle-correct connect/teardown. Domain code + a dedicated
-      scaffold land in a sequenced follow-on within this same pack.
+      Render the RTSP playback layer onto the skeleton: a Media3/ExoPlayer
+      RTSP playback controller (RtspPlaybackController) and a Compose
+      player screen (RtspPlayerScreen) that plays a stream URI discovered
+      via ONVIF, with lifecycle-correct connect/teardown
+      (DisposableEffect). Templates live in this pack's scaffolds/ overlay
+      (com.omnisight.pilot.rtsp); the dispatcher renders them on top of
+      the skeleton — no new scaffolder.
     depends_on: [android-onvif-discovery]
     artifacts: [android_rtsp_playback]
     estimated_hours: 4
     framework_gate: p4-role-android-kotlin
-    status: follow-on
+    status: active

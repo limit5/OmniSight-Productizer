@@ -1,24 +1,31 @@
-"""OP-1799 (Track B / B-1) — tests for the Case-1 Android RTSP/ONVIF
-CLIENT pack skeleton.
+"""OP-1799 (skeleton) + OP-1814 (B-1 content) — tests for the Case-1
+Android RTSP/ONVIF CLIENT pack.
 
 The pack (`configs/skills/android-rtsp-onvif-client`) ships NO scaffolder
 of its own: the dispatcher routes it to the existing
 `backend.android_scaffolder` via the explicit override in
-`backend/skill_registry.py`. These tests pin the three acceptance
+`backend/skill_registry.py`. OP-1814 adds the ONVIF-discovery +
+RTSP-playback client templates to the pack's `scaffolds/` dir; because
+that dir differs from the android scaffolder's own base dir,
+`resolve_scaffolder` surfaces it as an overlay and the dispatcher layers
+it on top of the borrowed skeleton. These tests pin the acceptance
 surfaces:
 
 * **Integration** — the pack is discoverable by the registry / dispatcher
   and its `skill.yaml` validates (`skill_manifest`).
 * **Code** — `resolve_scaffolder` binds the pack to
   `backend.android_scaffolder` (no new scaffolder), gated on the manifest
-  declaring a `scaffolds` artifact.
+  declaring a `scaffolds` artifact, and reports the pack's own scaffolds
+  dir as an overlay.
 * **Exercised** — dispatching the pack through `scripts/scaffold.py`
-  renders an Android project skeleton, byte-for-byte identical to a direct
-  `android_scaffolder.render_project` call.
+  renders the full Android client project: the base skeleton (byte-for-
+  byte identical to a direct `android_scaffolder.render_project` call)
+  PLUS the ONVIF + RTSP client overlay templates.
 """
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 from pathlib import Path
 
@@ -101,23 +108,53 @@ class TestRoutesToAndroidScaffolder:
         assert handle.skill_name == PACK
         assert handle.module_name == "backend.android_scaffolder"
         # Binds the *existing* public entry points — no new scaffolder.
-        assert handle.render is android_scaffolder.render_project
+        # The pack ships its own scaffolds/, so render is the android
+        # render_project with the overlay pre-bound (functools.partial)
+        # rather than the bare function; the underlying callable is still
+        # the existing scaffolder entry point.
+        assert isinstance(handle.render, functools.partial)
+        assert handle.render.func is android_scaffolder.render_project
+        assert handle.render.keywords["overlay_dirs"] == handle.overlay_dirs
         assert handle.options_cls is android_scaffolder.ScaffoldOptions
 
     def test_listed_as_scaffoldable(self):
         assert PACK in list_scaffoldable_skills()
 
+    def test_pack_scaffolds_resolved_as_overlay(self):
+        # The pack reuses the android scaffolder but ships its own
+        # scaffolds/ dir — resolve_scaffolder surfaces it as an overlay
+        # so the dispatcher layers ONVIF + RTSP on top of the skeleton.
+        handle = resolve_scaffolder(PACK)
+        pack_scaffolds = get_skill(PACK).path / "scaffolds"
+        assert [p.resolve() for p in handle.overlay_dirs] == [pack_scaffolds.resolve()]
+
+    def test_self_owned_pack_has_no_overlay(self):
+        # A pack bound to its own conventional scaffolder (skill-android)
+        # has no overlay — its scaffolds dir *is* the scaffolder base dir.
+        assert resolve_scaffolder("skill-android").overlay_dirs == []
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Exercised — dispatch renders the Android skeleton
+#  Exercised — dispatch renders skeleton + ONVIF + RTSP overlay
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# Overlay client source the dispatch must add on top of the base skeleton.
+_OVERLAY_FILES = (
+    "app/src/main/java/com/omnisight/pilot/onvif/WsDiscoveryClient.kt",
+    "app/src/main/java/com/omnisight/pilot/onvif/OnvifMediaClient.kt",
+    "app/src/main/java/com/omnisight/pilot/onvif/OnvifModels.kt",
+    "app/src/main/java/com/omnisight/pilot/rtsp/RtspPlaybackController.kt",
+    "app/src/main/java/com/omnisight/pilot/rtsp/RtspPlayerScreen.kt",
+    "app/src/test/java/com/omnisight/pilot/onvif/OnvifParsingTest.kt",
+)
 
-class TestDispatchRendersSkeleton:
-    def test_dispatch_matches_direct_android_render(self, tmp_path: Path):
-        """Dispatching the client pack renders the same Android skeleton as
-        a direct android_scaffolder call — proving it reuses the scaffolder
-        without altering output."""
+
+class TestDispatchRendersClientProject:
+    def test_dispatch_is_skeleton_superset_plus_overlay(self, tmp_path: Path):
+        """Dispatching the client pack renders the full project: every
+        file a direct android render produces (byte-for-byte) PLUS the
+        ONVIF + RTSP overlay — proving it reuses the scaffolder and layers
+        its own templates on top without altering the base output."""
         cli = _load_cli()
 
         via_dispatch = tmp_path / "dispatched"
@@ -134,9 +171,19 @@ class TestDispatchRendersSkeleton:
             android_scaffolder.ScaffoldOptions(project_name="CameraClient"),
         )
 
-        assert _rel_file_map(via_dispatch) == _rel_file_map(via_direct)
+        dispatch_files = _rel_file_map(via_dispatch)
+        direct_files = _rel_file_map(via_direct)
 
-    def test_main_renders_android_project(self, tmp_path: Path, capsys):
+        # Base skeleton is preserved byte-for-byte (the overlay is purely
+        # additive — no base file is overridden).
+        for rel, size in direct_files.items():
+            assert dispatch_files.get(rel) == size, f"base file changed: {rel}"
+
+        # The overlay added exactly the ONVIF + RTSP client surface.
+        added = set(dispatch_files) - set(direct_files)
+        assert added == set(_OVERLAY_FILES)
+
+    def test_main_renders_full_client_project(self, tmp_path: Path, capsys):
         cli = _load_cli()
         out_dir = tmp_path / "CameraClient"
         rc = cli.main([
@@ -144,9 +191,15 @@ class TestDispatchRendersSkeleton:
             "--project-name", "CameraClient",
         ])
         assert rc == 0
-        # The standard Android skeleton landed.
+        # The standard Android skeleton landed ...
         assert (out_dir / "build.gradle.kts").exists()
         assert (out_dir / "settings.gradle.kts").exists()
+        # ... and so did the ONVIF + RTSP client overlay.
+        for rel in _OVERLAY_FILES:
+            assert (out_dir / rel).is_file(), f"overlay file missing: {rel}"
+        # Overlay Kotlin keeps the skeleton's package root.
+        onvif = (out_dir / _OVERLAY_FILES[0]).read_text(encoding="utf-8")
+        assert "package com.omnisight.pilot.onvif" in onvif
         assert f"scaffolded {PACK}" in capsys.readouterr().out
 
     def test_main_list_includes_pack(self, capsys):
