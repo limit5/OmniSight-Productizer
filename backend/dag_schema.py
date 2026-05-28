@@ -40,6 +40,7 @@ class Task(BaseModel):
     # an `expected_output` only when BOTH set this to True (e.g. parallel
     # benchmark runs writing the same report path that's later merged).
     output_overlap_ack: bool = False
+    on_failure: Literal["abort", "continue"] = "abort"
 
     @field_validator("task_id")
     @classmethod

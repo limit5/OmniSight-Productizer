@@ -120,6 +120,7 @@ class TestSkillManifest:
         assert m.name == "my-skill"
         assert m.schema_version == SCHEMA_VERSION
         assert m.version == "0.1.0"
+        assert m.failure_policy == "abort"
         assert m.artifacts == []
 
     def test_valid_full(self):
@@ -132,6 +133,7 @@ class TestSkillManifest:
             compatible_socs=["Hi3516", "RK3566"],
             depends_on_skills=["skill-alpha"],
             depends_on_core=["CORE-16"],
+            failure_policy="continue",
             artifacts=[
                 ArtifactRef(kind="tasks", path="tasks.yaml"),
                 ArtifactRef(kind="scaffolds", path="scaffolds/"),
@@ -147,6 +149,7 @@ class TestSkillManifest:
             keywords=["uvc", "camera"],
         )
         assert m.name == "uvc-camera"
+        assert m.failure_policy == "continue"
         assert len(m.artifacts) == 5
         assert m.artifact_kinds_present() == REQUIRED_ARTIFACT_KINDS
         assert m.missing_artifact_kinds() == set()

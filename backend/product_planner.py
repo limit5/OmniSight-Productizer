@@ -157,7 +157,12 @@ def _ns_output(pack: str, output: str) -> str:
     return f"{pack}{OUTPUT_SEP}{output}"
 
 
-def _namespace_subdag(pack: str, sub: DAG) -> list[Task]:
+def _namespace_subdag(
+    pack: str,
+    sub: DAG,
+    *,
+    failure_policy: str = "abort",
+) -> list[Task]:
     """Return ``sub``'s tasks with every name pack-scoped.
 
     ``task_id`` and ``expected_output`` get the pack prefix; ``depends_on``
@@ -182,6 +187,7 @@ def _namespace_subdag(pack: str, sub: DAG) -> list[Task]:
             expected_output=out_map[t.expected_output],
             depends_on=[id_map[d] for d in t.depends_on],
             output_overlap_ack=t.output_overlap_ack,
+            on_failure=failure_policy,
         ))
     return namespaced
 
@@ -199,6 +205,7 @@ class _PackPlan:
     tasks: list[Task]
     provides: list[str] = field(default_factory=list)
     requires: list[str] = field(default_factory=list)
+    failure_policy: str = "abort"
 
 
 def _roots(tasks: list[Task]) -> list[Task]:
@@ -269,6 +276,47 @@ def _pack_compatible_socs(
         manifest = info.manifest if info is not None else None
 
     return list(manifest.compatible_socs) if manifest is not None else []
+
+
+def _pack_failure_policy(
+    pack: str,
+    manifests: Optional[Mapping[str, SkillManifest]],
+) -> str:
+    """Resolve a pack's product-level failure policy."""
+    manifest: Optional[SkillManifest]
+    if manifests is not None:
+        manifest = manifests.get(pack)
+    else:
+        from backend import skill_registry
+
+        info = skill_registry.get_skill(pack)
+        manifest = info.manifest if info is not None else None
+
+    return manifest.failure_policy if manifest is not None else "abort"
+
+
+def _product_acceptance_node(plans: list[_PackPlan]) -> Task:
+    """Forward-looking product-level test join-node for composed packs."""
+    sink_ids = [
+        sink.task_id
+        for plan in plans
+        for sink in _sinks(plan.tasks)
+    ]
+    sink_outputs = [
+        sink.expected_output
+        for plan in plans
+        for sink in _sinks(plan.tasks)
+    ]
+    return Task(
+        task_id="product__acceptance",
+        description="product-level integration test spanning all subsystems",
+        required_tier="t1",
+        toolchain="cmake",
+        inputs=sink_outputs,
+        expected_output="build/product-acceptance.json",
+        depends_on=list(dict.fromkeys(sink_ids)),
+        on_failure="abort",
+    )
 
 
 def _wire_cross_pack(plans: list[_PackPlan]) -> list[dict[str, str]]:
@@ -430,11 +478,13 @@ def compose_product(
     for pack in packs:
         sub = embedded_planner.plan_embedded_product(spec, hw, skill_pack=pack)
         provides, requires = _pack_provides_requires(pack, manifests)
+        failure_policy = _pack_failure_policy(pack, manifests)
         plans.append(_PackPlan(
             pack=pack,
-            tasks=_namespace_subdag(pack, sub),
+            tasks=_namespace_subdag(pack, sub, failure_policy=failure_policy),
             provides=provides,
             requires=requires,
+            failure_policy=failure_policy,
         ))
         socs_by_pack[pack] = _pack_compatible_socs(pack, manifests)
 
@@ -457,6 +507,7 @@ def compose_product(
         )
 
     tasks: list[Task] = [t for p in plans for t in p.tasks]
+    tasks.append(_product_acceptance_node(plans))
 
     if not dag_id:
         dag_id = f"product-{uuid.uuid4().hex[:12]}"

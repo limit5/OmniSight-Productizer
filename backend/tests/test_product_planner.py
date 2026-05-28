@@ -1,4 +1,4 @@
-"""1F.P1+P2a — unit tests for the system-of-systems product planner.
+"""1F.P1+P2a+P3+P4 — unit tests for the system-of-systems product planner.
 
 P1 (OP-1826) — compose_product() merge + namespacing:
   - composing >=2 parseable packs (imaging + connectivity) yields ONE
@@ -23,6 +23,11 @@ P3 (OP-1830) — SoC-compatibility reconciliation across composed packs
     {rk3566-only + []} -> OK
   - real case-8 (imaging + connectivity + npu-detection) on rk3566
     reconciles cleanly; retargeting to qcs8550 -> error naming imaging
+
+P4 (OP-1831) — plan-metadata only:
+  - pack failure_policy propagates to task on_failure
+  - compose_product appends one product-level acceptance join-node that
+    depends on every pack's sinks and remains abort-on-failure
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ from backend.product_planner import (
     _ns_output,
     _ns_task_id,
     _PackPlan,
+    _pack_failure_policy,
     _pack_compatible_socs,
     _reconcile_socs,
     _roots,
@@ -54,6 +60,7 @@ from backend.product_planner import (
 from backend.skill_manifest import SkillManifest
 
 TWO_PACKS = ["imaging", "connectivity"]
+PRODUCT_NODE_ID = "product__acceptance"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -94,6 +101,14 @@ def _pack_of(task_id: str) -> str:
     return task_id.split(TASK_ID_SEP, 1)[0]
 
 
+def _product_node(dag):
+    return next(t for t in dag.tasks if t.task_id == PRODUCT_NODE_ID)
+
+
+def _pack_tasks(dag):
+    return [t for t in dag.tasks if t.task_id != PRODUCT_NODE_ID]
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Core acceptance: merge + validate
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -121,13 +136,15 @@ class TestComposeAndValidate:
                 assert _ns_task_id(pack, t.task_id) in merged_ids
             expected_total += len(sub.tasks)
 
-        # Union, nothing dropped or duplicated.
-        assert len(dag.tasks) == expected_total
-        assert dag.total_tasks == expected_total
+        # Union, nothing dropped or duplicated, plus the P4 product
+        # acceptance join-node.
+        assert len(_pack_tasks(dag)) == expected_total
+        assert len(dag.tasks) == expected_total + 1
+        assert dag.total_tasks == expected_total + 1
 
     def test_both_packs_represented(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-two")
-        packs_seen = {_pack_of(t.task_id) for t in dag.tasks}
+        packs_seen = {_pack_of(t.task_id) for t in _pack_tasks(dag)}
         assert packs_seen == set(TWO_PACKS)
 
 
@@ -138,13 +155,13 @@ class TestComposeAndValidate:
 class TestNamespacing:
     def test_task_ids_prefixed_with_pack(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-two")
-        for t in dag.tasks:
+        for t in _pack_tasks(dag):
             assert _pack_of(t.task_id) in TWO_PACKS
             assert t.task_id.startswith(_pack_of(t.task_id) + TASK_ID_SEP)
 
     def test_expected_outputs_prefixed_with_pack(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-two")
-        for t in dag.tasks:
+        for t in _pack_tasks(dag):
             pack = _pack_of(t.task_id)
             assert t.expected_output.startswith(pack + OUTPUT_SEP)
 
@@ -158,7 +175,7 @@ class TestNamespacing:
     def test_intra_pack_inputs_namespaced_externals_untouched(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-two")
         produced = {t.expected_output for t in dag.tasks}
-        for t in dag.tasks:
+        for t in _pack_tasks(dag):
             for inp in t.inputs:
                 if inp.startswith("external:") or inp.startswith("user:"):
                     continue
@@ -185,16 +202,17 @@ class TestNamespacing:
 class TestScopeGuardNoCrossPackEdges:
     def test_no_cross_pack_depends_on(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-two")
-        for t in dag.tasks:
+        for t in _pack_tasks(dag):
             owner = _pack_of(t.task_id)
             for dep in t.depends_on:
                 assert _pack_of(dep) == owner, (
-                    f"P1 must not wire across packs: {t.task_id} -> {dep}"
+                    f"pack tasks must not gain extra cross-pack edges: "
+                    f"{t.task_id} -> {dep}"
                 )
 
     def test_no_cross_pack_inputs(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-two")
-        for t in dag.tasks:
+        for t in _pack_tasks(dag):
             owner = _pack_of(t.task_id)
             for inp in t.inputs:
                 if inp.startswith("external:") or inp.startswith("user:"):
@@ -222,7 +240,7 @@ class TestValidatorReuseAndBoundaries:
     def test_single_pack_composes(self, spec, hw):
         dag = compose_product(spec, hw, ["imaging"], dag_id="prod-one")
         assert validate(dag).ok
-        assert all(_pack_of(t.task_id) == "imaging" for t in dag.tasks)
+        assert all(_pack_of(t.task_id) == "imaging" for t in _pack_tasks(dag))
 
     def test_custom_dag_id_respected(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="my-product")
@@ -428,7 +446,7 @@ class TestCrossPackWiringCompose:
         # npu-detection is not in this pair -> still no cross-pack edges
         # between just these two packs even when reading real manifests.
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-nowire")
-        for t in dag.tasks:
+        for t in _pack_tasks(dag):
             owner = t.task_id.split(TASK_ID_SEP, 1)[0]
             for dep in t.depends_on:
                 assert dep.split(TASK_ID_SEP, 1)[0] == owner
@@ -474,7 +492,7 @@ class TestRealCaseEightComposition:
     def test_case8_composes_and_validates(self, spec, hw):
         dag = compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8")
         assert validate(dag).ok, validate(dag).summary()
-        packs_seen = {_pack_of(t.task_id) for t in dag.tasks}
+        packs_seen = {_pack_of(t.task_id) for t in _pack_tasks(dag)}
         assert packs_seen == set(CASE8_PACKS)
 
     def test_npu_detection_wired_to_both_providers(self, spec, hw):
@@ -643,3 +661,72 @@ class TestSocReconciliationCompose:
         }
         with pytest.raises(SocIncompatibilityError):
             compose_product(spec, hw, TWO_PACKS, manifests=manifests)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P4 (OP-1831) — failure-policy metadata + product acceptance join-node
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestFailurePolicyAndProductJoinNode:
+    def test_manifest_failure_policy_defaults_abort(self):
+        manifest = SkillManifest(name="imaging")
+        assert manifest.failure_policy == "abort"
+
+    def test_pack_failure_policy_reads_override(self):
+        manifests = {
+            "imaging": SkillManifest(name="imaging", failure_policy="continue"),
+        }
+        assert _pack_failure_policy("imaging", manifests) == "continue"
+        assert _pack_failure_policy("connectivity", manifests) == "abort"
+
+    def test_compose_propagates_pack_failure_policy_to_tasks(self, spec, hw):
+        manifests = {
+            "imaging": SkillManifest(name="imaging", failure_policy="continue"),
+            "connectivity": SkillManifest(name="connectivity"),
+        }
+        dag = compose_product(
+            spec, hw, TWO_PACKS, dag_id="prod-policy", manifests=manifests
+        )
+        assert validate(dag).ok, validate(dag).summary()
+        for task in _pack_tasks(dag):
+            if _pack_of(task.task_id) == "imaging":
+                assert task.on_failure == "continue"
+            elif _pack_of(task.task_id) == "connectivity":
+                assert task.on_failure == "abort"
+
+    def test_product_join_node_depends_on_every_pack_sink(self, spec, hw):
+        dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-join")
+        node = _product_node(dag)
+        expected_sinks = {
+            sink.task_id
+            for pack in TWO_PACKS
+            for sink in _sinks([
+                t for t in _pack_tasks(dag)
+                if _pack_of(t.task_id) == pack
+            ])
+        }
+        assert node.description == (
+            "product-level integration test spanning all subsystems"
+        )
+        assert node.toolchain == "cmake"
+        assert node.expected_output == "build/product-acceptance.json"
+        assert node.on_failure == "abort"
+        assert set(node.depends_on) == expected_sinks
+
+    def test_case8_has_one_product_join_node_covering_all_sinks(self, spec, hw):
+        dag = compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8-p4")
+        product_nodes = [t for t in dag.tasks if t.task_id.startswith("product__")]
+        assert [t.task_id for t in product_nodes] == [PRODUCT_NODE_ID]
+        node = product_nodes[0]
+        expected_sinks = {
+            sink.task_id
+            for pack in CASE8_PACKS
+            for sink in _sinks([
+                t for t in _pack_tasks(dag)
+                if _pack_of(t.task_id) == pack
+            ])
+        }
+        assert set(node.depends_on) == expected_sinks
+        assert {_pack_of(dep) for dep in node.depends_on} == set(CASE8_PACKS)
+        assert node.on_failure == "abort"
+        assert validate(dag).ok, validate(dag).summary()

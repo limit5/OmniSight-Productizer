@@ -9,7 +9,7 @@ dependency on other skills/core modules, and lifecycle hook commands.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -83,6 +83,10 @@ class SkillManifest(BaseModel):
     requires: list[str] = Field(
         default_factory=list,
         description="Free-form capability tokens this pack requires from other packs",
+    )
+    failure_policy: Literal["abort", "continue"] = Field(
+        default="abort",
+        description="Pack-level product planner failure policy",
     )
 
     artifacts: list[ArtifactRef] = Field(
