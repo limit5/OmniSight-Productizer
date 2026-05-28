@@ -1,191 +1,161 @@
+# Sensor-fusion skill pack — task template.
+#
+# OP-1810 (B2, 1D-rest): migrated from the legacy id/name/artifacts schema
+# to the embedded planner schema (task_id + expected_output) so the embedded
+# planner can consume it without a KeyError. This is a SCHEMA-ONLY migration:
+# task ordering/intent and depends_on edges are unchanged. The pack is still
+# `stubbed` (see docs/product/skill-pack-maturity-matrix.md); making these
+# tasks real is a separate, later track. Follows the proven imaging/OP-1786
+# pattern: each task carries a distinct build/<pack>/ expected_output and a
+# short description (required by dag_schema.Task). The legacy string `when:`
+# guards (which the planner's _evaluate_conditions could not consume) are
+# dropped along with the unread tier/toolchain/artifacts keys.
+schema_version: 1
 tasks:
   # -- IMU driver tasks --
-  - id: sf-imu-driver-init
+  - task_id: sf-imu-driver-init
     name: "IMU driver initialization"
     description: "Initialize IMU driver (MPU6050/LSM6DS3/BMI270) — WHO_AM_I check, register config, FIFO setup"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_imu: true"
     depends_on: []
-    artifacts:
-      - imu_driver.c
-      - imu_driver.h
+    expected_output: build/sensor_fusion/imu_driver.c
+    estimated_minutes: 45
 
-  - id: sf-imu-data-read
+  - task_id: sf-imu-data-read
     name: "IMU data acquisition"
     description: "Read accelerometer + gyroscope data via I2C/SPI, handle FIFO burst mode"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_imu: true"
     depends_on:
       - sf-imu-driver-init
-    artifacts:
-      - imu_data.c
+    expected_output: build/sensor_fusion/imu_data.c
+    estimated_minutes: 45
 
-  - id: sf-imu-interrupt
+  - task_id: sf-imu-interrupt
     name: "IMU interrupt handling"
     description: "Configure data-ready interrupt, wake-on-motion, FIFO watermark"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_imu: true"
     depends_on:
       - sf-imu-driver-init
-    artifacts:
-      - imu_interrupt.c
+    expected_output: build/sensor_fusion/imu_interrupt.c
+    estimated_minutes: 45
 
-  - id: sf-imu-selftest
+  - task_id: sf-imu-selftest
     name: "IMU self-test"
     description: "Execute accelerometer and gyroscope self-test routines"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_imu: true"
     depends_on:
       - sf-imu-data-read
+    expected_output: build/sensor_fusion/imu_selftest.c
+    estimated_minutes: 30
 
   # -- GPS tasks --
-  - id: sf-gps-nmea-parser
+  - task_id: sf-gps-nmea-parser
     name: "GPS NMEA parser"
     description: "Parse NMEA 0183 sentences (GGA/RMC/GSA/GSV/VTG/GLL) with checksum validation"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_gps: true"
     depends_on: []
-    artifacts:
-      - nmea_parser.c
-      - nmea_parser.h
+    expected_output: build/sensor_fusion/nmea_parser.c
+    estimated_minutes: 45
 
-  - id: sf-gps-ubx-protocol
+  - task_id: sf-gps-ubx-protocol
     name: "GPS UBX binary protocol"
     description: "u-blox UBX protocol handler — send/receive/ack with Fletcher-8 checksum"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_gps: true"
     depends_on: []
-    artifacts:
-      - ubx_protocol.c
-      - ubx_protocol.h
+    expected_output: build/sensor_fusion/ubx_protocol.c
+    estimated_minutes: 45
 
-  - id: sf-gps-configuration
+  - task_id: sf-gps-configuration
     name: "GPS module configuration"
     description: "Configure measurement rate, navigation mode, NMEA/UBX output selection"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_gps: true"
     depends_on:
       - sf-gps-ubx-protocol
-    artifacts:
-      - gps_config.c
+    expected_output: build/sensor_fusion/gps_config.c
+    estimated_minutes: 30
 
   # -- Barometer tasks --
-  - id: sf-baro-driver-init
+  - task_id: sf-baro-driver-init
     name: "Barometer driver initialization"
     description: "Initialize barometer driver (BMP280/LPS22) — ID check, calibration read, mode config"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_baro: true"
     depends_on: []
-    artifacts:
-      - baro_driver.c
-      - baro_driver.h
+    expected_output: build/sensor_fusion/baro_driver.c
+    estimated_minutes: 45
 
-  - id: sf-baro-compensation
+  - task_id: sf-baro-compensation
     name: "Barometer compensation algorithm"
     description: "Temperature-compensated pressure reading using factory calibration coefficients"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_baro: true"
     depends_on:
       - sf-baro-driver-init
-    artifacts:
-      - baro_compensation.c
+    expected_output: build/sensor_fusion/baro_compensation.c
+    estimated_minutes: 45
 
-  - id: sf-baro-altitude
+  - task_id: sf-baro-altitude
     name: "Barometric altitude calculation"
     description: "Convert compensated pressure to altitude using hypsometric formula"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_baro: true"
     depends_on:
       - sf-baro-compensation
+    expected_output: build/sensor_fusion/baro_altitude.c
+    estimated_minutes: 30
 
   # -- EKF tasks --
-  - id: sf-ekf-orientation
+  - task_id: sf-ekf-orientation
     name: "EKF 9-DoF orientation"
     description: "Extended Kalman Filter for 9-DoF orientation estimation (quaternion state)"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_ekf: true"
     depends_on:
       - sf-imu-data-read
-    artifacts:
-      - ekf_orientation.c
-      - ekf_orientation.h
+    expected_output: build/sensor_fusion/ekf_orientation.c
+    estimated_minutes: 60
 
-  - id: sf-ekf-tuning
+  - task_id: sf-ekf-tuning
     name: "EKF noise parameter tuning"
     description: "Tune process and measurement noise covariance for specific IMU hardware"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_ekf: true"
     depends_on:
       - sf-ekf-orientation
+    expected_output: build/sensor_fusion/ekf_tuning.c
+    estimated_minutes: 60
 
   # -- Calibration tasks --
-  - id: sf-calibration-6pos
+  - task_id: sf-calibration-6pos
     name: "6-position IMU calibration"
     description: "Static 6-position calibration for accelerometer bias, scale, and alignment"
-    tier: t3
-    toolchain: hardware-daemon-rpc
-    when: "sensor_fusion_calibration: true"
     depends_on:
       - sf-imu-data-read
-    artifacts:
-      - calibration_6pos.c
+    expected_output: build/sensor_fusion/calibration_6pos.c
+    estimated_minutes: 60
 
-  - id: sf-calibration-gyro-bias
+  - task_id: sf-calibration-gyro-bias
     name: "Gyroscope bias calibration"
     description: "Static averaging for gyroscope bias estimation"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_calibration: true"
     depends_on:
       - sf-imu-data-read
+    expected_output: build/sensor_fusion/calibration_gyro_bias.c
+    estimated_minutes: 30
 
-  - id: sf-calibration-mag
+  - task_id: sf-calibration-mag
     name: "Magnetometer calibration"
     description: "Hard-iron and soft-iron calibration via ellipsoid fitting"
-    tier: t3
-    toolchain: hardware-daemon-rpc
-    when: "sensor_fusion_calibration: true"
     depends_on: []
+    expected_output: build/sensor_fusion/calibration_mag.c
+    estimated_minutes: 60
 
-  - id: sf-calibration-baro
+  - task_id: sf-calibration-baro
     name: "Barometer calibration"
     description: "Pressure offset calibration against known reference"
-    tier: t3
-    toolchain: hardware-daemon-rpc
-    when: "sensor_fusion_calibration: true"
     depends_on:
       - sf-baro-driver-init
+    expected_output: build/sensor_fusion/calibration_baro.c
+    estimated_minutes: 60
 
   # -- Integration test tasks --
-  - id: sf-integration-trajectory-test
+  - task_id: sf-integration-trajectory-test
     name: "Trajectory fixture test"
     description: "Run EKF against known trajectory fixtures and verify orientation accuracy"
-    tier: t1
-    toolchain: cmake
-    when: "sensor_fusion_ekf: true"
     depends_on:
       - sf-ekf-orientation
       - sf-calibration-6pos
+    expected_output: build/sensor_fusion/trajectory_test_report.xml
+    estimated_minutes: 60
 
-  - id: sf-integration-full-stack
+  - task_id: sf-integration-full-stack
     name: "Full sensor fusion stack test"
     description: "End-to-end test: IMU + GPS + barometer → EKF → calibrated output"
-    tier: t3
-    toolchain: hardware-daemon-rpc
-    when: "sensor_fusion_imu: true"
     depends_on:
       - sf-ekf-orientation
       - sf-gps-nmea-parser
       - sf-baro-altitude
+    expected_output: build/sensor_fusion/full_stack_test_report.xml
+    estimated_minutes: 90
