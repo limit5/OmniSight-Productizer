@@ -1,0 +1,13 @@
+schema_version: 1
+name: npu-detection
+description: "NPU object/defect detection model deployment (YOLO quantize/convert + accuracy verification)"
+
+# 1F.P2b (OP-1829) — cross-pack wiring tokens for the system-of-systems
+# product planner. npu-detection consumes camera frames (imaging) and a
+# PLC transport channel (connectivity), and itself produces an inspection
+# verdict capability other packs may require.
+provides:
+  - inspection-verdict
+requires:
+  - camera-frames
+  - plc-transport

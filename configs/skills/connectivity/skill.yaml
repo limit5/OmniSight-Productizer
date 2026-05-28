@@ -10,6 +10,9 @@ compatible_socs: []
 depends_on_skills: []
 depends_on_core: ["CORE-05"]
 
+provides:
+  - plc-transport
+
 artifacts:
   - kind: tasks
     path: tasks.yaml

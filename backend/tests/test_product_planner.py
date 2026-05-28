@@ -325,6 +325,40 @@ class TestCrossPackWiringHelper:
         for t in consumer.tasks:
             assert "prod__only" in t.depends_on
 
+    def test_multi_require_consumer_wired_to_all_providers(self):
+        # OP-1829 regression: a consumer requiring TWO tokens from two
+        # DISTINCT providers must get BOTH cross-pack edges on its entry
+        # task. The pre-fix loop re-computed _roots() inside the requires
+        # loop; wiring the first token made the entry task non-root, so the
+        # second token was silently dropped. This test FAILS on that code
+        # (only proda's edge present) and PASSES once roots are snapshotted
+        # once before the loop.
+        prod_a = _PackPlan(
+            pack="proda",
+            tasks=[_task("proda__a1"), _task("proda__a2", ["proda__a1"])],
+            provides=["cap_a"],
+        )
+        prod_b = _PackPlan(
+            pack="prodb",
+            tasks=[_task("prodb__b1"), _task("prodb__b2", ["prodb__b1"])],
+            provides=["cap_b"],
+        )
+        consumer = _PackPlan(
+            pack="cons",
+            tasks=[_task("cons__c1"), _task("cons__c2", ["cons__c1"])],
+            requires=["cap_a", "cap_b"],
+        )
+        unmet = _wire_cross_pack([prod_a, prod_b, consumer])
+        assert unmet == []
+        c1 = next(t for t in consumer.tasks if t.task_id == "cons__c1")
+        # BOTH providers' sinks wired onto the consumer's single entry task.
+        assert "proda__a2" in c1.depends_on
+        assert "prodb__b2" in c1.depends_on
+        # Producers themselves remain unwired across packs.
+        for plan in (prod_a, prod_b):
+            for t in plan.tasks:
+                assert all(_pack_of(d) == plan.pack for d in t.depends_on)
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  P2a (OP-1827) — cross-pack wiring through compose_product (injected
@@ -379,10 +413,77 @@ class TestCrossPackWiringCompose:
             records[0].unmet_requires
 
     def test_no_manifests_preserves_p1_no_cross_pack_edges(self, spec, hw):
-        # Real packs declare no tokens yet (P2b) -> P1 behaviour preserved
-        # even though compose_product now reads manifests from the registry.
+        # imaging/connectivity now declare provides but no requires, and
+        # npu-detection is not in this pair -> still no cross-pack edges
+        # between just these two packs even when reading real manifests.
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-nowire")
         for t in dag.tasks:
             owner = t.task_id.split(TASK_ID_SEP, 1)[0]
             for dep in t.depends_on:
                 assert dep.split(TASK_ID_SEP, 1)[0] == owner
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P2b (OP-1829) — REAL case-8 composition: imaging + connectivity +
+#  npu-detection, using the packs' own declared provides/requires tokens
+#  (no injected manifests). Exercises the multi-require snapshot fix on
+#  real packs: npu-detection requires BOTH camera-frames (imaging) AND
+#  plc-transport (connectivity).
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CASE8_PACKS = ["imaging", "connectivity", "npu-detection"]
+
+
+class TestRealCaseEightComposition:
+    def test_three_packs_load_via_registry_with_tokens(self):
+        from backend import skill_registry
+
+        expected = {
+            "imaging": (["camera-frames"], []),
+            "connectivity": (["plc-transport"], []),
+            "npu-detection": (
+                ["inspection-verdict"],
+                ["camera-frames", "plc-transport"],
+            ),
+        }
+        for pack, (provides, requires) in expected.items():
+            info = skill_registry.get_skill(pack)
+            assert info is not None, f"{pack} not found in registry"
+            assert info.manifest is not None, f"{pack} has no parseable manifest"
+            assert info.manifest.provides == provides
+            assert info.manifest.requires == requires
+
+    def test_three_packs_parse_via_embedded_planner(self, spec, hw):
+        # npu-detection has no tasks.yaml -> falls back to _embedded_base;
+        # all three still yield a non-empty sub-DAG.
+        for pack in CASE8_PACKS:
+            sub = plan_embedded_product(spec, hw, skill_pack=pack)
+            assert sub.tasks, f"{pack} produced an empty sub-DAG"
+
+    def test_case8_composes_and_validates(self, spec, hw):
+        dag = compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8")
+        assert validate(dag).ok, validate(dag).summary()
+        packs_seen = {_pack_of(t.task_id) for t in dag.tasks}
+        assert packs_seen == set(CASE8_PACKS)
+
+    def test_npu_detection_wired_to_both_providers(self, spec, hw):
+        dag = compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8")
+        npu_cross_deps = {
+            dep
+            for t in dag.tasks
+            if _pack_of(t.task_id) == "npu-detection"
+            for dep in t.depends_on
+            if _pack_of(dep) != "npu-detection"
+        }
+        providers_wired = {_pack_of(d) for d in npu_cross_deps}
+        # The whole point of the fix: BOTH required tokens are wired, not
+        # just the first one (camera-frames). Pre-fix this set is {imaging}.
+        assert providers_wired == {"imaging", "connectivity"}, providers_wired
+
+    def test_case8_has_no_unmet_requires(self, spec, hw, caplog):
+        # Scope to the product planner logger so the embedded planner's own
+        # unmet_deps warnings (from the base template) are not conflated.
+        with caplog.at_level("WARNING", logger="backend.product_planner"):
+            compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8")
+        unmet = [r for r in caplog.records if hasattr(r, "unmet_requires")]
+        assert unmet == [], [r.unmet_requires for r in unmet]

@@ -241,6 +241,14 @@ def _wire_cross_pack(plans: list[_PackPlan]) -> list[dict[str, str]]:
     unmet: list[dict[str, str]] = []
 
     for p in plans:
+        # Snapshot the consumer's roots ONCE, before wiring any cross-pack
+        # edge. ``_roots`` keys off an empty ``depends_on``; wiring the first
+        # required token onto a root makes its ``depends_on`` non-empty, so a
+        # re-computation inside the loop would no longer see it as a root and
+        # the second+ required tokens would silently go unwired. Snapshotting
+        # honours ``_roots``'s "computed before cross-pack edges" invariant so
+        # a multi-require consumer wires ALL its tokens.
+        roots = _roots(p.tasks)
         for tok in p.requires:
             if tok.startswith(_CALLER_SATISFIED_PREFIXES):
                 continue
@@ -256,7 +264,7 @@ def _wire_cross_pack(plans: list[_PackPlan]) -> list[dict[str, str]]:
             # Unique by construction (duplicate provides already raised).
             producer = by_pack[next(iter(producers))]
             sinks = _sinks(producer.tasks)
-            for r in _roots(p.tasks):
+            for r in roots:
                 for s in sinks:
                     if s.task_id not in r.depends_on:
                         r.depends_on.append(s.task_id)
