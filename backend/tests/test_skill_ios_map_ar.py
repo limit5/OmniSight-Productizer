@@ -1,9 +1,13 @@
-"""OP-1816 (Track B / B-1) — tests for the Case-3 iOS map-AR pack skeleton.
+"""OP-1816 (skeleton) + OP-1820 (B-1 content) — tests for the Case-3
+iOS map-AR pack.
 
 The pack (`configs/skills/ios-map-ar`) ships NO scaffolder of its own: the
 dispatcher routes it to the existing `backend.ios_scaffolder` via the
-explicit override in `backend/skill_registry.py`. These tests pin the
-three acceptance surfaces:
+explicit override in `backend/skill_registry.py`. OP-1820 adds ARKit +
+MapKit domain templates to the pack's `scaffolds/` dir; because that dir
+differs from the iOS scaffolder's own base dir, `resolve_scaffolder`
+surfaces it as an overlay and the dispatcher layers it on top of the
+borrowed skeleton. These tests pin the acceptance surfaces:
 
 * **Integration** — the pack is discoverable by the registry / dispatcher
   and its `skill.yaml` validates (`skill_manifest`).
@@ -11,14 +15,17 @@ three acceptance surfaces:
   `backend.ios_scaffolder` (no new scaffolder), gated on the manifest
   declaring a `scaffolds` artifact.
 * **Exercised** — dispatching the pack through `scripts/scaffold.py`
-  renders an iOS project skeleton, byte-for-byte identical to a direct
-  `ios_scaffolder.render_project` call.
+  renders the full iOS map-AR project: the base skeleton plus the ARKit +
+  MapKit overlay templates.
 """
 
 from __future__ import annotations
 
 import importlib.util
+import functools
 from pathlib import Path
+
+import yaml
 
 from backend import ios_scaffolder
 from backend.skill_registry import (
@@ -34,6 +41,7 @@ PACK = "ios-map-ar"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "scaffold.py"
+PACK_DIR = REPO_ROOT / "configs" / "skills" / PACK
 
 
 def _load_cli():
@@ -82,6 +90,18 @@ class TestPackRegistry:
         assert "skill-ios" in info.manifest.depends_on_skills
         assert "CORE-05" in info.manifest.depends_on_core
 
+    def test_tasks_activate_mapkit_and_arkit_layers(self):
+        tasks_doc = yaml.safe_load((PACK_DIR / "tasks.yaml").read_text(encoding="utf-8"))
+        tasks = {task["id"]: task for task in tasks_doc["tasks"]}
+
+        assert tasks["ios-mapkit-map-view"]["status"] == "active"
+        assert tasks["ios-mapkit-map-view"]["depends_on"] == ["ios-map-ar-scaffold-init"]
+        assert tasks["ios-mapkit-map-view"]["artifacts"] == ["ios_mapkit"]
+
+        assert tasks["ios-arkit-ar-view"]["status"] == "active"
+        assert tasks["ios-arkit-ar-view"]["depends_on"] == ["ios-mapkit-map-view"]
+        assert tasks["ios-arkit-ar-view"]["artifacts"] == ["ios_arkit"]
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Code — routes to ios_scaffolder, NO new scaffolder
@@ -99,23 +119,50 @@ class TestRoutesToIosScaffolder:
         assert handle.skill_name == PACK
         assert handle.module_name == "backend.ios_scaffolder"
         # Binds the *existing* public entry points — no new scaffolder.
-        assert handle.render is ios_scaffolder.render_project
+        # The pack ships its own scaffolds/, so render is the iOS
+        # render_project with the overlay pre-bound (functools.partial)
+        # rather than the bare function; the underlying callable is still
+        # the existing scaffolder entry point.
+        assert isinstance(handle.render, functools.partial)
+        assert handle.render.func is ios_scaffolder.render_project
+        assert handle.render.keywords["overlay_dirs"] == handle.overlay_dirs
         assert handle.options_cls is ios_scaffolder.ScaffoldOptions
 
     def test_listed_as_scaffoldable(self):
         assert PACK in list_scaffoldable_skills()
 
+    def test_pack_scaffolds_resolved_as_overlay(self):
+        handle = resolve_scaffolder(PACK)
+        pack_scaffolds = get_skill(PACK).path / "scaffolds"
+        assert [p.resolve() for p in handle.overlay_dirs] == [pack_scaffolds.resolve()]
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Exercised — dispatch renders the iOS skeleton
+#  Exercised — dispatch renders skeleton + ARKit + MapKit overlay
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+_OVERLAY_FILES = (
+    "App/Resources/Info.plist",
+    "App/Sources/ContentView.swift",
+    "App/Sources/MapAR/ARKitOverlayView.swift",
+    "App/Sources/MapAR/MapARHomeView.swift",
+    "App/Sources/MapAR/MapKitMapView.swift",
+    "App/Sources/MapAR/MapLocationStore.swift",
+    "App/Sources/MapAR/PointOfInterest.swift",
+    "Tests/MapLocationStoreTests.swift",
+)
 
-class TestDispatchRendersSkeleton:
-    def test_dispatch_matches_direct_ios_render(self, tmp_path: Path):
-        """Dispatching the map-AR pack renders the same iOS skeleton as a
-        direct ios_scaffolder call — proving it reuses the scaffolder
-        without altering output."""
+_OVERLAY_OVERRIDES = {
+    "App/Resources/Info.plist",
+    "App/Sources/ContentView.swift",
+}
+
+
+class TestDispatchRendersMapARProject:
+    def test_dispatch_is_skeleton_plus_map_ar_overlay(self, tmp_path: Path):
+        """Dispatching the map-AR pack renders the full project: the base
+        iOS skeleton plus the ARKit + MapKit overlay. Non-overridden base
+        files stay byte-for-byte identical to a direct iOS render."""
         cli = _load_cli()
 
         via_dispatch = tmp_path / "dispatched"
@@ -132,9 +179,18 @@ class TestDispatchRendersSkeleton:
             ios_scaffolder.ScaffoldOptions(project_name="MapAR"),
         )
 
-        assert _rel_file_map(via_dispatch) == _rel_file_map(via_direct)
+        dispatch_files = _rel_file_map(via_dispatch)
+        direct_files = _rel_file_map(via_direct)
 
-    def test_main_renders_ios_project(self, tmp_path: Path, capsys):
+        for rel, size in direct_files.items():
+            if rel in _OVERLAY_OVERRIDES:
+                continue
+            assert dispatch_files.get(rel) == size, f"base file changed: {rel}"
+
+        added = set(dispatch_files) - set(direct_files)
+        assert added == set(_OVERLAY_FILES) - _OVERLAY_OVERRIDES
+
+    def test_main_renders_full_map_ar_project(self, tmp_path: Path, capsys):
         cli = _load_cli()
         out_dir = tmp_path / "MapAR"
         rc = cli.main([
@@ -146,6 +202,19 @@ class TestDispatchRendersSkeleton:
         assert (out_dir / "App/Sources/App.swift").exists()
         assert (out_dir / "Package.swift").exists()
         assert (out_dir / "App/Resources/Info.plist").exists()
+        # ... and so did the ARKit + MapKit overlay.
+        for rel in _OVERLAY_FILES:
+            assert (out_dir / rel).is_file(), f"overlay file missing: {rel}"
+        content = (out_dir / "App/Sources/ContentView.swift").read_text(encoding="utf-8")
+        assert "MapARHomeView()" in content
+        info = (out_dir / "App/Resources/Info.plist").read_text(encoding="utf-8")
+        assert "NSCameraUsageDescription" in info
+        assert "NSLocationWhenInUseUsageDescription" in info
+        map_ar = (out_dir / "App/Sources/MapAR/MapARHomeView.swift").read_text(
+            encoding="utf-8"
+        )
+        assert "MapKitMapView(store: store)" in map_ar
+        assert "ARKitOverlayView(" in map_ar
         assert f"scaffolded {PACK}" in capsys.readouterr().out
 
     def test_main_list_includes_pack(self, capsys):

@@ -1,15 +1,14 @@
-# OP-1816 (Track B / B-1) — Case-3 iOS map-AR app pack skeleton.
+# OP-1816 (skeleton) + OP-1820 (B-1 content) — Case-3 iOS map-AR app pack.
 #
 # An iOS app that combines ARKit (augmented reality) with MapKit (maps) —
 # e.g. an AR wayfinding / points-of-interest experience anchored to a map.
 #
-# This is a SKELETON only. The pack ships no scaffolder of its own: the
+# The pack ships no scaffolder of its own: the
 # dispatcher (scripts/scaffold.py) routes it to the existing
 # backend.ios_scaffolder via the explicit override in
 # backend/skill_registry.py (_SCAFFOLDER_MODULE_OVERRIDES). Rendering this
-# pack therefore produces the standard iOS app skeleton (SwiftUI + SPM);
-# the ARKit and MapKit domain scaffolds + glue code are sequenced
-# FOLLOW-ON tickets in this same pack.
+# pack produces the standard iOS app skeleton (SwiftUI + SPM), then layers
+# this pack's ARKit + MapKit scaffolds/ overlay on top.
 #
 # Safe-local internal dev — authored under omnisight-self, NOT a customer
 # run. Needs no platform/sandbox. (Note: an actual iOS BUILD needs a macOS
@@ -21,11 +20,10 @@ description: >
   Case-3 iOS map-AR app pack — an iOS application that combines ARKit
   (augmented reality) with MapKit (maps), e.g. an AR points-of-interest /
   wayfinding experience that anchors AR content to map locations.
-  SKELETON pickup: reuses the `ios` scaffolder (on ScaffolderBase) via the
-  dispatcher to render the base iOS app project (SwiftUI + Swift Package
-  Manager) — NO new scaffolder. ARKit (ARView / world tracking) and MapKit
-  (Map view / location) domain scaffolds and glue code are sequenced
-  follow-on tickets in this pack.
+  Reuses the `ios` scaffolder (on ScaffolderBase) via the dispatcher to
+  render the base iOS app project (SwiftUI + Swift Package Manager), then
+  layers this pack's ARKit (ARView / world tracking) and MapKit (Map view /
+  location) domain scaffolds and glue code on top — NO new scaffolder.
 version: "0.1.0"
 author: "OmniSight"
 license: "Apache-2.0"
@@ -70,4 +68,3 @@ keywords:
   - realitykit
   - swift-package-manager
   - case-3
-  - skeleton

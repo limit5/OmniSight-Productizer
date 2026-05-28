@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ios-map-ar (OP-1820) - Info.plist overlay for ARKit + MapKit. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>{{ project_name }}</string>
+    <key>CFBundleExecutable</key>
+    <string>{{ project_name }}</string>
+    <key>CFBundleIdentifier</key>
+    <string>{{ bundle_id }}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>{{ project_name }}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+        <string>arkit</string>
+    </array>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+{% if push %}
+    <key>UIBackgroundModes</key>
+    <array>
+        <string>remote-notification</string>
+    </array>
+{% endif %}
+    <key>NSCameraUsageDescription</key>
+    <string>Camera access is required to place AR overlays on nearby map locations.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Location access is required to show nearby map points and align AR overlays.</string>
+    <key>NSUserTrackingUsageDescription</key>
+    <string>Used only to deliver relevant content. You can decline.</string>
+</dict>
+</plist>
