@@ -18,6 +18,7 @@ import {
   Settings,
 } from "lucide-react"
 import { ProjectLifecycleProgress } from "@/components/omnisight/project-lifecycle-progress"
+import { ProjectDecisionInbox } from "@/components/omnisight/project-decision-inbox"
 import { useTenant } from "@/lib/tenant-context"
 import { useProject } from "@/lib/project-context"
 
@@ -169,7 +170,10 @@ export default function ProjectProgressPage({
           </div>
         </header>
 
-        <ProjectLifecycleProgress projectId={pid} />
+        <div className="flex flex-col gap-6">
+          <ProjectLifecycleProgress projectId={pid} />
+          <ProjectDecisionInbox projectId={pid} />
+        </div>
       </div>
     </main>
   )
