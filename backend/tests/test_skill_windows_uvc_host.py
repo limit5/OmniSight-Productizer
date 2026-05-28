@@ -1,20 +1,30 @@
-"""OP-1815 (Track B / B-1) - tests for the Windows UVC HOST skeleton pack.
+"""OP-1815 (skeleton) + OP-1817 (B-1 Case-2 content) - tests for the
+Windows UVC HOST pack.
 
 The pack (`configs/skills/windows-uvc-host`) ships NO scaffolder of its
 own: the dispatcher routes it to the existing `backend.tauri_scaffolder`
-via the explicit override in `backend/skill_registry.py`. These tests pin
-the acceptance surfaces:
+via the explicit override in `backend/skill_registry.py`. OP-1817 adds the
+UVC enumerate + capture domain templates to the pack's `scaffolds/` dir;
+because that dir differs from the tauri scaffolder's own base dir,
+`resolve_scaffolder` surfaces it as an overlay and the dispatcher layers it
+on top of the borrowed desktop skeleton. These tests pin the acceptance
+surfaces:
 
-* **Code** - registry/dispatcher discovery, manifest validation, and
-  routing to `backend.tauri_scaffolder` (no new Windows scaffolder).
-* **Exercised** - dispatching through `scripts/scaffold.py` renders the
-  same desktop skeleton as a direct `tauri_scaffolder.render_project`.
-* **Scope** - the pack documents skeleton-only UVC host work; capture
-  domain code remains follow-on.
+* **Integration** - the pack is discoverable by the registry / dispatcher
+  and its `skill.yaml` validates.
+* **Code** - `resolve_scaffolder` binds the pack to
+  `backend.tauri_scaffolder` (no new Windows scaffolder), gated on the
+  manifest declaring a `scaffolds` artifact, and reports the pack's own
+  scaffolds dir as an overlay.
+* **Exercised** - dispatching the pack through `scripts/scaffold.py`
+  renders the full UVC-host project: the base desktop skeleton (byte-for-
+  byte identical to a direct `tauri_scaffolder.render_project` call) PLUS
+  the UVC enumerate + capture overlay templates.
 """
 
 from __future__ import annotations
 
+import functools
 import importlib.util
 from pathlib import Path
 
@@ -51,6 +61,11 @@ def _rel_file_map(out_dir: Path) -> dict[str, int]:
     }
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Integration — discovery + manifest validation
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
 class TestPackRegistry:
     def test_pack_discoverable(self):
         names = {s.name for s in list_skills()}
@@ -76,6 +91,11 @@ class TestPackRegistry:
         assert "CORE-05" in info.manifest.depends_on_core
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Code — routes to tauri_scaffolder, NO new scaffolder
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
 class TestRoutesToTauriScaffolder:
     def test_module_name_overridden_to_tauri(self):
         assert scaffolder_module_name(PACK) == "backend.tauri_scaffolder"
@@ -84,15 +104,52 @@ class TestRoutesToTauriScaffolder:
         handle = resolve_scaffolder(PACK)
         assert handle.skill_name == PACK
         assert handle.module_name == "backend.tauri_scaffolder"
-        assert handle.render is tauri_scaffolder.render_project
+        # The pack ships its own scaffolds/, so render is the tauri
+        # render_project with the overlay pre-bound (functools.partial)
+        # rather than the bare function; the underlying callable is still
+        # the existing scaffolder entry point — no new Windows scaffolder.
+        assert isinstance(handle.render, functools.partial)
+        assert handle.render.func is tauri_scaffolder.render_project
+        assert handle.render.keywords["overlay_dirs"] == handle.overlay_dirs
         assert handle.options_cls is tauri_scaffolder.ScaffoldOptions
 
     def test_listed_as_scaffoldable(self):
         assert PACK in list_scaffoldable_skills()
 
+    def test_pack_scaffolds_resolved_as_overlay(self):
+        # The pack reuses the tauri scaffolder but ships its own scaffolds/
+        # dir — resolve_scaffolder surfaces it as an overlay so the
+        # dispatcher layers the UVC domain on top of the skeleton.
+        handle = resolve_scaffolder(PACK)
+        pack_scaffolds = get_skill(PACK).path / "scaffolds"
+        assert [p.resolve() for p in handle.overlay_dirs] == [pack_scaffolds.resolve()]
 
-class TestDispatchRendersDesktopSkeleton:
-    def test_dispatch_matches_direct_tauri_render(self, tmp_path: Path):
+    def test_self_owned_pack_has_no_overlay(self):
+        # The desktop-tauri pack is bound to its own scaffolder — its
+        # scaffolds dir *is* the scaffolder base dir, so no overlay.
+        assert resolve_scaffolder("skill-desktop-tauri").overlay_dirs == []
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Exercised — dispatch renders skeleton + UVC overlay
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Overlay UVC source the dispatch must add on top of the base skeleton.
+_OVERLAY_FILES = (
+    "src-tauri/src/uvc/mod.rs",
+    "src-tauri/src/uvc/device.rs",
+    "src-tauri/src/uvc/capture.rs",
+    "src-tauri/src/uvc/commands.rs",
+    "src/uvc.ts",
+)
+
+
+class TestDispatchRendersHostProject:
+    def test_dispatch_is_skeleton_superset_plus_overlay(self, tmp_path: Path):
+        """Dispatching the host pack renders the full project: every file a
+        direct tauri render produces (byte-for-byte) PLUS the UVC enumerate
+        + capture overlay — proving it reuses the scaffolder and layers its
+        own templates on top without altering the base output."""
         cli = _load_cli()
 
         via_dispatch = tmp_path / "dispatched"
@@ -109,9 +166,19 @@ class TestDispatchRendersDesktopSkeleton:
             tauri_scaffolder.ScaffoldOptions(project_name="UvcHost"),
         )
 
-        assert _rel_file_map(via_dispatch) == _rel_file_map(via_direct)
+        dispatch_files = _rel_file_map(via_dispatch)
+        direct_files = _rel_file_map(via_direct)
 
-    def test_main_renders_desktop_project(self, tmp_path: Path, capsys):
+        # Base skeleton is preserved byte-for-byte (the overlay is purely
+        # additive — no base file is overridden).
+        for rel, size in direct_files.items():
+            assert dispatch_files.get(rel) == size, f"base file changed: {rel}"
+
+        # The overlay added exactly the UVC enumerate + capture surface.
+        added = set(dispatch_files) - set(direct_files)
+        assert added == set(_OVERLAY_FILES)
+
+    def test_main_renders_full_host_project(self, tmp_path: Path, capsys):
         cli = _load_cli()
         out_dir = tmp_path / "UvcHost"
         rc = cli.main([
@@ -119,8 +186,17 @@ class TestDispatchRendersDesktopSkeleton:
             "--project-name", "UvcHost",
         ])
         assert rc == 0
+        # The standard Tauri desktop skeleton landed ...
         assert (out_dir / "package.json").exists()
         assert (out_dir / "src-tauri" / "tauri.conf.json").exists()
+        # ... and so did the UVC enumerate + capture overlay.
+        for rel in _OVERLAY_FILES:
+            assert (out_dir / rel).is_file(), f"overlay file missing: {rel}"
+        # Overlay Rust keeps the crate's module path; the IPC commands
+        # carry the #[tauri::command] attribute the capability system reads.
+        commands = (out_dir / "src-tauri/src/uvc/commands.rs").read_text(encoding="utf-8")
+        assert "#[tauri::command]" in commands
+        assert "pub fn uvc_enumerate" in commands
         assert f"scaffolded {PACK}" in capsys.readouterr().out
 
     def test_main_list_includes_pack(self, capsys):
@@ -130,10 +206,12 @@ class TestDispatchRendersDesktopSkeleton:
         assert PACK in capsys.readouterr().out
 
 
-class TestSkeletonScope:
-    def test_tasks_describe_windows_uvc_host_skeleton(self):
+class TestContentScope:
+    def test_tasks_describe_uvc_host_content(self):
         text = TASKS_PATH.read_text(encoding="utf-8")
         assert "Windows UVC HOST" in text
         assert "backend.tauri_scaffolder" in text
         assert "NO new Windows scaffolder" in text
-        assert "status: follow-on" in text
+        # The enumerate + capture tasks are now active (no longer follow-on).
+        assert "status: follow-on" not in text
+        assert text.count("status: active") == 3

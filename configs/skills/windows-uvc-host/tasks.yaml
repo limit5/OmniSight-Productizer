@@ -1,10 +1,14 @@
-# OP-1815 (Track B / B-1) - Case-2 Windows UVC HOST app DAG.
+# OP-1815 (skeleton) + OP-1817 (B-1 Case-2 content) — Windows UVC HOST
+# app DAG.
 #
-# Describes the Windows desktop UVC-host app build. Only the skeleton task
-# is active in this pickup; it routes to backend.tauri_scaffolder via the
-# dispatcher (NO new Windows scaffolder). UVC capture tasks are follow-on
-# entries so the intended host-app DAG is visible without claiming capture
-# domain code landed here.
+# Describes the Windows desktop UVC-host app build. All three tasks route
+# through the dispatcher (scripts/scaffold.py) to backend.tauri_scaffolder
+# — NO new Windows scaffolder. The UVC enumerate + capture domain
+# templates now ship in this pack's scaffolds/ overlay (OP-1817); the
+# dispatcher layers them on top of the borrowed desktop-tauri skeleton, so
+# one render produces the full host project (skeleton + enumerate +
+# capture). The two domain tasks are now active and keep the same DAG
+# ordering they carried as follow-ons.
 
 tasks:
   - id: windows-uvc-host-scaffold-init
@@ -23,29 +27,37 @@ tasks:
     status: active
 
   - id: windows-uvc-host-enumeration
-    name: "UVC camera enumeration (FOLLOW-ON)"
+    name: "UVC camera enumeration"
     description: >
-      FOLLOW-ON ticket (not in this skeleton pickup). Add the Windows host
-      camera enumeration layer that lists attached USB Video Class capture
-      devices and exposes typed metadata to the Tauri IPC boundary.
-      Domain code + dedicated scaffolds land in a sequenced follow-on
-      within this same pack.
+      Render the UVC enumeration layer onto the skeleton: the
+      platform-agnostic device model (UvcDevice / UvcFormat / FrameSize)
+      and the UvcEnumerator trait that lists attached USB Video Class
+      capture devices behind a backend-swappable boundary (Media
+      Foundation on Windows; NullEnumerator is the scaffold default).
+      Templates live in this pack's scaffolds/ overlay
+      (src-tauri/src/uvc/device.rs); the dispatcher renders them on top of
+      the borrowed desktop-tauri skeleton — NO new Windows scaffolder.
     depends_on: [windows-uvc-host-scaffold-init]
     artifacts: [uvc_host_enumeration]
     estimated_hours: 3
     framework_gate: x2-role-desktop-tauri
-    status: follow-on
+    status: active
 
   - id: windows-uvc-host-capture
-    name: "UVC host capture + preview (FOLLOW-ON)"
+    name: "UVC host capture + IPC"
     description: >
-      FOLLOW-ON ticket (not in this skeleton pickup). Add UVC frame
-      capture, lifecycle-correct start/stop controls, and a desktop
-      preview surface inside the Tauri app. This is host/consumer-side
-      capture from an attached UVC device, not the device-side `uvc`
-      gadget pack.
+      Render the UVC capture layer onto the skeleton: the pixel-format +
+      frame-geometry model, the lifecycle-correct capture state machine
+      (CaptureLifecycle: idle→running→stopped), and the Tauri IPC commands
+      (uvc_enumerate / uvc_start_capture / uvc_stop_capture /
+      uvc_capture_status) bridged to a typed frontend client (src/uvc.ts).
+      This is host/consumer-side capture from an attached UVC device, not
+      the device-side `uvc` gadget pack. Templates live in this pack's
+      scaffolds/ overlay (src-tauri/src/uvc/{capture,commands}.rs,
+      src/uvc.ts); the dispatcher renders them on top of the skeleton — NO
+      new Windows scaffolder.
     depends_on: [windows-uvc-host-enumeration]
     artifacts: [uvc_host_capture]
     estimated_hours: 4
     framework_gate: x2-role-desktop-tauri
-    status: follow-on
+    status: active
