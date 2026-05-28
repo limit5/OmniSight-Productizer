@@ -39,7 +39,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from backend import platform_profile as _platform
 from backend.scaffolder_base import RenderOutcome, ScaffolderBase
@@ -243,6 +243,7 @@ def render_project(
     options: ScaffoldOptions,
     *,
     overwrite: bool = True,
+    overlay_dirs: Iterable[Path] | None = None,
 ) -> RenderOutcome:
     """Render the SKILL-IOS scaffold into ``out_dir``.
 
@@ -257,8 +258,17 @@ def render_project(
         When ``True`` (default), existing files inside the scaffold
         surface are overwritten. Files OUTSIDE the scaffold surface
         are never touched.
+    overlay_dirs : iterable of Path, optional
+        Extra scaffold roots layered on top of the SKILL-IOS base
+        skeleton, sharing its render context. This is the path
+        ``ios-map-ar`` uses (via the dispatcher) to render its ARKit +
+        MapKit templates onto the borrowed iOS app shell — no new
+        scaffolder. ``None`` leaves the render byte-for-byte identical to
+        the bare skeleton.
     """
-    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
+    return _SCAFFOLDER.render_project(
+        out_dir, options, overwrite=overwrite, overlay_dirs=overlay_dirs
+    )
 
 
 def pilot_report(

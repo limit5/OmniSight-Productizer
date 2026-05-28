@@ -1,8 +1,7 @@
-# docs/ — OP-1816 skeleton
+# docs/ — ios-map-ar
 
-Datasheet / integration docs for the ARKit and MapKit layers land with
-their sequenced **follow-on** tickets in this same pack. This directory
-exists so the `docs` artifact declared in `skill.yaml` validates
-(`skill_manifest`).
+The pack overview in `../SKILL.md` documents how OP-1820 renders the full
+iOS map-AR project: the base iOS skeleton from `skill-ios` plus this
+pack's ARKit + MapKit overlay templates.
 
 See `../SKILL.md` for the pack overview.

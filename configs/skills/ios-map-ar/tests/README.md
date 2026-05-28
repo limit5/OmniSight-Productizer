@@ -1,10 +1,9 @@
-# tests/ — OP-1816 skeleton
+# tests/ — ios-map-ar
 
 Dispatch/render coverage for this pack lives in the backend test suite at
 `backend/tests/test_skill_ios_map_ar.py` (discovery, manifest validation,
-dispatcher routing to `backend.ios_scaffolder`, and an end-to-end render
-of the iOS skeleton).
+dispatcher routing to `backend.ios_scaffolder`, overlay resolution, and
+an end-to-end render of the full iOS map-AR project).
 
-Per-pack ARKit and MapKit layer tests land with their sequenced
-**follow-on** tickets in this same pack. This directory exists so the
-`tests` artifact declared in `skill.yaml` validates.
+The rendered project also includes `Tests/MapLocationStoreTests.swift`
+from the overlay, covering map/AR point selection state.
