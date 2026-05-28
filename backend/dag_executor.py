@@ -1114,7 +1114,7 @@ TOOLCHAIN_REGISTRY: dict[str, ToolchainSpec] = {
     "make": ToolchainSpec(command_seq=(("make",),), slice="local"),
     "python3": ToolchainSpec(command_seq=None, slice="local"),
     "gradle": ToolchainSpec(
-        command_seq=(("./gradlew", "assembleDebug", "test"),),
+        command_seq=(("gradle", "assembleDebug", "test"),),
         slice=BUILD_NETWORKED_SLICE,
         env_requires=("ANDROID_HOME",),
     ),
@@ -1362,7 +1362,7 @@ class LocalTaskHandler:
         cmake → configure + build (two commands, run in order);
         make  → ``make`` (default target);
         python3 → run the first ``.py`` in ``inputs`` with this interpreter.
-        gradle → wrap ``./gradlew assembleDebug test`` in the host sandbox
+        gradle → wrap ``gradle assembleDebug test`` in the host sandbox
         with network explicitly allowed.
         """
         tc = task.toolchain

@@ -116,6 +116,8 @@ ENV_ALLOWLIST: tuple[str, ...] = (
     "CODEX_HOME",
     # --- Android build-networked slice (OP-1839) ---
     "ANDROID_HOME",
+    "GRADLE_RO_DEP_CACHE",
+    "GRADLE_USER_HOME",
 )
 """Names of the only env vars projected into the agent CLI + its git
 children. Anything not listed here (notably every ``OMNISIGHT_*`` infra
@@ -340,6 +342,9 @@ def _nvm_node_toolchain_subtree(env: Mapping[str, str]) -> Path | None:
 # still authenticates), and redirect HOME + the CLI/XDG dirs there. RW-binding
 # the *shared* host config dir would break tenant isolation, so we copy instead.
 _CLI_HOME_DIRNAME = "cli-home"
+_GRADLE_HOME_DIRNAME = "gradle-home"
+_GRADLE_BINARY_DIRNAME = "gradle-8.7"
+_GRADLE_CACHE_REL = Path(".gradle") / "caches"
 
 
 # Agent-CLI config dirs (OP-1834): (ENV_NAME, relative subdir). The relative
@@ -600,6 +605,23 @@ def cli_home_for(ticket_key: str) -> Path:
     return Path("/tmp") / f"runner-{_safe_ticket(ticket_key)}" / _CLI_HOME_DIRNAME
 
 
+def gradle_home_for(ticket_key: str) -> Path:
+    """Return the writable per-ticket Gradle home path (OP-1841)."""
+    return Path("/tmp") / f"runner-{_safe_ticket(ticket_key)}" / _GRADLE_HOME_DIRNAME
+
+
+def _host_home(env: Mapping[str, str]) -> Path:
+    return Path(env.get("HOME") or os.path.expanduser("~")).expanduser()
+
+
+def _host_gradle_binary_tree(env: Mapping[str, str]) -> Path:
+    return _host_home(env) / _GRADLE_BINARY_DIRNAME
+
+
+def _host_gradle_dep_cache(env: Mapping[str, str]) -> Path:
+    return _host_home(env) / _GRADLE_CACHE_REL
+
+
 def cleanup_cli_home(ticket_key: str) -> None:
     """Remove the seeded per-ticket CLI home so creds never outlive the run.
 
@@ -708,9 +730,26 @@ def _build_bubblewrap_argv(
         tc_abs = str(toolchain)
         argv += ["--ro-bind", tc_abs, tc_abs]
 
-    android_home = build_allowlisted_env(env).get("ANDROID_HOME", "").strip()
+    allowed_env = build_allowlisted_env(env)
+    android_home = allowed_env.get("ANDROID_HOME", "").strip()
+    android_gradle_env: dict[str, str] = {}
     if android_home and Path(android_home).is_dir():
         argv += ["--ro-bind", android_home, android_home]
+        gradle_tree = _host_gradle_binary_tree(env)
+        gradle_cache = _host_gradle_dep_cache(env)
+        if gradle_tree.is_dir():
+            gradle_tree_abs = str(gradle_tree)
+            argv += ["--ro-bind", gradle_tree_abs, gradle_tree_abs]
+            gradle_bin = str(gradle_tree / "bin")
+            old_path = allowed_env.get("PATH", "")
+            android_gradle_env["PATH"] = (
+                f"{gradle_bin}:{old_path}" if old_path else gradle_bin
+            )
+        if gradle_cache.is_dir():
+            gradle_cache_abs = str(gradle_cache)
+            argv += ["--ro-bind", gradle_cache_abs, gradle_cache_abs]
+            android_gradle_env["GRADLE_RO_DEP_CACHE"] = gradle_cache_abs
+        android_gradle_env["GRADLE_USER_HOME"] = str(gradle_home_for(ticket_key))
 
     argv += ["--bind", worktree_abs, worktree_abs]
     argv += ["--bind", tmp_dir, tmp_dir]
@@ -743,8 +782,8 @@ def _build_bubblewrap_argv(
     # XDG_* are pinned to the writable per-ticket CLI home (OP-1834) — so skip
     # any host-inherited values for all of them here (the explicit values win).
     pinned = {"TMPDIR", *cli_env}
-    for name, value in build_allowlisted_env(env).items():
-        if name in pinned:
+    for name, value in allowed_env.items():
+        if name in pinned or name in android_gradle_env:
             continue
         argv += ["--setenv", name, value]
 
@@ -753,6 +792,8 @@ def _build_bubblewrap_argv(
     # stays the worktree — the CLI works on the code there, HOME lives apart.
     argv += ["--setenv", "TMPDIR", tmp_dir]
     for name, value in cli_env.items():
+        argv += ["--setenv", name, value]
+    for name, value in android_gradle_env.items():
         argv += ["--setenv", name, value]
     argv += ["--chdir", worktree_abs]
 
@@ -991,6 +1032,7 @@ __all__ = [
     "build_allowlisted_env",
     "assert_sandbox_enforced_for_fleet",
     "cli_home_for",
+    "gradle_home_for",
     "cleanup_cli_home",
     "prepare_cli_home",
     "detect_platform",

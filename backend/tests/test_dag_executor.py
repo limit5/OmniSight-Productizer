@@ -95,7 +95,7 @@ async def test_toolchain_registry_includes_gradle_build_networked():
     assert dx.TOOLCHAIN_REGISTRY["python3"].slice == "local"
     assert dx.TOOLCHAIN_REGISTRY["gradle"].slice == dx.BUILD_NETWORKED_SLICE
     assert dx.TOOLCHAIN_REGISTRY["gradle"].command_seq == (
-        ("./gradlew", "assembleDebug", "test"),
+        ("gradle", "assembleDebug", "test"),
     )
     assert dx.TOOLCHAIN_REGISTRY["gradle"].env_requires == ("ANDROID_HOME",)
 
@@ -128,14 +128,14 @@ async def test_gradle_build_networked_dispatches_wrapped_network_allowed(
 
     assert res.ok
     assert wrap_calls == [(
-        ["./gradlew", "assembleDebug", "test"],
+        ["gradle", "assembleDebug", "test"],
         tmp_path / "wd" / "1839-android",
         "dag-plan-1839-android",
         True,
         env,
     )]
     assert run_calls == [(
-        ["bwrap", "--network-allowed", "--", "./gradlew", "assembleDebug", "test"],
+        ["bwrap", "--network-allowed", "--", "gradle", "assembleDebug", "test"],
         tmp_path / "wd" / "1839-android",
         dx.DEFAULT_TASK_TIMEOUT_S,
     )]

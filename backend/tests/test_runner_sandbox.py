@@ -285,21 +285,30 @@ def test_network_caller_override_wins_without_env(tmp_path, monkeypatch):
     assert "--unshare-net" not in argv
 
 
-def test_android_home_is_readonly_bound_and_projected(tmp_path, monkeypatch):
-    """OP-1839: ANDROID_HOME is allowlisted and RO-bound for gradle builds."""
+def test_android_home_gradle_warm_cache_is_bound_and_projected(tmp_path, monkeypatch):
+    """OP-1839/OP-1841: Android builds get SDK + warm Gradle cache wiring."""
     _force_platform(monkeypatch, rs.PLATFORM_LINUX)
     _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
     worktree = tmp_path / "wt"
     worktree.mkdir()
     android_home = tmp_path / "android-sdk"
     android_home.mkdir()
+    host_home = tmp_path / "host-home"
+    gradle_tree = host_home / "gradle-8.7"
+    gradle_cache = host_home / ".gradle" / "caches"
+    (gradle_tree / "bin").mkdir(parents=True)
+    gradle_cache.mkdir(parents=True)
 
     argv = rs.wrap_in_bubblewrap(
-        ["./gradlew", "assembleDebug", "test"],
+        ["gradle", "assembleDebug", "test"],
         worktree_path=worktree,
-        ticket_key="OP-1839",
+        ticket_key="OP-1841",
         network=True,
-        env={"PATH": "/usr/bin", "ANDROID_HOME": str(android_home)},
+        env={
+            "PATH": "/usr/bin",
+            "HOME": str(host_home),
+            "ANDROID_HOME": str(android_home),
+        },
     )
 
     sdk_abs = str(android_home)
@@ -307,11 +316,25 @@ def test_android_home_is_readonly_bound_and_projected(tmp_path, monkeypatch):
     assert argv[bind_idx - 1] == "--ro-bind"
     assert argv[bind_idx + 1] == sdk_abs
 
+    gradle_tree_abs = str(gradle_tree)
+    tree_idx = argv.index(gradle_tree_abs)
+    assert argv[tree_idx - 1] == "--ro-bind"
+    assert argv[tree_idx + 1] == gradle_tree_abs
+
+    gradle_cache_abs = str(gradle_cache)
+    cache_idx = argv.index(gradle_cache_abs)
+    assert argv[cache_idx - 1] == "--ro-bind"
+    assert argv[cache_idx + 1] == gradle_cache_abs
+
     setenv: dict[str, str] = {}
     for i, tok in enumerate(argv):
         if tok == "--setenv":
             setenv[argv[i + 1]] = argv[i + 2]
     assert setenv["ANDROID_HOME"] == sdk_abs
+    assert setenv["GRADLE_RO_DEP_CACHE"] == gradle_cache_abs
+    assert setenv["GRADLE_USER_HOME"] == str(rs.gradle_home_for("OP-1841"))
+    assert setenv["GRADLE_USER_HOME"].startswith("/tmp/runner-OP-1841/")
+    assert setenv["PATH"] == f"{gradle_tree / 'bin'}:/usr/bin"
     assert "--unshare-net" not in argv
 
 
