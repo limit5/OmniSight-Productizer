@@ -167,9 +167,9 @@ class ScaffolderBase:
             if path.is_file():
                 yield path
 
-    def _build_jinja_env(self) -> jinja2.Environment:
+    def _build_jinja_env(self, root: Path | None = None) -> jinja2.Environment:
         return jinja2.Environment(
-            loader=jinja2.FileSystemLoader(str(self.scaffolds_dir)),
+            loader=jinja2.FileSystemLoader(str(root or self.scaffolds_dir)),
             undefined=jinja2.StrictUndefined,
             keep_trailing_newline=True,
             autoescape=False,
@@ -192,6 +192,7 @@ class ScaffolderBase:
         options: ScaffoldOptions,
         *,
         overwrite: bool = True,
+        overlay_dirs: Iterable[Path] | None = None,
     ) -> RenderOutcome:
         """Render the scaffold under :attr:`scaffolds_dir` into ``out_dir``.
 
@@ -205,6 +206,17 @@ class ScaffolderBase:
             When ``True`` (default), existing files inside the scaffold
             surface are overwritten. Files OUTSIDE the scaffold surface
             are never touched.
+        overlay_dirs : iterable of Path, optional
+            Additional scaffold roots rendered **on top of**
+            :attr:`scaffolds_dir`, in order, sharing the same render
+            context. This is how a pack that *reuses* another pack's
+            scaffolder (e.g. ``android-rtsp-onvif-client`` borrowing
+            ``backend.android_scaffolder``) layers its own templates onto
+            the borrowed base skeleton without shipping a scaffolder of
+            its own. An overlay file at the same relative path as a base
+            file overrides it (subject to ``overwrite``); a new path is
+            added. When ``None``/empty the render is byte-for-byte what it
+            was before overlays existed.
         """
         options.validate()
         out_dir = Path(out_dir)
@@ -215,13 +227,54 @@ class ScaffolderBase:
 
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        env = self._build_jinja_env()
         ctx = self.build_context(options)
         outcome = self.make_outcome(out_dir, ctx)
 
+        # Base scaffold first, then each overlay on top (last writer wins
+        # under overwrite=True). Each root gets its own Jinja loader so
+        # template names resolve relative to the root they live in.
+        self._render_root(
+            self.scaffolds_dir, out_dir, options, ctx, outcome, overwrite=overwrite
+        )
+        for overlay in overlay_dirs or ():
+            overlay = Path(overlay)
+            if not overlay.is_dir():
+                raise FileNotFoundError(
+                    f"overlay scaffolds directory missing: {overlay}"
+                )
+            self._render_root(
+                overlay, out_dir, options, ctx, outcome, overwrite=overwrite
+            )
+
+        logger.info(
+            "%s rendered %d files (%d bytes) into %s",
+            self.skill_label,
+            len(outcome.files_written),
+            outcome.bytes_written,
+            out_dir,
+        )
+        return outcome
+
+    def _render_root(
+        self,
+        root: Path,
+        out_dir: Path,
+        options: ScaffoldOptions,
+        ctx: dict[str, Any],
+        outcome: RenderOutcome,
+        *,
+        overwrite: bool,
+    ) -> None:
+        """Render one scaffold ``root`` into ``out_dir`` (base or overlay).
+
+        Shared by the base render and every overlay so the ``.j2`` /
+        byte-copy / ``should_skip`` / ``overwrite`` semantics are
+        identical regardless of which root a file comes from.
+        """
+        env = self._build_jinja_env(root)
         suffix = self.template_suffix
-        for src in self._iter_scaffold_files(self.scaffolds_dir):
-            rel = src.relative_to(self.scaffolds_dir).as_posix()
+        for src in self._iter_scaffold_files(root):
+            rel = src.relative_to(root).as_posix()
             if self.should_skip(rel, options):
                 continue
 
@@ -241,15 +294,6 @@ class ScaffolderBase:
                     continue
                 outcome.bytes_written += self._write_file(dest, src.read_bytes())
             outcome.files_written.append(dest)
-
-        logger.info(
-            "%s rendered %d files (%d bytes) into %s",
-            self.skill_label,
-            len(outcome.files_written),
-            outcome.bytes_written,
-            out_dir,
-        )
-        return outcome
 
 
 __all__ = [

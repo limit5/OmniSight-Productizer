@@ -25,6 +25,7 @@ Lifecycle hooks
 
 from __future__ import annotations
 
+import functools
 import importlib
 import logging
 import shlex
@@ -561,12 +562,28 @@ class ScaffolderHandle:
     ``backend/<stack>_scaffolder.py`` exposes (``render_project`` and
     ``ScaffoldOptions``). The dispatcher builds an options instance from
     CLI flags via ``options_cls`` and hands it to ``render``.
+
+    For the conventional case ``render`` *is* the module's
+    ``render_project``. For a reuse pack with an overlay it is that same
+    function with ``overlay_dirs`` pre-bound (a :func:`functools.partial`),
+    so the dispatcher calls it identically — ``overlay_dirs`` is also kept
+    on :attr:`overlay_dirs` for introspection.
     """
 
     skill_name: str
     module_name: str
     options_cls: type
     render: Callable[..., object]
+    #: Extra scaffold roots to layer on top of the resolved scaffolder's
+    #: own ``scaffolds`` dir. Non-empty only when a pack *reuses* another
+    #: pack's scaffolder (via :data:`_SCAFFOLDER_MODULE_OVERRIDES`) and
+    #: ships its own ``scaffolds/`` templates — e.g.
+    #: ``android-rtsp-onvif-client`` borrowing ``backend.android_scaffolder``
+    #: renders its ONVIF/RTSP client templates as an overlay. For a pack
+    #: bound to its own conventional scaffolder this is empty (its
+    #: ``scaffolds`` dir *is* the scaffolder's base dir), so the render is
+    #: unchanged.
+    overlay_dirs: list[Path] = field(default_factory=list)
 
 
 def scaffolder_module_name(skill_name: str) -> str:
@@ -657,12 +674,50 @@ def resolve_scaffolder(
             f"{_SCAFFOLDER_RENDER_ATTR!r}"
         )
 
+    # A pack that reuses another scaffolder but ships its own scaffolds/
+    # gets that dir bound as an overlay onto the resolved ``render``, so
+    # the existing dispatcher (scripts/scaffold.py, which only knows how
+    # to call ``render(out_dir, options, overwrite=...)``) renders the
+    # full project — base skeleton + overlay — with no CLI change. When
+    # there is no overlay, ``render`` is the scaffolder's own entry point
+    # unchanged (``is`` identity preserved for the conventional case).
+    overlay_dirs = _resolve_overlay_dirs(info, module)
+    bound_render = render
+    if overlay_dirs:
+        bound_render = functools.partial(render, overlay_dirs=overlay_dirs)
+
     return ScaffolderHandle(
         skill_name=skill_name,
         module_name=module_name,
         options_cls=options_cls,
-        render=render,
+        render=bound_render,
+        overlay_dirs=overlay_dirs,
     )
+
+
+def _resolve_overlay_dirs(info: SkillInfo, module: object) -> list[Path]:
+    """Overlay roots to render on top of the scaffolder's own base dir.
+
+    A pack that reuses another pack's scaffolder (via
+    :data:`_SCAFFOLDER_MODULE_OVERRIDES`) still ships its *own*
+    ``scaffolds/`` dir. When that dir is not the same directory the bound
+    scaffolder renders from (``module._SCAFFOLDS_DIR``), it is returned
+    here so the dispatcher layers it on top of the borrowed base skeleton.
+
+    For a pack bound to its own conventional scaffolder the two dirs are
+    the same path, so this returns ``[]`` and the render is unchanged —
+    making the overlay strictly opt-in to the reuse case.
+    """
+    pack_scaffolds = info.path / "scaffolds"
+    base_dir = getattr(module, "_SCAFFOLDS_DIR", None)
+    if base_dir is None or not pack_scaffolds.is_dir():
+        return []
+    try:
+        if pack_scaffolds.resolve() == Path(base_dir).resolve():
+            return []
+    except OSError:
+        return []
+    return [pack_scaffolds]
 
 
 def list_scaffoldable_skills(skills_dir: Optional[Path] = None) -> list[str]:
