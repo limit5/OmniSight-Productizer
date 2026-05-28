@@ -199,6 +199,33 @@ async def test_effective_skills_endpoint_uses_wp2_loader(
 
 
 @pytest.mark.asyncio
+async def test_scaffoldable_skills_endpoint_uses_skill_registry(client, monkeypatch):
+    from backend.routers import skills as _sk_router
+
+    monkeypatch.setattr(
+        _sk_router.skill_registry,
+        "list_scaffoldable_skills",
+        lambda: [
+            "android-rtsp-onvif-client",
+            "windows-uvc-host",
+            "ios-map-ar",
+        ],
+    )
+
+    r = await client.get("/api/v1/skills/scaffoldable")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {
+        "items": [
+            "android-rtsp-onvif-client",
+            "windows-uvc-host",
+            "ios-map-ar",
+        ],
+        "count": 3,
+    }
+
+
+@pytest.mark.asyncio
 async def test_promote_moves_into_live_tree(
     client, isolated_pending_dir, monkeypatch,
 ):

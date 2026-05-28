@@ -176,6 +176,17 @@ async def skill_list(_user=Depends(_au.require_operator)) -> dict:
     return {"items": items, "count": len(items)}
 
 
+@router.get("/scaffoldable")
+async def scaffoldable_skill_list(_user=Depends(_au.require_operator)) -> dict:
+    """List installed skill packs that can render scaffolds.
+
+    Mirrors ``scripts/scaffold.py --list`` by delegating to the shared
+    registry helper instead of maintaining a router-local allow-list.
+    """
+    items = skill_registry.list_scaffoldable_skills()
+    return {"items": items, "count": len(items)}
+
+
 @router.get("/registry/{name}")
 async def skill_detail(name: str,
                        _user=Depends(_au.require_operator)) -> dict:
