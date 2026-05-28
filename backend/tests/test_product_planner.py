@@ -1,20 +1,27 @@
-"""1F.P1 — unit tests for the system-of-systems product planner (OP-1826).
+"""1F.P1+P2a — unit tests for the system-of-systems product planner.
 
-Covers compose_product():
+P1 (OP-1826) — compose_product() merge + namespacing:
   - composing >=2 parseable packs (imaging + connectivity) yields ONE
     DAG that passes dag_validator.validate()
   - no task_id collisions across packs
   - every pack's tasks are present, pack-namespaced
   - expected_output / depends_on / inputs are namespaced consistently
-  - P1 scope guard: no cross-pack depends_on edges
   - the DAG validator is reused (invalid merge raises)
   - empty packs list is rejected
+
+P2a (OP-1827) — cross-pack provides/requires wiring MECHANISM, exercised
+with SYNTHETIC fixtures (no real pack declares tokens — that is P2b):
+  - {A provides "x", B requires "x"} -> B->A cross-pack edge
+  - {A, B both provide "x"} -> DuplicateProvideError
+  - {B requires "y", none provides} -> surfaced unmet_requires
+  - external:/user: and self-provided requires are neither wired nor surfaced
 """
 
 from __future__ import annotations
 
 import pytest
 
+from backend.dag_schema import Task
 from backend.dag_validator import validate
 from backend.embedded_planner import plan_embedded_product, reload_tasks_cache
 from backend.hardware_profile import HardwareProfile
@@ -23,11 +30,17 @@ from backend.intent_parser import ParsedSpec
 from backend.product_planner import (
     OUTPUT_SEP,
     TASK_ID_SEP,
+    DuplicateProvideError,
     ProductCompositionError,
     _ns_output,
     _ns_task_id,
+    _PackPlan,
+    _roots,
+    _sinks,
+    _wire_cross_pack,
     compose_product,
 )
+from backend.skill_manifest import SkillManifest
 
 TWO_PACKS = ["imaging", "connectivity"]
 
@@ -211,3 +224,165 @@ class TestValidatorReuseAndBoundaries:
     def test_schema_version_one(self, spec, hw):
         dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-two")
         assert dag.schema_version == 1
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P2a (OP-1827) — cross-pack wiring MECHANISM (pure helper, synthetic)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _task(task_id: str, depends_on: list[str] | None = None) -> Task:
+    """A minimal synthetic namespaced task (no real pack involved)."""
+    return Task(
+        task_id=task_id,
+        description="synthetic",
+        required_tier="t1",
+        toolchain="cmake",
+        inputs=[],
+        expected_output=f"{task_id}.bin",
+        depends_on=depends_on or [],
+    )
+
+
+def _two_pack_plans() -> tuple[_PackPlan, _PackPlan]:
+    # Each pack: one root (a1/b1) -> one sink (a2/b2).
+    a = _PackPlan(
+        pack="packa",
+        tasks=[_task("packa__a1"), _task("packa__a2", ["packa__a1"])],
+    )
+    b = _PackPlan(
+        pack="packb",
+        tasks=[_task("packb__b1"), _task("packb__b2", ["packb__b1"])],
+    )
+    return a, b
+
+
+class TestCrossPackWiringHelper:
+    def test_roots_and_sinks(self):
+        a, _ = _two_pack_plans()
+        assert [t.task_id for t in _roots(a.tasks)] == ["packa__a1"]
+        assert [t.task_id for t in _sinks(a.tasks)] == ["packa__a2"]
+
+    def test_provides_requires_wires_b_to_a(self):
+        a, b = _two_pack_plans()
+        a.provides = ["x"]
+        b.requires = ["x"]
+        unmet = _wire_cross_pack([a, b])
+        assert unmet == []
+        # B's root now depends on A's sink — a cross-pack B->A edge.
+        b1 = next(t for t in b.tasks if t.task_id == "packb__b1")
+        assert "packa__a2" in b1.depends_on
+        # The producing pack is untouched (no A->B edge introduced).
+        for t in a.tasks:
+            assert all(not d.startswith("packb__") for d in t.depends_on)
+
+    def test_duplicate_provides_raises(self):
+        a, b = _two_pack_plans()
+        a.provides = ["x"]
+        b.provides = ["x"]
+        with pytest.raises(DuplicateProvideError) as exc:
+            _wire_cross_pack([a, b])
+        assert exc.value.conflicts == {"x": ["packa", "packb"]}
+
+    def test_unmet_requires_surfaced(self):
+        a, b = _two_pack_plans()
+        b.requires = ["y"]
+        before = {t.task_id: list(t.depends_on) for t in b.tasks}
+        unmet = _wire_cross_pack([a, b])
+        assert unmet == [{"pack": "packb", "token": "y"}]
+        # Surfaced, never silently wired.
+        after = {t.task_id: list(t.depends_on) for t in b.tasks}
+        assert before == after
+
+    def test_external_and_user_requires_neither_wired_nor_surfaced(self):
+        a, b = _two_pack_plans()
+        b.requires = ["external:hardware_profile", "user:api_key"]
+        before = {t.task_id: list(t.depends_on) for t in b.tasks}
+        unmet = _wire_cross_pack([a, b])
+        assert unmet == []
+        after = {t.task_id: list(t.depends_on) for t in b.tasks}
+        assert before == after
+
+    def test_self_provided_requires_not_unmet(self):
+        a, b = _two_pack_plans()
+        b.provides = ["z"]
+        b.requires = ["z"]
+        before = {t.task_id: list(t.depends_on) for t in b.tasks}
+        unmet = _wire_cross_pack([a, b])
+        assert unmet == []
+        after = {t.task_id: list(t.depends_on) for t in b.tasks}
+        assert before == after  # met in-pack, no self-edge added
+
+    def test_multiple_roots_all_wired_to_producer_sink(self):
+        # Consumer with two independent roots: both must wait on producer.
+        producer = _PackPlan(pack="prod", tasks=[_task("prod__only")])
+        consumer = _PackPlan(
+            pack="cons",
+            tasks=[_task("cons__r1"), _task("cons__r2")],
+        )
+        producer.provides = ["cap"]
+        consumer.requires = ["cap"]
+        assert _wire_cross_pack([producer, consumer]) == []
+        for t in consumer.tasks:
+            assert "prod__only" in t.depends_on
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P2a (OP-1827) — cross-pack wiring through compose_product (injected
+#  synthetic manifests; real packs declare no tokens, so this is hermetic)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestCrossPackWiringCompose:
+    def test_merged_dag_has_consumer_to_producer_edge(self, spec, hw):
+        manifests = {
+            "imaging": SkillManifest(name="imaging", provides=["scan_pipeline"]),
+            "connectivity": SkillManifest(
+                name="connectivity", requires=["scan_pipeline"]
+            ),
+        }
+        dag = compose_product(
+            spec, hw, TWO_PACKS, dag_id="prod-wire", manifests=manifests
+        )
+        result = validate(dag)
+        assert result.ok, result.summary()
+        cross_edges = [
+            (t.task_id, dep)
+            for t in dag.tasks
+            for dep in t.depends_on
+            if dep.split(TASK_ID_SEP, 1)[0] == "imaging"
+            and t.task_id.split(TASK_ID_SEP, 1)[0] == "connectivity"
+        ]
+        assert cross_edges, "expected a connectivity->imaging cross-pack edge"
+
+    def test_duplicate_provides_raises(self, spec, hw):
+        manifests = {
+            "imaging": SkillManifest(name="imaging", provides=["dup"]),
+            "connectivity": SkillManifest(name="connectivity", provides=["dup"]),
+        }
+        with pytest.raises(DuplicateProvideError) as exc:
+            compose_product(spec, hw, TWO_PACKS, manifests=manifests)
+        assert exc.value.conflicts == {"dup": ["connectivity", "imaging"]}
+
+    def test_unmet_requires_surfaced_in_log(self, spec, hw, caplog):
+        manifests = {
+            "connectivity": SkillManifest(
+                name="connectivity", requires=["nonexistent_cap"]
+            ),
+        }
+        with caplog.at_level("WARNING", logger="backend.product_planner"):
+            dag = compose_product(
+                spec, hw, TWO_PACKS, dag_id="prod-unmet", manifests=manifests
+            )
+        assert validate(dag).ok
+        records = [r for r in caplog.records if hasattr(r, "unmet_requires")]
+        assert records
+        assert {"pack": "connectivity", "token": "nonexistent_cap"} in \
+            records[0].unmet_requires
+
+    def test_no_manifests_preserves_p1_no_cross_pack_edges(self, spec, hw):
+        # Real packs declare no tokens yet (P2b) -> P1 behaviour preserved
+        # even though compose_product now reads manifests from the registry.
+        dag = compose_product(spec, hw, TWO_PACKS, dag_id="prod-nowire")
+        for t in dag.tasks:
+            owner = t.task_id.split(TASK_ID_SEP, 1)[0]
+            for dep in t.depends_on:
+                assert dep.split(TASK_ID_SEP, 1)[0] == owner

@@ -68,6 +68,23 @@ class SkillManifest(BaseModel):
         description="L4-CORE modules required (e.g. CORE-16 for OTA)",
     )
 
+    # 1F.P2a (OP-1827) — cross-pack wiring tokens. Free-form capability
+    # labels used by the system-of-systems product planner
+    # (backend.product_planner.compose_product) to wire one pack's
+    # `requires` to another pack's `provides` when composing several packs
+    # into one product DAG. Both are OPTIONAL and unconstrained: a token is
+    # an arbitrary string (e.g. "rtsp_stream", or an "external:"/"user:"
+    # token the planner treats as caller-satisfied). Declaring these on
+    # REAL packs is P2b — this field only adds the schema seam.
+    provides: list[str] = Field(
+        default_factory=list,
+        description="Free-form capability tokens this pack provides to other packs",
+    )
+    requires: list[str] = Field(
+        default_factory=list,
+        description="Free-form capability tokens this pack requires from other packs",
+    )
+
     artifacts: list[ArtifactRef] = Field(
         default_factory=list,
         description="Declared artifact files/dirs the skill provides",

@@ -1,10 +1,10 @@
-"""1F.P1 — system-of-systems product planner (OP-1826).
+"""1F.P1+P2a — system-of-systems product planner (OP-1826, OP-1827).
 
 A planner layer *above* :mod:`backend.embedded_planner`. Where the
 embedded planner turns ONE skill pack into a sub-DAG, this module merges
 SEVERAL packs' sub-DAGs into ONE product DAG.
 
-P1 scope is MERGE + NAMESPACING only:
+P1 (OP-1826) scope was MERGE + NAMESPACING only:
 
   1. For each pack, call
      ``embedded_planner.plan_embedded_product(spec, hw, skill_pack=pack)``
@@ -19,14 +19,41 @@ P1 scope is MERGE + NAMESPACING only:
   3. Concatenate the namespaced sub-DAGs into one :class:`DAG` and run
      the existing ``dag_validator.validate`` over it.
 
-P1 deliberately adds NO cross-pack edges. Wiring one pack's ``provides``
-to another pack's ``requires`` is P2; toolchain reconciliation is P3;
-product test / HIL orchestration is P4. This module only consumes
-``embedded_planner`` — it never modifies it.
+P2a (OP-1827) adds the cross-pack WIRING MECHANISM, run after the P1
+merge+namespacing and before validation:
+
+  4. Read each pack's free-form ``provides`` / ``requires`` tokens from
+     its :class:`~backend.skill_manifest.SkillManifest` (or from an
+     injected ``manifests`` override — used by the synthetic tests so the
+     mechanism can be exercised without declaring tokens on real packs,
+     which is P2b). For every ``requires`` token of pack P, find the pack
+     that ``provides`` it and add cross-pack dependency edges so P depends
+     on the producer: each ROOT task of P (in-degree 0 within its own
+     namespaced sub-DAG) gains a ``depends_on`` edge to every SINK task of
+     the producing pack (out-degree 0). A pack-level capability is only
+     ready once the producing pack's terminal tasks complete, and the
+     requiring pack must not begin its entry tasks until then. The
+     existing validator's cycle / unknown_dep rules catch any pathological
+     wiring (e.g. a mutual requires cycle) — we add edges, never inputs,
+     so ``dep_closure`` is unaffected.
+
+  Fail-loud / surface contract (design §3, §6):
+    * **Duplicate provides** — a token listed in ≥2 *distinct* packs'
+      ``provides`` raises :class:`DuplicateProvideError` (a
+      ``ProductCompositionError``) before any DAG is built.
+    * **Unmet requires** — a ``requires`` token that no pack provides and
+      that is not an ``external:`` / ``user:`` token is never silently
+      dropped: it is collected and logged as structured ``unmet_requires``
+      (the OP-1774 unmet-deps pattern, mirrored from
+      ``embedded_planner._resolve_dependencies``).
+
+Toolchain reconciliation is P3 and product test / HIL orchestration is
+P4 — out of scope here. This module only consumes ``embedded_planner``
+and reads ``skill_registry`` — it never modifies either.
 
     dag = compose_product(spec, hw, ["imaging", "connectivity"])
 
-Note: the design doc referenced by OP-1826
+Note: the design doc referenced by OP-1826/OP-1827
 (``docs/operations/2026-05-28-1F-system-of-systems-planner-design.md``)
 was not present in the tree at implementation time, so the namespace
 format below is the locally chosen convention. ``__`` is the task-id
@@ -39,13 +66,15 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Mapping, Optional
 
 from backend import embedded_planner
 from backend.dag_schema import DAG, Task
 from backend.dag_validator import validate
 from backend.hardware_profile import HardwareProfile
 from backend.intent_parser import ParsedSpec
+from backend.skill_manifest import SkillManifest
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +83,33 @@ TASK_ID_SEP = "__"
 #: Separator between a pack name and the original ``expected_output``.
 OUTPUT_SEP = "/"
 
+#: Prefixes a ``requires`` token may carry to mark it as caller-satisfied
+#: (not produced by any pack). Mirrors the embedded planner's input
+#: exemption so an ``external:``/``user:`` requirement is neither wired
+#: nor surfaced as unmet.
+_CALLER_SATISFIED_PREFIXES = ("external:", "user:")
+
 
 class ProductCompositionError(ValueError):
     """Raised when the merged product DAG fails semantic validation."""
+
+
+class DuplicateProvideError(ProductCompositionError):
+    """Raised when ≥2 distinct packs ``provides`` the same token.
+
+    Cross-pack wiring is ambiguous when two packs claim to provide the
+    same capability — there is no single producer to wire a requiring
+    pack to — so :func:`compose_product` fails loud before building any
+    DAG. :attr:`conflicts` maps each duplicated token to the sorted list
+    of pack names that provide it.
+    """
+
+    def __init__(self, conflicts: dict[str, list[str]]):
+        self.conflicts = conflicts
+        detail = "; ".join(
+            f"{tok!r} provided by {pks}" for tok, pks in sorted(conflicts.items())
+        )
+        super().__init__(f"duplicate cross-pack provides: {detail}")
 
 
 def _ns_task_id(pack: str, task_id: str) -> str:
@@ -96,12 +149,128 @@ def _namespace_subdag(pack: str, sub: DAG) -> list[Task]:
     return namespaced
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P2a (OP-1827) — cross-pack provides/requires wiring
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@dataclass
+class _PackPlan:
+    """One pack's namespaced sub-DAG plus its cross-pack wiring tokens."""
+
+    pack: str
+    tasks: list[Task]
+    provides: list[str] = field(default_factory=list)
+    requires: list[str] = field(default_factory=list)
+
+
+def _roots(tasks: list[Task]) -> list[Task]:
+    """Entry tasks of a namespaced sub-DAG (no intra-pack ``depends_on``).
+
+    Computed *before* cross-pack edges are added, so a task's
+    ``depends_on`` still holds only intra-pack ids; an empty list therefore
+    means the task is a true pack entry point.
+    """
+    return [t for t in tasks if not t.depends_on]
+
+
+def _sinks(tasks: list[Task]) -> list[Task]:
+    """Terminal tasks of a sub-DAG (nothing in the same pack depends on)."""
+    depended_on: set[str] = set()
+    for t in tasks:
+        depended_on.update(t.depends_on)
+    return [t for t in tasks if t.task_id not in depended_on]
+
+
+def _pack_provides_requires(
+    pack: str,
+    manifests: Optional[Mapping[str, SkillManifest]],
+) -> tuple[list[str], list[str]]:
+    """Resolve a pack's ``(provides, requires)`` tokens.
+
+    When ``manifests`` is supplied it is authoritative (a pack absent from
+    it has no tokens) — this keeps the synthetic tests hermetic and lets
+    the mechanism be exercised without touching real ``skill.yaml`` files
+    (that is P2b). Otherwise the pack's manifest is read from the skill
+    registry; a pack with no manifest contributes no tokens, so the real
+    path is a no-op until packs actually declare tokens.
+    """
+    manifest: Optional[SkillManifest]
+    if manifests is not None:
+        manifest = manifests.get(pack)
+    else:
+        from backend import skill_registry
+
+        info = skill_registry.get_skill(pack)
+        manifest = info.manifest if info is not None else None
+
+    if manifest is None:
+        return [], []
+    return list(manifest.provides), list(manifest.requires)
+
+
+def _wire_cross_pack(plans: list[_PackPlan]) -> list[dict[str, str]]:
+    """Add cross-pack ``requires``→``provides`` edges in place.
+
+    Mutates each requiring pack's root tasks' ``depends_on`` to point at
+    the producing pack's sink tasks. Returns the structured
+    ``unmet_requires`` list (``{"pack", "token"}`` entries) for any
+    ``requires`` token no pack provides and that is not caller-satisfied.
+
+    Raises
+    ------
+    DuplicateProvideError
+        If any token is provided by ≥2 distinct packs.
+    """
+    # token -> set of distinct providing pack names. A pack listing a
+    # token twice, or the same pack name appearing twice in ``packs``,
+    # collapses to one entry — the latter is caught later by the
+    # validator's duplicate_id rule, not mistaken for a duplicate provide.
+    providers: dict[str, set[str]] = {}
+    for p in plans:
+        for tok in set(p.provides):
+            providers.setdefault(tok, set()).add(p.pack)
+
+    conflicts = {
+        tok: sorted(pks) for tok, pks in providers.items() if len(pks) > 1
+    }
+    if conflicts:
+        raise DuplicateProvideError(conflicts)
+
+    by_pack: dict[str, _PackPlan] = {p.pack: p for p in plans}
+    unmet: list[dict[str, str]] = []
+
+    for p in plans:
+        for tok in p.requires:
+            if tok.startswith(_CALLER_SATISFIED_PREFIXES):
+                continue
+            producers = providers.get(tok, set()) - {p.pack}
+            if not producers:
+                # Self-provided tokens are satisfied in-pack (no edge);
+                # everything else is a genuine unmet requirement.
+                if tok in set(p.provides):
+                    continue
+                unmet.append({"pack": p.pack, "token": tok})
+                continue
+
+            # Unique by construction (duplicate provides already raised).
+            producer = by_pack[next(iter(producers))]
+            sinks = _sinks(producer.tasks)
+            for r in _roots(p.tasks):
+                for s in sinks:
+                    if s.task_id not in r.depends_on:
+                        r.depends_on.append(s.task_id)
+
+    return unmet
+
+
 def compose_product(
     spec: ParsedSpec,
     hw: HardwareProfile,
     packs: list[str],
     *,
     dag_id: Optional[str] = None,
+    manifests: Optional[Mapping[str, SkillManifest]] = None,
 ) -> DAG:
     """Merge several skill packs' sub-DAGs into one product DAG.
 
@@ -113,28 +282,53 @@ def compose_product(
         Skill pack names to compose. Must be non-empty.
     dag_id : str, optional
         Override for the product DAG id. Auto-generated if omitted.
+    manifests : Mapping[str, SkillManifest], optional
+        Per-pack manifest override for cross-pack wiring. When omitted,
+        each pack's ``provides`` / ``requires`` tokens are read from its
+        registry manifest (P2a). Supplying this dict makes wiring hermetic
+        — used by the synthetic tests so the mechanism can be exercised
+        without declaring tokens on real packs (that is P2b).
 
     Returns
     -------
     DAG
         The union of each pack's sub-DAG with pack-namespaced
-        ``task_id`` / ``expected_output``, validated by
-        ``dag_validator.validate``.
+        ``task_id`` / ``expected_output``, cross-pack ``requires``→
+        ``provides`` edges wired in, validated by ``dag_validator.validate``.
 
     Raises
     ------
     ValueError
         If ``packs`` is empty.
+    DuplicateProvideError
+        If ≥2 distinct packs provide the same token.
     ProductCompositionError
         If the merged DAG fails semantic validation.
     """
     if not packs:
         raise ValueError("compose_product requires at least one pack")
 
-    tasks: list[Task] = []
+    plans: list[_PackPlan] = []
     for pack in packs:
         sub = embedded_planner.plan_embedded_product(spec, hw, skill_pack=pack)
-        tasks.extend(_namespace_subdag(pack, sub))
+        provides, requires = _pack_provides_requires(pack, manifests)
+        plans.append(_PackPlan(
+            pack=pack,
+            tasks=_namespace_subdag(pack, sub),
+            provides=provides,
+            requires=requires,
+        ))
+
+    # P2a — wire cross-pack edges, fail loud on duplicate provides, and
+    # surface unmet requires (OP-1774-style structured log).
+    unmet_requires = _wire_cross_pack(plans)
+    if unmet_requires:
+        logger.warning(
+            "product planner found unmet cross-pack requires",
+            extra={"unmet_requires": unmet_requires},
+        )
+
+    tasks: list[Task] = [t for p in plans for t in p.tasks]
 
     if not dag_id:
         dag_id = f"product-{uuid.uuid4().hex[:12]}"
