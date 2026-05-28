@@ -57,7 +57,12 @@ ProjectType = Literal[
 ProjectClass = Literal[
     "embedded_product", "algo_sim", "optical_sim",
     "iso_standard", "test_tool", "factory_tool",
-    "enterprise_web", "unknown",
+    "enterprise_web",
+    # Track-B software-case classes (OP-1821). These cover non-firmware
+    # mobile/desktop apps that the original 7-class taxonomy had no home
+    # for — they route to the Case packs, NOT embedded_product.
+    "mobile_rtsp_client", "desktop_uvc_host", "mobile_ar_app",
+    "unknown",
 ]
 
 
@@ -255,6 +260,26 @@ def _regex_first(patterns: dict[str, re.Pattern[str]], text: str) -> tuple[str, 
 
 
 _PROJECT_CLASS_PATTERNS: dict[str, re.Pattern[str]] = {
+    # ── Track-B software-case classes (OP-1821) ──────────────────────
+    # These MUST precede `embedded_product`: `_regex_first` returns the
+    # first matching key, and the firmware pattern below greedily claims
+    # `uvc`/`camera`. The naming trap (per the Case-pack skill.yamls):
+    # `uvc`/`ipcam`/`camera` are DEVICE-side (firmware that *exposes* a
+    # stream); these three classes are the missing CLIENT/HOST/app side.
+    # Disambiguation: a "UVC **host** app" carries an explicit host/
+    # desktop/Windows signal that plain firmware text does not.
+    "mobile_rtsp_client": re.compile(
+        f"{_NW}(?:rtsp|onvif|ws-?discovery|android(?:\\s+\\S+){{0,4}}\\s+client){_Nw}",
+        re.IGNORECASE,
+    ),
+    "desktop_uvc_host": re.compile(
+        f"{_NW}(?:uvc(?:\\s+\\S+){{0,3}}\\s+host(?:\\s+app)?|host(?:\\s+\\S+){{0,3}}\\s+uvc|(?:windows|win32|desktop)(?:\\s+\\S+){{0,4}}\\s+uvc){_Nw}",
+        re.IGNORECASE,
+    ),
+    "mobile_ar_app": re.compile(
+        f"{_NW}(?:arkit|mapkit|realitykit|(?:map|maps)[- ]?ar|ar[- ]?(?:map|maps|wayfinding)|ios(?:\\s+\\S+){{0,4}}\\s+ar){_Nw}",
+        re.IGNORECASE,
+    ),
     "embedded_product": re.compile(
         f"{_NW}(?:firmware|driver|bsp|uvc|ipcam|camera|dashcam|doorbell|router|gateway|earbuds|display|kiosk|scanner|printer|barcode|drone|watch|glasses|payment.?terminal|pos){_Nw}",
         re.IGNORECASE,
@@ -350,7 +375,7 @@ markdown, no prose) matching this schema exactly:
 
 {
   "project_type":   { "value": "embedded_firmware|web_app|data_pipeline|research|cli_tool|unknown", "confidence": 0.0..1.0 },
-  "project_class":  { "value": "embedded_product|algo_sim|optical_sim|iso_standard|test_tool|factory_tool|enterprise_web|unknown", "confidence": 0.0..1.0 },
+  "project_class":  { "value": "embedded_product|algo_sim|optical_sim|iso_standard|test_tool|factory_tool|enterprise_web|mobile_rtsp_client|desktop_uvc_host|mobile_ar_app|unknown", "confidence": 0.0..1.0 },
   "runtime_model":  { "value": "ssg|ssr|isr|spa|cli|batch|unknown", "confidence": 0.0..1.0 },
   "target_arch":    { "value": "x86_64|arm64|arm32|riscv64|unknown", "confidence": 0.0..1.0 },
   "target_os":      { "value": "linux|darwin|windows|rtos|unknown", "confidence": 0.0..1.0 },
@@ -369,6 +394,13 @@ project_class meanings:
 - test_tool: test harnesses, QA automation, validation tools
 - factory_tool: production line jigs, MES integration, SPC
 - enterprise_web: ERP/CRM/HRM/WMS/e-commerce/SaaS web applications
+- mobile_rtsp_client: Android/mobile app that CONSUMES IP-camera \
+  streams (RTSP playback) + discovers cameras over ONVIF/WS-Discovery \
+  (the client side, NOT device firmware)
+- desktop_uvc_host: Windows/desktop app that enumerates and captures \
+  from a UVC camera (the host side, NOT camera firmware)
+- mobile_ar_app: iOS/mobile app combining ARKit + MapKit (AR \
+  wayfinding / points-of-interest anchored to a map)
 
 Rules:
 - Use "unknown" with confidence 0.0 for any field the user didn't \

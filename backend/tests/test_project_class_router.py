@@ -216,6 +216,59 @@ class TestPlannerRouter:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Track-B Case-pack routing (OP-1821)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The end-to-end proof for the ticket: a customer's natural-language
+# intent must reach the matching Case pack's skill_pack_hint through the
+# full parse → route chain.
+
+class TestTrackBCasePackRouting:
+    CASES = [
+        ("build me an Android RTSP/ONVIF client app",
+         "mobile_rtsp_client", "android-rtsp-onvif-client"),
+        ("Windows UVC host app",
+         "desktop_uvc_host", "windows-uvc-host"),
+        ("iOS map-AR app",
+         "mobile_ar_app", "ios-map-ar"),
+    ]
+
+    @pytest.mark.parametrize(
+        ("intent_text", "expected_class", "expected_hint"), CASES,
+    )
+    @pytest.mark.asyncio
+    async def test_software_case_intents_route_to_case_packs(
+        self, intent_text, expected_class, expected_hint,
+    ):
+        p = await ip.parse_intent(intent_text)
+        assert p.project_class.value == expected_class, (
+            f"{intent_text!r} parsed to {p.project_class.value!r}, "
+            f"expected {expected_class!r}"
+        )
+        cfg = route_to_planner(p)
+        assert cfg.skill_pack_hint == expected_hint
+        assert cfg.planner_id != "general", (
+            f"{intent_text!r} fell through to the general planner"
+        )
+
+    @pytest.mark.asyncio
+    async def test_windows_uvc_host_does_not_route_to_embedded_pack(self):
+        """The naming trap: a UVC HOST app must reach windows-uvc-host,
+        never the device-side embedded SKILL-* pack."""
+        p = await ip.parse_intent("Windows UVC host app")
+        cfg = route_to_planner(p)
+        assert cfg.skill_pack_hint == "windows-uvc-host"
+        embedded_hint = get_config_for_class("embedded_product").skill_pack_hint
+        assert cfg.skill_pack_hint != embedded_hint
+
+    def test_case_pack_classes_have_unique_planner_ids(self):
+        ids = get_planner_ids()
+        assert len(ids) == len(set(ids))
+        for cls in ("mobile_rtsp_client", "desktop_uvc_host", "mobile_ar_app"):
+            assert get_config_for_class(cls).planner_id != "general"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  LLM parse includes project_class
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

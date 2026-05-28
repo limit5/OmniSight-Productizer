@@ -93,6 +93,42 @@ _PLANNER_REGISTRY: dict[str, PlannerConfig] = {
             "support, and import/export."
         ),
     ),
+    # ── Track-B software-case classes (OP-1821) ──────────────────────
+    # Each maps 1:1 to a Case pack via skill_pack_hint. The hints are
+    # the Case packs' directory names under configs/skills/ so the
+    # dispatcher resolves them directly. NOTE: desktop_uvc_host points
+    # at windows-uvc-host, NOT the embedded SKILL-* packs — the host app
+    # is a Tauri desktop project, not camera firmware.
+    "mobile_rtsp_client": PlannerConfig(
+        planner_id="mobile_rtsp_client",
+        prompt_supplement=(
+            "You are planning an Android RTSP/ONVIF camera-client app. "
+            "Generate a DAG covering: ONVIF/WS-Discovery device discovery, "
+            "RTSP stream negotiation and playback, credential handling, "
+            "multi-camera UI, and instrumented tests."
+        ),
+        skill_pack_hint="android-rtsp-onvif-client",
+    ),
+    "desktop_uvc_host": PlannerConfig(
+        planner_id="desktop_uvc_host",
+        prompt_supplement=(
+            "You are planning a Windows UVC host desktop app (Tauri). "
+            "Generate a DAG covering: UVC device enumeration, "
+            "capture-lifecycle state machine, frame rendering, IPC "
+            "commands, a typed frontend client, and tests."
+        ),
+        skill_pack_hint="windows-uvc-host",
+    ),
+    "mobile_ar_app": PlannerConfig(
+        planner_id="mobile_ar_app",
+        prompt_supplement=(
+            "You are planning an iOS map-AR app combining ARKit and "
+            "MapKit. Generate a DAG covering: AR world tracking, MapKit "
+            "map + CoreLocation, points-of-interest anchoring, AR overlay "
+            "UI, and tests."
+        ),
+        skill_pack_hint="ios-map-ar",
+    ),
 }
 
 _DEFAULT_CONFIG = PlannerConfig(
