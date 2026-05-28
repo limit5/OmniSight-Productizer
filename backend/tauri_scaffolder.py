@@ -56,7 +56,7 @@ import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterable, Optional
 
 from backend import platform_profile as _platform
 from backend.build_adapters import BuildSource, CargoDistAdapter
@@ -281,8 +281,11 @@ class _TauriScaffolder(ScaffolderBase):
         options: ScaffoldOptions,
         *,
         overwrite: bool = True,
+        overlay_dirs: Iterable[Path] | None = None,
     ) -> RenderOutcome:
-        outcome = super().render_project(out_dir, options, overwrite=overwrite)
+        outcome = super().render_project(
+            out_dir, options, overwrite=overwrite, overlay_dirs=overlay_dirs
+        )
 
         # check_cov.sh must be executable — the Makefile runs it directly.
         cov_script = Path(out_dir) / "scripts" / "check_cov.sh"
@@ -308,13 +311,26 @@ def render_project(
     options: ScaffoldOptions,
     *,
     overwrite: bool = True,
+    overlay_dirs: Iterable[Path] | None = None,
 ) -> RenderOutcome:
     """Render the SKILL-DESKTOP-TAURI scaffold into ``out_dir``.
 
     Thin façade over :data:`_SCAFFOLDER`; the render machinery lives in
     :class:`backend.scaffolder_base.ScaffolderBase`.
+
+    Parameters
+    ----------
+    overlay_dirs : iterable of Path, optional
+        Extra scaffold roots layered on top of the SKILL-DESKTOP-TAURI base
+        skeleton, sharing its render context. This is the seam the
+        ``windows-uvc-host`` pack uses (via the dispatcher) to render its
+        UVC enumerate + capture templates onto the borrowed desktop app
+        shell — no new scaffolder. ``None`` leaves the render byte-for-byte
+        identical to the bare skeleton.
     """
-    return _SCAFFOLDER.render_project(out_dir, options, overwrite=overwrite)
+    return _SCAFFOLDER.render_project(
+        out_dir, options, overwrite=overwrite, overlay_dirs=overlay_dirs
+    )
 
 
 def dry_run_build(

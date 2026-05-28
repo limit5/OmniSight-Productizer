@@ -1,26 +1,28 @@
-# OP-1815 (Track B / B-1) - Case-2 Windows UVC HOST app pack skeleton.
+# OP-1815 (skeleton) + OP-1817 (B-1 Case-2 content) - Windows UVC HOST
+# app pack.
 #
 # NAMING TRAP: the existing `uvc` pack is device-side (USB gadget). This
-# pack is the HOST / consumer side: a Windows desktop app that captures
-# from a UVC camera. This pickup is SKELETON only and ships no UVC capture
-# domain code yet.
+# pack is the HOST / consumer side: a Windows desktop app that enumerates
+# and captures from a UVC camera.
 #
 # The dispatcher routes this pack to the existing desktop-tauri scaffolder
 # (backend.tauri_scaffolder via backend/skill_registry.py). Rendering this
-# pack therefore produces the standard cross-platform Tauri desktop app
-# skeleton, covering Windows through the desktop-tauri pack rather than a
-# new Windows-specific scaffolder.
+# pack produces the standard cross-platform Tauri desktop app skeleton
+# (covering Windows through the desktop-tauri pack rather than a new
+# Windows-specific scaffolder) with this pack's scaffolds/ overlay layered
+# on top — the UVC enumerate + capture domain (OP-1817).
 
 schema_version: 1
 name: windows-uvc-host
 description: >
   Case-2 Windows UVC HOST desktop app pack - a Windows desktop application
-  that consumes/captures from a USB Video Class camera. This SKELETON
-  pickup reuses the existing desktop-tauri scaffolder (on ScaffolderBase)
-  via the dispatcher to render the base Tauri desktop app project. The UVC
-  host capture integration, camera enumeration, preview surface, and
-  Windows capture backend are sequenced follow-on work in this same pack.
-version: "0.1.0"
+  that enumerates and captures from a USB Video Class camera. Reuses the
+  existing desktop-tauri scaffolder (on ScaffolderBase) via the dispatcher
+  to render the base Tauri desktop app project, with this pack's scaffolds/
+  overlay adding the UVC enumerate + capture domain (device model +
+  enumerator boundary, capture-lifecycle state machine, Tauri IPC commands,
+  and a typed frontend client). No new Windows scaffolder.
+version: "0.2.0"
 author: "OmniSight"
 license: "Apache-2.0"
 
@@ -63,5 +65,6 @@ keywords:
   - desktop-tauri
   - host
   - consumer
+  - enumerate
+  - capture
   - case-2
-  - skeleton
