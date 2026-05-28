@@ -1,53 +1,63 @@
-# UVC 1.5 Gadget — DAG task definitions
+# UVC 1.5 Gadget — DAG task definitions.
+#
+# OP-1808 (B2, 1D-rest): migrated from the legacy id/name/artifacts schema
+# to the embedded planner schema (task_id + expected_output) so the embedded
+# planner can consume it without a KeyError. This is a SCHEMA-ONLY migration:
+# task ordering/intent and depends_on edges are unchanged. The pack is still
+# `stubbed` (see docs/product/skill-pack-maturity-matrix.md); making these
+# tasks real is a separate, later track. Follows the proven imaging/OP-1786
+# pattern: each task carries a distinct build/<pack>/ expected_output (the
+# planner enforces MECE outputs) and a short description (required by
+# dag_schema.Task).
 schema_version: "1"
 skill_id: uvc
 
 tasks:
-  - id: uvc_descriptor_scaffold
+  - task_id: uvc_descriptor_scaffold
     name: "UVC 1.5 Descriptor Scaffold"
     description: "Build USB descriptor tree: Video Control Interface, H.264 + MJPEG + Uncompressed streaming, still-image capture, and extension unit (XU) for vendor controls"
     depends_on: []
-    artifacts:
-      - backend/uvc_gadget.py
+    expected_output: build/uvc/uvc_descriptor_scaffold.py
+    estimated_minutes: 60
 
-  - id: gadgetfs_binding
+  - task_id: gadgetfs_binding
     name: "gadget-fs / functionfs Binding"
     description: "ConfigFS gadget creation, UVC function binding, UDC attachment, and FunctionFS control/streaming endpoint wiring"
     depends_on: [uvc_descriptor_scaffold]
-    artifacts:
-      - backend/uvc_gadget.py
+    expected_output: build/uvc/gadgetfs_binding.py
+    estimated_minutes: 60
 
-  - id: uvch264_payload
+  - task_id: uvch264_payload
     name: "UVCH264 Payload Generator"
     description: "H.264 NAL-unit framing into UVC payload headers per UVC 1.5 payload spec, including SCR/PTS timestamping and EOF/FID toggling"
     depends_on: [uvc_descriptor_scaffold]
-    artifacts:
-      - backend/uvc_gadget.py
+    expected_output: build/uvc/uvch264_payload.py
+    estimated_minutes: 60
 
-  - id: still_image_capture
+  - task_id: still_image_capture
     name: "Still Image Capture Method"
     description: "UVC still-image capture trigger (method 2 — dedicated bulk pipe or method 3 — hardware trigger) with JPEG snapshot delivery"
     depends_on: [gadgetfs_binding]
-    artifacts:
-      - backend/uvc_gadget.py
+    expected_output: build/uvc/still_image_capture.py
+    estimated_minutes: 45
 
-  - id: extension_unit
+  - task_id: extension_unit
     name: "Extension Unit (XU) Controls"
     description: "Vendor-specific extension unit with custom selectors for ISP tuning, firmware version query, and GPIO control"
     depends_on: [uvc_descriptor_scaffold]
-    artifacts:
-      - backend/uvc_gadget.py
+    expected_output: build/uvc/extension_unit.py
+    estimated_minutes: 45
 
-  - id: rest_endpoints
+  - task_id: rest_endpoints
     name: "REST API Endpoints"
     description: "FastAPI router for UVC gadget lifecycle management, stream control, and status monitoring"
     depends_on: [gadgetfs_binding, uvch264_payload, still_image_capture, extension_unit]
-    artifacts:
-      - backend/routers/uvc_gadget.py
+    expected_output: build/uvc/routers_uvc_gadget.py
+    estimated_minutes: 45
 
-  - id: unit_tests
+  - task_id: unit_tests
     name: "Unit Test Suite"
     description: "Comprehensive tests covering descriptor generation, payload framing, configfs operations, and endpoint behavior"
     depends_on: [rest_endpoints]
-    artifacts:
-      - backend/tests/test_uvc_gadget.py
+    expected_output: build/uvc/test_uvc_gadget.py
+    estimated_minutes: 45
