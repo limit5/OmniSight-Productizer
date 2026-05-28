@@ -637,14 +637,14 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
         />
       ))}
 
-      {/* Continue button */}
+      {/* Build handoff */}
       {onSpecReady && spec && (
         <div className="flex items-center justify-between gap-2 pt-1 border-t border-[var(--border)]">
           <span className="text-[10px] font-mono text-[var(--muted-foreground)]">
             {spec.conflicts.length > 0
               ? `${spec.conflicts.length} conflict${spec.conflicts.length > 1 ? "s" : ""} to resolve first`
               : canContinue
-                ? "Ready"
+                ? "Ready for guided build kickoff"
                 : "Some fields still have low confidence — fill them in the Form tab"}
           </span>
           <button
@@ -662,7 +662,7 @@ export function SpecTemplateEditor({ onSpecReady }: Props) {
             disabled={!canContinue}
             className="text-xs font-mono px-3 py-1 rounded bg-[var(--artifact-purple)] text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            Continue
+            Continue to Build
           </button>
         </div>
       )}
