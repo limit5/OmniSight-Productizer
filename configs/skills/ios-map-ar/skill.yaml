@@ -1,0 +1,73 @@
+# OP-1816 (Track B / B-1) — Case-3 iOS map-AR app pack skeleton.
+#
+# An iOS app that combines ARKit (augmented reality) with MapKit (maps) —
+# e.g. an AR wayfinding / points-of-interest experience anchored to a map.
+#
+# This is a SKELETON only. The pack ships no scaffolder of its own: the
+# dispatcher (scripts/scaffold.py) routes it to the existing
+# backend.ios_scaffolder via the explicit override in
+# backend/skill_registry.py (_SCAFFOLDER_MODULE_OVERRIDES). Rendering this
+# pack therefore produces the standard iOS app skeleton (SwiftUI + SPM);
+# the ARKit and MapKit domain scaffolds + glue code are sequenced
+# FOLLOW-ON tickets in this same pack.
+#
+# Safe-local internal dev — authored under omnisight-self, NOT a customer
+# run. Needs no platform/sandbox. (Note: an actual iOS BUILD needs a macOS
+# host — that is J2 infra, out of scope for this skeleton ticket.)
+
+schema_version: 1
+name: ios-map-ar
+description: >
+  Case-3 iOS map-AR app pack — an iOS application that combines ARKit
+  (augmented reality) with MapKit (maps), e.g. an AR points-of-interest /
+  wayfinding experience that anchors AR content to map locations.
+  SKELETON pickup: reuses the `ios` scaffolder (on ScaffolderBase) via the
+  dispatcher to render the base iOS app project (SwiftUI + Swift Package
+  Manager) — NO new scaffolder. ARKit (ARView / world tracking) and MapKit
+  (Map view / location) domain scaffolds and glue code are sequenced
+  follow-on tickets in this pack.
+version: "0.1.0"
+author: "OmniSight"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+# Reuses the ios scaffolder; declared so the dependency on the skill-ios
+# pack (templates + scaffolder module) is explicit.
+depends_on_skills:
+  - skill-ios
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - ios
+  - swift
+  - swiftui
+  - arkit
+  - augmented-reality
+  - ar
+  - mapkit
+  - maps
+  - corelocation
+  - realitykit
+  - swift-package-manager
+  - case-3
+  - skeleton

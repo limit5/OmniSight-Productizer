@@ -1,0 +1,53 @@
+# OP-1816 (Track B / B-1) — Case-3 iOS map-AR app DAG.
+#
+# Describes the ARKit + MapKit app build. Only the skeleton task is active
+# in this pickup; it routes to backend.ios_scaffolder via the dispatcher
+# (NO new scaffolder). The ARKit and MapKit domain tasks are the sequenced
+# FOLLOW-ON tickets in this same pack — declared here so the intended
+# map-AR app build DAG is visible, with `status: follow-on` so a runner
+# does not attempt to execute them in the skeleton pickup.
+
+tasks:
+  - id: ios-map-ar-scaffold-init
+    name: "Scaffold iOS map-AR app skeleton"
+    description: >
+      Render the base iOS (SwiftUI + Swift Package Manager) app project by
+      dispatching to the existing `ios` scaffolder (backend.ios_scaffolder
+      via scripts/scaffold.py — NO new scaffolder). This is the app shell
+      that the ARKit and MapKit layers below build on. Idempotent:
+      re-renders without clobbering files outside the scaffold surface.
+    depends_on: []
+    artifacts: [ios_skeleton]
+    estimated_hours: 1
+    framework_gate: p0-platform-profile
+    status: active
+
+  - id: ios-mapkit-map-view
+    name: "MapKit map view + CoreLocation (FOLLOW-ON)"
+    description: >
+      FOLLOW-ON ticket (not in this skeleton pickup). Add the MapKit
+      surface — a SwiftUI `Map` view with annotations, plus CoreLocation
+      authorization + the user's location/heading feed that the AR layer
+      anchors to. Adds the `NSLocationWhenInUseUsageDescription` Info.plist
+      key. Domain code + a dedicated scaffold land in a sequenced follow-on
+      within this same pack.
+    depends_on: [ios-map-ar-scaffold-init]
+    artifacts: [ios_mapkit]
+    estimated_hours: 3
+    framework_gate: p4-role-ios-swift
+    status: follow-on
+
+  - id: ios-arkit-ar-view
+    name: "ARKit / RealityKit AR view (FOLLOW-ON)"
+    description: >
+      FOLLOW-ON ticket (not in this skeleton pickup). Add the ARKit
+      surface — an `ARView` (RealityKit) with a world-tracking session that
+      places AR content anchored to the map points-of-interest from the
+      MapKit layer, including a lifecycle-correct session start/pause.
+      Adds the `NSCameraUsageDescription` Info.plist key. Domain code + a
+      dedicated scaffold land in a sequenced follow-on within this pack.
+    depends_on: [ios-mapkit-map-view]
+    artifacts: [ios_arkit]
+    estimated_hours: 4
+    framework_gate: p4-role-ios-swift
+    status: follow-on

@@ -525,6 +525,14 @@ _SCAFFOLDER_MODULE_OVERRIDES: dict[str, str] = {
     # enumeration + capture domain code are sequenced follow-ons in the same
     # pack (see configs/skills/windows-uvc-host).
     "windows-uvc-host": "backend.tauri_scaffolder",
+    # OP-1816 (Case-3, Track B): the iOS map-AR app pack (ARKit + MapKit)
+    # deliberately ships NO scaffolder of its own — it reuses the existing
+    # backend.ios_scaffolder to render the base iOS app skeleton. The
+    # convention would point it at backend.ios_map_ar_scaffolder (which
+    # does not exist), so the binding is made explicit here. ARKit + MapKit
+    # domain scaffolds are sequenced follow-ons in the same pack (see
+    # configs/skills/ios-map-ar).
+    "ios-map-ar": "backend.ios_scaffolder",
 }
 
 #: Public entry-point attribute names every scaffolder module exposes
