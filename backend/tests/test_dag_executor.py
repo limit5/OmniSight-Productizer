@@ -89,6 +89,92 @@ async def test_known_local_toolchains_are_exactly_three():
     assert set(dx.LOCAL_TOOLCHAINS) == {"cmake", "make", "python3"}
 
 
+async def test_toolchain_registry_includes_gradle_build_networked():
+    assert dx.TOOLCHAIN_REGISTRY["cmake"].slice == "local"
+    assert dx.TOOLCHAIN_REGISTRY["make"].slice == "local"
+    assert dx.TOOLCHAIN_REGISTRY["python3"].slice == "local"
+    assert dx.TOOLCHAIN_REGISTRY["gradle"].slice == dx.BUILD_NETWORKED_SLICE
+    assert dx.TOOLCHAIN_REGISTRY["gradle"].command_seq == (
+        ("./gradlew", "assembleDebug", "test"),
+    )
+    assert dx.TOOLCHAIN_REGISTRY["gradle"].env_requires == ("ANDROID_HOME",)
+
+
+async def test_gradle_build_networked_dispatches_wrapped_network_allowed(
+    tmp_path, monkeypatch,
+):
+    wrap_calls = []
+    run_calls = []
+
+    def fake_wrap(cmd, *, worktree_path, ticket_key, network, env):
+        wrap_calls.append((cmd, Path(worktree_path), ticket_key, network, env))
+        return ["bwrap", "--network-allowed", "--", *cmd]
+
+    def fake_runner(argv, cwd, timeout_s):
+        run_calls.append((argv, Path(cwd), timeout_s))
+        (Path(cwd) / "app.apk").write_text("apk")
+        return 0, "", ""
+
+    monkeypatch.setattr(dx.runner_sandbox, "wrap_in_bubblewrap", fake_wrap)
+
+    env = {"ANDROID_HOME": "/opt/android-sdk"}
+    handler = _handler(tmp_path, runner=fake_runner, env=env)
+    task = _task(
+        "android", toolchain="gradle", tier=dx.BUILD_NETWORKED_SLICE,
+        output="app.apk",
+    )
+
+    res = await handler.run(1839, task)
+
+    assert res.ok
+    assert wrap_calls == [(
+        ["./gradlew", "assembleDebug", "test"],
+        tmp_path / "wd" / "1839-android",
+        "dag-plan-1839-android",
+        True,
+        env,
+    )]
+    assert run_calls == [(
+        ["bwrap", "--network-allowed", "--", "./gradlew", "assembleDebug", "test"],
+        tmp_path / "wd" / "1839-android",
+        dx.DEFAULT_TASK_TIMEOUT_S,
+    )]
+
+
+async def test_gradle_requires_android_home_fail_closed(tmp_path):
+    handler = _handler(tmp_path, runner=_ok_runner, env={})
+    res = await handler.run(
+        1,
+        _task("android", toolchain="gradle", tier=dx.BUILD_NETWORKED_SLICE),
+    )
+    assert res.status == "failed"
+    assert "ANDROID_HOME" in res.reason
+    assert res.workspace is None
+
+
+async def test_cmake_still_routes_local_without_sandbox_wrap(tmp_path, monkeypatch):
+    def forbid_wrap(*args, **kwargs):
+        raise AssertionError("local cmake must not enter build-networked wrapper")
+
+    monkeypatch.setattr(dx.runner_sandbox, "wrap_in_bubblewrap", forbid_wrap)
+
+    calls = []
+
+    def record(argv, cwd, timeout_s):
+        calls.append(argv)
+        (Path(cwd) / dx.CMAKE_BUILD_DIR).mkdir(parents=True, exist_ok=True)
+        (Path(cwd) / "build" / "app").write_text("bin")
+        return 0, "", ""
+
+    handler = _handler(tmp_path, runner=record)
+    res = await handler.run(1, _task("c", toolchain="cmake", output="build/app"))
+    assert res.ok
+    assert calls == [
+        ["cmake", "-S", ".", "-B", dx.CMAKE_BUILD_DIR],
+        ["cmake", "--build", dx.CMAKE_BUILD_DIR],
+    ]
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  AC: expected_output escaping the workspace -> FAIL
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

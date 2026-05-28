@@ -114,6 +114,8 @@ ENV_ALLOWLIST: tuple[str, ...] = (
     # superseding the OP-1803 §2b RO config bind that broke session init).
     "CLAUDE_CONFIG_DIR",
     "CODEX_HOME",
+    # --- Android build-networked slice (OP-1839) ---
+    "ANDROID_HOME",
 )
 """Names of the only env vars projected into the agent CLI + its git
 children. Anything not listed here (notably every ``OMNISIGHT_*`` infra
@@ -705,6 +707,10 @@ def _build_bubblewrap_argv(
     if toolchain is not None and toolchain.exists():
         tc_abs = str(toolchain)
         argv += ["--ro-bind", tc_abs, tc_abs]
+
+    android_home = build_allowlisted_env(env).get("ANDROID_HOME", "").strip()
+    if android_home and Path(android_home).is_dir():
+        argv += ["--ro-bind", android_home, android_home]
 
     argv += ["--bind", worktree_abs, worktree_abs]
     argv += ["--bind", tmp_dir, tmp_dir]

@@ -48,8 +48,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Mapping, Optional
 
+from backend.agents import runner_sandbox
 from backend import dag_storage, metrics, worker
 from backend.dag_schema import DAG, Task
 from backend.env_contract import _truthy, canonical_env
@@ -1090,14 +1091,40 @@ class SerialPlanScheduler:
 # fail-closed side-effect guard for nonlocal toolchains beyond "just FAIL"
 # is a SEPARATE ticket's job.
 
-#: Toolchains this local slice knows how to run. Anything else FAILS the
-#: task (not a crash) — per the ticket MUST-NOT (no cross-compile / flash /
-#: remote / publish here).
-LOCAL_TOOLCHAINS: tuple[str, ...] = ("cmake", "make", "python3")
+@dataclass(frozen=True)
+class ToolchainSpec:
+    """Registry entry for a DAG task toolchain."""
+
+    command_seq: tuple[tuple[str, ...], ...] | None
+    slice: str
+    env_requires: tuple[str, ...] = ()
 
 #: The only tier this slice executes. ``networked`` / ``t3`` tasks FAIL as
 #: out-of-slice rather than running on the local host.
 LOCAL_TIER = "t1"
+
+#: The only non-local slice this ticket enables: Android gradle builds inside
+#: the existing host sandbox with network explicitly allowed.
+BUILD_NETWORKED_SLICE = "build-networked"
+
+#: Toolchain registry. Unknown entries FAIL the task (not a crash) — per the
+#: ticket MUST-NOT (no cross-compile / flash / remote / publish here).
+TOOLCHAIN_REGISTRY: dict[str, ToolchainSpec] = {
+    "cmake": ToolchainSpec(command_seq=None, slice="local"),
+    "make": ToolchainSpec(command_seq=(("make",),), slice="local"),
+    "python3": ToolchainSpec(command_seq=None, slice="local"),
+    "gradle": ToolchainSpec(
+        command_seq=(("./gradlew", "assembleDebug", "test"),),
+        slice=BUILD_NETWORKED_SLICE,
+        env_requires=("ANDROID_HOME",),
+    ),
+}
+
+#: Toolchains this local slice knows how to run. Kept as a compatibility
+#: export for the OP-1658 tests and callers.
+LOCAL_TOOLCHAINS: tuple[str, ...] = tuple(
+    name for name, spec in TOOLCHAIN_REGISTRY.items() if spec.slice == "local"
+)
 
 #: Per-task subprocess wall-clock budget (seconds). Mirrors the
 #: ``build_adapters._run`` default; injectable per-handler for tests.
@@ -1223,30 +1250,48 @@ class LocalTaskHandler:
         timeout_s: float = DEFAULT_TASK_TIMEOUT_S,
         runner: Callable[[list[str], Path, float], tuple[int, str, str]]
         | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
         self.workspace_builder = workspace_builder
         self.timeout_s = timeout_s
         self._runner = runner or _run_local
+        self._env = os.environ if env is None else env
 
     # ─── public API ──────────────────────────────────────────────
     async def run(self, plan_id: int, task: Task) -> LocalTaskResult:
         """Run ``task`` locally for ``plan_id``; return a result, never raise."""
-        # ── gate 1: tier (this slice is t1/local only) ─────────────
-        if task.required_tier != LOCAL_TIER:
+        # ── gate 1: known toolchain ───────────────────────────────
+        spec = TOOLCHAIN_REGISTRY.get(task.toolchain)
+        if spec is None:
             return self._fail(
                 plan_id, task, workspace=None,
                 reason=(
-                    f"required_tier {task.required_tier!r} is not local "
-                    f"({LOCAL_TIER}-only slice — networked/t3 out of slice)"
+                    f"unknown toolchain {task.toolchain!r} "
+                    f"(registered: {', '.join(TOOLCHAIN_REGISTRY)})"
                 ),
             )
-        # ── gate 2: known local toolchain ─────────────────────────
-        if task.toolchain not in LOCAL_TOOLCHAINS:
+        # ── gate 2: tier/slice ────────────────────────────────────
+        expected_tier = LOCAL_TIER if spec.slice == "local" else spec.slice
+        if task.required_tier != expected_tier:
             return self._fail(
                 plan_id, task, workspace=None,
                 reason=(
-                    f"unknown/nonlocal toolchain {task.toolchain!r} "
-                    f"(local handlers: {', '.join(LOCAL_TOOLCHAINS)})"
+                    f"required_tier {task.required_tier!r} does not match "
+                    f"{task.toolchain!r} slice {spec.slice!r} "
+                    f"(expected {expected_tier!r})"
+                ),
+            )
+        # ── gate 3: required environment ──────────────────────────
+        missing = [
+            name for name in spec.env_requires
+            if not str(self._env.get(name, "")).strip()
+        ]
+        if missing:
+            return self._fail(
+                plan_id, task, workspace=None,
+                reason=(
+                    f"{task.toolchain} requires env var(s): "
+                    f"{', '.join(missing)}"
                 ),
             )
 
@@ -1254,7 +1299,7 @@ class LocalTaskHandler:
         ws = self.workspace_builder.prepare(plan_id, task)
 
         try:
-            commands = self._command_sequence(task, ws)
+            commands = self._command_sequence(task, ws, spec)
         except _LocalHandlerError as exc:
             return self._fail(plan_id, task, workspace=ws.path, reason=str(exc))
 
@@ -1309,12 +1354,16 @@ class LocalTaskHandler:
         )
 
     # ─── command derivation ──────────────────────────────────────
-    def _command_sequence(self, task: Task, ws: TaskWorkspace) -> list[list[str]]:
+    def _command_sequence(
+        self, task: Task, ws: TaskWorkspace, spec: ToolchainSpec,
+    ) -> list[list[str]]:
         """Map a local toolchain to the command(s) to run in the workspace.
 
         cmake → configure + build (two commands, run in order);
         make  → ``make`` (default target);
         python3 → run the first ``.py`` in ``inputs`` with this interpreter.
+        gradle → wrap ``./gradlew assembleDebug test`` in the host sandbox
+        with network explicitly allowed.
         """
         tc = task.toolchain
         if tc == "cmake":
@@ -1323,10 +1372,21 @@ class LocalTaskHandler:
                 ["cmake", "--build", CMAKE_BUILD_DIR],
             ]
         if tc == "make":
-            return [["make"]]
+            return [list(argv) for argv in spec.command_seq or ()]
         if tc == "python3":
             return [[sys.executable, self._python_entry(task)]]
-        # Unreachable: run() already gated on LOCAL_TOOLCHAINS.
+        if tc == "gradle":
+            return [
+                runner_sandbox.wrap_in_bubblewrap(
+                    list(argv),
+                    worktree_path=ws.path,
+                    ticket_key=f"dag-plan-{ws.plan_id}-{ws.task_id}",
+                    network=True,
+                    env=self._env,
+                )
+                for argv in spec.command_seq or ()
+            ]
+        # Unreachable: run() already gated on TOOLCHAIN_REGISTRY.
         raise _LocalHandlerError(f"no command mapping for toolchain {tc!r}")
 
     @staticmethod
@@ -1992,8 +2052,11 @@ __all__ = [
     "TaskHandler",
     "TaskRun",
     "TaskWorkspace",
+    "ToolchainSpec",
+    "TOOLCHAIN_REGISTRY",
     "LOCAL_TOOLCHAINS",
     "LOCAL_TIER",
+    "BUILD_NETWORKED_SLICE",
     "DEFAULT_TASK_TIMEOUT_S",
     "CMAKE_BUILD_DIR",
     "LocalTaskHandler",

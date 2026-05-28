@@ -12,8 +12,6 @@ asserting the argv that *would* have been invoked.
 """
 from __future__ import annotations
 
-import json
-import os
 import shutil
 import subprocess
 import time
@@ -284,6 +282,36 @@ def test_network_caller_override_wins_without_env(tmp_path, monkeypatch):
         ["claude"], worktree_path=worktree, ticket_key="OP-TEST",
         network=True,
     )
+    assert "--unshare-net" not in argv
+
+
+def test_android_home_is_readonly_bound_and_projected(tmp_path, monkeypatch):
+    """OP-1839: ANDROID_HOME is allowlisted and RO-bound for gradle builds."""
+    _force_platform(monkeypatch, rs.PLATFORM_LINUX)
+    _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+    android_home = tmp_path / "android-sdk"
+    android_home.mkdir()
+
+    argv = rs.wrap_in_bubblewrap(
+        ["./gradlew", "assembleDebug", "test"],
+        worktree_path=worktree,
+        ticket_key="OP-1839",
+        network=True,
+        env={"PATH": "/usr/bin", "ANDROID_HOME": str(android_home)},
+    )
+
+    sdk_abs = str(android_home)
+    bind_idx = argv.index(sdk_abs)
+    assert argv[bind_idx - 1] == "--ro-bind"
+    assert argv[bind_idx + 1] == sdk_abs
+
+    setenv: dict[str, str] = {}
+    for i, tok in enumerate(argv):
+        if tok == "--setenv":
+            setenv[argv[i + 1]] = argv[i + 2]
+    assert setenv["ANDROID_HOME"] == sdk_abs
     assert "--unshare-net" not in argv
 
 

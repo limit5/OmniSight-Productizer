@@ -19,7 +19,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 
-TierId = Literal["t1", "networked", "t3"]
+TierId = Literal["t1", "networked", "build-networked", "t3"]
 SCHEMA_VERSION = 1
 
 
