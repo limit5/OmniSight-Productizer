@@ -47,9 +47,23 @@ merge+namespacing and before validation:
       (the OP-1774 unmet-deps pattern, mirrored from
       ``embedded_planner._resolve_dependencies``).
 
-Toolchain reconciliation is P3 and product test / HIL orchestration is
-P4 — out of scope here. This module only consumes ``embedded_planner``
-and reads ``skill_registry`` — it never modifies either.
+P3 (OP-1830) adds SoC-compatibility RECONCILIATION, run on the merged
+composition. Each pack declares a ``compatible_socs`` list on its
+:class:`~backend.skill_manifest.SkillManifest` (empty = SoC-agnostic, no
+constraint). The product target SoC is ``hw.soc``. A pack whose NON-EMPTY
+``compatible_socs`` does not contain the target SoC — compared
+case-insensitively, matching the embedded planner's ``soc_contains``
+case-folding (``embedded_planner.py``) — cannot run on the product
+hardware, so (per design §7 decision-2: error-on-conflict, mirroring
+duplicate provides rather than silently dropping)
+:func:`compose_product` raises :class:`SocIncompatibilityError` naming the
+offending pack(s), their ``compatible_socs``, and the target SoC. The
+product's compatible-SoC envelope — the intersection of every NON-EMPTY
+list — is computed and logged for downstream consumers.
+
+Product test / HIL orchestration is P4 — out of scope here. This module
+only consumes ``embedded_planner`` and reads ``skill_registry`` — it
+never modifies either.
 
     dag = compose_product(spec, hw, ["imaging", "connectivity"])
 
@@ -110,6 +124,29 @@ class DuplicateProvideError(ProductCompositionError):
             f"{tok!r} provided by {pks}" for tok, pks in sorted(conflicts.items())
         )
         super().__init__(f"duplicate cross-pack provides: {detail}")
+
+
+class SocIncompatibilityError(ProductCompositionError):
+    """Raised when a composed pack cannot run on the product target SoC.
+
+    A pack's NON-EMPTY ``compatible_socs`` that does not contain the
+    product's ``hw.soc`` (compared case-insensitively) is a hard hardware
+    conflict — that pack's firmware cannot run on the target silicon — so
+    :func:`compose_product` fails loud (design §7 decision-2:
+    error-on-conflict, like :class:`DuplicateProvideError`) rather than
+    composing an unrunnable product. :attr:`conflicts` maps each offending
+    pack to its declared ``compatible_socs``; :attr:`target_soc` is the
+    product target SoC the packs were reconciled against.
+    """
+
+    def __init__(self, target_soc: str, conflicts: dict[str, list[str]]):
+        self.target_soc = target_soc
+        self.conflicts = conflicts
+        detail = "; ".join(
+            f"{pack!r} supports {socs} (excludes target {target_soc!r})"
+            for pack, socs in sorted(conflicts.items())
+        )
+        super().__init__(f"SoC-incompatible composed pack(s): {detail}")
 
 
 def _ns_task_id(pack: str, task_id: str) -> str:
@@ -209,6 +246,31 @@ def _pack_provides_requires(
     return list(manifest.provides), list(manifest.requires)
 
 
+def _pack_compatible_socs(
+    pack: str,
+    manifests: Optional[Mapping[str, SkillManifest]],
+) -> list[str]:
+    """Resolve a pack's declared ``compatible_socs`` (empty = SoC-agnostic).
+
+    Mirrors :func:`_pack_provides_requires`'s manifest resolution: when
+    ``manifests`` is supplied it is authoritative (a pack absent from it is
+    SoC-agnostic), otherwise the manifest is read from the skill registry; a
+    pack with no manifest contributes no constraint. Kept as a separate
+    reader rather than folded into the wiring helper so the P2a wiring path
+    is left untouched per this ticket's scope guard.
+    """
+    manifest: Optional[SkillManifest]
+    if manifests is not None:
+        manifest = manifests.get(pack)
+    else:
+        from backend import skill_registry
+
+        info = skill_registry.get_skill(pack)
+        manifest = info.manifest if info is not None else None
+
+    return list(manifest.compatible_socs) if manifest is not None else []
+
+
 def _wire_cross_pack(plans: list[_PackPlan]) -> list[dict[str, str]]:
     """Add cross-pack ``requires``→``provides`` edges in place.
 
@@ -272,6 +334,51 @@ def _wire_cross_pack(plans: list[_PackPlan]) -> list[dict[str, str]]:
     return unmet
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P3 (OP-1830) — SoC-compatibility reconciliation across composed packs
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+def _reconcile_socs(
+    target_soc: str,
+    socs_by_pack: Mapping[str, list[str]],
+) -> set[str]:
+    """Reconcile each composed pack's ``compatible_socs`` vs the product SoC.
+
+    ``target_soc`` is the product's ``hw.soc`` (e.g. ``"RK3566"``).
+    ``socs_by_pack`` maps each composed pack to its declared
+    ``compatible_socs``. An empty list is SoC-agnostic (no constraint). A
+    pack whose NON-EMPTY list does not contain ``target_soc`` — compared
+    case-insensitively, matching the embedded planner's ``soc_contains``
+    case-folding — cannot run on the target silicon and is a fail-loud
+    conflict.
+
+    Returns the product's compatible-SoC envelope: the case-folded
+    intersection of every NON-EMPTY list (an empty set means no pack pins a
+    SoC, i.e. the product is SoC-agnostic).
+
+    Raises
+    ------
+    SocIncompatibilityError
+        If any pack's non-empty ``compatible_socs`` excludes ``target_soc``.
+    """
+    target = target_soc.lower()
+    conflicts: dict[str, list[str]] = {}
+    nonempty_folded: list[set[str]] = []
+    for pack, socs in socs_by_pack.items():
+        if not socs:
+            continue  # SoC-agnostic — imposes no constraint
+        folded = {s.lower() for s in socs}
+        nonempty_folded.append(folded)
+        if target not in folded:
+            conflicts[pack] = list(socs)
+
+    if conflicts:
+        raise SocIncompatibilityError(target_soc, conflicts)
+
+    return set.intersection(*nonempty_folded) if nonempty_folded else set()
+
+
 def compose_product(
     spec: ParsedSpec,
     hw: HardwareProfile,
@@ -308,6 +415,8 @@ def compose_product(
     ------
     ValueError
         If ``packs`` is empty.
+    SocIncompatibilityError
+        If any pack's non-empty ``compatible_socs`` excludes ``hw.soc``.
     DuplicateProvideError
         If ≥2 distinct packs provide the same token.
     ProductCompositionError
@@ -317,6 +426,7 @@ def compose_product(
         raise ValueError("compose_product requires at least one pack")
 
     plans: list[_PackPlan] = []
+    socs_by_pack: dict[str, list[str]] = {}
     for pack in packs:
         sub = embedded_planner.plan_embedded_product(spec, hw, skill_pack=pack)
         provides, requires = _pack_provides_requires(pack, manifests)
@@ -326,6 +436,16 @@ def compose_product(
             provides=provides,
             requires=requires,
         ))
+        socs_by_pack[pack] = _pack_compatible_socs(pack, manifests)
+
+    # P3 (OP-1830) — reconcile each pack's compatible_socs against the
+    # product target SoC. Fail loud (design §7 decision-2) before wiring or
+    # validation if any composed pack cannot run on hw.soc.
+    product_socs = _reconcile_socs(hw.soc, socs_by_pack)
+    logger.info(
+        "product compatible-SoC envelope for target %r: %s",
+        hw.soc, sorted(product_socs) or "(SoC-agnostic)",
+    )
 
     # P2a — wire cross-pack edges, fail loud on duplicate provides, and
     # surface unmet requires (OP-1774-style structured log).

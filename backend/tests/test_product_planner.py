@@ -15,6 +15,14 @@ with SYNTHETIC fixtures (no real pack declares tokens — that is P2b):
   - {A, B both provide "x"} -> DuplicateProvideError
   - {B requires "y", none provides} -> surfaced unmet_requires
   - external:/user: and self-provided requires are neither wired nor surfaced
+
+P3 (OP-1830) — SoC-compatibility reconciliation across composed packs
+(error-on-conflict, case-insensitive; empty compatible_socs = agnostic):
+  - {rk3566-only + imx8m-only} on rk3566 -> SocIncompatibilityError naming
+    the imx8m-only pack; {two agnostic + one rk3566-only} on rk3566 -> OK;
+    {rk3566-only + []} -> OK
+  - real case-8 (imaging + connectivity + npu-detection) on rk3566
+    reconciles cleanly; retargeting to qcs8550 -> error naming imaging
 """
 
 from __future__ import annotations
@@ -32,9 +40,12 @@ from backend.product_planner import (
     TASK_ID_SEP,
     DuplicateProvideError,
     ProductCompositionError,
+    SocIncompatibilityError,
     _ns_output,
     _ns_task_id,
     _PackPlan,
+    _pack_compatible_socs,
+    _reconcile_socs,
     _roots,
     _sinks,
     _wire_cross_pack,
@@ -487,3 +498,148 @@ class TestRealCaseEightComposition:
             compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8")
         unmet = [r for r in caplog.records if hasattr(r, "unmet_requires")]
         assert unmet == [], [r.unmet_requires for r in unmet]
+
+    # ── P3 (OP-1830) — SoC reconciliation on the real case-8 packs ──
+    # imaging pins [rk3566, rk3568, imx8m, stm32mp1, x86_64]; connectivity
+    # and npu-detection declare no compatible_socs (SoC-agnostic).
+
+    def test_case8_reconciles_cleanly_on_rk3566(self, spec, hw):
+        # hw.soc == "RK3566" ∈ imaging's list (case-insensitively); the
+        # other two are agnostic -> compose must NOT raise.
+        assert hw.soc == "RK3566"
+        dag = compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8-soc")
+        assert validate(dag).ok, validate(dag).summary()
+
+    def test_case8_socs_read_from_registry(self):
+        # Ground-truth the real compatible_socs the reconciliation reads.
+        assert _pack_compatible_socs("imaging", None) == [
+            "rk3566", "rk3568", "imx8m", "stm32mp1", "x86_64"
+        ]
+        assert _pack_compatible_socs("connectivity", None) == []
+        assert _pack_compatible_socs("npu-detection", None) == []
+
+    def test_case8_retargeted_to_incompatible_soc_raises_naming_imaging(
+        self, spec, hw
+    ):
+        # Retarget the product to a SoC NOT in imaging's list. imaging then
+        # cannot run on the silicon -> fail loud, naming imaging; the
+        # agnostic packs impose no constraint and are not named.
+        hw_qcs = hw.model_copy(update={"soc": "qcs8550"})
+        with pytest.raises(SocIncompatibilityError) as exc:
+            compose_product(spec, hw_qcs, CASE8_PACKS, dag_id="prod-case8-bad")
+        assert exc.value.target_soc == "qcs8550"
+        assert set(exc.value.conflicts) == {"imaging"}
+        assert exc.value.conflicts["imaging"] == [
+            "rk3566", "rk3568", "imx8m", "stm32mp1", "x86_64"
+        ]
+        assert "imaging" in str(exc.value)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P3 (OP-1830) — SoC-compatibility reconciliation MECHANISM (pure helper,
+#  synthetic multi-pack soc maps — covers the multi-N case directly)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestSocReconciliationHelper:
+    def test_rk3566_only_plus_imx8m_only_on_rk3566_names_imx8m_pack(self):
+        # Multi-pack: the rk3566-only pack is fine, the imx8m-only pack is
+        # the sole conflict and must be the only pack named.
+        with pytest.raises(SocIncompatibilityError) as exc:
+            _reconcile_socs(
+                "rk3566",
+                {"cam": ["rk3566"], "modem": ["imx8m"]},
+            )
+        assert exc.value.target_soc == "rk3566"
+        assert exc.value.conflicts == {"modem": ["imx8m"]}
+
+    def test_two_agnostic_plus_one_rk3566_only_on_rk3566_ok(self):
+        # Empty list == SoC-agnostic -> no constraint; the rk3566-only pack
+        # matches -> no error; envelope == the single non-empty pin.
+        envelope = _reconcile_socs(
+            "rk3566",
+            {"a": [], "b": [], "cam": ["rk3566"]},
+        )
+        assert envelope == {"rk3566"}
+
+    def test_rk3566_only_plus_agnostic_ok(self):
+        envelope = _reconcile_socs("rk3566", {"cam": ["rk3566"], "agn": []})
+        assert envelope == {"rk3566"}
+
+    def test_all_agnostic_is_soc_agnostic_product(self):
+        # No pack pins a SoC -> no constraint, empty envelope.
+        assert _reconcile_socs("rk3566", {"a": [], "b": []}) == set()
+
+    def test_case_insensitive_both_directions(self):
+        # Target case and declared case both fold; matching the
+        # embedded_planner soc_contains convention.
+        assert _reconcile_socs("RK3566", {"cam": ["rk3566"]}) == {"rk3566"}
+        assert _reconcile_socs("rk3566", {"cam": ["RK3566"]}) == {"rk3566"}
+
+    def test_envelope_is_intersection_of_nonempty_lists(self):
+        # Two SoC-pinning packs both list the target -> envelope is the
+        # intersection of their (folded) lists; an agnostic pack is ignored.
+        envelope = _reconcile_socs(
+            "rk3566",
+            {
+                "a": ["rk3566", "imx8m"],
+                "b": ["rk3566", "rk3568"],
+                "agn": [],
+            },
+        )
+        assert envelope == {"rk3566"}
+
+    def test_multiple_conflicting_packs_all_named(self):
+        with pytest.raises(SocIncompatibilityError) as exc:
+            _reconcile_socs(
+                "rk3566",
+                {"ok": ["rk3566"], "x": ["imx8m"], "y": ["stm32mp1"]},
+            )
+        assert set(exc.value.conflicts) == {"x", "y"}
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  P3 (OP-1830) — SoC reconciliation through compose_product (injected
+#  synthetic manifests pin compatible_socs on real packs; hermetic)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class TestSocReconciliationCompose:
+    def test_incompatible_pack_raises_naming_offender(self, spec, hw):
+        # imaging pinned rk3566 (matches hw.soc=RK3566), connectivity pinned
+        # imx8m (excludes it) -> fail loud naming connectivity only.
+        manifests = {
+            "imaging": SkillManifest(name="imaging", compatible_socs=["rk3566"]),
+            "connectivity": SkillManifest(
+                name="connectivity", compatible_socs=["imx8m"]
+            ),
+        }
+        with pytest.raises(SocIncompatibilityError) as exc:
+            compose_product(spec, hw, TWO_PACKS, manifests=manifests)
+        assert exc.value.target_soc == "RK3566"
+        assert set(exc.value.conflicts) == {"connectivity"}
+
+    def test_agnostic_and_matching_packs_compose(self, spec, hw):
+        # imaging agnostic ([]), connectivity pins RK3566 -> both fine.
+        manifests = {
+            "imaging": SkillManifest(name="imaging", compatible_socs=[]),
+            "connectivity": SkillManifest(
+                name="connectivity", compatible_socs=["RK3566"]
+            ),
+        }
+        dag = compose_product(
+            spec, hw, TWO_PACKS, dag_id="prod-soc-ok", manifests=manifests
+        )
+        assert validate(dag).ok
+
+    def test_soc_check_precedes_duplicate_provide(self, spec, hw):
+        # A SoC conflict AND a duplicate provide both present: the SoC
+        # precondition is reconciled first, so SocIncompatibilityError wins.
+        manifests = {
+            "imaging": SkillManifest(
+                name="imaging", provides=["dup"], compatible_socs=["imx8m"]
+            ),
+            "connectivity": SkillManifest(
+                name="connectivity", provides=["dup"], compatible_socs=["imx8m"]
+            ),
+        }
+        with pytest.raises(SocIncompatibilityError):
+            compose_product(spec, hw, TWO_PACKS, manifests=manifests)
