@@ -1,62 +1,67 @@
 # Enterprise Web Stack DAG tasks
+#
+# OP-1813 (B2, 1D-rest): migrated from the legacy id/artifacts schema to the
+# embedded planner schema (task_id + expected_output). This is schema-only:
+# task content/intent and dependency edges are unchanged.
+schema_version: 1
 tasks:
-  - id: ews-auth-setup
+  - task_id: ews-auth-setup
     name: "Auth Module Setup"
     description: "Configure NextAuth with credentials + optional SSO providers"
     depends_on: []
-    artifacts: [auth_module]
-    estimated_hours: 4
+    expected_output: build/enterprise_web/auth_module.tar.gz
+    estimated_minutes: 240
 
-  - id: ews-rbac-setup
+  - task_id: ews-rbac-setup
     name: "RBAC Module Setup"
     description: "Define role/permission schema and policy middleware"
     depends_on: [ews-auth-setup]
-    artifacts: [rbac_module]
-    estimated_hours: 3
+    expected_output: build/enterprise_web/rbac_module.tar.gz
+    estimated_minutes: 180
 
-  - id: ews-audit-setup
+  - task_id: ews-audit-setup
     name: "Audit Module Setup"
     description: "Implement hash-chained audit log for all write operations"
     depends_on: [ews-auth-setup]
-    artifacts: [audit_module]
-    estimated_hours: 3
+    expected_output: build/enterprise_web/audit_module.tar.gz
+    estimated_minutes: 180
 
-  - id: ews-i18n-setup
+  - task_id: ews-i18n-setup
     name: "i18n Scaffold"
     description: "Configure next-intl with zh/en locale bundles"
     depends_on: []
-    artifacts: [i18n_scaffold]
-    estimated_hours: 2
+    expected_output: build/enterprise_web/i18n_scaffold.tar.gz
+    estimated_minutes: 120
 
-  - id: ews-tenant-setup
+  - task_id: ews-tenant-setup
     name: "Multi-tenant Module"
     description: "Add tenant_id column + row-level security middleware"
     depends_on: [ews-auth-setup, ews-rbac-setup]
-    artifacts: [tenant_module]
-    estimated_hours: 4
+    expected_output: build/enterprise_web/tenant_module.tar.gz
+    estimated_minutes: 240
 
-  - id: ews-reports-setup
+  - task_id: ews-reports-setup
     name: "Reports Module"
     description: "Build tabular + chart components with Tremor/shadcn"
     depends_on: [ews-tenant-setup]
-    artifacts: [report_components]
-    estimated_hours: 4
+    expected_output: build/enterprise_web/report_components.tar.gz
+    estimated_minutes: 240
 
-  - id: ews-import-export
+  - task_id: ews-import-export
     name: "Import/Export Module"
     description: "CSV/XLSX/JSON round-trip with validation pipeline"
     depends_on: [ews-tenant-setup]
-    artifacts: [import_export_module]
-    estimated_hours: 3
+    expected_output: build/enterprise_web/import_export_module.tar.gz
+    estimated_minutes: 180
 
-  - id: ews-workflow-engine
+  - task_id: ews-workflow-engine
     name: "Workflow Engine"
     description: "State machine + approval chain for business processes"
     depends_on: [ews-rbac-setup, ews-audit-setup]
-    artifacts: [workflow_module]
-    estimated_hours: 4
+    expected_output: build/enterprise_web/workflow_module.tar.gz
+    estimated_minutes: 240
 
-  - id: ews-integration-test
+  - task_id: ews-integration-test
     name: "Full Integration Test"
     description: "End-to-end test of all modules working together"
     depends_on:
@@ -68,12 +73,12 @@ tasks:
       - ews-reports-setup
       - ews-import-export
       - ews-workflow-engine
-    artifacts: []
-    estimated_hours: 2
+    expected_output: build/enterprise_web/full_integration_test_report.xml
+    estimated_minutes: 120
 
-  - id: ews-template-finalize
+  - task_id: ews-template-finalize
     name: "Reference Template Finalization"
     description: "Prepare as reusable template for SW-WEB-* tracks"
     depends_on: [ews-integration-test]
-    artifacts: []
-    estimated_hours: 1
+    expected_output: build/enterprise_web/reference_template.tar.gz
+    estimated_minutes: 60
