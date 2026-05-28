@@ -350,6 +350,12 @@ _CLI_CONFIG_DIRS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Agent-CLI config files that live at HOME root (OP-1838), not inside the
+# CLI config dirs above. These are copied into the per-ticket cli-home root so
+# wrapped CLIs see the same HOME-relative config without sharing host writes.
+_CLI_HOME_CONFIG_FILES: tuple[str, ...] = (".claude.json",)
+
+
 # XDG base dirs projected inside the writable CLI home (OP-1834). The CLI may
 # write to each, so they are redirected off any RO/absent host path into the
 # per-ticket writable home. ``HOME`` itself is the cli-home root.
@@ -395,6 +401,8 @@ def prepare_cli_home(
       bot's auth is seeded + readable AND the CLI writes its session/cache to
       the SAME writable dir (the host dir is never bound, so writes never leak
       back to the shared config — isolation preserved);
+    * COPY HOME-root CLI config files (currently ``~/.claude.json``) into the
+      cli-home root for CLIs whose primary config is HOME-relative;
     * create the XDG base dirs inside ``cli_home``.
 
     Deliberately SEPARATE from :func:`wrap_in_bubblewrap` so building the wrap
@@ -432,6 +440,19 @@ def prepare_cli_home(
                 )
         else:
             dest.mkdir(parents=True, exist_ok=True)
+
+    for rel in _CLI_HOME_CONFIG_FILES:
+        host_path = Path(host_home) / rel
+        dest = cli_home / rel
+        if not host_path.is_file():
+            continue
+        try:
+            shutil.copy2(host_path, dest)
+        except OSError as exc:
+            logger.warning(
+                "[cli-home-seed] skipped %s for %s: %s",
+                host_path, ticket_key, exc,
+            )
 
     for _, rel in _CLI_HOME_XDG_DIRS:
         (cli_home / rel).mkdir(parents=True, exist_ok=True)

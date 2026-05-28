@@ -27,6 +27,16 @@ from backend.agents import runner_sandbox as rs
 HAS_BWRAP = shutil.which("bwrap") is not None
 
 
+def _prepare_cli_home(ticket_key: str, tmp_path: Path) -> Path:
+    host_home = tmp_path / f"{ticket_key}-home"
+    host_home.mkdir()
+    rs.prepare_cli_home(
+        ticket_key,
+        env={"PATH": "/usr/bin", "HOME": str(host_home)},
+    )
+    return rs.cli_home_for(ticket_key)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_paths(tmp_path, monkeypatch):
     """Redirect tenant_fs roots to tmp_path so tests never touch real data."""
@@ -223,10 +233,11 @@ def test_e2e_build_reads_cache_offline(tmp_path):
 
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    mounts = pw.dep_cache_mounts("t-alpha", home=worktree)
+    cli_home = _prepare_cli_home("OP-1781", tmp_path)
+    mounts = pw.dep_cache_mounts("t-alpha", home=cli_home)
     assert mounts  # npm mount present
 
-    # The "build" reads its dep straight out of ~/.npm (HOME == worktree).
+    # The "build" reads its dep straight out of ~/.npm (HOME == cli-home).
     cmd = ["sh", "-c", "cat $HOME/.npm/left-pad-1.0.0.tgz"]
     argv = rs.wrap_in_bubblewrap(
         cmd, worktree_path=worktree, ticket_key="OP-1781",
@@ -245,7 +256,8 @@ def test_e2e_network_denied_with_cache_mounted(tmp_path):
     (cache_root / "npm").mkdir(parents=True)
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    mounts = pw.dep_cache_mounts("t-alpha", home=worktree)
+    cli_home = _prepare_cli_home("OP-1781", tmp_path)
+    mounts = pw.dep_cache_mounts("t-alpha", home=cli_home)
 
     # Python's socket connect to a routable host must fail under --unshare-net.
     probe = (
@@ -275,7 +287,8 @@ def test_e2e_cache_is_read_only_inside_jail(tmp_path):
     (cache_root / "npm").mkdir(parents=True)
     worktree = tmp_path / "wt"
     worktree.mkdir()
-    mounts = pw.dep_cache_mounts("t-alpha", home=worktree)
+    cli_home = _prepare_cli_home("OP-1781", tmp_path)
+    mounts = pw.dep_cache_mounts("t-alpha", home=cli_home)
 
     cmd = ["sh", "-c", "echo poison > $HOME/.npm/evil && echo WROTE || echo BLOCKED"]
     argv = rs.wrap_in_bubblewrap(

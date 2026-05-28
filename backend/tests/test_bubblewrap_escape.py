@@ -20,6 +20,15 @@ from backend.agents import runner_sandbox as rs
 HAS_BWRAP = shutil.which("bwrap") is not None
 
 
+def _prepare_cli_home(ticket_key: str, tmp_path: Path) -> None:
+    host_home = tmp_path / f"{ticket_key}-home"
+    host_home.mkdir()
+    rs.prepare_cli_home(
+        ticket_key,
+        env={"PATH": "/usr/bin", "HOME": str(host_home)},
+    )
+
+
 @dataclass(frozen=True)
 class EscapeProbe:
     name: str
@@ -62,9 +71,9 @@ cat > story_module.py <<'PY'
 def answer() -> int:
     return 42
 PY
-python3 - <<'PY'
-import py_compile
-py_compile.compile("story_module.py", doraise=True)
+python3 -B - <<'PY'
+from pathlib import Path
+compile(Path("story_module.py").read_text(), "story_module.py", "exec")
 PY
 git add story_module.py
 git -c commit.gpgsign=false commit -m "[OP-862] Synthetic story completion"
@@ -87,6 +96,7 @@ def test_sensitive_host_paths_are_not_accessible_inside_bubblewrap(
     scratch = Path("/tmp/runner-OP-862")
     stdout_path = scratch / f"{probe.name}.stdout"
     stderr_path = scratch / f"{probe.name}.stderr"
+    _prepare_cli_home("OP-862", tmp_path)
 
     cmd = [
         "sh",
@@ -152,6 +162,7 @@ def test_sandboxed_story_completion_matches_unsandboxed_baseline(
         text=True,
         timeout=20,
     )
+    _prepare_cli_home("OP-862", tmp_path)
     inside_argv = rs.wrap_in_bubblewrap(
         ["sh", "-c", STORY_COMPLETION_SCRIPT],
         worktree_path=inside,

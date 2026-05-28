@@ -160,6 +160,7 @@ def test_seeded_auth_is_present_and_readable(tmp_path):
     host_home = tmp_path / "home"
     (host_home / ".claude").mkdir(parents=True)
     (host_home / ".claude" / ".credentials.json").write_text("CLAUDE-TOKEN")
+    (host_home / ".claude.json").write_text('{"primary":"CLAUDE-CONFIG"}')
     (host_home / ".codex").mkdir()
     (host_home / ".codex" / "auth.json").write_text("CODEX-TOKEN")
 
@@ -169,12 +170,32 @@ def test_seeded_auth_is_present_and_readable(tmp_path):
 
     cli_home = rs.cli_home_for("OP-1834-c")
     claude_cred = cli_home / ".claude" / ".credentials.json"
+    claude_config = cli_home / ".claude.json"
     codex_cred = cli_home / ".codex" / "auth.json"
     assert claude_cred.read_text() == "CLAUDE-TOKEN"
+    assert claude_config.read_text() == '{"primary":"CLAUDE-CONFIG"}'
     assert codex_cred.read_text() == "CODEX-TOKEN"
     # The returned redirects match the in-jail --setenv paths.
     assert redirects["CLAUDE_CONFIG_DIR"] == str(cli_home / ".claude")
     assert redirects["CODEX_HOME"] == str(cli_home / ".codex")
+
+
+def test_missing_home_root_config_file_is_skipped(tmp_path):
+    """OP-1838: missing HOME-root CLI config files are best-effort and do
+    not abort seeding the cli-home."""
+    host_home = tmp_path / "home"
+    (host_home / ".claude").mkdir(parents=True)
+    (host_home / ".claude" / ".credentials.json").write_text("CLAUDE-TOKEN")
+
+    rs.prepare_cli_home(
+        "OP-1834-missing-root", env={"PATH": "/usr/bin", "HOME": str(host_home)},
+    )
+
+    cli_home = rs.cli_home_for("OP-1834-missing-root")
+    assert (
+        cli_home / ".claude" / ".credentials.json"
+    ).read_text() == "CLAUDE-TOKEN"
+    assert not (cli_home / ".claude.json").exists()
 
 
 def test_prepare_redirects_match_argv_setenv(tmp_path, monkeypatch):
