@@ -1,0 +1,67 @@
+# OP-1815 (Track B / B-1) - Case-2 Windows UVC HOST app pack skeleton.
+#
+# NAMING TRAP: the existing `uvc` pack is device-side (USB gadget). This
+# pack is the HOST / consumer side: a Windows desktop app that captures
+# from a UVC camera. This pickup is SKELETON only and ships no UVC capture
+# domain code yet.
+#
+# The dispatcher routes this pack to the existing desktop-tauri scaffolder
+# (backend.tauri_scaffolder via backend/skill_registry.py). Rendering this
+# pack therefore produces the standard cross-platform Tauri desktop app
+# skeleton, covering Windows through the desktop-tauri pack rather than a
+# new Windows-specific scaffolder.
+
+schema_version: 1
+name: windows-uvc-host
+description: >
+  Case-2 Windows UVC HOST desktop app pack - a Windows desktop application
+  that consumes/captures from a USB Video Class camera. This SKELETON
+  pickup reuses the existing desktop-tauri scaffolder (on ScaffolderBase)
+  via the dispatcher to render the base Tauri desktop app project. The UVC
+  host capture integration, camera enumeration, preview surface, and
+  Windows capture backend are sequenced follow-on work in this same pack.
+version: "0.1.0"
+author: "OmniSight"
+license: "Apache-2.0"
+
+compatible_socs: []
+
+# Reuses the desktop-tauri pack; declared so the dependency on the Tauri
+# templates + backend.tauri_scaffolder module is explicit.
+depends_on_skills:
+  - skill-desktop-tauri
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - windows
+  - uvc
+  - usb-video-class
+  - camera-host
+  - capture-host
+  - desktop
+  - tauri
+  - tauri-2
+  - desktop-tauri
+  - host
+  - consumer
+  - case-2
+  - skeleton

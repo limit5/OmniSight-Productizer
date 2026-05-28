@@ -148,6 +148,13 @@ class TestRenderOutcome:
             "profile_binding": {"k": "v"},
         }
 
+    def test_to_dict_preserves_string_profile_binding(self):
+        outcome = RenderOutcome(
+            out_dir=Path("/tmp/x"),
+            profile_binding="linux-x86_64-native",
+        )
+        assert outcome.to_dict()["profile_binding"] == "linux-x86_64-native"
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  ScaffolderBase render loop

@@ -1,0 +1,51 @@
+# OP-1815 (Track B / B-1) - Case-2 Windows UVC HOST app DAG.
+#
+# Describes the Windows desktop UVC-host app build. Only the skeleton task
+# is active in this pickup; it routes to backend.tauri_scaffolder via the
+# dispatcher (NO new Windows scaffolder). UVC capture tasks are follow-on
+# entries so the intended host-app DAG is visible without claiming capture
+# domain code landed here.
+
+tasks:
+  - id: windows-uvc-host-scaffold-init
+    name: "Scaffold Windows UVC host desktop skeleton"
+    description: >
+      Render the base desktop Tauri 2.x app project by dispatching to the
+      existing desktop-tauri scaffolder (backend.tauri_scaffolder via
+      scripts/scaffold.py - NO new Windows scaffolder). This is the
+      Windows UVC HOST app shell that the camera enumeration, capture, and
+      preview layers below build on. Idempotent: re-renders without
+      clobbering files outside the scaffold surface.
+    depends_on: []
+    artifacts: [tauri_skeleton]
+    estimated_hours: 1
+    framework_gate: x2-role-desktop-tauri
+    status: active
+
+  - id: windows-uvc-host-enumeration
+    name: "UVC camera enumeration (FOLLOW-ON)"
+    description: >
+      FOLLOW-ON ticket (not in this skeleton pickup). Add the Windows host
+      camera enumeration layer that lists attached USB Video Class capture
+      devices and exposes typed metadata to the Tauri IPC boundary.
+      Domain code + dedicated scaffolds land in a sequenced follow-on
+      within this same pack.
+    depends_on: [windows-uvc-host-scaffold-init]
+    artifacts: [uvc_host_enumeration]
+    estimated_hours: 3
+    framework_gate: x2-role-desktop-tauri
+    status: follow-on
+
+  - id: windows-uvc-host-capture
+    name: "UVC host capture + preview (FOLLOW-ON)"
+    description: >
+      FOLLOW-ON ticket (not in this skeleton pickup). Add UVC frame
+      capture, lifecycle-correct start/stop controls, and a desktop
+      preview surface inside the Tauri app. This is host/consumer-side
+      capture from an attached UVC device, not the device-side `uvc`
+      gadget pack.
+    depends_on: [windows-uvc-host-enumeration]
+    artifacts: [uvc_host_capture]
+    estimated_hours: 4
+    framework_gate: x2-role-desktop-tauri
+    status: follow-on

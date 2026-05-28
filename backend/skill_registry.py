@@ -519,6 +519,12 @@ _SCAFFOLDER_MODULE_OVERRIDES: dict[str, str] = {
     # discovery + RTSP playback client scaffolds are sequenced follow-ons
     # in the same pack (see configs/skills/android-rtsp-onvif-client).
     "android-rtsp-onvif-client": "backend.android_scaffolder",
+    # OP-1815 (Case-2, Track B): the Windows UVC HOST app pack deliberately
+    # ships NO scaffolder of its own. It reuses the existing desktop-tauri
+    # scaffolder to render the Windows-capable desktop skeleton. UVC camera
+    # enumeration + capture domain code are sequenced follow-ons in the same
+    # pack (see configs/skills/windows-uvc-host).
+    "windows-uvc-host": "backend.tauri_scaffolder",
 }
 
 #: Public entry-point attribute names every scaffolder module exposes

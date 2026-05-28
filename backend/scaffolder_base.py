@@ -90,15 +90,20 @@ class RenderOutcome:
     files_written: list[Path] = field(default_factory=list)
     bytes_written: int = 0
     warnings: list[str] = field(default_factory=list)
-    profile_binding: dict[str, Any] = field(default_factory=dict)
+    profile_binding: Any = field(default_factory=dict)
 
     def to_dict(self) -> dict:
+        profile_binding = (
+            dict(self.profile_binding)
+            if isinstance(self.profile_binding, dict)
+            else self.profile_binding
+        )
         return {
             "out_dir": str(self.out_dir),
             "files_written": [str(p) for p in self.files_written],
             "bytes_written": self.bytes_written,
             "warnings": list(self.warnings),
-            "profile_binding": dict(self.profile_binding),
+            "profile_binding": profile_binding,
         }
 
 
