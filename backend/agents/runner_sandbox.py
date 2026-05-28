@@ -163,6 +163,45 @@ LINUX_READONLY_MOUNTS: tuple[str, ...] = (
 are absent on some distros; we skip mounts that don't exist."""
 
 
+# ─── In-jail DNS: resolved resolv.conf bind (OP-1835) ───────────────
+#
+# The ``/etc`` RO-bind above brings ``/etc/resolv.conf`` into the jail AS-IS.
+# On WSL2 that file is a SYMLINK → ``/mnt/wsl/resolv.conf`` (and under
+# systemd-resolved → ``/run/systemd/resolve/stub-resolv.conf``); the symlink
+# target dir is NOT mounted in the jail, so the link dangles → glibc returns
+# ``Temporary failure in name resolution`` → the wrapped CLI can't reach
+# ``api.anthropic.com`` → it hangs on the model-API call. We resolve the host
+# symlink chain and RO-bind the REAL file at the canonical in-jail path so DNS
+# works regardless of where the host keeps it.
+HOST_RESOLV_CONF = "/etc/resolv.conf"
+"""Host resolver-config path we resolve to its real target (a symlink on WSL2
+/ systemd-resolved, a plain file elsewhere). Tests monkeypatch this to a stub
+symlink to exercise the resolve without touching the real host file."""
+
+JAIL_RESOLV_CONF = "/etc/resolv.conf"
+"""Fixed in-jail dest for the resolver-config bind — always ``/etc/resolv.conf``
+regardless of where the host keeps the real file."""
+
+
+def _resolv_conf_bind() -> tuple[str, str] | None:
+    """Return ``(real_src, JAIL_RESOLV_CONF)`` to RO-bind for in-jail DNS (OP-1835).
+
+    Resolves the :data:`HOST_RESOLV_CONF` symlink chain to its real target
+    (WSL2 ``/mnt/wsl/resolv.conf``, systemd-resolved
+    ``/run/systemd/resolve/stub-resolv.conf``, or a plain file) so the jail
+    binds the actual file — binding the dangling symlink, or all of
+    ``/mnt/wsl``, would be wrong. Only the single resolved file is bound.
+
+    Returns None when the host has no readable resolv.conf (absent file or a
+    symlink that dangles on the host too), so the caller skips the bind
+    gracefully rather than handing bwrap a non-existent source.
+    """
+    real = os.path.realpath(HOST_RESOLV_CONF)
+    if not os.path.isfile(real) or not os.access(real, os.R_OK):
+        return None
+    return real, JAIL_RESOLV_CONF
+
+
 def _is_relative_to(path: Path, parent: Path) -> bool:
     try:
         path.relative_to(parent)
@@ -614,6 +653,18 @@ def _build_bubblewrap_argv(
         if Path(ro).exists():
             argv += ["--ro-bind", ro, ro]
 
+    # OP-1835: RO-bind the RESOLVED real resolv.conf over the /etc bind so
+    # in-jail DNS works. The /etc bind above carried in /etc/resolv.conf AS-IS;
+    # on WSL2 / systemd-resolved that's a symlink whose target dir isn't mounted
+    # here, so it dangles → "Temporary failure in name resolution" → the wrapped
+    # CLI hangs on the model API. Binding the resolved target AT /etc/resolv.conf
+    # (AFTER the /etc bind, so it overlays) fixes DNS regardless of host layout;
+    # only the single resolved file is bound (NOT /mnt/wsl), and an absent/
+    # unreadable resolv.conf is skipped gracefully.
+    resolv_bind = _resolv_conf_bind()
+    if resolv_bind is not None:
+        argv += ["--ro-bind", resolv_bind[0], resolv_bind[1]]
+
     # OP-1803 (§2a): RO-bind the resolved nvm node-version subtree so the jail
     # can execvp the agent CLI. We bind the specific <ver>/ dir (node + the
     # claude/codex shims + node_modules), NOT all of ~/.nvm.
@@ -888,6 +939,8 @@ __all__ = [
     "LINUX_BINARY",
     "MACOS_BINARY",
     "LINUX_READONLY_MOUNTS",
+    "HOST_RESOLV_CONF",
+    "JAIL_RESOLV_CONF",
     "LOG_SANDBOX_WRAPPED",
     "LOG_SANDBOX_DEGRADED",
     "LOG_SANDBOX_DISABLED",
