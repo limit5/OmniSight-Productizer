@@ -7,10 +7,9 @@ tasks:
     phase: integration
     depends_on: []
     inputs:
-      - sdk_profile
-      - hardware_profile
-    outputs:
-      - telemetry_sdk_source
+      - external:sdk_profile
+      - external:hardware_profile
+    expected_output: build/telemetry/telemetry_sdk_source.tar.gz
     estimated_minutes: 30
 
   - task_id: telemetry-crash-handler
@@ -20,9 +19,8 @@ tasks:
     depends_on:
       - telemetry-sdk-init
     inputs:
-      - telemetry_sdk_source
-    outputs:
-      - crash_handler_source
+      - build/telemetry/telemetry_sdk_source.tar.gz
+    expected_output: build/telemetry/crash_handler_source.tar.gz
     estimated_minutes: 45
 
   - task_id: telemetry-usage-tracker
@@ -32,9 +30,8 @@ tasks:
     depends_on:
       - telemetry-sdk-init
     inputs:
-      - telemetry_sdk_source
-    outputs:
-      - usage_tracker_source
+      - build/telemetry/telemetry_sdk_source.tar.gz
+    expected_output: build/telemetry/usage_tracker_source.tar.gz
     estimated_minutes: 30
 
   - task_id: telemetry-perf-collector
@@ -44,9 +41,8 @@ tasks:
     depends_on:
       - telemetry-sdk-init
     inputs:
-      - telemetry_sdk_source
-    outputs:
-      - perf_collector_source
+      - build/telemetry/telemetry_sdk_source.tar.gz
+    expected_output: build/telemetry/perf_collector_source.tar.gz
     estimated_minutes: 30
 
   - task_id: telemetry-offline-queue
@@ -56,9 +52,8 @@ tasks:
     depends_on:
       - telemetry-sdk-init
     inputs:
-      - telemetry_sdk_source
-    outputs:
-      - offline_queue_source
+      - build/telemetry/telemetry_sdk_source.tar.gz
+    expected_output: build/telemetry/offline_queue_source.tar.gz
     estimated_minutes: 45
 
   - task_id: telemetry-ingestion-deploy
@@ -68,9 +63,8 @@ tasks:
     depends_on:
       - telemetry-sdk-init
     inputs:
-      - ingestion_config
-    outputs:
-      - ingestion_endpoint_url
+      - external:ingestion_config
+    expected_output: build/telemetry/ingestion_endpoint_url.txt
     estimated_minutes: 30
 
   - task_id: telemetry-privacy-setup
@@ -80,9 +74,8 @@ tasks:
     depends_on:
       - telemetry-ingestion-deploy
     inputs:
-      - privacy_config
-    outputs:
-      - privacy_module_config
+      - external:privacy_config
+    expected_output: build/telemetry/privacy_module_config.yaml
     estimated_minutes: 20
 
   - task_id: telemetry-storage-setup
@@ -92,9 +85,8 @@ tasks:
     depends_on:
       - telemetry-ingestion-deploy
     inputs:
-      - storage_config
-    outputs:
-      - storage_schema
+      - external:storage_config
+    expected_output: build/telemetry/storage_schema.sql
     estimated_minutes: 30
 
   - task_id: telemetry-dashboard-setup
@@ -104,9 +96,8 @@ tasks:
     depends_on:
       - telemetry-storage-setup
     inputs:
-      - dashboard_config
-    outputs:
-      - dashboard_urls
+      - external:dashboard_config
+    expected_output: build/telemetry/dashboard_urls.json
     estimated_minutes: 30
 
   - task_id: telemetry-integration-test
@@ -121,7 +112,6 @@ tasks:
       - telemetry-privacy-setup
       - telemetry-dashboard-setup
     inputs:
-      - test_recipes
-    outputs:
-      - test_report
+      - external:test_recipes
+    expected_output: build/telemetry/test_report.xml
     estimated_minutes: 60
