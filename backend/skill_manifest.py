@@ -10,7 +10,7 @@ dependency on other skills/core modules, and lifecycle hook commands.
 from __future__ import annotations
 
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 SCHEMA_VERSION = 1
 
@@ -41,7 +41,14 @@ class LifecycleHooks(BaseModel):
 
 class SkillManifest(BaseModel):
     schema_version: int = SCHEMA_VERSION
-    name: str = Field(..., min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9\-]*$")
+    skill_id: str | None = Field(
+        None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[a-z][a-z0-9_-]*$",
+        description="Stable slug; when omitted, name is treated as the legacy slug",
+    )
+    name: str = Field(..., min_length=1, max_length=128)
     description: str = Field("", max_length=1024)
     version: str = Field("0.1.0", max_length=32, pattern=r"^\d+\.\d+\.\d+")
     author: str = Field("", max_length=256)
@@ -73,6 +80,21 @@ class SkillManifest(BaseModel):
         if v != SCHEMA_VERSION:
             raise ValueError(f"unsupported schema_version {v}, expected {SCHEMA_VERSION}")
         return v
+
+    @model_validator(mode="after")
+    def _check_slug(self) -> "SkillManifest":
+        if self.skill_id is None and not self._slug_is_valid(self.name):
+            raise ValueError("name must be a valid skill slug when skill_id is absent")
+        return self
+
+    @staticmethod
+    def _slug_is_valid(v: str) -> bool:
+        if not v:
+            return False
+        first, rest = v[0], v[1:]
+        if first < "a" or first > "z":
+            return False
+        return all(("a" <= ch <= "z") or ("0" <= ch <= "9") or ch in "-_" for ch in rest)
 
     def artifact_kinds_present(self) -> set[str]:
         return {a.kind for a in self.artifacts}

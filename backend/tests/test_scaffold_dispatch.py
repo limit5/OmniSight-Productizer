@@ -207,8 +207,10 @@ class TestDispatchEndToEnd:
         cli = _load_cli()
         rc = cli.main(["--list"])
         assert rc == 0
-        out = capsys.readouterr().out
+        captured = capsys.readouterr()
+        out = captured.out
         assert "skill-android" in out
+        assert captured.err == ""
 
     def test_main_renders(self, tmp_path: Path, capsys):
         cli = _load_cli()

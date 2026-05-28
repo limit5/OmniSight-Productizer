@@ -40,6 +40,8 @@ from backend.skill_registry import (
     validate_skill,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Fixtures
@@ -148,6 +150,32 @@ class TestSkillManifest:
         assert len(m.artifacts) == 5
         assert m.artifact_kinds_present() == REQUIRED_ARTIFACT_KINDS
         assert m.missing_artifact_kinds() == set()
+
+    def test_skill_id_carries_slug_when_name_is_title(self):
+        m = SkillManifest(
+            skill_id="barcode_scanner",
+            name="Barcode/Scanning SDK Abstraction",
+        )
+        assert m.skill_id == "barcode_scanner"
+        assert m.name == "Barcode/Scanning SDK Abstraction"
+
+    @pytest.mark.parametrize(
+        "pack,expected_slug",
+        [
+            ("barcode_scanner", "barcode_scanner"),
+            ("depth_sensing", "depth_sensing"),
+            ("enterprise_web", "enterprise_web"),
+            ("sensor_fusion", None),
+        ],
+    )
+    def test_gap5_packs_load_without_name_slug_errors(
+        self,
+        pack: str,
+        expected_slug: str | None,
+    ):
+        manifest = load_manifest(REPO_ROOT / "configs" / "skills" / pack / "skill.yaml")
+        assert manifest.skill_id == expected_slug
+        assert manifest.name
 
     def test_invalid_name_uppercase(self):
         with pytest.raises(Exception):
