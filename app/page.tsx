@@ -14,6 +14,7 @@ import { BudgetStrategyPanel } from "@/components/omnisight/budget-strategy-pane
 import { PipelineTimeline } from "@/components/omnisight/pipeline-timeline"
 import { DecisionRulesEditor } from "@/components/omnisight/decision-rules-editor"
 import { DagEditor } from "@/components/omnisight/dag-editor"
+import { GuidedBuildFlow } from "@/components/omnisight/guided-build-flow"
 import { OpsSummaryPanel } from "@/components/omnisight/ops-summary-panel"
 import { OrchestrationPanel } from "@/components/omnisight/orchestration-panel"
 import { SpecTemplateEditor } from "@/components/omnisight/spec-template-editor"
@@ -118,6 +119,7 @@ export default function Home() {
   // a deep link rendered "orchestrator" on the server but "decisions"
   // on the client, triggering React hydration warnings.
   const [activePanel, setActivePanel] = useState<PanelId>("orchestrator")
+  const [guidedBuildSpec, setGuidedBuildSpec] = useState<ParsedSpec | null>(null)
   useEffect(() => {
     const p = readPanelFromUrl()
     if (p && p !== "orchestrator") setActivePanel(p)
@@ -606,6 +608,23 @@ export default function Home() {
       case "forecast":
         return <ForecastPanel />
       case "dag":
+        if (guidedBuildSpec) {
+          return (
+            <GuidedBuildFlow
+              spec={guidedBuildSpec}
+              onOpenEditor={() => {
+                if (typeof window !== "undefined") {
+                  window.dispatchEvent(
+                    new CustomEvent("omnisight:dag-seed-from-spec", {
+                      detail: { spec: guidedBuildSpec },
+                    }),
+                  )
+                }
+                setGuidedBuildSpec(null)
+              }}
+            />
+          )
+        }
         return <DagEditor />
       case "history":
         return <RunHistoryPanel />
@@ -631,16 +650,11 @@ export default function Home() {
         return (
           <SpecTemplateEditor
             onSpecReady={(spec: ParsedSpec) => {
-              // Hand off to DagEditor: navigate to the DAG panel and
-              // seed it with a template best matching the parsed spec.
-              // DagEditor listens for `omnisight:dag-seed-from-spec`
-              // on window and pre-fills its JSON text accordingly.
+              // Hand off to the guided build kickoff. The raw DAG editor
+              // remains available from that flow for operators who need
+              // to inspect or tweak the generated plan.
               if (typeof window === "undefined") return
-              window.dispatchEvent(
-                new CustomEvent("omnisight:dag-seed-from-spec", {
-                  detail: { spec },
-                }),
-              )
+              setGuidedBuildSpec(spec)
               window.dispatchEvent(
                 new CustomEvent("omnisight:navigate", {
                   detail: { panel: "dag" },
