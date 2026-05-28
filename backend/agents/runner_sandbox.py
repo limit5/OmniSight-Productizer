@@ -184,7 +184,7 @@ regardless of where the host keeps the real file."""
 
 
 def _resolv_conf_bind() -> tuple[str, str] | None:
-    """Return ``(real_src, JAIL_RESOLV_CONF)`` to RO-bind for in-jail DNS (OP-1835).
+    """Return ``(real_src, real_src)`` to RO-bind for in-jail DNS (OP-1835/OP-1836).
 
     Resolves the :data:`HOST_RESOLV_CONF` symlink chain to its real target
     (WSL2 ``/mnt/wsl/resolv.conf``, systemd-resolved
@@ -199,7 +199,19 @@ def _resolv_conf_bind() -> tuple[str, str] | None:
     real = os.path.realpath(HOST_RESOLV_CONF)
     if not os.path.isfile(real) or not os.access(real, os.R_OK):
         return None
-    return real, JAIL_RESOLV_CONF
+    if real == HOST_RESOLV_CONF:
+        # Plain file at the host path — the ``/etc`` RO-bind already provides
+        # it in-jail; no extra bind needed (and binding over the read-only
+        # ``/etc`` would fail).
+        return None
+    # ``/etc/resolv.conf`` is a SYMLINK to a path OUTSIDE the ``/etc`` bind
+    # (WSL2 ``/mnt/wsl/resolv.conf``, systemd-resolved ``/run/...``). Bind the
+    # real file AT ITS OWN (target) path so the in-jail ``/etc/resolv.conf``
+    # symlink resolves to it. Binding it AT ``/etc/resolv.conf`` instead FAILS:
+    # bwrap follows the dangling in-jail symlink to the (absent) target and
+    # can't create the mountpoint — ``Can't create file at /etc/resolv.conf:
+    # No such file or directory`` (the original OP-1835 bug).
+    return real, real
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

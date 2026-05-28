@@ -71,18 +71,23 @@ def test_resolv_bind_resolves_symlink_to_real_target(tmp_path, monkeypatch):
     monkeypatch.setattr(rs, "HOST_RESOLV_CONF", str(symlink))
 
     bind = rs._resolv_conf_bind()
-    assert bind == (str(real_target), "/etc/resolv.conf")
+    # Bind the real target AT ITS OWN PATH so the in-jail /etc/resolv.conf
+    # symlink resolves to it (binding AT /etc/resolv.conf follows the dangling
+    # symlink to the absent target and fails — the OP-1835 bug, fixed OP-1836).
+    assert bind == (str(real_target), str(real_target))
     # The symlink itself is never the bind source.
     assert bind[0] != str(symlink)
 
 
-def test_resolv_bind_handles_plain_file(tmp_path, monkeypatch):
-    """A plain (non-symlink) host resolv.conf binds itself at the jail path."""
+def test_resolv_bind_skips_plain_file_covered_by_etc(tmp_path, monkeypatch):
+    """A plain (non-symlink) host resolv.conf needs NO extra bind — the /etc
+    RO-bind already provides it in-jail (and binding over read-only /etc would
+    fail). Only a symlink-to-outside-/etc needs the target-path bind."""
     plain = tmp_path / "resolv.conf"
     plain.write_text("nameserver 1.1.1.1\n")
     monkeypatch.setattr(rs, "HOST_RESOLV_CONF", str(plain))
 
-    assert rs._resolv_conf_bind() == (str(plain), "/etc/resolv.conf")
+    assert rs._resolv_conf_bind() is None
 
 
 def test_resolv_bind_skips_absent_file(tmp_path, monkeypatch):
@@ -116,12 +121,14 @@ def test_argv_ro_binds_resolved_resolv_conf(tmp_path, monkeypatch):
         env={"PATH": "/usr/bin", "HOME": str(tmp_path / "home")},
     )
 
-    # The REAL target is the bind source; the jail dest is /etc/resolv.conf.
-    assert (str(real_target), "/etc/resolv.conf") in _ro_bind_pairs(argv)
-    # Located as a contiguous `--ro-bind <real> /etc/resolv.conf` triple.
+    # The REAL target is bound AT ITS OWN PATH so the in-jail /etc/resolv.conf
+    # symlink resolves to it (binding AT /etc/resolv.conf follows the dangling
+    # symlink and fails — the OP-1835 bug, fixed OP-1836).
+    assert (str(real_target), str(real_target)) in _ro_bind_pairs(argv)
+    # Located as a contiguous `--ro-bind <real> <real>` triple.
     idx = argv.index(str(real_target))
     assert argv[idx - 1] == "--ro-bind"
-    assert argv[idx + 1] == "/etc/resolv.conf"
+    assert argv[idx + 1] == str(real_target)
 
 
 def test_argv_resolv_bind_overlays_after_etc(tmp_path, monkeypatch):
