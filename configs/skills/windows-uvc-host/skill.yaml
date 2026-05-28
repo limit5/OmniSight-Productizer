@@ -26,6 +26,15 @@ version: "0.2.0"
 author: "OmniSight"
 license: "Apache-2.0"
 
+# OP-1823 (Track-B gap #3): this pack borrows the desktop-tauri
+# scaffolder, whose default platform_profile is linux-x86_64-native —
+# which would silently produce a Linux-targeted build for this Windows
+# pack. Pin a Windows desktop target so the dispatcher binds
+# windows-x86_64. skill_registry.resolve_scaffolder reads this and binds
+# it onto the render for THIS pack only — the shared desktop-tauri default
+# is untouched, so other Tauri packs (Linux/macOS) are unaffected.
+platform_profile: windows-x86_64
+
 compatible_socs: []
 
 # Reuses the desktop-tauri pack; declared so the dependency on the Tauri

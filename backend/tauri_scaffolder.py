@@ -54,7 +54,7 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -312,6 +312,7 @@ def render_project(
     *,
     overwrite: bool = True,
     overlay_dirs: Iterable[Path] | None = None,
+    platform_profile_override: str | None = None,
 ) -> RenderOutcome:
     """Render the SKILL-DESKTOP-TAURI scaffold into ``out_dir``.
 
@@ -327,7 +328,18 @@ def render_project(
         UVC enumerate + capture templates onto the borrowed desktop app
         shell — no new scaffolder. ``None`` leaves the render byte-for-byte
         identical to the bare skeleton.
+    platform_profile_override : str, optional
+        When set, the render binds this X0 profile id instead of
+        ``options.platform_profile``. This is the seam a *reuse* pack uses
+        to target an OS that differs from this scaffolder's shared default
+        (``linux-x86_64-native``) without mutating that default — e.g. the
+        ``windows-uvc-host`` pack pins ``windows-x86_64`` in its
+        ``skill.yaml`` and :func:`backend.skill_registry.resolve_scaffolder`
+        pre-binds it here. ``None`` leaves ``options`` untouched, so a
+        direct caller's render is byte-for-byte unchanged.
     """
+    if platform_profile_override is not None:
+        options = replace(options, platform_profile=platform_profile_override)
     return _SCAFFOLDER.render_project(
         out_dir, options, overwrite=overwrite, overlay_dirs=overlay_dirs
     )
