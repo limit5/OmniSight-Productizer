@@ -1469,15 +1469,16 @@ def _invoke_cli(
 
     # OP-1781 (1A.4): RO-mount the pre-warmed per-tenant dependency cache so
     # the build resolves deps offline while the jail keeps --unshare-net.
-    # Mount points are HOME-relative and the jail pins HOME to the worktree,
-    # so compute them against effective_worktree. Best-effort: a missing
-    # tenant binding or cache just yields no mounts (deny-by-default network
-    # is unchanged either way).
+    # Mount points are HOME-relative; OP-1834 pins the jail's HOME to the
+    # writable per-ticket cli-home, so compute them against that path (not the
+    # worktree). Best-effort: a missing tenant binding or cache just yields no
+    # mounts (deny-by-default network is unchanged either way).
     effective_tenant = tenant_id or db_context.current_tenant_id()
     dep_cache_mounts = None
     try:
         dep_cache_mounts = sandbox_prewarm.dep_cache_mounts(
-            effective_tenant, home=effective_worktree,
+            effective_tenant,
+            home=runner_sandbox.cli_home_for(ticket_key),
         )
     except Exception as e:  # pragma: no cover - defensive; never block the run
         print(
@@ -1512,35 +1513,56 @@ def _invoke_cli(
         print(f"[runner] sandbox unavailable (ENFORCE=1): {e}", file=sys.stderr)
         return 126
 
-    if DRY_RUN:
-        print(f"[runner] DRY_RUN: would invoke `{' '.join(cmd[:3])}...` with {len(full_prompt)} char prompt")
-        return 0
-
-    print(f"[runner] invoking {cmd[0]} (timeout {TASK_TIMEOUT_S}s)...")
     try:
-        proc = subprocess.Popen(
-            wrapped_cmd,
-            cwd=cwd,
-            env=scrubbed_env,
-            stdin=subprocess.PIPE if cmd[0] == "codex" else None,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-            text=True,
-            start_new_session=True,
-        )
-        if cmd[0] == "codex":
-            proc.communicate(input=full_prompt, timeout=TASK_TIMEOUT_S)
-        else:
-            proc.communicate(timeout=TASK_TIMEOUT_S)
-        return proc.returncode
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
-        print(f"[runner] CLI timed out after {TASK_TIMEOUT_S}s", file=sys.stderr)
-        return 124
-    except FileNotFoundError as e:
-        print(f"[runner] CLI not installed: {e}", file=sys.stderr)
-        return 127
+        if DRY_RUN:
+            print(f"[runner] DRY_RUN: would invoke `{' '.join(cmd[:3])}...` with {len(full_prompt)} char prompt")
+            return 0
+
+        # OP-1834: seed the writable per-ticket CLI home (HOME/CODEX_HOME/
+        # CLAUDE_CONFIG_DIR/XDG_* point here inside the jail) with the bot's
+        # auth so session/cache/state writes succeed. Only when the sandbox is
+        # actually active — the degraded fleet (no bwrap) uses the host config
+        # directly, so we seed nothing (the fix stays INERT until re-enabled).
+        if runner_sandbox.sandbox_available():
+            try:
+                runner_sandbox.prepare_cli_home(ticket_key, env=scrubbed_env)
+            except Exception as e:  # never block the run on a seed hiccup
+                print(
+                    f"[runner] cli-home seed failed for {ticket_key}: "
+                    f"{type(e).__name__}: {e}",
+                    file=sys.stderr,
+                )
+
+        print(f"[runner] invoking {cmd[0]} (timeout {TASK_TIMEOUT_S}s)...")
+        try:
+            proc = subprocess.Popen(
+                wrapped_cmd,
+                cwd=cwd,
+                env=scrubbed_env,
+                stdin=subprocess.PIPE if cmd[0] == "codex" else None,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
+                text=True,
+                start_new_session=True,
+            )
+            if cmd[0] == "codex":
+                proc.communicate(input=full_prompt, timeout=TASK_TIMEOUT_S)
+            else:
+                proc.communicate(timeout=TASK_TIMEOUT_S)
+            return proc.returncode
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            print(f"[runner] CLI timed out after {TASK_TIMEOUT_S}s", file=sys.stderr)
+            return 124
+        except FileNotFoundError as e:
+            print(f"[runner] CLI not installed: {e}", file=sys.stderr)
+            return 127
+    finally:
+        # OP-1834: wipe the seeded per-ticket CLI home so the bot's auth creds
+        # never outlive the invocation in /tmp. No-op in the degraded/raw spawn
+        # (nothing was seeded).
+        runner_sandbox.cleanup_cli_home(ticket_key)
 
 
 def _finalize_under_review(
