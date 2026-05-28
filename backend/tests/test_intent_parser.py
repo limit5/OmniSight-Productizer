@@ -120,6 +120,45 @@ async def test_regex_respects_word_boundaries():
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Track-B software-case classes (OP-1821)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# The heuristic must classify the three software-case intents into the
+# new mobile/desktop classes so planner_router can reach the Case packs.
+# The naming-trap guard below pins the disambiguation: a "UVC host app"
+# is NOT firmware (`embedded_product`).
+
+@pytest.mark.asyncio
+async def test_android_rtsp_onvif_client_classifies_as_mobile_rtsp_client():
+    p = await ip.parse_intent("build me an Android RTSP/ONVIF client app")
+    assert p.project_class.value == "mobile_rtsp_client"
+    assert p.project_class.confidence > 0
+
+
+@pytest.mark.asyncio
+async def test_windows_uvc_host_classifies_as_desktop_uvc_host_not_embedded():
+    p = await ip.parse_intent("Windows UVC host app")
+    assert p.project_class.value == "desktop_uvc_host"
+    assert p.project_class.value != "embedded_product"
+
+
+@pytest.mark.asyncio
+async def test_ios_map_ar_classifies_as_mobile_ar_app():
+    p = await ip.parse_intent("iOS map-AR app")
+    assert p.project_class.value == "mobile_ar_app"
+    assert p.project_class.confidence > 0
+
+
+@pytest.mark.asyncio
+async def test_uvc_camera_firmware_still_classifies_as_embedded_product():
+    """Regression guard for the desktop_uvc_host disambiguation: plain
+    camera firmware (no host/desktop/Windows signal) must still land on
+    embedded_product, not get hijacked by the new host class."""
+    p = await ip.parse_intent("Write UVC camera firmware for the RK3588.")
+    assert p.project_class.value == "embedded_product"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Conflict detector — smoke (68-B replaces with YAML)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
