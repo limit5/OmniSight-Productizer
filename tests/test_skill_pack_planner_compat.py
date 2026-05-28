@@ -257,29 +257,15 @@ def test_compatibility_partition_is_documented():
     assert set(parsed_ok) | set(incompatible) == set(_SKILL_PACKS)
     assert not (set(parsed_ok) & set(incompatible))
 
-    # The embedded-native packs that the planner can consume today.
-    # ``imaging`` joined this set in OP-1786 (W2-3, 1D-pilot) — its
-    # tasks.yaml was migrated from the legacy id/name/artifacts schema to
-    # the embedded task_id/expected_output schema (schema-only; the pack is
-    # still `stubbed`). Packs join this set as their tasks.yaml is migrated
-    # to the embedded schema (B-2 1D-rest): imaging (OP-1786), barcode_scanner
-    # (OP-1801), payment/ota/printing/ipcam (batch), depth_sensing (OP-1805) —
-    # all schema-only (still stubs). NOTE: this exact-set pin conflicts on every
-    # parallel migration; tracked for conversion to a dynamic check.
-    assert parsed_ok == [
-        "_embedded_base",
-        "barcode_scanner",
-        "connectivity",
-        "depth_sensing",
-        "imaging",
-        "ipcam",
-        "ota",
-        "payment",
-        "printing",
-    ], (
-        "embedded-compatible pack set changed — if a pack was migrated to "
-        "the embedded schema this is expected; update the expectation."
-    )
+    # The parseable set is computed DYNAMICALLY from each pack's schema via
+    # ``_expected_outcome`` (a pack parses iff every task carries ``task_id`` +
+    # ``expected_output``), and the parametrized sweep asserts the planner's
+    # ACTUAL outcome matches that expectation per pack. We deliberately do NOT
+    # pin the exact parseable SET here: a hardcoded list conflicts on every
+    # parallel B-2 migration and drifts stale (it caused the #1309 conflict +
+    # a develop-red test). Sanity floor: the always-embedded base packs parse.
+    # (Per-pack ACTUAL planner consumption is asserted by the parametrized sweep.)
+    assert {"_embedded_base", "connectivity"}.issubset(set(parsed_ok))
 
 
 def test_imaging_pack_is_planner_parseable():
