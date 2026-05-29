@@ -174,6 +174,10 @@ def test_seeded_auth_is_present_and_readable(tmp_path):
     codex_cred = cli_home / ".codex" / "auth.json"
     assert claude_cred.read_text() == "CLAUDE-TOKEN"
     assert claude_config.read_text() == '{"primary":"CLAUDE-CONFIG"}'
+    # claude-code reads .claude.json from INSIDE CLAUDE_CONFIG_DIR when that env
+    # is set (the jail sets it) — it MUST be seeded there, not just the root,
+    # else wrapped claude runs config-less and exits 1 on real tasks.
+    assert (cli_home / ".claude" / ".claude.json").read_text() == '{"primary":"CLAUDE-CONFIG"}'
     assert codex_cred.read_text() == "CODEX-TOKEN"
     # The returned redirects match the in-jail --setenv paths.
     assert redirects["CLAUDE_CONFIG_DIR"] == str(cli_home / ".claude")

@@ -357,10 +357,18 @@ _CLI_CONFIG_DIRS: tuple[tuple[str, str], ...] = (
 )
 
 
-# Agent-CLI config files that live at HOME root (OP-1838), not inside the
-# CLI config dirs above. These are copied into the per-ticket cli-home root so
-# wrapped CLIs see the same HOME-relative config without sharing host writes.
-_CLI_HOME_CONFIG_FILES: tuple[str, ...] = (".claude.json",)
+# Agent-CLI config files that live at HOME root on the host (OP-1838), seeded
+# into the per-ticket cli-home as (host-relative source, in-jail destination).
+# claude-code keeps .claude.json INSIDE CLAUDE_CONFIG_DIR when that env var is
+# set, and the jail sets CLAUDE_CONFIG_DIR=cli-home/.claude — so the config MUST
+# land at cli-home/.claude/.claude.json. (OP-1838 seeded only the cli-home root;
+# a wrapped claude with CLAUDE_CONFIG_DIR set then could not find its config and
+# exited 1 on real tasks. Seed both the CLAUDE_CONFIG_DIR location and the root
+# fallback.)
+_CLI_HOME_CONFIG_FILES: tuple[tuple[str, str], ...] = (
+    (".claude.json", ".claude/.claude.json"),
+    (".claude.json", ".claude.json"),
+)
 
 
 # XDG base dirs projected inside the writable CLI home (OP-1834). The CLI may
@@ -448,12 +456,13 @@ def prepare_cli_home(
         else:
             dest.mkdir(parents=True, exist_ok=True)
 
-    for rel in _CLI_HOME_CONFIG_FILES:
-        host_path = Path(host_home) / rel
-        dest = cli_home / rel
+    for src_rel, dst_rel in _CLI_HOME_CONFIG_FILES:
+        host_path = Path(host_home) / src_rel
+        dest = cli_home / dst_rel
         if not host_path.is_file():
             continue
         try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(host_path, dest)
         except OSError as exc:
             logger.warning(
