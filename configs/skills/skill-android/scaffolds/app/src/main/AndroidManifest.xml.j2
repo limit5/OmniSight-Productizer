@@ -13,6 +13,10 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- Camera/vision client apps discover LAN devices via multicast (e.g. ONVIF
+         WS-Discovery): a held MulticastLock needs CHANGE_WIFI_MULTICAST_STATE. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
 {% if push %}
     <!-- Android 13+ runtime-requested permission for notifications. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -20,6 +24,7 @@
 
     <application
         android:name=".{{ project_name }}App"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- ONVIF device/media SOAP services + many RTSP setup channels are plain HTTP
+     on the LAN. Permit cleartext so the camera client can reach them. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true"/>
+</network-security-config>
