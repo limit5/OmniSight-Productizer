@@ -103,6 +103,23 @@ class Settings(BaseSettings):
     # ``gerrit_replication_targets``.
     delivery_targets: str = ""
 
+    # ── Per-project product sources (OP-1842 / P2.1 — camviewpro B2) ──
+    # The SOURCE-side analog of ``delivery_targets``: a JSON object mapping a
+    # JIRA project key → the external product repo its build is sourced from:
+    #   {"OP": {"repo_url": "ssh://git@github.com/operator/camviewpro-android",
+    #           "tier": "consumer", "branch": "main",
+    #           "pinned_ref": "v3.2.0", "git_account_ref": "camviewpro-ro"}}
+    # ``pinned_ref`` is mandatory (reproducible/auditable — a blind HEAD is
+    # rejected); ``tier`` ∈ {consumer, medical, automotive}; ``git_account_ref``
+    # names the git_accounts row carrying the (read) clone credential (reused —
+    # NOT a new secret store; only a reference is held here). A project with no
+    # entry resolves to None → the current in-repo build flow (back-compat).
+    # Resolved by ``backend.agents.product_source.resolve_product_source``.
+    # Like ``delivery_targets`` this is a *source pointer* (a reference + repo/
+    # ref), not a credential, so it is deliberately NOT in
+    # LEGACY_CREDENTIAL_FIELDS.
+    product_sources: str = ""
+
     # ── Token Budget & Resilience ──
     token_budget_daily: float = 0.0  # USD per day (0 = unlimited)
     # L1-06: hourly burn-rate kill-switch. A daily budget catches slow
