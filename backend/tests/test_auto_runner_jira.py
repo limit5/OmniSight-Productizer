@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -45,6 +47,7 @@ class _StubClient:
     jira_dispatch module attributes)."""
     agent_class = "subscription-codex"
     bot_email = "rt3628+codex-bot@gmail.com"
+    bot_account_id = "acc-codex-bot"
 
 
 def _patch_dispatch(monkeypatch: pytest.MonkeyPatch, mod: Any, **overrides: Any) -> dict[str, list]:
@@ -90,6 +93,21 @@ def _patch_dispatch(monkeypatch: pytest.MonkeyPatch, mod: Any, **overrides: Any)
     # Pin the constant so the runner's status-comparison stays stable
     monkeypatch.setattr(mod.jira_dispatch, "UNDER_REVIEW_STATUS_NAME", "Under Review")
     return calls
+
+
+def _snapshot(labels: tuple[str, ...] = ()) -> Any:
+    return SimpleNamespace(
+        key="OP-1848",
+        component="META",
+        fix_version=None,
+        created_at="2026-05-29T00:00:00.000+0000",
+        days_since_created=1.0,
+        days_to_fix_version=None,
+        downstream_blocked_count=0,
+        mutex_labels=(),
+        has_mutex_in_progress_sibling=False,
+        labels=labels,
+    )
 
 
 # ── AC5: agent already transitioned the ticket itself ─────────────
@@ -212,3 +230,333 @@ def test_finalize_continues_to_transition_when_status_read_fails(
     assert len(calls["transition_to_under_review_if_needed"]) == 1
     err = capsys.readouterr().err
     assert "could not read OP-691 status" in err
+
+
+def test_is_camviewpro_contribution_requires_exact_target_label() -> None:
+    mod = _load_jira_runner()
+
+    assert mod._is_camviewpro_contribution(("target:camviewpro",))
+    assert not mod._is_camviewpro_contribution(("target:other", "camviewpro"))
+    assert not mod._is_camviewpro_contribution(())
+
+
+def test_run_camviewpro_contribution_derives_inputs_and_sets_pr_labels(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mod = _load_jira_runner()
+    snapshot = _snapshot((
+        "target:camviewpro",
+        "camviewpro-project:CAM",
+        "camviewpro-base:release/2.4",
+    ))
+    calls: dict[str, list] = {
+        "contribute": [],
+        "invoke": [],
+        "labels": [],
+        "transitions": [],
+    }
+
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "_request",
+        lambda c, method, path: {"fields": {"summary": "Add runner route"}},
+    )
+
+    async def fake_contribute_to_product(project_key, **kwargs):
+        calls["contribute"].append((project_key, kwargs))
+        kwargs["implement"](tmp_path / "camviewpro")
+        return SimpleNamespace(
+            no_changes=False,
+            pr=SimpleNamespace(number=42, flagged_medical=False),
+        )
+
+    monkeypatch.setattr(mod, "contribute_to_product", fake_contribute_to_product)
+    monkeypatch.setattr(
+        mod,
+        "_invoke_cli",
+        lambda *args, **kwargs: calls["invoke"].append((args, kwargs)) or 0,
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_label",
+        lambda c, k, label, idem_key=None: calls["labels"].append((k, label)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "transition_to_under_review_if_needed",
+        lambda c, k, **kw: calls["transitions"].append(k) or True,
+    )
+
+    rc = mod._run_camviewpro_contribution(
+        _StubClient(), snapshot, "prompt", "subscription-codex", "tenant-a"
+    )
+
+    assert rc == 0
+    project_key, kwargs = calls["contribute"][0]
+    assert project_key == "CAM"
+    assert kwargs["ticket_key"] == "OP-1848"
+    assert kwargs["base"] == "release/2.4"
+    assert kwargs["slug"] == "Add runner route"
+    assert kwargs["git_account_ref"] == "camviewpro-ro"
+    assert kwargs["tenant_id"] == "tenant-a"
+    invoke_args, invoke_kwargs = calls["invoke"][0]
+    assert invoke_args[:2] == ("subscription-codex", "prompt")
+    assert invoke_kwargs["ticket_key"] == "OP-1848"
+    assert invoke_kwargs["worktree_path"] == tmp_path / "camviewpro"
+    assert invoke_kwargs["tenant_id"] == "tenant-a"
+    assert calls["labels"] == [("OP-1848", "camviewpro-pr:42")]
+    assert calls["transitions"] == ["OP-1848"]
+
+
+def test_run_camviewpro_contribution_defaults_base_and_marks_medical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    snapshot = _snapshot(("target:camviewpro",))
+    calls: dict[str, list] = {"contribute": [], "labels": []}
+
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "_request",
+        lambda c, method, path: {"fields": {"summary": "Medical lane change"}},
+    )
+
+    async def fake_contribute_to_product(project_key, **kwargs):
+        calls["contribute"].append((project_key, kwargs))
+        return SimpleNamespace(
+            no_changes=False,
+            pr=SimpleNamespace(number=7, flagged_medical=True),
+        )
+
+    monkeypatch.setattr(mod, "contribute_to_product", fake_contribute_to_product)
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_label",
+        lambda c, k, label, idem_key=None: calls["labels"].append((k, label)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "transition_to_under_review_if_needed",
+        lambda c, k, **kw: True,
+    )
+
+    rc = mod._run_camviewpro_contribution(
+        _StubClient(), snapshot, "prompt", "subscription-codex", "tenant-a"
+    )
+
+    assert rc == 0
+    project_key, kwargs = calls["contribute"][0]
+    assert project_key == "OP"
+    assert kwargs["base"] == "main"
+    assert calls["labels"] == [
+        ("OP-1848", "camviewpro-pr:7"),
+        ("OP-1848", "regulated-lane"),
+    ]
+
+
+def test_run_camviewpro_contribution_no_changes_comments_without_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    comments: list[str] = []
+
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "_request",
+        lambda c, method, path: {"fields": {"summary": "No-op"}},
+    )
+
+    async def fake_contribute_to_product(project_key, **kwargs):
+        return SimpleNamespace(no_changes=True, pr=None)
+
+    monkeypatch.setattr(mod, "contribute_to_product", fake_contribute_to_product)
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_comment",
+        lambda c, k, text, idem_key=None: comments.append(text),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_label",
+        lambda *a, **kw: pytest.fail("no_changes must not label a PR"),
+    )
+
+    rc = mod._run_camviewpro_contribution(
+        _StubClient(), _snapshot(("target:camviewpro",)), "prompt", "subscription-codex", None
+    )
+
+    assert rc == 1
+    assert "[runner-camviewpro-no-changes]" in comments[0]
+
+
+def test_run_camviewpro_contribution_nonzero_cli_raises_before_pr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mod = _load_jira_runner()
+
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "_request",
+        lambda c, method, path: {"fields": {"summary": "Failing change"}},
+    )
+
+    async def fake_contribute_to_product(project_key, **kwargs):
+        kwargs["implement"](tmp_path)
+        pytest.fail("implement failure must stop before PR result")
+
+    monkeypatch.setattr(mod, "contribute_to_product", fake_contribute_to_product)
+    monkeypatch.setattr(mod, "_invoke_cli", lambda *a, **kw: 23)
+
+    with pytest.raises(RuntimeError, match="rc=23"):
+        mod._run_camviewpro_contribution(
+            _StubClient(), _snapshot(("target:camviewpro",)), "prompt",
+            "subscription-codex", None,
+        )
+
+
+def _wire_main_to_invoke(
+    monkeypatch: pytest.MonkeyPatch,
+    mod: Any,
+    tmp_path: Path,
+    snapshot: Any,
+) -> dict[str, list]:
+    calls: dict[str, list] = {
+        "invoke": [],
+        "camviewpro": [],
+        "push": [],
+        "release": [],
+    }
+    monkeypatch.setattr(mod, "AGENT_CLASS", "subscription-codex")
+    monkeypatch.setattr(mod, "TARGET_OVERRIDE", "")
+    monkeypatch.setattr(mod, "DRY_RUN", False)
+    monkeypatch.setattr(mod, "CODEX_WORKTREE", str(tmp_path))
+    monkeypatch.setattr(mod.circuit_breaker, "open_services", lambda: [])
+    monkeypatch.setattr(mod, "sweep_stale_runner_branches", lambda p: None)
+    monkeypatch.setattr(mod, "configure_orphan_salvage_runtime", lambda: None)
+    monkeypatch.setattr(mod.orphan_salvage, "salvage_orphan_commits", lambda p, c: 0)
+    monkeypatch.setattr(mod.jira_dispatch, "assert_worktree_config_enabled", lambda r: None)
+    monkeypatch.setattr(
+        mod.jira_dispatch, "backpressure_decide", lambda *a, **kw: (True, "active")
+    )
+    monkeypatch.setattr(mod.jira_dispatch, "make_client", lambda *a, **kw: _StubClient())
+    monkeypatch.setattr(mod, "_bridge_health_pickup_gate", lambda c: True)
+    monkeypatch.setattr(mod.jira_dispatch, "fetch_pickable_tickets", lambda c: [object()])
+    monkeypatch.setattr(mod.jira_dispatch, "to_snapshot", lambda issue: snapshot)
+    monkeypatch.setattr(mod.scheduler, "load_weights", lambda: object())
+    monkeypatch.setattr(
+        mod.scheduler,
+        "dispatch",
+        lambda snapshots, weights, pre_pickup_check=None: snapshots[0],
+    )
+    monkeypatch.setattr(mod.runner_tenant, "resolve_tenant_id", lambda labels: "tenant-a")
+    monkeypatch.setattr(mod.runner_tenant, "is_self_tenant", lambda tenant_id: True)
+    monkeypatch.setattr(mod.db_context, "set_tenant_id", lambda tenant_id: None)
+    monkeypatch.setattr(mod, "already_merged_in_gerrit", lambda key: None)
+    monkeypatch.setattr(mod.jira_dispatch, "set_bot_identity_in_worktree", lambda *a, **kw: None)
+    monkeypatch.setattr(mod.jira_dispatch, "install_commit_msg_hook", lambda p: True)
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "sync_to_gerrit_develop",
+        lambda *a, **kw: SimpleNamespace(develop_sha="a" * 40, detail="synced"),
+    )
+    monkeypatch.setattr(mod.runner_progress, "find_recovered_snapshot", lambda p: None)
+    monkeypatch.setattr(mod.jira_dispatch, "pre_pickup_ok", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(mod.jira_dispatch, "fetch_description", lambda c, k: "desc")
+    monkeypatch.setattr(mod.jira_dispatch, "file_mutex_check", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(mod.jira_dispatch, "remove_label", lambda *a, **kw: None)
+    monkeypatch.setattr(mod, "_pre_pickup_capability_ok", lambda *a, **kw: (True, "ok"))
+    monkeypatch.setattr(mod, "_build_prompt", lambda c, k, d: "prompt")
+    monkeypatch.setattr(
+        mod.runner_workspace_safety, "assert_main_repo_unwritable_for_cli", lambda p: None
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "claim_ticket_atomic",
+        lambda *a, **kw: SimpleNamespace(
+            ok=True,
+            lost_to=None,
+            claim_token="default:tok",
+            coordination_lease_id=None,
+            coordination_fencing_token=None,
+        ),
+    )
+    monkeypatch.setattr(mod, "_ensure_runner_character_card", lambda key: None)
+    monkeypatch.setattr(
+        mod.runner_workspace_safety,
+        "write_workspace_sentinel",
+        lambda p, k: tmp_path / "sentinel",
+    )
+    monkeypatch.setattr(mod.jira_dispatch, "transition_to_in_progress", lambda *a, **kw: None)
+    monkeypatch.setattr(mod.runner_progress, "record_phase", lambda *a, **kw: None)
+    monkeypatch.setattr(mod.live_state_check, "capture_transition_boundary_snapshot", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        mod.runner_metrics_recorder,
+        "record_pickup_sync",
+        lambda start: (1, datetime.now(timezone.utc)),
+    )
+    monkeypatch.setattr(mod.runner_metrics_recorder, "record_completion_sync", lambda **kw: None)
+    monkeypatch.setattr(
+        mod.runner_workspace_safety,
+        "verify_workspace_sentinel",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_invoke_cli",
+        lambda *args, **kwargs: calls["invoke"].append((args, kwargs)) or 99,
+    )
+    monkeypatch.setattr(
+        mod,
+        "_run_camviewpro_contribution",
+        lambda *args, **kwargs: calls["camviewpro"].append((args, kwargs)) or 0,
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "push_to_gerrit_for_review",
+        lambda *args, **kwargs: calls["push"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "transition_back_to_todo",
+        lambda *a, **kw: None,
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "release_ticket_claim",
+        lambda *args, **kwargs: calls["release"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(mod, "_run_memory_writeback", lambda *a, **kw: None)
+    return calls
+
+
+def test_main_without_camviewpro_label_uses_existing_invoke_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mod = _load_jira_runner()
+    calls = _wire_main_to_invoke(monkeypatch, mod, tmp_path, _snapshot(()))
+
+    rc = mod.main()
+
+    assert rc == 99
+    assert calls["camviewpro"] == []
+    assert len(calls["invoke"]) == 1
+    assert calls["push"] == []
+
+
+def test_main_with_camviewpro_label_routes_to_contribution_and_skips_invoke(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mod = _load_jira_runner()
+    snapshot = _snapshot(("target:camviewpro",))
+    calls = _wire_main_to_invoke(monkeypatch, mod, tmp_path, snapshot)
+
+    rc = mod.main()
+
+    assert rc == 0
+    assert calls["invoke"] == []
+    assert calls["push"] == []
+    assert len(calls["camviewpro"]) == 1
+    args, _kwargs = calls["camviewpro"][0]
+    assert isinstance(args[0], _StubClient)
+    assert args[1:] == (snapshot, "prompt", "subscription-codex", "tenant-a")
+    assert len(calls["release"]) == 1

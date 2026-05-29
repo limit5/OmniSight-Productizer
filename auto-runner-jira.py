@@ -42,6 +42,7 @@ import logging
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -89,6 +90,7 @@ from backend.agents.loop_detector import (
     OutcomesGraderUnavailable,
     extract_acceptance_criteria_section,
 )
+from backend.agents.contribution_runner import contribute_to_product
 
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "default"
@@ -1753,6 +1755,100 @@ def _finalize_successful_push(
         )
 
 
+def _is_camviewpro_contribution(labels) -> bool:
+    """Return True iff the ticket targets the camviewpro contribution lane."""
+    return "target:camviewpro" in set(labels or ())
+
+
+def _camviewpro_label_value(labels, prefix: str) -> str | None:
+    for label in labels or ():
+        text = str(label)
+        if text.startswith(prefix):
+            value = text.split(":", 1)[1].strip()
+            if value:
+                return value
+    return None
+
+
+def _ticket_summary(client: "jira_dispatch.DispatchClient", snapshot) -> str:
+    summary = str(getattr(snapshot, "summary", "") or "").strip()
+    if summary:
+        return summary
+    issue = jira_dispatch._request(
+        client,
+        "GET",
+        f"/issue/{snapshot.key}?fields=summary",
+    )
+    return str(((issue.get("fields") or {}).get("summary")) or snapshot.key)
+
+
+def _run_camviewpro_contribution(
+    client: "jira_dispatch.DispatchClient",
+    snapshot,
+    prompt: str,
+    agent_class: str,
+    tenant_id: str | None,
+) -> int:
+    """Route a target:camviewpro ticket through the contribution orchestrator."""
+    labels = tuple(getattr(snapshot, "labels", ()) or ())
+    ticket_key = snapshot.key
+    project_key = (
+        _camviewpro_label_value(labels, "camviewpro-project:")
+        or ticket_key.split("-", 1)[0]
+    )
+    base = _camviewpro_label_value(labels, "camviewpro-base:") or "main"
+    slug = _ticket_summary(client, snapshot)
+
+    def implement(worktree_path: Path) -> None:
+        rc = _invoke_cli(
+            agent_class,
+            prompt,
+            ticket_key=ticket_key,
+            worktree_path=worktree_path,
+            tenant_id=tenant_id,
+        )
+        if rc != 0:
+            raise RuntimeError(f"camviewpro implement CLI failed rc={rc}")
+
+    with tempfile.TemporaryDirectory(prefix=f"camviewpro-{ticket_key}-") as workspace:
+        result = asyncio.run(
+            contribute_to_product(
+                project_key,
+                ticket_key=ticket_key,
+                base=base,
+                slug=slug,
+                implement=implement,
+                git_account_ref="camviewpro-ro",
+                workspace_root=Path(workspace),
+                tenant_id=tenant_id,
+            )
+        )
+
+    if result.no_changes:
+        jira_dispatch.add_comment(
+            client,
+            ticket_key,
+            "[runner-camviewpro-no-changes] Contribution agent completed, "
+            "but the camviewpro worktree had no changes. No PR was opened.",
+        )
+        return 1
+
+    pr = result.pr
+    if pr is None:
+        jira_dispatch.add_comment(
+            client,
+            ticket_key,
+            "[runner-camviewpro-no-pr] Contribution completed without a PR result.",
+        )
+        return 1
+
+    jira_dispatch.add_label(client, ticket_key, f"camviewpro-pr:{pr.number}")
+    if pr.flagged_medical:
+        jira_dispatch.add_label(client, ticket_key, "regulated-lane")
+    jira_dispatch.transition_to_under_review_if_needed(client, ticket_key)
+    return 0
+
+
 # OP-1681 (F8) — memoized Memory Tool handler for the write-back inject.
 # Built lazily so module import stays side-effect-free (no /var/omnisight
 # mkdir at import time, and tests can pin OMNISIGHT_MEMORY_TOOL_ROOT before
@@ -3077,6 +3173,25 @@ def _main_impl() -> int:
             or os.environ.get("CLAUDE_MODEL"),
         )
     )
+    if _is_camviewpro_contribution(snapshot.labels):
+        rc = _run_camviewpro_contribution(
+            client,
+            snapshot,
+            prompt,
+            AGENT_CLASS,
+            tenant_id,
+        )
+        runner_metrics_recorder.record_completion_sync(
+            metric_id=metric_id,
+            ticket_key=snapshot.key,
+            agent_class=AGENT_CLASS,
+            instance_id=INSTANCE_ID,
+            outcome=runner_metrics_recorder.outcome_from_return_code(rc),
+            started_at=metric_started_at,
+        )
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+        return rc
+
     rc = _invoke_cli(
         AGENT_CLASS, prompt,
         ticket_key=snapshot.key, worktree_path=worktree_path,
