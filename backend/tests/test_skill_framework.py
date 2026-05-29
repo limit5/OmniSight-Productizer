@@ -1192,3 +1192,112 @@ class TestEdgeCases:
         assert m.hooks.install == ""
         assert m.hooks.validate_cmd == ""
         assert m.hooks.enumerate_cmd == ""
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  15. P2.3 (OP-1844) — pack deprecation / supersede
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class TestSkillDeprecation:
+    """Deprecation is advisory-only (WARN, never error): a superseded pack
+    still parses, validates ``ok=True``, and remains fully usable — it is
+    only flagged + pointed at its successor. Both manifest fields default
+    to the non-deprecated state so every existing skill.yaml parses
+    unchanged (back-compat)."""
+
+    def test_model_deprecated_fields_surface(self):
+        m = SkillManifest(
+            name="old-pack",
+            deprecated=True,
+            superseded_by="new-external-source",
+        )
+        assert m.deprecated is True
+        assert m.superseded_by == "new-external-source"
+
+    def test_deprecated_manifest_dict_parses(self, tmp_path: Path):
+        data = {
+            "schema_version": 1,
+            "name": "old-pack",
+            "deprecated": True,
+            "superseded_by": "new-external-source",
+            "artifacts": [{"kind": "tasks", "path": "tasks.yaml"}],
+        }
+        path = tmp_path / "skill.yaml"
+        _write_yaml(path, data)
+        m = load_manifest(path)
+        assert m.deprecated is True
+        assert m.superseded_by == "new-external-source"
+
+    def test_existing_manifest_without_fields_loads_non_deprecated(self, tmp_path: Path):
+        """AC1 back-compat fixture: an existing manifest declaring NEITHER
+        field loads with deprecated=False / superseded_by=None."""
+        data = {
+            "schema_version": 1,
+            "name": "legacy-no-deprecation-fields",
+            "artifacts": [{"kind": "tasks", "path": "tasks.yaml"}],
+        }
+        path = tmp_path / "skill.yaml"
+        _write_yaml(path, data)
+        m = load_manifest(path)
+        assert m.deprecated is False
+        assert m.superseded_by is None
+
+    def test_validate_deprecated_pack_warns_but_ok(self, registry: Path):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "deprecated-pack",
+            deprecated=True,
+            superseded_by="successor-pack",
+        )
+        result = validate_skill("deprecated-pack", registry)
+        # WARNING, not error — an otherwise-valid deprecated pack stays ok.
+        assert result.ok is True
+        assert result.errors == []
+        assert any(
+            "deprecated" in w.message and "successor-pack" in w.message
+            for w in result.warnings
+        ), [w.message for w in result.warnings]
+
+    def test_inspect_deprecated_pack_logs_once(self, registry: Path, caplog):
+        registry.mkdir(parents=True)
+        _make_complete_skill(
+            registry, "deprecated-logged",
+            deprecated=True,
+            superseded_by="successor-pack",
+        )
+        with caplog.at_level("WARNING", logger="backend.skill_registry"):
+            _inspect_skill(registry / "deprecated-logged")
+        dep_logs = [
+            rec for rec in caplog.records
+            if "is deprecated" in rec.message and "successor-pack" in rec.message
+        ]
+        assert len(dep_logs) == 1, [r.message for r in caplog.records]
+
+    def test_non_deprecated_pack_no_warning_back_compat(self, registry: Path, caplog):
+        """Back-compat guard: a normal pack defaults to deprecated=False /
+        superseded_by=None, with NO deprecation warning issue and NO
+        deprecation log line."""
+        registry.mkdir(parents=True)
+        _make_complete_skill(registry, "fresh-pack")
+        with caplog.at_level("WARNING", logger="backend.skill_registry"):
+            result = validate_skill("fresh-pack", registry)
+            info = _inspect_skill(registry / "fresh-pack")
+        assert info.manifest is not None
+        assert info.manifest.deprecated is False
+        assert info.manifest.superseded_by is None
+        assert not any("deprecated" in w.message for w in result.warnings)
+        assert not any("is deprecated" in rec.message for rec in caplog.records)
+
+    def test_real_android_rtsp_onvif_client_is_deprecated(self):
+        """AC4: the real pack manifest now loads with deprecated=True and
+        points at its camviewpro-android successor."""
+        path = (
+            REPO_ROOT / "configs" / "skills"
+            / "android-rtsp-onvif-client" / "skill.yaml"
+        )
+        m = load_manifest(path)
+        assert m.deprecated is True
+        assert m.superseded_by is not None
+        assert "camviewpro" in m.superseded_by
+        assert m.description.startswith("[SUPERSEDED by camviewpro]")

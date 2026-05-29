@@ -111,6 +111,22 @@ class SkillManifest(BaseModel):
         description="Scaffolder platform_profile id to pin for this pack",
     )
 
+    # P2.3 (OP-1844) — pack deprecation / supersede seam. Advisory only:
+    # a deprecated pack still loads and remains fully usable. The registry
+    # surfaces it as a WARNING (validate_skill issue + one log line per
+    # inspect) so a superseded pack is not silently chosen as the canonical
+    # path. Both fields default to the non-deprecated state so every
+    # existing skill.yaml parses unchanged.
+    deprecated: bool = Field(
+        False,
+        description="Pack is superseded; advisory-only (still loads and is usable)",
+    )
+    superseded_by: Optional[str] = Field(
+        None,
+        max_length=256,
+        description="Human pointer to the successor (free-form; e.g. an external ProductSource name)",
+    )
+
     @field_validator("schema_version")
     @classmethod
     def _check_version(cls, v: int) -> int:

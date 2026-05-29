@@ -19,7 +19,7 @@
 schema_version: 1
 name: android-rtsp-onvif-client
 description: >
-  Case-1 Android RTSP/ONVIF CLIENT app pack — an Android application that
+  [SUPERSEDED by camviewpro] Case-1 Android RTSP/ONVIF CLIENT app pack — an Android application that
   consumes IP-camera streams (RTSP playback) and discovers cameras on the
   LAN over ONVIF/WS-Discovery. This is the CLIENT counterpart to the
   device-side `ipcam`/`uvc` packs (which expose a stream as a gadget).
@@ -30,6 +30,13 @@ description: >
 version: "0.1.0"
 author: "OmniSight"
 license: "Apache-2.0"
+
+# P2.3 (OP-1844) — superseded by the external camviewpro-android ProductSource
+# (wired in P2.1/P2.2), now the canonical Android RTSP/ONVIF base. WARN-ONLY:
+# this scaffold-only skeleton still loads and remains a working reference; the
+# flag just stops it being silently chosen as the canonical path.
+deprecated: true
+superseded_by: "camviewpro-android (external ProductSource — canonical Android RTSP/ONVIF base)"
 
 compatible_socs: []
 

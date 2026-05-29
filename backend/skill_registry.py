@@ -216,6 +216,13 @@ def _inspect_skill(skill_dir: Path) -> SkillInfo:
         try:
             manifest = load_manifest(manifest_path)
             artifact_kinds = manifest.artifact_kinds_present()
+            if manifest.deprecated:
+                logger.warning(
+                    "skill pack %r is deprecated; superseded by %s "
+                    "(still loads and is usable — advisory only)",
+                    name,
+                    manifest.superseded_by or "(no successor declared)",
+                )
         except Exception as exc:
             logger.warning("failed to parse manifest for %s: %s", name, exc)
 
@@ -306,6 +313,13 @@ def validate_skill(name: str, skills_dir: Optional[Path] = None) -> ValidationRe
     except Exception as exc:
         issues.append(ValidationIssue("error", f"skill.yaml parse error: {exc}"))
         return ValidationResult(skill_name=name, ok=False, issues=issues)
+
+    if manifest.deprecated:
+        issues.append(ValidationIssue(
+            "warning",
+            f"pack deprecated; superseded by "
+            f"{manifest.superseded_by or '(no successor declared)'}",
+        ))
 
     if manifest.name != name:
         issues.append(ValidationIssue(
