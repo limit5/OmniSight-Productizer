@@ -23,10 +23,18 @@ from backend.agents.scheduler import TicketSnapshot
 LOGGER = logging.getLogger(__name__)
 PR_LABEL_RE = re.compile(r"^camviewpro-pr:(\d+)$")
 REGULATED_LANE_LABEL = "regulated-lane"
+REGULATORY_CLEARED_LABEL = "regulatory-cleared"
 REGULATORY_CLEARED_REQUIRED_LABEL = "regulatory-cleared-required"
 TRIAGE_LABEL = "camviewpro-pr-closed"
 
-PrSyncAction = Literal["none", "to_under_review", "to_done", "flag_closed", "hold_regulated"]
+PrSyncAction = Literal[
+    "none",
+    "to_under_review",
+    "to_done",
+    "flag_closed",
+    "hold_regulated",
+    "to_done_cleared",
+]
 
 
 class ContributionPrTrackerError(RuntimeError):
@@ -241,6 +249,27 @@ def _hold_regulated(
     )
 
 
+def _mark_done_cleared(
+    client: jira_dispatch.DispatchClient,
+    key: str,
+    *,
+    merge_sha: str,
+) -> None:
+    _transition_to_done(client, key)
+    jira_dispatch.add_comment(
+        client,
+        key,
+        f"regulatory clearance recorded; transitioning to Done with merge commit {merge_sha}.",
+        idem_key=_comment_idem(key, "regulatory-cleared"),
+    )
+    jira_dispatch.remove_label(
+        client,
+        key,
+        REGULATORY_CLEARED_REQUIRED_LABEL,
+        idem_key=f"contribution-pr-{key}-regulatory-cleared-required-label-remove",
+    )
+
+
 def _flag_closed(client: jira_dispatch.DispatchClient, key: str, pr_number: int) -> None:
     jira_dispatch.add_comment(
         client,
@@ -282,6 +311,7 @@ async def sync_contribution_pr_state(
     state = str(pr.get("state") or "").lower()
     merged = bool(pr.get("merged"))
     label_names = _pr_label_names(pr)
+    ticket_label_names = {str(label) for label in ticket.labels}
     pr_url = _pr_url(pr, repo_url, pr_number)
     client = _jira_client()
 
@@ -292,6 +322,26 @@ async def sync_contribution_pr_state(
     if merged:
         merge_sha = str(pr.get("merge_commit_sha") or "").strip()
         if REGULATED_LANE_LABEL in label_names:
+            if REGULATORY_CLEARED_LABEL in ticket_label_names:
+                _mark_done_cleared(
+                    client,
+                    ticket.key,
+                    merge_sha=merge_sha or "<unknown>",
+                )
+                _record_regulated_lane_event(
+                    ticket_key=ticket.key,
+                    pr_number=pr_number,
+                    pr_url=pr_url,
+                    action="to_done_cleared",
+                    merge_sha=merge_sha or None,
+                    pr_state="merged",
+                )
+                return PrSyncOutcome(
+                    ticket.key,
+                    pr_number,
+                    "merged",
+                    "to_done_cleared",
+                )
             _hold_regulated(client, ticket.key, merge_sha=merge_sha or "<unknown>")
             _record_regulated_lane_event(
                 ticket_key=ticket.key,

@@ -79,6 +79,7 @@ def _install_jira(monkeypatch) -> dict:
         "under_review": [],
         "comments": [],
         "labels": [],
+        "remove_labels": [],
         "requests": [],
     }
     client = object()
@@ -94,6 +95,10 @@ def _install_jira(monkeypatch) -> dict:
 
     def _label(got_client, key, label, idem_key=None):
         calls["labels"].append((got_client, key, label, idem_key))
+        assert got_client is client
+
+    def _remove_label(got_client, key, label, idem_key=None):
+        calls["remove_labels"].append((got_client, key, label, idem_key))
         assert got_client is client
 
     def _request(got_client, method, path, body=None, idem_key=None):
@@ -115,6 +120,7 @@ def _install_jira(monkeypatch) -> dict:
     )
     monkeypatch.setattr(tracker.jira_dispatch, "add_comment", _comment)
     monkeypatch.setattr(tracker.jira_dispatch, "add_label", _label)
+    monkeypatch.setattr(tracker.jira_dispatch, "remove_label", _remove_label)
     monkeypatch.setattr(tracker.jira_dispatch, "_request", _request)
     monkeypatch.setattr(
         tracker.jira_dispatch,
@@ -174,12 +180,13 @@ def test_open_regulated_lane_pr_moves_ticket_to_under_review(monkeypatch):
     )
     jira = _install_jira(monkeypatch)
 
-    outcome = _sync(_ticket("camviewpro-pr:42"))
+    outcome = _sync(_ticket("camviewpro-pr:42", tracker.REGULATORY_CLEARED_LABEL))
 
     assert outcome == tracker.PrSyncOutcome(
         "OP-1847", 42, "open", "to_under_review"
     )
     assert jira["under_review"][0][1] == "OP-1847"
+    assert jira["remove_labels"] == []
     assert http["calls"][0][1] == (
         "https://api.github.com/repos/limit5/camviewpro-android/pulls/42"
     )
@@ -220,6 +227,55 @@ def test_merged_regulated_lane_pr_holds_for_regulatory_clearance(monkeypatch):
     ]
 
 
+def test_merged_regulated_lane_pr_with_clearance_moves_ticket_to_done(monkeypatch):
+    _install_credential(monkeypatch)
+    _install_github(
+        monkeypatch,
+        {
+            "state": "closed",
+            "merged": True,
+            "merge_commit_sha": "abc123def456",
+            "html_url": "https://github.com/limit5/camviewpro-android/pull/42",
+            "labels": [{"name": tracker.REGULATED_LANE_LABEL}],
+        },
+    )
+    jira = _install_jira(monkeypatch)
+    audit = _install_audit(monkeypatch)
+
+    outcome = _sync(
+        _ticket(
+            "camviewpro-pr:42",
+            tracker.REGULATORY_CLEARED_LABEL,
+            tracker.REGULATORY_CLEARED_REQUIRED_LABEL,
+        )
+    )
+
+    assert outcome == tracker.PrSyncOutcome(
+        "OP-1847", 42, "merged", "to_done_cleared"
+    )
+    assert _done_transition_fired(jira)
+    assert jira["comments"] == [
+        (
+            jira["comments"][0][0],
+            "OP-1847",
+            "regulatory clearance recorded; transitioning to Done with merge commit abc123def456.",
+            jira["comments"][0][3],
+        )
+    ]
+    assert jira["labels"] == []
+    assert jira["remove_labels"][0][2] == tracker.REGULATORY_CLEARED_REQUIRED_LABEL
+    assert audit == [
+        {
+            "ticket_key": "OP-1847",
+            "pr_number": 42,
+            "pr_url": "https://github.com/limit5/camviewpro-android/pull/42",
+            "action": "to_done_cleared",
+            "merge_sha": "abc123def456",
+            "pr_state": "merged",
+        }
+    ]
+
+
 def test_merged_pr_without_regulated_lane_moves_ticket_to_done(monkeypatch):
     _install_credential(monkeypatch)
     _install_github(
@@ -242,6 +298,31 @@ def test_merged_pr_without_regulated_lane_moves_ticket_to_done(monkeypatch):
     assert audit == []
 
 
+def test_merged_non_regulated_pr_ignores_regulatory_clearance_label(monkeypatch):
+    _install_credential(monkeypatch)
+    _install_github(
+        monkeypatch,
+        {
+            "state": "closed",
+            "merged": True,
+            "merge_commit_sha": "abc123def456",
+            "labels": [],
+        },
+    )
+    jira = _install_jira(monkeypatch)
+    audit = _install_audit(monkeypatch)
+
+    outcome = _sync(
+        _ticket("camviewpro-pr:42", tracker.REGULATORY_CLEARED_LABEL)
+    )
+
+    assert outcome == tracker.PrSyncOutcome("OP-1847", 42, "merged", "to_done")
+    assert _done_transition_fired(jira)
+    assert "abc123def456" in jira["comments"][0][2]
+    assert jira["remove_labels"] == []
+    assert audit == []
+
+
 def test_closed_unmerged_regulated_lane_flags_for_human_triage_without_done(monkeypatch):
     _install_credential(monkeypatch)
     _install_github(
@@ -256,11 +337,12 @@ def test_closed_unmerged_regulated_lane_flags_for_human_triage_without_done(monk
     jira = _install_jira(monkeypatch)
     audit = _install_audit(monkeypatch)
 
-    outcome = _sync(_ticket("camviewpro-pr:42"))
+    outcome = _sync(_ticket("camviewpro-pr:42", tracker.REGULATORY_CLEARED_LABEL))
 
     assert outcome == tracker.PrSyncOutcome("OP-1847", 42, "closed", "flag_closed")
     assert "closed without merge" in jira["comments"][0][2]
     assert jira["labels"][0][2] == "camviewpro-pr-closed"
+    assert jira["remove_labels"] == []
     assert not _done_transition_fired(jira)
     assert audit == [
         {
