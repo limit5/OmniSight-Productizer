@@ -560,3 +560,81 @@ def test_main_with_camviewpro_label_routes_to_contribution_and_skips_invoke(
     assert isinstance(args[0], _StubClient)
     assert args[1:] == (snapshot, "prompt", "subscription-codex", "tenant-a")
     assert len(calls["release"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# OP-1850 — _invoke_cli must honour the worktree_path override so the CLI's
+# --cd (codex) / cwd (claude) point at the JAIL-BOUND worktree, not the default
+# OmniSight one. Regression for the canary blocker: P2.4.3b dispatch passes a
+# camviewpro clone as worktree_path; pre-fix the codex --cd was hardcoded to
+# CODEX_WORKTREE → "No such file or directory" in the jail.
+# ---------------------------------------------------------------------------
+
+def _stub_invoke_sandbox(monkeypatch, mod) -> None:
+    monkeypatch.setattr(mod.runner_sandbox, "build_allowlisted_env", lambda: {})
+    monkeypatch.setattr(mod.runner_sandbox, "sandbox_available", lambda: False)
+    monkeypatch.setattr(mod.runner_sandbox, "cli_home_for", lambda key: Path("/tmp/cli-home"))
+    monkeypatch.setattr(mod.runner_sandbox, "cleanup_cli_home", lambda key: None)
+    monkeypatch.setattr(mod.sandbox_prewarm, "dep_cache_mounts", lambda *a, **kw: None)
+    monkeypatch.setattr(mod.db_context, "current_tenant_id", lambda: None)
+
+
+def test_invoke_cli_codex_cd_uses_worktree_path_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mod = _load_jira_runner()
+    omni = tmp_path / "omnisight-wt"; omni.mkdir()
+    override = tmp_path / "camviewpro-clone"; override.mkdir()
+    monkeypatch.setattr(mod, "CODEX_WORKTREE", str(omni))
+    monkeypatch.setattr(mod, "DRY_RUN", True)  # skip the real Popen; capture the cmd
+    _stub_invoke_sandbox(monkeypatch, mod)
+    captured: dict[str, Any] = {}
+
+    def _fake_wrap(cmd, **kw):
+        captured["cmd"] = list(cmd)
+        captured["worktree_path"] = kw.get("worktree_path")
+        return list(cmd)
+
+    monkeypatch.setattr(mod.runner_sandbox, "wrap_in_bubblewrap", _fake_wrap)
+
+    rc = mod._invoke_cli(
+        "subscription-codex", prompt="x", ticket_key="OP-T", worktree_path=override
+    )
+
+    assert rc == 0
+    assert captured["cmd"][:2] == ["codex", "exec"]
+    cd_at = captured["cmd"].index("--cd")
+    # the regression: pre-OP-1850 this was str(omni); MUST now be the override.
+    assert captured["cmd"][cd_at + 1] == str(override)
+    assert captured["worktree_path"] == override
+
+
+def test_invoke_cli_claude_cwd_uses_worktree_path_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    mod = _load_jira_runner()
+    omni = tmp_path / "omnisight-wt"; omni.mkdir()
+    override = tmp_path / "camviewpro-clone"; override.mkdir()
+    monkeypatch.setattr(mod, "CLAUDE_WORKTREE", str(omni))
+    monkeypatch.setattr(mod, "DRY_RUN", False)  # need Popen to capture cwd
+    _stub_invoke_sandbox(monkeypatch, mod)
+    monkeypatch.setattr(mod.runner_sandbox, "wrap_in_bubblewrap", lambda cmd, **kw: list(cmd))
+    captured: dict[str, Any] = {}
+
+    class _FakeProc:
+        def __init__(self, *a, **kw):
+            captured["cwd"] = kw.get("cwd")
+            self.returncode = 0
+
+        def communicate(self, input=None, timeout=None):  # noqa: A002 - shim
+            return ("", "")
+
+    monkeypatch.setattr(mod.subprocess, "Popen", _FakeProc)
+
+    rc = mod._invoke_cli(
+        "subscription-claude", prompt="x", ticket_key="OP-T", worktree_path=override
+    )
+
+    assert rc == 0
+    # the regression: pre-OP-1850 this was str(omni); MUST now be the override.
+    assert captured["cwd"] == str(override)

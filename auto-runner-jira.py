@@ -1438,19 +1438,27 @@ def _invoke_cli(
         if not os.path.isdir(CODEX_WORKTREE):
             print(f"[runner] codex worktree missing: {CODEX_WORKTREE}", file=sys.stderr)
             return 2
-        cmd = ["codex", "exec", "--cd", CODEX_WORKTREE, "--yolo"]
         sandbox_worktree = Path(CODEX_WORKTREE)
+        # OP-1850: honour the worktree_path override (B2 contribution dispatch
+        # passes a camviewpro clone) so codex --cd points at the jail-bound
+        # worktree, not the default OmniSight one (which isn't mounted here).
+        effective_worktree = worktree_path or sandbox_worktree
+        cmd = ["codex", "exec", "--cd", str(effective_worktree), "--yolo"]
     elif agent_class == "subscription-claude":
         if not os.path.isdir(CLAUDE_WORKTREE):
             print(f"[runner] claude worktree missing: {CLAUDE_WORKTREE}", file=sys.stderr)
             return 2
+        sandbox_worktree = Path(CLAUDE_WORKTREE)
+        # OP-1850: honour the worktree_path override (B2 contribution dispatch
+        # passes a camviewpro clone) so claude commits land in the jail-bound
+        # worktree, not the default OmniSight one (which isn't mounted here).
+        effective_worktree = worktree_path or sandbox_worktree
         cmd = ["claude", "--dangerously-skip-permissions", "-p", full_prompt]
         # OP-795 Bug 3: claude CLI doesn't take a --cd flag, so pin its cwd to
         # the worktree via subprocess.Popen — otherwise it inherits the
         # runner's cwd (main repo) and commits land outside the worktree,
         # causing "no new changes" rejections at push time.
-        cwd = CLAUDE_WORKTREE
-        sandbox_worktree = Path(CLAUDE_WORKTREE)
+        cwd = str(effective_worktree)
     elif agent_class.startswith("api-"):
         print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")
         return 99
@@ -1466,8 +1474,8 @@ def _invoke_cli(
 
     # OP-845: wrap the CLI argv in the platform sandbox jail. Caller can
     # pass an explicit worktree_path override; otherwise we use the
-    # per-class default chosen above.
-    effective_worktree = worktree_path or sandbox_worktree
+    # per-class default chosen above (OP-1850: now computed inside each branch
+    # so it also drives the CLI's --cd / cwd, not just the jail mount).
 
     # OP-1781 (1A.4): RO-mount the pre-warmed per-tenant dependency cache so
     # the build resolves deps offline while the jail keeps --unshare-net.
