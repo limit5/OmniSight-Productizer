@@ -1778,6 +1778,14 @@ def _camviewpro_label_value(labels, prefix: str) -> str | None:
     return None
 
 
+def _camviewpro_project_key(labels, ticket_key: str) -> str:
+    return (
+        _camviewpro_label_value(labels, "customer:")
+        or _camviewpro_label_value(labels, "camviewpro-project:")
+        or ticket_key.split("-", 1)[0]
+    )
+
+
 def _ticket_summary(client: "jira_dispatch.DispatchClient", snapshot) -> str:
     summary = str(getattr(snapshot, "summary", "") or "").strip()
     if summary:
@@ -1800,10 +1808,7 @@ def _run_camviewpro_contribution(
     """Route a target:camviewpro ticket through the contribution orchestrator."""
     labels = tuple(getattr(snapshot, "labels", ()) or ())
     ticket_key = snapshot.key
-    project_key = (
-        _camviewpro_label_value(labels, "camviewpro-project:")
-        or ticket_key.split("-", 1)[0]
-    )
+    project_key = _camviewpro_project_key(labels, ticket_key)
     base = _camviewpro_label_value(labels, "camviewpro-base:") or "main"
     slug = _ticket_summary(client, snapshot)
 

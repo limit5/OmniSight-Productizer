@@ -240,6 +240,65 @@ def test_is_camviewpro_contribution_requires_exact_target_label() -> None:
     assert not mod._is_camviewpro_contribution(())
 
 
+@pytest.mark.parametrize(
+    ("labels", "expected_project_key"),
+    [
+        (("target:camviewpro", "camviewpro-project:CAMVIEWPRO"), "CAMVIEWPRO"),
+        (("target:camviewpro", "customer:case-1"), "case-1"),
+        (
+            ("target:camviewpro", "customer:case-1", "camviewpro-project:CAMVIEWPRO"),
+            "case-1",
+        ),
+        (("target:camviewpro",), "OP"),
+    ],
+)
+def test_run_camviewpro_contribution_derives_project_key_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    labels: tuple[str, ...],
+    expected_project_key: str,
+) -> None:
+    mod = _load_jira_runner()
+    snapshot = _snapshot(labels)
+    calls: dict[str, list] = {"contribute": [], "labels": []}
+
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "_request",
+        lambda c, method, path: {"fields": {"summary": "Route customer source"}},
+    )
+
+    async def fake_contribute_to_product(project_key, **kwargs):
+        calls["contribute"].append((project_key, kwargs))
+        return SimpleNamespace(
+            no_changes=False,
+            pr=SimpleNamespace(number=42, flagged_medical=False),
+        )
+
+    monkeypatch.setattr(mod, "contribute_to_product", fake_contribute_to_product)
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_label",
+        lambda c, k, label, idem_key=None: calls["labels"].append((k, label)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "transition_to_under_review_if_needed",
+        lambda c, k, **kw: True,
+    )
+
+    rc = mod._run_camviewpro_contribution(
+        _StubClient(), snapshot, "prompt", "subscription-codex", "tenant-a"
+    )
+
+    assert rc == 0
+    project_key, kwargs = calls["contribute"][0]
+    assert project_key == expected_project_key
+    assert kwargs["ticket_key"] == "OP-1848"
+    assert kwargs["base"] == "main"
+    assert kwargs["tenant_id"] == "tenant-a"
+    assert calls["labels"] == [("OP-1848", "camviewpro-pr:42")]
+
+
 def test_run_camviewpro_contribution_derives_inputs_and_sets_pr_labels(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
