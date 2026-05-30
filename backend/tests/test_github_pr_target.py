@@ -47,8 +47,17 @@ def _fake_pick_by_id(monkeypatch, row):
 
 
 class GitRecorder:
-    def __init__(self, changed_files: list[str] | None = None):
+    def __init__(
+        self,
+        changed_files: list[str] | None = None,
+        *,
+        worktree_origin_url: str = REPO_URL,
+    ):
         self.changed_files = changed_files or ["app/src/MainActivity.kt"]
+        # OP-1862: open_contribution_pr now reads the worktree's origin remote
+        # to decide where to push (instead of inferring from the cred row's
+        # instance_url). Default = REPO_URL so existing tests stay byte-identical.
+        self.worktree_origin_url = worktree_origin_url
         self.calls: list[list[str]] = []
         self.remote_url = ""
 
@@ -58,6 +67,12 @@ class GitRecorder:
             return SimpleNamespace(
                 returncode=0,
                 stdout="\n".join(self.changed_files) + "\n",
+                stderr="",
+            )
+        if argv[:4] == ["git", "remote", "get-url", "origin"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=self.worktree_origin_url + "\n",
                 stderr="",
             )
         if argv[:3] == ["git", "remote", "set-url"]:
@@ -140,9 +155,10 @@ def _install_fakes(
     account: dict | None = None,
     changed_files: list[str] | None = None,
     existing: list[dict] | None = None,
+    worktree_origin_url: str = REPO_URL,
 ):
     _fake_pick_by_id(monkeypatch, account if account is not None else _account())
-    git = GitRecorder(changed_files)
+    git = GitRecorder(changed_files, worktree_origin_url=worktree_origin_url)
     monkeypatch.setattr(gpt.subprocess, "run", git)
     http = _fake_http(monkeypatch, existing=existing)
     return git, http
@@ -335,4 +351,53 @@ def test_missing_token_raises(monkeypatch, tmp_path):
     _install_fakes(monkeypatch, account=_account(token=""))
 
     with pytest.raises(gpt.GithubPrError):
+        _open(tmp_path)
+
+
+# OP-1862 — REGRESSION: when the worktree's origin URL DIFFERS from the cred
+# row's `instance_url` (a broad-scoped PAT reused across multiple product
+# repos), the push + the PR API MUST target the WORKTREE's URL, NOT the cred
+# row's URL. Pre-OP-1862 the cred row's `instance_url` was silently authoritative
+# and every cross-product B2 contribution mis-routed to the cred's first repo
+# (OP-1861 surfaced this: UVCCamera_Qt commit pushed to camviewpro-android).
+
+def test_worktree_origin_wins_over_cred_row_url_for_routing(monkeypatch, tmp_path):
+    other_repo_url = "https://github.com/limit5/UVCCamera_Qt.git"
+    # cred row registered against camviewpro-android (the pre-OP-1862 routing winner)
+    cred = _account()  # repo_url = REPO_URL = camviewpro-android
+    # but the worktree's origin is UVCCamera_Qt (the source product the caller
+    # actually cloned and committed against)
+    git, http = _install_fakes(
+        monkeypatch, account=cred, worktree_origin_url=other_repo_url,
+    )
+
+    _open(tmp_path)
+
+    # PUSH target: the token-bearing set-url calls + the post-push scrub MUST
+    # point at UVCCamera_Qt, NOT camviewpro-android.
+    set_urls = git.set_url_calls
+    for call in set_urls:
+        u = call[-1]
+        assert "UVCCamera_Qt" in u, (
+            f"set-url should target the worktree origin (UVCCamera_Qt); "
+            f"got {u!r} (pre-OP-1862 bug would put camviewpro-android here)"
+        )
+        assert "camviewpro-android" not in u
+
+    # GitHub API POST URL must target the worktree owner/repo too.
+    post_calls = [c for c in http["calls"] if c[0] == "POST"]
+    assert post_calls, "open_contribution_pr should POST a PR"
+    post_url = post_calls[0][1]
+    assert "/limit5/UVCCamera_Qt/" in post_url, (
+        f"PR POST should route to UVCCamera_Qt; got {post_url!r}"
+    )
+    assert "camviewpro-android" not in post_url
+
+
+def test_worktree_with_no_origin_raises_clearly(monkeypatch, tmp_path):
+    # Edge: if the caller forgot to set origin (or it was unset somehow),
+    # open_contribution_pr should fail loudly instead of silently mis-routing.
+    _install_fakes(monkeypatch, worktree_origin_url="")
+
+    with pytest.raises(gpt.GithubPrError, match=r"origin"):
         _open(tmp_path)

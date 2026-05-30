@@ -70,7 +70,17 @@ def open_contribution_pr(
             "PR write-back"
         )
 
-    repo_url = _repo_url_from_row(row)
+    # OP-1862: the routing repo is the WORKTREE's actual origin (which
+    # `contribute_to_product` set to `source.repo_url` before calling us), NOT
+    # the cred row's `instance_url`. The cred row's URL is whatever the
+    # operator registered the token against; a broad-scoped PAT (the
+    # `camviewpro-ro` case) gets reused for multiple repos, and the pre-OP-1862
+    # `_repo_url_from_row` inference silently mis-routed every B2 contribution
+    # to whatever single repo the cred was first registered with. OP-1861
+    # surfaced this: a UVCCamera_Qt contribution pushed to camviewpro-android,
+    # and GitHub returned 422 "no history in common with main" because the
+    # branch was authored off UVCCamera_Qt's main but pushed to the wrong repo.
+    repo_url = _read_worktree_origin(worktree)
     repo = _parse_repo_url(repo_url)
     clean_url = repo.clean_url
     token_url = repo.token_url(token)
@@ -270,6 +280,38 @@ def _regulated_lane_pr_body(changed_files: list[str], body: str) -> str:
 
 def _set_origin_url(worktree: Path, url: str) -> None:
     _run_git(worktree, ["git", "remote", "set-url", "origin", url])
+
+
+def _read_worktree_origin(worktree: Path) -> str:
+    """Return the worktree's current ``origin`` remote URL (OP-1862).
+
+    The caller (``contribute_to_product``) sets origin to the source product's
+    repo URL before invoking ``open_contribution_pr``; trusting that URL is
+    how we route to the CORRECT repo when a cred (e.g. a broad-scoped PAT)
+    is reused across multiple product sources. The pre-OP-1862 code inferred
+    the repo URL from the cred row's ``instance_url`` and silently mis-routed
+    cross-product contributions.
+    """
+    proc = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise GithubPrError(
+            f"could not read worktree origin (cwd={worktree}): "
+            f"{(proc.stderr or proc.stdout).strip()}"
+        )
+    url = (proc.stdout or "").strip()
+    if not url:
+        raise GithubPrError(
+            f"worktree (cwd={worktree}) has no origin remote URL set; "
+            "the caller must set origin to source.repo_url before "
+            "invoking open_contribution_pr"
+        )
+    return url
 
 
 def _push_branch(worktree: Path, branch: str) -> None:
