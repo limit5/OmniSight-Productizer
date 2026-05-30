@@ -1859,6 +1859,49 @@ def _run_camviewpro_contribution(
     return 0
 
 
+def _handle_camviewpro_dispatch_outcome(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    claim: "jira_dispatch.ClaimResult | None",
+    *,
+    rc: int | None = None,
+    exc: BaseException | None = None,
+) -> None:
+    """OP-1858: clean up after the camviewpro dispatch.
+
+    The pre-OP-1858 code path released the claim ONLY on success (rc==0). If
+    ``_run_camviewpro_contribution`` raised (RuntimeError from a non-zero
+    implement CLI, ContributionError, GithubPrError) OR returned a non-zero rc
+    (the no_changes / no_pr internal branches), the post-success
+    ``_release_ticket_claim_if_acquired`` was skipped and the OmniSight ticket
+    stayed assigned to this runner with our ``claim:*`` label. PICKUP_JQL
+    requires ``assignee is EMPTY``, so re-pickup then silently failed — this
+    is the same gap the OP-1849 canary #2 hit (40 min of mystery before the
+    operator manual-unassigned). Mirror ``_revert_cli_failure_to_todo`` for
+    the failure cases (release claim, transition to To Do with a revert
+    reason, clear assignee); keep release-only for the rc==0 happy path.
+    """
+    if exc is not None:
+        # Best-effort comment; cleanup is what actually matters.
+        try:
+            jira_dispatch.add_comment(
+                client,
+                key,
+                f"[runner-camviewpro-failure] {type(exc).__name__}: {exc}. "
+                "Reverting and clearing assignee for re-pickup.",
+            )
+        except Exception:  # noqa: BLE001 — comment is non-essential
+            pass
+        _revert_cli_failure_to_todo(client, key, 1, claim)
+        return
+    if rc is not None and rc != 0:
+        # no_changes / no_pr returned non-zero — also unstick the ticket so
+        # the operator can re-pick without manually unassigning.
+        _revert_cli_failure_to_todo(client, key, rc, claim)
+        return
+    _release_ticket_claim_if_acquired(client, key, claim)
+
+
 # OP-1681 (F8) — memoized Memory Tool handler for the write-back inject.
 # Built lazily so module import stays side-effect-free (no /var/omnisight
 # mkdir at import time, and tests can pin OMNISIGHT_MEMORY_TOOL_ROOT before
@@ -3184,13 +3227,31 @@ def _main_impl() -> int:
         )
     )
     if _is_camviewpro_contribution(snapshot.labels):
-        rc = _run_camviewpro_contribution(
-            client,
-            snapshot,
-            prompt,
-            AGENT_CLASS,
-            tenant_id,
-        )
+        try:
+            rc = _run_camviewpro_contribution(
+                client,
+                snapshot,
+                prompt,
+                AGENT_CLASS,
+                tenant_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — any failure must clean up
+            # OP-1858: without this, contribute_to_product raises propagate
+            # silently and leave the ticket assigned with our claim:* — the
+            # OP-1849 canary #2 stale-assignee failure mode.
+            print(
+                f"[runner-camviewpro-failure] {snapshot.key}: "
+                f"{type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )
+            _handle_camviewpro_dispatch_outcome(
+                client, snapshot.key, claim, exc=exc,
+            )
+            rc = 1
+        else:
+            _handle_camviewpro_dispatch_outcome(
+                client, snapshot.key, claim, rc=rc,
+            )
         runner_metrics_recorder.record_completion_sync(
             metric_id=metric_id,
             ticket_key=snapshot.key,
@@ -3199,7 +3260,6 @@ def _main_impl() -> int:
             outcome=runner_metrics_recorder.outcome_from_return_code(rc),
             started_at=metric_started_at,
         )
-        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         return rc
 
     rc = _invoke_cli(

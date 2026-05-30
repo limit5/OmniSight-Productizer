@@ -748,3 +748,108 @@ def test_invoke_cli_claude_cwd_uses_worktree_path_override(
     assert rc == 0
     # the regression: pre-OP-1850 this was str(omni); MUST now be the override.
     assert captured["cwd"] == str(override)
+
+
+# ---------------------------------------------------------------------------
+# OP-1858 — _handle_camviewpro_dispatch_outcome must clean up the ticket on
+# failure (release claim + revert to To Do + clear assignee) so re-pickup is
+# not silently blocked by stale assignee / claim:*. Regression-guards the
+# OP-1849 canary #2 finding.
+# ---------------------------------------------------------------------------
+
+def _make_claim() -> Any:
+    return SimpleNamespace(ok=True, claim_token="codex-1:tok-1858", lost_to=None)
+
+
+def test_handle_camviewpro_dispatch_outcome_success_releases_claim_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"revert": [], "release": []}
+    monkeypatch.setattr(
+        mod, "_revert_cli_failure_to_todo",
+        lambda c, k, rc, claim: calls["revert"].append((k, rc, claim)),
+    )
+    monkeypatch.setattr(
+        mod, "_release_ticket_claim_if_acquired",
+        lambda c, k, claim: calls["release"].append((k, claim)),
+    )
+
+    claim = _make_claim()
+    mod._handle_camviewpro_dispatch_outcome(
+        _StubClient(), "OP-X", claim, rc=0,
+    )
+
+    assert calls["release"] == [("OP-X", claim)]
+    assert calls["revert"] == []  # success → NO revert, only release
+
+
+def test_handle_camviewpro_dispatch_outcome_nonzero_rc_calls_full_revert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"revert": [], "release": []}
+    monkeypatch.setattr(
+        mod, "_revert_cli_failure_to_todo",
+        lambda c, k, rc, claim: calls["revert"].append((k, rc)),
+    )
+    monkeypatch.setattr(
+        mod, "_release_ticket_claim_if_acquired",
+        lambda c, k, claim: calls["release"].append(k),
+    )
+
+    mod._handle_camviewpro_dispatch_outcome(
+        _StubClient(), "OP-X", _make_claim(), rc=1,
+    )
+
+    assert calls["revert"] == [("OP-X", 1)]
+    assert calls["release"] == []  # full revert subsumes release
+
+
+def test_handle_camviewpro_dispatch_outcome_exception_comments_and_reverts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"revert": [], "comments": []}
+    monkeypatch.setattr(
+        mod, "_revert_cli_failure_to_todo",
+        lambda c, k, rc, claim: calls["revert"].append((k, rc)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch, "add_comment",
+        lambda c, k, body: calls["comments"].append((k, body)),
+    )
+
+    mod._handle_camviewpro_dispatch_outcome(
+        _StubClient(), "OP-X", _make_claim(),
+        exc=RuntimeError("camviewpro implement CLI failed rc=1"),
+    )
+
+    assert calls["revert"] == [("OP-X", 1)]
+    assert len(calls["comments"]) == 1
+    assert "RuntimeError" in calls["comments"][0][1]
+    assert "camviewpro implement CLI failed" in calls["comments"][0][1]
+
+
+def test_handle_camviewpro_dispatch_outcome_comment_failure_does_not_block_revert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # add_comment failing must NOT prevent the cleanup — the comment is
+    # advisory, the revert is the safety-critical action.
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"revert": []}
+    monkeypatch.setattr(
+        mod, "_revert_cli_failure_to_todo",
+        lambda c, k, rc, claim: calls["revert"].append((k, rc)),
+    )
+
+    def _boom(*a, **kw):
+        raise ConnectionError("JIRA down")
+
+    monkeypatch.setattr(mod.jira_dispatch, "add_comment", _boom)
+
+    mod._handle_camviewpro_dispatch_outcome(
+        _StubClient(), "OP-X", _make_claim(), exc=ValueError("bad config"),
+    )
+
+    assert calls["revert"] == [("OP-X", 1)]  # revert still ran
