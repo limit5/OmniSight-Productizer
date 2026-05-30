@@ -56,6 +56,8 @@ anthropic==0.100.0
 # in scratch worktrees before merger-agent-bot pushes a patchset.
 pytest==8.3.5
 pytest-timeout==2.3.1
+# OP-1858: backend/tests/test_jira_dispatch.py uses property-based cases.
+hypothesis==6.155.1
 
 # --- Reports (Jinja + PDF; weasyprint is non-Windows only) -------------
 jinja2==3.1.6

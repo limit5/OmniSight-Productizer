@@ -1275,6 +1275,95 @@ def _fake_dispatch_client() -> jd.DispatchClient:
     )
 
 
+class _RevertCleanupFakeJira:
+    def __init__(self, *, labels=(), assignee: str | None = None) -> None:
+        self.labels = set(labels)
+        self.assignee = assignee
+        self.calls: list[tuple[str, str, dict | None]] = []
+
+    def request(self, client, method, path, body=None, idem_key=None):
+        self.calls.append((method, path, body))
+        if method == "GET" and path.startswith("/issue/"):
+            return {
+                "fields": {
+                    "labels": sorted(self.labels),
+                    "assignee": (
+                        {"accountId": self.assignee} if self.assignee else None
+                    ),
+                }
+            }
+        if method == "PUT" and path.startswith("/issue/"):
+            fields = (body or {}).get("fields") or {}
+            if "assignee" in fields:
+                assignee = fields["assignee"]
+                self.assignee = (assignee or {}).get("accountId") if assignee else None
+            for op in ((body or {}).get("update") or {}).get("labels", []):
+                if "remove" in op:
+                    self.labels.discard(op["remove"])
+            return {}
+        if method == "POST" and path.endswith("/comment"):
+            return {}
+        if method == "POST" and path.endswith("/transitions"):
+            return {}
+        raise AssertionError(f"unexpected request {method} {path}")
+
+
+def test_transition_back_to_todo_strips_claim_labels_and_assignee_before_transition(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-1858: revert cleanup drops every claim:* label and assignee first."""
+    fake = _RevertCleanupFakeJira(
+        labels=("area:backend", "claim:codex-2:abc", "claim:codex-7:old"),
+        assignee="codex-bot",
+    )
+    from backend.agents import runner_stoploss
+
+    monkeypatch.setattr(jd, "_request", fake.request)
+    monkeypatch.setattr(runner_stoploss, "register_revert", lambda *a, **kw: None)
+
+    jd.transition_back_to_todo(_fake_dispatch_client(), "OP-1858", "test revert")
+
+    transition_idx = next(
+        idx for idx, call in enumerate(fake.calls)
+        if call[0] == "POST" and call[1].endswith("/transitions")
+    )
+    cleanup_idx, cleanup_body = next(
+        (idx, call[2]) for idx, call in enumerate(fake.calls)
+        if call[0] == "PUT" and call[1] == "/issue/OP-1858"
+    )
+    assert cleanup_idx < transition_idx
+    assert cleanup_body == {
+        "fields": {"assignee": None},
+        "update": {
+            "labels": [
+                {"remove": "claim:codex-2:abc"},
+                {"remove": "claim:codex-7:old"},
+            ]
+        },
+    }
+    assert fake.assignee is None
+    assert fake.labels == {"area:backend"}
+
+
+def test_transition_back_to_todo_clean_ticket_does_not_send_cleanup_put(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-1858: already-clean revert path is a no-op for ownership fields."""
+    fake = _RevertCleanupFakeJira(labels=("area:backend",), assignee=None)
+    from backend.agents import runner_stoploss
+
+    monkeypatch.setattr(jd, "_request", fake.request)
+    monkeypatch.setattr(runner_stoploss, "register_revert", lambda *a, **kw: None)
+
+    jd.transition_back_to_todo(_fake_dispatch_client(), "OP-1858", "clean revert")
+
+    put_calls = [
+        call for call in fake.calls
+        if call[0] == "PUT" and call[1] == "/issue/OP-1858"
+    ]
+    assert put_calls == []
+
+
 def _snapshot(
     key: str = "OP-555",
     mutex: tuple = ("mutex:backend/foo.py",),

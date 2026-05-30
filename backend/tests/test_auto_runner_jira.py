@@ -232,6 +232,57 @@ def test_finalize_continues_to_transition_when_status_read_fails(
     assert "could not read OP-691 status" in err
 
 
+def test_finalize_successful_push_does_not_run_revert_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OP-1858: claim/assignee strip stays bound to revert paths only."""
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"finalize": [], "release": []}
+
+    monkeypatch.setattr(
+        mod,
+        "_finalize_under_review",
+        lambda *args, **kwargs: calls["finalize"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "release_ticket_claim",
+        lambda *args, **kwargs: calls["release"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "transition_back_to_todo",
+        lambda *a, **kw: pytest.fail("successful push must not revert"),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "cleanup_reverted_ticket_claims_and_assignee",
+        lambda *a, **kw: pytest.fail("successful push must not run revert cleanup"),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "clear_assignee",
+        lambda *a, **kw: pytest.fail("successful push must not clear assignee"),
+    )
+
+    claim = SimpleNamespace(
+        ok=True,
+        claim_token="default:tok",
+        coordination_lease_id=None,
+        coordination_fencing_token=None,
+    )
+    push_result = SimpleNamespace(
+        change_url="https://gerrit.example/+/1858",
+        change_number=1858,
+        post_push_warning=None,
+    )
+
+    mod._finalize_successful_push(_StubClient(), "OP-1858", push_result, claim)
+
+    assert len(calls["finalize"]) == 1
+    assert len(calls["release"]) == 1
+
+
 def test_is_camviewpro_contribution_requires_exact_target_label() -> None:
     mod = _load_jira_runner()
 

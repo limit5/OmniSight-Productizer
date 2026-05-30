@@ -2300,7 +2300,7 @@ def transition_back_to_todo(
     mutex_label: str | None = None,
     area: str | None = None,
 ) -> None:
-    """In Progress → TODO with reason comment + clear assignee.
+    """In Progress → TODO with reason comment + cleanup ownership markers.
 
     OP-1541 invariant: this is a destructive recovery — it clears the
     assignee. Under a shared JIRA account ONLY the current winning
@@ -2346,7 +2346,9 @@ def transition_back_to_todo(
         client, key, f"Reverting to TODO. Reason:\n{reason}",
         idem_key=f"{base_key}-comment",
     )
-    clear_assignee(client, key, idem_key=f"{base_key}-clear-assignee")
+    cleanup_reverted_ticket_claims_and_assignee(
+        client, key, idem_key=f"{base_key}-cleanup-claim-assignee",
+    )
     _request_idempotent(
         client, "POST", f"/issue/{key}/transitions",
         {"transition": {"id": TRANSITION_IDS["back_to_todo"]}},
@@ -2384,6 +2386,45 @@ def clear_assignee(client: DispatchClient, key: str, idem_key: str | None = None
         client, "PUT", f"/issue/{key}",
         {"fields": {"assignee": None}},
         idem_key,
+    )
+
+
+def cleanup_reverted_ticket_claims_and_assignee(
+    client: DispatchClient,
+    key: str,
+    idem_key: str | None = None,
+) -> None:
+    """Drop all claim labels and clear assignee for an owned revert path.
+
+    This helper is intentionally called only from revert / abstain paths,
+    after the runner has decided it owns the recovery. It must not be used
+    as generic post-run cleanup because active sibling runners rely on
+    assignee + winning ``claim:*`` labels while their CLI is still running.
+    """
+    issue = _request(client, "GET", f"/issue/{key}?fields=labels,assignee")
+    fields = issue.get("fields") or {}
+    labels = list(fields.get("labels") or [])
+    claim_labels = [
+        label for label in labels
+        if isinstance(label, str) and label.startswith(CLAIM_LABEL_PREFIX)
+    ]
+    assignee = fields.get("assignee")
+    if not claim_labels and not assignee:
+        return
+
+    body: dict[str, Any] = {}
+    if assignee:
+        body["fields"] = {"assignee": None}
+    if claim_labels:
+        body["update"] = {
+            "labels": [{"remove": label} for label in sorted(set(claim_labels))]
+        }
+    _request_idempotent(
+        client,
+        "PUT",
+        f"/issue/{key}",
+        body,
+        idem_key or f"cleanup-claim-assignee-{key}-{uuid.uuid4().hex[:12]}",
     )
 
 

@@ -1713,11 +1713,8 @@ def _clear_assignee_after_revert(
     client: "jira_dispatch.DispatchClient",
     key: str,
 ) -> None:
-    """Best-effort assignee clear after reverting a claimed ticket."""
-    try:
-        jira_dispatch.clear_assignee(client, key)
-    except Exception as exc:  # noqa: BLE001 — release path must fail open
-        print(f"[runner] clear_assignee failed: {exc}", file=sys.stderr)
+    """Compatibility no-op: revert cleanup now runs before To-Do transition."""
+    return
 
 
 def _revert_cli_failure_to_todo(
