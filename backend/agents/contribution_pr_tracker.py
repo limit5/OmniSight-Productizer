@@ -6,10 +6,12 @@ the narrow JIRA action needed to keep the ticket lifecycle aligned.
 """
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
 from typing import Iterable, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -18,6 +20,7 @@ from backend.agents.github_pr_target import GithubPrError, _github_headers, _par
 from backend.agents.scheduler import TicketSnapshot
 
 
+LOGGER = logging.getLogger(__name__)
 PR_LABEL_RE = re.compile(r"^camviewpro-pr:(\d+)$")
 REGULATED_LANE_LABEL = "regulated-lane"
 REGULATORY_CLEARED_REQUIRED_LABEL = "regulatory-cleared-required"
@@ -54,6 +57,45 @@ def _pr_label_names(pr: dict) -> set[str]:
             if name:
                 names.add(name)
     return names
+
+
+def _pr_url(pr: dict, repo_url: str, pr_number: int) -> str:
+    html_url = str(pr.get("html_url") or "").strip()
+    if html_url:
+        return html_url
+
+    cleaned = repo_url.strip()
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    parts = urlsplit(cleaned)
+    path = parts.path.rstrip("/")
+    return urlunsplit(
+        (parts.scheme, parts.netloc, f"{path}/pull/{pr_number}", "", "")
+    )
+
+
+def _record_regulated_lane_event(
+    *,
+    ticket_key: str,
+    pr_number: int,
+    pr_url: str,
+    action: PrSyncAction,
+    merge_sha: str | None = None,
+    pr_state: str | None = None,
+) -> None:
+    try:
+        from backend.agents.regulated_lane_audit import record_regulated_lane_event
+
+        record_regulated_lane_event(
+            ticket_key=ticket_key,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            action=action,
+            merge_sha=merge_sha,
+            pr_state=pr_state,
+        )
+    except Exception as exc:  # pragma: no cover - defensive best-effort hook
+        LOGGER.warning("regulated-lane audit hook failed: %s", exc)
 
 
 async def _resolve_git_account(
@@ -234,10 +276,13 @@ async def sync_contribution_pr_state(
 
     account = await _resolve_git_account(git_account_ref, tenant_id=tenant_id)
     token = _token_from_row(account, git_account_ref)
-    pr = await _fetch_pr(_repo_url_from_row(account), token, pr_number)
+    repo_url = _repo_url_from_row(account)
+    pr = await _fetch_pr(repo_url, token, pr_number)
 
     state = str(pr.get("state") or "").lower()
     merged = bool(pr.get("merged"))
+    label_names = _pr_label_names(pr)
+    pr_url = _pr_url(pr, repo_url, pr_number)
     client = _jira_client()
 
     if state == "open" and not merged:
@@ -246,14 +291,34 @@ async def sync_contribution_pr_state(
 
     if merged:
         merge_sha = str(pr.get("merge_commit_sha") or "").strip()
-        if REGULATED_LANE_LABEL in _pr_label_names(pr):
+        if REGULATED_LANE_LABEL in label_names:
             _hold_regulated(client, ticket.key, merge_sha=merge_sha or "<unknown>")
+            _record_regulated_lane_event(
+                ticket_key=ticket.key,
+                pr_number=pr_number,
+                pr_url=pr_url,
+                action="hold_regulated",
+                merge_sha=merge_sha or None,
+                pr_state="merged",
+            )
             return PrSyncOutcome(ticket.key, pr_number, "merged", "hold_regulated")
         _mark_done(client, ticket.key, merge_sha=merge_sha or "<unknown>")
         return PrSyncOutcome(ticket.key, pr_number, "merged", "to_done")
 
     if state == "closed":
         _flag_closed(client, ticket.key, pr_number)
+        if REGULATED_LANE_LABEL in label_names:
+            # OP-1853 PS2: pass merge_sha=None explicitly so the audit JSONL
+            # line carries the field consistently across actions (hold_regulated
+            # path passes the merge SHA; flag_closed has none).
+            _record_regulated_lane_event(
+                ticket_key=ticket.key,
+                pr_number=pr_number,
+                pr_url=pr_url,
+                action="flag_closed",
+                pr_state="closed",
+                merge_sha=None,
+            )
         return PrSyncOutcome(ticket.key, pr_number, "closed", "flag_closed")
 
     return PrSyncOutcome(ticket.key, pr_number, state or None, "none")
