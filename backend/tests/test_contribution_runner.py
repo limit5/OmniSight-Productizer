@@ -46,8 +46,12 @@ def _install_credential(monkeypatch):
 
 
 class GitRecorder:
-    def __init__(self, *, changed: bool):
+    def __init__(self, *, changed: bool, commits_ahead: int = 0):
         self.changed = changed
+        # OP-1855: number of commits the branch is ahead of base (0 by default
+        # preserves the pre-OP-1855 behaviour; tests for the agent-committed
+        # path pass commits_ahead>=1).
+        self.commits_ahead = commits_ahead
         self.calls: list[tuple[list[str], Path | None]] = []
         self.remote_url = ""
 
@@ -62,6 +66,8 @@ class GitRecorder:
         if argv[:3] == ["git", "status", "--porcelain"]:
             stdout = " M app/src/main.kt\n" if self.changed else ""
             return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+        if argv[:3] == ["git", "rev-list", "--count"]:
+            return SimpleNamespace(returncode=0, stdout=f"{self.commits_ahead}\n", stderr="")
         if argv[:3] == ["git", "config", "--get"]:
             value = "codex-bot\n" if argv[-1] == "user.name" else "codex@example.test\n"
             return SimpleNamespace(returncode=0, stdout=value, stderr="")
@@ -81,11 +87,12 @@ def _install(
     monkeypatch,
     *,
     changed: bool = True,
+    commits_ahead: int = 0,
     pr: gpt.PrResult | None = None,
 ):
     monkeypatch.setattr(cr, "resolve_product_source", lambda key: _source())
     pick = _install_credential(monkeypatch)
-    git = GitRecorder(changed=changed)
+    git = GitRecorder(changed=changed, commits_ahead=commits_ahead)
     monkeypatch.setattr(cr.subprocess, "run", git)
     calls = []
     pr_result = pr or gpt.PrResult(
@@ -211,3 +218,33 @@ def test_token_scrub_happens_after_the_authenticated_base_fetch(monkeypatch, tmp
     fetch_idx = next(i for i, c in enumerate(cmds) if c[:3] == ["git", "fetch", "origin"])
     scrub_idx = next(i for i, c in enumerate(cmds) if c[:4] == ["git", "remote", "set-url", "origin"])
     assert fetch_idx < scrub_idx, "token must be scrubbed only AFTER the authenticated base fetch"
+
+
+def test_post_clone_sets_git_identity_for_agent_commits(monkeypatch, tmp_path):
+    # OP-1855: the fresh clone must carry a usable git user.name/user.email so
+    # the agent can commit without scrambling for one (canary finding).
+    git, _calls, _pick, _pr = _install(monkeypatch)
+
+    _run_contribution(tmp_path, lambda worktree: None)
+
+    cmds = git.commands()
+    assert ["git", "config", "user.name", "OmniSight Runner"] in cmds
+    assert ["git", "config", "user.email", "runner@omnisight.local"] in cmds
+
+
+def test_agent_made_commits_push_without_orchestrator_recommit(monkeypatch, tmp_path):
+    # OP-1855 (the canary fix): the agent committed its changes itself (WT is
+    # clean) but the branch is ahead of base — the orchestrator MUST detect that
+    # and proceed to push+PR, NOT treat it as no_changes and drop the commit.
+    git, calls, _pick, _pr = _install(monkeypatch, changed=False, commits_ahead=1)
+
+    result = _run_contribution(tmp_path, lambda worktree: None)
+
+    assert result.no_changes is False
+    assert result.pr is not None
+    cmds = git.commands()
+    # the orchestrator must NOT issue its own add/commit when the agent already committed
+    assert not any(c[:2] == ["git", "add"] for c in cmds), "orchestrator should not re-add"
+    assert not any(c[:2] == ["git", "commit"] for c in cmds), "orchestrator should not re-commit"
+    # but open_contribution_pr WAS called
+    assert len(calls) == 1

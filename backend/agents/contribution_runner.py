@@ -139,16 +139,39 @@ async def contribute_to_product(
     _run(["git", "checkout", "-b", branch], cwd=worktree)
     _run(["git", "remote", "set-url", "origin", clean_url], cwd=worktree)
 
+    # OP-1855: pre-set a usable git identity in the fresh clone so the agent can
+    # commit without scrambling for one (canary finding: agents naturally commit
+    # their changes; a missing identity blocks them and pollutes the commit author
+    # with whatever fallback they invent).
+    _run(["git", "config", "user.name", "OmniSight Runner"], cwd=worktree)
+    _run(["git", "config", "user.email", "runner@omnisight.local"], cwd=worktree)
+
     result = implement(worktree)
     if inspect.isawaitable(result):
         await result
 
+    # OP-1855: accept agent-made commits. The pre-OP-1855 check looked only at
+    # `git status --porcelain` (working-tree changes) and treated a clean WT as
+    # no-changes — but if the agent committed its own changes (which is normal),
+    # the WT is clean even though the branch has real commits ahead of base, and
+    # those commits would be lost when the tempdir is torn down. So now: "work
+    # exists" iff the WT is dirty OR the branch has commits ahead of base.
     status = _run(["git", "status", "--porcelain"], cwd=worktree)
-    if not (status.stdout or "").strip():
+    wt_dirty = bool((status.stdout or "").strip())
+    ahead = _run(["git", "rev-list", "--count", f"{base}..{branch}"], cwd=worktree)
+    try:
+        commits_ahead = int((ahead.stdout or "0").strip() or 0) > 0
+    except ValueError:
+        commits_ahead = False
+
+    if not wt_dirty and not commits_ahead:
         return ContributionResult(branch=branch, pr=None, no_changes=True)
 
-    _run(["git", "add", "-A"], cwd=worktree)
-    _run(["git", "commit", "-m", _commit_message(ticket_key)], cwd=worktree)
+    if wt_dirty:
+        # Agent left uncommitted changes (the original path); we commit them.
+        _run(["git", "add", "-A"], cwd=worktree)
+        _run(["git", "commit", "-m", _commit_message(ticket_key)], cwd=worktree)
+    # else: agent committed already; nothing for us to add/commit — push as-is.
 
     # open_contribution_pr is synchronous and resolves its credential via an
     # internal asyncio.run(), so it must NOT be invoked from this coroutine's
