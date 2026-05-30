@@ -77,6 +77,11 @@ def open_contribution_pr(
 
     changed_files = _changed_files(worktree, clean_base, clean_branch)
     flagged_medical = _touches_medical_lane(changed_files)
+    pr_body = (
+        _regulated_lane_pr_body(changed_files, body)
+        if flagged_medical
+        else body
+    )
 
     _set_origin_url(worktree, token_url)
     try:
@@ -90,7 +95,7 @@ def open_contribution_pr(
         branch=clean_branch,
         base=clean_base,
         title=title,
-        body=body,
+        body=pr_body,
     )
     if flagged_medical:
         _add_regulated_lane_label(repo=repo, token=token, number=pr["number"])
@@ -227,6 +232,39 @@ def _touches_medical_lane(changed_files: list[str]) -> bool:
         path.startswith(prefix)
         for path in changed_files
         for prefix in MEDICAL_PATH_PREFIXES
+    )
+
+
+def _matched_medical_path_prefixes(changed_files: list[str]) -> list[str]:
+    return [
+        prefix
+        for prefix in MEDICAL_PATH_PREFIXES
+        if any(path.startswith(prefix) for path in changed_files)
+    ]
+
+
+def _regulated_lane_pr_body(changed_files: list[str], body: str) -> str:
+    matched = _matched_medical_path_prefixes(changed_files)
+    matched_lines = "\n".join(f"- `{prefix}`" for prefix in matched)
+    checklist = "\n".join(
+        [
+            "- [ ] DHF entry path/id:",
+            "- [ ] RTM trace:",
+            "- [ ] SOUP impact:",
+            "- [ ] ISO 14971 Risk update:",
+            "- [ ] IEC 62304 Class B activity log:",
+            "- [ ] HIPAA impact (if PHI-adjacent):",
+        ]
+    )
+    return (
+        "## ⚠️ REGULATED LANE — medical-tier change\n\n"
+        "Matched medical lane path prefixes:\n"
+        f"{matched_lines}\n\n"
+        "Operator checklist:\n"
+        f"{checklist}\n\n"
+        "camviewpro CODEOWNERS + regulatory bench own the merge decision.\n\n"
+        "---\n\n"
+        f"{body}"
     )
 
 

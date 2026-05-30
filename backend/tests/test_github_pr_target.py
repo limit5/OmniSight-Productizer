@@ -162,6 +162,33 @@ def _open(tmp_path: Path, **kwargs) -> gpt.PrResult:
     return gpt.open_contribution_pr(**data)
 
 
+def _pr_write_body(http: dict, method: str) -> str:
+    call = [call for call in http["calls"] if call[0] == method][0]
+    return call[3]["body"]
+
+
+def _assert_regulated_lane_body(
+    body: str,
+    caller_body: str,
+    matched_prefix: str = "`apps/medical/`",
+) -> None:
+    separator = "\n\n---\n\n"
+    assert "REGULATED LANE" in body
+    assert body.index("REGULATED LANE") < body.index(matched_prefix)
+    assert body.index(matched_prefix) < body.index("- [ ] DHF entry path/id:")
+    assert body.index("- [ ] DHF entry path/id:") < body.index(separator)
+    assert body.endswith(f"{separator}{caller_body}")
+    for checkbox in [
+        "- [ ] DHF entry path/id:",
+        "- [ ] RTM trace:",
+        "- [ ] SOUP impact:",
+        "- [ ] ISO 14971 Risk update:",
+        "- [ ] IEC 62304 Class B activity log:",
+        "- [ ] HIPAA impact (if PHI-adjacent):",
+    ]:
+        assert checkbox in body
+
+
 def test_head_equal_base_raises(tmp_path):
     with pytest.raises(gpt.GithubPrError):
         _open(tmp_path, branch="main", base="main")
@@ -233,6 +260,7 @@ def test_medical_change_sets_flag_and_regulated_label(monkeypatch, tmp_path):
     ]
     assert label_calls
     assert label_calls[0][3] == {"labels": ["regulated-lane"]}
+    _assert_regulated_lane_body(_pr_write_body(http, "POST"), "mocked proof")
 
 
 def test_non_medical_change_skips_regulated_label(monkeypatch, tmp_path):
@@ -241,13 +269,19 @@ def test_non_medical_change_skips_regulated_label(monkeypatch, tmp_path):
         changed_files=["apps/consumer/src/MainActivity.kt"],
     )
 
-    result = _open(tmp_path)
+    caller_body = "mocked proof\nwith exact bytes"
+    result = _open(tmp_path, body=caller_body)
 
     assert result.flagged_medical is False
     assert not [
         call for call in http["calls"]
         if call[0] == "PATCH" and "/issues/" in call[1]
     ]
+    body = _pr_write_body(http, "POST")
+    assert body == caller_body
+    assert "REGULATED LANE" not in body
+    assert "- [ ] DHF entry path/id:" not in body
+    assert "\n\n---\n\n" not in body
 
 
 def test_existing_pr_for_head_updates_without_duplicate_create(monkeypatch, tmp_path):
@@ -267,6 +301,34 @@ def test_existing_pr_for_head_updates_without_duplicate_create(monkeypatch, tmp_
     assert patch[1].endswith("/pulls/77")
     assert patch[3]["title"] == "updated"
     assert patch[3]["body"] == "updated body"
+
+
+def test_existing_medical_pr_update_enriches_body(monkeypatch, tmp_path):
+    _, http = _install_fakes(
+        monkeypatch,
+        changed_files=[
+            "libs/core-medical-grade/src/device.kt",
+            "docs/regulatory/AUDIT.md",
+        ],
+        existing=[{
+            "number": 77,
+            "html_url": "https://github.com/limit5/camviewpro-android/pull/77",
+        }],
+    )
+
+    result = _open(tmp_path, title="updated", body="updated body")
+
+    assert result.flagged_medical is True
+    assert result.number == 77
+    assert not [call for call in http["calls"] if call[0] == "POST"]
+    body = _pr_write_body(http, "PATCH")
+    assert "`libs/core-medical-grade/`" in body
+    assert "`docs/regulatory/`" in body
+    _assert_regulated_lane_body(
+        body,
+        "updated body",
+        matched_prefix="`libs/core-medical-grade/`",
+    )
 
 
 def test_missing_token_raises(monkeypatch, tmp_path):
