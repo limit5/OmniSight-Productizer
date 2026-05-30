@@ -19,9 +19,11 @@ from backend.agents.scheduler import TicketSnapshot
 
 
 PR_LABEL_RE = re.compile(r"^camviewpro-pr:(\d+)$")
+REGULATED_LANE_LABEL = "regulated-lane"
+REGULATORY_CLEARED_REQUIRED_LABEL = "regulatory-cleared-required"
 TRIAGE_LABEL = "camviewpro-pr-closed"
 
-PrSyncAction = Literal["none", "to_under_review", "to_done", "flag_closed"]
+PrSyncAction = Literal["none", "to_under_review", "to_done", "flag_closed", "hold_regulated"]
 
 
 class ContributionPrTrackerError(RuntimeError):
@@ -42,6 +44,16 @@ def _extract_pr_number(labels: Iterable[str]) -> int | None:
         if match:
             return int(match.group(1))
     return None
+
+
+def _pr_label_names(pr: dict) -> set[str]:
+    names: set[str] = set()
+    for label in pr.get("labels") or []:
+        if isinstance(label, dict):
+            name = str(label.get("name") or "").strip()
+            if name:
+                names.add(name)
+    return names
 
 
 async def _resolve_git_account(
@@ -167,6 +179,26 @@ def _mark_done(
     )
 
 
+def _hold_regulated(
+    client: jira_dispatch.DispatchClient,
+    key: str,
+    *,
+    merge_sha: str,
+) -> None:
+    jira_dispatch.add_comment(
+        client,
+        key,
+        f"camviewpro PR merged with merge commit {merge_sha}.",
+        idem_key=_comment_idem(key, "merged"),
+    )
+    jira_dispatch.add_label(
+        client,
+        key,
+        REGULATORY_CLEARED_REQUIRED_LABEL,
+        idem_key=f"contribution-pr-{key}-regulatory-cleared-required-label",
+    )
+
+
 def _flag_closed(client: jira_dispatch.DispatchClient, key: str, pr_number: int) -> None:
     jira_dispatch.add_comment(
         client,
@@ -214,6 +246,9 @@ async def sync_contribution_pr_state(
 
     if merged:
         merge_sha = str(pr.get("merge_commit_sha") or "").strip()
+        if REGULATED_LANE_LABEL in _pr_label_names(pr):
+            _hold_regulated(client, ticket.key, merge_sha=merge_sha or "<unknown>")
+            return PrSyncOutcome(ticket.key, pr_number, "merged", "hold_regulated")
         _mark_done(client, ticket.key, merge_sha=merge_sha or "<unknown>")
         return PrSyncOutcome(ticket.key, pr_number, "merged", "to_done")
 

@@ -130,6 +130,13 @@ def _sync(ticket: TicketSnapshot, **kwargs) -> tracker.PrSyncOutcome:
     return asyncio.run(tracker.sync_contribution_pr_state(ticket, **data))
 
 
+def _done_transition_fired(jira: dict) -> bool:
+    return any(
+        call[0] == "POST" and call[1] == "/issue/OP-1847/transitions"
+        for call in jira["requests"]
+    )
+
+
 def test_no_camviewpro_pr_label_skips_without_api_call(monkeypatch):
     pick = _install_credential(monkeypatch)
     http = _install_github(monkeypatch, {"state": "open", "merged": False})
@@ -145,9 +152,16 @@ def test_no_camviewpro_pr_label_skips_without_api_call(monkeypatch):
     assert jira["labels"] == []
 
 
-def test_open_pr_moves_ticket_to_under_review(monkeypatch):
+def test_open_regulated_lane_pr_moves_ticket_to_under_review(monkeypatch):
     pick = _install_credential(monkeypatch)
-    http = _install_github(monkeypatch, {"state": "open", "merged": False})
+    http = _install_github(
+        monkeypatch,
+        {
+            "state": "open",
+            "merged": False,
+            "labels": [{"name": tracker.REGULATED_LANE_LABEL}],
+        },
+    )
     jira = _install_jira(monkeypatch)
 
     outcome = _sync(_ticket("camviewpro-pr:42"))
@@ -161,7 +175,7 @@ def test_open_pr_moves_ticket_to_under_review(monkeypatch):
     assert pick.seen == ("camviewpro-pr", "t-op")
 
 
-def test_merged_pr_moves_ticket_to_done_and_comments_merge_sha(monkeypatch):
+def test_merged_regulated_lane_pr_holds_for_regulatory_clearance(monkeypatch):
     _install_credential(monkeypatch)
     _install_github(
         monkeypatch,
@@ -169,6 +183,28 @@ def test_merged_pr_moves_ticket_to_done_and_comments_merge_sha(monkeypatch):
             "state": "closed",
             "merged": True,
             "merge_commit_sha": "abc123def456",
+            "labels": [{"name": tracker.REGULATED_LANE_LABEL}],
+        },
+    )
+    jira = _install_jira(monkeypatch)
+
+    outcome = _sync(_ticket("camviewpro-pr:42"))
+
+    assert outcome == tracker.PrSyncOutcome("OP-1847", 42, "merged", "hold_regulated")
+    assert "abc123def456" in jira["comments"][0][2]
+    assert jira["labels"][0][2] == tracker.REGULATORY_CLEARED_REQUIRED_LABEL
+    assert not _done_transition_fired(jira)
+
+
+def test_merged_pr_without_regulated_lane_moves_ticket_to_done(monkeypatch):
+    _install_credential(monkeypatch)
+    _install_github(
+        monkeypatch,
+        {
+            "state": "closed",
+            "merged": True,
+            "merge_commit_sha": "abc123def456",
+            "labels": [],
         },
     )
     jira = _install_jira(monkeypatch)
@@ -180,9 +216,16 @@ def test_merged_pr_moves_ticket_to_done_and_comments_merge_sha(monkeypatch):
     assert "abc123def456" in jira["comments"][0][2]
 
 
-def test_closed_unmerged_flags_for_human_triage_without_done(monkeypatch):
+def test_closed_unmerged_regulated_lane_flags_for_human_triage_without_done(monkeypatch):
     _install_credential(monkeypatch)
-    _install_github(monkeypatch, {"state": "closed", "merged": False})
+    _install_github(
+        monkeypatch,
+        {
+            "state": "closed",
+            "merged": False,
+            "labels": [{"name": tracker.REGULATED_LANE_LABEL}],
+        },
+    )
     jira = _install_jira(monkeypatch)
 
     outcome = _sync(_ticket("camviewpro-pr:42"))
@@ -190,10 +233,7 @@ def test_closed_unmerged_flags_for_human_triage_without_done(monkeypatch):
     assert outcome == tracker.PrSyncOutcome("OP-1847", 42, "closed", "flag_closed")
     assert "closed without merge" in jira["comments"][0][2]
     assert jira["labels"][0][2] == "camviewpro-pr-closed"
-    assert not any(
-        call[0] == "POST" and call[1] == "/issue/OP-1847/transitions"
-        for call in jira["requests"]
-    )
+    assert not _done_transition_fired(jira)
 
 
 def test_batch_helper_returns_outcomes(monkeypatch):
