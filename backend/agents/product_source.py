@@ -43,7 +43,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional, cast
 
 from backend.config import settings
 
@@ -53,6 +53,8 @@ log = logging.getLogger(__name__)
 # camviewpro integration design (§6): consumer is the camviewpro default,
 # medical/automotive are the regulated bases.
 ALLOWED_TIERS = frozenset({"consumer", "medical", "automotive"})
+ALLOWED_BUILD_SYSTEMS = frozenset({"gradle", "cmake"})
+BuildSystem = Literal["gradle", "cmake"]
 
 
 class ProductSourceError(RuntimeError):
@@ -85,6 +87,10 @@ class ProductSource:
     ``git_account_ref`` id of the ``git_accounts`` row carrying the clone
                         credential, or ``None`` for a source that needs none
                         (a public repo).
+    ``build_system``    build orchestrator family. Defaults to ``gradle`` to
+                        preserve the existing camviewpro Android flow.
+    ``artifact_glob``   optional artifact glob relative to the cloned worktree;
+                        used by non-gradle build systems such as CMake.
     """
 
     repo_url: str
@@ -92,6 +98,8 @@ class ProductSource:
     branch: Optional[str]
     pinned_ref: str
     git_account_ref: Optional[str]
+    build_system: BuildSystem = "gradle"
+    artifact_glob: Optional[str] = None
 
 
 def _load_product_sources() -> dict:
@@ -158,12 +166,21 @@ def resolve_product_source(project_key: Optional[str]) -> Optional[ProductSource
 
     branch = str(entry.get("branch") or "").strip() or None
     git_account_ref = str(entry.get("git_account_ref") or "").strip() or None
+    build_system = str(entry.get("build_system") or "gradle").strip().lower()
+    if build_system not in ALLOWED_BUILD_SYSTEMS:
+        raise ProductSourceError(
+            f"product source for project {project_key!r} has invalid build_system "
+            f"{build_system!r}; expected one of {sorted(ALLOWED_BUILD_SYSTEMS)}"
+        )
+    artifact_glob = str(entry.get("artifact_glob") or "").strip() or None
     return ProductSource(
         repo_url=repo_url,
         tier=tier,
         branch=branch,
         pinned_ref=pinned_ref,
         git_account_ref=git_account_ref,
+        build_system=cast(BuildSystem, build_system),
+        artifact_glob=artifact_glob,
     )
 
 

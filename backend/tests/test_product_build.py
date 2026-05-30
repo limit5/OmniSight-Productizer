@@ -22,19 +22,24 @@ def _configure(
     *,
     tier: str = "consumer",
     pinned_ref: str = "c360a9d0",
+    build_system: str = "gradle",
+    artifact_glob: str | None = None,
 ) -> None:
+    entry = {
+        "repo_url": "https://github.com/operator/camviewpro-android.git",
+        "tier": tier,
+        "branch": "main",
+        "pinned_ref": pinned_ref,
+        "git_account_ref": "camviewpro-ro",
+    }
+    if build_system != "gradle":
+        entry["build_system"] = build_system
+    if artifact_glob is not None:
+        entry["artifact_glob"] = artifact_glob
     monkeypatch.setattr(
         settings,
         "product_sources",
-        json.dumps({
-            "DEMO": {
-                "repo_url": "https://github.com/operator/camviewpro-android.git",
-                "tier": tier,
-                "branch": "main",
-                "pinned_ref": pinned_ref,
-                "git_account_ref": "camviewpro-ro",
-            }
-        }),
+        json.dumps({"DEMO": entry}),
         raising=False,
     )
 
@@ -159,6 +164,29 @@ def test_tier_to_module_map_for_supported_tiers(tmp_path, monkeypatch, tier, mod
     ] in run.commands()
 
 
+def test_gradle_command_sequence_and_apk_path_are_unchanged(tmp_path, monkeypatch):
+    result, run = _build(tmp_path, monkeypatch)
+    assert run.commands() == [
+        [
+            "git",
+            "clone",
+            "https://ci:ghp_secret_token@github.com/operator/camviewpro-android.git",
+            str(tmp_path / "camviewpro-android"),
+        ],
+        [
+            "git",
+            "remote",
+            "set-url",
+            "origin",
+            "https://github.com/operator/camviewpro-android.git",
+        ],
+        ["git", "checkout", "--detach", "c360a9d0"],
+        ["git", "rev-parse", "HEAD"],
+        ["gradle", ":apps:consumer:assembleDebug", "--offline", "--console=plain"],
+    ]
+    assert result.apk_path == _apk_path(tmp_path, "consumer")
+
+
 def test_unknown_tier_raises_defence_in_depth(tmp_path, monkeypatch):
     source = ps.ProductSource(
         repo_url="https://github.com/operator/camviewpro-android.git",
@@ -202,3 +230,91 @@ def test_gradle_non_zero_raises_with_stderr_tail(tmp_path, monkeypatch):
     apk.write_text("apk", encoding="utf-8")
     with pytest.raises(ps.ProductSourceError, match="line 44"):
         asyncio.run(pb.build_product_source("DEMO", workspace_root=tmp_path))
+
+
+def test_cmake_source_invokes_configure_build_and_returns_artifact(
+    tmp_path,
+    monkeypatch,
+):
+    _configure(monkeypatch, build_system="cmake", artifact_glob="build/UVCCamera")
+    monkeypatch.setattr(pb, "resolve_product_source_credential", _fake_credential)
+    monkeypatch.setattr(pb.shutil, "which", lambda name: "/usr/bin/cmake")
+    run = RecordingRun()
+    monkeypatch.setattr(pb.subprocess, "run", run)
+    artifact = tmp_path / "camviewpro-android" / "build" / "UVCCamera"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("binary", encoding="utf-8")
+
+    result = asyncio.run(pb.build_product_source("DEMO", workspace_root=tmp_path))
+
+    assert [
+        "/usr/bin/cmake",
+        "-S",
+        ".",
+        "-B",
+        "build",
+        "-DCMAKE_PREFIX_PATH=",
+        "-DCMAKE_BUILD_TYPE=Release",
+    ] in run.commands()
+    build_cmd = next(
+        cmd
+        for cmd in run.commands()
+        if cmd[:3] == ["/usr/bin/cmake", "--build", "build"]
+    )
+    assert build_cmd[3].startswith("-j")
+    assert result.apk_path == artifact
+    assert result.module == "cmake"
+
+
+def test_cmake_artifact_glob_no_match_raises_with_build_dir_contents(
+    tmp_path,
+    monkeypatch,
+):
+    _configure(monkeypatch, build_system="cmake", artifact_glob="build/UVCCamera")
+    monkeypatch.setattr(pb, "resolve_product_source_credential", _fake_credential)
+    monkeypatch.setattr(pb.shutil, "which", lambda name: "/usr/bin/cmake")
+    monkeypatch.setattr(pb.subprocess, "run", RecordingRun())
+    marker = tmp_path / "camviewpro-android" / "build" / "CMakeCache.txt"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("cache", encoding="utf-8")
+
+    with pytest.raises(
+        ps.ProductSourceError,
+        match=r"build/UVCCamera[\s\S]*CMakeCache.txt",
+    ):
+        asyncio.run(pb.build_product_source("DEMO", workspace_root=tmp_path))
+
+
+def test_missing_cmake_binary_raises(tmp_path, monkeypatch):
+    _configure(monkeypatch, build_system="cmake", artifact_glob="build/UVCCamera")
+    monkeypatch.setattr(pb, "resolve_product_source_credential", _fake_credential)
+    monkeypatch.setattr(pb.shutil, "which", lambda name: None)
+    monkeypatch.setattr(pb.subprocess, "run", RecordingRun())
+
+    with pytest.raises(ps.ProductSourceError, match="cmake"):
+        asyncio.run(pb.build_product_source("DEMO", workspace_root=tmp_path))
+
+
+def test_cmake_prefix_path_flows_to_configure_command_and_env(
+    tmp_path,
+    monkeypatch,
+):
+    _configure(monkeypatch, build_system="cmake", artifact_glob="build/UVCCamera")
+    monkeypatch.setattr(pb, "resolve_product_source_credential", _fake_credential)
+    monkeypatch.setattr(pb.shutil, "which", lambda name: "/usr/bin/cmake")
+    monkeypatch.setenv("CMAKE_PREFIX_PATH", "/opt/Qt/6.8.3/gcc_64")
+    run = RecordingRun()
+    monkeypatch.setattr(pb.subprocess, "run", run)
+    artifact = tmp_path / "camviewpro-android" / "build" / "UVCCamera"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("binary", encoding="utf-8")
+
+    asyncio.run(pb.build_product_source("DEMO", workspace_root=tmp_path))
+
+    configure = next(
+        call
+        for call in run.calls
+        if call[0][:5] == ["/usr/bin/cmake", "-S", ".", "-B", "build"]
+    )
+    assert "-DCMAKE_PREFIX_PATH=/opt/Qt/6.8.3/gcc_64" in configure[0]
+    assert configure[1]["env"]["CMAKE_PREFIX_PATH"] == "/opt/Qt/6.8.3/gcc_64"

@@ -75,6 +75,40 @@ def test_configured_project_resolves_to_its_source(monkeypatch):
     assert source.branch == "main"
     assert source.pinned_ref == "v3.2.0"
     assert source.git_account_ref == "camviewpro-ro"
+    assert source.build_system == "gradle"
+    assert source.artifact_glob is None
+
+
+def test_cmake_source_build_fields_round_trip(monkeypatch):
+    _configure(monkeypatch, {
+        "FT-C600": {
+            "repo_url": "ssh://git@github.com/limit5/UVCCamera_Qt",
+            "tier": "consumer",
+            "branch": "main",
+            "pinned_ref": "a1b2c3d4",
+            "git_account_ref": "camviewpro-ro",
+            "build_system": "cmake",
+            "artifact_glob": "build/UVCCamera",
+        }
+    })
+    source = ps.resolve_product_source("FT-C600")
+    assert source is not None
+    assert source.build_system == "cmake"
+    assert source.artifact_glob == "build/UVCCamera"
+
+
+def test_missing_build_fields_default_to_gradle(monkeypatch):
+    _configure(monkeypatch, {
+        "OP": {
+            "repo_url": "ssh://git@github.com/operator/camviewpro-android",
+            "tier": "consumer",
+            "pinned_ref": "v3.2.0",
+        }
+    })
+    source = ps.resolve_product_source("OP")
+    assert source is not None
+    assert source.build_system == "gradle"
+    assert source.artifact_glob is None
 
 
 def test_configured_source_normalises_tier_case(monkeypatch):
