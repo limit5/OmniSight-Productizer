@@ -1,0 +1,95 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "spdxVersion": "SPDX-2.3",
+  "creationInfo": {
+    "created": "2026-06-03T00:00:00Z",
+    "creators": [
+      "Organization: OmniSight",
+      "Tool: OP-1949 BSP package manifest"
+    ]
+  },
+  "name": "OP-1949 ATK-DLRK3588 BSP/SDK package",
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://omnisight.local/spdx/op-1949/case4-rk3588",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-LinuxKernel",
+      "name": "linux-kernel-rk3588",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only",
+      "licenseDeclared": "GPL-2.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-ATKDLRK3588DTB",
+      "name": "atk-dlrk3588-device-tree",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only",
+      "licenseDeclared": "GPL-2.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-UVCStitching",
+      "name": "uvc-stitching",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright OmniSight contributors"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-CustomerSDKHeaders",
+      "name": "omnisight-case4-rk3588-sdk-headers",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright OmniSight contributors"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-RockchipBSPBlobs",
+      "name": "rockchip-rk3588-bsp-vendor-blobs",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "LicenseRef-Rockchip-BSP-Redistributable",
+      "licenseDeclared": "LicenseRef-Rockchip-BSP-Redistributable",
+      "copyrightText": "NOASSERTION"
+    }
+  ],
+  "hasExtractedLicensingInfos": [
+    {
+      "licenseId": "LicenseRef-Rockchip-BSP-Redistributable",
+      "extractedText": "Redistribution is permitted only for vendor-supplied Rockchip RK3588 BSP components that the customer is licensed to receive. Preserve upstream notices and do not redistribute NDA-covered blobs outside the customer delivery boundary.",
+      "name": "Rockchip BSP Redistributable"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-LinuxKernel"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-ATKDLRK3588DTB"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-UVCStitching"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-CustomerSDKHeaders"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-RockchipBSPBlobs"
+    }
+  ]
+}
