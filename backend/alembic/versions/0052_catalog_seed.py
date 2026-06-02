@@ -636,6 +636,35 @@ _SEED_ENTRIES: tuple[dict[str, Any], ...] = (
             "nda_required": False,
         },
     },
+    # ─── Phase 0 P0.A.1b: Rockchip RV1126 armhf toolchain (32-bit ARMv7-A) ───
+    # ISP-line SoC (Cortex-A7 single-core + RISC-V NPU). ATK-DLRV1126 EVK.
+    # Open-source Linaro base; no NDA gate. Wave 1 of EPIC OP-1918 (added
+    # in design v3 per operator EVK list 2026-06-02).
+    {
+        "id": "rockchip-rv1126-armhf-gcc-7",
+        "vendor": "rockchip",
+        "family": "cross-toolchain",
+        "display_name": (
+            "Rockchip RV1126 armhf toolchain (Linaro GCC 7.5 base)"
+        ),
+        "version": "7.5-2019.12",
+        "install_method": "vendor_installer",
+        "install_url": (
+            "https://releases.linaro.org/components/toolchain/binaries/"
+            "7.5-2019.12/arm-linux-gnueabihf/"
+            "gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz"
+        ),
+        "size_bytes": 134217728,
+        "metadata": {
+            "target_triple": "arm-linux-gnueabihf",
+            "gcc_version": "7.5.0",
+            "bundled_libc": "glibc",
+            "socs": ["rv1126"],
+            "cpu_arch": "armv7-a-cortex-a7",
+            "bsp_compatibility": ["rockchip-linux-sdk-rv1126"],
+            "nda_required": False,
+        },
+    },
     {
         "id": "riscv-gnu-toolchain",
         "vendor": "riscv-international",
