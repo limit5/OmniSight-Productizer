@@ -605,6 +605,37 @@ _SEED_ENTRIES: tuple[dict[str, Any], ...] = (
             "flavour": "linaro_release_branch",
         },
     },
+    # ─── Phase 0 P0.A.1: Rockchip RK3576/RK3588 aarch64 toolchain ───
+    # Open-source toolchain (Linaro base); no NDA gate. Wave 1 of
+    # Phase 0 EPIC OP-1918. Sister Qualcomm + MediaTek entries (P0.A.2/3)
+    # are wave 2, gated on OP-491 NDA-mirror infra.
+    {
+        "id": "rockchip-rk35xx-aarch64-gcc-11",
+        "vendor": "rockchip",
+        "family": "cross-toolchain",
+        "display_name": (
+            "Rockchip RK3576/RK3588 aarch64 toolchain (Linaro GCC 11.3 base)"
+        ),
+        "version": "11.3-2022.06",
+        "install_method": "vendor_installer",
+        "install_url": (
+            "https://releases.linaro.org/components/toolchain/binaries/"
+            "11.3-2022.06/aarch64-linux-gnu/"
+            "gcc-linaro-11.3.0-x86_64_aarch64-linux-gnu.tar.xz"
+        ),
+        "size_bytes": 178257920,
+        "metadata": {
+            "target_triple": "aarch64-linux-gnu",
+            "gcc_version": "11.3.0",
+            "bundled_libc": "glibc",
+            "socs": ["rk3576", "rk3588"],
+            "bsp_compatibility": [
+                "rockchip-linux-sdk-1.x",
+                "yocto-meta-rockchip",
+            ],
+            "nda_required": False,
+        },
+    },
     {
         "id": "riscv-gnu-toolchain",
         "vendor": "riscv-international",
