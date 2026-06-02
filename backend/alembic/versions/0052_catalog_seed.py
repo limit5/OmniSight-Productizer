@@ -337,18 +337,18 @@ _SEED_ENTRIES: tuple[dict[str, Any], ...] = (
         },
     },
     {
-        "id": "yocto-kirkstone",
+        "id": "yocto-scarthgap",
         "vendor": "yoctoproject",
         "family": "embedded",
-        "display_name": "Yocto Project (kirkstone LTS)",
-        "version": "4.0.21",
+        "display_name": "Yocto Project (scarthgap LTS)",
+        "version": "5.0.17",
         "install_method": "shell_script",
         "install_url": "https://git.yoctoproject.org/poky",
         "size_bytes": 314572800,
         "depends_on": ["arm-gnu-toolchain-13"],
         "metadata": {
-            "branch": "kirkstone",
-            "lts_until": "2026-04",
+            "branch": "scarthgap",
+            "lts_until": "2028-04",
         },
     },
     {
