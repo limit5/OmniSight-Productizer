@@ -1,4 +1,4 @@
-"""BS.1.2 — Seed shipped catalog entries (~33 entries).
+"""BS.1.2 — Seed shipped catalog entries (~34 entries).
 
 Data migration that pours the OmniSight upstream catalog into
 ``catalog_entries`` with ``source='shipped'``.  First-batch coverage
@@ -9,9 +9,9 @@ matches the BS.1.2 TODO row split:
   * Web             — 4 entries
   * Software        — 5 entries
   * RTOS            — 3 entries
-  * cross-toolchain — 7 entries
+  * cross-toolchain — 8 entries
   ───────────────────────────
-  Total             — 33 entries
+  Total             — 34 entries
 
 The yaml mirrors at ``configs/embedded_catalog/*.yaml`` carry the same
 content for human review and admin-UI display; the alembic migration
@@ -564,7 +564,7 @@ _SEED_ENTRIES: tuple[dict[str, Any], ...] = (
             "configure_required": True,
         },
     },
-    # ─── cross-toolchain (7) ─────────────────────────────────────────
+    # ─── cross-toolchain (8) ─────────────────────────────────────────
     {
         "id": "arm-gnu-toolchain-13",
         "vendor": "arm",
@@ -692,6 +692,33 @@ _SEED_ENTRIES: tuple[dict[str, Any], ...] = (
             "cpu_arch": "armv7-a-cortex-a7",
             "bsp_compatibility": ["rockchip-linux-sdk-rv1126"],
             "nda_required": False,
+        },
+    },
+    # ─── Phase 0 P0.A.3: MediaTek Genio 1200 aarch64 toolchain ───
+    # MediaTek IoT Yocto BSP manifest; NDA mirror cleared for wave 2.
+    {
+        "id": "mediatek-genio1200-aarch64",
+        "vendor": "mediatek",
+        "family": "cross-toolchain",
+        "display_name": (
+            "MediaTek Genio 1200 aarch64 toolchain "
+            "(IoT Yocto rity scarthgap base)"
+        ),
+        "version": "rity-scarthgap-v25.1.1",
+        "install_method": "shell_script",
+        "install_url": (
+            "https://gitlab.com/mediatek/aiot/bsp/manifest.git"
+        ),
+        "metadata": {
+            "target_triple": "aarch64-poky-linux",
+            "yocto_release": "rity-scarthgap-v25.1.1",
+            "socs": ["mt8395", "genio1200"],
+            "bsp_compatibility": [
+                "meta-mediatek-bsp",
+                "meta-rity",
+                "genio-1200-evk",
+            ],
+            "nda_required": True,
         },
     },
     {

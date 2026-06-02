@@ -80,6 +80,21 @@ entries:
       bsp_compatibility: [rockchip-linux-sdk-rv1126]
       nda_required: false
 
+  # Phase 0 P0.A.3: MediaTek Genio 1200 aarch64 toolchain.
+  # MediaTek IoT Yocto BSP manifest; NDA mirror cleared for wave 2.
+  - id: mediatek-genio1200-aarch64
+    vendor: mediatek
+    display_name: MediaTek Genio 1200 aarch64 toolchain (IoT Yocto rity scarthgap base)
+    version: "rity-scarthgap-v25.1.1"
+    install_method: shell_script
+    install_url: https://gitlab.com/mediatek/aiot/bsp/manifest.git
+    metadata:
+      target_triple: aarch64-poky-linux
+      yocto_release: rity-scarthgap-v25.1.1
+      socs: [mt8395, genio1200]
+      bsp_compatibility: [meta-mediatek-bsp, meta-rity, genio-1200-evk]
+      nda_required: true
+
   - id: riscv-gnu-toolchain
     vendor: riscv-international
     display_name: RISC-V GNU Toolchain (multilib)
