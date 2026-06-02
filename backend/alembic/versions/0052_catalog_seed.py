@@ -1,4 +1,4 @@
-"""BS.1.2 — Seed shipped catalog entries (~30 entries).
+"""BS.1.2 — Seed shipped catalog entries (~33 entries).
 
 Data migration that pours the OmniSight upstream catalog into
 ``catalog_entries`` with ``source='shipped'``.  First-batch coverage
@@ -9,9 +9,9 @@ matches the BS.1.2 TODO row split:
   * Web             — 4 entries
   * Software        — 5 entries
   * RTOS            — 3 entries
-  * cross-toolchain — 4 entries
+  * cross-toolchain — 7 entries
   ───────────────────────────
-  Total             — 30 entries
+  Total             — 33 entries
 
 The yaml mirrors at ``configs/embedded_catalog/*.yaml`` carry the same
 content for human review and admin-UI display; the alembic migration
@@ -85,7 +85,7 @@ Production readiness gate
   ``install_jobs`` / ``catalog_subscriptions`` in
   ``scripts/migrate_sqlite_to_pg.py::TABLES_IN_ORDER`` —
   BS.1.4 owns that mirror, same as 0051's HANDOFF said).
-* The seeded rows are 30 single-row INSERTs; on a clean DB this is
+* The seeded rows are 33 single-row INSERTs; on a clean DB this is
   sub-second on both SQLite and PG.
 * Production status of THIS commit: **dev-only**.  Next gate is
   ``deployed-inactive`` — operator runs ``alembic upgrade head`` on
@@ -564,7 +564,7 @@ _SEED_ENTRIES: tuple[dict[str, Any], ...] = (
             "configure_required": True,
         },
     },
-    # ─── cross-toolchain (4) ─────────────────────────────────────────
+    # ─── cross-toolchain (7) ─────────────────────────────────────────
     {
         "id": "arm-gnu-toolchain-13",
         "vendor": "arm",
@@ -634,6 +634,35 @@ _SEED_ENTRIES: tuple[dict[str, Any], ...] = (
                 "yocto-meta-rockchip",
             ],
             "nda_required": False,
+        },
+    },
+    # ─── Phase 0 P0.A.2: Qualcomm QCS6490 aarch64 toolchain ─────────
+    # NDA-cleared wave 2 entry for Radxa Dragon Q6A. Mirror artifact is
+    # intentionally NDA-gated; keep metadata.nda_required true.
+    {
+        "id": "qualcomm-qcs6490-aarch64",
+        "vendor": "qualcomm",
+        "family": "cross-toolchain",
+        "display_name": (
+            "Qualcomm QCS6490 aarch64 toolchain (QCS6490 Linux SDK)"
+        ),
+        "version": "qcs6490-linux-sdk-1.x",
+        "install_method": "vendor_installer",
+        "install_url": (
+            "https://vendor-mirrors-nda.omnisight.local/qualcomm/qcs6490/"
+            "qcs6490-linux-sdk-aarch64-toolchain.tar.xz"
+        ),
+        "size_bytes": 536870912,
+        "metadata": {
+            "target_triple": "aarch64-linux-gnu",
+            "bundled_libc": "glibc",
+            "socs": ["qcs6490"],
+            "board_compatibility": ["radxa-dragon-q6a"],
+            "bsp_compatibility": [
+                "qualcomm-linux-sdk-qcs6490",
+                "yocto-meta-qcom",
+            ],
+            "nda_required": True,
         },
     },
     # ─── Phase 0 P0.A.1b: Rockchip RV1126 armhf toolchain (32-bit ARMv7-A) ───
