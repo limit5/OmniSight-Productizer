@@ -1,0 +1,100 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "OmniSight ATK-DLRV1126 BSP Package",
+  "documentNamespace": "https://omnisight.local/spdx/OP-1952/atk-dlrv1126-bsp",
+  "creationInfo": {
+    "created": "2026-06-03T00:00:00Z",
+    "creators": [
+      "Organization: OmniSight",
+      "Tool: deploy/case4/rv1126/bsp-package.sh"
+    ]
+  },
+  "packages": [
+    {
+      "name": "linux-kernel-rv1126",
+      "SPDXID": "SPDXRef-Package-LinuxKernelRV1126",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only",
+      "licenseDeclared": "GPL-2.0-only",
+      "copyrightText": "NOASSERTION",
+      "description": "RV1126 armhf kernel image supplied by the BSP build."
+    },
+    {
+      "name": "atk-dlrv1126-device-tree",
+      "SPDXID": "SPDXRef-Package-ATKDLRV1126DTB",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only OR MIT",
+      "licenseDeclared": "GPL-2.0-only OR MIT",
+      "copyrightText": "NOASSERTION",
+      "description": "ATK-DLRV1126 device-tree blob supplied by the BSP build."
+    },
+    {
+      "name": "uvc-stitching-rv1126",
+      "SPDXID": "SPDXRef-Package-UVCStitchingRV1126",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) OmniSight contributors",
+      "description": "Customer-facing RV1126 uvc-stitching binary."
+    },
+    {
+      "name": "omnisight-rv1126-sdk-headers",
+      "SPDXID": "SPDXRef-Package-OmniSightRV1126SDKHeaders",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright (c) OmniSight contributors",
+      "description": "Customer SDK headers for BSP metadata and stitching calls."
+    },
+    {
+      "name": "rockchip-rv1126-vendor-bsp-blobs",
+      "SPDXID": "SPDXRef-Package-RockchipRV1126VendorBSPBlobs",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "LicenseRef-Rockchip-BSP-Redistribution",
+      "licenseDeclared": "LicenseRef-Rockchip-BSP-Redistribution",
+      "copyrightText": "NOASSERTION",
+      "description": "Redistributable Rockchip RV1126 BSP firmware or loader artifacts, when included by the caller."
+    }
+  ],
+  "hasExtractedLicensingInfos": [
+    {
+      "licenseId": "LicenseRef-Rockchip-BSP-Redistribution",
+      "extractedText": "Rockchip RV1126 BSP binary redistribution terms are vendor supplied and must be attached to the customer contract before release.",
+      "name": "Rockchip BSP redistribution terms"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-LinuxKernelRV1126"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-ATKDLRV1126DTB"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-UVCStitchingRV1126"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-OmniSightRV1126SDKHeaders"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-RockchipRV1126VendorBSPBlobs"
+    }
+  ]
+}
