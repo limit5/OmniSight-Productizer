@@ -1,0 +1,23 @@
+/* SPDX-License-Identifier: MIT
+ *
+ * Customer SDK umbrella header for the OP-1971 Genio 1200-EVK BSP package.
+ */
+#ifndef OMNISIGHT_CASE4_GENIO1200_H
+#define OMNISIGHT_CASE4_GENIO1200_H
+
+#include "omnisight_case4_genio1200_stitching.h"
+
+#define OMNISIGHT_CASE4_EVK_NAME "MediaTek Genio 1200-EVK"
+#define OMNISIGHT_CASE4_SOC_NAME "MediaTek Genio 1200"
+#define OMNISIGHT_CASE4_TARGET_ARCH "aarch64"
+#define OMNISIGHT_CASE4_TARGET_TRIPLE "aarch64-poky-linux"
+#define OMNISIGHT_CASE4_DEFAULT_DTB "genio-1200-evk.dtb"
+#define OMNISIGHT_CASE4_KERNEL_IMAGE "Image"
+#define OMNISIGHT_CASE4_STITCHING_BIN "uvc-stitching"
+
+#define OMNISIGHT_CASE4_SDK_VERSION_MAJOR 1
+#define OMNISIGHT_CASE4_SDK_VERSION_MINOR 0
+#define OMNISIGHT_CASE4_SDK_VERSION_PATCH 0
+#define OMNISIGHT_CASE4_SDK_VERSION "1.0.0"
+
+#endif /* OMNISIGHT_CASE4_GENIO1200_H */

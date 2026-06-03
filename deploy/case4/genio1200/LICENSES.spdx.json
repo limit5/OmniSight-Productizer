@@ -1,0 +1,95 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "spdxVersion": "SPDX-2.3",
+  "creationInfo": {
+    "created": "2026-06-03T00:00:00Z",
+    "creators": [
+      "Organization: OmniSight",
+      "Tool: OP-1971 BSP package manifest"
+    ]
+  },
+  "name": "OP-1971 MediaTek Genio 1200-EVK BSP/SDK package",
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://omnisight.local/spdx/op-1971/case4-genio1200",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-LinuxKernel",
+      "name": "linux-kernel-genio1200",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only",
+      "licenseDeclared": "GPL-2.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-Genio1200EVKDTB",
+      "name": "genio-1200-evk-device-tree",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only",
+      "licenseDeclared": "GPL-2.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-UVCStitching",
+      "name": "uvc-stitching-genio1200",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright OmniSight contributors"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-CustomerSDKHeaders",
+      "name": "omnisight-case4-genio1200-sdk-headers",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright OmniSight contributors"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-MediaTekBSPBlobs",
+      "name": "mediatek-genio1200-bsp-vendor-blobs",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "LicenseRef-MediaTek-Genio-BSP-Redistributable",
+      "licenseDeclared": "LicenseRef-MediaTek-Genio-BSP-Redistributable",
+      "copyrightText": "NOASSERTION"
+    }
+  ],
+  "hasExtractedLicensingInfos": [
+    {
+      "licenseId": "LicenseRef-MediaTek-Genio-BSP-Redistributable",
+      "extractedText": "Redistribution is permitted only for vendor-supplied MediaTek Genio 1200 BSP components that the customer is licensed to receive. Preserve upstream notices and do not redistribute NDA-covered blobs outside the customer delivery boundary.",
+      "name": "MediaTek Genio BSP Redistributable"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-LinuxKernel"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-Genio1200EVKDTB"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-UVCStitching"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-CustomerSDKHeaders"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-MediaTekBSPBlobs"
+    }
+  ]
+}
