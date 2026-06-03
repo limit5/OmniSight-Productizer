@@ -1,0 +1,60 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "creationInfo": {
+    "comment": "Case 4 FT-C600 reference-bundle license manifest re-exporting Case 2 UVCCamera_Qt deliverables.",
+    "created": "2026-06-03T00:00:00Z",
+    "creators": [
+      "Tool: OmniSight Case4 FT-C600 bundle-from-case2.sh"
+    ],
+    "licenseListVersion": "3.25"
+  },
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://omnisight.local/spdx/case4/ft-c600/reference-bundle/2026-06-03",
+  "name": "OmniSight Case4 FT-C600 BSP Reference Bundle",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-Case2-UVCCamera-Qt",
+      "copyrightText": "NOASSERTION",
+      "description": "Case 2 UVCCamera_Qt artifacts re-exported as the FT-C600 Case 4 BSP/SDK reference bundle.",
+      "downloadLocation": "git+https://github.com/limit5/UVCCamera_Qt.git",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:github/limit5/UVCCamera_Qt",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "limit5/UVCCamera_Qt",
+      "primaryPackagePurpose": "APPLICATION",
+      "supplier": "Organization: limit5"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-OmniSight-FT-C600-SDK-Headers",
+      "copyrightText": "NOASSERTION",
+      "description": "OmniSight SDK headers for consuming the FT-C600 Case 4 reference bundle and Phase 0 UVC XU dispatcher.",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "name": "omnisight-ft-c600-sdk-headers",
+      "primaryPackagePurpose": "SOURCE",
+      "supplier": "Organization: OmniSight"
+    }
+  ],
+  "relationships": [
+    {
+      "relatedSpdxElement": "SPDXRef-Package-Case2-UVCCamera-Qt",
+      "relationshipType": "DESCRIBES",
+      "spdxElementId": "SPDXRef-DOCUMENT"
+    },
+    {
+      "relatedSpdxElement": "SPDXRef-Package-OmniSight-FT-C600-SDK-Headers",
+      "relationshipType": "DESCRIBES",
+      "spdxElementId": "SPDXRef-DOCUMENT"
+    }
+  ],
+  "spdxVersion": "SPDX-2.3"
+}
