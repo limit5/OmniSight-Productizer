@@ -1,0 +1,95 @@
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "spdxVersion": "SPDX-2.3",
+  "creationInfo": {
+    "created": "2026-06-03T00:00:00Z",
+    "creators": [
+      "Organization: OmniSight",
+      "Tool: OP-1968 BSP package manifest"
+    ]
+  },
+  "name": "OP-1968 Radxa Dragon Q6A BSP/SDK package",
+  "dataLicense": "CC0-1.0",
+  "documentNamespace": "https://omnisight.local/spdx/op-1968/case4-qcs6490",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-LinuxKernel",
+      "name": "linux-kernel-qcs6490",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only",
+      "licenseDeclared": "GPL-2.0-only",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-RadxaDragonQ6ADTB",
+      "name": "radxa-dragon-q6a-device-tree",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "GPL-2.0-only OR MIT",
+      "licenseDeclared": "GPL-2.0-only OR MIT",
+      "copyrightText": "NOASSERTION"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-UVCStitching",
+      "name": "uvc-stitching-qcs6490",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright OmniSight contributors"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-CustomerSDKHeaders",
+      "name": "omnisight-case4-qcs6490-sdk-headers",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "Copyright OmniSight contributors"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-QualcommQCS6490NDABlobs",
+      "name": "qualcomm-qcs6490-nda-bsp-blobs",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "LicenseRef-Qualcomm-QCS6490-NDA-BSP",
+      "licenseDeclared": "LicenseRef-Qualcomm-QCS6490-NDA-BSP",
+      "copyrightText": "NOASSERTION"
+    }
+  ],
+  "hasExtractedLicensingInfos": [
+    {
+      "licenseId": "LicenseRef-Qualcomm-QCS6490-NDA-BSP",
+      "extractedText": "NDA-covered Qualcomm QCS6490 BSP firmware, boot, acceleration, or board-support blobs are attributable to Qualcomm and may be redistributed only to the licensed customer delivery boundary cleared for OP-1968. Preserve vendor notices and do not publish these blobs in public mirrors or source commits.",
+      "name": "Qualcomm QCS6490 NDA BSP terms"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-LinuxKernel"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-RadxaDragonQ6ADTB"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-UVCStitching"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-CustomerSDKHeaders"
+    },
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-QualcommQCS6490NDABlobs"
+    }
+  ]
+}
