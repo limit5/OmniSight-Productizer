@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config OMNISIGHT_RK3588_TYPEC_TCPC
+	tristate "OmniSight RK3588 Type-C TCPC binding"
+	depends on I2C
+	depends on TYPEC
+	select TYPEC_TCPM
+	select TYPEC_FUSB302
+	help
+	  Bind the ATK-DLRK3588 Type-C controller to the upstream Linux
+	  Type-C controller driver. The default controller is FUSB302, matching
+	  the C5.C.0 spike and the RK3588 design assumption.
+
+	  This shim instantiates the upstream I2C client and leaves TCPM
+	  registration plus /sys/class/typec exposure to the selected upstream
+	  driver. It does not implement UCSI or userspace PD contract policy.
+
+	  HUSB311 and FUSB304 are intentionally not enabled here because the
+	  C5.C.0 spike did not find a mainline-compatible driver binding for
+	  those alternates. WUSB3801 may be instantiated for attach/orientation
+	  smoke only, but it is not equivalent to FUSB302-class TCPM PD.
