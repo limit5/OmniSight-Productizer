@@ -1,0 +1,23 @@
+; OmniSight Type-C charging daemon (OP-2000).
+;
+; Install on the RK3588 target rootfs, then:
+;   sudo cp src/embedded/typec/omnisight-charging-daemon.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-charging-daemon.service
+
+[Unit]
+Description=OmniSight Type-C Charging Daemon
+After=systemd-udevd.service local-fs.target
+ConditionPathExists=/sys/class/typec
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/charging-daemon /run/charging-daemon.sock /sys/class/typec
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=charging-daemon
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
