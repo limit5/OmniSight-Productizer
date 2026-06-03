@@ -48,7 +48,17 @@ int eth_vlan_delete(const char *parent_if, uint16_t vlan_id) {
 }
 
 int eth_poe_get_status(const char *ifname, poe_status_t *status) {
-    /* TODO: read from sysfs or PSE controller I2C */
+    /*
+     * TODO(C5.B.1): keep this as a PD-only PoE status stub for the
+     * initial Case 5 Phase 1B shipment.
+     *
+     * PSE controller driver work is deferred to follow-up Sub-EPIC
+     * C5.B', which opens when the PoE daughtercard arrives on bench
+     * per D1=(c) PD-only ship plan. See OP-1982 C5.B.0 board
+     * inspection findings and
+     * docs/architecture/2026-06-03-case5-conference-device-epic-design.md
+     * section A9 for the deferral rationale.
+     */
     memset(status, 0, sizeof(*status));
     return 0;
 }
