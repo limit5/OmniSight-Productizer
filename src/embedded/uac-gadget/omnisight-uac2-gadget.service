@@ -1,0 +1,24 @@
+; OmniSight USB UAC2 gadget configfs setup (OP-1985).
+;
+; Install on the RK3588 target rootfs, then:
+;   sudo cp src/embedded/uac-gadget/omnisight-uac2-gadget.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-uac2-gadget.service
+
+[Unit]
+Description=OmniSight USB UAC2 Gadget Configfs Setup
+DefaultDependencies=no
+After=local-fs.target
+Before=usb-gadget.target
+ConditionPathExists=/sys/class/udc
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/setup_uac2_gadget.sh
+RemainAfterExit=true
+Restart=no
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
