@@ -19,3 +19,16 @@ config OMNISIGHT_RK3588_TYPEC_TCPC
 	  C5.C.0 spike did not find a mainline-compatible driver binding for
 	  those alternates. WUSB3801 may be instantiated for attach/orientation
 	  smoke only, but it is not equivalent to FUSB302-class TCPM PD.
+
+config OMNISIGHT_TYPEC_UCSI_BINDINGS
+	tristate "OmniSight Type-C UCSI bindings"
+	depends on TYPEC
+	depends on UCSI
+	help
+	  Register a board-supplied UCSI transport with the upstream Linux UCSI
+	  core so connector status, PD contract state, and alternate modes are
+	  exposed through /sys/class/typec.
+
+	  This is a narrow binding layer only. It does not instantiate the
+	  RK3588 Type-C controller from C5.C.1 and does not implement the
+	  charging daemon or userspace PD policy from C5.C.3.
