@@ -1,0 +1,34 @@
+config OMNISIGHT_UAC_GADGET_ALSA_WIRING
+	tristate "OmniSight UAC2 ALSA PCM wiring"
+	depends on SND && USB && USB_GADGET
+	select SND_PCM
+	select SND_USB_AUDIO
+	help
+	  Expose the Case 5 UAC2 gadget endpoints as ALSA PCM capture and
+	  playback devices under /dev/snd. The PCM format is fixed to 48 kHz,
+	  16-bit stereo so host-side snd_usb_audio sees the same defaults as
+	  the UAC2 descriptor path.
+
+choice
+	prompt "OmniSight UAC2 codec hook"
+	depends on OMNISIGHT_UAC_GADGET_ALSA_WIRING
+	default OMNISIGHT_UAC_GADGET_CODEC_NONE
+	help
+	  Select the board codec hook compiled beside the UAC2 ALSA wiring.
+	  RK3588 boards commonly pair with ES8388 or RT5640; board Kconfig
+	  should select the option matching the device-tree audio codec.
+
+config OMNISIGHT_UAC_GADGET_CODEC_NONE
+	bool "No board codec hook"
+
+config OMNISIGHT_UAC_GADGET_CODEC_ES8388
+	bool "ES8388 board codec hook"
+	depends on SND_SOC
+	select SND_SOC_ES8388
+
+config OMNISIGHT_UAC_GADGET_CODEC_RT5640
+	bool "RT5640 board codec hook"
+	depends on SND_SOC
+	select SND_SOC_RT5640
+
+endchoice
