@@ -44,6 +44,23 @@ entries:
       bsp_compatibility: [rockchip-linux-sdk-1.x, yocto-meta-rockchip]
       nda_required: false
 
+  # Phase 0 P0.A.2: Qualcomm QCS6490 aarch64 toolchain.
+  # NDA-cleared wave 2 entry for Radxa Dragon Q6A; mirror artifact is NDA-gated.
+  - id: qualcomm-qcs6490-aarch64
+    vendor: qualcomm
+    display_name: Qualcomm QCS6490 aarch64 toolchain (QCS6490 Linux SDK)
+    version: "qcs6490-linux-sdk-1.x"
+    install_method: vendor_installer
+    install_url: https://vendor-mirrors-nda.omnisight.local/qualcomm/qcs6490/qcs6490-linux-sdk-aarch64-toolchain.tar.xz
+    size_bytes: 536870912
+    metadata:
+      target_triple: aarch64-linux-gnu
+      bundled_libc: glibc
+      socs: [qcs6490]
+      board_compatibility: [radxa-dragon-q6a]
+      bsp_compatibility: [qualcomm-linux-sdk-qcs6490, yocto-meta-qcom]
+      nda_required: true
+
   # Phase 0 P0.A.1b: Rockchip RV1126 armhf toolchain (ISP-line, ARMv7-A 32-bit).
   # ATK-DLRV1126 EVK target. Open-source Linaro base; no NDA gate.
   # Wave 1 of EPIC OP-1918 (added in design v3 per operator EVK list).
