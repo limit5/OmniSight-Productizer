@@ -1,0 +1,22 @@
+; OmniSight audio-router userspace daemon (OP-1991).
+;
+; Install on the target rootfs beside the UAC2 gadget service, then:
+;   sudo cp src/embedded/uac-gadget/omnisight-audio-router.service /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now omnisight-audio-router.service
+
+[Unit]
+Description=OmniSight Audio Router Daemon
+After=omnisight-uac2-gadget.service
+ConditionPathExists=/sys/class/sound
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/audio-router-daemon
+Restart=on-failure
+RestartSec=2s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
