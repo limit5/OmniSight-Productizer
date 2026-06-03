@@ -1,0 +1,56 @@
+services:
+  asterisk:
+    image: ${SIP_INTEROP_ASTERISK_IMAGE:-andrius/asterisk:20-current}
+    network_mode: host
+    command:
+      - /bin/sh
+      - -lc
+      - |
+        cat >/etc/asterisk/pjsip.conf <<'ASTERISK_PJSIP'
+        [global]
+        type=global
+        user_agent=OmniSight SIP interop
+
+        [transport-udp]
+        type=transport
+        protocol=udp
+        bind=0.0.0.0:5060
+
+        [1001]
+        type=endpoint
+        context=interop
+        disallow=all
+        allow=ulaw
+        aors=1001
+        direct_media=no
+        force_rport=yes
+        rewrite_contact=yes
+        rtp_symmetric=yes
+
+        [1001]
+        type=aor
+        max_contacts=1
+        remove_existing=yes
+        ASTERISK_PJSIP
+        cat >/etc/asterisk/extensions.conf <<'ASTERISK_EXTENSIONS'
+        [interop]
+        exten => 600,1,Answer()
+          same => n,Echo()
+          same => n,Hangup()
+        ASTERISK_EXTENSIONS
+        cat >/etc/asterisk/rtp.conf <<'ASTERISK_RTP'
+        [general]
+        rtpstart=10000
+        rtpend=10099
+        strictrtp=no
+        ASTERISK_RTP
+        exec asterisk -fvvv
+
+  freeswitch:
+    image: ${SIP_INTEROP_FREESWITCH_IMAGE:-safarov/freeswitch:latest}
+    profiles:
+      - freeswitch
+    network_mode: host
+    environment:
+      SOUND_RATES: "8000"
+      SOUND_TYPES: "music"
