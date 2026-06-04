@@ -21,3 +21,24 @@ target_compile_options(omnisight-uav-autopilot-abstraction PRIVATE
   -Wextra
   -Werror
 )
+
+add_library(omnisight-uav-flight-mode-fsm STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/flight-mode-fsm.cpp
+)
+
+target_include_directories(omnisight-uav-flight-mode-fsm PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}
+)
+
+target_link_libraries(omnisight-uav-flight-mode-fsm PUBLIC
+  omnisight-uav-autopilot-abstraction
+)
+
+target_compile_features(omnisight-uav-flight-mode-fsm PUBLIC
+  cxx_std_17
+)
+target_compile_options(omnisight-uav-flight-mode-fsm PRIVATE
+  -Wall
+  -Wextra
+  -Werror
+)
