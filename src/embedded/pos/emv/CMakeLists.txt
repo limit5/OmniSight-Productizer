@@ -1,5 +1,5 @@
-# Case 7 EMV contact/contactless smart-card reader CMake fragment
-# (OP-2024/OP-2032).
+# Case 7 EMV contact/contactless smart-card reader + PED CMake fragment
+# (OP-2024/OP-2032/OP-2041).
 #
 # Include this fragment from the embedded platform CMake entry point. Cross
 # compilation is supplied by the caller through the platform toolchain file.
@@ -39,4 +39,36 @@ target_compile_options(omnisight-pos-emv-iso14443-contactless-reader PRIVATE
 )
 target_link_libraries(omnisight-pos-emv-iso14443-contactless-reader PUBLIC
   omnisight-pos-emv-iso7816-contact-reader
+)
+
+add_library(omnisight-pos-emv-ped-pin-entry STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/ped-pin-entry.cpp
+)
+
+target_include_directories(omnisight-pos-emv-ped-pin-entry PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}
+)
+
+target_compile_features(omnisight-pos-emv-ped-pin-entry PUBLIC
+  cxx_std_17
+)
+target_compile_options(omnisight-pos-emv-ped-pin-entry PRIVATE
+  -Wall
+  -Wextra
+  -Werror
+)
+
+add_executable(omnisight-pos-emv-ped-pin-entry-smoke
+  ${CMAKE_CURRENT_LIST_DIR}/ped-pin-entry.cpp
+)
+target_compile_definitions(omnisight-pos-emv-ped-pin-entry-smoke PRIVATE
+  OMNISIGHT_PED_PIN_ENTRY_SMOKE_MAIN=1
+)
+target_compile_features(omnisight-pos-emv-ped-pin-entry-smoke PRIVATE
+  cxx_std_17
+)
+target_compile_options(omnisight-pos-emv-ped-pin-entry-smoke PRIVATE
+  -Wall
+  -Wextra
+  -Werror
 )
