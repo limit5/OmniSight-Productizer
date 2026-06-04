@@ -1,0 +1,77 @@
+/* SPDX-License-Identifier: MIT
+ *
+ * Cases 6+7 PX4 autopilot backend stub (OP-2033).
+ */
+#include "autopilot-abstraction.h"
+
+#include <utility>
+
+namespace omnisight::embedded::uav::flight {
+namespace {
+
+class Px4BackendStub : public AutopilotBackend {
+public:
+	AutopilotStatus arm() override
+	{
+		return unsupported("PX4 backend integration is not linked");
+	}
+
+	AutopilotStatus disarm() override
+	{
+		return unsupported("PX4 backend integration is not linked");
+	}
+
+	AutopilotStatus setMode(const std::string &mode) override
+	{
+		if (mode.empty())
+			return fail(AutopilotStatus::kInvalidArgument,
+				    "PX4 mode is required");
+		mode_ = mode;
+		return unsupported("PX4 mode dispatch is not linked");
+	}
+
+	AutopilotStatus uploadMission(
+		const std::vector<MissionItem> &mission) override
+	{
+		if (mission.empty())
+			return fail(AutopilotStatus::kInvalidArgument,
+				    "PX4 mission must contain at least one item");
+		mission_ = mission;
+		return unsupported("PX4 mission upload is not linked");
+	}
+
+	AutopilotTelemetry getStatus() const override
+	{
+		return {false, false, mode_, "PX4 backend stub only"};
+	}
+
+	const std::string &lastError() const override
+	{
+		return last_error_;
+	}
+
+private:
+	AutopilotStatus fail(AutopilotStatus status, std::string error)
+	{
+		last_error_ = std::move(error);
+		return status;
+	}
+
+	AutopilotStatus unsupported(std::string error)
+	{
+		return fail(AutopilotStatus::kUnsupported, std::move(error));
+	}
+
+	std::string mode_;
+	std::vector<MissionItem> mission_;
+	std::string last_error_;
+};
+
+} // namespace
+
+std::unique_ptr<AutopilotBackend> createPx4Backend()
+{
+	return std::make_unique<Px4BackendStub>();
+}
+
+} // namespace omnisight::embedded::uav::flight
