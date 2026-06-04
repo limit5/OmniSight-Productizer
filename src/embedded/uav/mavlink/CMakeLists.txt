@@ -5,6 +5,7 @@
 
 add_library(omnisight-uav-mavlink-transport STATIC
   ${CMAKE_CURRENT_LIST_DIR}/mavlink-transport.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/mavlink-transport-udp.cpp
 )
 
 target_include_directories(omnisight-uav-mavlink-transport PUBLIC
