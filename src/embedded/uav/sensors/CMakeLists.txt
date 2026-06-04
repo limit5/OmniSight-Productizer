@@ -1,4 +1,4 @@
-# Case 6 UAV sensor drivers CMake fragment (OP-2025 GPS, OP-2035 barometer).
+# Case 6 UAV sensor drivers CMake fragment (OP-2025 GPS, OP-2029 EKF, OP-2035 barometer).
 #
 # Include this fragment from the embedded platform CMake entry point. Cross
 # compilation is supplied by the caller through the platform toolchain file.
@@ -42,3 +42,23 @@ target_compile_definitions(omnisight-uav-barometer-driver-smoke PRIVATE
 )
 target_compile_features(omnisight-uav-barometer-driver-smoke PRIVATE cxx_std_17)
 target_compile_options(omnisight-uav-barometer-driver-smoke PRIVATE -Wall -Wextra -Werror)
+
+# ── EKF flight integration (OP-2029) ────────────────────────────────
+
+add_library(omnisight-uav-ekf-flight-integration STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/ekf-flight-integration.cpp
+)
+target_include_directories(omnisight-uav-ekf-flight-integration PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}
+)
+target_compile_features(omnisight-uav-ekf-flight-integration PUBLIC cxx_std_17)
+target_compile_options(omnisight-uav-ekf-flight-integration PRIVATE -Wall -Wextra -Werror)
+
+add_executable(omnisight-uav-ekf-flight-integration-smoke
+  ${CMAKE_CURRENT_LIST_DIR}/ekf-flight-integration.cpp
+)
+target_compile_definitions(omnisight-uav-ekf-flight-integration-smoke PRIVATE
+  OMNISIGHT_UAV_EKF_FLIGHT_INTEGRATION_SMOKE_MAIN=1
+)
+target_compile_features(omnisight-uav-ekf-flight-integration-smoke PRIVATE cxx_std_17)
+target_compile_options(omnisight-uav-ekf-flight-integration-smoke PRIVATE -Wall -Wextra -Werror)
