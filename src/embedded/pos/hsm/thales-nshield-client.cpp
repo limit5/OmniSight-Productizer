@@ -4,6 +4,8 @@
  */
 #include "thales-nshield-client.h"
 
+#include "hsm-client-registry.h"
+
 #include <cstdint>
 #include <iostream>
 #include <utility>
@@ -362,6 +364,15 @@ const char *toString(ThalesNShieldProtocol protocol)
 
 	return "unknown";
 }
+
+namespace {
+
+ThalesNShieldClient thales_nshield_registry_client({}, {});
+[[maybe_unused]] const bool thales_nshield_registered =
+	HsmClientRegistry::instance().registerClient("thales-nshield",
+						    &thales_nshield_registry_client);
+
+} // namespace
 
 } // namespace omnisight::embedded::pos::hsm
 

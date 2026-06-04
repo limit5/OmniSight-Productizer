@@ -4,6 +4,8 @@
  */
 #include "utimaco-client.h"
 
+#include "hsm-client-registry.h"
+
 #include <algorithm>
 #include <iostream>
 #include <utility>
@@ -52,6 +54,74 @@ static std::string transport_error(const UtimacoTransport &transport)
 		return "Utimaco SDK operation failed";
 
 	return error;
+}
+
+static HSMStatus to_hsm_status(HsmStatus status)
+{
+	switch (status) {
+	case HsmStatus::kOk:
+		return HSMStatus::kOk;
+	case HsmStatus::kInvalidArgument:
+		return HSMStatus::kInvalidArgument;
+	case HsmStatus::kUnavailable:
+		return HSMStatus::kUnavailable;
+	case HsmStatus::kInvalidState:
+		return HSMStatus::kInvalidState;
+	case HsmStatus::kBackendError:
+		return HSMStatus::kBackendError;
+	}
+
+	return HSMStatus::kBackendError;
+}
+
+static bool to_utimaco_key_spec(const HSMKeySpec &spec, HsmKeySpec *out)
+{
+	if (!out)
+		return false;
+
+	out->label = spec.label;
+	out->extractable = spec.extractable;
+	switch (spec.algorithm) {
+	case HSMKeyAlgorithm::kAes256:
+		out->algorithm = HsmKeyAlgorithm::kAes;
+		out->bits = 256;
+		return true;
+	case HSMKeyAlgorithm::kRsa2048:
+		out->algorithm = HsmKeyAlgorithm::kRsa;
+		out->bits = 2048;
+		return true;
+	case HSMKeyAlgorithm::kRsa3072:
+		out->algorithm = HsmKeyAlgorithm::kRsa;
+		out->bits = 3072;
+		return true;
+	case HSMKeyAlgorithm::kEcP256:
+		return false;
+	}
+
+	return false;
+}
+
+static HsmKeyHandle to_utimaco_key_handle(const HSMKeyHandle &key)
+{
+	return { key.id, key.label, key.vendor_specific_ptr };
+}
+
+static HSMKeyHandle to_hsm_key_handle(const HsmKeyHandle &key)
+{
+	return { key.id, key.label, key.vendor_specific_ptr };
+}
+
+static bool to_utimaco_cipher_request(const HSMOperationRequest &request,
+				      HsmCipherRequest *out)
+{
+	if (!out || request.mechanism != HSMMechanism::kAesCbc)
+		return false;
+
+	out->key = to_utimaco_key_handle(request.key);
+	out->mode = HsmCipherMode::kCbc;
+	out->iv = request.iv;
+	out->input = request.input;
+	return true;
 }
 
 } // namespace
@@ -267,6 +337,121 @@ const UtimacoClientConfig &UtimacoClient::config() const
 {
 	return impl_->config();
 }
+
+namespace {
+
+class UtimacoRegistryClient final : public HSMClient {
+public:
+	UtimacoRegistryClient() : client_({}) {}
+
+	HSMStatus connect() override
+	{
+		return to_hsm_status(client_.connect());
+	}
+
+	HSMStatus disconnect() override
+	{
+		client_.disconnect();
+		return HSMStatus::kOk;
+	}
+
+	bool connected() const override
+	{
+		return client_.connected();
+	}
+
+	HSMStatus generateKey(const HSMKeySpec &spec, HSMKeyHandle *key) override
+	{
+		HsmKeySpec utimaco_spec;
+		HsmKeyHandle utimaco_key;
+
+		if (!key || !to_utimaco_key_spec(spec, &utimaco_spec)) {
+			last_error_ = "Utimaco registry key spec is invalid";
+			return HSMStatus::kInvalidArgument;
+		}
+
+		HSMStatus status =
+			to_hsm_status(client_.generateKey(utimaco_spec,
+							 &utimaco_key));
+		if (status == HSMStatus::kOk) {
+			*key = to_hsm_key_handle(utimaco_key);
+			last_error_.clear();
+		} else {
+			last_error_ = client_.lastError();
+		}
+		return status;
+	}
+
+	HSMStatus importKey(const HSMKeySpec &spec,
+			    const std::vector<uint8_t> &wrapped_key,
+			    HSMKeyHandle *key) override
+	{
+		(void)spec;
+		(void)wrapped_key;
+		(void)key;
+		last_error_ = "Utimaco registry key import is not linked";
+		return HSMStatus::kUnavailable;
+	}
+
+	HSMStatus encrypt(const HSMOperationRequest &request,
+			  std::vector<uint8_t> *ciphertext) override
+	{
+		return crypt(request, ciphertext, true);
+	}
+
+	HSMStatus decrypt(const HSMOperationRequest &request,
+			  std::vector<uint8_t> *plaintext) override
+	{
+		return crypt(request, plaintext, false);
+	}
+
+	HSMStatus sign(const HSMOperationRequest &request,
+		       std::vector<uint8_t> *signature) override
+	{
+		(void)request;
+		(void)signature;
+		last_error_ = "Utimaco registry signing is not linked";
+		return HSMStatus::kUnavailable;
+	}
+
+	const std::string &lastError() const override
+	{
+		return last_error_.empty() ? client_.lastError() : last_error_;
+	}
+
+private:
+	HSMStatus crypt(const HSMOperationRequest &request,
+		       std::vector<uint8_t> *output, bool encrypt)
+	{
+		HsmCipherRequest utimaco_request;
+
+		if (!output ||
+		    !to_utimaco_cipher_request(request, &utimaco_request)) {
+			last_error_ = "Utimaco registry cipher request is invalid";
+			return HSMStatus::kInvalidArgument;
+		}
+
+		HsmStatus status = encrypt ?
+					   client_.encrypt(utimaco_request, output) :
+					   client_.decrypt(utimaco_request, output);
+		HSMStatus hsm_status = to_hsm_status(status);
+		if (hsm_status == HSMStatus::kOk)
+			last_error_.clear();
+		else
+			last_error_ = client_.lastError();
+		return hsm_status;
+	}
+
+	UtimacoClient client_;
+	std::string last_error_;
+};
+
+UtimacoRegistryClient utimaco_registry_client;
+[[maybe_unused]] const bool utimaco_registered =
+	HsmClientRegistry::instance().registerClient("utimaco",
+						    &utimaco_registry_client);
+
+} // namespace
 
 } // namespace omnisight::embedded::pos::hsm
 

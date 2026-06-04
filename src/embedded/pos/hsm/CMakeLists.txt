@@ -7,6 +7,17 @@
 # static-link path bridges each SDK's glibc ABI; container fallback remains
 # outside this wrapper when vendor runtime invariants reject static linking.
 
+# ── Unified HSM client registry (OP-2050) ───────────────────────────
+
+add_library(omnisight-pos-hsm-client-registry STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/hsm-client-registry.cpp
+)
+target_include_directories(omnisight-pos-hsm-client-registry PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}
+)
+target_compile_features(omnisight-pos-hsm-client-registry PUBLIC cxx_std_17)
+target_compile_options(omnisight-pos-hsm-client-registry PRIVATE -Wall -Wextra -Werror)
+
 # ── Thales nShield HSM client (OP-2027) ─────────────────────────────
 
 add_library(omnisight-pos-hsm-thales-nshield-client STATIC
@@ -17,6 +28,9 @@ target_include_directories(omnisight-pos-hsm-thales-nshield-client PUBLIC
 )
 target_compile_features(omnisight-pos-hsm-thales-nshield-client PUBLIC cxx_std_17)
 target_compile_options(omnisight-pos-hsm-thales-nshield-client PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(omnisight-pos-hsm-thales-nshield-client PUBLIC
+  omnisight-pos-hsm-client-registry
+)
 
 set(OMNISIGHT_THALES_NSHIELD_SDK_ROOT "" CACHE PATH
   "NDA-mirror Thales nShield SDK root for static-link builds")
@@ -47,6 +61,9 @@ target_compile_definitions(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE
 )
 target_compile_features(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE cxx_std_17)
 target_compile_options(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE
+  omnisight-pos-hsm-client-registry
+)
 
 # ── Utimaco SecurityServer HSM client (OP-2036) ─────────────────────
 
@@ -58,6 +75,9 @@ target_include_directories(omnisight-pos-hsm-utimaco-client PUBLIC
 )
 target_compile_features(omnisight-pos-hsm-utimaco-client PUBLIC cxx_std_17)
 target_compile_options(omnisight-pos-hsm-utimaco-client PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(omnisight-pos-hsm-utimaco-client PUBLIC
+  omnisight-pos-hsm-client-registry
+)
 
 set(OMNISIGHT_UTIMACO_SDK_ROOT "" CACHE PATH
   "NDA-mirror Utimaco SecurityServer SDK root for static-link builds")
@@ -88,6 +108,9 @@ target_compile_definitions(omnisight-pos-hsm-utimaco-client-smoke PRIVATE
 )
 target_compile_features(omnisight-pos-hsm-utimaco-client-smoke PRIVATE cxx_std_17)
 target_compile_options(omnisight-pos-hsm-utimaco-client-smoke PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(omnisight-pos-hsm-utimaco-client-smoke PRIVATE
+  omnisight-pos-hsm-client-registry
+)
 
 # ── SafeNet Luna Network HSM client (OP-2043) ───────────────────────
 
@@ -99,6 +122,9 @@ target_include_directories(omnisight-pos-hsm-safenet-luna-client PUBLIC
 )
 target_compile_features(omnisight-pos-hsm-safenet-luna-client PUBLIC cxx_std_17)
 target_compile_options(omnisight-pos-hsm-safenet-luna-client PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(omnisight-pos-hsm-safenet-luna-client PUBLIC
+  omnisight-pos-hsm-client-registry
+)
 
 set(OMNISIGHT_SAFENET_LUNA_SDK_ROOT "" CACHE PATH
   "NDA-mirror SafeNet Luna SDK root for static-link builds")
@@ -129,3 +155,6 @@ target_compile_definitions(omnisight-pos-hsm-safenet-luna-client-smoke PRIVATE
 )
 target_compile_features(omnisight-pos-hsm-safenet-luna-client-smoke PRIVATE cxx_std_17)
 target_compile_options(omnisight-pos-hsm-safenet-luna-client-smoke PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(omnisight-pos-hsm-safenet-luna-client-smoke PRIVATE
+  omnisight-pos-hsm-client-registry
+)

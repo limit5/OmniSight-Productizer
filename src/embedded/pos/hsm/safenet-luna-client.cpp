@@ -4,6 +4,8 @@
  */
 #include "safenet-luna-client.h"
 
+#include "hsm-client-registry.h"
+
 #include <cstdint>
 #include <iostream>
 #include <utility>
@@ -315,6 +317,15 @@ const char *toString(SafeNetLunaProtocol protocol)
 
 	return "unknown";
 }
+
+namespace {
+
+SafeNetLunaClient safenet_luna_registry_client({}, {});
+[[maybe_unused]] const bool safenet_luna_registered =
+	HsmClientRegistry::instance().registerClient("safenet-luna",
+						    &safenet_luna_registry_client);
+
+} // namespace
 
 } // namespace omnisight::embedded::pos::hsm
 
