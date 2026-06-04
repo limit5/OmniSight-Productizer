@@ -1,35 +1,39 @@
-# Cases 6+7 UAV optical flow CMake fragment (OP-2031).
+# Cases 6+7 UAV computer vision CMake fragment (OP-2031 optical flow, OP-2037 object detect).
 #
 # Include this fragment from the embedded platform CMake entry point. Cross
 # compilation is supplied by the caller through the platform toolchain file.
 
+# ── Lucas-Kanade optical flow (OP-2031) ─────────────────────────────
+
 add_library(omnisight-uav-cv-optical-flow STATIC
   ${CMAKE_CURRENT_LIST_DIR}/optical-flow.cpp
 )
-
 target_include_directories(omnisight-uav-cv-optical-flow PUBLIC
   ${CMAKE_CURRENT_LIST_DIR}
 )
+target_compile_features(omnisight-uav-cv-optical-flow PUBLIC cxx_std_17)
+target_compile_options(omnisight-uav-cv-optical-flow PRIVATE -Wall -Wextra -Werror)
 
-target_compile_features(omnisight-uav-cv-optical-flow PUBLIC
-  cxx_std_17
-)
-target_compile_options(omnisight-uav-cv-optical-flow PRIVATE
-  -Wall
-  -Wextra
-  -Werror
-)
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(OPENCV4 QUIET opencv4)
+endif()
 
-find_package(OpenCV QUIET COMPONENTS core imgproc video)
-if(OpenCV_FOUND)
+if(OPENCV4_FOUND)
   target_compile_definitions(omnisight-uav-cv-optical-flow PRIVATE
-    OMNISIGHT_UAV_CV_WITH_OPENCV=1
+    OMNISIGHT_CV_WITH_OPENCV=1
   )
   target_include_directories(omnisight-uav-cv-optical-flow PRIVATE
-    ${OpenCV_INCLUDE_DIRS}
+    ${OPENCV4_INCLUDE_DIRS}
   )
   target_link_libraries(omnisight-uav-cv-optical-flow PUBLIC
-    ${OpenCV_LIBS}
+    ${OPENCV4_LIBRARIES}
+  )
+  target_link_directories(omnisight-uav-cv-optical-flow PUBLIC
+    ${OPENCV4_LIBRARY_DIRS}
+  )
+  target_compile_options(omnisight-uav-cv-optical-flow PRIVATE
+    ${OPENCV4_CFLAGS_OTHER}
   )
 endif()
 
@@ -37,24 +41,27 @@ add_executable(omnisight-uav-cv-optical-flow-smoke
   ${CMAKE_CURRENT_LIST_DIR}/optical-flow.cpp
 )
 target_compile_definitions(omnisight-uav-cv-optical-flow-smoke PRIVATE
-  OMNISIGHT_UAV_OPTICAL_FLOW_SMOKE_MAIN=1
+  OMNISIGHT_UAV_CV_OPTICAL_FLOW_SMOKE_MAIN=1
 )
-target_compile_features(omnisight-uav-cv-optical-flow-smoke PRIVATE
-  cxx_std_17
+target_compile_features(omnisight-uav-cv-optical-flow-smoke PRIVATE cxx_std_17)
+target_compile_options(omnisight-uav-cv-optical-flow-smoke PRIVATE -Wall -Wextra -Werror)
+
+# ── NPU object detection wire-up (OP-2037) ──────────────────────────
+
+add_library(omnisight-uav-cv-object-detection STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/object-detection.cpp
 )
-target_compile_options(omnisight-uav-cv-optical-flow-smoke PRIVATE
-  -Wall
-  -Wextra
-  -Werror
+target_include_directories(omnisight-uav-cv-object-detection PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}
 )
-if(OpenCV_FOUND)
-  target_compile_definitions(omnisight-uav-cv-optical-flow-smoke PRIVATE
-    OMNISIGHT_UAV_CV_WITH_OPENCV=1
-  )
-  target_include_directories(omnisight-uav-cv-optical-flow-smoke PRIVATE
-    ${OpenCV_INCLUDE_DIRS}
-  )
-  target_link_libraries(omnisight-uav-cv-optical-flow-smoke PRIVATE
-    ${OpenCV_LIBS}
-  )
-endif()
+target_compile_features(omnisight-uav-cv-object-detection PUBLIC cxx_std_17)
+target_compile_options(omnisight-uav-cv-object-detection PRIVATE -Wall -Wextra -Werror)
+
+add_executable(omnisight-uav-cv-object-detection-smoke
+  ${CMAKE_CURRENT_LIST_DIR}/object-detection.cpp
+)
+target_compile_definitions(omnisight-uav-cv-object-detection-smoke PRIVATE
+  OMNISIGHT_UAV_CV_OBJECT_DETECTION_SMOKE_MAIN=1
+)
+target_compile_features(omnisight-uav-cv-object-detection-smoke PRIVATE cxx_std_17)
+target_compile_options(omnisight-uav-cv-object-detection-smoke PRIVATE -Wall -Wextra -Werror)
