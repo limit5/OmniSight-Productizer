@@ -1,4 +1,5 @@
-# Case 7 POS HSM clients CMake fragment (OP-2027 Thales, OP-2036 Utimaco).
+# Case 7 POS HSM clients CMake fragment (OP-2027 Thales, OP-2036 Utimaco,
+# OP-2043 SafeNet Luna).
 #
 # Include this fragment from the embedded platform CMake entry point. Cross
 # compilation is supplied by the caller through the platform toolchain file.
@@ -87,3 +88,44 @@ target_compile_definitions(omnisight-pos-hsm-utimaco-client-smoke PRIVATE
 )
 target_compile_features(omnisight-pos-hsm-utimaco-client-smoke PRIVATE cxx_std_17)
 target_compile_options(omnisight-pos-hsm-utimaco-client-smoke PRIVATE -Wall -Wextra -Werror)
+
+# ── SafeNet Luna Network HSM client (OP-2043) ───────────────────────
+
+add_library(omnisight-pos-hsm-safenet-luna-client STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/safenet-luna-client.cpp
+)
+target_include_directories(omnisight-pos-hsm-safenet-luna-client PUBLIC
+  ${CMAKE_CURRENT_LIST_DIR}
+)
+target_compile_features(omnisight-pos-hsm-safenet-luna-client PUBLIC cxx_std_17)
+target_compile_options(omnisight-pos-hsm-safenet-luna-client PRIVATE -Wall -Wextra -Werror)
+
+set(OMNISIGHT_SAFENET_LUNA_SDK_ROOT "" CACHE PATH
+  "NDA-mirror SafeNet Luna SDK root for static-link builds")
+
+if(OMNISIGHT_SAFENET_LUNA_SDK_ROOT)
+  find_library(OMNISIGHT_SAFENET_LUNA_LIBRARY
+    NAMES libCryptoki2_64.a libCryptoki2.a
+    PATHS ${OMNISIGHT_SAFENET_LUNA_SDK_ROOT}/lib
+    NO_DEFAULT_PATH
+    REQUIRED
+  )
+  target_compile_definitions(omnisight-pos-hsm-safenet-luna-client PRIVATE
+    OMNISIGHT_HSM_WITH_SAFENET_LUNA=1
+  )
+  target_include_directories(omnisight-pos-hsm-safenet-luna-client PRIVATE
+    ${OMNISIGHT_SAFENET_LUNA_SDK_ROOT}/include
+  )
+  target_link_libraries(omnisight-pos-hsm-safenet-luna-client PUBLIC
+    ${OMNISIGHT_SAFENET_LUNA_LIBRARY}
+  )
+endif()
+
+add_executable(omnisight-pos-hsm-safenet-luna-client-smoke
+  ${CMAKE_CURRENT_LIST_DIR}/safenet-luna-client.cpp
+)
+target_compile_definitions(omnisight-pos-hsm-safenet-luna-client-smoke PRIVATE
+  OMNISIGHT_SAFENET_LUNA_CLIENT_SMOKE_MAIN=1
+)
+target_compile_features(omnisight-pos-hsm-safenet-luna-client-smoke PRIVATE cxx_std_17)
+target_compile_options(omnisight-pos-hsm-safenet-luna-client-smoke PRIVATE -Wall -Wextra -Werror)
