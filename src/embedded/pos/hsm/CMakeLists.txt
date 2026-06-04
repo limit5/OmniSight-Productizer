@@ -1,63 +1,41 @@
-# Case 7 Thales nShield HSM client CMake fragment (OP-2027).
+# Case 7 POS HSM clients CMake fragment (OP-2027 Thales, OP-2036 Utimaco).
 #
 # Include this fragment from the embedded platform CMake entry point. Cross
 # compilation is supplied by the caller through the platform toolchain file.
-# The nShield static-link path uses SDK artifacts from the NDA mirror when
-# OMNISIGHT_THALES_NSHIELD_SDK_ROOT is set; package-level container fallback
-# remains outside this wrapper when vendor runtime invariants reject static
-# linking.
+# Vendor HSM SDKs are fetched from the NDA mirror (OP-491-style infra). The
+# static-link path bridges each SDK's glibc ABI; container fallback remains
+# outside this wrapper when vendor runtime invariants reject static linking.
+
+# ── Thales nShield HSM client (OP-2027) ─────────────────────────────
 
 add_library(omnisight-pos-hsm-thales-nshield-client STATIC
   ${CMAKE_CURRENT_LIST_DIR}/thales-nshield-client.cpp
 )
-
 target_include_directories(omnisight-pos-hsm-thales-nshield-client PUBLIC
   ${CMAKE_CURRENT_LIST_DIR}
 )
-
-target_compile_features(omnisight-pos-hsm-thales-nshield-client PUBLIC
-  cxx_std_17
-)
-target_compile_options(omnisight-pos-hsm-thales-nshield-client PRIVATE
-  -Wall
-  -Wextra
-  -Werror
-)
+target_compile_features(omnisight-pos-hsm-thales-nshield-client PUBLIC cxx_std_17)
+target_compile_options(omnisight-pos-hsm-thales-nshield-client PRIVATE -Wall -Wextra -Werror)
 
 set(OMNISIGHT_THALES_NSHIELD_SDK_ROOT "" CACHE PATH
   "NDA-mirror Thales nShield SDK root for static-link builds")
 
 if(OMNISIGHT_THALES_NSHIELD_SDK_ROOT)
-  find_library(OMNISIGHT_THALES_NSHIELD_PKCS11_LIBRARY
-    NAMES libcknfast.a cknfast
+  find_library(OMNISIGHT_THALES_NSHIELD_LIBRARY
+    NAMES libnfast.a
     PATHS ${OMNISIGHT_THALES_NSHIELD_SDK_ROOT}/lib
     NO_DEFAULT_PATH
+    REQUIRED
   )
-  find_library(OMNISIGHT_THALES_NSHIELD_NFAST_LIBRARY
-    NAMES libnfast.a nfast
-    PATHS ${OMNISIGHT_THALES_NSHIELD_SDK_ROOT}/lib
-    NO_DEFAULT_PATH
-  )
-
   target_compile_definitions(omnisight-pos-hsm-thales-nshield-client PRIVATE
-    OMNISIGHT_THALES_NSHIELD_WITH_SDK=1
+    OMNISIGHT_HSM_WITH_THALES_NSHIELD=1
   )
   target_include_directories(omnisight-pos-hsm-thales-nshield-client PRIVATE
     ${OMNISIGHT_THALES_NSHIELD_SDK_ROOT}/include
   )
-  target_link_directories(omnisight-pos-hsm-thales-nshield-client PUBLIC
-    ${OMNISIGHT_THALES_NSHIELD_SDK_ROOT}/lib
+  target_link_libraries(omnisight-pos-hsm-thales-nshield-client PUBLIC
+    ${OMNISIGHT_THALES_NSHIELD_LIBRARY}
   )
-  if(OMNISIGHT_THALES_NSHIELD_PKCS11_LIBRARY)
-    target_link_libraries(omnisight-pos-hsm-thales-nshield-client PUBLIC
-      ${OMNISIGHT_THALES_NSHIELD_PKCS11_LIBRARY}
-    )
-  endif()
-  if(OMNISIGHT_THALES_NSHIELD_NFAST_LIBRARY)
-    target_link_libraries(omnisight-pos-hsm-thales-nshield-client PUBLIC
-      ${OMNISIGHT_THALES_NSHIELD_NFAST_LIBRARY}
-    )
-  endif()
 endif()
 
 add_executable(omnisight-pos-hsm-thales-nshield-client-smoke
@@ -66,14 +44,46 @@ add_executable(omnisight-pos-hsm-thales-nshield-client-smoke
 target_compile_definitions(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE
   OMNISIGHT_THALES_NSHIELD_CLIENT_SMOKE_MAIN=1
 )
-target_compile_features(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE
-  cxx_std_17
+target_compile_features(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE cxx_std_17)
+target_compile_options(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE -Wall -Wextra -Werror)
+
+# ── Utimaco SecurityServer HSM client (OP-2036) ─────────────────────
+
+add_library(omnisight-pos-hsm-utimaco-client STATIC
+  ${CMAKE_CURRENT_LIST_DIR}/utimaco-client.cpp
 )
-target_compile_options(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE
-  -Wall
-  -Wextra
-  -Werror
-)
-target_include_directories(omnisight-pos-hsm-thales-nshield-client-smoke PRIVATE
+target_include_directories(omnisight-pos-hsm-utimaco-client PUBLIC
   ${CMAKE_CURRENT_LIST_DIR}
 )
+target_compile_features(omnisight-pos-hsm-utimaco-client PUBLIC cxx_std_17)
+target_compile_options(omnisight-pos-hsm-utimaco-client PRIVATE -Wall -Wextra -Werror)
+
+set(OMNISIGHT_UTIMACO_SDK_ROOT "" CACHE PATH
+  "NDA-mirror Utimaco SecurityServer SDK root for static-link builds")
+
+if(OMNISIGHT_UTIMACO_SDK_ROOT)
+  find_library(OMNISIGHT_UTIMACO_LIBRARY
+    NAMES libcxi.a libcs2.a
+    PATHS ${OMNISIGHT_UTIMACO_SDK_ROOT}/lib
+    NO_DEFAULT_PATH
+    REQUIRED
+  )
+  target_compile_definitions(omnisight-pos-hsm-utimaco-client PRIVATE
+    OMNISIGHT_HSM_WITH_UTIMACO=1
+  )
+  target_include_directories(omnisight-pos-hsm-utimaco-client PRIVATE
+    ${OMNISIGHT_UTIMACO_SDK_ROOT}/include
+  )
+  target_link_libraries(omnisight-pos-hsm-utimaco-client PUBLIC
+    ${OMNISIGHT_UTIMACO_LIBRARY}
+  )
+endif()
+
+add_executable(omnisight-pos-hsm-utimaco-client-smoke
+  ${CMAKE_CURRENT_LIST_DIR}/utimaco-client.cpp
+)
+target_compile_definitions(omnisight-pos-hsm-utimaco-client-smoke PRIVATE
+  OMNISIGHT_UTIMACO_CLIENT_SMOKE_MAIN=1
+)
+target_compile_features(omnisight-pos-hsm-utimaco-client-smoke PRIVATE cxx_std_17)
+target_compile_options(omnisight-pos-hsm-utimaco-client-smoke PRIVATE -Wall -Wextra -Werror)
