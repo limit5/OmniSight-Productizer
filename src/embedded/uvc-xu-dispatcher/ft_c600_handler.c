@@ -1,40 +1,28 @@
-#include <stddef.h>
-#include <stdint.h>
+#include "vendor_registry.h"
 
-struct uvc_xu_guid {
-	uint32_t data1;
-	uint16_t data2;
-	uint16_t data3;
-	uint8_t data4[8];
+#include <stdio.h>
+
+static const struct vendor_vid_pid ft_c600_vid_pid[] = {
+	{ 0x2207, 0xc600 },
 };
 
-struct uvc_xu_vendor_adapter {
-	const char *vendor_id;
-	struct uvc_xu_guid xu_guid;
-	const void *vid_pids;
-	size_t vid_pid_count;
-	const void *cmd_types;
-	size_t cmd_type_count;
-};
-
-extern int register_vendor(const struct uvc_xu_vendor_adapter *adapter);
-
-static const struct uvc_xu_vendor_adapter ft_c600_adapter = {
+static const struct vendor_adapter ft_c600_adapter = {
 	.vendor_id = "ft-c600",
 	.xu_guid = {
-		.data1 = 0x20209E96,
-		.data2 = 0x90F1,
-		.data3 = 0xA540,
-		.data4 = { 0x90, 0x75, 0xF9, 0x3D, 0x7A, 0xBA, 0x9D, 0x05 },
+		0x96, 0x9e, 0x20, 0x20, 0xf1, 0x90, 0x40, 0xa5,
+		0x90, 0x75, 0xf9, 0x3d, 0x7a, 0xba, 0x9d, 0x05,
 	},
 	/* VID:PID and command maps are awaiting HIL validation. */
-	.vid_pids = NULL,
-	.vid_pid_count = 0,
+	.vid_pid = ft_c600_vid_pid,
+	.vid_pid_count = 1,
 	.cmd_types = NULL,
 	.cmd_type_count = 0,
 };
 
 static void __attribute__((constructor)) register_ft_c600_handler(void)
 {
-	(void)register_vendor(&ft_c600_adapter);
+	int rc = register_vendor(&ft_c600_adapter);
+
+	if (rc)
+		fprintf(stderr, "ft-c600: register_vendor failed rc=%d\n", rc);
 }
