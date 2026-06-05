@@ -1,0 +1,18 @@
+# OmniSight bench USB permissions for flashing and serial console access.
+
+# Rockchip rockusb maskrom
+SUBSYSTEM=="usb", ATTR{idVendor}=="2207", ATTR{idProduct}=="350a", MODE="0666", GROUP="dialout"
+SUBSYSTEM=="usb", ATTR{idVendor}=="2207", ATTR{idProduct}=="110c", MODE="0666"
+
+# Qualcomm EDL/QDL
+SUBSYSTEM=="usb", ATTR{idVendor}=="05c6", ATTR{idProduct}=="9008", MODE="0666"
+SUBSYSTEM=="usb", ATTR{idVendor}=="18d1", ATTR{idProduct}=="d00d", MODE="0666"
+
+# MediaTek BROM
+SUBSYSTEM=="usb", ATTR{idVendor}=="0e8d", ATTR{idProduct}=="0003", MODE="0666"
+
+# USB-UART adapters for bench serial console
+SUBSYSTEM=="tty", ATTRS{idVendor}=="0403", MODE="0666", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", MODE="0666", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", MODE="0666", GROUP="dialout"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="067b", MODE="0666", GROUP="dialout"
