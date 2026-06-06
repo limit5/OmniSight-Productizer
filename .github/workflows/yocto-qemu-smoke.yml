@@ -1,0 +1,55 @@
+name: Yocto qemuarm64 smoke
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/yocto-qemu-smoke.yml"
+      - "scripts/ci/yocto-qemu-smoke.sh"
+      - "yocto/meta-omnisight-camera/**"
+      - "src/embedded/uvc-xu-dispatcher/**"
+
+permissions:
+  contents: read
+
+jobs:
+  qemuarm64-yocto-smoke:
+    runs-on: ubuntu-latest
+    container:
+      image: crops/poky:ubuntu-22.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: clone poky scarthgap
+        id: poky
+        run: |
+          set -euo pipefail
+          git clone --depth=1 -b scarthgap https://git.yoctoproject.org/poky "$RUNNER_TEMP/poky"
+          printf 'sha=%s\n' "$(git -C "$RUNNER_TEMP/poky" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: clone meta-openembedded scarthgap
+        id: metaoe
+        run: |
+          set -euo pipefail
+          git clone --depth=1 -b scarthgap https://git.openembedded.org/meta-openembedded "$RUNNER_TEMP/meta-openembedded"
+          printf 'sha=%s\n' "$(git -C "$RUNNER_TEMP/meta-openembedded" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: restore Yocto downloads and sstate
+        uses: actions/cache@v4
+        with:
+          path: |
+            .yocto-cache/downloads
+            .yocto-cache/sstate-cache
+          key: ${{ runner.os }}-yocto-qemuarm64-scarthgap-poky-${{ steps.poky.outputs.sha }}-metaoe-${{ steps.metaoe.outputs.sha }}-layer-${{ hashFiles('yocto/meta-omnisight-camera/**', 'src/embedded/uvc-xu-dispatcher/**') }}
+          restore-keys: |
+            ${{ runner.os }}-yocto-qemuarm64-scarthgap-poky-${{ steps.poky.outputs.sha }}-metaoe-${{ steps.metaoe.outputs.sha }}-
+            ${{ runner.os }}-yocto-qemuarm64-scarthgap-
+
+      - name: build omnisight camera image
+        env:
+          POKY_DIR: ${{ runner.temp }}/poky
+          META_OPENEMBEDDED_DIR: ${{ runner.temp }}/meta-openembedded
+          SSTATE_DIR: ${{ github.workspace }}/.yocto-cache/sstate-cache
+          DL_DIR: ${{ github.workspace }}/.yocto-cache/downloads
+        run: scripts/ci/yocto-qemu-smoke.sh
