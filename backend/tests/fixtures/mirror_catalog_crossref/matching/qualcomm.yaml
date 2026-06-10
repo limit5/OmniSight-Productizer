@@ -1,0 +1,15 @@
+schema_version: 1
+vendor: qualcomm
+entries:
+  - catalog_id: qualcomm-qcs6490-aarch64
+    nda_posture: YES
+    artifact_shape: blob
+    mirror_url: http://sora.services:49154/vendor-mirrors-nda/qualcomm/qcs6490-linux-sdk/-/packages/generic/qcs6490-linux-sdk/1.x/qcs6490-toolchain.tar.xz
+    sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+    size_bytes: 536870912
+    overlay_ref: null
+    vendor_ref: null
+    portal_url: null
+    license_clause: QCS6490 Linux SDK redistribution internal re-host permitted
+    bot_pull: allow
+    last_verified: "2026-06-10"
