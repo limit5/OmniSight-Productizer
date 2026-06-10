@@ -120,6 +120,14 @@ class Settings(BaseSettings):
     # LEGACY_CREDENTIAL_FIELDS.
     product_sources: str = ""
 
+    # ── Vendor mirror catalog (OP-2101 / vmnda C5) ──
+    # Local checkout/snapshot of the isolated ``vendor-mirrors-nda/catalog``
+    # repo. ``backend.agents.mirror_artifact.resolve`` reads ``mirror/*.yaml``
+    # from this directory. The actual NDA blob credential remains a
+    # ``git_account_ref`` indirection in each catalog row, never an inline
+    # token in Productizer config or source.
+    mirror_catalog_dir: str = "third_party/vendor-mirror-catalog"
+
     # ── Token Budget & Resilience ──
     token_budget_daily: float = 0.0  # USD per day (0 = unlimited)
     # L1-06: hourly burn-rate kill-switch. A daily budget catches slow
