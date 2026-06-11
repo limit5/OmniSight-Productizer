@@ -1,3 +1,10 @@
+---
+id: ADR-0016
+title: D5 develop→main promotion via Gerrit review change, not direct push
+status: Superseded by ADR-0020
+date: 2026-05-12
+---
+
 # ADR-0016 — D5 develop→main promotion via Gerrit review change, not direct push
 
 - **Status**: **Superseded by [ADR-0020](ADR-0020-release-cut-as-single-merge-change.md) (2026-05-12).** Retained for historical context. The `refs/for/main` *bulk-chain* mechanism this ADR specified (one Gerrit change per intervening `main..develop` commit) was fundamentally wrong for release-cut semantics — every release after the first hits Gerrit's "no new changes" rejection (the develop commits already carry Change-Ids) and/or `receive.maxBatchChanges`. ADR-0020 replaces it with a **single merge change** on `refs/for/main` + `submit-type: MERGE_ALWAYS` + a quad-keyed `release-cut-promote` conditional submit-requirement. The only piece carried forward is the `milestone:R3-fastforward` hashtag — ADR-0016's "path C" forward-compat hook is the seam ADR-0020 builds on. (Status flip done by AUDIT-26f / OP-985, which owns the AUDIT-13/13a/13b cleanup pass.)
