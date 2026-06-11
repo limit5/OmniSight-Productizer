@@ -119,6 +119,10 @@ class Settings(BaseSettings):
     # ref), not a credential, so it is deliberately NOT in
     # LEGACY_CREDENTIAL_FIELDS.
     product_sources: str = ""
+    # Pinned checkout/submodule path for the vendor-mirrors-nda mirror catalog.
+    # OP-2100/C4 and the C5 mirror resolver share this knob; empty/missing
+    # snapshot keeps the Productizer-side cross-repo guard inert.
+    mirror_catalog_dir: str = "third_party/vendor-mirrors-nda/catalog/mirror"
 
     # ── Token Budget & Resilience ──
     token_budget_daily: float = 0.0  # USD per day (0 = unlimited)

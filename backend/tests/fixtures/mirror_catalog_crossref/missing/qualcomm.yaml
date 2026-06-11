@@ -1,0 +1,15 @@
+schema_version: 1
+vendor: qualcomm
+entries:
+  - catalog_id: qualcomm-qcs6490-source
+    nda_posture: YES
+    artifact_shape: git
+    mirror_url: null
+    sha256: null
+    size_bytes: null
+    overlay_ref: omnisight/qcs6490-linux-sdk/qcs6490-linux-sdk-1.x-omni.1
+    vendor_ref: vendor/qcs6490-linux-sdk-1.x
+    portal_url: null
+    license_clause: QCS6490 Linux SDK redistribution source overlay permitted
+    bot_pull: allow
+    last_verified: "2026-06-10"
