@@ -1,0 +1,121 @@
+{
+  "$defs": {
+    "Defect": {
+      "additionalProperties": true,
+      "description": "One detected defect in an inspection verdict.",
+      "properties": {
+        "class": {
+          "minLength": 1,
+          "title": "Class",
+          "type": "string"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 4,
+              "minItems": 4,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Bbox"
+        },
+        "loc": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Loc"
+        },
+        "score": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "class",
+        "score"
+      ],
+      "title": "Defect",
+      "type": "object"
+    }
+  },
+  "additionalProperties": true,
+  "description": "Canonical verdict consumed by inference and line-logic components.",
+  "properties": {
+    "part_id": {
+      "minLength": 1,
+      "title": "Part Id",
+      "type": "string"
+    },
+    "station_id": {
+      "minLength": 1,
+      "title": "Station Id",
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "fail"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "defects": {
+      "items": {
+        "$ref": "#/$defs/Defect"
+      },
+      "title": "Defects",
+      "type": "array"
+    },
+    "model_version": {
+      "minLength": 1,
+      "title": "Model Version",
+      "type": "string"
+    },
+    "recipe_version": {
+      "minLength": 1,
+      "title": "Recipe Version",
+      "type": "string"
+    },
+    "ts_capture": {
+      "format": "date-time",
+      "title": "Ts Capture",
+      "type": "string"
+    },
+    "ts_verdict": {
+      "format": "date-time",
+      "title": "Ts Verdict",
+      "type": "string"
+    }
+  },
+  "required": [
+    "part_id",
+    "station_id",
+    "verdict",
+    "model_version",
+    "recipe_version",
+    "ts_capture",
+    "ts_verdict"
+  ],
+  "title": "InspectionVerdict",
+  "type": "object"
+}
