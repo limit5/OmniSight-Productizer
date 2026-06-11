@@ -7,6 +7,8 @@ license: "Proprietary"
 compatible_socs:
   - rk3566
   - rk3568
+  - rv1126
+  - rk3588
   - imx8m
   - stm32mp1
   - x86_64

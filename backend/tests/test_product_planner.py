@@ -21,8 +21,8 @@ P3 (OP-1830) — SoC-compatibility reconciliation across composed packs
   - {rk3566-only + imx8m-only} on rk3566 -> SocIncompatibilityError naming
     the imx8m-only pack; {two agnostic + one rk3566-only} on rk3566 -> OK;
     {rk3566-only + []} -> OK
-  - real case-8 (imaging + connectivity + npu-detection) on rk3566
-    reconciles cleanly; retargeting to qcs8550 -> error naming imaging
+  - real case-8 (imaging + connectivity + npu-detection) on rk3566/rv1126
+    reconciles cleanly; retargeting to esp32 -> error naming imaging
 
 P4 (OP-1831) — plan-metadata only:
   - pack failure_policy propagates to task on_failure
@@ -518,8 +518,9 @@ class TestRealCaseEightComposition:
         assert unmet == [], [r.unmet_requires for r in unmet]
 
     # ── P3 (OP-1830) — SoC reconciliation on the real case-8 packs ──
-    # imaging pins [rk3566, rk3568, imx8m, stm32mp1, x86_64]; connectivity
-    # and npu-detection declare no compatible_socs (SoC-agnostic).
+    # imaging pins [rk3566, rk3568, rv1126, rk3588, imx8m, stm32mp1,
+    # x86_64]; connectivity and npu-detection declare no compatible_socs
+    # (SoC-agnostic).
 
     def test_case8_reconciles_cleanly_on_rk3566(self, spec, hw):
         # hw.soc == "RK3566" ∈ imaging's list (case-insensitively); the
@@ -528,10 +529,25 @@ class TestRealCaseEightComposition:
         dag = compose_product(spec, hw, CASE8_PACKS, dag_id="prod-case8-soc")
         assert validate(dag).ok, validate(dag).summary()
 
+    def test_case8_reconciles_cleanly_on_rv1126(self, spec, hw):
+        # Case 8 production-line vision retarget: imaging, connectivity, and
+        # npu-detection must compose on RV1126 without a SoC conflict.
+        hw_rv1126 = hw.model_copy(update={"soc": "RV1126"})
+        dag = compose_product(
+            spec, hw_rv1126, CASE8_PACKS, dag_id="prod-case8-rv1126"
+        )
+        assert validate(dag).ok, validate(dag).summary()
+
     def test_case8_socs_read_from_registry(self):
         # Ground-truth the real compatible_socs the reconciliation reads.
         assert _pack_compatible_socs("imaging", None) == [
-            "rk3566", "rk3568", "imx8m", "stm32mp1", "x86_64"
+            "rk3566",
+            "rk3568",
+            "rv1126",
+            "rk3588",
+            "imx8m",
+            "stm32mp1",
+            "x86_64",
         ]
         assert _pack_compatible_socs("connectivity", None) == []
         assert _pack_compatible_socs("npu-detection", None) == []
@@ -542,13 +558,19 @@ class TestRealCaseEightComposition:
         # Retarget the product to a SoC NOT in imaging's list. imaging then
         # cannot run on the silicon -> fail loud, naming imaging; the
         # agnostic packs impose no constraint and are not named.
-        hw_qcs = hw.model_copy(update={"soc": "qcs8550"})
+        hw_esp32 = hw.model_copy(update={"soc": "esp32"})
         with pytest.raises(SocIncompatibilityError) as exc:
-            compose_product(spec, hw_qcs, CASE8_PACKS, dag_id="prod-case8-bad")
-        assert exc.value.target_soc == "qcs8550"
+            compose_product(spec, hw_esp32, CASE8_PACKS, dag_id="prod-case8-bad")
+        assert exc.value.target_soc == "esp32"
         assert set(exc.value.conflicts) == {"imaging"}
         assert exc.value.conflicts["imaging"] == [
-            "rk3566", "rk3568", "imx8m", "stm32mp1", "x86_64"
+            "rk3566",
+            "rk3568",
+            "rv1126",
+            "rk3588",
+            "imx8m",
+            "stm32mp1",
+            "x86_64",
         ]
         assert "imaging" in str(exc.value)
 
