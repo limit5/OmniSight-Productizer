@@ -142,6 +142,8 @@ class TestRoutesToIosScaffolder:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _OVERLAY_FILES = (
+    "App/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json",
+    "App/Resources/Assets.xcassets/Contents.json",
     "App/Resources/Info.plist",
     "App/Sources/ContentView.swift",
     "App/Sources/MapAR/ARKitOverlayView.swift",
@@ -220,6 +222,14 @@ class TestDispatchRendersMapARProject:
         info = (out_dir / "App/Resources/Info.plist").read_text(encoding="utf-8")
         assert "NSCameraUsageDescription" in info
         assert "NSLocationWhenInUseUsageDescription" in info
+        assert "NSUserTrackingUsageDescription" not in info
+        project = (out_dir / "project.yml").read_text(encoding="utf-8")
+        assert "ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon" in project
+        app_icon = (
+            out_dir
+            / "App/Resources/Assets.xcassets/AppIcon.appiconset/Contents.json"
+        ).read_text(encoding="utf-8")
+        assert '"idiom": "ios-marketing"' in app_icon
         map_ar = (out_dir / "App/Sources/MapAR/MapARHomeView.swift").read_text(
             encoding="utf-8"
         )

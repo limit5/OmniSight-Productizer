@@ -168,6 +168,11 @@ class TestScaffoldRender:
         assert "<key>UIBackgroundModes</key>" not in info
         assert "<string>remote-notification</string>" not in info
 
+    def test_base_info_plist_omits_tracking_usage(self, project_dir):
+        render_project(project_dir, _default_opts())
+        info = (project_dir / "App/Resources/Info.plist").read_text()
+        assert "<key>NSUserTrackingUsageDescription</key>" not in info
+
     def test_push_on_emits_apns_files(self, project_dir):
         render_project(project_dir, _default_opts(push=True))
         for rel in _PUSH_ONLY_FILES:
