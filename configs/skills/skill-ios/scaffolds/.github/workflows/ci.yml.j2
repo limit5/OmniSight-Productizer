@@ -31,7 +31,6 @@ concurrency:
 
 env:
   DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
-  IOS_SIMULATOR_DESTINATION: platform=iOS Simulator,name=iPhone 15,OS=latest
 
 jobs:
   swiftpm:
@@ -69,14 +68,18 @@ jobs:
       - name: generate Xcode project
         run: xcodegen generate
 
-      - name: boot simulator
+      - name: pick + boot simulator (UDID-addressed)
         run: |
           set -euo pipefail
-          xcrun simctl boot "iPhone 15" || true
-          xcrun simctl bootstatus booted -b
+          UDID=$(xcrun simctl list devices available | grep -E 'iPhone' | grep -oE '[0-9A-F-]{36}' | head -1)
+          NAME=$(xcrun simctl list devices available | grep "$UDID" | sed 's/ (.*//' | xargs)
+          echo "picked simulator: $NAME ($UDID)"
+          echo "IOS_SIM_UDID=$UDID" >> "$GITHUB_ENV"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
 
       - name: grant location permission
-        run: xcrun simctl privacy booted grant location-when-in-use {{ bundle_id }} || echo "::warning::privacy grant skipped (best-effort until location UI tests land)"
+        run: xcrun simctl privacy "$IOS_SIM_UDID" grant location-when-in-use {{ bundle_id }} || echo "::warning::privacy grant skipped (best-effort until location UI tests land)"
 
       - name: xcodebuild build and test
         run: |
@@ -84,7 +87,7 @@ jobs:
           xcodebuild \
             -project {{ project_name }}.xcodeproj \
             -scheme {{ project_name }} \
-            -destination "$IOS_SIMULATOR_DESTINATION" \
+            -destination "id=$IOS_SIM_UDID" \
             CODE_SIGN_IDENTITY= \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
