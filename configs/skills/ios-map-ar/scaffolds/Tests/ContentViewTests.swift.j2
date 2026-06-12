@@ -1,0 +1,17 @@
+// ios-map-ar (OP-2122) - unit tests for the rendered map/AR root.
+
+import XCTest
+@testable import {{ project_name }}
+
+@MainActor
+final class ContentViewTests: XCTestCase {
+    func testDefaultStoreSelectsFirstPoint() {
+        let store = MapLocationStore()
+
+        XCTAssertEqual(store.selectedPoint, store.pointsOfInterest.first)
+    }
+
+    func testContentViewCanBeConstructed() {
+        _ = ContentView()
+    }
+}

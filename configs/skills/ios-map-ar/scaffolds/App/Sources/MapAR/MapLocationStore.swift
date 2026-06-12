@@ -1,8 +1,9 @@
 // ios-map-ar (OP-1820) - CoreLocation feed and map selection state.
 
-import CoreLocation
+@preconcurrency import CoreLocation
 import Foundation
 
+@MainActor
 final class MapLocationStore: NSObject, ObservableObject, CLLocationManagerDelegate {
     private let manager: CLLocationManager
 

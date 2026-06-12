@@ -149,12 +149,16 @@ _OVERLAY_FILES = (
     "App/Sources/MapAR/MapKitMapView.swift",
     "App/Sources/MapAR/MapLocationStore.swift",
     "App/Sources/MapAR/PointOfInterest.swift",
+    "Tests/ContentViewTests.swift",
     "Tests/MapLocationStoreTests.swift",
+    "UITests/SmokeTests.swift",
 )
 
 _OVERLAY_OVERRIDES = {
     "App/Resources/Info.plist",
     "App/Sources/ContentView.swift",
+    "Tests/ContentViewTests.swift",
+    "UITests/SmokeTests.swift",
 }
 
 
@@ -216,6 +220,41 @@ class TestDispatchRendersMapARProject:
         assert "MapKitMapView(store: store)" in map_ar
         assert "ARKitOverlayView(" in map_ar
         assert f"scaffolded {PACK}" in capsys.readouterr().out
+
+    def test_dispatch_storekit_push_off_overrides_stale_base_tests(
+        self,
+        tmp_path: Path,
+    ):
+        cli = _load_cli()
+        out_dir = tmp_path / "MapAR"
+        result = cli.run_scaffold(
+            PACK,
+            out_dir,
+            [
+                "--project-name", "MapAR",
+                "--no-storekit",
+                "--no-push",
+            ],
+        )
+
+        assert result["files_written"], "dispatch rendered no files"
+        assert not (out_dir / "App/Sources/StoreKit/StoreView.swift").exists()
+        assert not (out_dir / "App/Sources/Push/AppDelegate.swift").exists()
+
+        content_tests = (out_dir / "Tests/ContentViewTests.swift").read_text(
+            encoding="utf-8"
+        )
+        assert "FeatureCounter" not in content_tests
+        assert "MapLocationStore" in content_tests
+        assert "@MainActor" in content_tests
+
+        smoke_tests = (out_dir / "UITests/SmokeTests.swift").read_text(
+            encoding="utf-8"
+        )
+        assert "Increment counter" not in smoke_tests
+        assert "Open in-app purchase store" not in smoke_tests
+        assert "ContentView.mapARRoot" in smoke_tests
+        assert "MapARHomeView.selectedPoint" in smoke_tests
 
     def test_main_list_includes_pack(self, capsys):
         cli = _load_cli()

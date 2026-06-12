@@ -1,5 +1,6 @@
 // ios-map-ar (OP-1820) - SwiftUI MapKit surface.
 
+import Combine
 import MapKit
 import SwiftUI
 
@@ -45,7 +46,7 @@ struct MapKitMapView: View {
             }
         }
         .accessibilityIdentifier("MapKitMapView.map")
-        .onChange(of: store.selectedPoint) { point in
+        .onReceive(store.$selectedPoint) { point in
             guard let point else { return }
             focus(on: point)
         }
