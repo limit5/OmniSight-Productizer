@@ -149,6 +149,11 @@ _OVERLAY_FILES = (
     "App/Sources/MapAR/MapKitMapView.swift",
     "App/Sources/MapAR/MapLocationStore.swift",
     "App/Sources/MapAR/PointOfInterest.swift",
+    "Modules/MapARCore/Package.swift",
+    "Modules/MapARCore/Sources/MapARCore/GeoCoordinate.swift",
+    "Modules/MapARCore/Sources/MapARCore/PointOfInterest.swift",
+    "Modules/MapARCore/Tests/MapARCoreTests/GeoCoordinateTests.swift",
+    "project.yml",
     "Tests/ContentViewTests.swift",
     "Tests/MapLocationStoreTests.swift",
     "UITests/SmokeTests.swift",
@@ -157,6 +162,7 @@ _OVERLAY_FILES = (
 _OVERLAY_OVERRIDES = {
     "App/Resources/Info.plist",
     "App/Sources/ContentView.swift",
+    "project.yml",
     "Tests/ContentViewTests.swift",
     "UITests/SmokeTests.swift",
 }
@@ -220,6 +226,91 @@ class TestDispatchRendersMapARProject:
         assert "MapKitMapView(store: store)" in map_ar
         assert "ARKitOverlayView(" in map_ar
         assert f"scaffolded {PACK}" in capsys.readouterr().out
+
+    def test_map_ar_core_package_is_rendered(self, tmp_path: Path):
+        cli = _load_cli()
+        out_dir = tmp_path / "MapAR"
+        rc = cli.main([
+            PACK, "--out-dir", str(out_dir),
+            "--project-name", "MapAR",
+        ])
+        assert rc == 0
+
+        package = (out_dir / "Modules/MapARCore/Package.swift").read_text(
+            encoding="utf-8"
+        )
+        geo = (
+            out_dir / "Modules/MapARCore/Sources/MapARCore/GeoCoordinate.swift"
+        ).read_text(encoding="utf-8")
+        poi = (
+            out_dir / "Modules/MapARCore/Sources/MapARCore/PointOfInterest.swift"
+        ).read_text(encoding="utf-8")
+
+        assert 'name: "MapARCore"' in package
+        assert '.library(name: "MapARCore", targets: ["MapARCore"])' in package
+        assert "public struct GeoCoordinate" in geo
+        assert "public struct PointOfInterest" in poi
+
+    def test_map_ar_core_has_no_apple_framework_imports(self, tmp_path: Path):
+        cli = _load_cli()
+        out_dir = tmp_path / "MapAR"
+        rc = cli.main([
+            PACK, "--out-dir", str(out_dir),
+            "--project-name", "MapAR",
+        ])
+        assert rc == 0
+
+        apple_frameworks = {
+            "ARKit",
+            "CoreLocation",
+            "MapKit",
+            "RealityKit",
+            "SwiftUI",
+            "UIKit",
+        }
+        core_dir = out_dir / "Modules/MapARCore"
+        for swift_file in core_dir.rglob("*.swift"):
+            text = swift_file.read_text(encoding="utf-8")
+            for framework in apple_frameworks:
+                assert f"import {framework}" not in text, (
+                    f"{swift_file.relative_to(out_dir)} imports {framework}"
+                )
+
+    def test_project_yml_wires_map_ar_core_package(self, tmp_path: Path):
+        cli = _load_cli()
+        out_dir = tmp_path / "MapAR"
+        rc = cli.main([
+            PACK, "--out-dir", str(out_dir),
+            "--project-name", "MapAR",
+        ])
+        assert rc == 0
+
+        project = yaml.safe_load((out_dir / "project.yml").read_text(encoding="utf-8"))
+        assert project["packages"]["MapARCore"] == {"path": "Modules/MapARCore"}
+        app_deps = project["targets"]["MapAR"]["dependencies"]
+        test_deps = project["targets"]["MapARTests"]["dependencies"]
+        assert {"package": "MapARCore", "product": "MapARCore"} in app_deps
+        assert {"package": "MapARCore", "product": "MapARCore"} in test_deps
+
+    def test_corelocation_conversion_stays_in_app_target(self, tmp_path: Path):
+        cli = _load_cli()
+        out_dir = tmp_path / "MapAR"
+        rc = cli.main([
+            PACK, "--out-dir", str(out_dir),
+            "--project-name", "MapAR",
+        ])
+        assert rc == 0
+
+        bridge = (out_dir / "App/Sources/MapAR/PointOfInterest.swift").read_text(
+            encoding="utf-8"
+        )
+        store = (out_dir / "App/Sources/MapAR/MapLocationStore.swift").read_text(
+            encoding="utf-8"
+        )
+        assert "import CoreLocation" in bridge
+        assert "extension GeoCoordinate" in bridge
+        assert "import MapARCore" in store
+        assert "CLLocationManager" in store
 
     def test_dispatch_storekit_push_off_overrides_stale_base_tests(
         self,
