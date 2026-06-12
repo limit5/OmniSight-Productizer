@@ -8,14 +8,34 @@ struct ARKitOverlayView: UIViewRepresentable {
     let selectedPoint: PointOfInterest?
     let allPoints: [PointOfInterest]
 
-    func makeUIView(context: Context) -> ARView {
-        let view = ARView(frame: .zero)
-        view.automaticallyConfigureSession = false
+    /// AR availability guard (design finding 4): ARWorldTrackingConfiguration is
+    /// unsupported on the simulator — running it hangs the app at launch. Fall
+    /// back to a virtual-camera RealityKit scene so the same anchors render.
+    static var isARSupported: Bool {
+        #if targetEnvironment(simulator)
+        return false
+        #else
+        return ARWorldTrackingConfiguration.isSupported
+        #endif
+    }
 
-        let configuration = ARWorldTrackingConfiguration()
-        configuration.worldAlignment = .gravityAndHeading
-        configuration.planeDetection = [.horizontal]
-        view.session.run(configuration)
+    func makeUIView(context: Context) -> ARView {
+        let view: ARView
+        if Self.isARSupported {
+            view = ARView(frame: .zero)
+            view.automaticallyConfigureSession = false
+
+            let configuration = ARWorldTrackingConfiguration()
+            configuration.worldAlignment = .gravityAndHeading
+            configuration.planeDetection = [.horizontal]
+            view.session.run(configuration)
+        } else {
+            view = ARView(
+                frame: .zero,
+                cameraMode: .nonAR,
+                automaticallyConfigureSession: false
+            )
+        }
 
         context.coordinator.installAnchors(
             in: view,
@@ -41,6 +61,9 @@ struct ARKitOverlayView: UIViewRepresentable {
         uiView.session.pause()
     }
 
+    // RealityKit scene APIs are MainActor-isolated; UIViewRepresentable drives the
+    // coordinator on the main thread — make that explicit for Swift 6.
+    @MainActor
     final class Coordinator {
         private var renderedSelection: PointOfInterest.ID?
 

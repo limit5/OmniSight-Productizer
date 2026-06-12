@@ -7,6 +7,10 @@
 
 import XCTest
 
+// XCUIApplication APIs are MainActor-isolated under Swift 6 — without this
+// the scaffold fails to compile when SWIFT_STRICT_CONCURRENCY=complete
+// (proven on mapar-ios CI run #6).
+@MainActor
 final class SmokeTests: XCTestCase {
     override func setUp() {
         super.setUp()

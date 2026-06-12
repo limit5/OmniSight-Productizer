@@ -17,11 +17,20 @@ struct MapARHomeView: View {
                     selectedPoint: store.selectedPoint,
                     allPoints: store.pointsOfInterest
                 )
+                // Identifier must precede .overlay(): applied after it, SwiftUI
+                // propagates it onto the overlay's combined accessibility
+                // element and stomps the panel's own 'selectedPoint' identifier.
+                .accessibilityIdentifier("MapARHomeView.arOverlay")
                 .overlay(alignment: .bottomLeading) {
                     selectedPointPanel
                 }
-                .accessibilityIdentifier("MapARHomeView.arOverlay")
             }
+            // Root smoke-test marker. Lives INSIDE the NavigationStack on
+            // purpose: accessibility modifiers applied outside the stack are
+            // dropped (its content is hosted in a separate UIKit hierarchy),
+            // which is why marking ContentView itself never surfaced.
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("ContentView.mapARRoot")
             .navigationTitle("Map AR")
             .task {
                 store.requestLocationUpdates()
