@@ -37,12 +37,10 @@ jobs:
   swiftpm:
     name: swift test (Ubuntu)
     runs-on: ubuntu-latest
+    container: swift:6.1
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "5.9"
       - name: swift test
         run: swift test --package-path .
 
@@ -78,7 +76,7 @@ jobs:
           xcrun simctl bootstatus booted -b
 
       - name: grant location permission
-        run: xcrun simctl privacy booted grant location-when-in-use {{ bundle_id }}
+        run: xcrun simctl privacy booted grant location-when-in-use {{ bundle_id }} || echo "::warning::privacy grant skipped (best-effort until location UI tests land)"
 
       - name: xcodebuild build and test
         run: |
