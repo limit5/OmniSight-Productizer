@@ -15,13 +15,13 @@ let package = Package(
         .iOS("{{ min_os_version }}"),
     ],
     products: [
-        .library(name: "{{ project_name }}Feature", targets: ["{{ project_name }}Feature"]),
+        .library(name: "{{ project_name }}Feature", targets: ["FeatureModule"]),
     ],
     dependencies: [],
     targets: [
         .target(
-            name: "{{ project_name }}Feature",
-            path: "Modules/{{ project_name }}Feature/Sources",
+            name: "FeatureModule",
+            path: "Modules/Feature/Sources",
             swiftSettings: [
                 // Strict concurrency from day one; matches the
                 // ios-swift role anti-pattern guard rails.
@@ -30,9 +30,9 @@ let package = Package(
             ]
         ),
         .testTarget(
-            name: "{{ project_name }}FeatureTests",
-            dependencies: ["{{ project_name }}Feature"],
-            path: "Modules/{{ project_name }}Feature/Tests"
+            name: "FeatureModuleTests",
+            dependencies: ["FeatureModule"],
+            path: "Modules/Feature/Tests"
         ),
     ]
 )
