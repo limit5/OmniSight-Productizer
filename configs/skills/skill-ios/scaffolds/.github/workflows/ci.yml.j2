@@ -42,6 +42,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: swift test
         run: swift test --package-path .
+      - name: swift test (local packages)
+        # Local SwiftPM packages (e.g. Modules/MapARCore) are separate
+        # manifests — root `swift test` does not run their suites.
+        run: |
+          for p in Modules/*/Package.swift; do
+            [ -e "$p" ] || continue
+            swift test --package-path "$(dirname "$p")"
+          done
 
   xcodegen-simulator:
     name: XcodeGen build + test (macOS)
