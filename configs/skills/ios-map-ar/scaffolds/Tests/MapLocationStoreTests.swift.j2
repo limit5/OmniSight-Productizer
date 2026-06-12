@@ -1,6 +1,6 @@
 // ios-map-ar (OP-1820) - unit tests for map/AR selection state.
 
-import CoreLocation
+import MapARCore
 import XCTest
 @testable import {{ project_name }}
 
@@ -9,12 +9,12 @@ final class MapLocationStoreTests: XCTestCase {
         let first = PointOfInterest(
             name: "First",
             summary: "First marker",
-            coordinate: CLLocationCoordinate2D(latitude: 1, longitude: 2)
+            coordinate: GeoCoordinate(latitudeDegrees: 1, longitudeDegrees: 2)
         )
         let second = PointOfInterest(
             name: "Second",
             summary: "Second marker",
-            coordinate: CLLocationCoordinate2D(latitude: 3, longitude: 4)
+            coordinate: GeoCoordinate(latitudeDegrees: 3, longitudeDegrees: 4)
         )
 
         let store = MapLocationStore(pointsOfInterest: [first, second])
@@ -26,12 +26,12 @@ final class MapLocationStoreTests: XCTestCase {
         let first = PointOfInterest(
             name: "First",
             summary: "First marker",
-            coordinate: CLLocationCoordinate2D(latitude: 1, longitude: 2)
+            coordinate: GeoCoordinate(latitudeDegrees: 1, longitudeDegrees: 2)
         )
         let second = PointOfInterest(
             name: "Second",
             summary: "Second marker",
-            coordinate: CLLocationCoordinate2D(latitude: 3, longitude: 4)
+            coordinate: GeoCoordinate(latitudeDegrees: 3, longitudeDegrees: 4)
         )
         let store = MapLocationStore(pointsOfInterest: [first, second])
 

@@ -1,6 +1,7 @@
 // ios-map-ar (OP-1820) - SwiftUI MapKit surface.
 
 import Combine
+import MapARCore
 import MapKit
 import SwiftUI
 
@@ -10,8 +11,8 @@ struct MapKitMapView: View {
 
     init(store: MapLocationStore) {
         self.store = store
-        let center = store.selectedPoint?.coordinate
-            ?? store.pointsOfInterest.first?.coordinate
+        let center = store.selectedPoint?.coordinate.clLocationCoordinate
+            ?? store.pointsOfInterest.first?.coordinate.clLocationCoordinate
             ?? CLLocationCoordinate2D(latitude: 37.334_900, longitude: -122.009_020)
         _region = State(initialValue: MKCoordinateRegion(
             center: center,
@@ -25,7 +26,7 @@ struct MapKitMapView: View {
             showsUserLocation: true,
             annotationItems: store.pointsOfInterest
         ) { point in
-            MapAnnotation(coordinate: point.coordinate) {
+            MapAnnotation(coordinate: point.coordinate.clLocationCoordinate) {
                 Button {
                     store.select(point)
                     focus(on: point)
@@ -55,7 +56,7 @@ struct MapKitMapView: View {
     private func focus(on point: PointOfInterest) {
         withAnimation {
             region = MKCoordinateRegion(
-                center: point.coordinate,
+                center: point.coordinate.clLocationCoordinate,
                 span: MKCoordinateSpan(latitudeDelta: 0.006, longitudeDelta: 0.006)
             )
         }

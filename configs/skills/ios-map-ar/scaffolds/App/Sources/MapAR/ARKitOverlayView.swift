@@ -1,6 +1,7 @@
 // ios-map-ar (OP-1820) - RealityKit AR overlay anchored to map points.
 
 import ARKit
+import MapARCore
 import RealityKit
 import SwiftUI
 

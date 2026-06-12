@@ -1,44 +1,20 @@
-// ios-map-ar (OP-1820) - shared point-of-interest model for MapKit + ARKit.
+// ios-map-ar (OP-2124) - CoreLocation conversion glue for MapARCore values.
 
 import CoreLocation
-import Foundation
+import MapARCore
 
-struct PointOfInterest: Identifiable, Equatable, Hashable {
-    let id: UUID
-    let name: String
-    let summary: String
-    let coordinate: CLLocationCoordinate2D
-    let altitudeMeters: CLLocationDistance
-
-    init(
-        id: UUID = UUID(),
-        name: String,
-        summary: String,
-        coordinate: CLLocationCoordinate2D,
-        altitudeMeters: CLLocationDistance = 0
-    ) {
-        self.id = id
-        self.name = name
-        self.summary = summary
-        self.coordinate = coordinate
-        self.altitudeMeters = altitudeMeters
+extension GeoCoordinate {
+    init(_ coordinate: CLLocationCoordinate2D) {
+        self.init(
+            latitudeDegrees: coordinate.latitude,
+            longitudeDegrees: coordinate.longitude
+        )
     }
 
-    static func == (lhs: PointOfInterest, rhs: PointOfInterest) -> Bool {
-        lhs.id == rhs.id
-            && lhs.name == rhs.name
-            && lhs.summary == rhs.summary
-            && lhs.coordinate.latitude == rhs.coordinate.latitude
-            && lhs.coordinate.longitude == rhs.coordinate.longitude
-            && lhs.altitudeMeters == rhs.altitudeMeters
-    }
-
-    func hash(into hasher: inout Hasher) {
-        hasher.combine(id)
-        hasher.combine(name)
-        hasher.combine(summary)
-        hasher.combine(coordinate.latitude)
-        hasher.combine(coordinate.longitude)
-        hasher.combine(altitudeMeters)
+    var clLocationCoordinate: CLLocationCoordinate2D {
+        CLLocationCoordinate2D(
+            latitude: latitudeDegrees,
+            longitude: longitudeDegrees
+        )
     }
 }

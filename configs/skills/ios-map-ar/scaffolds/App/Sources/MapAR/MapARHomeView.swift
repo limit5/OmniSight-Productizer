@@ -1,5 +1,6 @@
 // ios-map-ar (OP-1820) - integrated MapKit + ARKit app surface.
 
+import MapARCore
 import SwiftUI
 
 struct MapARHomeView: View {

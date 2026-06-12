@@ -2,6 +2,7 @@
 
 @preconcurrency import CoreLocation
 import Foundation
+import MapARCore
 
 @MainActor
 final class MapLocationStore: NSObject, ObservableObject, CLLocationManagerDelegate {
@@ -73,19 +74,19 @@ final class MapLocationStore: NSObject, ObservableObject, CLLocationManagerDeleg
         PointOfInterest(
             name: "North Gate",
             summary: "Primary entrance marker for AR wayfinding.",
-            coordinate: CLLocationCoordinate2D(latitude: 37.334_900, longitude: -122.009_020),
+            coordinate: GeoCoordinate(latitudeDegrees: 37.334_900, longitudeDegrees: -122.009_020),
             altitudeMeters: 1.4
         ),
         PointOfInterest(
             name: "Transit Stop",
             summary: "Map anchor for pickup guidance and live AR labels.",
-            coordinate: CLLocationCoordinate2D(latitude: 37.333_520, longitude: -122.011_470),
+            coordinate: GeoCoordinate(latitudeDegrees: 37.333_520, longitudeDegrees: -122.011_470),
             altitudeMeters: 0.8
         ),
         PointOfInterest(
             name: "Observation Deck",
             summary: "Elevated point rendered above the AR horizon guide.",
-            coordinate: CLLocationCoordinate2D(latitude: 37.332_620, longitude: -122.006_260),
+            coordinate: GeoCoordinate(latitudeDegrees: 37.332_620, longitudeDegrees: -122.006_260),
             altitudeMeters: 4.0
         ),
     ]
