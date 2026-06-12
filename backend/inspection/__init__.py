@@ -28,6 +28,14 @@ from backend.inspection.golden import (
     GoldenSampleRegistry,
     PixelFeatureDiffScorer,
 )
+from backend.inspection.linescan import (
+    CameraSourceLike,
+    LineScanFrame,
+    LineScanStitcher,
+    LineScanStrip,
+    LineScanStripSource,
+    SyntheticLineScanSource,
+)
 from backend.inspection.verdict import Defect, InspectionVerdict, verdict_json_schema
 
 __all__ = [
@@ -35,6 +43,7 @@ __all__ = [
     "CameraConfig",
     "CameraFrame",
     "CameraSource",
+    "CameraSourceLike",
     "D3_SAFETY_INVARIANT",
     "ConnectionState",
     "Defect",
@@ -47,12 +56,17 @@ __all__ = [
     "GoldenSample",
     "GoldenSampleRegistry",
     "InspectionVerdict",
+    "LineScanFrame",
+    "LineScanStitcher",
+    "LineScanStrip",
+    "LineScanStripSource",
     "ModbusFieldbusAdapter",
     "PixelFeatureDiffScorer",
     "PollCycleResult",
     "RegisterRead",
     "RegisterWrite",
     "SimulatedModbusEndpoint",
+    "SyntheticLineScanSource",
     "TriggerMode",
     "V4L2CameraSource",
     "verdict_json_schema",
