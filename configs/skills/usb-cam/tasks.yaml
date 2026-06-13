@@ -1,0 +1,15 @@
+# usb-cam skill pack — task template (embedded planner schema).
+schema_version: 1
+
+tasks:
+  - task_id: prebuilt_firmware_integration
+    name: "Integrate prebuilt uvc-uac-app release"
+    description: "Stamp a customer USB camera wired to a pinned omnisight/uvc-uac-app release: render the product manifest (release tag + board HAL profile by SoC + device mode), the on-device profile (UVC-only vs UVC+UAC; VPU-aware video formats), and the packaging glue (Yocto SRCREV pin / Buildroot defconfig / Debian .deb). Reuses the tested gadget firmware (UVC 1.0/1.5, UAC 1.0-3.0, zero-copy DMABUF pipeline, dual-role) rather than regenerating it. Mode UVC_ONLY serves pure-camera products (laptop module / Windows Hello / AI streaming stick); UVC_UAC serves camera+audio (conferencing, medical/industrial)."
+    depends_on: []
+    expected_output: configs/skills/usb-cam/scaffolds/prebuilt_uvc_uac_integration.py
+
+  - task_id: board_profile_authoring
+    name: "Author a board HAL profile for a new SoC/EVK"
+    description: "When the target SoC has no verified uvc-uac-app profile, author profiles/<board>.yaml against the firmware's profile field-reference (usb/buffer/camera/encoder/video/audio/device), then on-target HIL validation (configfs/V4L2/ALSA/role). Hardware-gated — part of the component board matrix, not a host task."
+    depends_on: [prebuilt_firmware_integration]
+    expected_output: profiles/<board>.yaml

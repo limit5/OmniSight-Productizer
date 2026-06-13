@@ -1,0 +1,60 @@
+schema_version: 1
+name: usb-cam
+description: >
+  USB camera product pack — turns an embedded board into a standard USB
+  video (UVC) + optional audio (UAC) device, consuming the prebuilt,
+  tested omnisight/uvc-uac-app gadget firmware. The USB-side complement
+  to the `ipcam` pack (network camera): pick this when the product is a
+  USB webcam / AI streaming-input stick / laptop camera module /
+  conferencing or medical/industrial USB camera. Reuses the embedded
+  scaffolder; stamps a product wired to a pinned uvc-uac-app release plus
+  a board profile, in either UVC-only or UVC+UAC mode.
+version: "0.1.0"
+author: "OmniSight"
+license: "Proprietary"
+
+# uvc-uac-app currently ships a verified RK3588 profile; the others are
+# HAL-supported but profile/HIL-pending (component R6-style board matrix).
+compatible_socs:
+  - rk3588
+  - rk3576
+  - rk3568
+  - rv1126b
+  - rv1126
+  - imx93
+  - am62x
+  - genio1200
+  - genio720
+  - qcs6490
+  - qcs8550
+
+# Reuses the embedded scaffolder; declared so the dependency is explicit.
+depends_on_skills: []
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds/
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - usb-cam
+  - uvc
+  - uac
+  - usb-camera
+  - webcam
+  - gadget
+  - windows-hello
+  - streaming-stick
+  - conferencing
+  - composite-device
+  - h264
+  - h265
+  - mjpeg
