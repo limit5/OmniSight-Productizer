@@ -49,3 +49,14 @@ tasks:
     description: "Offline pytest covering RTSP scaffold (config, mount points, session FSM, transport parsing, SDP, auth, method dispatch), ONVIF SOAP envelope construction, WS-Discovery message parsing, and per-SoC codec selection."
     depends_on: [rtsp_server_scaffold, onvif_endpoints, ws_discovery, hw_codec_binding]
     expected_output: backend/tests/test_ipcam_rtsp_server.py
+
+  # R5.3 (OP-2164): the reuse path — a customer IPCAM consumes the
+  # prebuilt, tested omnisight/rtsp-onvif-server release instead of
+  # regenerating the stack above. The scaffolds above remain the
+  # from-scratch path; this task is preferred when a server release
+  # covers the product's needs.
+  - task_id: prebuilt_server_integration
+    name: "Integrate prebuilt rtsp-onvif-server release"
+    description: "Stamp a customer IPCAM wired to a pinned omnisight/rtsp-onvif-server release: render the product manifest (release tag + board HAL profile by SoC), the on-device config.yaml, and the packaging glue (Yocto meta-layer image-install + SRCREV pin, or Buildroot external defconfig). Reuses the tested server (RTSP + ONVIF Profile S/T/G + WS-Discovery + recording/search/replay) rather than regenerating it."
+    depends_on: []
+    expected_output: configs/skills/ipcam/scaffolds/prebuilt_rtsp_onvif_integration.py
