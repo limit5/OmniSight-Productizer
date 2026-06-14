@@ -70,6 +70,7 @@ from backend.agents import (
     runner_metrics_recorder,
     runner_failure_classifier,
     runner_progress,
+    routed_repo,
     runner_sandbox,
     runner_tenant,
     runner_workspace_safety,
@@ -540,12 +541,73 @@ def _bridge_health_pickup_gate(
     return False
 
 
+#: R.1 (OP-2193): label applied when a ticket asserts an unresolvable
+#: ``repo:<name>`` so the operator can see why the runner abstained.
+ROUTED_REPO_UNRESOLVED_LABEL = "runner-blocked:repo-unresolved"
+
+
+def _routed_repo_unresolved_comment(reason: str) -> str:
+    return (
+        "[runner-blocked:repo-unresolved] This ticket asserts a `repo:<name>` "
+        "label that does not resolve in `settings.routed_repos` (or the routed "
+        "config is malformed): "
+        f"{reason}\n\n"
+        "The runner abstained fail-closed rather than work this ticket against "
+        "the OmniSight-Productizer repo. Fix the `routed_repos` config entry "
+        "(or the `repo:` label), then remove this label to re-enable pickup."
+    )
+
+
+def _routed_repo_pre_gate_ok(
+    client: jira_dispatch.DispatchClient,
+    snapshot: scheduler.TicketSnapshot,
+    stats: dict[str, int] | None = None,
+) -> bool:
+    """Fail-closed routed-repo pre-gate (OP-2193 / R.1).
+
+    Runs BEFORE any worktree prep / pickup. If a ticket asserts a
+    ``repo:<name>`` label that does not resolve in ``settings.routed_repos``
+    (or routed config is malformed), the runner ABSTAINS — it must never fall
+    through to the productizer workspace for a ticket that meant to target a
+    different Gerrit project (the mis-pickup this whole feature prevents).
+
+    R.1 only *guards*; it does NOT yet route the clone/push to the resolved
+    repo (that is R.2a/R.2b/R.3). Until routing lands, no Case 5 ticket carries
+    a ``repo:`` label (the EPIC keeps them un-labelled + HOLD until R.7), so a
+    no-``repo:`` ticket returns True unchanged — the gate is inert for the
+    existing fleet.
+    """
+    try:
+        routed_repo.resolve_routed_repo(snapshot.labels or ())
+    except routed_repo.RoutedRepoError as exc:
+        if stats is not None:
+            stats["other_blocked"] = stats.get("other_blocked", 0) + 1
+        print(
+            f"[runner] runner.pickup_blocked_repo_unresolved {snapshot.key}: {exc}"
+        )
+        if not DRY_RUN:
+            jira_dispatch.add_label(
+                client, snapshot.key, ROUTED_REPO_UNRESOLVED_LABEL
+            )
+            jira_dispatch.add_comment(
+                client,
+                snapshot.key,
+                _routed_repo_unresolved_comment(str(exc)),
+                idem_key=f"repo-unresolved-{snapshot.key}",
+            )
+        return False
+    return True
+
+
 def _check_pre_pickup_candidate(
     client: jira_dispatch.DispatchClient,
     snapshot: scheduler.TicketSnapshot,
     stats: dict[str, int] | None = None,
 ) -> bool:
-    """Runner selection predicate: existing pre-pickup gate + OP-731 file mutex."""
+    """Runner selection predicate: routed-repo fail-closed pre-gate (R.1) +
+    existing pre-pickup gate + OP-731 file mutex."""
+    if not _routed_repo_pre_gate_ok(client, snapshot, stats):
+        return False
     ok, reason = jira_dispatch.pre_pickup_ok(client, snapshot)
     if not ok:
         if stats is not None:
