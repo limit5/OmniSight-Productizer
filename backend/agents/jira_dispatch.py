@@ -1298,6 +1298,33 @@ def _routed_clone_dir(repo_name: str, instance_id: str, ticket_key: str, run_id:
     return ROUTED_WORKSPACE_BASE / safe_repo / f"{instance_id}-{ticket_key}-{run_id}"
 
 
+def _routed_url_for_bot(gerrit_url: str, bot_user: str) -> str:
+    """Rewrite the SSH userinfo of a routed Gerrit URL to *bot_user*.
+
+    The ``routed_repos`` config carries ONE fixed SSH user in its
+    ``gerrit_url`` (e.g. ``ssh://claude-bot@…``), but a routed ticket may be
+    picked by ANY runner instance, and each instance authenticates with its
+    own per-instance Gerrit key (``_gerrit_auth_for_instance`` →
+    ``codex-bot-codex-1`` etc.). Gerrit SSH binds the presented key to the
+    account named in the URL, so a codex instance cloning a ``claude-bot@``
+    URL with the codex key is rejected ``Permission denied (publickey)`` (the
+    R.x e2e blocker — clone exit 128). Substitute the URL's user with the
+    instance's own ``bot_user`` so URL-account and key-account always match.
+
+    Only the userinfo is touched; scheme/host/port/path are preserved. A URL
+    with no userinfo (or a non-ssh URL) is returned unchanged so the HTTP
+    camviewpro lane and malformed configs degrade safely.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(gerrit_url)
+    if parts.scheme != "ssh" or "@" not in parts.netloc:
+        return gerrit_url
+    host_port = parts.netloc.rsplit("@", 1)[1]
+    new_netloc = f"{bot_user}@{host_port}"
+    return urlunsplit((parts.scheme, new_netloc, parts.path, parts.query, parts.fragment))
+
+
 def sync_routed_repo(
     routed: RoutedRepo,
     ticket_key: str,
@@ -1329,7 +1356,11 @@ def sync_routed_repo(
     """
     import subprocess
 
-    _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    bot_user, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    # The config gerrit_url carries one fixed SSH user; rewrite it to THIS
+    # instance's bot account so the URL-account matches the per-instance key
+    # (else a codex instance cloning a claude-bot@ URL is rejected → exit 128).
+    clone_url = _routed_url_for_bot(routed.gerrit_url, bot_user)
     env = runner_sandbox.build_allowlisted_env(
         extra={"GIT_SSH_COMMAND": f"ssh -i {ssh_key}"}
     )
@@ -1345,18 +1376,19 @@ def sync_routed_repo(
     clone_dir.parent.mkdir(parents=True, exist_ok=True)
 
     # Step 1: fresh clone of the ROUTED repo (NOT the productizer worktree).
-    # The gerrit_url already carries the bot SSH user; GIT_SSH_COMMAND supplies
-    # the key. No token in the URL (Gerrit SSH, unlike the camviewpro HTTP lane).
+    # clone_url carries THIS instance's bot SSH user (see _routed_url_for_bot);
+    # GIT_SSH_COMMAND supplies the matching per-instance key. No token in the
+    # URL (Gerrit SSH, unlike the camviewpro HTTP lane).
     BREAKERS["gerrit_ssh"].call(
         subprocess.run,
-        ["git", "clone", routed.gerrit_url, str(clone_dir)],
+        ["git", "clone", clone_url, str(clone_dir)],
         env=env, check=True, capture_output=True, text=True, timeout=180,
     )
 
     # Step 2: fetch develop from the routed repo + capture the SHA.
     BREAKERS["gerrit_ssh"].call(
         subprocess.run,
-        ["git", "fetch", routed.gerrit_url, "develop"],
+        ["git", "fetch", clone_url, "develop"],
         cwd=clone_dir, env=env, check=True, capture_output=True, text=True, timeout=60,
     )
     develop_sha = subprocess.run(
@@ -1380,7 +1412,6 @@ def sync_routed_repo(
     # is not a registered Gerrit email for the bot account → the routed push
     # was rejected with `settings#EmailAddresses` (forgeAuthor block). --local
     # is the correct scope for a dedicated clone and is always read.
-    bot_user, _ = _gerrit_auth_for_instance(agent_class, instance_id)
     bot_email = _bot_email_for(agent_class, instance_id)
     subprocess.run(
         ["git", "config", "--local", "user.email", bot_email],
@@ -1461,9 +1492,14 @@ def push_routed_for_review(
     """
     import subprocess
 
-    _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    bot_user, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
     if not ssh_key.exists():
         return GerritPushResult(False, None, None, f"SSH key not found at {ssh_key}")
+    # Match the push URL's SSH account to this instance's per-instance key
+    # (same reason as the clone in sync_routed_repo — a fixed config user would
+    # reject codex instances). _routed_url_for_bot is a no-op for the matching
+    # claude instance and for non-ssh URLs.
+    push_url = _routed_url_for_bot(routed.gerrit_url, bot_user)
     env = runner_sandbox.build_allowlisted_env(
         extra={"GIT_SSH_COMMAND": f"ssh -i {ssh_key}"}
     )
@@ -1475,7 +1511,7 @@ def push_routed_for_review(
     for attempt in range(1, max_attempts + 1):
         result = BREAKERS["gerrit_ssh"].call(
             subprocess.run,
-            ["git", "push", "--no-thin", routed.gerrit_url, f"HEAD:{routed.ref}"],
+            ["git", "push", "--no-thin", push_url, f"HEAD:{routed.ref}"],
             cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
         )
         blob = (result.stderr + "\n" + result.stdout).strip()

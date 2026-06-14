@@ -135,3 +135,43 @@ def test_path_isolation_between_instances(fake_git):
     a = jira_dispatch.sync_routed_repo(ROUTED, "OP-2170", "subscription-claude", "claude-1", run_id="r1")
     b = jira_dispatch.sync_routed_repo(ROUTED, "OP-2170", "subscription-claude", "claude-2", run_id="r2")
     assert a.worktree_path != b.worktree_path
+
+
+# --- routed URL SSH-user rewrite (the codex clone exit-128 regression) ---------
+
+
+def test_routed_url_for_bot_rewrites_ssh_user():
+    # config carries a fixed claude-bot@ user; a codex instance must clone with
+    # its OWN account or Gerrit rejects the key (Permission denied → exit 128).
+    out = jira_dispatch._routed_url_for_bot(ROUTED.gerrit_url, "codex-bot-codex-1")
+    assert out == (
+        "ssh://codex-bot-codex-1@sora.services:29418/omnisight/conference-appliance"
+    )
+    # matching user → unchanged; non-ssh / userless → returned as-is.
+    assert jira_dispatch._routed_url_for_bot(ROUTED.gerrit_url, "claude-bot") == ROUTED.gerrit_url
+    assert jira_dispatch._routed_url_for_bot("https://h/x.git", "codex-bot") == "https://h/x.git"
+    assert jira_dispatch._routed_url_for_bot("ssh://sora.services/x", "codex-bot") == "ssh://sora.services/x"
+
+
+def test_codex_instance_clones_with_its_own_account(monkeypatch, fake_git):
+    # Override the fixture's auth so the resolved bot user (codex-bot-codex-1)
+    # differs from the config URL's user (claude-bot). The clone + fetch URLs
+    # MUST be rewritten to the codex account, key stays the per-instance key.
+    monkeypatch.setattr(
+        jira_dispatch, "_gerrit_auth_for_instance",
+        lambda ac, iid=None: ("codex-bot-codex-1", Path("/fake/codex-key")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        jira_dispatch, "_bot_email_for",
+        lambda ac, iid=None: "rt3628+codex-bot@gmail.com", raising=False,
+    )
+    jira_dispatch.sync_routed_repo(
+        ROUTED, "OP-2171", "subscription-codex", "codex-1", run_id="r1",
+    )
+    clone = [c for c, _ in fake_git if c[:2] == ["git", "clone"]][0]
+    fetch = [c for c, _ in fake_git if c[:2] == ["git", "fetch"]][0]
+    assert clone[2] == "ssh://codex-bot-codex-1@sora.services:29418/omnisight/conference-appliance"
+    assert fetch[2] == "ssh://codex-bot-codex-1@sora.services:29418/omnisight/conference-appliance"
+    # never the config's claude-bot user
+    assert all("claude-bot@" not in arg for c, _ in fake_git for arg in c)
