@@ -52,6 +52,7 @@ from backend.agents.delivery_target import (
     resolve_delivery_target,
 )
 from backend.agents.idempotency import DEFAULT_STORE
+from backend.agents.routed_repo import RoutedRepo
 from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import (
     ALWAYS_TOUCHED,
@@ -1233,6 +1234,106 @@ def sync_to_gerrit_develop(
         branch_name=branch_name,
         develop_sha=develop_sha,
         detail=f"fresh branch {branch_name} at {develop_sha[:12]}",
+    )
+
+
+#: R.2a (OP-2194): base dir for routed-repo clones, one fresh clone per
+#: (repo, instance, ticket, run) so concurrent routed work never shares a tree.
+ROUTED_WORKSPACE_BASE = Path(
+    os.environ.get("OMNISIGHT_ROUTED_WORKSPACE_BASE", "~/work/sora-routed-worktrees")
+).expanduser()
+
+
+def _routed_clone_dir(repo_name: str, instance_id: str, ticket_key: str, run_id: str) -> Path:
+    """Per-(repo, instance, ticket, run) routed clone path.
+
+    Distinct from the productizer ``_ephemeral_worktree_dir`` namespace so the
+    orphan-reaper / workspace-safety sweeper can tell routed clones apart and
+    two concurrent runners on two routed tickets never collide (codex finding:
+    ``_repo_dir_name`` alone keys on the URL only).
+    """
+    safe_repo = re.sub(r"[^A-Za-z0-9._-]", "_", repo_name)
+    return ROUTED_WORKSPACE_BASE / safe_repo / f"{instance_id}-{ticket_key}-{run_id}"
+
+
+def sync_routed_repo(
+    routed: RoutedRepo,
+    ticket_key: str,
+    agent_class: str,
+    instance_id: str | None = None,
+    *,
+    run_id: str | None = None,
+) -> WorktreeSyncResult:
+    """Clone + branch a ROUTED Gerrit repo for a ticket (OP-2194 / R.2a).
+
+    The routed analog of :func:`sync_to_gerrit_develop`. Deliberately a
+    SEPARATE function (not a parameterization of the productizer-shaped one,
+    per the 3-way audit) because the routed flow CLONES a fresh repo rather
+    than reusing the wrapper's productizer worktree:
+
+    1. Fresh ``git clone`` of ``routed.gerrit_url`` into a per-instance dir
+       (``ROUTED_WORKSPACE_BASE/<repo>/<instance>-<ticket>-<run_id>/``) — the
+       wrapper's productizer clone is unused for a routed ticket.
+    2. Fetch the routed develop ref + capture its SHA.
+    3. Cut a fresh ``feature/<ticket>-runner-fresh`` branch at that tip.
+
+    Auth: the same per-bot Gerrit SSH key as the normal lane
+    (``_gerrit_auth_for_instance``); only the project URL differs (``routed``).
+    R.2a does NOT push (that is R.3 / GerritReviewDelivery) — it only prepares
+    a clean clone for the agent to work in. Caller MUST clean up the returned
+    ``worktree_path`` (R.2b wires orphan-reaper / workspace-safety).
+
+    Raises CalledProcessError if any git op fails.
+    """
+    import subprocess
+
+    _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    env = runner_sandbox.build_allowlisted_env(
+        extra={"GIT_SSH_COMMAND": f"ssh -i {ssh_key}"}
+    )
+    instance = instance_id or DEFAULT_INSTANCE_ID
+    run_id = run_id or _new_run_id()
+    clone_dir = _routed_clone_dir(routed.name, instance, ticket_key, run_id)
+
+    if clone_dir.exists():
+        raise RuntimeError(
+            f"routed clone dir already exists: {clone_dir}; "
+            "pass a unique run_id or clean up the stale directory."
+        )
+    clone_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: fresh clone of the ROUTED repo (NOT the productizer worktree).
+    # The gerrit_url already carries the bot SSH user; GIT_SSH_COMMAND supplies
+    # the key. No token in the URL (Gerrit SSH, unlike the camviewpro HTTP lane).
+    BREAKERS["gerrit_ssh"].call(
+        subprocess.run,
+        ["git", "clone", routed.gerrit_url, str(clone_dir)],
+        env=env, check=True, capture_output=True, text=True, timeout=180,
+    )
+
+    # Step 2: fetch develop from the routed repo + capture the SHA.
+    BREAKERS["gerrit_ssh"].call(
+        subprocess.run,
+        ["git", "fetch", routed.gerrit_url, "develop"],
+        cwd=clone_dir, env=env, check=True, capture_output=True, text=True, timeout=60,
+    )
+    develop_sha = subprocess.run(
+        ["git", "rev-parse", "FETCH_HEAD"],
+        cwd=clone_dir, capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    # Step 3: cut a fresh feature branch at the routed develop tip.
+    branch_name = f"feature/{ticket_key}-runner-fresh"
+    subprocess.run(
+        ["git", "switch", "-C", branch_name, develop_sha],
+        cwd=clone_dir, check=True, capture_output=True, text=True,
+    )
+
+    return WorktreeSyncResult(
+        branch_name=branch_name,
+        develop_sha=develop_sha,
+        detail=f"routed clone {clone_dir} ({routed.name}) at {develop_sha[:12]}",
+        worktree_path=clone_dir,
     )
 
 
