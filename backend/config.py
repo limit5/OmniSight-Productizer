@@ -119,6 +119,20 @@ class Settings(BaseSettings):
     # ref), not a credential, so it is deliberately NOT in
     # LEGACY_CREDENTIAL_FIELDS.
     product_sources: str = ""
+    # ── Per-ticket routed repos (OP-2192 / R.0 — multi-project runner routing) ──
+    # A JSON object mapping a routed repo name → its Gerrit destination, used by
+    # ``backend.agents.routed_repo.resolve_routed_repo`` when a ticket asserts a
+    # ``repo:<name>`` label. Unlike ``delivery_targets`` (fail-OPEN, routes by
+    # JIRA project key), this is routed by LABEL and is fail-CLOSED: a ticket
+    # that asserts ``repo:<name>`` with no/blank entry RAISES rather than fall
+    # back to the productizer repo. Example::
+    #   {"conference-appliance": {
+    #       "gerrit_url": "ssh://claude-bot@sora.services:29418/omnisight/conference-appliance",
+    #       "ref": "refs/for/develop", "git_account_ref": "...", "context": "conference-appliance"}}
+    # Empty/missing (the default) keeps the feature inert — zero behavior change.
+    # A *source pointer*, not a credential → deliberately NOT in
+    # LEGACY_CREDENTIAL_FIELDS.
+    routed_repos: str = ""
     # Pinned checkout/submodule path for the vendor-mirrors-nda mirror catalog.
     # OP-2100/C4 and the C5 mirror resolver share this knob; empty/missing
     # snapshot keeps the Productizer-side cross-repo guard inert.
