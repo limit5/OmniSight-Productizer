@@ -1376,6 +1376,77 @@ def cleanup_routed_clone(worktree_path: Path) -> None:
             log.warning("cleanup_routed_clone: rmtree failed for %s: %s", worktree_path, exc)
 
 
+def push_routed_for_review(
+    worktree_path: Path,
+    routed: RoutedRepo,
+    agent_class: str,
+    instance_id: str | None = None,
+) -> GerritPushResult:
+    """Push a routed clone's HEAD to the ROUTED Gerrit project's review queue
+    (OP-2196 / R.3 — GerritReviewDelivery).
+
+    The routed analog of :func:`push_to_gerrit_for_review`. Deliberately does
+    NOT call :func:`resolve_gerrit_push_identity` (which is hardcoded to the
+    productizer project for the self tenant — the audit blocker): the push
+    target is ``routed.gerrit_url`` with the per-bot Gerrit SSH key, and the
+    ref is ``routed.ref`` (e.g. ``refs/for/develop``). Caller must have run
+    :func:`ensure_change_ids` so every commit carries a Change-Id (the
+    commit-msg hook is installed in the routed clone in R.2b); the L1 dual
+    co-author trailers come from the agent's commits, same as the normal lane.
+
+    Returns a :class:`GerritPushResult` (Change number + URL on success).
+    Retries transient Gerrit failures with the shared backoff schedule.
+    """
+    import subprocess
+
+    _, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
+    if not ssh_key.exists():
+        return GerritPushResult(False, None, None, f"SSH key not found at {ssh_key}")
+    env = runner_sandbox.build_allowlisted_env(
+        extra={"GIT_SSH_COMMAND": f"ssh -i {ssh_key}"}
+    )
+
+    retry_notes: list[str] = []
+    max_attempts = len(_GERRIT_PUSH_RETRY_BACKOFFS) + 1
+    result: subprocess.CompletedProcess[str] | None = None
+    blob = ""
+    for attempt in range(1, max_attempts + 1):
+        result = BREAKERS["gerrit_ssh"].call(
+            subprocess.run,
+            ["git", "push", "--no-thin", routed.gerrit_url, f"HEAD:{routed.ref}"],
+            cwd=worktree_path, capture_output=True, text=True, env=env, timeout=120,
+        )
+        blob = (result.stderr + "\n" + result.stdout).strip()
+        if result.returncode == 0:
+            break
+        if attempt == max_attempts or not _is_transient_gerrit_push_failure(blob):
+            break
+        backoff = _GERRIT_PUSH_RETRY_BACKOFFS[attempt - 1]
+        note = (
+            f"attempt {attempt}/{max_attempts} failed with transient Gerrit "
+            f"push error; retrying in {backoff}s"
+        )
+        retry_notes.append(note)
+        log.warning("%s: %s", note, blob[-500:])
+        time.sleep(backoff)
+
+    if result is None:
+        return GerritPushResult(False, None, None, "git push did not run")
+    if result.returncode != 0:
+        detail = blob[-1500:]
+        if retry_notes:
+            detail = "\n".join([*retry_notes, detail])
+        return GerritPushResult(False, None, None, detail)
+
+    m = _GERRIT_CHANGE_URL_RE.search(blob)
+    if not m:
+        return GerritPushResult(
+            False, None, None,
+            f"push succeeded but Change URL not parsed:\n{blob[-1500:]}",
+        )
+    return GerritPushResult(True, int(m.group(2)), m.group(1), blob[-500:])
+
+
 def assert_worktree_clean(worktree_path: Path) -> None:
     """Detect and recover stale git operation state before branch ops.
 

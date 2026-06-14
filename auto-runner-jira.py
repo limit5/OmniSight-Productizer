@@ -546,6 +546,78 @@ def _bridge_health_pickup_gate(
 ROUTED_REPO_UNRESOLVED_LABEL = "runner-blocked:repo-unresolved"
 
 
+def _deliver_routed(
+    client: "jira_dispatch.DispatchClient",
+    snapshot: "scheduler.TicketSnapshot",
+    routed: "routed_repo.RoutedRepo",
+    worktree_path,
+    sync_result,
+    cli_rc: int,
+    claim,
+) -> int:
+    """Deliver a routed ticket's work to its OWN Gerrit project (R.3 / OP-2196).
+
+    Called from the routed branch of the dispatch loop after the CLI ran in the
+    routed clone. On a clean CLI exit: stamp Change-Ids + push HEAD:refs/for to
+    ``routed.gerrit_url`` (NOT the productizer project), then post the
+    ``[runner-pushed-to-gerrit]`` comment + transition Under Review. On any
+    failure, revert to To Do so the ticket re-queues. The routed clone itself is
+    cleaned up by the caller (R.2b) in a ``finally``.
+
+    The transition to merged/published is driven by the gerrit_jira_bridge
+    consuming the routed project's change-merged event, same as the normal lane.
+    """
+    if cli_rc != 0:
+        # CLI failed in the routed clone — nothing to push; surface + revert.
+        jira_dispatch.add_comment(
+            client, snapshot.key,
+            f"[runner-routed-cli-failed] The agent CLI exited rc={cli_rc} while "
+            f"working {routed.name}; reverting to To Do.",
+        )
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+        jira_dispatch.transition_back_to_todo(
+            client, snapshot.key, f"[runner-routed-cli-failed] rc={cli_rc}",
+        )
+        return cli_rc
+    try:
+        jira_dispatch.ensure_change_ids(worktree_path, base_ref=sync_result.develop_sha)
+        push = jira_dispatch.push_routed_for_review(
+            worktree_path, routed, AGENT_CLASS, INSTANCE_ID,
+        )
+    except jira_dispatch.NoCommitsOnBranchError:
+        # No commits to deliver — treat like the normal lane's no-commits path:
+        # release the claim and let the operator / re-pickup decide.
+        print(f"[runner] {snapshot.key} routed: CLI produced 0 commits")
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+        jira_dispatch.transition_back_to_todo(
+            client, snapshot.key, "[runner-routed-no-commits]",
+        )
+        return 1
+    if not push.success:
+        print(
+            f"[runner] {snapshot.key} routed push to {routed.name} FAILED: "
+            f"{push.detail[-300:]}",
+            file=sys.stderr,
+        )
+        jira_dispatch.add_comment(
+            client, snapshot.key,
+            f"[runner-routed-push-failed] Push to {routed.name} "
+            f"({routed.gerrit_url}) failed:\n{push.detail[-800:]}\n\n"
+            f"Reverting to To Do.",
+        )
+        _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+        jira_dispatch.transition_back_to_todo(
+            client, snapshot.key, "[runner-routed-push-failed]",
+        )
+        return 1
+    print(
+        f"[runner] {snapshot.key} routed push OK → {routed.name} "
+        f"Change #{push.change_number}: {push.change_url}"
+    )
+    jira_dispatch.transition_to_under_review(client, snapshot.key, push.change_url)
+    return 0
+
+
 def _routed_repo_unresolved_comment(reason: str) -> str:
     return (
         "[runner-blocked:repo-unresolved] This ticket asserts a `repo:<name>` "
@@ -3410,17 +3482,19 @@ def _main_impl() -> int:
         started_at=metric_started_at,
     )
     if routed_clone_path is not None:
-        # R.2b (OP-2195): a routed ticket's CLI ran in its own routed clone.
-        # The routed Gerrit push is R.3 (GerritReviewDelivery) — a routed
-        # ticket MUST NOT enter the productizer push pipeline below. Clean up
-        # the routed clone and return. (Dormant until R.3 + a routed_repos
-        # entry exist; no pickable ticket carries a repo: label today.)
-        jira_dispatch.cleanup_routed_clone(routed_clone_path)
-        print(
-            f"[runner] {snapshot.key} routed clone cleaned up; routed push "
-            f"deferred to R.3 (rc={rc})"
-        )
-        return rc
+        # R.3 (OP-2196): a routed ticket's CLI ran in its own routed clone.
+        # Deliver to the ROUTED Gerrit project's review queue (NOT the
+        # productizer push pipeline below), then clean up the clone. Dormant
+        # until a routed_repos entry exists (R.7); no pickable ticket carries a
+        # repo: label today.
+        try:
+            routed_rc = _deliver_routed(
+                client, snapshot, routed_repo_for_ticket, worktree_path,
+                sync_result, rc, claim,
+            )
+        finally:
+            jira_dispatch.cleanup_routed_clone(routed_clone_path)
+        return routed_rc
     if rc == 0:
         # OP-855 capability gate: refuse the auto-push if `gerrit_push` is
         # not in the matrix for this (ticket_type × area × tier). Operator
