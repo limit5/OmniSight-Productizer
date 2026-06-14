@@ -1368,6 +1368,22 @@ def _build_prompt(
         tenant_id = None
     is_omnisight_self = bool(tenant_id) and runner_tenant.is_self_tenant(tenant_id)
 
+    # R.5 (OP-2198): a ROUTED ticket (a ``repo:<name>`` label → a different
+    # Gerrit project) runs under the omnisight-self tenant — it is OmniSight's
+    # own repo — but its work targets conference-appliance (etc.), NOT the
+    # productizer repo. So even though it is self-tenant, it MUST NOT receive
+    # the PRODUCTIZER repo's internal SOP corpus (lessons / anti-patterns /
+    # CLAUDE.md doc-rules): those describe productizer process, not the routed
+    # repo. The routed repo's own CLAUDE.md reaches the CLI from the routed
+    # clone (R.2b), exactly like a customer tenant gets its repo's CLAUDE.md.
+    # Fail-safe to "routed" (strip) on an unresolvable repo: label — R.1 owns
+    # the abstain; here we only avoid leaking productizer context.
+    try:
+        is_routed = routed_repo.resolve_routed_repo(labels) is not None
+    except routed_repo.RoutedRepoError:
+        is_routed = True
+    is_productizer_self = is_omnisight_self and not is_routed
+
     # AUDIT-29b-6 (OP-1024) — the lesson-surface meta-mechanism: feed the
     # most relevant prior lessons + the architecture anti-patterns matching
     # this ticket's area into the pickup prompt. Both are flag-gated (default
@@ -1384,7 +1400,7 @@ def _build_prompt(
     # (OP-1778 passes the bound tenant_id), so for a customer tenant it draws
     # from that tenant's own reflection store, never OmniSight's.
     reflection_block = _build_reflection_rag_block(key, summary, description)
-    if is_omnisight_self:
+    if is_productizer_self:
         lessons_block = _build_lesson_recall_block(key, summary, description)
         antipattern_block = _build_antipattern_block(
             key, summary, description, declared_areas,
@@ -1392,8 +1408,10 @@ def _build_prompt(
     else:
         lessons_block = ""
         antipattern_block = ""
+        strip_reason = "routed-repo" if is_routed else "customer-tenant"
         print(
             f"[runner] tenant_context_strip key={key} tenant={tenant_id} "
+            f"reason={strip_reason} "
             f"stripped=lessons,antipatterns,claude_md_docrules",
             file=sys.stderr,
         )
@@ -1403,7 +1421,7 @@ def _build_prompt(
     # A customer tenant must never receive them — its own repo's CLAUDE.md is
     # picked up by the CLI from the cloned tenant workspace instead.
     docrules_block = ""
-    if is_omnisight_self:
+    if is_productizer_self:
         docrules_block = (
             "# Documentation rules (per CLAUDE.md L1, amended 2026-05-06)\n"
             "\n"
