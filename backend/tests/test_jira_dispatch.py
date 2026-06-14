@@ -1195,7 +1195,7 @@ def test_pickup_staleness_warns_at_eight_days(monkeypatch) -> None:
 
     monkeypatch.setattr(
         jd, "_query_open_change_for_ticket_staleness",
-        lambda key, agent_class, instance_id=None: change,
+        lambda key, agent_class, instance_id=None, gerrit_project=None: change,
     )
     monkeypatch.setattr(
         jd,
@@ -1235,7 +1235,7 @@ def test_pickup_staleness_abstains_at_fifteen_days(monkeypatch) -> None:
 
     monkeypatch.setattr(
         jd, "_query_open_change_for_ticket_staleness",
-        lambda key, agent_class, instance_id=None: change,
+        lambda key, agent_class, instance_id=None, gerrit_project=None: change,
     )
     monkeypatch.setattr(
         jd,

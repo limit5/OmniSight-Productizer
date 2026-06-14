@@ -561,7 +561,9 @@ def _wire_main_to_invoke(
     monkeypatch.setattr(mod.runner_tenant, "resolve_tenant_id", lambda labels: "tenant-a")
     monkeypatch.setattr(mod.runner_tenant, "is_self_tenant", lambda tenant_id: True)
     monkeypatch.setattr(mod.db_context, "set_tenant_id", lambda tenant_id: None)
-    monkeypatch.setattr(mod, "already_merged_in_gerrit", lambda key: None)
+    monkeypatch.setattr(
+        mod, "already_merged_in_gerrit", lambda key, gerrit_project=None: None
+    )
     monkeypatch.setattr(mod.jira_dispatch, "set_bot_identity_in_worktree", lambda *a, **kw: None)
     monkeypatch.setattr(mod.jira_dispatch, "install_commit_msg_hook", lambda p: True)
     monkeypatch.setattr(

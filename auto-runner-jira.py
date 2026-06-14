@@ -422,11 +422,17 @@ def _clear_dependency_waiting_markers(
     )
 
 
-def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
+def already_merged_in_gerrit(
+    ticket_key: str, gerrit_project: str | None = None
+) -> tuple[int, str] | None:
     """Return merged Gerrit change metadata for ``ticket_key``, if any.
 
     Fail-open by design: a Gerrit/network problem must not block legitimate
     pickup. Strict subject-prefix matching avoids body-only false positives.
+
+    R.4: *gerrit_project* scopes the H12 merged-check to one project so a
+    routed ticket does not match a merged change in productizer with the same
+    key (and vice-versa). ``None`` → no project filter (unchanged default).
     """
     try:
         user, ssh_key = jira_dispatch._gerrit_auth_for_instance(AGENT_CLASS, INSTANCE_ID)
@@ -436,7 +442,7 @@ def already_merged_in_gerrit(ticket_key: str) -> tuple[int, str] | None:
         "ssh", "-i", str(ssh_key), "-p", str(jira_dispatch.GERRIT_SSH_PORT),
         f"{user}@{jira_dispatch.GERRIT_SSH_HOST}",
         "gerrit", "query", "--format=JSON",
-        f"message:{ticket_key} status:merged",
+        f"{jira_dispatch._project_filter(gerrit_project)}message:{ticket_key} status:merged",
     ]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
@@ -3022,7 +3028,12 @@ def _main_impl() -> int:
     )
     routed_clone_path = None
 
-    merged_info = already_merged_in_gerrit(snapshot.key)
+    merged_info = already_merged_in_gerrit(
+        snapshot.key,
+        gerrit_project=jira_dispatch.gerrit_project_for_labels(
+            getattr(snapshot, "labels", ())
+        ),
+    )
     if merged_info:
         change_number, change_url = merged_info
         print(

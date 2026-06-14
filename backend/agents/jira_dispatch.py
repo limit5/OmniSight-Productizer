@@ -52,6 +52,7 @@ from backend.agents.delivery_target import (
     resolve_delivery_target,
 )
 from backend.agents.idempotency import DEFAULT_STORE
+from backend.agents import routed_repo
 from backend.agents.routed_repo import RoutedRepo
 from backend.agents.scheduler import TicketSnapshot
 from backend.agents.scope_to_paths import (
@@ -503,6 +504,43 @@ GERRIT_SSH_PORT = 29418
 GERRIT_PROJECT_PATH = "omnisight/OmniSight-Productizer"
 GERRIT_HOOK_URL = "https://sora.services:29420/tools/hooks/commit-msg"
 
+
+def _project_filter(gerrit_project: str | None) -> str:
+    """R.4 (OP-2197): additive Gerrit ``project:`` query token.
+
+    Returns ``"project:<x> "`` when *gerrit_project* is set, else ``""`` — so a
+    ``None`` argument leaves the query byte-identical to the pre-R.4 default
+    (the productizer-only fleet). When a routed ticket scopes a shared gate to
+    its own project, conf changes no longer pause productizer runners, collide
+    on same relative paths, or match the wrong open patch (the audit finding).
+    """
+    return f"project:{gerrit_project} " if gerrit_project else ""
+
+
+def gerrit_project_from_url(gerrit_url: str) -> str:
+    """Extract the Gerrit project path (e.g. ``omnisight/conference-appliance``)
+    from a routed ``gerrit_url`` for use in a ``project:`` query filter."""
+    from urllib.parse import urlparse
+
+    path = urlparse(gerrit_url).path.lstrip("/")
+    return path[:-4] if path.endswith(".git") else path
+
+
+def gerrit_project_for_labels(labels) -> str | None:
+    """The Gerrit project a ticket's gate queries should scope to.
+
+    Returns the routed project (from a ``repo:<name>`` label) or ``None`` for a
+    normal productizer ticket (gate stays at the unchanged default). Fail-soft:
+    a malformed routed config returns ``None`` here rather than raising — the
+    R.1 dispatch pre-gate is the place that abstains on an unresolved
+    ``repo:`` label; a gate just falls back to the default scope.
+    """
+    try:
+        routed = routed_repo.resolve_routed_repo(labels or ())
+    except routed_repo.RoutedRepoError:
+        return None
+    return gerrit_project_from_url(routed.gerrit_url) if routed is not None else None
+
 # agent_class → (gerrit username, ssh private key path).
 # Memory: claude-bot for subscription-claude / api-anthropic; codex-bot for subscription-codex / api-openai.
 _GERRIT_AUTH_BY_CLASS: dict[str, tuple[str, Path]] = {
@@ -558,14 +596,18 @@ def _gerrit_auth_for_bot(bot_username: str) -> tuple[str, Path]:
     raise ValueError(f"unknown Gerrit bot username: {bot_username}")
 
 
-def open_ps_count_for(bot_username: str) -> int:
-    """Return open Gerrit patchsets owned by ``bot_username``."""
+def open_ps_count_for(bot_username: str, gerrit_project: str | None = None) -> int:
+    """Return open Gerrit patchsets owned by ``bot_username``.
+
+    R.4: pass *gerrit_project* to scope the count to one project (so a routed
+    project's open changes don't inflate the productizer backpressure count and
+    vice-versa). ``None`` → all projects (unchanged default)."""
     user, ssh_key = _gerrit_auth_for_bot(bot_username)
     cmd = [
         "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
         f"{user}@{GERRIT_SSH_HOST}",
         "gerrit", "query", "--format=JSON",
-        f"is:open owner:{bot_username}",
+        f"{_project_filter(gerrit_project)}is:open owner:{bot_username}",
     ]
     out = BREAKERS["gerrit_ssh"].call(
         subprocess.run, cmd, capture_output=True, text=True, timeout=10
@@ -2110,11 +2152,14 @@ def already_merged_in_gerrit(
     jira_key: str,
     agent_class: str = "subscription-codex",
     instance_id: str | None = None,
+    gerrit_project: str | None = None,
 ) -> GerritMergedInfo | None:
     """Return merged sibling change info for ``jira_key``, if Gerrit has one."""
 
     bot_username, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
-    query = f"status:merged project:{GERRIT_PROJECT_PATH} {jira_key}"
+    # R.4: gerrit_project overrides the default productizer scope for a routed
+    # ticket; None keeps the byte-identical productizer query.
+    query = f"status:merged project:{gerrit_project or GERRIT_PROJECT_PATH} {jira_key}"
     cmd = [
         "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
         f"{bot_username}@{GERRIT_SSH_HOST}",
@@ -2775,7 +2820,7 @@ def predict_target_files(
     return files
 
 
-def _open_bot_owned_file_owners() -> dict[str, list[GerritFileOwner]]:
+def _open_bot_owned_file_owners(gerrit_project: str | None = None) -> dict[str, list[GerritFileOwner]]:
     """Return file → open bot-owned Gerrit PS metadata.
 
     Per OP-783, file-mutex must catch PSes owned by per-instance bots
@@ -2792,7 +2837,7 @@ def _open_bot_owned_file_owners() -> dict[str, list[GerritFileOwner]]:
         "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
         f"claude-bot@{GERRIT_SSH_HOST}",
         "gerrit", "query", "--format=JSON", "--current-patch-set", "--files",
-        "is:open",
+        f"{_project_filter(gerrit_project)}is:open".strip(),
     ]
     result = BREAKERS["gerrit_ssh"].call(
         subprocess.run, cmd, capture_output=True, text=True, timeout=15
@@ -2947,6 +2992,7 @@ def _query_open_change_for_ticket_staleness(
     key: str,
     agent_class: str,
     instance_id: str | None = None,
+    gerrit_project: str | None = None,
 ) -> dict | None:
     try:
         gerrit_user, ssh_key = _gerrit_auth_for_instance(agent_class, instance_id)
@@ -2956,7 +3002,7 @@ def _query_open_change_for_ticket_staleness(
         "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
         f"{gerrit_user}@{GERRIT_SSH_HOST}",
         "gerrit", "query", "--format=JSON", "--current-patch-set",
-        "status:open", "branch:develop",
+        f"{_project_filter(gerrit_project)}status:open".strip(), "branch:develop",
     ]
     try:
         result = BREAKERS["gerrit_ssh"].call(
@@ -2985,9 +3031,15 @@ def pickup_staleness_check(
     *,
     now_ts: float | None = None,
     worktree_path: Path | None = None,
+    gerrit_project: str | None = None,
 ) -> tuple[bool, str]:
-    """Warn/abstain if an existing open PS for ``key`` is stale."""
-    change = _query_open_change_for_ticket_staleness(key, client.agent_class)
+    """Warn/abstain if an existing open PS for ``key`` is stale.
+
+    R.4: *gerrit_project* scopes the open-change scan to the ticket's own
+    project; ``None`` → unchanged (all open develop changes)."""
+    change = _query_open_change_for_ticket_staleness(
+        key, client.agent_class, gerrit_project=gerrit_project
+    )
     if change is None:
         return True, "ps staleness check skipped: no open Gerrit PS found"
     assessment = assess_patchset_staleness(
@@ -3028,7 +3080,7 @@ def pickup_staleness_check(
     )
 
 
-def _open_bot_owned_patch_signals() -> list[feature_dup_detector.PatchSignal]:
+def _open_bot_owned_patch_signals(gerrit_project: str | None = None) -> list[feature_dup_detector.PatchSignal]:
     """Return open bot-owned Gerrit PS signals for feature-dup detection."""
 
     _, ssh_key = _GERRIT_AUTH_BY_CLASS["subscription-claude"]
@@ -3036,7 +3088,7 @@ def _open_bot_owned_patch_signals() -> list[feature_dup_detector.PatchSignal]:
         "ssh", "-i", str(ssh_key), "-p", str(GERRIT_SSH_PORT),
         f"claude-bot@{GERRIT_SSH_HOST}",
         "gerrit", "query", "--format=JSON", "--current-patch-set", "--files",
-        "is:open",
+        f"{_project_filter(gerrit_project)}is:open".strip(),
     ]
     result = BREAKERS["gerrit_ssh"].call(
         subprocess.run, cmd, capture_output=True, text=True, timeout=15
@@ -3270,7 +3322,12 @@ def file_mutex_check(
         return True, "no prediction available - mutex check skipped"
 
     try:
-        in_flight_owners = _open_bot_owned_file_owners()
+        # R.4: scope the file-mutex scan to the ticket's own Gerrit project so a
+        # routed ticket doesn't collide on same relative paths with productizer
+        # changes (and vice-versa). None for a normal ticket → unchanged.
+        in_flight_owners = _open_bot_owned_file_owners(
+            gerrit_project=gerrit_project_for_labels(getattr(snapshot, "labels", ()))
+        )
     except (OSError, subprocess.SubprocessError) as exc:
         return True, f"gerrit query failed - mutex check skipped: {type(exc).__name__}: {exc}"
 
@@ -4582,7 +4639,8 @@ def pre_pickup_ok(
     caps = set(enabled_capabilities or ())
     if "gerrit_push" in caps:
         staleness_ok, staleness_reason = pickup_staleness_check(
-            client, snapshot.key, worktree_path=worktree_path
+            client, snapshot.key, worktree_path=worktree_path,
+            gerrit_project=gerrit_project_for_labels(getattr(snapshot, "labels", ())),
         )
         if not staleness_ok:
             return False, staleness_reason

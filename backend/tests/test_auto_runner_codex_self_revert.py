@@ -157,7 +157,9 @@ def _wire_main_to_no_commits(
         mod.jira_dispatch, "_request", lambda client, method, path: _issue()
     )
     monkeypatch.setattr(mod.jira_dispatch, "to_snapshot", jira_dispatch.to_snapshot)
-    monkeypatch.setattr(mod, "already_merged_in_gerrit", lambda key: None)
+    monkeypatch.setattr(
+        mod, "already_merged_in_gerrit", lambda key, gerrit_project=None: None
+    )
     monkeypatch.setattr(
         mod.jira_dispatch, "set_bot_identity_in_worktree", lambda *a, **kw: None
     )
