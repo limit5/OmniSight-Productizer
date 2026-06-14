@@ -53,6 +53,10 @@ def fake_git(monkeypatch, tmp_path):
         lambda ac, iid=None: ("claude-bot", Path("/fake/key")), raising=False,
     )
     monkeypatch.setattr(
+        jira_dispatch, "_bot_email_for",
+        lambda ac, iid=None: "rt3628+claude-bot@gmail.com", raising=False,
+    )
+    monkeypatch.setattr(
         jira_dispatch.runner_sandbox, "build_allowlisted_env",
         lambda extra=None: {"GIT_SSH_COMMAND": "ssh -i /fake/key"}, raising=False,
     )
@@ -97,6 +101,24 @@ def test_fetch_and_branch_target_the_clone_cwd(fake_git):
         "git", "switch", "-C", "feature/OP-2170-runner-fresh",
         "deadbeefcafebabe0000000000000000deadbeef",
     ]
+
+
+def test_sets_local_bot_identity_on_clone(fake_git):
+    # The routed clone is a fresh `git clone`, not a linked worktree, so the
+    # identity MUST be set with `git config --local` (not --worktree, which git
+    # IGNORES on a plain clone → the agent would commit with the host's global
+    # identity, whose email is not a registered Gerrit email → push rejected
+    # with settings#EmailAddresses). Regression for the R.7 e2e push failure.
+    jira_dispatch.sync_routed_repo(
+        ROUTED, "OP-2170", "subscription-claude", "claude-1", run_id="r1",
+    )
+    cfgs = [c for c, _ in fake_git if c[:3] == ["git", "config", "--local"]]
+    emails = [c for c in cfgs if len(c) > 3 and c[3] == "user.email"]
+    names = [c for c in cfgs if len(c) > 3 and c[3] == "user.name"]
+    assert emails and emails[0][4] == "rt3628+claude-bot@gmail.com"
+    assert names and names[0][4] == "claude-bot"
+    # must NOT use --worktree (the bug)
+    assert not [c for c, _ in fake_git if c[:3] == ["git", "config", "--worktree"]]
 
 
 def test_refuses_existing_clone_dir(fake_git, tmp_path):

@@ -1371,6 +1371,26 @@ def sync_routed_repo(
         cwd=clone_dir, check=True, capture_output=True, text=True,
     )
 
+    # Step 4: set the bot git identity on the routed clone with --local.
+    # A routed clone is a fresh `git clone` (its OWN repo), NOT a linked
+    # `git worktree`, so set_bot_identity_in_worktree's `git config --worktree`
+    # would write to .git/config.worktree — which git IGNORES unless
+    # extensions.worktreeConfig=true (it isn't on a plain clone). The result
+    # was the agent committing with the host's GLOBAL git identity, whose email
+    # is not a registered Gerrit email for the bot account → the routed push
+    # was rejected with `settings#EmailAddresses` (forgeAuthor block). --local
+    # is the correct scope for a dedicated clone and is always read.
+    bot_user, _ = _gerrit_auth_for_instance(agent_class, instance_id)
+    bot_email = _bot_email_for(agent_class, instance_id)
+    subprocess.run(
+        ["git", "config", "--local", "user.email", bot_email],
+        cwd=clone_dir, check=True, capture_output=True, text=True,
+    )
+    subprocess.run(
+        ["git", "config", "--local", "user.name", bot_user],
+        cwd=clone_dir, check=True, capture_output=True, text=True,
+    )
+
     return WorktreeSyncResult(
         branch_name=branch_name,
         develop_sha=develop_sha,
