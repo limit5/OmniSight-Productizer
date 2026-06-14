@@ -1337,6 +1337,45 @@ def sync_routed_repo(
     )
 
 
+def is_routed_clone(path: Path) -> bool:
+    """True iff *path* lives under :data:`ROUTED_WORKSPACE_BASE`.
+
+    A sweeper / the cleanup helper uses this to distinguish routed clones
+    (R.2a) from the productizer worktree and the per-tenant workspaces — and
+    to refuse to ``rm`` anything outside the routed base.
+    """
+    try:
+        path.resolve().relative_to(ROUTED_WORKSPACE_BASE.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def cleanup_routed_clone(worktree_path: Path) -> None:
+    """Tear down a routed clone created by :func:`sync_routed_repo` (R.2b).
+
+    Idempotent + best-effort (never raises — leaking a routed clone defeats
+    the per-(repo,instance,ticket,run) isolation), BUT fail-closed on path:
+    refuses to remove anything that is not under
+    :data:`ROUTED_WORKSPACE_BASE` so a bad caller can never ``rm -rf`` the
+    productizer worktree or a tenant workspace.
+    """
+    import shutil
+
+    if not is_routed_clone(worktree_path):
+        log.warning(
+            "cleanup_routed_clone: refusing to remove %s — not under the "
+            "routed workspace base %s",
+            worktree_path, ROUTED_WORKSPACE_BASE,
+        )
+        return
+    if worktree_path.exists():
+        try:
+            shutil.rmtree(worktree_path, ignore_errors=True)
+        except OSError as exc:
+            log.warning("cleanup_routed_clone: rmtree failed for %s: %s", worktree_path, exc)
+
+
 def assert_worktree_clean(worktree_path: Path) -> None:
     """Detect and recover stale git operation state before branch ops.
 

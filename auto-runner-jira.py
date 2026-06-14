@@ -2940,6 +2940,16 @@ def _main_impl() -> int:
     db_context.set_tenant_id(tenant_id)
     print(f"[runner] tenant bound: {tenant_id} (ticket {snapshot.key})")
 
+    # R.2b (OP-2195): resolve the routed repo for this ticket. The R.1 pre-gate
+    # already abstained on an UNRESOLVABLE repo: label, so this either returns a
+    # RoutedRepo (the ticket targets a different Gerrit project) or None (the
+    # normal productizer path). routed_clone_path tracks the fresh clone for
+    # post-CLI cleanup. Dormant today: no pickable ticket carries a repo: label.
+    routed_repo_for_ticket = routed_repo.resolve_routed_repo(
+        getattr(snapshot, "labels", ()) or ()
+    )
+    routed_clone_path = None
+
     merged_info = already_merged_in_gerrit(snapshot.key)
     if merged_info:
         change_number, change_url = merged_info
@@ -3002,15 +3012,33 @@ def _main_impl() -> int:
                 )
                 return 1
         try:
-            print(f"[runner] preparing worktree {worktree_path}...")
-            jira_dispatch.set_bot_identity_in_worktree(
-                worktree_path, AGENT_CLASS, INSTANCE_ID
-            )
-            jira_dispatch.install_commit_msg_hook(worktree_path)
-            sync_result = jira_dispatch.sync_to_gerrit_develop(
-                worktree_path, AGENT_CLASS, snapshot.key, INSTANCE_ID
-            )
-            print(f"[runner] worktree synced: {sync_result.detail}")
+            if routed_repo_for_ticket is not None:
+                # R.2b (OP-2195): a routed ticket works in a FRESH clone of its
+                # own Gerrit project — NOT the wrapper's productizer worktree.
+                # sync_routed_repo clones + branches; identity + hook then apply
+                # to that clone. ``routed_clone_path`` is cleaned up after the
+                # CLI (a routed ticket does not enter the productizer push
+                # pipeline — routed delivery is R.3).
+                sync_result = jira_dispatch.sync_routed_repo(
+                    routed_repo_for_ticket, snapshot.key, AGENT_CLASS, INSTANCE_ID
+                )
+                worktree_path = sync_result.worktree_path
+                routed_clone_path = worktree_path
+                jira_dispatch.set_bot_identity_in_worktree(
+                    worktree_path, AGENT_CLASS, INSTANCE_ID
+                )
+                jira_dispatch.install_commit_msg_hook(worktree_path)
+                print(f"[runner] routed worktree: {sync_result.detail}")
+            else:
+                print(f"[runner] preparing worktree {worktree_path}...")
+                jira_dispatch.set_bot_identity_in_worktree(
+                    worktree_path, AGENT_CLASS, INSTANCE_ID
+                )
+                jira_dispatch.install_commit_msg_hook(worktree_path)
+                sync_result = jira_dispatch.sync_to_gerrit_develop(
+                    worktree_path, AGENT_CLASS, snapshot.key, INSTANCE_ID
+                )
+                print(f"[runner] worktree synced: {sync_result.detail}")
         except Exception as e:
             print(f"[runner] worktree pre-sync failed: {type(e).__name__}: {e}", file=sys.stderr)
             jira_dispatch.add_comment(
@@ -3381,6 +3409,18 @@ def _main_impl() -> int:
         outcome=runner_metrics_recorder.outcome_from_return_code(rc),
         started_at=metric_started_at,
     )
+    if routed_clone_path is not None:
+        # R.2b (OP-2195): a routed ticket's CLI ran in its own routed clone.
+        # The routed Gerrit push is R.3 (GerritReviewDelivery) — a routed
+        # ticket MUST NOT enter the productizer push pipeline below. Clean up
+        # the routed clone and return. (Dormant until R.3 + a routed_repos
+        # entry exist; no pickable ticket carries a repo: label today.)
+        jira_dispatch.cleanup_routed_clone(routed_clone_path)
+        print(
+            f"[runner] {snapshot.key} routed clone cleaned up; routed push "
+            f"deferred to R.3 (rc={rc})"
+        )
+        return rc
     if rc == 0:
         # OP-855 capability gate: refuse the auto-push if `gerrit_push` is
         # not in the matrix for this (ticket_type × area × tier). Operator
