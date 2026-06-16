@@ -5,9 +5,9 @@ Verifies that:
 1. ``RUNNER_RUNTIME_ARTIFACTS`` is the single source of truth — both
    ``runner_progress._worktree_dirty`` and
    ``jira_dispatch.ensure_change_ids`` import + use it.
-2. Each of the three known artifacts (``progress.txt``,
-   ``progress.txt.tmp``, ``.runner-cwd-sentinel``) is excluded by BOTH
-   dirty-checks.
+2. Each of the known artifacts (``progress.txt``,
+   ``progress.txt.tmp``, ``.runner-cwd-sentinel``,
+   ``.ac-verification.md``) is excluded by BOTH dirty-checks.
 3. An unrelated untracked file still raises ``WorktreeDirtyError`` in
    ``ensure_change_ids`` (so the filter is surgical, not blanket).
 4. The back-compat alias ``_OUR_OWN_ARTIFACTS`` still resolves to the
@@ -33,11 +33,12 @@ def test_canonical_constant_is_frozenset() -> None:
     assert isinstance(runner_progress.RUNNER_RUNTIME_ARTIFACTS, frozenset)
 
 
-def test_canonical_constant_includes_all_three_artifacts() -> None:
+def test_canonical_constant_includes_all_artifacts() -> None:
     expected = {
         runner_progress.PROGRESS_FILENAME,
         runner_progress.PROGRESS_FILENAME + runner_progress._PROGRESS_TMP_SUFFIX,
         ".runner-cwd-sentinel",
+        ".ac-verification.md",  # OP-2229
     }
     assert runner_progress.RUNNER_RUNTIME_ARTIFACTS == frozenset(expected)
 
@@ -75,6 +76,7 @@ def test_worktree_dirty_clean_returns_false(git_worktree: Path) -> None:
         runner_progress.PROGRESS_FILENAME,
         runner_progress.PROGRESS_FILENAME + runner_progress._PROGRESS_TMP_SUFFIX,
         ".runner-cwd-sentinel",
+        ".ac-verification.md",  # OP-2229
     ],
 )
 def test_worktree_dirty_excludes_each_runtime_artifact(
