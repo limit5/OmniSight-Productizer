@@ -155,4 +155,5 @@ metrics/
 progress.txt
 progress.txt.tmp
 .runner-cwd-sentinel
+.ac-verification.md
 # === OP-1111 RUNNER_RUNTIME_ARTIFACTS auto-mirror END ===

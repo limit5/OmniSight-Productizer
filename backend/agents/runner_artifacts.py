@@ -48,6 +48,18 @@ _PROGRESS_TMP_SUFFIX: str = ".tmp"
 #: pre-CLI as an intentionally-untracked tamper-detection marker.
 _WORKSPACE_SENTINEL: str = ".runner-cwd-sentinel"
 
+#: Agent-written AC-verification scratch file (OP-2229). In a ROUTED
+#: worktree the CLI cannot post the ``AC verification for <KEY>:`` JIRA
+#: comment programmatically (``jira_dispatch`` is not checked out — only
+#: the routed product repo is), so it sometimes dumps the verification
+#: to this loose file instead of inlining it in its final message. It is
+#: a non-deliverable; without filtering it here the pre-push dirty guard
+#: (``ensure_change_ids`` / ``_worktree_dirty``) raises
+#: ``WorktreeDirtyError`` and DISCARDS the otherwise-valid committed
+#: change (first hit: OP-2225, uvc-uac-app P3 RGA scaler — commit lost).
+#: Same failure class as the OP-842 sentinel.
+_AC_VERIFICATION_SCRATCH: str = ".ac-verification.md"
+
 
 #: Canonical set of runner-runtime artifact filenames. Every
 #: dirty-check / stash / change-id site filters against this set.
@@ -60,6 +72,7 @@ RUNNER_RUNTIME_ARTIFACTS: frozenset[str] = frozenset({
     PROGRESS_FILENAME,
     PROGRESS_FILENAME + _PROGRESS_TMP_SUFFIX,
     _WORKSPACE_SENTINEL,
+    _AC_VERIFICATION_SCRATCH,
 })
 
 
