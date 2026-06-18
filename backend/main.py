@@ -1404,6 +1404,8 @@ from backend.routers import meeting_summary as _meeting_summary_router  # OP-224
 _include_versioned_router(_meeting_summary_router.router)
 from backend.routers import meeting_translate as _meeting_translate_router  # OP-2241 BI2
 _include_versioned_router(_meeting_translate_router.router)
+from backend.routers import meeting_actions as _meeting_actions_router  # OP-2242 BI3
+_include_versioned_router(_meeting_actions_router.router)
 _include_versioned_router(tools.router)
 _include_versioned_router(providers.router)
 _include_versioned_router(invoke.router)

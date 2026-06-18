@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.3
     meeting_translate_enabled: bool = False  # OP-2241 BI2: on-demand meeting translation
 
+    # OP-2242 BI3: on-demand meeting action-items extraction. Disabled
+    # unless operators explicitly enable it; the endpoint has no storage
+    # side effects and reads final transcript segments only.
+    meeting_action_items_enabled: bool = False
+
     # ── Git Authentication ──
     git_ssh_key_path: str = "~/.ssh/id_ed25519"  # Default SSH key (fallback)
     github_token: str = ""  # Default GitHub PAT (fallback)
