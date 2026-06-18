@@ -91,6 +91,7 @@ class FakeConn:
                 tenant_id TEXT NOT NULL,
                 title TEXT,
                 status TEXT NOT NULL DEFAULT 'open',
+                retention_until REAL,
                 created_at REAL NOT NULL,
                 updated_at REAL NOT NULL
             );

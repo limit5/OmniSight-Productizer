@@ -52,6 +52,7 @@ from fastapi.responses import JSONResponse
 
 from backend import audit
 from backend import auth as _au
+from backend import transcripts_retention as _retention
 from backend.db_pool import get_conn
 from backend.models import (
     MeetingEnvelope,
@@ -138,11 +139,15 @@ async def _ensure_meeting_row(
             raise HTTPException(status_code=404, detail="meeting not found")
         return "existing"
     now = time.time()
+    # OP-2239 BI0b -- stamp the retention deadline at create time so the
+    # row carries its own expiry independent of later config changes.
+    retention_until = _retention.compute_retention_until(now)
     inserted = await conn.fetchrow(
-        "INSERT INTO meetings (id, tenant_id, status, created_at, updated_at) "
-        "VALUES ($1, $2, 'open', $3, $3) "
+        "INSERT INTO meetings (id, tenant_id, status, retention_until, "
+        "created_at, updated_at) "
+        "VALUES ($1, $2, 'open', $3, $4, $4) "
         "ON CONFLICT (id) DO NOTHING RETURNING id",
-        meeting_id, tenant_id, now,
+        meeting_id, tenant_id, retention_until, now,
     )
     if inserted is None:
         # Lost the race against a concurrent writer — re-probe to confirm
@@ -181,12 +186,16 @@ async def open_meeting(
     tenant_id = user.tenant_id
     meeting_id = (body.id or "").strip() or _new_meeting_id()
     now = time.time()
+    # OP-2239 BI0b -- stamp the retention deadline at create time so the
+    # row carries its own expiry independent of later config changes.
+    retention_until = _retention.compute_retention_until(now)
     inserted = await conn.fetchrow(
-        "INSERT INTO meetings (id, tenant_id, title, status, created_at, updated_at) "
-        "VALUES ($1, $2, $3, 'open', $4, $4) "
+        "INSERT INTO meetings (id, tenant_id, title, status, "
+        "retention_until, created_at, updated_at) "
+        "VALUES ($1, $2, $3, 'open', $4, $5, $5) "
         "ON CONFLICT (id) DO NOTHING "
         "RETURNING id, tenant_id, title, status, created_at, updated_at",
-        meeting_id, tenant_id, body.title, now,
+        meeting_id, tenant_id, body.title, retention_until, now,
     )
     if inserted is None:
         existing = await conn.fetchrow(
