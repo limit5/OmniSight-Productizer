@@ -182,6 +182,26 @@ async def _fetch_all_user_data(conn, user: auth.User) -> dict:
         "FROM dsar_requests WHERE user_id = $1 ORDER BY requested_at DESC, id",
         user.id,
     )
+    # OP-2239 BI0b -- include transcript artefacts in the DSAR envelope.
+    # ``meetings`` / ``transcript_segments`` are tenant-scoped (no user_id
+    # column -- see alembic 0249), so the only correct scope on read is
+    # ``tenant_id``. The export envelope downstream marks these as
+    # tenant-scoped via the row payload (``tenant_id`` is included) so a
+    # downstream auditor can distinguish them from per-user rows.
+    meetings = await conn.fetch(
+        "SELECT id, tenant_id, title, status, retention_until, "
+        "created_at, updated_at "
+        "FROM meetings WHERE tenant_id = $1 ORDER BY created_at, id",
+        user.tenant_id,
+    )
+    transcript_segments = await conn.fetch(
+        "SELECT id, tenant_id, meeting_id, session_id, segment_seq, "
+        "start_ms, end_ms, text, language, confidence, is_final, source, "
+        "created_at, updated_at "
+        "FROM transcript_segments WHERE tenant_id = $1 "
+        "ORDER BY meeting_id, segment_seq, id",
+        user.tenant_id,
+    )
 
     return {
         "profile": _row(profile),
@@ -198,6 +218,8 @@ async def _fetch_all_user_data(conn, user: auth.User) -> dict:
         "api_keys_created": _rows(api_keys_created),
         "oauth_connections": _rows(oauth_connections),
         "dsar_requests": _rows(dsar_requests),
+        "meetings": _rows(meetings),
+        "transcript_segments": _rows(transcript_segments),
     }
 
 
@@ -276,16 +298,44 @@ _ERASURE_DELETE_STATEMENTS: tuple[tuple[str, str], ...] = (
 )
 
 
+# OP-2239 BI0b -- tenant-scoped erasure for transcript artefacts.
+#
+# ``meetings`` + ``transcript_segments`` (alembic 0249) have NO user_id
+# column -- the BI0 contract scopes a meeting to its tenant, not to the
+# user who posted the segment. So per-user erasure cannot key on
+# ``user_id`` for these tables; the cross-tenant invariant the ticket
+# AC calls out ("erasure removes that tenant's meetings+segments only,
+# cross-tenant untouched") is enforced by keying on ``tenant_id`` and
+# letting PG's row-level isolation guarantee no cross-tenant bleed.
+#
+# Order matters: segments first, then meetings -- the segment table
+# has no FK to meetings (BI0 chose composite-key dedup over an FK), but
+# deleting segments first keeps the intermediate state internally
+# consistent for any concurrent reader that walks the parent->child
+# join.
+_ERASURE_TENANT_DELETE_STATEMENTS: tuple[tuple[str, str], ...] = (
+    ("transcript_segments",
+        "DELETE FROM transcript_segments WHERE tenant_id = $1"),
+    ("meetings",
+        "DELETE FROM meetings WHERE tenant_id = $1"),
+)
+
+
 async def _erase_user_data(conn, user: auth.User) -> dict:
     """Erase mutable user-owned records and redact the retained user row.
 
-    Module-global state audit: the immutable statement tuple is identical
-    in every worker; all mutable erasure state is coordinated by PG in one
-    transaction scoped to ``user.id``.
+    Module-global state audit: the immutable statement tuples are
+    identical in every worker; all mutable erasure state is coordinated
+    by PG in one transaction scoped to ``user.id`` (per-user tables) and
+    ``user.tenant_id`` (transcript artefacts -- BI0b tenant scope).
     """
     erased: dict[str, int] = {}
     for category, sql in _ERASURE_DELETE_STATEMENTS:
         erased[category] = _execute_count(await conn.execute(sql, user.id))
+    for category, sql in _ERASURE_TENANT_DELETE_STATEMENTS:
+        erased[category] = _execute_count(
+            await conn.execute(sql, user.tenant_id)
+        )
 
     erased["projects_created"] = _execute_count(await conn.execute(
         "UPDATE projects SET created_by = NULL WHERE created_by = $1",
