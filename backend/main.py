@@ -1398,6 +1398,8 @@ app.include_router(_a2a_inbound_router.router)
 _include_versioned_router(agents.router)
 _include_versioned_router(tasks.router)
 _include_versioned_router(chat.router)
+from backend.routers import transcripts as _transcripts_router  # OP-2238 BI0
+_include_versioned_router(_transcripts_router.router)
 _include_versioned_router(tools.router)
 _include_versioned_router(providers.router)
 _include_versioned_router(invoke.router)

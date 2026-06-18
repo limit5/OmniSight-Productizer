@@ -838,3 +838,105 @@ class UVCDevice(BaseModel):
     formats: list[str] = Field(default_factory=list)  # ["MJPG", "YUYV", "H264"]
     resolutions: list[str] = Field(default_factory=list)  # ["1920x1080", "1280x720"]
     capabilities: list[str] = Field(default_factory=list)  # ["video_capture", "streaming"]
+
+
+# ---------- OP-2238 BI0 — TEXT-only transcript ingest contract ----------
+#
+# Shared between the on-board MI lane (POST) and BI1-4 readers (GET).
+# Audio is intentionally absent — TEXT segments only. Per-segment
+# fields mirror the ``transcript_segments`` schema (alembic 0249).
+
+
+class TranscriptSegmentIn(BaseModel):
+    """One ASR segment as posted by the on-board MI lane.
+
+    ``segment_seq`` is monotonic per ``(tenant_id, meeting_id)`` and the
+    UNIQUE constraint over ``(tenant_id, meeting_id, session_id,
+    segment_seq)`` is what makes a reconnect-replay deduplicate. The
+    ``is_final`` flag drives the supersede rule — a final overwrites a
+    same-seq partial; a partial arriving after a final is rejected.
+    """
+    segment_seq: int = Field(ge=0)
+    text: str
+    is_final: bool
+    source: str = Field(min_length=1)
+    start_ms: Optional[int] = Field(default=None, ge=0)
+    end_ms: Optional[int] = Field(default=None, ge=0)
+    language: Optional[str] = None
+    confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+
+class TranscriptIngestRequest(BaseModel):
+    """Batch ingest body for ``POST /meetings/{meeting_id}/segments``.
+
+    ``session_id`` scopes the batch to one ASR connection — the on-board
+    lane mints a fresh id per reconnect so the replay arrives with the
+    same ``(meeting_id, session_id, segment_seq)`` triplet and trips
+    the UNIQUE-based dedup.
+    """
+    session_id: str = Field(min_length=1)
+    segments: list[TranscriptSegmentIn] = Field(default_factory=list)
+
+
+class TranscriptIngestRejection(BaseModel):
+    """Per-segment rejection record returned in the ingest result.
+
+    ``reason`` is a short token the caller can switch on:
+      * ``"final_superseded"`` — a partial arrived after the row was
+        already finalised (never downgrade).
+    """
+    segment_seq: int
+    reason: str
+
+
+class TranscriptIngestResult(BaseModel):
+    """Per-batch outcome returned by ``POST /meetings/{id}/segments``."""
+    accepted: int = 0
+    deduped: int = 0
+    superseded: int = 0
+    rejected: list[TranscriptIngestRejection] = Field(default_factory=list)
+
+
+class TranscriptSegmentOut(BaseModel):
+    """Single segment row projection for ``GET /meetings/{id}/segments``."""
+    id: str
+    meeting_id: str
+    session_id: str
+    segment_seq: int
+    text: str
+    is_final: bool
+    source: str
+    start_ms: Optional[int] = None
+    end_ms: Optional[int] = None
+    language: Optional[str] = None
+    confidence: Optional[float] = None
+
+
+class MeetingEnvelope(BaseModel):
+    """Aggregate projection for ``GET /meetings/{id}``.
+
+    BI1-4 read this to size a summarisation / translation request without
+    pulling the whole segment list first.
+    """
+    id: str
+    tenant_id: str
+    title: Optional[str] = None
+    status: str = "open"
+    segment_count: int = 0
+    final_segment_count: int = 0
+    languages: list[str] = Field(default_factory=list)
+    first_segment_ts_ms: Optional[int] = None
+    last_segment_ts_ms: Optional[int] = None
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+
+class OpenMeetingRequest(BaseModel):
+    """Body for ``POST /meetings`` — operator-driven meeting open.
+
+    ``id`` lets a caller seed a deterministic meeting id (mtg-<uuid> if
+    omitted). ``title`` is optional metadata; later BI rows surface it
+    on the meeting list panel.
+    """
+    id: Optional[str] = Field(default=None, max_length=120)
+    title: Optional[str] = Field(default=None, max_length=240)
