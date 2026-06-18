@@ -696,6 +696,14 @@ class Settings(BaseSettings):
     # cross-worker consistency is automatic.
     as_enabled: bool = True
 
+    # OP-2240 BI1: meeting summary over transcript (LLM).
+    # Disabled-by-default kill-switch for the on-demand summary endpoint
+    # POST /meetings/{meeting_id}/summary. When False the router returns
+    # 404 (feature not enabled) so operators can ship the binary without
+    # exposing the LLM-backed endpoint. No migration / no table; the
+    # endpoint reads final segments from the OP-2238 BI0 ingest store.
+    meeting_summary_enabled: bool = False
+
     # ─── Declared-only-to-satisfy-extra=forbid fields ────────────────
     # Phase-3-Runtime-v2 SP-3.1 (2026-04-20): these env vars are read
     # elsewhere in the codebase via ``os.environ.get(...)`` directly
