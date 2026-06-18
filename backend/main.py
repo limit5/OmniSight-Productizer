@@ -1402,6 +1402,8 @@ from backend.routers import transcripts as _transcripts_router  # OP-2238 BI0
 _include_versioned_router(_transcripts_router.router)
 from backend.routers import meeting_summary as _meeting_summary_router  # OP-2240 BI1
 _include_versioned_router(_meeting_summary_router.router)
+from backend.routers import meeting_translate as _meeting_translate_router  # OP-2241 BI2
+_include_versioned_router(_meeting_translate_router.router)
 _include_versioned_router(tools.router)
 _include_versioned_router(providers.router)
 _include_versioned_router(invoke.router)
