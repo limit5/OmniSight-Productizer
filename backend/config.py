@@ -77,6 +77,7 @@ class Settings(BaseSettings):
 
     # LLM parameters
     llm_temperature: float = 0.3
+    meeting_translate_enabled: bool = False  # OP-2241 BI2: on-demand meeting translation
 
     # ── Git Authentication ──
     git_ssh_key_path: str = "~/.ssh/id_ed25519"  # Default SSH key (fallback)
