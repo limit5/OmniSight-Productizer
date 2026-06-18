@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     # side effects and reads final transcript segments only.
     meeting_action_items_enabled: bool = False
 
+    # BI4 speaker/contribution text suggestions. Disabled by default:
+    # this is an on-demand TEXT/LLM nudge over final transcript segments,
+    # not active-speaker / diarization / audio analysis.
+    meeting_suggestions_enabled: bool = False
+
     # ── Git Authentication ──
     git_ssh_key_path: str = "~/.ssh/id_ed25519"  # Default SSH key (fallback)
     github_token: str = ""  # Default GitHub PAT (fallback)
