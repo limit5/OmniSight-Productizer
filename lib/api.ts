@@ -8423,3 +8423,107 @@ export type _N3_ContractProbes = [
   _N3_AgentCreateBody,
   _N3_TaskCreateBody,
 ]
+
+// ─── Meeting intelligence (BI0 ingest read + BI1-4 insights) ───
+// Backend: backend/routers/{transcripts,meeting_summary,meeting_translate,
+// meeting_actions,meeting_suggestions}.py. BI1-4 are POST generate-on-demand
+// and disabled-by-default (404 "feature not enabled" when off).
+
+export interface MeetingEnvelope {
+  id: string
+  tenant_id: string
+  title: string | null
+  status: string
+  segment_count: number
+  final_segment_count: number
+  languages: string[]
+  first_segment_ts_ms: number | null
+  last_segment_ts_ms: number | null
+  created_at: number | null
+  updated_at: number | null
+}
+
+export interface TranscriptSegment {
+  id: string
+  meeting_id: string
+  session_id: string
+  segment_seq: number
+  text: string
+  is_final: boolean
+  source: string
+  start_ms: number | null
+  end_ms: number | null
+  language: string | null
+  confidence: number | null
+}
+
+export interface MeetingSummary {
+  meeting_id: string
+  tldr: string
+  bullet_points: string[]
+  generated_at: number
+  model: string
+  segment_count: number
+}
+
+export interface ActionItem { text: string; owner: string | null; due: string | null }
+export interface DiscussionPoint { topic: string; summary: string }
+export interface ActionItemsResult {
+  action_items: ActionItem[]
+  discussion_points: DiscussionPoint[]
+  model: string
+}
+
+export interface MeetingSuggestion { kind: string; text: string }
+export interface SuggestionsResult { suggestions: MeetingSuggestion[]; model: string }
+
+export interface TranslationSegment {
+  id: string
+  segment_seq: number
+  source_lang: string | null
+  text: string
+  translated_text: string
+  skipped: boolean
+}
+export interface TranslationResult {
+  target_lang: string
+  segments: TranslationSegment[]
+  text: string
+  model: string | null
+}
+
+const _mid = (id: string) => encodeURIComponent(id)
+
+export async function getMeeting(id: string): Promise<MeetingEnvelope> {
+  return request<MeetingEnvelope>(`/meetings/${_mid(id)}`)
+}
+
+export async function listMeetingSegments(
+  id: string, opts: { finalOnly?: boolean; sinceSeq?: number } = {},
+): Promise<TranscriptSegment[]> {
+  const q = new URLSearchParams()
+  if (opts.finalOnly) q.set("final_only", "true")
+  if (opts.sinceSeq != null) q.set("since_seq", String(opts.sinceSeq))
+  const qs = q.toString()
+  return request<TranscriptSegment[]>(`/meetings/${_mid(id)}/segments${qs ? "?" + qs : ""}`)
+}
+
+export async function generateMeetingSummary(id: string): Promise<MeetingSummary> {
+  return request<MeetingSummary>(`/meetings/${_mid(id)}/summary`, { method: "POST" })
+}
+
+export async function generateMeetingActionItems(id: string): Promise<ActionItemsResult> {
+  return request<ActionItemsResult>(`/meetings/${_mid(id)}/action-items`, { method: "POST" })
+}
+
+export async function generateMeetingSuggestions(id: string): Promise<SuggestionsResult> {
+  return request<SuggestionsResult>(`/meetings/${_mid(id)}/suggestions`, { method: "POST" })
+}
+
+export async function translateMeeting(
+  id: string, targetLang: string,
+): Promise<TranslationResult> {
+  return request<TranslationResult>(
+    `/meetings/${_mid(id)}/translate?target_lang=${encodeURIComponent(targetLang)}`,
+    { method: "POST" })
+}
