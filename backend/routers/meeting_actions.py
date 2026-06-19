@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import asyncpg
@@ -13,6 +14,8 @@ from backend import llm_adapter
 from backend.agents.llm import get_llm
 from backend.config import settings
 from backend.db_pool import get_conn
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/meetings", tags=["meeting-actions"])
 
@@ -150,24 +153,43 @@ async def extract_action_items(
 
     llm = get_llm()
     if llm is None:
-        raise HTTPException(status_code=503, detail="llm unavailable")
+        raise HTTPException(status_code=503, detail="action-items unavailable: LLM provider not configured")
 
-    response = llm_adapter.tool_call(
-        _build_messages("\n".join(texts)),
-        [_ACTION_ITEMS_TOOL],
-        llm=llm,
-    )
+    # OP-2267: provider exceptions (e.g. ollama daemon down, anthropic 5xx)
+    # used to bubble as 500. Catch and translate to 503 so meeting-intelligence
+    # endpoints degrade uniformly with BI1 summary. The ollama-specific
+    # fallback inside ``llm_adapter.tool_call`` returns an empty tool_calls
+    # response in that case (handled by the ``if not response.tool_calls``
+    # branch below — also 503).
+    try:
+        response = llm_adapter.tool_call(
+            _build_messages("\n".join(texts)),
+            [_ACTION_ITEMS_TOOL],
+            llm=llm,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — provider failures bubble as 503
+        logger.warning(
+            "meeting_actions: LLM tool_call failed for %s: %s",
+            meeting_id, exc,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="action-items unavailable: LLM call failed",
+        ) from exc
+
     if not response.tool_calls:
-        raise HTTPException(status_code=502, detail="llm did not return structured output")
+        raise HTTPException(status_code=503, detail="action-items unavailable: llm returned no structured output")
 
     call = response.tool_calls[0]
     if call.name and call.name != "record_meeting_action_items":
-        raise HTTPException(status_code=502, detail="llm returned unexpected tool")
+        raise HTTPException(status_code=503, detail="action-items unavailable: llm returned unexpected tool")
 
     try:
         extracted = _StructuredExtraction.model_validate(call.arguments)
     except Exception as exc:  # noqa: BLE001 - normalize provider schema drift.
-        raise HTTPException(status_code=502, detail="invalid structured output") from exc
+        raise HTTPException(status_code=503, detail="action-items unavailable: invalid structured output") from exc
 
     return ActionItemsResult(
         action_items=extracted.action_items,

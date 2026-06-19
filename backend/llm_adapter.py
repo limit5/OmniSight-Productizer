@@ -357,9 +357,14 @@ def invoke_chat(
     if chat is None:
         return ""
     if max_tokens:
-        # Module-global audit: max_tokens/bind_tools are per-call inputs; no
-        # module state touched, so workers do not need cross-process sync.
-        chat = chat.bind(max_tokens=max_tokens)
+        # OP-2267: ChatOllama's underlying ollama Client.chat() rejects
+        # ``max_tokens`` ("got an unexpected keyword argument 'max_tokens'") —
+        # the ollama output-token cap is exposed as ``num_predict``. Translate
+        # at the firewall so callers don't need provider-specific param names.
+        if _is_ollama_model(provider, llm, chat):
+            chat = chat.bind(num_predict=max_tokens)
+        else:
+            chat = chat.bind(max_tokens=max_tokens)
     msgs = _coerce_messages(messages)
     resp = chat.invoke(msgs)
     return _message_text(resp)

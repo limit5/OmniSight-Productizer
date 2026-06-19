@@ -9,6 +9,7 @@ requested BCP-47 target. Disabled by default via
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Optional
 
 import asyncpg
@@ -20,6 +21,8 @@ from backend.agents.llm import get_llm
 from backend.config import settings
 from backend.db_pool import get_conn
 from backend.llm_adapter import invoke_chat
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/meetings", tags=["meeting-translate"])
 
@@ -94,18 +97,22 @@ def _translation_prompt(target_lang: str, rows: list[asyncpg.Record]) -> list[tu
 
 
 def _parse_translations(raw: str, rows: list[asyncpg.Record]) -> dict[str, str]:
+    # OP-2267: empty / malformed / partial provider replies degrade to 503
+    # "translation unavailable" to match the BI1 summary contract (the four
+    # meeting-intelligence endpoints must fail uniformly when the LLM is
+    # unhealthy — anything 5xx other than 503 trips paging alerts).
     if not raw.strip():
-        raise HTTPException(status_code=502, detail="translation llm returned empty response")
+        raise HTTPException(status_code=503, detail="translation unavailable: llm returned empty response")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise HTTPException(
-            status_code=502,
-            detail="translation llm returned invalid json",
+            status_code=503,
+            detail="translation unavailable: llm returned invalid json",
         ) from exc
     items = data.get("segments") if isinstance(data, dict) else data
     if not isinstance(items, list):
-        raise HTTPException(status_code=502, detail="translation llm returned invalid shape")
+        raise HTTPException(status_code=503, detail="translation unavailable: llm returned invalid shape")
     by_id: dict[str, str] = {}
     for item in items:
         if not isinstance(item, dict):
@@ -116,7 +123,7 @@ def _parse_translations(raw: str, rows: list[asyncpg.Record]) -> dict[str, str]:
             by_id[seg_id] = translated
     missing = [r["id"] for r in rows if r["id"] not in by_id]
     if missing:
-        raise HTTPException(status_code=502, detail="translation llm omitted segments")
+        raise HTTPException(status_code=503, detail="translation unavailable: llm omitted segments")
     return by_id
 
 
@@ -166,9 +173,32 @@ async def translate_meeting(
     translations: dict[str, str] = {}
     model: Optional[str] = None
     if llm_rows:
+        # OP-2267: LLM-unavailable / provider-exception must surface as 503
+        # (matching BI1 summary), not a 500/502 paged-alert. ``get_llm()``
+        # returns ``None`` when no provider is configured; the adapter would
+        # then return "" and the parser would already raise 503 — but a
+        # configured-but-broken provider (e.g. ollama daemon refusing
+        # connections) raises from invoke_chat, so wrap it here.
         llm = get_llm()
+        if llm is None:
+            raise HTTPException(
+                status_code=503,
+                detail="translation unavailable: LLM provider not configured",
+            )
         model = _model_name(llm)
-        raw = invoke_chat(_translation_prompt(target, llm_rows), llm=llm)
+        try:
+            raw = invoke_chat(_translation_prompt(target, llm_rows), llm=llm)
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 — provider failures bubble as 503
+            logger.warning(
+                "meeting_translate: LLM invoke failed for %s: %s",
+                meeting_id, exc,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="translation unavailable: LLM call failed",
+            ) from exc
         translations = _parse_translations(raw, llm_rows)
 
     segments = [_segment_result(r, target, translations) for r in rows]
