@@ -856,8 +856,16 @@ class Settings(BaseSettings):
         """Return the model name, using provider-specific defaults if not set."""
         if self.llm_model:
             return self.llm_model
+        # NOTE: keep the anthropic default at a CURRENTLY-AVAILABLE model.
+        # The previous default (claude-sonnet-4-20250514) is a dated Sonnet 4
+        # that the live API key no longer serves (404 not_found_error), so any
+        # env that does NOT set OMNISIGHT_LLM_MODEL fell through to a broken
+        # default — meeting-intelligence (BI1-4) and every other un-pinned LLM
+        # call 404'd. Prod pins llm_model explicitly so it was masked; staging
+        # / dev / fresh deploys were not. claude-sonnet-4-6 is the current
+        # Sonnet alias (available, auto-tracks point releases).
         defaults = {
-            "anthropic": "claude-sonnet-4-20250514",
+            "anthropic": "claude-sonnet-4-6",
             "google": "gemini-1.5-pro",
             "openai": "gpt-4o",
             "xai": "grok-3-mini",
@@ -866,7 +874,7 @@ class Settings(BaseSettings):
             "together": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
             "ollama": "llama3.1",
         }
-        return defaults.get(self.llm_provider, "claude-sonnet-4-20250514")
+        return defaults.get(self.llm_provider, "claude-sonnet-4-6")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
