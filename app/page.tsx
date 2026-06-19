@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useCallback, useRef, useEffect } from "react"
+import dynamic from "next/dynamic"
 import { NeuralGrid } from "@/components/omnisight/neural-grid"
 import { NotificationCenter } from "@/components/omnisight/notification-center"
 import { NPITimeline } from "@/components/omnisight/npi-timeline"
@@ -26,9 +27,21 @@ import { ChatOpsMirror } from "@/components/omnisight/chatops-mirror"
 // doc §2C) into the command-center panel registry. Import + route only.
 import { SoftwareReleaseDashboard } from "@/components/omnisight/software-release-dashboard"
 import { StoreSubmissionDashboard } from "@/components/omnisight/store-submission-dashboard"
-import { ProjectReportPanel } from "@/components/omnisight/project-report-panel"
 import { TestCoverageViewer } from "@/components/omnisight/test-coverage-viewer"
 import type { ParsedSpec } from "@/lib/api"
+
+// ProjectReportPanel pulls isomorphic-dompurify, which on the server loads
+// jsdom → html-encoding-sniffer@6 (an ESM-only package that breaks both
+// Turbopack's SSR bundler and Node's CommonJS require). The panel fetches its
+// data client-side anyway, so render it client-only — this keeps jsdom out of
+// the SSR graph entirely (otherwise the whole root route 500s at SSR).
+const ProjectReportPanel = dynamic(
+  () =>
+    import("@/components/omnisight/project-report-panel").then(
+      (m) => m.ProjectReportPanel,
+    ),
+  { ssr: false },
+)
 import { UserMenu } from "@/components/omnisight/user-menu"
 import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
 import { ProjectSwitcher } from "@/components/omnisight/project-switcher"
