@@ -175,8 +175,13 @@ def _request(method: str, url: str, auth_header: str, body: dict[str, Any] | Non
 
 
 def _labels(args: argparse.Namespace) -> list[str]:
-    labels = [
-        "agent:auto",
+    labels = []
+    # agent:auto makes the ticket runner-pickable. Omit it for a STAGED filing
+    # (e.g. multi-project repo:-routed tickets) where the label/route must
+    # propagate first; add agent:auto later once the ticket is ready.
+    if not getattr(args, "no_agent_auto", False):
+        labels.append("agent:auto")
+    labels += [
         f"class:{args.cls}",
         f"tier:{args.tier}",
         "priority:meta",
@@ -241,31 +246,57 @@ def maybe_inject_hot_file_mutexes(description_text: str) -> str:
     return result.description
 
 
+def _resolve_account_id(site: str, auth_header: str, assignee: str) -> str:
+    """Map ``--assignee`` to a JIRA accountId. ``self`` resolves to the filing
+    bot's own account; anything else is treated as a literal accountId."""
+    if assignee != "self":
+        return assignee
+    me = _request("GET", site + "/rest/api/3/myself", auth_header, None)
+    return me["accountId"]
+
+
 def file_ticket(args: argparse.Namespace, description_text: str) -> str:
     """POST a Story issue to JIRA and return the created issue key."""
     _validate_or_exit(args, description_text)
     description_text = maybe_inject_hot_file_mutexes(description_text)
     site, project, auth_header = _jira_config(args.cls)
-    body = {
-        "fields": {
-            "project": {"key": project},
-            "summary": args.summary,
-            "description": parse_description_to_adf(description_text),
-            "issuetype": {"name": "Story"},
-            "priority": {"name": args.priority},
-            "labels": _labels(args),
-        }
+    fields = {
+        "project": {"key": project},
+        "summary": args.summary,
+        "description": parse_description_to_adf(description_text),
+        "issuetype": {"name": "Story"},
+        "priority": {"name": args.priority},
+        "labels": _labels(args),
     }
-    resp = _request("POST", site + "/rest/api/3/issue", auth_header, body)
+    # Assigning at creation atomically blocks runner pickup — the pickup JQL
+    # requires `assignee is EMPTY`, so a non-empty assignee set in the SAME
+    # request closes the file→PUT race where a runner claims the ticket before
+    # a follow-up assignee PUT lands (see the OP-2261/OP-2265 duplicate-change
+    # incidents).
+    if getattr(args, "assignee", None):
+        fields["assignee"] = {
+            "accountId": _resolve_account_id(site, auth_header, args.assignee)
+        }
+    resp = _request("POST", site + "/rest/api/3/issue", auth_header, {"fields": fields})
     return resp["key"]
 
 
 def _print_check(args: argparse.Namespace, description_text: str) -> int:
     _validate_or_exit(args, description_text)
     project = "OP"
-    visible = args.tier != "X"
+    blocked = bool(getattr(args, "assignee", None)) or bool(
+        getattr(args, "no_agent_auto", False)
+    )
+    visible = args.tier != "X" and not blocked
     print("Runner pickup JQL:")
     print(runner_pickup_jql(project, args.cls))
+    print(f"labels: {_labels(args)}")
+    if getattr(args, "assignee", None):
+        print(f"assignee at creation: {args.assignee} (blocks pickup atomically)")
+    if blocked and args.tier != "X":
+        print("OK - would file Story ticket, NOT runner-pickable yet "
+              "(staged: assignee set and/or agent:auto omitted)")
+        return 0
     if visible:
         print("OK - would file runner-visible Story ticket")
         return 0
@@ -289,6 +320,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scope", default=None)
     parser.add_argument("--check", action="store_true", help="dry-run, validate, no POST")
     parser.add_argument("--force", action="store_true", help="bypass area-mismatch warning")
+    parser.add_argument(
+        "--assignee",
+        default=None,
+        help=(
+            "assign the ticket at creation (atomic) to block runner pickup — "
+            "the pickup JQL needs `assignee is EMPTY`. Use 'self' for the "
+            "filing bot's own account, or pass an explicit JIRA accountId. "
+            "Closes the file->PUT race that caused duplicate changes "
+            "(OP-2261/OP-2265). Pair with --no-agent-auto for a fully staged "
+            "filing."
+        ),
+    )
+    parser.add_argument(
+        "--no-agent-auto",
+        dest="no_agent_auto",
+        action="store_true",
+        help=(
+            "omit the agent:auto label so the ticket is NOT runner-pickable "
+            "yet (staged filing). Add agent:auto later once repo:/route labels "
+            "have propagated."
+        ),
+    )
     parser.add_argument(
         "--no-push-capability",
         dest="no_push_capability",
