@@ -1,0 +1,83 @@
+{
+  "$schema": "./design-tokens.schema.json",
+  "_about": "OmniSight design-system tokens — the SINGLE SOURCE for the UI shell's look. Values mirror the productizer brand (app/globals.css): deep-space dark theme + neural-blue accent + holo-glass surfaces + domain colors. A build step compiles this to (a) a QML theme singleton Theme.qml for launcher-qt and (b) a Tailwind v4 @theme preset / CSS vars for launcher-web, so both renderers are pixel-consistent + on-brand. Do NOT hardcode colors in either renderer — read from here.",
+  "brand": "omnisight",
+
+  "color": {
+    "deep_space_start": "#010409",
+    "deep_space_end":   "#0f172a",
+    "neural_blue":      "#38bdf8",
+    "neural_blue_dim":  "rgba(56,189,248,0.30)",
+    "neural_blue_glow": "rgba(56,189,248,0.50)",
+    "hardware_orange":  "#f97316",
+    "artifact_purple":  "#a855f7",
+    "validation_emerald": "#10b981",
+    "critical_red":     "#ef4444",
+    "holo_glass":        "rgba(0,242,255,0.03)",
+    "holo_glass_border": "rgba(56,189,248,0.20)",
+
+    "semantic": {
+      "background":          "#010409",
+      "foreground":          "#e2e8f0",
+      "card":                "rgba(0,242,255,0.03)",
+      "card_foreground":     "#e2e8f0",
+      "popover":             "#0f172a",
+      "primary":             "#38bdf8",
+      "primary_foreground":  "#010409",
+      "secondary":           "#1e293b",
+      "muted":               "#1e293b",
+      "muted_foreground":    "#94a3b8",
+      "accent":              "#38bdf8",
+      "destructive":         "#ef4444",
+      "border":              "rgba(56,189,248,0.35)",
+      "input":               "rgba(56,189,248,0.15)",
+      "ring":                "#38bdf8"
+    },
+
+    "chart": ["#38bdf8", "#10b981", "#a855f7", "#f97316", "#ef4444"]
+  },
+
+  "category_accent": {
+    "_note": "Each launcher category gets a domain color, so the home screen reads at a glance.",
+    "core":        "#38bdf8",
+    "media":       "#a855f7",
+    "tools":       "#f97316",
+    "diagnostics": "#ef4444",
+    "settings":    "#94a3b8"
+  },
+
+  "typography": {
+    "display": { "family": "Orbitron", "weights": [500, 700], "use": "launcher title, clock, brand wordmark, tile section headers" },
+    "mono":    { "family": "Fira Code", "weights": [400, 500], "use": "technical readouts, diagnostics, logs, metrics" },
+    "body":    { "family": "Inter, system-ui, sans-serif", "weights": [400, 500, 600], "use": "tile labels, dialogs, body" },
+    "scale_rem": { "xs": 0.75, "sm": 0.875, "base": 1.0, "lg": 1.125, "xl": 1.25, "2xl": 1.5, "3xl": 1.875, "4xl": 2.25 }
+  },
+
+  "radius_rem":  { "sm": 0.25, "base": 0.5, "lg": 0.75, "pill": 9999 },
+  "space_rem":   [0, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4],
+
+  "surface": {
+    "_note": "Tiles/cards use holo-glass (glassmorphism): card bg + blue border + subtle blur + neural-blue glow on focus/active.",
+    "tile_bg":        "rgba(0,242,255,0.03)",
+    "tile_border":    "rgba(56,189,248,0.20)",
+    "tile_focus_ring":"#38bdf8",
+    "tile_blur_px":   12,
+    "app_bg_gradient":["#010409", "#0f172a"]
+  },
+
+  "breakpoints_px": { "sm": 640, "md": 768, "lg": 1024, "xl": 1280, "2xl": 1536, "3xl": 2160 },
+  "_breakpoints_note": "3xl=2160 keeps the productizer's 4K awareness; the launcher's adaptive grid (from pos-kiosk AdaptiveGrid + DIP engine) reflows tiles across 7\" panel → 4K.",
+
+  "icons": {
+    "set": "lucide",
+    "_note": "lucide is open-source SVG → launcher-web uses lucide-react natively; launcher-qt ships the same lucide SVGs as a QML icon provider, so manifest `icon` ids resolve identically in both. Custom omnisight glyphs (logo mark) live under icons/omnisight/.",
+    "aliases": {
+      "cashier": "shopping-cart", "camera": "camera", "settings": "settings",
+      "diagnostics": "activity", "files": "folder", "media": "play-circle",
+      "network": "network", "storage": "hard-drive", "security": "shield",
+      "factory-test": "wrench", "streams": "video", "call": "phone"
+    }
+  },
+
+  "motion": { "tile_press_ms": 120, "page_swipe_ms": 240, "easing": "cubic-bezier(0.22,1,0.36,1)" }
+}
