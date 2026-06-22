@@ -1,0 +1,52 @@
+# U4.4 OP-2306 — pos-kiosk-rk3588 fleet device fixture.
+#
+# Static per-device record served by GET /api/v1/fleet/devices and
+# /api/v1/fleet/devices/{id}, plus an embedded apps.manifest served by
+# /api/v1/fleet/devices/{id}/manifest. The manifest mirrors the
+# pos-kiosk-rk3588 example in
+# third_party/omnisight-ui/design-system/apps.manifest.example.yaml
+# (doc B) and validates against apps.manifest.schema.json.
+#
+# Live device fetch/sync is a deferred tier:X follow-up — fixtures only.
+
+id: pos-kiosk-rk3588
+name: POS Kiosk (RK3588)
+model: rk3588
+renderer: qt
+last_seen: "2026-06-22T17:24:01Z"
+manifest_ref: consumers/pos-kiosk-rk3588/apps.manifest.yaml
+manifest:
+  schema_version: 1
+  device:
+    id: pos-kiosk-rk3588
+    display: local
+    default_renderer: qt
+    locales: [en, zh-Hant]
+  theme:
+    accent: "#38bdf8"
+    density: comfortable
+  apps:
+    - id: cashier
+      title: { en: Cashier, zh-Hant: 收銀 }
+      icon: cashier
+      category: core
+      order: 10
+      entry:
+        qml: "qrc:/apps/CashierView.qml"
+        web: /cashier
+      caps_required: [display, payment]
+      roles: [operator]
+    - id: camera
+      title: { en: Camera, zh-Hant: 相機 }
+      icon: camera
+      category: media
+      entry:
+        qml: "qrc:/apps/CameraView.qml"
+      caps_required: [camera]
+    - id: factory-test
+      title: { en: "Factory Test", zh-Hant: 產測 }
+      icon: factory-test
+      category: diagnostics
+      entry:
+        process: ["/usr/bin/factorytest", "--fullscreen"]
+      roles: [service]

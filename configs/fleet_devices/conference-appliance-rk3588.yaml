@@ -1,0 +1,66 @@
+# U4.4 OP-2306 — conference-appliance-rk3588 fleet device fixture.
+#
+# Static per-device record served by GET /api/v1/fleet/devices and
+# /api/v1/fleet/devices/{id}, plus an embedded apps.manifest served by
+# /api/v1/fleet/devices/{id}/manifest. Validates against
+# apps.manifest.schema.json. display: both → has both a Qt panel and a
+# web admin surface; default_renderer: qt for the in-room appliance.
+#
+# Live device fetch/sync is a deferred tier:X follow-up — fixtures only.
+
+id: conference-appliance-rk3588
+name: Conference Appliance (RK3588)
+model: rk3588
+renderer: qt
+last_seen: "2026-06-22T17:11:09Z"
+manifest_ref: consumers/conference-appliance-rk3588/apps.manifest.yaml
+manifest:
+  schema_version: 1
+  device:
+    id: conference-appliance-rk3588
+    display: both
+    default_renderer: qt
+    locales: [en, zh-Hant]
+  theme:
+    accent: "#38bdf8"
+    density: comfortable
+  apps:
+    - id: meeting
+      title: { en: Meeting, zh-Hant: 會議 }
+      icon: video
+      category: communication
+      order: 10
+      entry:
+        qml: "qrc:/apps/MeetingView.qml"
+        web: /meeting
+      caps_required: [display, camera]
+      roles: [operator]
+    - id: whiteboard
+      title: { en: Whiteboard, zh-Hant: 白板 }
+      icon: edit
+      category: tools
+      entry:
+        qml: "qrc:/apps/WhiteboardView.qml"
+        web: /whiteboard
+      caps_required: [display]
+    - id: roster
+      title: { en: Roster, zh-Hant: 名冊 }
+      icon: users
+      category: core
+      entry:
+        web: /roster
+    - id: settings
+      title: { en: Settings, zh-Hant: 設定 }
+      icon: settings
+      category: settings
+      entry:
+        qml: "qrc:/apps/SettingsView.qml"
+        web: /settings
+      roles: [admin]
+    - id: diagnostics
+      title: { en: Diagnostics, zh-Hant: 診斷 }
+      icon: diagnostics
+      category: diagnostics
+      entry:
+        web: /diag
+      roles: [service]

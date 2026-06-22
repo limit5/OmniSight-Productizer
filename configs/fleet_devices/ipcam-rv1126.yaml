@@ -1,0 +1,57 @@
+# U4.4 OP-2306 — ipcam-rv1126 fleet device fixture.
+#
+# Static per-device record served by GET /api/v1/fleet/devices and
+# /api/v1/fleet/devices/{id}, plus an embedded apps.manifest served by
+# /api/v1/fleet/devices/{id}/manifest. The manifest mirrors the
+# ipcam-rv1126 example in
+# third_party/omnisight-ui/design-system/apps.manifest.example.yaml
+# (doc A) and validates against apps.manifest.schema.json (headless →
+# default_renderer MUST be "web").
+#
+# Live device fetch/sync is a deferred tier:X follow-up — fixtures only.
+
+id: ipcam-rv1126
+name: IP Camera (RV1126)
+model: rv1126
+renderer: web
+last_seen: "2026-06-22T16:58:42Z"
+manifest_ref: consumers/ipcam-rv1126/apps.manifest.yaml
+manifest:
+  schema_version: 1
+  device:
+    id: ipcam-rv1126
+    display: headless
+    default_renderer: web
+    locales: [en, zh-Hant]
+  apps:
+    - id: live-view
+      title: { en: Live, zh-Hant: 即時影像 }
+      icon: video
+      category: media
+      entry:
+        web: /live
+      caps_required: [camera]
+    - id: streams
+      title: { en: "Streams / ONVIF", zh-Hant: "串流 / ONVIF" }
+      icon: network
+      category: core
+      entry:
+        web: /streams
+    - id: storage
+      title: { en: Storage, zh-Hant: 儲存 }
+      icon: storage
+      category: tools
+      entry:
+        web: /storage
+    - id: settings
+      title: { en: Settings, zh-Hant: 設定 }
+      icon: settings
+      category: settings
+      entry:
+        web: /settings
+    - id: diagnostics
+      title: { en: Diagnostics, zh-Hant: 診斷 }
+      icon: diagnostics
+      category: diagnostics
+      entry:
+        web: /diag

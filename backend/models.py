@@ -940,3 +940,46 @@ class OpenMeetingRequest(BaseModel):
     """
     id: Optional[str] = Field(default=None, max_length=120)
     title: Optional[str] = Field(default=None, max_length=240)
+
+
+# ---------- OP-2306 U4.4 — Fleet device registry ----------
+
+class FleetDevice(BaseModel):
+    """One row in ``GET /fleet/devices`` / ``GET /fleet/devices/{id}``.
+
+    Fixture-backed (configs/fleet_devices/*.yaml). Live device fetch is
+    a deferred tier:X follow-up. ``manifest_ref`` is the logical pointer
+    to the device's apps.manifest (the actual manifest body is served
+    via ``GET /fleet/devices/{id}/manifest`` from the same fixture).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    model: str
+    renderer: str
+    last_seen: Optional[str] = None
+    manifest_ref: str
+
+
+class FleetDeviceManifest(BaseModel):
+    """Apps-manifest envelope returned by
+    ``GET /fleet/devices/{id}/manifest``.
+
+    Mirrors third_party/omnisight-ui/design-system/apps.manifest.schema.json:
+    ``schema_version`` is the const 1 marker, ``device`` carries the
+    device descriptor block (id/display/default_renderer/locales),
+    ``theme`` is optional per-device overrides, and ``apps`` is the
+    tile array the launcher renders. The inner shapes are kept as
+    open dicts here because the canonical schema is JSON Schema (not
+    Pydantic) and the API is a thin fixture passthrough — strict
+    validation lives in the upstream omnisight-ui CI.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int
+    device: dict
+    apps: list[dict]
+    theme: Optional[dict] = None
