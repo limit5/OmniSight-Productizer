@@ -3,16 +3,26 @@
 /**
  * OP-2307 (U4.5) — DeviceLauncher: render one fleet device's app grid
  * via the vendored launcher-web components.
+ * OP-2308 (U4.6) — `onTileActivate` is now wired by the page to a
+ *   productizer-side dispatcher (`lib/fleet-device-launch.ts`) that
+ *   classifies the app's `entry.web` target (same SAFE_PATH / http(s)
+ *   policy launcher-web uses on-device) and posts a thin command stub.
+ *   This component remains a pure renderer — it forwards the appId
+ *   only; it does NOT execute remote commands itself.
  *
  * Reads the apps.manifest envelope returned by GET /fleet/devices/{id}/manifest
  * (FleetDeviceManifest), projects each tile into the launcher-web
  * FilteredApp shape, and hands it to the shared <AppGrid>. This makes
  * the productizer the 4th consumer of the one shared UI — a read-only
- * mirror of what the device renders locally.
+ * mirror of what the device renders locally, plus (U4.6) the
+ * tile-activate seam the page wires to the launch dispatcher.
  *
- * MUST NOT: do NOT remote-drive on tile activate (U4.6 territory). The
- * `onActivate` we pass to AppGrid is a no-op (or a caller-supplied
- * observer) — never a navigation or command dispatch.
+ * MUST NOT: do NOT execute real remote commands here. Do NOT use eval
+ * / unsafe navigation — every dispatch path goes through the page's
+ * `dispatchFleetDeviceLaunch` call. qt-only / process-only tiles are
+ * dropped by `projectApps` below so they never reach the AppGrid (the
+ * launcher-web AppGrid's `onActivate` only ever fires for web-routable
+ * apps).
  */
 
 import { useMemo, type ReactElement } from "react"
@@ -36,10 +46,12 @@ export interface DeviceLauncherProps {
    */
   locale?: string
   /**
-   * Optional observer fired when a tile is activated. Read-only mirror
-   * here: the productizer NEVER dispatches a remote command from this
-   * surface (that wiring lives in U4.6). Use this only for telemetry
-   * / e2e assertions if needed.
+   * Fired when a tile is activated (click / Enter / Space). The
+   * productizer page wires this to `dispatchFleetDeviceLaunch`, which
+   * classifies the app's `entry.web` target via launcher-web's
+   * `classifyTarget` (safe http(s) / same-origin only — never eval)
+   * and posts the fleet command stub. Pure-render callers (Storybook,
+   * unit tests of `DeviceLauncher` itself) can pass a spy.
    */
   onTileActivate?: (appId: string) => void
 }

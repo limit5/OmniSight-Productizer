@@ -983,3 +983,30 @@ class FleetDeviceManifest(BaseModel):
     device: dict
     apps: list[dict]
     theme: Optional[dict] = None
+
+
+class FleetDeviceLaunchAck(BaseModel):
+    """U4.6 OP-2308 — ack from
+    ``POST /fleet/devices/{device_id}/apps/{app_id}/launch``.
+
+    The launch endpoint is a fixture-scoped command stub: it validates
+    the device + app + safe web target and records the launch intent
+    in the request log, but does NOT execute anything against a real
+    remote device. Live remote command dispatch is a deferred tier:X
+    HIL follow-up. ``target`` is the resolved deep-link path the
+    productizer would navigate to on the device's served launcher,
+    and ``mode`` mirrors launcher-web/lib/launch.ts::classifyTarget
+    (``internal`` = same-origin path, ``external`` = absolute http(s)
+    URL). ``status`` is always ``"dispatched"`` on a 200 — failure
+    paths (unknown device, qt-only/process-only app, unsafe target)
+    return 404/422 instead of an ack.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    device_id: str
+    app_id: str
+    target: str
+    mode: str
+    status: str
+    dispatched_at: str

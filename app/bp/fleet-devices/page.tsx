@@ -2,17 +2,27 @@
 
 /**
  * OP-2307 (U4.5) — Productizer fleet "Devices" view.
+ * OP-2308 (U4.6) — capstone: makes the launcher INTERACTIVE within the
+ *   fixture scope by wiring tile activation to a productizer-side
+ *   dispatcher (`lib/fleet-device-launch.ts`). The dispatcher classifies
+ *   the app's `entry.web` target via the same SAFE_PATH / http(s)
+ *   policy launcher-web enforces on-device, posts a thin command stub
+ *   (`POST /fleet/devices/{d}/apps/{a}/launch` — no real remote execution;
+ *   live HIL is a deferred tier:X follow-up) and surfaces the resolved
+ *   deep-link / rejection in a result banner so operators see what
+ *   would happen.
  *
  * Lists every device the U4.4 fleet device-registry API exposes
  * (`GET /fleet/devices`) and, on drill-down, fetches that device's
  * apps.manifest (`GET /fleet/devices/{id}/manifest`) and renders the
  * launcher tile grid via the vendored launcher-web `AppGrid` (U4.3).
  * This makes the productizer the 4th consumer of the one shared UI —
- * a read-only remote mirror of what each device shows locally.
+ * a read-only remote mirror of what each device shows locally, plus
+ * (U4.6) a safe deep-link / command-stub layer on top of tile clicks.
  *
- * MUST NOT: do NOT remote-drive / dispatch on tile activate (U4.6).
- * Do NOT reimplement the launcher components. Do NOT do a live device
- * fetch — the API is fixture-backed.
+ * MUST NOT: do NOT execute real remote commands against live devices.
+ * Do NOT reimplement the launcher components. Do NOT use eval / unsafe
+ * navigation — every target goes through `dispatchFleetDeviceLaunch`.
  */
 
 import { useCallback, useEffect, useState } from "react"
@@ -33,6 +43,10 @@ import {
   type FleetDevice,
   type FleetDeviceManifest,
 } from "@/lib/api"
+import {
+  dispatchFleetDeviceLaunch,
+  type FleetDeviceLaunchResult,
+} from "@/lib/fleet-device-launch"
 import { DeviceLauncher } from "@/components/omnisight/device-launcher"
 
 export default function FleetDevicesPage() {
@@ -93,11 +107,33 @@ export default function FleetDevicesPage() {
     }
   }, [])
 
+  const [launchResult, setLaunchResult] =
+    useState<FleetDeviceLaunchResult | null>(null)
+  const [launchInFlight, setLaunchInFlight] = useState<string | null>(null)
+
   const handleBack = useCallback(() => {
     setSelectedId(null)
     setManifest(null)
     setManifestError(null)
+    setLaunchResult(null)
+    setLaunchInFlight(null)
   }, [])
+
+  const handleTileActivate = useCallback(
+    async (appId: string) => {
+      if (!selectedId || !manifest) return
+      setLaunchInFlight(appId)
+      setLaunchResult(null)
+      const result = await dispatchFleetDeviceLaunch(
+        selectedId,
+        appId,
+        manifest.apps ?? [],
+      )
+      setLaunchResult(result)
+      setLaunchInFlight(null)
+    },
+    [selectedId, manifest],
+  )
 
   if (auth.loading || (!auth.user && auth.authMode !== "open")) {
     return (
@@ -193,6 +229,9 @@ export default function FleetDevicesPage() {
             loading={manifestLoading}
             error={manifestError}
             onBack={handleBack}
+            launchResult={launchResult}
+            launchInFlight={launchInFlight}
+            onTileActivate={handleTileActivate}
           />
         ) : (
           <DeviceList
@@ -278,6 +317,9 @@ interface DeviceDetailProps {
   loading: boolean
   error: string | null
   onBack: () => void
+  launchResult: FleetDeviceLaunchResult | null
+  launchInFlight: string | null
+  onTileActivate: (appId: string) => void
 }
 
 function DeviceDetail({
@@ -286,6 +328,9 @@ function DeviceDetail({
   loading,
   error,
   onBack,
+  launchResult,
+  launchInFlight,
+  onTileActivate,
 }: DeviceDetailProps) {
   return (
     <section
@@ -319,6 +364,21 @@ function DeviceDetail({
         </div>
       )}
 
+      {launchInFlight && (
+        <div
+          className="rounded border border-[var(--border)] bg-[var(--card)] p-3 text-xs font-mono text-[var(--muted-foreground)]"
+          data-testid="fleet-device-launch-pending"
+          data-app-id={launchInFlight}
+        >
+          <Loader2 size={12} className="animate-spin inline-block mr-2" />
+          Dispatching {launchInFlight}…
+        </div>
+      )}
+
+      {launchResult && (
+        <LaunchResultBanner result={launchResult} />
+      )}
+
       {loading && !manifest ? (
         <div
           className="rounded-md border border-dashed bg-muted/20 p-6 text-center text-xs font-mono text-muted-foreground"
@@ -328,8 +388,103 @@ function DeviceDetail({
           Loading manifest...
         </div>
       ) : manifest ? (
-        <DeviceLauncher manifest={manifest} />
+        <DeviceLauncher manifest={manifest} onTileActivate={onTileActivate} />
       ) : null}
     </section>
+  )
+}
+
+/**
+ * Render the discriminated `FleetDeviceLaunchResult` so operators see
+ * exactly which device+app the dispatcher resolved (or why it was
+ * rejected). Carries `data-*` attributes so the e2e test can assert
+ * the resolved deep-link / target without scraping copy.
+ */
+function LaunchResultBanner({
+  result,
+}: {
+  result: FleetDeviceLaunchResult
+}) {
+  if (result.status === "dispatched") {
+    const { plan, ack } = result
+    return (
+      <div
+        className="rounded border border-[var(--border)] bg-[var(--card)] p-3 text-xs font-mono"
+        data-testid="fleet-device-launch-result"
+        data-status="dispatched"
+        data-device-id={plan.deviceId}
+        data-app-id={plan.appId}
+        data-target={plan.target}
+        data-mode={plan.mode}
+        data-deep-link={plan.deepLink}
+        data-dispatched-at={ack.dispatched_at}
+      >
+        <div>
+          Dispatched <strong>{plan.appId}</strong> on{" "}
+          <strong>{plan.deviceId}</strong> →{" "}
+          <code className="text-[var(--foreground)]">{plan.target}</code>{" "}
+          <span className="text-[var(--muted-foreground)]">
+            (mode={plan.mode})
+          </span>
+        </div>
+        <div className="text-[var(--muted-foreground)] mt-1">
+          Deep-link: <code>{plan.deepLink}</code>
+        </div>
+      </div>
+    )
+  }
+  if (result.status === "unsafe-target") {
+    return (
+      <div
+        className="rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-3 text-xs font-mono text-[var(--destructive)]"
+        data-testid="fleet-device-launch-result"
+        data-status="unsafe-target"
+        data-device-id={result.deviceId}
+        data-app-id={result.appId}
+        data-target={result.target}
+        data-reason={result.reason}
+      >
+        Rejected unsafe target for <strong>{result.appId}</strong>:{" "}
+        {result.reason}
+      </div>
+    )
+  }
+  if (result.status === "no-web-entry") {
+    return (
+      <div
+        className="rounded border border-[var(--border)] bg-[var(--card)] p-3 text-xs font-mono text-[var(--muted-foreground)]"
+        data-testid="fleet-device-launch-result"
+        data-status="no-web-entry"
+        data-device-id={result.deviceId}
+        data-app-id={result.appId}
+      >
+        {result.appId}: {result.reason}
+      </div>
+    )
+  }
+  if (result.status === "unknown-app") {
+    return (
+      <div
+        className="rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-3 text-xs font-mono text-[var(--destructive)]"
+        data-testid="fleet-device-launch-result"
+        data-status="unknown-app"
+        data-device-id={result.deviceId}
+        data-app-id={result.appId}
+      >
+        Unknown app: {result.appId}
+      </div>
+    )
+  }
+  return (
+    <div
+      className="rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-3 text-xs font-mono text-[var(--destructive)]"
+      data-testid="fleet-device-launch-result"
+      data-status="error"
+      data-device-id={result.deviceId}
+      data-app-id={result.appId}
+      data-error={result.error}
+    >
+      Failed to dispatch {result.appId}: {result.error}
+    </div>
   )
 }

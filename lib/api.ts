@@ -1362,6 +1362,43 @@ export async function getFleetDeviceManifest(deviceId: string) {
   )
 }
 
+/**
+ * OP-2308 (U4.6) — Ack returned by
+ * ``POST /fleet/devices/{device_id}/apps/{app_id}/launch``.
+ *
+ * The endpoint is a fixture-scoped command stub: it validates the
+ * device + app + the app's web target (same SAFE_PATH / http(s)
+ * policy launcher-web enforces on-device) and returns a
+ * ``dispatched`` ack. It never executes anything against a real
+ * remote device — live remote command dispatch is a deferred tier:X
+ * HIL follow-up.
+ */
+export interface FleetDeviceLaunchAck {
+  device_id: string
+  app_id: string
+  target: string
+  mode: "internal" | "external"
+  status: "dispatched"
+  dispatched_at: string
+}
+
+/**
+ * POST /fleet/devices/{deviceId}/apps/{appId}/launch — dispatch a
+ * fleet device-launcher command stub. Backend returns 404 for an
+ * unknown device/app and 422 for a missing/unsafe web target (qt-only
+ * tile, `javascript:` target, protocol-relative URL, etc.); callers
+ * surface the rejection in the productizer console without retrying.
+ */
+export async function postFleetDeviceLaunch(
+  deviceId: string,
+  appId: string,
+): Promise<FleetDeviceLaunchAck> {
+  return request<FleetDeviceLaunchAck>(
+    `/fleet/devices/${encodeURIComponent(deviceId)}/apps/${encodeURIComponent(appId)}/launch`,
+    { method: "POST" },
+  )
+}
+
 export async function getAgent(id: string) {
   return request<ApiAgent>(`/agents/${id}`)
 }

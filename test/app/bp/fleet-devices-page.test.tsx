@@ -1,5 +1,5 @@
 /**
- * OP-2307 (U4.5) — /bp/fleet-devices page contract tests.
+ * OP-2307 (U4.5) / OP-2308 (U4.6) — /bp/fleet-devices page contract tests.
  *
  * Locks in the operator-visible behaviour of the productizer's fleet
  * Devices view: the 4th consumer of the shared launcher-web UI.
@@ -13,8 +13,10 @@
  *      pos-kiosk-rk3588 → only the cashier tile that has a web entry).
  *   4. Failure path: a rejected /fleet/devices surfaces an error
  *      banner; a rejected manifest surfaces a per-detail banner.
- *   5. Read-only mirror: no remote-drive / command dispatch fires on
- *      tile activate (U4.6 territory).
+ *   5. (U4.6) Tile-activate: clicking a tile dispatches the productizer
+ *      fleet-launch stub (POST /fleet/devices/{d}/apps/{a}/launch),
+ *      renders a result banner with the resolved deep-link/target for
+ *      that device+app, and back-navigation clears the result.
  */
 
 import React from "react"
@@ -57,17 +59,24 @@ vi.mock("@/lib/api", async (importOriginal) => {
     ...actual,
     getFleetDevices: vi.fn(),
     getFleetDeviceManifest: vi.fn(),
+    postFleetDeviceLaunch: vi.fn(),
   }
 })
 
 import FleetDevicesPage from "@/app/bp/fleet-devices/page"
-import { getFleetDevices, getFleetDeviceManifest } from "@/lib/api"
+import {
+  getFleetDevices,
+  getFleetDeviceManifest,
+  postFleetDeviceLaunch,
+} from "@/lib/api"
 
 const mockedGetFleetDevices = getFleetDevices as unknown as ReturnType<
   typeof vi.fn
 >
 const mockedGetFleetDeviceManifest =
   getFleetDeviceManifest as unknown as ReturnType<typeof vi.fn>
+const mockedPostFleetDeviceLaunch =
+  postFleetDeviceLaunch as unknown as ReturnType<typeof vi.fn>
 
 const ipcamDevice: FleetDevice = {
   id: "ipcam-rv1126",
@@ -413,5 +422,231 @@ describe("/bp/fleet-devices page (OP-2307 U4.5)", () => {
     await waitFor(() =>
       expect(screen.getByTestId("fleet-devices-empty")).toBeInTheDocument(),
     )
+  })
+
+  // ─── OP-2308 U4.6 — tile-activate end-to-end ──────────────────────
+  // Drives the full productizer flow: devices list -> device -> launcher
+  // -> tile activate -> backend launch stub -> deep-link/command banner.
+  // The U4.4 fixtures (ipcam-rv1126, pos-kiosk-rk3588) are mirrored
+  // inline above so the assertion is grounded in the real
+  // configs/fleet_devices/*.yaml payloads.
+
+  it("e2e: ipcam-rv1126 -> launcher -> activate live-view tile -> dispatches /live deep-link", async () => {
+    setSignedIn()
+    mockedGetFleetDevices.mockResolvedValue([ipcamDevice])
+    mockedGetFleetDeviceManifest.mockResolvedValue(ipcamManifest)
+    mockedPostFleetDeviceLaunch.mockResolvedValue({
+      device_id: "ipcam-rv1126",
+      app_id: "live-view",
+      target: "/live",
+      mode: "internal",
+      status: "dispatched",
+      dispatched_at: "2026-06-23T00:00:00+00:00",
+    })
+
+    await act(async () => {
+      render(<FleetDevicesPage />)
+    })
+    await waitFor(() =>
+      expect(mockedGetFleetDevices).toHaveBeenCalledTimes(1),
+    )
+
+    // 1) drill into the device card
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId(`fleet-device-card-${ipcamDevice.id}`),
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("app-grid")).toBeInTheDocument(),
+    )
+
+    // 2) activate a tile — the vendored AppGrid renders one
+    //    button[data-testid=app-tile-<id>] per launchable app.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("app-tile-live-view"))
+    })
+
+    // 3) the dispatcher hit the fleet-launch stub with (device, app)
+    await waitFor(() =>
+      expect(mockedPostFleetDeviceLaunch).toHaveBeenCalledWith(
+        "ipcam-rv1126",
+        "live-view",
+      ),
+    )
+
+    // 4) the banner exposes the resolved deep-link/target for that
+    //    device+app so operators (and this e2e) can assert it without
+    //    scraping copy.
+    const banner = await waitFor(() =>
+      screen.getByTestId("fleet-device-launch-result"),
+    )
+    expect(banner.dataset.status).toBe("dispatched")
+    expect(banner.dataset.deviceId).toBe("ipcam-rv1126")
+    expect(banner.dataset.appId).toBe("live-view")
+    expect(banner.dataset.target).toBe("/live")
+    expect(banner.dataset.mode).toBe("internal")
+    expect(banner.dataset.deepLink).toBe(
+      "/bp/fleet-devices/ipcam-rv1126/apps/live-view?target=%2Flive",
+    )
+  })
+
+  it("e2e: pos-kiosk-rk3588 -> launcher -> activate cashier tile -> dispatches /cashier deep-link", async () => {
+    setSignedIn()
+    mockedGetFleetDevices.mockResolvedValue([posDevice])
+    mockedGetFleetDeviceManifest.mockResolvedValue(posManifest)
+    mockedPostFleetDeviceLaunch.mockResolvedValue({
+      device_id: "pos-kiosk-rk3588",
+      app_id: "cashier",
+      target: "/cashier",
+      mode: "internal",
+      status: "dispatched",
+      dispatched_at: "2026-06-23T00:00:01+00:00",
+    })
+
+    await act(async () => {
+      render(<FleetDevicesPage />)
+    })
+    await waitFor(() =>
+      expect(mockedGetFleetDevices).toHaveBeenCalledTimes(1),
+    )
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId(`fleet-device-card-${posDevice.id}`),
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("app-tile-cashier")).toBeInTheDocument(),
+    )
+
+    // The qt-only camera tile + process-only factory-test tile were
+    // dropped by the launcher-web web-only filter, so they are NOT in
+    // the AppGrid at all (proving "qt-only apps without a web/route
+    // target are disabled" is enforced at the render layer — the
+    // dispatcher never even sees a click for them).
+    expect(screen.queryByTestId("app-tile-camera")).not.toBeInTheDocument()
+    expect(
+      screen.queryByTestId("app-tile-factory-test"),
+    ).not.toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("app-tile-cashier"))
+    })
+
+    await waitFor(() =>
+      expect(mockedPostFleetDeviceLaunch).toHaveBeenCalledWith(
+        "pos-kiosk-rk3588",
+        "cashier",
+      ),
+    )
+
+    const banner = await waitFor(() =>
+      screen.getByTestId("fleet-device-launch-result"),
+    )
+    expect(banner.dataset.status).toBe("dispatched")
+    expect(banner.dataset.deviceId).toBe("pos-kiosk-rk3588")
+    expect(banner.dataset.appId).toBe("cashier")
+    expect(banner.dataset.target).toBe("/cashier")
+    expect(banner.dataset.deepLink).toBe(
+      "/bp/fleet-devices/pos-kiosk-rk3588/apps/cashier?target=%2Fcashier",
+    )
+  })
+
+  it("e2e: activating a tile whose entry.web is an unsafe target rejects without calling the backend", async () => {
+    setSignedIn()
+    // Manifest where the web entry uses a `javascript:` URL — the
+    // dispatcher must reject this client-side BEFORE the stub fires.
+    const evilManifest: FleetDeviceManifest = {
+      schema_version: 1,
+      device: {
+        id: ipcamDevice.id,
+        display: "headless",
+        default_renderer: "web",
+      },
+      apps: [
+        {
+          id: "evil",
+          title: { en: "Evil" },
+          icon: "video",
+          category: "tools",
+          entry: { web: "javascript:alert(1)" },
+        },
+      ],
+    }
+    mockedGetFleetDevices.mockResolvedValue([ipcamDevice])
+    mockedGetFleetDeviceManifest.mockResolvedValue(evilManifest)
+
+    await act(async () => {
+      render(<FleetDevicesPage />)
+    })
+    await waitFor(() =>
+      expect(mockedGetFleetDevices).toHaveBeenCalledTimes(1),
+    )
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId(`fleet-device-card-${ipcamDevice.id}`),
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("app-tile-evil")).toBeInTheDocument(),
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("app-tile-evil"))
+    })
+
+    const banner = await waitFor(() =>
+      screen.getByTestId("fleet-device-launch-result"),
+    )
+    expect(banner.dataset.status).toBe("unsafe-target")
+    expect(banner.dataset.appId).toBe("evil")
+    expect(banner.dataset.target).toBe("javascript:alert(1)")
+    expect(mockedPostFleetDeviceLaunch).not.toHaveBeenCalled()
+  })
+
+  it("e2e: back navigation clears the launch result banner", async () => {
+    setSignedIn()
+    mockedGetFleetDevices.mockResolvedValue([ipcamDevice])
+    mockedGetFleetDeviceManifest.mockResolvedValue(ipcamManifest)
+    mockedPostFleetDeviceLaunch.mockResolvedValue({
+      device_id: "ipcam-rv1126",
+      app_id: "live-view",
+      target: "/live",
+      mode: "internal",
+      status: "dispatched",
+      dispatched_at: "2026-06-23T00:00:02+00:00",
+    })
+
+    await act(async () => {
+      render(<FleetDevicesPage />)
+    })
+    await waitFor(() =>
+      expect(mockedGetFleetDevices).toHaveBeenCalledTimes(1),
+    )
+    await act(async () => {
+      fireEvent.click(
+        screen.getByTestId(`fleet-device-card-${ipcamDevice.id}`),
+      )
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("app-grid")).toBeInTheDocument(),
+    )
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("app-tile-live-view"))
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("fleet-device-launch-result")).toBeInTheDocument(),
+    )
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("fleet-device-back"))
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId("fleet-devices-list")).toBeInTheDocument(),
+    )
+    expect(
+      screen.queryByTestId("fleet-device-launch-result"),
+    ).not.toBeInTheDocument()
   })
 })

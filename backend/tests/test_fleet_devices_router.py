@@ -1,10 +1,16 @@
-"""U4.4 OP-2306 — fleet device-registry router tests.
+"""U4.4 OP-2306 / U4.6 OP-2308 — fleet device-registry router tests.
 
 Asserts the GET /fleet/devices, /fleet/devices/{id} and
 /fleet/devices/{id}/manifest endpoints serve the bundled fixtures
 under ``configs/fleet_devices/`` and 404 on unknown ids. Schema-shape
 checks confirm each manifest carries the apps.manifest envelope
 (schema_version=1, device.{id,display,default_renderer}, apps[]).
+
+OP-2308 adds POST /fleet/devices/{d}/apps/{a}/launch — a fixture-
+scoped command stub. The tests below pin its acceptance contract
+(safe target ⇒ ``dispatched`` ack; qt-only / unsafe target ⇒ 422;
+unknown device or app ⇒ 404) without ever running a real remote
+command.
 
 Scope: only this file's tests run via
 ``pytest backend/tests/test_fleet_devices_router.py -v`` —
@@ -112,3 +118,114 @@ class TestGetDeviceManifest:
     def test_unknown_device_manifest_returns_404(self, client: TestClient) -> None:
         resp = client.get("/fleet/devices/does-not-exist/manifest")
         assert resp.status_code == 404
+
+
+class TestLaunchDeviceApp:
+    """OP-2308 U4.6 — POST /fleet/devices/{d}/apps/{a}/launch stub.
+
+    The endpoint never executes anything against a real remote device
+    (live HIL is a deferred tier:X follow-up). It validates the
+    device + app + the app's `entry.web` target against the same
+    SAFE_PATH / http(s) policy launcher-web enforces on-device and
+    returns a `dispatched` ack. Rejection paths are exercised below.
+    """
+
+    def test_launches_an_internal_target_for_a_web_routable_app(
+        self, client: TestClient
+    ) -> None:
+        # ipcam-rv1126 / live-view has entry.web = "/live"
+        resp = client.post("/fleet/devices/ipcam-rv1126/apps/live-view/launch")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["device_id"] == "ipcam-rv1126"
+        assert body["app_id"] == "live-view"
+        assert body["target"] == "/live"
+        assert body["mode"] == "internal"
+        assert body["status"] == "dispatched"
+        assert body["dispatched_at"]  # ISO-8601 timestamp
+
+    def test_launches_the_only_web_routable_pos_tile(
+        self, client: TestClient
+    ) -> None:
+        # pos-kiosk-rk3588 / cashier has entry.web = "/cashier" (the
+        # camera + factory-test apps are qt-only / process-only and
+        # would 422 here — see test_qt_only_app_returns_422).
+        resp = client.post(
+            "/fleet/devices/pos-kiosk-rk3588/apps/cashier/launch"
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["device_id"] == "pos-kiosk-rk3588"
+        assert body["app_id"] == "cashier"
+        assert body["target"] == "/cashier"
+        assert body["mode"] == "internal"
+
+    def test_qt_only_app_returns_422_no_web_entry(
+        self, client: TestClient
+    ) -> None:
+        # camera tile on pos-kiosk-rk3588 has only entry.qml — no
+        # web/route target, so it is NOT launchable from the web mirror.
+        resp = client.post(
+            "/fleet/devices/pos-kiosk-rk3588/apps/camera/launch"
+        )
+        assert resp.status_code == 422
+        assert "no-web-entry" in resp.json()["detail"]
+
+    def test_process_only_app_returns_422_no_web_entry(
+        self, client: TestClient
+    ) -> None:
+        # factory-test has only entry.process — same rejection.
+        resp = client.post(
+            "/fleet/devices/pos-kiosk-rk3588/apps/factory-test/launch"
+        )
+        assert resp.status_code == 422
+        assert "no-web-entry" in resp.json()["detail"]
+
+    def test_unknown_app_returns_404(self, client: TestClient) -> None:
+        resp = client.post(
+            "/fleet/devices/ipcam-rv1126/apps/does-not-exist/launch"
+        )
+        assert resp.status_code == 404
+        assert "does-not-exist" in resp.json()["detail"]
+
+    def test_unknown_device_returns_404(self, client: TestClient) -> None:
+        resp = client.post("/fleet/devices/does-not-exist/apps/anything/launch")
+        assert resp.status_code == 404
+
+    def test_classify_target_rejects_unsafe_paths(self) -> None:
+        """Direct coverage of the SAFE_PATH / scheme gate.
+
+        The fixtures only carry safe targets, so this exercises the
+        rejection branches without needing a malicious fixture. Mirrors
+        the launcher-web `classifyTarget` policy.
+        """
+        from fastapi import HTTPException
+
+        from backend.routers.fleet_devices import _classify_target
+
+        for bad in (
+            "",  # empty
+            "javascript:alert(1)",  # bare scheme-less / non-URL
+            "//evil.example/x",  # protocol-relative
+            "/x?javascript:alert(1)",  # path with disallowed chars
+            "data:text/html,<script>alert(1)</script>",  # data: scheme
+            "ftp://x.example",  # non-http(s) scheme
+        ):
+            try:
+                _classify_target(bad)
+            except HTTPException as exc:
+                assert exc.status_code == 422
+                assert "unsafe-target" in exc.detail
+            else:
+                raise AssertionError(f"_classify_target accepted unsafe: {bad!r}")
+
+    def test_classify_target_accepts_safe_internal_and_external(self) -> None:
+        from backend.routers.fleet_devices import _classify_target
+
+        assert _classify_target("/live") == ("internal", "/live")
+        assert _classify_target("/admin/devices") == ("internal", "/admin/devices")
+        mode, target = _classify_target("https://device.example/admin")
+        assert mode == "external"
+        assert target == "https://device.example/admin"
+        mode, target = _classify_target("http://x.example")
+        assert mode == "external"
