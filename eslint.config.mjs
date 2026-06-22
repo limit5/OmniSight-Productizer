@@ -142,3 +142,6 @@ export default tseslint.config(
     },
   },
 )
+
+// U4 (OP-2284): the vendored omnisight-ui snapshot is linted upstream.
+const __omniIgnores = { ignores: ["third_party/**"] };

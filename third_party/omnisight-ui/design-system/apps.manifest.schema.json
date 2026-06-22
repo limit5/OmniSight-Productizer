@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omnisight/schemas/apps.manifest.schema.json",
+  "title": "OmniSight UI app-registration manifest",
+  "description": "Each SDK/device ships ONE apps.manifest.(yaml|json). The shared launcher (launcher-qt for local panels, launcher-web for headless/remote) reads it, renders one tile per app filtered by device capabilities + roles, and launches the renderer-appropriate entry. Adding an app = a manifest entry + its entry component; the shell is never edited. Validated in CI (mirrors hal/profiles/validate_profile.py).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "device", "apps"],
+  "properties": {
+    "schema_version": { "const": 1 },
+
+    "device": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "display", "default_renderer"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,62}$",
+          "description": "Product/build id, e.g. pos-kiosk-rk3588, ipcam-rv1126."
+        },
+        "display": {
+          "enum": ["local", "headless", "both"],
+          "description": "local=has a panel (qt); headless=no panel (web only); both=panel + web admin."
+        },
+        "default_renderer": {
+          "enum": ["qt", "web"],
+          "description": "Primary renderer. MUST be 'web' when display=headless (enforced by allOf below)."
+        },
+        "locales": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z]{2}(-[A-Za-z]{2,4})?$" },
+          "minItems": 1,
+          "uniqueItems": true,
+          "default": ["en", "zh-Hant"],
+          "description": "BCP-47-ish locale tags. Default = OmniSight standard en + zh-Hant."
+        }
+      }
+    },
+
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-device theme overrides on top of the OmniSight design-system (deep-space / neural-blue). Omit to use the brand defaults.",
+      "properties": {
+        "brand": {
+          "type": "string",
+          "default": "omnisight",
+          "description": "Design-system theme variant id."
+        },
+        "accent": {
+          "$ref": "#/$defs/hexColor",
+          "default": "#38bdf8",
+          "description": "Per-device accent override (default = brand neural-blue #38bdf8)."
+        },
+        "density": {
+          "enum": ["comfortable", "compact"],
+          "default": "comfortable",
+          "description": "Tile/spacing density (compact for small panels)."
+        }
+      }
+    },
+
+    "apps": {
+      "type": "array",
+      "minItems": 1,
+      "description": "App tiles. ids must be unique (uniqueness checked in CI — JSON Schema can't enforce by-key uniqueness).",
+      "items": { "$ref": "#/$defs/app" }
+    }
+  },
+
+  "allOf": [
+    {
+      "if": { "properties": { "device": { "properties": { "display": { "const": "headless" } } } } },
+      "then": { "properties": { "device": { "properties": { "default_renderer": { "const": "web" } } } } },
+      "$comment": "Decision (locked 2026-06-21): headless devices are web-launcher ONLY."
+    }
+  ],
+
+  "$defs": {
+    "hexColor": {
+      "type": "string",
+      "pattern": "^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$",
+      "description": "#rrggbb or #rrggbbaa."
+    },
+
+    "localizedString": {
+      "type": "object",
+      "description": "Locale-keyed strings. MUST include 'en' (the fallback); SHOULD include every device.locales entry (CI warns on missing).",
+      "required": ["en"],
+      "propertyNames": { "pattern": "^[a-z]{2}(-[A-Za-z]{2,4})?$" },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+
+    "app": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "title", "icon", "category", "entry"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{1,47}$",
+          "description": "Stable app id, e.g. cashier, camera, settings."
+        },
+        "title": { "$ref": "#/$defs/localizedString" },
+        "icon": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$",
+          "description": "Design-system icon id (lucide name or an omnisight custom icon, e.g. camera, settings, activity, shield)."
+        },
+        "category": {
+          "enum": ["core", "media", "communication", "tools", "diagnostics", "settings"],
+          "description": "Home-screen grouping. Drives section + the category accent (diagnostics=critical-red, media=artifact-purple, communication=teal, etc.)."
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 100,
+          "description": "Sort within category (ascending)."
+        },
+        "entry": { "$ref": "#/$defs/entry" },
+        "caps_required": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9_.-]+$" },
+          "uniqueItems": true,
+          "default": [],
+          "description": "Capabilities the device must have for the tile to show (resolved from the HAL/profile, e.g. display, camera, payment, printer, nfc, plc)."
+        },
+        "roles": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9_-]+$" },
+          "uniqueItems": true,
+          "default": [],
+          "description": "RBAC gate; empty = visible to all. e.g. operator, admin, service."
+        },
+        "single_instance": {
+          "type": "boolean",
+          "default": true,
+          "description": "If true, re-launching focuses the running instance instead of spawning another."
+        }
+      }
+    },
+
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Renderer-specific launch targets. launcher-qt picks 'qml' else 'process'; launcher-web picks 'web'. At least one MUST be present; an app with only 'web' is web-only (and won't appear on a qt-only device that lacks it — CI warns).",
+      "properties": {
+        "qml": {
+          "type": "string",
+          "pattern": "^(qrc:/|file:/|\\./).+\\.qml$",
+          "description": "QML component URL for launcher-qt (e.g. qrc:/apps/CameraView.qml)."
+        },
+        "web": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9/_-]*$",
+          "description": "Route in launcher-web (e.g. /camera)."
+        },
+        "process": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "External process argv launched by launcher-qt (e.g. [\"/usr/bin/cashier\",\"--fullscreen\"]). Used when an app is a separate binary, not in-process QML."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,21 @@
+# Example apps.manifest files (validated against apps.manifest.schema.json).
+# Each SDK ships ONE such file; the shared launcher renders it.
+---
+# A) Headless IPCAM (camera-sdk / rtsp-onvif) — web launcher only
+schema_version: 1
+device: { id: ipcam-rv1126, display: headless, default_renderer: web, locales: [en, zh-Hant] }
+apps:
+  - { id: live-view, title: { en: Live, zh-Hant: 即時影像 }, icon: video, category: media, entry: { web: /live }, caps_required: [camera] }
+  - { id: streams,   title: { en: "Streams / ONVIF", zh-Hant: "串流 / ONVIF" }, icon: network, category: core, entry: { web: /streams } }
+  - { id: storage,   title: { en: Storage, zh-Hant: 儲存 }, icon: storage, category: tools, entry: { web: /storage } }
+  - { id: settings,  title: { en: Settings, zh-Hant: 設定 }, icon: settings, category: settings, entry: { web: /settings } }
+  - { id: diagnostics, title: { en: Diagnostics, zh-Hant: 診斷 }, icon: diagnostics, category: diagnostics, entry: { web: /diag } }
+---
+# B) pos-kiosk panel (KIOSK/POS) — Qt6 launcher; cashier dual qt+web, factory-test = external process
+schema_version: 1
+device: { id: pos-kiosk-rk3588, display: local, default_renderer: qt }
+theme: { accent: "#38bdf8", density: comfortable }
+apps:
+  - { id: cashier, title: { en: Cashier, zh-Hant: 收銀 }, icon: cashier, category: core, order: 10, entry: { qml: "qrc:/apps/CashierView.qml", web: /cashier }, caps_required: [display, payment], roles: [operator] }
+  - { id: camera,  title: { en: Camera, zh-Hant: 相機 }, icon: camera, category: media, entry: { qml: "qrc:/apps/CameraView.qml" }, caps_required: [camera] }
+  - { id: factory-test, title: { en: "Factory Test", zh-Hant: 產測 }, icon: factory-test, category: diagnostics, entry: { process: ["/usr/bin/factorytest", "--fullscreen"] }, roles: [service] }

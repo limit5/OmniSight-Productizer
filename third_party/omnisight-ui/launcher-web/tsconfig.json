@@ -1,12 +1,12 @@
 {
   "compilerOptions": {
+    "target": "ES2022",
     "lib": [
       "dom",
       "dom.iterable",
-      "esnext"
+      "ES2022"
     ],
-    "allowJs": true,
-    "target": "ES6",
+    "allowJs": false,
     "skipLibCheck": true,
     "strict": true,
     "noEmit": true,
@@ -22,9 +22,17 @@
         "name": "next"
       }
     ],
+    "types": [
+      "node",
+      "vitest/globals",
+      "@testing-library/jest-dom"
+    ],
     "paths": {
       "@/*": [
         "./*"
+      ],
+      "launcher-web": [
+        "./lib/index.ts"
       ]
     }
   },
@@ -36,16 +44,9 @@
     ".next/dev/types/**/*.ts"
   ],
   "exclude": [
-    "third_party",
     "node_modules",
-    "configs/skills/*/scaffolds",
-    "templates",
-    "backend",
-    "scripts",
-    "deploy",
-    "test_assets",
-    "test",
-    "e2e",
-    "tests"
+    "out",
+    ".next",
+    "examples"
   ]
 }

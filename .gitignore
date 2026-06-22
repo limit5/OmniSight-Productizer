@@ -157,3 +157,11 @@ progress.txt.tmp
 .runner-cwd-sentinel
 .ac-verification.md
 # === OP-1111 RUNNER_RUNTIME_ARTIFACTS auto-mirror END ===
+
+# U4 (OP-2284) vendored omnisight-ui build/scratch + pnpm store
+/third_party/**/node_modules
+/third_party/**/.next
+/third_party/**/out
+/third_party/**/build
+.pnpm-store/
+**/.pnpm-store/
