@@ -1298,6 +1298,70 @@ export async function revokeFleetAgent(agentId: string): Promise<void> {
   )
 }
 
+// ─── U4.4 / U4.5 — Fleet device registry (OP-2306 backend / OP-2307 FE) ───
+// Read-only client mirror of backend/routers/fleet_devices.py:
+//   GET /fleet/devices              → FleetDevice[]
+//   GET /fleet/devices/{id}         → FleetDevice
+//   GET /fleet/devices/{id}/manifest → FleetDeviceManifest
+// Fixture-backed (configs/fleet_devices/*.yaml); the productizer fleet
+// Devices view drills into a device and renders its app grid via the
+// vendored launcher-web AppGrid (third_party/omnisight-ui/launcher-web).
+
+/** One row of GET /fleet/devices. */
+export interface FleetDevice {
+  id: string
+  name: string
+  model: string
+  renderer: string
+  last_seen: string | null
+  manifest_ref: string
+}
+
+/** GET /fleet/devices/{id}/manifest envelope (mirror of
+ * design-system/apps.manifest.schema.json — kept open here because the
+ * canonical schema is JSON Schema and the API is a thin fixture
+ * passthrough). The `device` / `apps[*]` shapes are the same the
+ * vendored launcher-web manifest model consumes. */
+export interface FleetDeviceManifestApp {
+  id: string
+  title: Record<string, string>
+  icon: string
+  category: string
+  order?: number
+  entry: { web?: string; qml?: string; process?: string[] }
+  caps_required?: string[]
+  roles?: string[]
+  single_instance?: boolean
+}
+
+export interface FleetDeviceManifest {
+  schema_version: number
+  device: {
+    id: string
+    display: string
+    default_renderer: string
+    locales?: string[]
+  }
+  apps: FleetDeviceManifestApp[]
+  theme?: { brand?: string; accent?: string; density?: string }
+}
+
+export async function getFleetDevices() {
+  return request<FleetDevice[]>("/fleet/devices")
+}
+
+export async function getFleetDevice(deviceId: string) {
+  return request<FleetDevice>(
+    `/fleet/devices/${encodeURIComponent(deviceId)}`,
+  )
+}
+
+export async function getFleetDeviceManifest(deviceId: string) {
+  return request<FleetDeviceManifest>(
+    `/fleet/devices/${encodeURIComponent(deviceId)}/manifest`,
+  )
+}
+
 export async function getAgent(id: string) {
   return request<ApiAgent>(`/agents/${id}`)
 }

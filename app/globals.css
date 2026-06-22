@@ -2001,3 +2001,153 @@ html {
   transition: box-shadow 120ms linear;
   will-change: box-shadow;
 }
+
+/* OP-2307 (U4.5) — Fleet DeviceLauncher / vendored launcher-web styles.
+ *
+ * The launcher-web AppGrid / AppTile / CategoryStrip components ship
+ * unstyled (the static SPA bakes its own globals.css that the U4.3
+ * vendor pulls do NOT include — see third_party/omnisight-ui/README.md).
+ * These rules give the productizer surface the same brand language:
+ *
+ *   - --color-cat-* derives the category accents from the shared
+ *     design-tokens.json (kept in lock-step with launcher-web's
+ *     gen_web_theme.py output, see design-tokens.json `category_accent`).
+ *     Living here (outside the @generated fence) keeps gen_app_theme.py
+ *     --check green; if/when U4.2's generator is extended to emit these,
+ *     this block can move into the fenced region.
+ *   - .app-grid / .app-tiles / .category-strip / .app-tile match the
+ *     classNames the vendored components emit verbatim.
+ */
+:root {
+  --color-cat-core: #38bdf8;
+  --color-cat-media: #a855f7;
+  --color-cat-communication: #2dd4bf;
+  --color-cat-tools: #f97316;
+  --color-cat-diagnostics: #ef4444;
+  --color-cat-settings: #94a3b8;
+}
+
+.device-launcher {
+  display: block;
+}
+
+.app-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.home-empty {
+  border: 1px dashed var(--border);
+  background: rgba(56, 189, 248, 0.03);
+  padding: 1.5rem;
+  border-radius: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+.category-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.category-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding-bottom: 0.25rem;
+  border-bottom: 1px solid rgba(56, 189, 248, 0.15);
+}
+
+.category-strip-accent {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 9999px;
+  background: var(--tile-accent, var(--neural-blue));
+  box-shadow: 0 0 6px var(--tile-accent, var(--neural-blue));
+}
+
+.category-strip-label {
+  font-family: var(--font-sans);
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--foreground);
+  margin: 0;
+}
+
+.category-strip-count {
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: var(--muted-foreground);
+  margin-left: auto;
+}
+
+.app-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.75rem;
+}
+
+.app-tile {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.9rem 0.9rem 1rem 0.9rem;
+  border-radius: 0.5rem;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  background: rgba(1, 4, 9, 0.6);
+  color: var(--foreground);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 120ms linear,
+    background 120ms linear,
+    box-shadow 120ms linear;
+}
+
+.app-tile:hover,
+.app-tile:focus-visible {
+  border-color: var(--tile-accent, var(--neural-blue));
+  background: rgba(1, 4, 9, 0.75);
+  box-shadow:
+    0 0 0 1px var(--tile-accent, var(--neural-blue)),
+    0 0 8px rgba(56, 189, 248, 0.25);
+  outline: none;
+}
+
+.app-tile-accent-stripe {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  right: 0.5rem;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--tile-accent, var(--neural-blue));
+  opacity: 0.85;
+}
+
+.app-tile-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  margin-top: 0.5rem;
+  border-radius: 0.4rem;
+  background: color-mix(in oklab, var(--tile-accent, var(--neural-blue)) 18%, transparent);
+  color: var(--tile-accent, var(--neural-blue));
+}
+
+.app-tile-title {
+  font-family: var(--font-sans);
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--foreground);
+}
