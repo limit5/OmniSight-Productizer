@@ -27,10 +27,17 @@
 
 ## Wave plan (effort-ascending, value-weighted)
 - **Wave 0** (infra): process-launch-on-weston spike + qt6multimedia bundle. *Gate for process apps.*
-- **Wave 1** (in-launcher qml, no cross-build — fast proof): **diagnostics + settings**. Proves tap→launch→dock-switch→home end-to-end with real views.
+- **Wave 1** (in-launcher qml, no cross-build — fast proof): **diagnostics + settings**. Proves tap→launch→dock-switch→home end-to-end with real views. ✅ **DONE 2026-06-24** (OP-2341 W1.1, OP-2342 W1.2, OP-2343 target-Qt6 XHR fix). Both live on board, baked into update.img.
 - **Wave 2** (qml views w/ device I/O): live-view, streams, storage.
 - **Wave 3** (process apps — the big reuse win): camera + scanner (UVCCamera_Qt), ai-vision (RKNN).
 - **Wave 4**: conference (conf-touch-ui).
+
+### ⚠ Wave 2 RE-SEQUENCING (board probe 2026-06-24, ATK-DLRK3588 @ adb 192.168.0.113)
+Two of the three Wave 2 apps have unmet upstream deps on THIS board — only **storage** is buildable + board-verifiable today:
+- **storage** → recordings/files browser over **`/userdata`** (mmcblk0p8, 101 GB, empty). No streaming dep. **Do this first (Wave 2a).** ⚠ Per [[project_rk3588_qt6_bundle]] OP-2343: the target Qt6 has NO `qml_xmlhttprequest` and likely no `Qt.labs.folderlistmodel` either — directory listing MUST go through a **C++ helper** (extend `SystemReadout` or a sibling `FsBrowser`), never QML XHR/JS file APIs. Bake this into the ticket AC.
+- **live-view** → needs **QtMultimedia (VideoOutput)** which is NOT in the current bundle (Quick+Wayland only). **Hard-blocked on Wave 0 qt6multimedia bundle.** Source = local IMX415 (V4L2/Mali) or RTSP.
+- **streams / ONVIF** → there is **no rtsp-onvif-server / onvif daemon on this board** (that daemon is the Case 1 EVK, [[project_rtsp_onvif_server_evk_bringup]]). On the allinone box the only stream source is the local IMX415, so "streams" overlaps Wave 3's camera path + also needs QtMultimedia. **Re-scope or defer until camera path + qt6multimedia land.**
+- **Implication:** qt6multimedia bundle (Wave 0 #2) is the real gate for live-view AND streams AND Wave 3 camera — promote it. Sensible new order: **storage (now) → qt6multimedia bundle → live-view + streams + camera (share the multimedia stack)**.
 
 ## Decomposition / delivery lanes
 - **qml-view apps** (diagnostics/settings/live-view/streams/storage/ai-vision) = new QML in `omnisight-ui` launcher module → **routed runner tickets** (Gerrit), verified by offscreen ctest, then re-vendored into the image. (Watch the `.so`-deploy + NO_CACHEGEN gotchas from [[project_rk3588_qt6_bundle]].)
