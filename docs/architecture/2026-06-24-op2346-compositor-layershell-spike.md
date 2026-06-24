@@ -56,6 +56,12 @@ Supporting facts:
 - **P2:** make cage+seatd the boot compositor (init scripts), keep a weston fallback; re-vendor + bake; on-board soak.
 - **P3:** generalise to Wave 3 process-apps (camera/scanner/conference) + grow the bar (recents/status). Optionally add `LayerShellQt` so the launcher owns the bar in OmniSight design.
 
+## P0 PoC RESULT (2026-06-24) — PARTIAL, blocker found
+- ✅ cage 0.2.0 cross-built (buildroot-2025.02: +cage +wlroots +seatd +eudev +libinput +pixman; flip /dev mgmt to eudev for `BR2_PACKAGE_HAS_UDEV`). Vendored to `/opt/omnisight/cage/` (3.1M; **excluded Mali EGL/GLES/GBM** so it uses the board's libmali — the Mesa-shadow lesson).
+- ✅ cage RUNS on the board: gets **DRM master** (after killing weston — only one DRM master; weston `S49weston` had to be killed, no respawn), **initializes Mali** (`arm_release_ver: g24p0-00eac0` banner), runs its child (`libseat` builtin backend, root — no seatd daemon needed). So **layer-shell compositor on this HW is viable in principle.**
+- 🚫 **BLOCKER: the Qt launcher CLIENT fails EGL under cage** — `qt.qpa.wayland: Failed to initialize EGL display 3001` / `QRhiGles2: Failed to create context` / `Failed to create RHI`. Hypothesis: the ATK **Mali blob is weston-coupled** — weston advertises a Mali-specific **`mali_buffer_sharing`** wayland global (confirmed in weston `wayland-info`) that the Mali client libEGL uses for buffer sharing; cage/wlroots exposes standard **`linux-dmabuf`** instead, so Mali client-EGL can't init. Compositor-side Mali (GBM/KMS) works; CLIENT-side is the gap.
+- **Next investigation (before committing to migration):** (a) try a **GBM/dmabuf libmali variant** (Rockchip libmali has `-gbm` / `-wayland-gbm` builds; the ATK one may be the weston-specific variant) so clients use standard wayland-egl+dmabuf; (b) Qt EGL platform/env knobs under wlroots; (c) confirm wlroots advertises `zwp_linux_dmabuf_v1` + `wl_drm` that Mali expects; (d) test a NON-Qt GL client (e.g. `weston-simple-egl`/glmark2-wayland) under cage to isolate Qt-vs-Mali. If the Mali blob can't do standard dmabuf clients, cage is blocked on THIS board's GPU userspace → fall back to weston-panel-bar or revisit with a different libmali.
+
 ## Effort / call
 Multi-day migration with real risk (new compositor under the whole UI). **Do P0 PoC first** — it's the cheap gate that proves Mali+cage+layer-shell on this board before committing. If P0 fails (Mali/wlroots incompatible), fall back to the weston-panel-bar compromise (windowed apps) or a hardware-key escape.
 
