@@ -28,9 +28,11 @@
 ## Wave plan (effort-ascending, value-weighted)
 - **Wave 0** (infra): process-launch-on-weston spike + qt6multimedia bundle. *Gate for process apps.*
 - **Wave 1** (in-launcher qml, no cross-build — fast proof): **diagnostics + settings**. Proves tap→launch→dock-switch→home end-to-end with real views. ✅ **DONE 2026-06-24** (OP-2341 W1.1, OP-2342 W1.2, OP-2343 target-Qt6 XHR fix). Both live on board, baked into update.img.
-- **Wave 2** (qml views w/ device I/O): live-view, streams, storage.
-- **Wave 3** (process apps — the big reuse win): camera + scanner (UVCCamera_Qt), ai-vision (RKNN).
+- **Wave 2** (qml views w/ device I/O): live-view ✅ (OP-2347, process-app), storage ✅ (OP-2344), streams (re-scope pending).
+- **Wave 3** (process apps): camera / scanner / ai-vision — **NOTE: re-audited, see below**.
 - **Wave 4**: conference (conf-touch-ui).
+
+> **⚠ Wave 2 streams + Wave 3 camera were RE-AUDITED 2026-06-24** against board ground-truth — the original "UVCCamera_Qt camera" + "rtsp-onvif-server streams" assumptions are INVALID on this board (MIPI-only camera, no UVC, no onvif daemon, Qt Camera broken). **Read `2026-06-24-wave2-streams-wave3-camera-reaudit.md` for the revised plan** (gst/V4L2 not Qt-Camera; MIPI Camera Studio not UVCCamera_Qt; RKNN ai-vision; streams needs an RTSP-out-vs-dual-cam product decision; all gated on OP-2346 compositor nav).
 
 ### ⚠ Wave 2 RE-SEQUENCING (board probe 2026-06-24, ATK-DLRK3588 @ adb 192.168.0.113)
 Two of the three Wave 2 apps have unmet upstream deps on THIS board — only **storage** is buildable + board-verifiable today:
