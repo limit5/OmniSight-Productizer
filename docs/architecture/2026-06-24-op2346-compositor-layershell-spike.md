@@ -67,6 +67,18 @@ The decisive isolation test: **`weston-simple-egl` (a minimal NON-Qt EGL client)
 
 ⇒ **cage/wlroots is not viable on this board without swapping libmali** for a gbm/standard-dmabuf variant (e.g. Rockchip `libmali-valhall-g610-*-gbm`). That's a GPU-blob swap matched to the kernel — a separate, risky effort that could also destabilise weston. **Recommend NOT pursuing cage now.** Fallbacks: (1) weston desktop-shell **panel nav-bar** (windowed apps, weston-styled bar — works on today's stack, no GPU risk); (2) **park nav**, keep adb/`go-home.sh` for dev, build Wave 3 camera/ai-vision (process-apps demo fine without nav), revisit a libmali swap later as its own spike. Artifacts kept at `/opt/omnisight/cage/` on the board (not autostarted) for any future libmali retry.
 
+## libmali swap ATTEMPTED + TESTED (2026-06-24) — also NO-GO
+Operator chose to try the libmali swap. Findings:
+- Current board libmali (g24p0): **`mali_buffer_sharing` PRESENT, `zwp_linux_dmabuf` ABSENT** — weston-coupled.
+- Fetched the matching DDK variant `libmali-valhall-g610-g24p0-wayland-gbm.so` (Rockchip/JeffyCN libmali repo). It is **ALSO `mali_buffer_sharing`-only** (`zwp_linux_dmabuf` absent; tagged `valhall---mbs2`). **Every Rockchip libmali wayland variant uses `mali_buffer_sharing`, not standard linux-dmabuf.**
+- Tested it under cage (vendored into a cage-only LD_LIBRARY_PATH, system libmali untouched): `weston-simple-egl` **still fails `init_egl` assertion**. Confirmed: the swap does not help.
+
+**Definitive verdict: cage/wlroots clients cannot run on this board's GPU userspace.** The Rockchip proprietary Mali stack only does wayland buffer-sharing via its `mali_buffer_sharing` protocol (weston has a module for it; wlroots does not). The only ways to wlroots here are both large + out of scope for a nav feature:
+1. **Patch wlroots/cage to implement `mali_buffer_sharing`** (Rockchip's protocol) — deep custom-compositor work + ongoing maintenance.
+2. **Kernel 6.1 → 6.10+ for Panfrost/panthor** (open Mali driver = standard dmabuf, works with wlroots) — a massive ATK BSP upgrade.
+
+⇒ **OP-2346 layer-shell-compositor path is closed on the current ATK BSP.** Recommended: **weston desktop-shell panel nav-bar** (windowed apps) as the pragmatic on-screen nav, OR **park nav** (interim `go-home.sh`/adb) and build Wave 3; revisit only if/when the BSP moves to a Panfrost-capable kernel. cage artifacts + the candidate libmali kept at `/opt/omnisight/cage/` for a future kernel-6.10 retry.
+
 ## Effort / call
 Multi-day migration with real risk (new compositor under the whole UI). **Do P0 PoC first** — it's the cheap gate that proves Mali+cage+layer-shell on this board before committing. If P0 fails (Mali/wlroots incompatible), fall back to the weston-panel-bar compromise (windowed apps) or a hardware-key escape.
 
