@@ -21,10 +21,9 @@ Confirmed assets: **dual IMX415** (multiple `rkisp` ISP paths — mainpath `/dev
 3. **UVCCamera_Qt stays a Case-2 (UVC customer) deliverable**, not an allinone-board app. Don't force-fit it onto the MIPI board.
 
 ## Revised Wave 2 — streams (NEEDS ONE PRODUCT DECISION)
-"streams / ONVIF" as originally scoped is dead (no daemon, no external source). Two coherent re-scopes given the hardware — **operator to choose**:
-- **(A) RTSP-out server** — make the board an **IP camera**: expose the IMX415 over RTSP/ONVIF (gst `rtspclientsink`/`test-launch` + an ONVIF responder). Aligns with the IPCAM product identity; the "Streams" tile shows/manages the outbound stream + clients. *This is the more on-brand option.*
-- **(B) Dual-camera viewer** — the board has **2× IMX415**; "Streams" = a 2-up live grid (CSI1 + CSI3), each a gst pipeline. Pure on-board, no networking.
-- (Deferring is fine — streams is the least-defined tile; live-view already covers single-camera viewing.)
+"streams / ONVIF" as originally scoped is dead (no daemon, no external source). **DECIDED 2026-06-24 (operator): (B) Dual-camera viewer.**
+- **Streams = a 2-up live grid of the board's 2× IMX415** (CSI1 + CSI3), each its own gst pipeline → its own surface/region. Pure on-board, no networking. Process-app (gst, two `v4l2src` pipelines), gated on OP-2346 nav. Builds on the live-view pipeline (two instances / a compositor-side 2-up, or a single gst pipeline with `compositor`/`videomixer` 2-up → one waylandsink).
+- (Rejected (A) RTSP-out/IPCAM-server for now — revisit if outbound streaming becomes a product need.)
 
 ## Revised Wave 3 — camera / scanner / ai-vision / conference
 All **gst/V4L2-based** (not Qt Camera, not UVCCamera_Qt), process-apps, gated on OP-2346 for nav:
