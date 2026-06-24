@@ -16,8 +16,8 @@ See also [[project_rk3588_qt6_bundle]] and the Phase-2 plan doc.
 Confirmed assets: **dual IMX415** (multiple `rkisp` ISP paths — mainpath `/dev/video44` + others), **RKNN NPU** (`librknnrt.so`, `rknn_server`, `/sys/kernel/debug/rknpu`), system **gstreamer 1.24.13** (v4l2src + waylandsink + full plugin set).
 
 ## Cross-cutting decisions (apply to all camera apps)
-1. **Never use Qt6 `Camera`/`MediaDevices` on this board** — it's broken. Drive **gstreamer/V4L2 directly** (proven). Either a gst-launch process-app (like live-view) or, for a styled in-launcher view, a C++ `gstreamer→QVideoSink` bridge.
-2. **All camera/scanner/ai-vision/conference apps are process-apps** → their close/switch is **gated on OP-2346** (compositor nav). They can be *built + demoed* before nav lands; they're not *usable* as a product until it does.
+1. **Never use Qt6 `Camera`/`MediaDevices` on this board** — it's broken. Drive **gstreamer/V4L2 directly** (proven).
+2. **PREFER in-launcher QML views via the C++ `GstVideoSource` bridge — NOT process-apps.** ⭐ **Proven 2026-06-24 (OP-2348 camera):** a C++ `gst→QVideoSink` bridge (`v4l2src ! appsink → QVideoFrame → VideoOutput`) inside an AppHost-pushed QML view gives the live feed AND the launcher's ← Home / dock nav **for free** — sidestepping the OP-2346 close/switch gap entirely (that gap only afflicts fullscreen *process-apps* with their own wayland surface). So camera ✅ and ai-vision should both be in-launcher views via the bridge; **OP-2346 is NOT a prerequisite for them.** (live-view shipped as a process-app earlier; it can later migrate to the bridge to gain nav.)
 3. **UVCCamera_Qt stays a Case-2 (UVC customer) deliverable**, not an allinone-board app. Don't force-fit it onto the MIPI board.
 
 ## Revised Wave 2 — streams (NEEDS ONE PRODUCT DECISION)
@@ -26,8 +26,8 @@ Confirmed assets: **dual IMX415** (multiple `rkisp` ISP paths — mainpath `/dev
 - (Rejected (A) RTSP-out/IPCAM-server for now — revisit if outbound streaming becomes a product need.)
 
 ## Revised Wave 3 — camera / scanner / ai-vision / conference
-All **gst/V4L2-based** (not Qt Camera, not UVCCamera_Qt), process-apps, gated on OP-2346 for nav:
-- **camera** = **MIPI Camera Studio**: live preview + capture photo / record clip (gst → mp4 on /userdata) + CSI1/CSI3 switch + resolution/format per the [[project_uvc_format_matrix_spec]]. Builds on the live-view pipeline + controls. *(Replaces "UVCCamera_Qt".)*
+All **gst/V4L2-based** (not Qt Camera, not UVCCamera_Qt), **in-launcher QML views via the `GstVideoSource` bridge** (nav for free, no OP-2346):
+- **camera** = **MIPI Camera Studio** ✅ **v1 DONE (OP-2348, #1742, board-verified)**: live preview via the bridge, in-launcher. FOLLOW-UP: capture photo / record clip (gst → mp4 on /userdata) + CSI1/CSI3 switch + resolution/format per the [[project_uvc_format_matrix_spec]]. *(Replaces "UVCCamera_Qt".)*
 - **scanner** = barcode/QR from the live camera frames — gst `v4l2src ! ... ! appsink` → a decoder (zbar / zxing-cpp) → result overlay. Needs a barcode lib in the bundle. *(No longer "rides UVCCamera_Qt".)*
 - **ai-vision** = **RKNN detection overlay** on the camera feed (person/object) — `librknnrt.so` + a `.rknn` model + gst pipeline + box overlay. NPU confirmed present → the real edge-AI differentiator. Highest value, med-high effort.
 - **conference** = conf-touch-ui (Case 5), camera + ES8388 audio — heaviest; separate cross-build; last.
