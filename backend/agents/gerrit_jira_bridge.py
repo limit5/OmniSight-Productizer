@@ -28,6 +28,7 @@ from uuid import uuid4
 from backend import db_pool
 from backend.agents import jira_dispatch, reviewer_safety
 from backend.db import _resolve_pg_dsn
+from scripts import medical_readiness_check
 
 # OP-831 (2026-05-11 post-mortem): the cursor file path was hard-coded to a
 # root-owned path under ``/var/lib/``. The bridge runs as user-level systemd
@@ -2124,6 +2125,8 @@ class GerritJiraBridge:
                     err=status,
                 )
                 return False
+            if not self.medical_readiness_ok_for_closure(ticket_key):
+                return False
             try:
                 if status in IN_PROGRESS_STATUS_NAMES:
                     self.transition_ticket(ticket_key, "to_under_review")
@@ -2174,6 +2177,41 @@ class GerritJiraBridge:
                 ),
             )
             return True
+
+    def medical_readiness_labels_and_summary(
+        self,
+        ticket_key: str,
+    ) -> tuple[tuple[str, ...], str]:
+        issue = self.jira_request("GET", f"/issue/{ticket_key}?fields=summary,labels")
+        fields = issue.get("fields") or {}
+        return tuple(fields.get("labels") or ()), str(fields.get("summary") or "")
+
+    def medical_readiness_ok_for_closure(self, ticket_key: str) -> bool:
+        labels, summary = self.medical_readiness_labels_and_summary(ticket_key)
+        result = medical_readiness_check.check_medical_readiness(
+            labels=labels,
+            summary=summary,
+        )
+        if result.passed:
+            return True
+        self.log(
+            "WARN",
+            "medical_readiness_blocked",
+            ticket_key=ticket_key,
+            err="; ".join(result.reasons),
+        )
+        reasons = "\n".join(f"- {reason}" for reason in result.reasons)
+        command = " ".join(result.negative_leak_command) or "(not run)"
+        self.add_jira_comment(
+            ticket_key,
+            (
+                "[medical-readiness-blocked]\n\n"
+                "Medical ticket closure refused before Published transition.\n\n"
+                f"Reasons:\n{reasons}\n\n"
+                f"Negative-leak command: `{command}`"
+            ),
+        )
+        return False
 
     def _lock_for(self, ticket_key: str) -> Lock:
         with self._locks_guard:

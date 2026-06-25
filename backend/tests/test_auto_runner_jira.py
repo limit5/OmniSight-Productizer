@@ -245,6 +245,11 @@ def test_finalize_successful_push_does_not_run_revert_cleanup(
         lambda *args, **kwargs: calls["finalize"].append((args, kwargs)),
     )
     monkeypatch.setattr(
+        mod,
+        "_medical_readiness_ok_for_closure",
+        lambda *args, **kwargs: True,
+    )
+    monkeypatch.setattr(
         mod.jira_dispatch,
         "release_ticket_claim",
         lambda *args, **kwargs: calls["release"].append((args, kwargs)),
@@ -281,6 +286,98 @@ def test_finalize_successful_push_does_not_run_revert_cleanup(
 
     assert len(calls["finalize"]) == 1
     assert len(calls["release"]) == 1
+
+
+def test_finalize_successful_push_blocks_medical_ticket_without_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"comments": [], "finalize": [], "release": []}
+
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "_request",
+        lambda c, method, path: {
+            "fields": {
+                "summary": "[Medical] close regulated ticket",
+                "labels": ("regulated-lane",),
+            }
+        },
+    )
+    monkeypatch.setattr(
+        mod.medical_readiness_check,
+        "check_medical_readiness",
+        lambda **kwargs: mod.medical_readiness_check.MedicalReadinessResult(
+            passed=False,
+            required=True,
+            reasons=("missing required JIRA label 'regulated:medical'",),
+            negative_leak_command=("pytest", "negative-leak"),
+        ),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_comment",
+        lambda c, k, text, idem_key=None: calls["comments"].append((k, text)),
+    )
+    monkeypatch.setattr(
+        mod,
+        "_finalize_under_review",
+        lambda *args, **kwargs: calls["finalize"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "release_ticket_claim",
+        lambda *args, **kwargs: calls["release"].append((args, kwargs)),
+    )
+
+    claim = SimpleNamespace(
+        ok=True,
+        claim_token="default:tok",
+        coordination_lease_id=None,
+        coordination_fencing_token=None,
+    )
+    push_result = SimpleNamespace(
+        change_url="https://gerrit.example/+/2414",
+        change_number=2414,
+        post_push_warning=None,
+    )
+
+    mod._finalize_successful_push(_StubClient(), "OP-2414", push_result, claim)
+
+    assert calls["finalize"] == []
+    assert len(calls["release"]) == 1
+    assert calls["comments"][0][0] == "OP-2414"
+    assert "[medical-readiness-blocked]" in calls["comments"][0][1]
+    assert "regulated:medical" in calls["comments"][0][1]
+
+
+def test_ops_only_forward_blocks_medical_ticket_without_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mod = _load_jira_runner()
+    calls: dict[str, list] = {"forward": [], "comments": []}
+
+    monkeypatch.setattr(
+        mod,
+        "_medical_readiness_ok_for_closure",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "forward_transition_ops_only",
+        lambda *args, **kwargs: calls["forward"].append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        mod.jira_dispatch,
+        "add_comment",
+        lambda c, k, text, idem_key=None: calls["comments"].append((k, text)),
+    )
+
+    rc = mod._handle_ops_only_forward_transition(_StubClient(), "OP-2414")
+
+    assert rc == 1
+    assert calls["forward"] == []
+    assert calls["comments"] == []
 
 
 def test_is_camviewpro_contribution_requires_exact_target_label() -> None:

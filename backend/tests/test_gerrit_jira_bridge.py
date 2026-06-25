@@ -59,6 +59,8 @@ class FakeBridge(bridge.GerritJiraBridge):
     def __init__(self) -> None:
         self.requests: list[tuple[str, str, dict[str, Any] | None]] = []
         self.statuses: dict[str, str] = {}
+        self.labels: dict[str, tuple[str, ...]] = {}
+        self.summaries: dict[str, str] = {}
         self.comments: dict[str, list[dict[str, Any]]] = {}
         self.approved: list[dict[str, Any]] = []
         self.gerrit: dict[str, bridge.GerritChange | None] = {}
@@ -79,6 +81,14 @@ class FakeBridge(bridge.GerritJiraBridge):
 
     def jira_request(self, method: str, path: str, body: dict[str, Any] | None = None, *, max_attempts: int = 3) -> dict[str, Any]:
         self.requests.append((method, path, body))
+        if method == "GET" and path.startswith("/issue/") and "fields=summary,labels" in path:
+            ticket_key = path.split("/", 2)[2].split("?", 1)[0]
+            return {
+                "fields": {
+                    "summary": self.summaries.get(ticket_key, ""),
+                    "labels": list(self.labels.get(ticket_key, ())),
+                }
+            }
         if method == "PUT" or path.endswith("/transitions") or path.endswith("/comment"):
             return {}
         raise AssertionError(f"unexpected request: {method} {path}")
@@ -391,6 +401,42 @@ def test_approved_ticket_transitions_with_id_7_and_comment() -> None:
     assert ("POST", "/issue/OP-19/transitions", {"transition": {"id": "7"}}) in b.requests
     assert any(req[1] == "/issue/OP-19/comment" for req in b.requests)
     assert b.counters.transitions_made == 1
+
+
+def test_medical_ticket_without_readiness_does_not_publish() -> None:
+    b = FakeBridge()
+    b.statuses["OP-2414"] = "Approved"
+    b.labels["OP-2414"] = ("regulated-lane",)
+    b.summaries["OP-2414"] = "[Medical] regulated closure"
+
+    assert not b.process_ticket_for_change("OP-2414", "Iabc12345")
+
+    transition_requests = [req for req in b.requests if req[1].endswith("/transitions")]
+    assert transition_requests == []
+    comment_requests = [req for req in b.requests if req[1].endswith("/comment")]
+    assert len(comment_requests) == 1
+    assert "[medical-readiness-blocked]" in comment_requests[0][2]["body"]["content"][0]["content"][0]["text"]
+    assert any(event == "medical_readiness_blocked" for _level, event, _extra in b.logs)
+
+
+def test_medical_ticket_with_readiness_can_publish(monkeypatch: pytest.MonkeyPatch) -> None:
+    b = FakeBridge()
+    b.statuses["OP-2414"] = "Approved"
+    b.labels["OP-2414"] = ("regulated:medical", "regulatory-cleared")
+
+    monkeypatch.setattr(
+        bridge.medical_readiness_check,
+        "check_medical_readiness",
+        lambda **kwargs: bridge.medical_readiness_check.MedicalReadinessResult(
+            passed=True,
+            required=True,
+            negative_leak_command=("pytest", "negative-leak"),
+        ),
+    )
+
+    assert b.process_ticket_for_change("OP-2414", "Iabc12345")
+
+    assert ("POST", "/issue/OP-2414/transitions", {"transition": {"id": "7"}}) in b.requests
 
 
 def test_published_migration_removes_in_flight_label() -> None:

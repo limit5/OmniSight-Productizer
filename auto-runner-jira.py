@@ -92,6 +92,7 @@ from backend.agents.loop_detector import (
     extract_acceptance_criteria_section,
 )
 from backend.agents.contribution_runner import contribute_to_product
+from scripts import medical_readiness_check
 
 AGENT_CLASS = os.environ.get("OMNISIGHT_RUNNER_CLASS", "subscription-codex")
 INSTANCE_ID = os.environ.get("OMNISIGHT_RUNNER_INSTANCE_ID", "").strip() or "default"
@@ -1902,6 +1903,9 @@ def _finalize_successful_push(
     push_result: "jira_dispatch.GerritPushResult",
     claim: "jira_dispatch.ClaimResult | None" = None,
 ) -> None:
+    if not _medical_readiness_ok_for_closure(client, key):
+        _release_ticket_claim_if_acquired(client, key, claim)
+        return
     _finalize_under_review(
         client,
         key,
@@ -1916,6 +1920,58 @@ def _finalize_successful_push(
             "[runner-pre-review-self-fix-warning] "
             f"{push_result.post_push_warning}",
         )
+
+
+def _medical_readiness_labels_and_summary(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+) -> tuple[tuple[str, ...], str]:
+    issue = jira_dispatch._request(
+        client,
+        "GET",
+        f"/issue/{key}?fields=summary,labels",
+    )
+    fields = issue.get("fields") or {}
+    return tuple(fields.get("labels") or ()), str(fields.get("summary") or "")
+
+
+def _comment_medical_readiness_block(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+    result: "medical_readiness_check.MedicalReadinessResult",
+) -> None:
+    reasons = "\n".join(f"- {reason}" for reason in result.reasons)
+    command = " ".join(result.negative_leak_command) or "(not run)"
+    jira_dispatch.add_comment(
+        client,
+        key,
+        (
+            "[medical-readiness-blocked]\n\n"
+            "Medical ticket closure refused before workflow advancement.\n\n"
+            f"Reasons:\n{reasons}\n\n"
+            f"Negative-leak command: `{command}`"
+        ),
+    )
+
+
+def _medical_readiness_ok_for_closure(
+    client: "jira_dispatch.DispatchClient",
+    key: str,
+) -> bool:
+    labels, summary = _medical_readiness_labels_and_summary(client, key)
+    result = medical_readiness_check.check_medical_readiness(
+        labels=labels,
+        summary=summary,
+    )
+    if result.passed:
+        return True
+    print(
+        f"[runner] {key} medical readiness gate failed: "
+        f"{'; '.join(result.reasons)}",
+        file=sys.stderr,
+    )
+    _comment_medical_readiness_block(client, key, result)
+    return False
 
 
 def _is_camviewpro_contribution(labels) -> bool:
@@ -2283,6 +2339,8 @@ def _handle_ops_only_forward_transition(
                 f"operator: confirm the label still applies)."
             ),
         )
+    if not _medical_readiness_ok_for_closure(client, key):
+        return 1
     try:
         jira_dispatch.forward_transition_ops_only(client, key)
     except jira_dispatch.WorkflowTransitionPermissionRefused as e:
