@@ -1,0 +1,43 @@
+# OP-2428 - Case-9 marine helm dashboard packaging DAG.
+#
+# This is a packaging profile only. The all-in-one image already carries the
+# Helm tile; these tasks make the pack discoverable and express the selected
+# app/layout/capability contract for product planning.
+
+tasks:
+  - id: marine-dashboard-pack-discovery
+    name: "Register marine dashboard skill pack"
+    description: >
+      Load configs/skills/marine-dashboard/skill.yaml through the standard
+      skill-pack registry and expose the pack as the Case-9 target for
+      yacht / marine helm dashboard intents.
+    depends_on: []
+    artifacts: [marine_dashboard_skill_pack]
+    estimated_hours: 1
+    framework_gate: core-skill-pack
+    status: active
+
+  - id: marine-dashboard-capability-contract
+    name: "Declare marine connectivity capability contract"
+    description: >
+      Record the helm dashboard's required connectivity feeds:
+      signalk-rest, nmea2000-can, and nmea0183-serial. The protocol
+      bridge implementations are intentionally out of scope for this
+      packaging pack.
+    depends_on: [marine-dashboard-pack-discovery]
+    artifacts: [marine_connectivity_contract]
+    estimated_hours: 1
+    framework_gate: product-planner
+    status: active
+
+  - id: marine-dashboard-consumer-profile
+    name: "Select MarineDashboard on yacht helm RK3588 profile"
+    description: >
+      Bind the yacht-helm-rk3588 consumer profile to MarineDashboard as
+      the primary/default day-bright helm app so consumer builds select the
+      marine dashboard surface.
+    depends_on: [marine-dashboard-capability-contract]
+    artifacts: [yacht_helm_consumer_profile]
+    estimated_hours: 1
+    framework_gate: fleet-device-manifest
+    status: active

@@ -1,0 +1,61 @@
+# OP-2428 - Case-9 marine helm dashboard pack.
+#
+# Packaging-only pack for the yacht / marine helm dashboard lane. The
+# dashboard backends (Signal K / NMEA bridges) shipped in W3a/W3b; this pack
+# declares the consumer-facing dashboard surface and the connectivity
+# capabilities it expects from the deployment environment.
+
+schema_version: 1
+name: marine-dashboard
+description: >
+  Case-9 marine helm dashboard pack - a day-bright yacht / marine helm
+  dashboard that consumes Signal K REST, NMEA 2000 over CAN, and NMEA 0183
+  serial feeds to render navigation, engine, tank, electrical, and alarm
+  status for a local helm display. Packaging-only: the protocol backends are
+  outside this pack and are satisfied by the target product image.
+version: "0.1.0"
+author: "OmniSight"
+license: "Apache-2.0"
+
+compatible_socs:
+  - rk3588
+
+depends_on_skills: []
+
+depends_on_core:
+  - CORE-05  # skill pack framework
+
+requires:
+  - signalk-rest
+  - nmea2000-can
+  - nmea0183-serial
+
+artifacts:
+  - kind: tasks
+    path: tasks.yaml
+  - kind: scaffolds
+    path: scaffolds
+  - kind: tests
+    path: tests
+  - kind: hil
+    path: hil
+  - kind: docs
+    path: docs
+
+hooks:
+  install: ""
+  validate: ""
+  enumerate: ""
+
+keywords:
+  - marine
+  - yacht
+  - helm
+  - dashboard
+  - signalk
+  - nmea2000
+  - nmea0183
+  - can
+  - serial
+  - rk3588
+  - case-9

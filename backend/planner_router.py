@@ -129,6 +129,16 @@ _PLANNER_REGISTRY: dict[str, PlannerConfig] = {
         ),
         skill_pack_hint="ios-map-ar",
     ),
+    "marine_dashboard": PlannerConfig(
+        planner_id="marine_dashboard",
+        prompt_supplement=(
+            "You are planning a yacht / marine helm dashboard. Generate a "
+            "DAG covering: Signal K REST ingestion, NMEA 2000 CAN and NMEA "
+            "0183 serial feed wiring, day-bright helm layout, alarm/status "
+            "surfaces, and consumer device manifest selection."
+        ),
+        skill_pack_hint="marine-dashboard",
+    ),
 }
 
 _DEFAULT_CONFIG = PlannerConfig(

@@ -62,6 +62,7 @@ ProjectClass = Literal[
     # mobile/desktop apps that the original 7-class taxonomy had no home
     # for — they route to the Case packs, NOT embedded_product.
     "mobile_rtsp_client", "desktop_uvc_host", "mobile_ar_app",
+    "marine_dashboard",
     "unknown",
 ]
 
@@ -280,6 +281,10 @@ _PROJECT_CLASS_PATTERNS: dict[str, re.Pattern[str]] = {
         f"{_NW}(?:arkit|mapkit|realitykit|(?:map|maps)[- ]?ar|ar[- ]?(?:map|maps|wayfinding)|ios(?:\\s+\\S+){{0,4}}\\s+ar){_Nw}",
         re.IGNORECASE,
     ),
+    "marine_dashboard": re.compile(
+        f"{_NW}(?:(?:yacht|marine|boat|vessel)(?:\\s+\\S+){{0,5}}\\s+(?:helm|dashboard|mfd|navigation)|(?:helm|dashboard)(?:\\s+\\S+){{0,5}}\\s+(?:yacht|marine|boat|vessel)|signal\\s*k|signalk|nmea\\s*2000|nmea\\s*0183){_Nw}",
+        re.IGNORECASE,
+    ),
     "embedded_product": re.compile(
         f"{_NW}(?:firmware|driver|bsp|uvc|ipcam|camera|dashcam|doorbell|router|gateway|earbuds|display|kiosk|scanner|printer|barcode|drone|watch|glasses|payment.?terminal|pos){_Nw}",
         re.IGNORECASE,
@@ -375,7 +380,7 @@ markdown, no prose) matching this schema exactly:
 
 {
   "project_type":   { "value": "embedded_firmware|web_app|data_pipeline|research|cli_tool|unknown", "confidence": 0.0..1.0 },
-  "project_class":  { "value": "embedded_product|algo_sim|optical_sim|iso_standard|test_tool|factory_tool|enterprise_web|mobile_rtsp_client|desktop_uvc_host|mobile_ar_app|unknown", "confidence": 0.0..1.0 },
+  "project_class":  { "value": "embedded_product|algo_sim|optical_sim|iso_standard|test_tool|factory_tool|enterprise_web|mobile_rtsp_client|desktop_uvc_host|mobile_ar_app|marine_dashboard|unknown", "confidence": 0.0..1.0 },
   "runtime_model":  { "value": "ssg|ssr|isr|spa|cli|batch|unknown", "confidence": 0.0..1.0 },
   "target_arch":    { "value": "x86_64|arm64|arm32|riscv64|unknown", "confidence": 0.0..1.0 },
   "target_os":      { "value": "linux|darwin|windows|rtos|unknown", "confidence": 0.0..1.0 },
@@ -401,6 +406,8 @@ project_class meanings:
   from a UVC camera (the host side, NOT camera firmware)
 - mobile_ar_app: iOS/mobile app combining ARKit + MapKit (AR \
   wayfinding / points-of-interest anchored to a map)
+- marine_dashboard: yacht / marine / boat helm dashboard or MFD that \
+  consumes Signal K or NMEA feeds
 
 Rules:
 - Use "unknown" with confidence 0.0 for any field the user didn't \

@@ -1,0 +1,54 @@
+# OP-2428 - yacht-helm-rk3588 fleet device fixture.
+#
+# Static Case-9 consumer profile for the marine dashboard lane. The
+# all-in-one image already carries the Helm tile; this fixture selects
+# MarineDashboard as the primary/default day-bright helm app.
+
+id: yacht-helm-rk3588
+name: Yacht Helm (RK3588)
+model: rk3588
+renderer: qt
+last_seen: "2026-06-25T14:13:13Z"
+manifest_ref: consumers/yacht-helm-rk3588/apps.manifest.yaml
+manifest:
+  schema_version: 1
+  device:
+    id: yacht-helm-rk3588
+    display: local
+    default_renderer: qt
+    locales: [en, zh-Hant]
+  theme:
+    accent: "#facc15"
+    density: comfortable
+    mode: day-bright
+    layout: helm
+  apps:
+    - id: marine-dashboard
+      title: { en: MarineDashboard, zh-Hant: 航海儀表板 }
+      icon: compass
+      category: core
+      order: 10
+      entry:
+        qml: "qrc:/apps/MarineDashboard.qml"
+        web: /helm
+      caps_required: [display, signalk-rest, nmea2000-can, nmea0183-serial]
+      roles: [operator]
+    - id: alarms
+      title: { en: Alarms, zh-Hant: 警報 }
+      icon: bell
+      category: diagnostics
+      order: 20
+      entry:
+        qml: "qrc:/apps/MarineAlarms.qml"
+        web: /helm/alarms
+      caps_required: [display]
+      roles: [operator]
+    - id: settings
+      title: { en: Settings, zh-Hant: 設定 }
+      icon: settings
+      category: settings
+      order: 90
+      entry:
+        qml: "qrc:/apps/SettingsView.qml"
+        web: /settings
+      roles: [admin]
