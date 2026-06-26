@@ -1446,6 +1446,8 @@ _include_versioned_router(system.router)
 _include_versioned_router(_host_router.router)
 from backend.routers import fleet_devices as _fleet_devices_router  # OP-2306 U4.4
 _include_versioned_router(_fleet_devices_router.router)
+from backend.routers import conf_signaling as _conf_signaling_router  # OP-2469 case5 EPIC-B B2
+_include_versioned_router(_conf_signaling_router.router)
 from backend.routers import tenant_egress as _tenant_egress_router  # M6
 _include_versioned_router(_tenant_egress_router.router)
 from backend.routers import decisions as _decisions_router  # Phase 47A
