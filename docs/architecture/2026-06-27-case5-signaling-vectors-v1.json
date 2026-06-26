@@ -1,0 +1,51 @@
+{
+  "_doc": "Golden vectors for Case5 signaling protocol v1 (B-MI0). B1 + B2 tests consume THIS file. Each sequence is an ordered list of {dir, frame}; dir = c2s (client->server) or s2c (server->client as the server should emit / the client should receive). Peer ids chosen so 'boardA' < 'peerB' lexicographically => boardA is the offerer (impolite), peerB is the answerer (polite).",
+  "version": 1,
+  "sequences": {
+    "happy_two_peer": [
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"boardA","payload":{"peers":[]}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"peerB","to":null,"payload":{}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"peerB","payload":{"peers":["boardA"]}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"boardA","payload":{"peers":["peerB"]}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"offer","room":"r1","from":"boardA","to":"peerB","payload":{"sdp":"v=0\r\n...offerA..."}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"offer","room":"r1","from":"boardA","to":"peerB","payload":{"sdp":"v=0\r\n...offerA..."}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"answer","room":"r1","from":"peerB","to":"boardA","payload":{"sdp":"v=0\r\n...answerB..."}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"answer","room":"r1","from":"peerB","to":"boardA","payload":{"sdp":"v=0\r\n...answerB..."}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"ice","room":"r1","from":"boardA","to":"peerB","payload":{"candidate":"candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host","sdpMid":"0","sdpMLineIndex":0}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"ice","room":"r1","from":"boardA","to":"peerB","payload":{"candidate":"candidate:1 1 udp 2122260223 192.0.2.1 50000 typ host","sdpMid":"0","sdpMLineIndex":0}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"ice","room":"r1","from":"boardA","to":"peerB","payload":{"candidate":"","sdpMid":"0","sdpMLineIndex":0}}}
+    ],
+    "end_of_candidates": [
+      {"dir": "c2s", "frame": {"v":1,"type":"ice","room":"r1","from":"boardA","to":"peerB","payload":{"candidate":"","sdpMid":"0","sdpMLineIndex":0}}}
+    ],
+    "glare_both_offer": [
+      {"dir": "c2s", "frame": {"v":1,"type":"offer","room":"r1","from":"boardA","to":"peerB","payload":{"sdp":"...A..."}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"offer","room":"r1","from":"peerB","to":"boardA","payload":{"sdp":"...B..."}}},
+      {"_note": "Resolution: boardA < peerB so boardA is impolite (keeps its offer); peerB is polite (rolls back its own offer, accepts boardA's). Test asserts the polite peer ends in have-remote-offer with A's sdp."}
+    ],
+    "duplicate_peer": [
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"error","room":"r1","from":"server","to":"boardA","payload":{"code":"duplicate_peer","msg":"peer boardA already in room r1"}}}
+    ],
+    "unknown_relay_target": [
+      {"dir": "c2s", "frame": {"v":1,"type":"offer","room":"r1","from":"boardA","to":"ghost","payload":{"sdp":"...A..."}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"error","room":"r1","from":"server","to":"boardA","payload":{"code":"unknown_peer","msg":"no peer ghost in room r1"}}}
+    ],
+    "peer_disconnect": [
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"peerB","to":null,"payload":{}}},
+      {"_note": "peerB's WS closes here (no frame)"},
+      {"dir": "s2c", "frame": {"v":1,"type":"leave","room":"r1","from":"peerB","to":"boardA","payload":{}}}
+    ],
+    "version_mismatch": [
+      {"dir": "c2s", "frame": {"v":2,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"error","room":"r1","from":"server","to":"boardA","payload":{"code":"version_mismatch","msg":"server speaks v1"}}}
+    ],
+    "bad_envelope": [
+      {"dir": "c2s", "raw": "{not json"},
+      {"dir": "s2c", "frame": {"v":1,"type":"error","room":"","from":"server","to":null,"payload":{"code":"bad_envelope","msg":"malformed JSON"}}}
+    ]
+  }
+}
