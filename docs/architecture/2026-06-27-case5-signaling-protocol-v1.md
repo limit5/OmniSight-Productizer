@@ -1,7 +1,9 @@
 # Case 5 two-way call — signaling protocol v1 (B-MI0)
 
-**Date:** 2026-06-27. The contract `conf-webrtc-app` (B1) and the self-built
-signaling server (B2) BOTH implement. Frozen here; golden vectors in
+**Date:** 2026-06-27 (**amended 2026-06-28**: appliance-always-offers role — see
+"Offerer role" — after on-HW validation showed the appliance cannot be the SDP
+answerer). The contract `conf-webrtc-app` (B1) and the self-built signaling
+server (B2) BOTH implement. Frozen here; golden vectors in
 `2026-06-27-case5-signaling-vectors-v1.json` (same dir) — tests consume the
 vectors from that file, not hand-copied.
 
@@ -31,12 +33,15 @@ Every frame is a JSON object:
 - `payload` = type-specific (below).
 
 ## Types
-- `join` (client→server, room-scoped): `payload:{}`. Client announces presence as
-  `from` in `room`. Server replies with `peers` to the joiner and broadcasts a
-  `peers` delta to the room.
-- `peers` (server→client): `payload:{ "peers": ["<peer_id>", ...] }` — current
-  room membership (excluding the recipient). The lexicographically-LOWER peer id
-  is the **polite/offerer convention** (see glare).
+- `join` (client→server, room-scoped): `payload:{ "role": "appliance" | "client" }`
+  (default `"client"` when absent). Client announces presence as `from` in `room`
+  and declares its ROLE. Server replies with `peers` to the joiner and broadcasts
+  a `peers` delta to the room. Exactly ONE `appliance`-role peer per room (the
+  device that ran `/v1/call/start`); every browser/remote peer is `client`.
+- `peers` (server→client): `payload:{ "peers": [ {"id":"<peer_id>","role":"appliance|client"}, ... ] }`
+  — current room membership (excluding the recipient), each tagged with its role.
+  The **appliance-role peer is the offerer** (see "Offerer role"); a client reads
+  this list to learn which peer is the appliance (whose offer it must await).
 - `offer` (client→server→client, directed): `payload:{ "sdp": "<sdp>" }`.
 - `answer` (directed): `payload:{ "sdp": "<sdp>" }`.
 - `ice` (directed): `payload:{ "candidate":"<cand>", "sdpMid":"<mid>",
@@ -46,13 +51,29 @@ Every frame is a JSON object:
   the server SYNTHESIZES a `leave` for that peer to the room.
 - `error` (server→client): `payload:{ "code":"<code>", "msg":"<text>" }`. Codes:
   `version_mismatch`, `bad_envelope`, `room_full`, `duplicate_peer`,
-  `unknown_peer` (relay target absent), `unauthorized`.
+  `unknown_peer` (relay target absent), `unauthorized`,
+  `unexpected_offer` (a client offered to the appliance — clients answer, never offer).
 
 ## Semantics / edge policy (the audit's required corners)
-- **Offer collision / glare**: deterministic by peer id — the peer with the
-  LEXICOGRAPHICALLY-LOWER `peer_id` is the **offerer** (impolite); the higher id
-  is the **answerer** (polite) and rolls back its own offer on collision
-  (perfect-negotiation pattern). No timestamps (clock-free → resumable).
+- **Offerer role (appliance always offers)**: the `appliance`-role peer is the
+  MANDATORY offerer — it creates an offer to every `client` peer that appears in
+  its `peers` set; clients ALWAYS answer and MUST NOT offer to the appliance. This
+  is a hard requirement, not a preference: the appliance's on-device WebRTC stack
+  (gstreamer `webrtcbin`) cannot act as the SDP *answerer* — validated on
+  ATK-DLRK3588 (2026-06-28), where as answerer `create-answer` yields `a=inactive`
+  because webrtcbin will not bind the appliance's mpph264enc baseline-H264 send
+  transceiver (`profile-level-id=42c028`, the level its 1080p encode needs) to a
+  browser's constrained-baseline (`42e01f`) offer. As OFFERER the appliance emits
+  42c028 and browsers leniently accept it (proven end-to-end, real Chrome). The
+  server MUST reject a client→appliance `offer` with `error{unexpected_offer}` and
+  NOT relay it. Glare therefore cannot arise in the appliance↔client topology
+  (only the appliance offers). For a hypothetical client↔client leg (future
+  multi-device / SFU), fall back to the perfect-negotiation tiebreaker: the
+  LEXICOGRAPHICALLY-LOWER `peer_id` is the impolite offerer, the higher rolls back
+  its own offer on collision. Clock-free (no timestamps → resumable).
+- B1 (`conf-webrtc-app`) on the appliance joins with `role: "appliance"`, offers
+  on each new `client` in its `peers` set, and never answers (the server guards
+  the inbound-offer path above; the worker's answer code stays only for tests).
 - **Duplicate peer**: a `join` with a `from` already present in the room →
   server replies `error{duplicate_peer}` and rejects the WS (does not evict the
   incumbent).

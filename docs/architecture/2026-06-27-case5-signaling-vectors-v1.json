@@ -1,13 +1,13 @@
 {
-  "_doc": "Golden vectors for Case5 signaling protocol v1 (B-MI0). B1 + B2 tests consume THIS file. Each sequence is an ordered list of {dir, frame}; dir = c2s (client->server) or s2c (server->client as the server should emit / the client should receive). Peer ids chosen so 'boardA' < 'peerB' lexicographically => boardA is the offerer (impolite), peerB is the answerer (polite).",
+  "_doc": "Golden vectors for Case5 signaling protocol v1 (B-MI0). B1 + B2 tests consume THIS file. Each sequence is an ordered list of {dir, frame}; dir = c2s (client->server) or s2c (server->client as the server should emit / the client should receive). boardA joins with role 'appliance' => boardA is the MANDATORY offerer (the appliance cannot act as the SDP answerer; validated on-HW 2026-06-28). peerB joins role 'client' => answerer; a client MUST NOT offer to the appliance. See protocol 'Offerer role'.",
   "version": 1,
   "sequences": {
     "happy_two_peer": [
-      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{"role":"appliance"}}},
       {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"boardA","payload":{"peers":[]}}},
-      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"peerB","to":null,"payload":{}}},
-      {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"peerB","payload":{"peers":["boardA"]}}},
-      {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"boardA","payload":{"peers":["peerB"]}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"peerB","to":null,"payload":{"role":"client"}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"peerB","payload":{"peers":[{"id":"boardA","role":"appliance"}]}}},
+      {"dir": "s2c", "frame": {"v":1,"type":"peers","room":"r1","from":"server","to":"boardA","payload":{"peers":[{"id":"peerB","role":"client"}]}}},
       {"dir": "c2s", "frame": {"v":1,"type":"offer","room":"r1","from":"boardA","to":"peerB","payload":{"sdp":"v=0\r\n...offerA..."}}},
       {"dir": "s2c", "frame": {"v":1,"type":"offer","room":"r1","from":"boardA","to":"peerB","payload":{"sdp":"v=0\r\n...offerA..."}}},
       {"dir": "c2s", "frame": {"v":1,"type":"answer","room":"r1","from":"peerB","to":"boardA","payload":{"sdp":"v=0\r\n...answerB..."}}},
@@ -19,14 +19,14 @@
     "end_of_candidates": [
       {"dir": "c2s", "frame": {"v":1,"type":"ice","room":"r1","from":"boardA","to":"peerB","payload":{"candidate":"","sdpMid":"0","sdpMLineIndex":0}}}
     ],
-    "glare_both_offer": [
-      {"dir": "c2s", "frame": {"v":1,"type":"offer","room":"r1","from":"boardA","to":"peerB","payload":{"sdp":"...A..."}}},
+    "client_offer_rejected": [
       {"dir": "c2s", "frame": {"v":1,"type":"offer","room":"r1","from":"peerB","to":"boardA","payload":{"sdp":"...B..."}}},
-      {"_note": "Resolution: boardA < peerB so boardA is impolite (keeps its offer); peerB is polite (rolls back its own offer, accepts boardA's). Test asserts the polite peer ends in have-remote-offer with A's sdp."}
+      {"dir": "s2c", "frame": {"v":1,"type":"error","room":"r1","from":"server","to":"peerB","payload":{"code":"unexpected_offer","msg":"peer peerB must answer; appliance boardA is the offerer"}}},
+      {"_note": "Appliance-always-offers: a client MUST NOT offer to the appliance (it cannot answer). Server rejects with unexpected_offer and does NOT relay; boardA keeps its offerer role. Glare cannot arise in the appliance<->client topology. (Client<->client fallback = lexicographically-lower peer_id offers, per protocol 'Offerer role'.)"}
     ],
     "duplicate_peer": [
-      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
-      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{"role":"appliance"}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{"role":"appliance"}}},
       {"dir": "s2c", "frame": {"v":1,"type":"error","room":"r1","from":"server","to":"boardA","payload":{"code":"duplicate_peer","msg":"peer boardA already in room r1"}}}
     ],
     "unknown_relay_target": [
@@ -34,13 +34,13 @@
       {"dir": "s2c", "frame": {"v":1,"type":"error","room":"r1","from":"server","to":"boardA","payload":{"code":"unknown_peer","msg":"no peer ghost in room r1"}}}
     ],
     "peer_disconnect": [
-      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
-      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"peerB","to":null,"payload":{}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"boardA","to":null,"payload":{"role":"appliance"}}},
+      {"dir": "c2s", "frame": {"v":1,"type":"join","room":"r1","from":"peerB","to":null,"payload":{"role":"client"}}},
       {"_note": "peerB's WS closes here (no frame)"},
       {"dir": "s2c", "frame": {"v":1,"type":"leave","room":"r1","from":"peerB","to":"boardA","payload":{}}}
     ],
     "version_mismatch": [
-      {"dir": "c2s", "frame": {"v":2,"type":"join","room":"r1","from":"boardA","to":null,"payload":{}}},
+      {"dir": "c2s", "frame": {"v":2,"type":"join","room":"r1","from":"boardA","to":null,"payload":{"role":"appliance"}}},
       {"dir": "s2c", "frame": {"v":1,"type":"error","room":"r1","from":"server","to":"boardA","payload":{"code":"version_mismatch","msg":"server speaks v1"}}}
     ],
     "bad_envelope": [
