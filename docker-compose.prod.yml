@@ -177,6 +177,9 @@ services:
       - omnisight-data:/app/data
       - omnisight-artifacts:/app/.artifacts
       - omnisight-sdks:/app/.sdks
+      # OP-1646/RT-08: deploy-prod.sh writes the deploy-overlay lock before
+      # bring-up so /api/version reports the pinned backend/frontend digests.
+      - ${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/prod/overlay}:/etc/omnisight:ro
       # Audit C1 (2026-04-19): host socket mount REMOVED — was a Tier-0
       # container-escape primitive (any Python RCE in backend could open
       # /var/run/docker.sock and `docker run --privileged -v /:/host`).
@@ -202,6 +205,9 @@ services:
       # only prod requires the URL.
       - OMNISIGHT_DATABASE_URL=${OMNISIGHT_DATABASE_URL:?OMNISIGHT_DATABASE_URL (prod PostgreSQL DSN) is required in .env — refusing to start to avoid silent SQLite fallback (OP-1699)}
       - OMNISIGHT_INSTANCE_ID=backend-a
+      # OP-1646/B1b: actual backend digest exported by deploy-prod.sh during
+      # digest deploys; empty keeps the overlay digest compare observational.
+      - OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND=${OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND:-}
       - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
       - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
       - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}
@@ -320,6 +326,8 @@ services:
       - omnisight-data:/app/data
       - omnisight-artifacts:/app/.artifacts
       - omnisight-sdks:/app/.sdks
+      # OP-1646/RT-08: see backend-a.
+      - ${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/prod/overlay}:/etc/omnisight:ro
       # Audit C1 (2026-04-19): host socket mount REMOVED — was a Tier-0
       # container-escape primitive (any Python RCE in backend could open
       # /var/run/docker.sock and `docker run --privileged -v /:/host`).
@@ -336,6 +344,8 @@ services:
       # (deploy-audit #18 silent-SQLite-fallback footgun).
       - OMNISIGHT_DATABASE_URL=${OMNISIGHT_DATABASE_URL:?OMNISIGHT_DATABASE_URL (prod PostgreSQL DSN) is required in .env — refusing to start to avoid silent SQLite fallback (OP-1699)}
       - OMNISIGHT_INSTANCE_ID=backend-b
+      # OP-1646/B1b: see backend-a.
+      - OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND=${OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND:-}
       - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
       - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
       - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}

@@ -62,6 +62,11 @@ BACKUP_DR_ENV="${OMNISIGHT_BACKUP_DR_ENV:-/etc/omnisight/backup-dr.env}"
 # from (override OMNISIGHT_PROD_CHECKOUT for tests / non-standard hosts).
 RELEASE_SHA=""
 PROD_CHECKOUT="${OMNISIGHT_PROD_CHECKOUT:-/home/user/omnisight-prod}"
+# OP-1646/RT-08: optional candidate bundle used to verify tag-vs-digest
+# equality and write the deploy-overlay lock consumed by /api/version.
+CANDIDATE_BUNDLE="${OMNISIGHT_CANDIDATE_BUNDLE:-}"
+OVERLAY_LOCK_WRITER="${OMNISIGHT_OVERLAY_LOCK_WRITER:-scripts/write_deploy_overlay_lock.py}"
+OVERLAY_STATE_DIR="${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/prod/overlay}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
@@ -107,13 +112,14 @@ for arg in "$@"; do
         --backend-digest=*) BACKEND_DIGEST="${arg#*=}" ;;
         --frontend-digest=*) FRONTEND_DIGEST="${arg#*=}" ;;
         --release-sha=*) RELEASE_SHA="${arg#*=}" ;;        # OP-1741: advance the release-SHA-pinned prod checkout (compose context only; NOT the deploy identity)
+        --bundle=*) CANDIDATE_BUNDLE="${arg#*=}" ;;       # OP-1646: candidate bundle for digest equality + /api/version overlay
         --skip-build) SKIP_BUILD=true ;;
         --skip-backup) SKIP_BACKUP=true ;;
         --dry-run) DRY_RUN=true ;;
         --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
         --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
         --help|-h)
-            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--release-sha=<git-sha>] [--skip-build] [--skip-backup] [--dry-run] [--alembic-mode=apply|pg-clone]"
+            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--bundle=<bundle.json>] [--release-sha=<git-sha>] [--skip-build] [--skip-backup] [--dry-run] [--alembic-mode=apply|pg-clone]"
             echo "       (--release-sha advances the release-SHA-pinned prod compose checkout ($PROD_CHECKOUT) BEFORE the deploy by delegating to scripts/advance_prod_checkout.sh — fail-closed on a dirty tree. It only moves the compose-file pin; the deploy identity is still the image digest. See docs/sop/deploy-prod-runbook.md.)"
             echo "       (--skip-backup deploys WITHOUT a pre-deploy backup — NOT recommended; the backup is otherwise fail-closed.)"
             echo "       (--digest=sha256:<64hex> is a back-compat alias for --backend-digest; pass both --backend-digest and --frontend-digest to pin both images by digest)"
@@ -255,6 +261,64 @@ _clone_url_for_db() {
         query="?${url#*\?}"
     fi
     printf '%s/%s%s\n' "${base%/*}" "$clone_db" "$query"
+}
+
+_bundle_image_digest() {
+    local bundle="$1"
+    local image="$2"
+    python3 - "$bundle" "$image" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+bundle = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+entry = bundle.get("images", {}).get(sys.argv[2], {})
+print((entry.get("digest") or "").strip())
+PY
+}
+
+_write_prod_overlay_lock() {
+    if [ -z "$CANDIDATE_BUNDLE" ]; then
+        warn "deploy-overlay: no --bundle / OMNISIGHT_CANDIDATE_BUNDLE; /api/version overlay remains whatever the current host lock contains"
+        export OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND="${BACKEND_DIGEST:-}"
+        return 0
+    fi
+    if [ ! -f "$CANDIDATE_BUNDLE" ]; then
+        err "candidate bundle not found: $CANDIDATE_BUNDLE"
+    fi
+
+    local bundle_backend bundle_frontend overlay_tag
+    bundle_backend="$(_bundle_image_digest "$CANDIDATE_BUNDLE" backend)" || \
+        err "could not read backend digest from candidate bundle $CANDIDATE_BUNDLE"
+    bundle_frontend="$(_bundle_image_digest "$CANDIDATE_BUNDLE" frontend)" || \
+        err "could not read frontend digest from candidate bundle $CANDIDATE_BUNDLE"
+    [ -n "$bundle_backend" ] || err "candidate bundle $CANDIDATE_BUNDLE missing backend digest"
+    [ -n "$bundle_frontend" ] || err "candidate bundle $CANDIDATE_BUNDLE missing frontend digest"
+    [ "$bundle_backend" = "$BACKEND_DIGEST" ] || \
+        err "tag-vs-digest equality failed: bundle backend digest $bundle_backend != requested $BACKEND_DIGEST"
+    [ "$bundle_frontend" = "$FRONTEND_DIGEST" ] || \
+        err "tag-vs-digest equality failed: bundle frontend digest $bundle_frontend != requested $FRONTEND_DIGEST"
+
+    export OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND="$bundle_backend"
+    export OMNISIGHT_DEPLOY_OVERLAY_DIR="$OVERLAY_STATE_DIR"
+    overlay_tag="${CURRENT_IMAGE_TAG:-${OMNISIGHT_IMAGE_TAG:-digest-deploy}}"
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "  [dry-run] tag-vs-digest equality verified from $CANDIDATE_BUNDLE"
+        echo "  [dry-run] set OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND=$OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND"
+        echo "  [dry-run] write deploy-overlay lock $OVERLAY_STATE_DIR/deploy-overlay.lock"
+        return 0
+    fi
+
+    mkdir -p "$OVERLAY_STATE_DIR"
+    python3 "$OVERLAY_LOCK_WRITER" \
+        --bundle "$CANDIDATE_BUNDLE" \
+        --tag "$overlay_tag" \
+        --digest-backend "$BACKEND_DIGEST" \
+        --digest-frontend "$FRONTEND_DIGEST" \
+        --out "$OVERLAY_STATE_DIR/deploy-overlay.lock" || \
+        err "could not write deploy-overlay lock from $CANDIDATE_BUNDLE"
+    log "deploy-overlay: wrote $OVERLAY_STATE_DIR/deploy-overlay.lock; running backend digest=$OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND"
 }
 
 _run_alembic_apply() {
@@ -475,6 +539,13 @@ if [ -n "$CURRENT_IMAGE_TAG" ]; then
     _upsert_env "OMNISIGHT_IMAGE_TAG" "$CURRENT_IMAGE_TAG"
 fi
 log "SLO monitor image tags: current=${CURRENT_IMAGE_TAG:-unset} previous=${PREVIOUS_IMAGE_TAG:-unknown}"
+
+# OP-1646: when the promote/cut pipeline supplies the candidate bundle, prove
+# the requested backend/frontend digests equal that bundle before any replica is
+# touched, then write the RT-08 overlay lock consumed by /api/version.
+if [ "$DIGEST_DEPLOY" = true ]; then
+    _write_prod_overlay_lock
+fi
 
 if [ "$DRY_RUN" = false ]; then
     if systemctl --user list-unit-files omnisight-slo-monitor.service >/dev/null 2>&1; then
