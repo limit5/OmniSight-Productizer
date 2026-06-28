@@ -59,3 +59,24 @@ entries:
     metadata:
       install_via: tarball
       hooks: [pre-push, post-checkout, post-commit, post-merge]
+
+  # R5.3 follow-up (OP-2166) — prebuilt RTSP/ONVIF server release that the
+  # ipcam skill pack's prebuilt_server_integration task pins via release
+  # tag (Yocto SRCREV / Buildroot package version). install_method is noop
+  # with manual_step: true mirroring the beaglebone-debian-image precedent
+  # in embedded.yaml — the server isn't installed onto the registry host;
+  # the on-device image bakes it in via the meta-layer or external tree.
+  # The yaml mirror is paired with alembic 0251 (not 0052 which is frozen).
+  - id: rtsp-onvif-server
+    vendor: omnisight
+    display_name: OmniSight RTSP/ONVIF Server (prebuilt release)
+    version: "0.1.0"
+    install_method: noop
+    install_url: https://gitlab.com/omnisight/rtsp-onvif-server
+    metadata:
+      repo: omnisight/rtsp-onvif-server
+      gitlab_project_id: 45
+      first_release_tag: v0.1.0
+      release_pinning: yocto_srcrev_or_buildroot_version
+      integrates_via: ipcam_prebuilt_server_integration
+      manual_step: true
