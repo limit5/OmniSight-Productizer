@@ -3835,40 +3835,64 @@ def _main_impl() -> int:
             _clear_assignee_after_revert(client, snapshot.key)
             return 1
         except Exception as e:
-            # Empty-tree / rebase --keep-empty failure path: the most common
-            # trigger is the CLI abstaining ("implementation already exists,
-            # nothing to push"), which leaves zero diff; ensure_change_ids
-            # then trips `git rebase --keep-empty --exec` with a non-zero
-            # exit status (not NoCommitsOnBranchError because the branch
-            # itself has commits — just no NEW commits vs base).
+            # OP-2484: push-setup failure (rebase / Change-Id stamp) — the
+            # OP-1647 regression was that ``ensure_change_ids`` tripped on
+            # ``git rebase --keep-empty --exec amend`` when the amend would
+            # produce an empty commit (commit's net diff already on develop
+            # tip). The rebase-command fix (jira_dispatch.ensure_change_ids,
+            # 2026-06-28) handles that specific shape; this handler is the
+            # backstop for any OTHER push-setup failure (real conflict,
+            # commit-msg hook crash, ssh transport blip, ...).
             #
-            # The pre-ephemeral version of this comment told operators to
-            # "review changes in `{worktree_path}`, push manually" — that
-            # advice is dead under OP-1136/OP-1137 ephemeral workspaces
-            # (the worktree is reaped at next cycle), so without a revert
-            # the ticket is silently stuck In Progress with no claim label
-            # and no Gerrit Change (the zombie pattern documented in the
-            # 2026-05-17 health audit). Mirror the OP-827
-            # NoCommitsOnBranchError / WorktreeDirtyError recovery: comment
-            # + revert + release claim.
+            # Per the OP-2484 ticket: DO NOT silently revert to a
+            # re-pickable state. The pre-OP-2484 behaviour reverted to To Do
+            # + cleared assignee, which lost the worktree commit (ephemeral
+            # under OP-1136/OP-1137) AND fed the OP-1400 silent re-pickup
+            # loop — same ticket, same failure, every tick, all the way to
+            # stoploss. The CLI has already posted its AC-verification
+            # comment (rc=0 path); surface a runner-blocked marker on top
+            # so the operator can see why the runner gave up and
+            # investigate before the ticket is re-queued.
+            #
+            # Recovery flow for the operator:
+            # 1. Read `[runner-gerrit-setup-fail]` comment for the
+            #    underlying cause.
+            # 2. Salvage the work if needed (commit was made in the
+            #    ephemeral worktree; if it had a Change-Id, an operator
+            #    can replay it locally and push to refs/for/develop —
+            #    see OP-1647 salvage steps for an example).
+            # 3. Fix the underlying issue, strip
+            #    `runner-blocked:gerrit-setup-fail`, transition the
+            #    ticket back to To Do for re-pickup.
             print(f"[runner] Gerrit push setup failed: {e}", file=sys.stderr)
-            # OP-1524: strip our own claim label BEFORE the revert
-            # comment so the next pickup is not blocked by a stale
-            # ``claim:{INSTANCE_ID}:*``.
-            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
+            try:
+                jira_dispatch.add_label(
+                    client, snapshot.key, "runner-blocked:gerrit-setup-fail",
+                )
+            except Exception as label_err:  # noqa: BLE001
+                print(
+                    f"[runner] add_label(runner-blocked:gerrit-setup-fail) "
+                    f"failed for {snapshot.key}: "
+                    f"{type(label_err).__name__}: {label_err}",
+                    file=sys.stderr,
+                )
             jira_dispatch.add_comment(
                 client, snapshot.key,
-                f"[runner-gerrit-setup-fail] Could not prepare Gerrit push:\n{type(e).__name__}: {e}\n\n"
-                f"Ephemeral worktree will be reaped at next cycle; reverting to To Do for re-pickup.",
+                f"[runner-gerrit-setup-fail] Could not prepare Gerrit push:\n"
+                f"{type(e).__name__}: {e}\n\n"
+                f"Ephemeral worktree will be reaped at next cycle so the local "
+                f"commit cannot be retried in-place. Ticket left In Progress "
+                f"with `runner-blocked:gerrit-setup-fail` label so the JQL "
+                f"pickup does not re-claim it (OP-1400 / OP-2484 silent-loop "
+                f"fix). Operator: investigate the underlying cause, strip "
+                f"the label, and transition back to To Do to re-queue.",
             )
-            try:
-                jira_dispatch.transition_back_to_todo(
-                    client, snapshot.key,
-                    f"[runner-gerrit-setup-fail] Push setup failure: {type(e).__name__}.",
-                )
-            except Exception as revert_err:
-                print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
-            _clear_assignee_after_revert(client, snapshot.key)
+            # OP-1524: release our claim label so the operator's recovery
+            # (label-strip + transition-to-TODO) is not blocked by a stale
+            # ``claim:{INSTANCE_ID}:*``. Status / assignee are intentionally
+            # left untouched — OP-2484: NO silent revert to a re-pickable
+            # state.
+            _release_ticket_claim_if_acquired(client, snapshot.key, claim)
             return 1
 
         if push_result.success:

@@ -177,8 +177,12 @@ def test_enumerated_exit_paths_release_after_claim() -> None:
         "_release_ticket_claim_if_acquired(client, key, claim)",
         "except jira_dispatch.NoCommitsOnBranchError as e:",
         "except jira_dispatch.WorktreeDirtyError as e:",
+        # OP-2484: the rebase / push-setup catch-all no longer reverts to
+        # To Do — the leading comment now names the silent-loop fix
+        # explicitly so a future refactor cannot accidentally restore the
+        # OP-1647 regression without tripping this audit.
         "except Exception as e:\n"
-        "            # Empty-tree / rebase --keep-empty failure path:",
+        "            # OP-2484: push-setup failure (rebase / Change-Id stamp)",
         "except outcomes_consumer.OutcomesGraderRefused:\n"
         "                _release_ticket_claim_if_acquired(client, snapshot.key, claim)",
         "if outcomes_status == \"fail\":",
@@ -197,11 +201,13 @@ def test_audited_revert_paths_clear_assignee_before_release() -> None:
     source = (REPO_ROOT / "auto-runner-jira.py").read_text().split(
         "# OP-836 post-CLI verify", 1
     )[1]
+    # OP-2484: the `[runner] Gerrit push setup failed:` marker is NO LONGER a
+    # revert path — surfacing-without-revert is the fix for the OP-1647 silent
+    # re-pickup loop. See ``test_gerrit_push_setup_fail_does_not_revert``.
     markers = [
         "[runner-workspace-tampered]",
         'print(f"[runner] CLI produced no commits:',
         'print(f"[runner] CLI left worktree dirty:',
-        'print(f"[runner] Gerrit push setup failed:',
     ]
     for marker in markers:
         block = source.split(marker, 1)[1].split("return 1", 1)[0]
@@ -210,6 +216,30 @@ def test_audited_revert_paths_clear_assignee_before_release() -> None:
         assert block.index("_clear_assignee_after_revert") < block.index(
             "_release_ticket_claim_if_acquired"
         )
+
+
+def test_gerrit_push_setup_fail_does_not_revert() -> None:
+    """OP-2484 / OP-1400: when ``ensure_change_ids`` / push-setup fails, the
+    runner MUST surface a ``runner-blocked:gerrit-setup-fail`` marker and
+    release the claim, but MUST NOT silently revert to To Do or clear the
+    assignee — those actions feed the OP-1647 silent re-pickup loop
+    (re-claim → same failure → re-claim, all the way to stoploss).
+    """
+    source = (REPO_ROOT / "auto-runner-jira.py").read_text().split(
+        "# OP-836 post-CLI verify", 1
+    )[1]
+    block = source.split(
+        'print(f"[runner] Gerrit push setup failed:', 1,
+    )[1].split("return 1", 1)[0]
+    # MUST release the claim so the operator's recovery (label-strip +
+    # transition-to-To-Do) is not blocked by a stale ``claim:*``.
+    assert "_release_ticket_claim_if_acquired(client, snapshot.key, claim)" in block
+    # MUST add the marker label so the operator can see why the runner
+    # gave up + so any future JQL-level pickup-exclusion has a hook.
+    assert '"runner-blocked:gerrit-setup-fail"' in block
+    # MUST NOT silently revert / clear assignee — that's the OP-1647 loop.
+    assert "transition_back_to_todo" not in block
+    assert "_clear_assignee_after_revert" not in block
 
 
 def test_area_label_rejection_remains_pre_claim_noop() -> None:

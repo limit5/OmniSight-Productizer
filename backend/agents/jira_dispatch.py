@@ -1711,12 +1711,25 @@ def ensure_change_ids(worktree_path: Path, base_ref: str) -> None:
     if dirty:
         raise WorktreeDirtyError(dirty_files=dirty)
 
+    # OP-2484: handle BOTH shapes of "empty commit" so the rebase + exec
+    # amend does not crash on the OP-1647 regression (commit's net diff is
+    # already on develop tip → ``git commit --amend --no-edit`` refuses with
+    # "doing so would make it empty"). ``--keep-empty`` covers commits that
+    # START empty; ``--empty=keep`` covers commits that BECOME empty after
+    # rebase; ``--allow-empty`` on the amend lets the no-op amend succeed so
+    # the commit-msg hook still fires and the Change-Id footer is stamped.
+    # The kept-but-empty commit still has a Change-Id and pushes cleanly to
+    # ``refs/for/develop``; Gerrit shows it as a zero-diff patchset, which
+    # the reviewer can resolve (abandon as already-shipped, or push a real
+    # follow-up). Either outcome is better than the silent re-pickup loop
+    # that wedged OP-1647 prior to this fix.
     try:
         subprocess.run(
             [
                 "git", "rebase", base_ref,
                 "--keep-empty",
-                "--exec", "git commit --amend --no-edit",
+                "--empty=keep",
+                "--exec", "git commit --amend --no-edit --allow-empty",
             ],
             cwd=worktree_path, check=True, capture_output=True, text=True,
         )

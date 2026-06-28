@@ -846,7 +846,10 @@ def _fake_passing_preconditions_run(cmd, **kwargs):
 
 
 def test_ensure_change_ids_rebase_command_shape(tmp_path, monkeypatch):
-    """ensure_change_ids invokes `git rebase <base_ref> --keep-empty --exec amend`."""
+    """ensure_change_ids invokes rebase with both --keep-empty AND --empty=keep
+    (OP-2484: handle commits that BECOME empty after rebase, not just commits
+    that start empty), and the --exec amend carries --allow-empty so the
+    commit-msg hook still fires when the rebased commit has zero net diff."""
     calls = []
 
     def fake_run(cmd, **kwargs):
@@ -861,10 +864,12 @@ def test_ensure_change_ids_rebase_command_shape(tmp_path, monkeypatch):
     assert len(rebase_calls) == 1
     assert rebase_calls[0][:3] == ["git", "rebase", "abcdef1234"]
     assert "--keep-empty" in rebase_calls[0]
+    assert "--empty=keep" in rebase_calls[0]
     assert "--exec" in rebase_calls[0]
-    # The exec command must run `git commit --amend --no-edit` to trigger commit-msg hook
+    # The exec command must run `git commit --amend --no-edit --allow-empty`
+    # to trigger commit-msg hook even when the rebased commit is empty.
     exec_idx = rebase_calls[0].index("--exec") + 1
-    assert "commit --amend --no-edit" in rebase_calls[0][exec_idx]
+    assert "commit --amend --no-edit --allow-empty" in rebase_calls[0][exec_idx]
 
 
 def test_ensure_change_ids_quits_rebase_on_failure(tmp_path, monkeypatch):
@@ -887,6 +892,7 @@ def test_ensure_change_ids_quits_rebase_on_failure(tmp_path, monkeypatch):
     )
     assert rebase_main[:3] == ["git", "rebase", "abcdef1234"]
     assert "--keep-empty" in rebase_main
+    assert "--empty=keep" in rebase_main  # OP-2484
     # Cleanup `git rebase --quit` must run after the failed rebase.
     assert ["git", "rebase", "--quit"] in calls
 
@@ -2331,6 +2337,113 @@ def test_ensure_change_ids_raises_when_sentinel_plus_other_dirty(tmp_path: Path)
         jd.ensure_change_ids(repo, base_ref=base)
     assert "uncommitted.py" in ei.value.dirty_files
     assert ".runner-cwd-sentinel" not in ei.value.dirty_files
+
+
+# OP-2484: regression — when a commit's net diff is already on develop tip,
+# the rebase + exec amend used to fail with "doing so would make it empty"
+# and crash ``ensure_change_ids`` with a CalledProcessError, feeding the
+# OP-1400 silent re-pickup loop documented on OP-1647. The fix is to combine
+# ``--keep-empty`` + ``--empty=keep`` with ``--allow-empty`` on the amend so
+# the commit is retained (with its Change-Id, ready to push) even when the
+# rebase makes it empty.
+
+
+def test_ensure_change_ids_succeeds_when_rebased_commit_becomes_empty(
+    tmp_path: Path,
+) -> None:
+    """OP-2484 regression: a commit whose net diff is already on the rebase
+    base must NOT crash ``ensure_change_ids``. Pre-fix the runner caught the
+    CalledProcessError, marked the ticket ``[runner-gerrit-setup-fail]``,
+    and reverted to To Do — re-pickup hit the same failure every tick all
+    the way to stoploss (OP-1647 victim, 2026-06-28).
+    """
+    repo = _init_worktree(tmp_path)
+    base_after_seed = _head_sha(repo)
+
+    # Feature commit on main that we are going to rebase.
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.py"], cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m",
+         "feat: x = 1 (claude-bot)"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    # Simulate develop advancing past base with the SAME final tree content
+    # for feature.py (but a different commit message + an extra path, so the
+    # cherry-pick detector does NOT silently drop the commit — we want the
+    # post-rebase "becomes empty" branch, not the cherry-pick branch).
+    subprocess.run(
+        ["git", "checkout", "-b", "advanced_base", base_after_seed],
+        cwd=repo, check=True, capture_output=True,
+    )
+    (repo / "feature.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "other.py").write_text("other\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "add", "feature.py", "other.py"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit", "-q", "-m",
+         "different stuff from another ticket"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    advanced_base_sha = _head_sha(repo)
+
+    # Back on main: the feature commit's tree will collide with advanced_base.
+    subprocess.run(
+        ["git", "checkout", "main"], cwd=repo, check=True, capture_output=True,
+    )
+    head_before = _head_sha(repo)
+
+    # MUST NOT raise. Pre-fix, this raised
+    # subprocess.CalledProcessError with stderr containing
+    # "doing so would make it empty".
+    jd.ensure_change_ids(repo, base_ref=advanced_base_sha)
+
+    # The kept-but-empty commit is still on the branch (so the subsequent
+    # push to refs/for/develop has something to push); HEAD must NOT equal
+    # the base (that would mean the commit was silently dropped and the
+    # CLI's work would be lost).
+    head_after = _head_sha(repo)
+    assert head_after != advanced_base_sha, (
+        "OP-2484: commit was silently dropped — the CLI's work would be "
+        "lost rather than pushed to Gerrit"
+    )
+    count = subprocess.run(
+        ["git", "rev-list", f"{advanced_base_sha}..HEAD", "--count"],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert count == "1"
+    # HEAD did change (amend re-wrote the commit) but exactly 1 commit
+    # is on the branch relative to the new base.
+    assert head_after != head_before
+
+
+def test_ensure_change_ids_succeeds_when_commit_starts_empty(tmp_path: Path) -> None:
+    """OP-2484: ``--keep-empty`` keeps commits that START empty too.
+    The amend then carries ``--allow-empty`` so the exec step doesn't trip
+    on the no-net-diff state. Belt-and-suspenders to the becomes-empty test
+    above — both shapes are now covered by one rebase invocation.
+    """
+    repo = _init_worktree(tmp_path)
+    base = _head_sha(repo)
+    # Commit that is intentionally empty from the start.
+    subprocess.run(
+        ["git", "-c", "commit.gpgsign=false", "commit",
+         "--allow-empty", "-q", "-m", "intentionally empty marker"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    # MUST NOT raise — pre-fix the exec amend would refuse with
+    # "doing so would make it empty".
+    jd.ensure_change_ids(repo, base_ref=base)
+    count = subprocess.run(
+        ["git", "rev-list", f"{base}..HEAD", "--count"],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    assert count == "1"
 
 
 def test_ensure_change_ids_no_commits_error_carries_diagnostic_text() -> None:
