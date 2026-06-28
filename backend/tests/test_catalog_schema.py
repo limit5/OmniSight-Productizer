@@ -77,6 +77,17 @@ MIGRATION_0051 = (
     BACKEND_ROOT / "alembic" / "versions" / "0051_catalog_tables.py"
 )
 
+# OP-2166 — follow-on catalog-seed migrations that insert additional
+# shipped rows after 0052. The drift guard checks yaml ↔ union(0052 +
+# follow-ons), because the yaml is the *current* mirror of every shipped
+# row visible to the operator UI, not just the BS.1.2 first-batch frozen
+# in 0052. Add a new path here whenever a new alembic revision lands a
+# ``SEED_ENTRIES`` tuple of additional ``catalog_entries`` rows.
+FOLLOWON_SEED_MIGRATIONS: tuple[Path, ...] = (
+    BACKEND_ROOT / "alembic" / "versions"
+    / "0251_catalog_seed_rtsp_onvif_server.py",
+)
+
 # Family enum mirror — BS.1.3 schema seven values incl. 'custom' for
 # BS.8.5 subscription feed.  Shipped seed uses six (no 'custom').
 ALEMBIC_FAMILY_ENUM = {
@@ -113,9 +124,16 @@ EXPECTED_PER_FAMILY_COUNT = {
     "mobile": 6,
     "embedded": 8,
     "web": 4,
-    "software": 5,
+    # OP-2166 R5.3 follow-up: +1 rtsp-onvif-server row added by
+    # alembic 0251; the yaml mirror grew the same row in software.yaml.
+    "software": 6,
     "rtos": 3,
-    "cross-toolchain": 4,
+    # OP-2166 alignment: cross-toolchain.yaml + alembic 0052 SEED_ENTRIES
+    # both list 8 entries today (Phase 0 P0.A.1/2/3 added Rockchip /
+    # Qualcomm / MediaTek toolchains on top of the BS.1.2 first-batch
+    # four); the table value here was stale from the BS.1.2 seed count
+    # and tripped this PR's drift-guard run.
+    "cross-toolchain": 8,
 }
 
 KEBAB_CASE_ID_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9]))*$")
@@ -138,6 +156,34 @@ def schema() -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def m0052():
     return _load_module(MIGRATION_0052, "_bs15_test_alembic_0052")
+
+
+@pytest.fixture(scope="module")
+def followon_seed_modules() -> tuple[Any, ...]:
+    """Loaded modules for ``FOLLOWON_SEED_MIGRATIONS`` (OP-2166).
+
+    Same ``importlib`` shape used for ``m0052`` so each follow-on
+    migration's ``SEED_ENTRIES`` round-trips through the drift guard the
+    same way the BS.1.2 first-batch does.
+    """
+    return tuple(
+        _load_module(path, f"_bs15_test_alembic_{path.stem}")
+        for path in FOLLOWON_SEED_MIGRATIONS
+    )
+
+
+@pytest.fixture(scope="module")
+def all_seed_entries(m0052, followon_seed_modules) -> tuple[dict[str, Any], ...]:
+    """Concatenation of 0052's seed with every follow-on migration's seed.
+
+    The yaml mirror in ``configs/embedded_catalog/*.yaml`` is the union
+    of every shipped row across alembic history; the drift guard must
+    compare against the same union.
+    """
+    combined: list[dict[str, Any]] = list(m0052.SEED_ENTRIES)
+    for module in followon_seed_modules:
+        combined.extend(getattr(module, "SEED_ENTRIES", ()))
+    return tuple(combined)
 
 
 @pytest.fixture(scope="module")
@@ -389,9 +435,16 @@ class TestSeedCompleteness:
     structural group; we re-assert here so the BS.1.5 contract is
     self-contained and survives a hypothetical refactor that drops
     those structural tests.
+
+    OP-2166: every assertion now runs over ``all_seed_entries`` (the
+    union of 0052 + every follow-on catalog-seed migration) so the
+    structural contract binds new rows the same way it binds the
+    first-batch frozen in 0052.
     """
 
-    def test_every_seed_entry_has_required_columns(self, m0052) -> None:
+    def test_every_seed_entry_has_required_columns(
+        self, all_seed_entries
+    ) -> None:
         required = {
             "id",
             "vendor",
@@ -400,7 +453,7 @@ class TestSeedCompleteness:
             "version",
             "install_method",
         }
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             missing = required - set(entry.keys())
             assert not missing, (
                 f"{entry.get('id')!r}: missing required columns {missing}"
@@ -413,54 +466,62 @@ class TestSeedCompleteness:
                 )
 
     def test_every_seed_install_method_in_alembic_enum(
-        self, m0052
+        self, all_seed_entries
     ) -> None:
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             assert entry["install_method"] in ALEMBIC_INSTALL_METHOD_ENUM, (
                 f"{entry['id']}.install_method={entry['install_method']!r} "
                 f"not in {ALEMBIC_INSTALL_METHOD_ENUM}"
             )
 
-    def test_every_seed_family_in_shipped_enum(self, m0052) -> None:
+    def test_every_seed_family_in_shipped_enum(
+        self, all_seed_entries
+    ) -> None:
         # 'custom' is reserved for BS.8.5 third-party subscription
         # feed entries — no shipped row may carry it.
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             assert entry["family"] in SHIPPED_FAMILY_ENUM, (
                 f"{entry['id']}.family={entry['family']!r} not in "
                 f"{SHIPPED_FAMILY_ENUM} (custom reserved for BS.8.5)"
             )
 
     def test_every_seed_id_matches_kebab_case_pattern(
-        self, m0052
+        self, all_seed_entries
     ) -> None:
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             assert KEBAB_CASE_ID_PATTERN.match(entry["id"]), (
                 f"{entry['id']!r} fails kebab-case pattern"
             )
 
-    def test_every_seed_id_within_length_bounds(self, m0052) -> None:
-        for entry in m0052.SEED_ENTRIES:
+    def test_every_seed_id_within_length_bounds(
+        self, all_seed_entries
+    ) -> None:
+        for entry in all_seed_entries:
             length = len(entry["id"])
             assert 2 <= length <= 64, (
                 f"{entry['id']!r} length {length} outside [2, 64]"
             )
 
-    def test_no_seed_entry_carries_tenant_id(self, m0052) -> None:
+    def test_no_seed_entry_carries_tenant_id(
+        self, all_seed_entries
+    ) -> None:
         # Shipped rows are tenant-scopeless (alembic 0051 CHECK enforces
         # source='shipped' XOR tenant_id IS NULL).
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             assert "tenant_id" not in entry, entry["id"]
 
-    def test_no_seed_entry_overrides_source(self, m0052) -> None:
+    def test_no_seed_entry_overrides_source(
+        self, all_seed_entries
+    ) -> None:
         # Migration hard-codes source='shipped' in _build_insert; an
         # entry-side override would be silently ignored.
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             assert "source" not in entry, entry["id"]
 
-    def test_seed_depends_on_resolves(self, m0052) -> None:
-        ids = {e["id"] for e in m0052.SEED_ENTRIES}
+    def test_seed_depends_on_resolves(self, all_seed_entries) -> None:
+        ids = {e["id"] for e in all_seed_entries}
         unresolved: list[str] = []
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             for dep in entry.get("depends_on", []) or []:
                 if dep not in ids:
                     unresolved.append(
@@ -468,22 +529,26 @@ class TestSeedCompleteness:
                     )
         assert not unresolved, "\n".join(unresolved)
 
-    def test_seed_sha256_is_null_or_64_hex(self, m0052) -> None:
+    def test_seed_sha256_is_null_or_64_hex(
+        self, all_seed_entries
+    ) -> None:
         # BS.1.2 design: all shipped rows ship with sha256 NULL.  When
         # BS.7 back-fills digests in a later alembic rev, this
         # assertion will need either an exemption window or to be
         # updated to the hex pattern.
         hex_re = re.compile(r"^[0-9a-f]{64}$")
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             sha = entry.get("sha256")
             assert sha is None or (
                 isinstance(sha, str) and hex_re.match(sha)
             ), f"{entry['id']}.sha256={sha!r} — must be null or 64-hex"
 
-    def test_seed_size_bytes_within_sane_range(self, m0052) -> None:
+    def test_seed_size_bytes_within_sane_range(
+        self, all_seed_entries
+    ) -> None:
         # 1 TiB cap mirrors schema's maximum.  Negative or > 1 TiB
         # is a typo (extra zero / wrong unit).
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             sz = entry.get("size_bytes")
             if sz is None:
                 continue
@@ -491,6 +556,22 @@ class TestSeedCompleteness:
             assert 0 <= sz <= 1099511627776, (
                 f"{entry['id']}.size_bytes={sz} outside [0, 1 TiB]"
             )
+
+    def test_seed_ids_unique_across_all_migrations(
+        self, all_seed_entries
+    ) -> None:
+        # A follow-on migration silently re-inserting an id already
+        # present in 0052 would be hidden by ``INSERT OR IGNORE`` at
+        # apply time but would break the drift guard's "every seed
+        # entry has a yaml mirror" invariant (the yaml side dedupes).
+        ids = [e["id"] for e in all_seed_entries]
+        seen: dict[str, int] = {}
+        for eid in ids:
+            seen[eid] = seen.get(eid, 0) + 1
+        dups = {eid: n for eid, n in seen.items() if n > 1}
+        assert not dups, (
+            f"duplicate seed ids across 0052 + follow-ons: {dups}"
+        )
 
 
 # ─── Group 4: yaml ↔ alembic seed drift guard (per-field equality) ───────
@@ -503,6 +584,15 @@ class TestYamlSeedDriftGuard:
     typo) must touch the yaml mirror AND the alembic seed.  Any
     asymmetry shows up here as a per-field diff with the offending id
     in the assertion message.
+
+    OP-2166: the "alembic seed" side is now the union of 0052's
+    ``_SEED_ENTRIES`` with every follow-on catalog-seed migration's
+    ``SEED_ENTRIES`` (see ``FOLLOWON_SEED_MIGRATIONS``). The yaml is
+    the human-curated mirror of every shipped row at edit time; the
+    drift gate accordingly compares yaml ↔ union(0052 + follow-ons),
+    not yaml ↔ 0052 alone (which would force every follow-on row to
+    bake into the frozen 0052 migration, defeating the whole point of
+    additive seed migrations).
     """
 
     # Fields that round-trip 1:1 between yaml and alembic seed.
@@ -522,26 +612,26 @@ class TestYamlSeedDriftGuard:
     )
 
     def test_yaml_id_set_equals_seed_id_set(
-        self, m0052, yaml_entries_by_id
+        self, all_seed_entries, yaml_entries_by_id
     ) -> None:
-        seed_ids = {e["id"] for e in m0052.SEED_ENTRIES}
+        seed_ids = {e["id"] for e in all_seed_entries}
         yaml_ids = set(yaml_entries_by_id.keys())
         only_yaml = yaml_ids - seed_ids
         only_seed = seed_ids - yaml_ids
         assert not only_yaml, (
-            f"id present in yaml but not in alembic 0052 seed: "
-            f"{sorted(only_yaml)}"
+            f"id present in yaml but not in any alembic catalog seed "
+            f"(0052 + follow-ons): {sorted(only_yaml)}"
         )
         assert not only_seed, (
-            f"id present in alembic 0052 seed but not in yaml mirror: "
-            f"{sorted(only_seed)}"
+            f"id present in alembic catalog seed (0052 + follow-ons) "
+            f"but not in yaml mirror: {sorted(only_seed)}"
         )
 
     def test_per_family_yaml_count_equals_seed_count(
-        self, m0052, yaml_docs
+        self, all_seed_entries, yaml_docs
     ) -> None:
         seed_by_family: dict[str, int] = {}
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             seed_by_family[entry["family"]] = (
                 seed_by_family.get(entry["family"], 0) + 1
             )
@@ -555,20 +645,20 @@ class TestYamlSeedDriftGuard:
         )
 
     def test_every_seed_entry_has_yaml_mirror(
-        self, m0052, yaml_entries_by_id
+        self, all_seed_entries, yaml_entries_by_id
     ) -> None:
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             assert entry["id"] in yaml_entries_by_id, (
-                f"alembic 0052 seed entry {entry['id']!r} has no yaml "
+                f"alembic seed entry {entry['id']!r} has no yaml "
                 f"mirror in configs/embedded_catalog/"
             )
 
     @pytest.mark.parametrize("field", _SCALAR_FIELDS)
     def test_scalar_field_per_entry_equality(
-        self, field, m0052, yaml_entries_by_id
+        self, field, all_seed_entries, yaml_entries_by_id
     ) -> None:
         diffs: list[str] = []
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             yaml_entry = yaml_entries_by_id.get(entry["id"])
             if yaml_entry is None:
                 continue  # reported by test_every_seed_entry_has_yaml_mirror
@@ -583,10 +673,10 @@ class TestYamlSeedDriftGuard:
 
     @pytest.mark.parametrize("field", _OPTIONAL_SCALAR_FIELDS)
     def test_optional_scalar_field_per_entry_equality(
-        self, field, m0052, yaml_entries_by_id
+        self, field, all_seed_entries, yaml_entries_by_id
     ) -> None:
         diffs: list[str] = []
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             yaml_entry = yaml_entries_by_id.get(entry["id"])
             if yaml_entry is None:
                 continue
@@ -601,7 +691,7 @@ class TestYamlSeedDriftGuard:
         assert not diffs, "\n".join(diffs)
 
     def test_depends_on_per_entry_equality(
-        self, m0052, yaml_entries_by_id
+        self, all_seed_entries, yaml_entries_by_id
     ) -> None:
         # Order-insensitive: yaml authors may reorder for readability.
         # alembic 0052 _build_insert uses ``json.dumps(depends_on)`` which
@@ -610,7 +700,7 @@ class TestYamlSeedDriftGuard:
         # set of deps".  If order matters operationally the rule
         # should tighten — for now (BS.1.2 first-seed) it doesn't.
         diffs: list[str] = []
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             yaml_entry = yaml_entries_by_id.get(entry["id"])
             if yaml_entry is None:
                 continue
@@ -624,13 +714,13 @@ class TestYamlSeedDriftGuard:
         assert not diffs, "\n".join(diffs)
 
     def test_metadata_per_entry_equality(
-        self, m0052, yaml_entries_by_id
+        self, all_seed_entries, yaml_entries_by_id
     ) -> None:
         # Metadata is an open dict (R24 forward-compat).  Compare with
         # JSON-canonicalised (sort_keys) round-trip so dict insertion
         # order doesn't show up as a diff.
         diffs: list[str] = []
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             yaml_entry = yaml_entries_by_id.get(entry["id"])
             if yaml_entry is None:
                 continue
@@ -647,7 +737,7 @@ class TestYamlSeedDriftGuard:
         assert not diffs, "\n".join(diffs)
 
     def test_filename_to_family_groups_match_seed(
-        self, m0052, yaml_docs
+        self, all_seed_entries, yaml_docs
     ) -> None:
         # Each yaml's family bucket must contain exactly the alembic
         # entries with that family.  Catches an entry being moved
@@ -659,7 +749,7 @@ class TestYamlSeedDriftGuard:
                 e["id"] for e in (doc.get("entries", []) or [])
             )
         seed_groups: dict[str, set[str]] = {}
-        for entry in m0052.SEED_ENTRIES:
+        for entry in all_seed_entries:
             seed_groups.setdefault(entry["family"], set()).add(entry["id"])
         all_families = yaml_groups.keys() | seed_groups.keys()
         only_in_yaml = {

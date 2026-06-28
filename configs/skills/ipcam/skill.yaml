@@ -20,6 +20,18 @@ depends_on_core:
   - CORE-05
   - CORE-07
   - CORE-24
+# OP-2166 R5.3 follow-up — capability_matrix entry mapping the ipcam
+# pack to the prebuilt-server capability. The `prebuilt-server` token
+# is the SkillManifest `provides` field's free-form capability label
+# (see backend/skill_manifest.py: cross-pack wiring tokens for the
+# system-of-systems product planner) and corresponds to the
+# rtsp-onvif-server catalog entry seeded by alembic 0251 — i.e. the
+# `prebuilt_server_integration` task in tasks.yaml (R5.3, OP-2164) is
+# the concrete implementation of this capability. The from-scratch
+# scaffolds (rtsp_server_scaffold / onvif_endpoints / ws_discovery)
+# remain the alternative path for products a release tag cannot cover.
+provides:
+  - prebuilt-server
 artifacts:
   - kind: tasks
     path: tasks.yaml

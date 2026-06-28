@@ -97,7 +97,13 @@ class TestMigrationFileStructure:
 
     def test_seed_entries_counts_by_family(self, m0052) -> None:
         entries = m0052.SEED_ENTRIES
-        assert len(entries) == 30
+        # OP-2166 alignment: 0052 grew from the BS.1.2 first-batch 30
+        # rows to 34 when Phase 0 P0.A.1/2/3 (OP-1918) appended four
+        # vendor toolchains in cross-toolchain (Rockchip RK35xx +
+        # RV1126, Qualcomm QCS6490, MediaTek Genio 1200) to the same
+        # frozen migration; the per-family check below is the source of
+        # truth for that final shape.
+        assert len(entries) == 34
         by_family: dict[str, int] = {}
         for e in entries:
             by_family[e["family"]] = by_family.get(e["family"], 0) + 1
@@ -107,7 +113,7 @@ class TestMigrationFileStructure:
             "web": 4,
             "software": 5,
             "rtos": 3,
-            "cross-toolchain": 4,
+            "cross-toolchain": 8,
         }
 
     def test_seed_install_methods_within_enum(self, m0052) -> None:
@@ -210,7 +216,7 @@ class TestSqliteUpgradeSeedsAllRows:
         cur = upgraded_db.execute(
             "SELECT COUNT(*) FROM catalog_entries WHERE source='shipped'"
         )
-        assert cur.fetchone()[0] == 30
+        assert cur.fetchone()[0] == 34
 
     def test_count_by_family_matches_split(self, upgraded_db) -> None:
         cur = upgraded_db.execute(
@@ -222,7 +228,10 @@ class TestSqliteUpgradeSeedsAllRows:
         )
         rows = dict(cur.fetchall())
         assert rows == {
-            "cross-toolchain": 4,
+            # OP-2166 alignment: cross-toolchain grew to 8 via OP-1918
+            # Phase 0 P0.A.1/2/3 entries (Rockchip + Qualcomm + MediaTek
+            # toolchains) appended to the BS.1.2 first-batch four.
+            "cross-toolchain": 8,
             "embedded": 8,
             "mobile": 6,
             "rtos": 3,
@@ -320,7 +329,9 @@ class TestIdempotentReupgrade:
         second = conn.execute(
             "SELECT COUNT(*) FROM catalog_entries"
         ).fetchone()[0]
-        assert first == second == 30
+        # OP-2166 alignment: matches the 34-row total locked in
+        # test_seed_entries_counts_by_family (post-Phase 0 / OP-1918).
+        assert first == second == 34
 
 
 # ─── Group 4: downgrade symmetry ─────────────────────────────────────────
@@ -412,7 +423,9 @@ class TestPgBranchExecutes:
         monkeypatch.setattr(alembic_op, "get_bind", lambda: _PgBind())
         monkeypatch.setattr(alembic_op, "execute", lambda sql: captured.append(sql))
         m0052.upgrade()
-        assert len(captured) == 30
+        # OP-2166 alignment: 34 rows now (Phase 0 / OP-1918 appended 4
+        # vendor cross-toolchain rows to the BS.1.2 first-batch 30).
+        assert len(captured) == 34
         joined = "\n".join(captured)
         assert "::jsonb" in joined
         assert "INSERT OR IGNORE INTO catalog_entries" in joined
