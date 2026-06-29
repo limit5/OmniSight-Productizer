@@ -1528,8 +1528,13 @@ export async function* streamChat(
 ): AsyncGenerator<{ event: string; data: unknown }> {
   const res = await fetch(`${API_V1}/chat/stream`, {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
+      // The backend's csrf_check rejects state-changing POSTs without the
+      // echoed CSRF token (require_role → 403). The generic request() helper
+      // attaches this; this raw streaming fetch must too (dogfood 2026-06-29).
+      "X-CSRF-Token": readCookie("omnisight_csrf") ?? "",
       ...getFrontendCompatHeaders(),
     },
     body: JSON.stringify({ message }),

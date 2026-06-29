@@ -263,6 +263,10 @@ export function CommandPalette({ onNavigatePanel }: Props) {
   )
 
   const commands = useMemo<CommandItem[]>(() => [
+    // Start — the user's entry point to describe a new product/task. The
+    // NewProjectWizard listens for this event (dogfood 2026-06-29: the wizard
+    // was first-run-only with no re-entry; this restores a discoverable way in).
+    { id: "new-project", icon: Wand2, label: { en: "New Project / Task", "zh-TW": "新建專案 / 任務", "zh-CN": "新建项目 / 任务", ja: "新規プロジェクト / タスク" }, run: () => { navigatePanel("orchestrator"); window.dispatchEvent(new CustomEvent("omnisight:new-project")) }, tags: ["create", "start", "new", "建立", "新增", "開始", "wizard", "describe"] },
     // Panels — navigate via ?panel=…
     { id: "panel-orchestrator", icon: LayoutDashboard, label: { en: "Go to Orchestrator", "zh-TW": "前往 Orchestrator", "zh-CN": "前往 Orchestrator", ja: "Orchestrator へ" }, run: () => navigatePanel("orchestrator"), tags: ["chat", "command"] },
     { id: "panel-decisions",    icon: Zap,             label: { en: "Go to Decision Queue", "zh-TW": "前往決策佇列", "zh-CN": "前往决策队列", ja: "Decision Queue へ" }, run: () => navigatePanel("decisions"), tags: ["pending", "approve", "reject"] },

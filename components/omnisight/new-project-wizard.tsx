@@ -99,6 +99,16 @@ export function NewProjectWizard() {
     })
   }, [userId])
 
+  // Re-entry (dogfood 2026-06-29): the wizard auto-opens only once on first
+  // run, after which LS_WIZARD_SEEN keeps it closed forever — leaving no way
+  // back in. Any "New Project" affordance (command palette, button) dispatches
+  // this event to reopen it on demand.
+  useEffect(() => {
+    const reopen = () => setOpen(true)
+    window.addEventListener("omnisight:new-project", reopen)
+    return () => window.removeEventListener("omnisight:new-project", reopen)
+  }, [])
+
   function markWizardSeen() {
     if (!userId) return
     const store = getUserStorage(currentTenantId, userId)
