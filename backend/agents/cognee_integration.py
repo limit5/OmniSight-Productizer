@@ -657,22 +657,33 @@ def build_repo_map_via_cognee(
     existing B8 PageRank baseline so the system keeps producing a useful
     preamble (AC #5 fallback contract — same shape).
     """
-    seed = ticket_text or _ticket_seed_default(repo_root)
+    # The repo-map preamble is an OPTIONAL prompt enhancement — it must NEVER
+    # crash the orchestrator pipeline. The narrow except clauses below only
+    # cover *known* Cognee failure modes; an UNEXPECTED error (e.g. the B8
+    # fallback's SQLite repo-map cache being unwritable on prod's read-only
+    # site-packages path — dogfood 2026-06-30, which dropped every /chat/stream
+    # request with "unable to open database file") must degrade to no preamble,
+    # not propagate. The empty string is a valid "same shape" fallback.
     try:
-        adapter = adapter or CogneeAdapter.from_env()
-    except CogneeNotInstalled as exc:
-        log.info("cognee_repo_map_fallback: %s", exc)
-        return _b8_fallback(repo_root, ticket_text, token_budget, top_n)
-    try:
-        hits = _run_async(
-            adapter.search(seed, kinds=[SOURCE_KIND_CODE], top_k=top_n)
-        )
-    except (CogneeNeo4jUnavailable, CogneeQueryTimeout, CogneeIndexCorruption) as exc:
-        log.warning("cognee_repo_map_fallback: %s", exc)
-        return _b8_fallback(repo_root, ticket_text, token_budget, top_n)
-    if not hits:
-        return _b8_fallback(repo_root, ticket_text, token_budget, top_n)
-    return _render_cognee_repo_map(hits, token_budget=token_budget)
+        seed = ticket_text or _ticket_seed_default(repo_root)
+        try:
+            adapter = adapter or CogneeAdapter.from_env()
+        except CogneeNotInstalled as exc:
+            log.info("cognee_repo_map_fallback: %s", exc)
+            return _b8_fallback(repo_root, ticket_text, token_budget, top_n)
+        try:
+            hits = _run_async(
+                adapter.search(seed, kinds=[SOURCE_KIND_CODE], top_k=top_n)
+            )
+        except (CogneeNeo4jUnavailable, CogneeQueryTimeout, CogneeIndexCorruption) as exc:
+            log.warning("cognee_repo_map_fallback: %s", exc)
+            return _b8_fallback(repo_root, ticket_text, token_budget, top_n)
+        if not hits:
+            return _b8_fallback(repo_root, ticket_text, token_budget, top_n)
+        return _render_cognee_repo_map(hits, token_budget=token_budget)
+    except Exception as exc:  # noqa: BLE001 — last-resort: never crash the graph
+        log.warning("repo_map_disabled (unexpected, returning empty preamble): %s", exc)
+        return ""
 
 
 # ── B10 replacement (AC #5) — lessons via Cognee semantic search ───────
