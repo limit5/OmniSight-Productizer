@@ -1,0 +1,12 @@
+{
+  "actor": "sora",
+  "approval_refs": [
+    "operator-go-v0.7.0-20260629"
+  ],
+  "bundle_id": "develop+20260629.shacacc701",
+  "from_env": "staging",
+  "image_ref": "sora.services:49160/omnisight/omnisight-productizer/frontend@sha256:ba04a454bf8d06d3e5e3802241f8ee94f8b46bd9858ed520ea48dc39504df43f",
+  "parent_attestation": null,
+  "time": "2026-06-29T09:51:06Z",
+  "to_env": "v0.7.0"
+}
