@@ -1,0 +1,40 @@
+; OmniSight PROD stack lifecycle (2026-06-29) — gives the live prod deploy
+; stack a real, reboot-survivable systemd owner instead of the manual
+; `docker compose up` from the runner tree that caused the 2026-06-29
+; project-name collision (deploy-prod.sh spawned a parallel `omnisight-prod`
+; project). Project is PINNED to `omnisight-productizer` (matches the live
+; stack + bootstrap_prod.sh + the .env COMPOSE_PROJECT_NAME pin).
+;
+; Scope: the 6 services in docker-compose.prod.yml (backend-a/b, frontend,
+; caddy, docker-socket-proxy, installer). It deliberately does NOT use
+; --remove-orphans because cloudflared (public tunnel) / grafana / prometheus
+; run in the same project from a SEPARATE compose overlay — orphan-removal
+; would tear down the public tunnel. Those three still need their own owner
+; (follow-up). `up -d` adopts the already-running stack with no recreate when
+; in-sync (verified 2026-06-29), so `systemctl start` is non-destructive.
+
+[Unit]
+Description=OmniSight prod stack (docker compose up -d, project omnisight-productizer)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/user/omnisight-prod
+Environment=OMNISIGHT_ENV=production
+Environment=COMPOSE_PROJECT_NAME=omnisight-productizer
+; boot-guard: refuse to start unless the .env is the pinned prod project (so a
+; fat-fingered .env can't bring the wrong stack up under the prod name).
+ExecStartPre=/bin/sh -c 'grep -q "^COMPOSE_PROJECT_NAME=omnisight-productizer$" /home/user/omnisight-prod/.env'
+; --no-recreate: ADOPT an already-running in-sync stack on `start` (no recreate,
+; no caddy-healthcheck flicker) while still CREATING missing containers on a
+; fresh boot. Image updates are deploy-prod.sh's job (explicit rolling recreate),
+; NOT this lifecycle unit's — so never recreating here is correct.
+ExecStart=/usr/bin/docker compose -p omnisight-productizer --env-file /home/user/omnisight-prod/.env -f /home/user/omnisight-prod/docker-compose.prod.yml up -d --no-recreate
+ExecStop=/usr/bin/docker compose -p omnisight-productizer --env-file /home/user/omnisight-prod/.env -f /home/user/omnisight-prod/docker-compose.prod.yml stop
+TimeoutStartSec=300
+TimeoutStopSec=120
+
+[Install]
+WantedBy=default.target

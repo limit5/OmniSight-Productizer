@@ -1,0 +1,25 @@
+; OmniSight prod DB backup (user-level, 2026-06-29) — restores automated
+; backups that died 2026-05-27 (the system-level OP-887 timers were never
+; installed + /etc/omnisight/backup-dr.env vanished). This runs entirely as
+; the user: backup_prod_db.sh docker-execs omnisight-pg-primary -> pg_dump
+; (custom format) -> gpg AES-256 -> /home/user/omnisight-prod/data/backups,
+; pruning to the newest 30. NO sudo/root needed.
+;
+; The passphrase lives in ~/.config/omnisight/backup-dr.env (user-readable,
+; mode 600) — use the SAME OMNISIGHT_BACKUP_PASSPHRASE as the old backups so
+; the historical *.dump.gpg stay decryptable. Optional off-site: add
+; OMNISIGHT_BACKUP_S3_URI=s3://... to that same env file.
+
+[Unit]
+Description=OmniSight prod Postgres backup (pg_dump + gpg, user-level)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/omnisight-prod
+EnvironmentFile=-/home/user/.config/omnisight/backup-dr.env
+ExecStart=/usr/bin/bash /home/user/omnisight-prod/scripts/backup_prod_db.sh --prune 30
+StandardOutput=append:/home/user/work/sora/logs/backup/prod-backup.log
+StandardError=append:/home/user/work/sora/logs/backup/prod-backup.log
+TimeoutStartSec=1800

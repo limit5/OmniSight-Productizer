@@ -1,0 +1,14 @@
+; Daily trigger for the user-level OmniSight prod DB backup (2026-06-29).
+; Persistent=true => a missed run (box asleep) fires on next wake.
+
+[Unit]
+Description=Daily trigger for OmniSight prod Postgres backup
+
+[Timer]
+Unit=omnisight-prod-backup.service
+OnCalendar=*-*-* 02:17:00
+Persistent=true
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
