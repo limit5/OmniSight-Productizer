@@ -1433,6 +1433,13 @@ def _build_prompt(
             "\n"
         )
 
+    # B-Voice (2026-06-29): the sandbox scrubs JIRA creds from the agent CLI
+    # (OP-1777), so it cannot post to JIRA itself. It writes its report to this
+    # jail-RW, identity-bound, non-git file and the wrapper relays it out-of-jail
+    # (see _relay_runner_report). Restores charter §4 (explain-when-stuck) + the
+    # AC verification, with zero security regression (creds never enter the jail).
+    report_path = runner_sandbox.runner_report_path(key)
+
     return f"""You are working on JIRA ticket {key}.
 
 Component: {component_label}
@@ -1445,40 +1452,41 @@ Stay strictly within these boundaries. Do NOT introduce changes to:
   - {forbidden_block}
 
 If you find that completing this ticket requires touching an out-of-area
-domain, halt, comment on the ticket, and transition back to TODO with
-a discovered-dependency note (per docs/sop/jira-ticket-conventions.md §11).
+domain, halt, write a discovered-dependency note to your report file (see
+below) and exit WITHOUT committing — the runner surfaces your note and reverts
+the ticket per docs/sop/jira-ticket-conventions.md §11.
 {capabilities_block}{fg_block}{ps_block}{ops_only_block}{reflection_block}{lessons_block}{antipattern_block}
-{docrules_block}# Acceptance Criteria verification (REQUIRED before exit)
+{docrules_block}# Acceptance Criteria verification + reporting (REQUIRED before exit)
 
-Before you finish, post ONE final JIRA comment to ticket {key} listing
-each Acceptance Criteria item from the description with ✓ (verified)
-or ✗ (skipped/blocked, with reason). Each ✓ MUST cite concrete evidence
-— test name, file:line range, or Gerrit Change-Id. Vague evidence ("looks
-right", "should work") is auto-rejected by the convention §3 DoD spirit
-and will be flagged in retrospective.
+You run inside a sandbox with NO JIRA credentials — you CANNOT call
+jira_dispatch or post to JIRA yourself (any such call fails by design,
+OP-1777). Instead WRITE your report to this file and the runner relays it to
+JIRA for you:
 
-Format:
+  {report_path}
+
+On SUCCESS, write your Acceptance Criteria verification — each AC item from the
+description with ✓ (verified) or ✗ (skipped/blocked, with reason). Each ✓ MUST
+cite concrete evidence — test name, file:line range, or Gerrit Change-Id. Vague
+evidence ("looks right", "should work") is auto-rejected (convention §3 DoD
+spirit) and flagged in retrospective. Format:
 
   AC verification for {key}:
   ✓ <AC item 1 paraphrased> — <test_name|file:Lstart-Lend|change-id>
   ✓ <AC item 2 paraphrased> — <evidence>
   ✗ <AC item N paraphrased> — <reason it could not be verified>
 
-For programmatic JIRA writes use ONLY these helpers from
-`backend/agents/jira_dispatch.py`:
+If you are BLOCKED / must surrender (an out-of-area dependency per §11, or you
+cannot complete the work), write to the SAME file instead: your hypothesis,
+what you tried, the EXACT blocker, and the suggested next step — so the
+operator/coordinator can act — and exit WITHOUT committing.
 
-  - `add_comment(client, key, text)` — post the AC verification comment
-    (and any other operator-facing notes).
-  - `transition_back_to_todo(client, key, reason)` — only when you discover
-    an out-of-area dependency and need to surrender the ticket per §11.
-
-⚠ DO NOT call `transition_to_under_review` (or any other `transition_*`
-helper that moves the ticket forward) yourself. The runner owns forward
-transitions — after your CLI exits cleanly, the runner pushes to Gerrit
-and transitions the ticket to Under Review on your behalf. If you do it
-yourself you race the runner and create a duplicate
-`[runner-pushed-to-gerrit]` comment + a misleading "runner failed"
-signal even when the work shipped (OP-690 incident, 2026-05-07).
+⚠ DO NOT call jira_dispatch.add_comment or any transition_* helper yourself —
+you have no creds and the runner owns ALL JIRA writes: it relays THIS file,
+posts the [runner-pushed-to-gerrit] comment, and does the forward transition to
+Under Review after your CLI exits cleanly. Doing it yourself fails (no creds) or
+races the runner into a duplicate comment + a misleading "runner failed" signal
+even when the work shipped (OP-690 incident, 2026-05-07 / OP-1777).
 
 Full ticket description follows:
 
@@ -1664,8 +1672,9 @@ def _invoke_cli(
     try:
         # OP-1803 (§2c, v1): the agent CLI is network-allowed (blanket-allow
         # for v1) so claude/codex can reach the model API + git remote from
-        # inside the jail. INERT until bwrap is re-enabled — with bwrap absent
-        # (current fleet state) wrap_in_bubblewrap returns the raw cmd.
+        # inside the jail. NOTE (2026-06-29): bwrap is now ENABLED fleet-wide
+        # (sandbox=wrapped, ENFORCE=1) — this path is ACTIVE, not inert. With
+        # bwrap absent (dev workstation) wrap_in_bubblewrap returns the raw cmd.
         wrapped_cmd = runner_sandbox.wrap_in_bubblewrap(
             cmd, worktree_path=effective_worktree, ticket_key=ticket_key,
             env=scrubbed_env, dep_cache_mounts=dep_cache_mounts,
@@ -1732,6 +1741,36 @@ def _invoke_cli(
         # never outlive the invocation in /tmp. No-op in the degraded/raw spawn
         # (nothing was seeded).
         runner_sandbox.cleanup_cli_home(ticket_key)
+
+
+def _relay_runner_report(client: "jira_dispatch.DispatchClient", key: str) -> None:
+    """B-Voice (2026-06-29): relay the jailed agent's self-written report to JIRA.
+
+    The sandbox scrubs JIRA creds from the agent CLI (OP-1777), so it cannot post
+    to JIRA itself — it writes its AC verification (success) / blocked-or-surrender
+    explanation (charter §4) to ``runner_sandbox.runner_report_path(key)`` and we
+    (outside the jail, holding the creds) post it here, then delete the file.
+
+    Best-effort + NON-FATAL: a missing file (agent wrote nothing / degraded raw
+    spawn) or any relay error is a silent no-op — it must never turn the runner
+    exit non-zero nor block the push pipeline. Called once right after the CLI
+    returns, so it surfaces the agent's voice for EVERY outcome (success, revert,
+    push-fail, tamper).
+    """
+    try:
+        path = runner_sandbox.runner_report_path(key)
+        if not path.exists():
+            return
+        body = path.read_text(errors="replace").strip()
+        if body:
+            jira_dispatch.add_comment(client, key, f"[runner-report]\n\n{body}")
+            print(f"[runner] relayed agent report for {key} ({len(body)} chars)")
+        path.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001 — relay is best-effort, never fatal
+        print(
+            f"[runner] report relay failed for {key}: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
 
 
 def _finalize_under_review(
@@ -3516,6 +3555,12 @@ def _main_impl() -> int:
         ticket_key=snapshot.key, worktree_path=worktree_path,
         tenant_id=tenant_id,
     )
+
+    # B-Voice (2026-06-29): relay the agent's self-written report (AC on success
+    # / blocked-or-surrender explanation when stuck) to JIRA via our out-of-jail
+    # creds. Runs BEFORE the outcome branches below so the agent's voice is
+    # surfaced for every path (success/tamper/push-fail/revert).
+    _relay_runner_report(client, snapshot.key)
 
     # OP-836 post-CLI verify — abort the Gerrit-push pipeline if the CLI
     # tampered with the worktree.

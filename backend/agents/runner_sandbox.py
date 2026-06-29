@@ -619,6 +619,30 @@ def gradle_home_for(ticket_key: str) -> Path:
     return Path("/tmp") / f"runner-{_safe_ticket(ticket_key)}" / _GRADLE_HOME_DIRNAME
 
 
+RUNNER_REPORT_FILENAME = "runner-report.md"
+
+
+def runner_report_path(ticket_key: str) -> Path:
+    """Path where the jailed agent writes its JIRA report for the wrapper to
+    relay out-of-jail (B-Voice, 2026-06-29).
+
+    The bwrap jail scrubs every ``OMNISIGHT_*`` secret — incl the JIRA token —
+    from the agent CLI (OP-1777, prompt-injection defense), so the agent CANNOT
+    post to JIRA itself. Instead it writes its AC verification (success) or its
+    blocked/surrender explanation (stuck — charter §4) to THIS file, and the
+    wrapper (which holds the creds, outside the jail) posts it.
+
+    The path lives in the already-RW per-ticket scratch ROOT
+    (``/tmp/runner-<ticket>``) — identity-bound into the jail (``--bind tmp_dir
+    tmp_dir``), a SIBLING of ``cli-home`` so it survives :func:`cleanup_cli_home`
+    (which only wipes the cli-home subdir), and NON-git so it is never committed.
+    NEVER bind real JIRA creds into the jail — this one-way file IS the
+    isolation-preserving relay channel. Creates the scratch dir (via
+    :func:`_tmp_dir_for`) so the agent can write immediately.
+    """
+    return _tmp_dir_for(ticket_key) / RUNNER_REPORT_FILENAME
+
+
 def _host_home(env: Mapping[str, str]) -> Path:
     return Path(env.get("HOME") or os.path.expanduser("~")).expanduser()
 
