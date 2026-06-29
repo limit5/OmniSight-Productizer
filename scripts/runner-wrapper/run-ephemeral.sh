@@ -73,6 +73,22 @@ fi
 
 export GIT_SSH_COMMAND="ssh -i $SSH_KEY -o IdentitiesOnly=yes -o StrictHostKeyChecking=no"
 
+# OP-2489 L1-Obs (EPIC OP-2485): restore the shared Postgres DSN so the runner's
+# telemetry sinks can write — runner_metrics (0231) + provider_usage_event /
+# provider_quota_state (provider_quota_tracker). The legacy deploy wrappers
+# (deploy/runner-wrappers/runner-{claude,codex}.sh) source this exact block, but
+# the Family-F migration to this ephemeral wrapper (2026-05-18) dropped it, so the
+# fleet ran observability-blind (all three tables empty until 2026-06-29). `set -a`
+# auto-exports the assignments (audit-db.env has no `export`) so the inherited env
+# reaches the `python3 auto-runner-jira.py` invocation below. Best-effort: a DB
+# outage NEVER wedges a pickup (runner_metrics_recorder swallows MetricsInsertFailed),
+# and `|| true` keeps a missing cred file from aborting the wrapper. The DSN is the
+# wrapper's own env only — runner_sandbox's ENV_ALLOWLIST still scrubs it from the
+# jailed agent CLI (OP-1777), so no creds leak into the sandbox.
+set -a
+. /home/user/.config/omnisight/audit-db.env 2>/dev/null || true
+set +a
+
 cycle=0
 while true; do
     cycle=$((cycle + 1))
