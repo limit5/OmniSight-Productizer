@@ -35,6 +35,19 @@ daemons:
     heartbeat_event: heartbeat
     max_silence_minutes: 10
 
+  # OP-2488 — L1 runner-supervisor (the automated Claude-in-tmux). Timer-driven
+  # oneshot; run-supervisor.sh writes the heartbeat file on each successful
+  # --execute. The timer fires every 10 min, so 30 min of silence = 3 missed
+  # firings = a real stall (not a one-off clone/network blip). The supervisor is
+  # NON-safety-critical (the L0 floor is the safety net) — this watchdog just
+  # keeps the auto-rescues running; if it goes silent the runners self-fail-safe.
+  - unit: runner-supervisor.timer
+    scope: user
+    log_path: /home/user/work/sora/logs/supervisor/run.log
+    heartbeat_file_path: /home/user/.local/state/omnisight-supervisor/heartbeat
+    heartbeat_event: heartbeat
+    max_silence_minutes: 30
+
 # How far back to scan the daemon log file for the most recent
 # heartbeat (in bytes). 256 KiB easily covers several hours of JSON
 # heartbeat lines without slurping a multi-day log when journals

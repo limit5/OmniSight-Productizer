@@ -1,0 +1,19 @@
+; OmniSight L1 runner-supervisor (OP-2488 / EPIC OP-2485) — the automated
+; rule-engine fleet rescue. Timer-driven oneshot: clone develop fresh, run the
+; non-destructive rescues once, write a heartbeat the watchdog reads.
+; Install (user-level, no sudo):
+;   cp deploy/systemd/runner-supervisor.{service,timer} ~/.config/systemd/user/
+;   systemctl --user daemon-reload && systemctl --user enable --now runner-supervisor.timer
+[Unit]
+Description=OmniSight L1 runner-supervisor (OP-2488) — rule-engine fleet rescue
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=900
+StartLimitBurst=4
+[Service]
+Type=oneshot
+ExecStart=/home/user/work/sora/OmniSight-Productizer/scripts/runner-wrapper/run-supervisor.sh
+TimeoutStartSec=300
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=runner-supervisor

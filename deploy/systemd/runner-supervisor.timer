@@ -1,0 +1,12 @@
+; Timer for the L1 runner-supervisor (OP-2488). Fires every 10 min; OnBootSec
+; gives an early firing after boot; Persistent catches up missed firings.
+[Unit]
+Description=Run the OmniSight L1 runner-supervisor every 10 min (OP-2488)
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=true
+Unit=runner-supervisor.service
+[Install]
+WantedBy=timers.target
