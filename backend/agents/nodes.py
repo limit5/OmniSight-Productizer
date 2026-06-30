@@ -52,7 +52,7 @@ from typing import Any, Awaitable, Callable
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
-from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, TOOL_MAP, set_active_workspace
+from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -99,13 +99,17 @@ def _parse_model_spec(model_name: str) -> tuple[str | None, str | None]:
     return None, model_name
 
 
-def _get_llm(bind_tools_for: str | None = None, model_name: str = ""):
+def _get_llm(bind_tools_for: str | None = None, model_name: str = "", extra_tools=None):
     """Get the LLM, optionally with per-agent provider/model override.
 
     Args:
         bind_tools_for: Agent type for tool binding.
         model_name: Per-agent model spec (e.g. "openrouter:qwen/qwen3-235b").
                     If empty, uses global settings.llm_provider/model.
+        extra_tools: Optional explicit tool list to bind ON TOP of (or
+                    instead of) the guild tools. Used by the conversation
+                    node to expose just ``create_task`` on the otherwise
+                    tool-free chat path (Gap-② routing fix, 2026-06-30).
 
     Z.6.3: ollama is not short-circuited here — GUILD_TOOLS is provider-agnostic
     (keyed by agent_type, not provider).  ``get_llm()`` applies
@@ -117,6 +121,8 @@ def _get_llm(bind_tools_for: str | None = None, model_name: str = ""):
         if bind_tools_for
         else None
     )
+    if extra_tools:
+        tools = list(tools or []) + list(extra_tools)
     provider, model = _parse_model_spec(model_name)
     guild = bind_tools_for if bind_tools_for in GUILD_TOOLS else None
     return get_llm(
@@ -277,14 +283,18 @@ def orchestrator_node(state: GraphState) -> dict:
     if llm:
         sys = SystemMessage(content=(
             "You are the OmniSight Orchestrator. Determine the user's intent:\n"
-            "1. If the user is asking a QUESTION, requesting advice, or inquiring about "
-            "status (NOT asking to execute/build/compile/test/deploy), respond ONLY with: CONVERSATIONAL\n"
-            "2. Otherwise, decide which specialist agent should handle the task. "
-            "Valid agents: firmware, software, validator, reporter, reviewer, general. "
-            "Respond with agent name(s) comma-separated (primary first).\n"
+            "1. If the user is asking a QUESTION, requesting advice, inquiring about "
+            "status, OR discussing/planning what to build and asking you to file or "
+            "arrange a task (the conversational orchestrator handles task-filing "
+            "itself), respond ONLY with: CONVERSATIONAL\n"
+            "2. Otherwise, when the user gives a direct one-shot execution command "
+            "(build/compile/test/deploy now), decide which specialist agent should "
+            "handle it. Valid agents: firmware, software, validator, reporter, "
+            "reviewer, general. Respond with agent name(s) comma-separated (primary first).\n"
             "Examples:\n"
             "- 'What is ISP tuning?' → CONVERSATIONAL\n"
             "- 'How many agents are running?' → CONVERSATIONAL\n"
+            "- '幫我建立對應的 OmniSight Task / file this as a task' → CONVERSATIONAL\n"
             "- 'Compile the firmware driver' → firmware\n"
             "- 'Run tests and generate report' → validator,reporter"
         ))
@@ -1564,6 +1574,16 @@ async def conversation_node(state: GraphState) -> dict:
     """
     state_summary = _build_state_summary()
     llm = _get_llm(bind_tools_for=None, model_name=state.model_name)
+    # Gap-② routing fix (2026-06-30): the conversational path is where the
+    # user actually talks to the orchestrator, so it — not just the
+    # specialist task nodes — must be able to FILE work. Bind just
+    # ``create_task`` here (the gated Story filer); everything else stays
+    # tool-free. ``llm`` (no tools) is still used for the offline fallback
+    # and for summarising a tool result without re-triggering the tool.
+    llm_tools = _get_llm(
+        bind_tools_for=None, model_name=state.model_name,
+        extra_tools=ORCHESTRATION_TOOLS,
+    ) if llm else None
 
     # R20 Phase 0: pull last user message (if any) for RAG + injection
     # detection. If there's no user message, skip retrieval and run
@@ -1637,9 +1657,17 @@ async def conversation_node(state: GraphState) -> dict:
         "- If retrieved docs don't answer the question, say so and "
         "suggest where the operator might look (without inventing a "
         "doc path).\n"
-        "- If the user wants to execute a task (compile, test, deploy), "
-        "suggest typing a command like \"compile firmware\" or creating "
-        "a task via the Task Backlog.\n"
+        "- You are the user's orchestrator. When the user wants real work "
+        "done (build / fix / implement / a tool or feature) AND has "
+        "confirmed the scope, CALL the create_task tool ONCE to file it as "
+        "a runner Story — pick the closest area and write crisp acceptance "
+        "criteria. Refer back to earlier turns in this conversation for the "
+        "details instead of re-asking what the user already told you. The "
+        "Story is filed GATED (it will not dispatch until the operator "
+        "releases it), so report the ticket key and that it awaits their "
+        "approval — never claim the work has started. Do not file before "
+        "the user agrees on scope; for a quick one-off command (compile / "
+        "test / deploy) you may instead suggest typing it directly.\n"
         "- Answer in the same language as the user's question."
     )
 
@@ -1673,7 +1701,34 @@ async def conversation_node(state: GraphState) -> dict:
 
     emit_pipeline_phase("conversation", "Generating conversational response")
     try:
-        resp = llm.invoke([sys_prompt, *send_messages])
+        resp = (llm_tools or llm).invoke([sys_prompt, *send_messages])
+        # Gap-② routing fix: if the model decided to file work, run the
+        # tool(s) it requested (only create_task is bound here), then let
+        # the plain (tool-free) LLM turn the result into a natural-language
+        # reply. Bounded to a single tool round — the summary LLM has no
+        # tools, so it cannot re-trigger create_task into a loop.
+        tool_calls = getattr(resp, "tool_calls", None) or []
+        if tool_calls:
+            from langchain_core.messages import ToolMessage
+            emit_pipeline_phase("conversation", f"Filing {len(tool_calls)} task(s)")
+            followup = [sys_prompt, *send_messages, resp]
+            for call in tool_calls:
+                name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
+                args = (call.get("args") if isinstance(call, dict) else getattr(call, "args", {})) or {}
+                cid = (call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or name
+                fn = TOOL_MAP.get(name)
+                if fn is None:
+                    out = f"[ERROR] Unknown tool: {name}"
+                else:
+                    try:
+                        out = await fn.ainvoke(args)
+                    except Exception as tool_exc:  # noqa: BLE001
+                        out = f"[ERROR] {name} failed: {tool_exc}"
+                emit_tool_progress(
+                    name, "done" if str(out).startswith("[OK]") else "error", str(out),
+                )
+                followup.append(ToolMessage(content=str(out), tool_call_id=cid))
+            resp = llm.invoke(followup)
         answer = resp.content  # type: ignore[union-attr]
         # R20 Phase 0: redact accidentally-leaked secrets from the
         # LLM's output BEFORE it reaches the chat / SSE / audit log.
