@@ -54,7 +54,7 @@ from __future__ import annotations
 import os
 from types import MappingProxyType
 
-from backend.llm_adapter import END, HumanMessage, StateGraph
+from backend.llm_adapter import AIMessage, END, HumanMessage, StateGraph
 from backend.agents.state import GraphState
 from backend.agents.nodes import (
     _should_retry,
@@ -264,6 +264,7 @@ async def run_graph(
     size: TopologySize = "M",
     firewall_result: FirewallResult | None = None,
     firewall_trust: str = "external",
+    prior_messages: list[tuple[str, str]] | None = None,
 ) -> GraphState:
     """Execute the full agent pipeline for a user command.
 
@@ -316,7 +317,23 @@ async def run_graph(
                 handoff_context,
             )
 
-    messages = [HumanMessage(content=user_command)]
+    # Gap-A memory wiring (dogfood 2026-06-30): the chat entry point now
+    # threads the current session's prior turns in as ``prior_messages``
+    # — ``(role, content)`` pairs oldest-first — so the orchestrator
+    # carries conversation state instead of cold-starting every turn.
+    # ``user``/``operator`` map to HumanMessage, everything else
+    # (orchestrator/assistant/system) collapses to AIMessage so the model
+    # sees a clean alternation. Empty/None keeps the legacy single-shot
+    # behaviour for every non-chat caller (runner, specialist handoffs).
+    history: list = []
+    for role, content in prior_messages or []:
+        if not content:
+            continue
+        if role in ("user", "operator", "human"):
+            history.append(HumanMessage(content=content))
+        else:
+            history.append(AIMessage(content=content))
+    messages = [*history, HumanMessage(content=user_command)]
     initial_state = GraphState(
         user_command=user_command,
         messages=messages,

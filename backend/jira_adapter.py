@@ -282,6 +282,64 @@ class JiraAdapter:
             ))
         return refs
 
+    async def create_story(
+        self,
+        summary: str,
+        description: str,
+        *,
+        project: str = "",
+        labels: list[str] | None = None,
+        issuetype: str = "Story",
+        priority: str = "",
+    ) -> SubtaskRef:
+        """Create a top-level issue (default issuetype ``Story``) and return
+        a :class:`SubtaskRef` for it (``parent`` left empty).
+
+        Create-side counterpart to :meth:`create_subtasks`. The
+        orchestrator's ``create_task`` tool (Gap-B, dogfood 2026-06-30)
+        uses it to turn an understood user intent into a runner-pickable
+        Story — issuetype hard-defaults to ``Story`` because PICKUP_JQL
+        only ever selects ``Story`` / ``ストーリー``.
+        """
+        proj = project or self.project_key
+        if not proj:
+            raise AdapterError(
+                self.vendor, "create_story", "no project key configured",
+            )
+        fields: dict[str, Any] = {
+            "project": {"key": proj},
+            "summary": summary,
+            "description": description,
+            "issuetype": {"name": issuetype},
+        }
+        if labels:
+            fields["labels"] = list(labels)
+        if priority:
+            fields["priority"] = {"name": priority}
+        request_body = {"fields": fields}
+        status, body = await self._api(
+            "POST", "/rest/api/2/issue", request_body,
+        )
+        await audit_outbound(
+            vendor=self.vendor, action="create_story", ticket=proj,
+            request=request_body, response=body, status_code=status,
+        )
+        if (status < 200 or status >= 300 or not isinstance(body, dict)
+                or not body.get("key")):
+            raise AdapterError(
+                self.vendor, "create_story",
+                f"create failed: HTTP {status}",
+                status_code=status, response=body,
+            )
+        key = body.get("key") or ""
+        return SubtaskRef(
+            vendor=self.vendor,
+            ticket=key,
+            url=self._browse_url(key),
+            parent="",
+            extra={"id": body.get("id", "")},
+        )
+
     async def update_status(self, ticket: str, status: IntentStatus,
                             *, comment: str = "") -> dict[str, Any]:
         _require_ticket(ticket)

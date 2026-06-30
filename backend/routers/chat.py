@@ -95,12 +95,43 @@ def _build_suggestion(result) -> AISuggestion | None:
     return None
 
 
-async def _run_pipeline(user_msg: str) -> OrchestratorMessage:
+# How many prior turns of the current session to feed the orchestrator
+# as conversation memory (Gap-A, dogfood 2026-06-30). 24 messages ≈ 12
+# user/orchestrator turns — enough to carry a multi-step intent ("the
+# RK3588 health tool we discussed") without blowing the LLM context
+# budget; the graph's own token-budget node trims further if needed.
+_MEMORY_TURNS = 24
+
+
+async def _load_session_memory(
+    conn: asyncpg.Connection, user_id: str, session_id: str,
+) -> list[tuple[str, str]]:
+    """Return the current session's prior turns as ``(role, content)``
+    pairs, oldest-first, for injection into ``run_graph``. Empty list
+    on any failure — memory is a best-effort enhancement, never a hard
+    dependency of the chat path.
+    """
+    if not session_id:
+        return []
+    try:
+        from backend import db as _db
+        rows = await _db.list_chat_messages(
+            conn, user_id, session_id=session_id, limit=_MEMORY_TURNS,
+        )
+        return [(r["role"], r["content"]) for r in rows if r.get("content")]
+    except Exception as exc:  # noqa: BLE001 — never let memory break chat
+        logger.debug("session memory load failed (user=%s): %s", user_id, exc)
+        return []
+
+
+async def _run_pipeline(
+    user_msg: str, prior_messages: list[tuple[str, str]] | None = None,
+) -> OrchestratorMessage:
     """Run the LangGraph pipeline. Emits real-time events via the event bus."""
     try:
         emit_pipeline_phase("start", f"Processing: {user_msg[:80]}")
         add_system_log(f"Command received: {user_msg[:60]}", "info")
-        result = await run_graph(user_msg)
+        result = await run_graph(user_msg, prior_messages=prior_messages)
         add_system_log(f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s)", "info")
         emit_pipeline_phase("complete", f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s) used")
         suggestion = _build_suggestion(result)
@@ -457,6 +488,9 @@ async def chat(
     conn: asyncpg.Connection = Depends(get_conn),
 ):
     session_id = _session_id_from_request(request)
+    # Load conversation memory BEFORE persisting the current turn so the
+    # injected history excludes the message we're about to answer.
+    prior = await _load_session_memory(conn, user.id, session_id)
     user_message = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",
         role=MessageRole.user,
@@ -469,7 +503,7 @@ async def chat(
     if slash_reply:
         await _persist_and_emit(conn, slash_reply, user_id=user.id, session_id=session_id)
         return ChatResponse(message=slash_reply)
-    reply = await _run_pipeline(body.message)
+    reply = await _run_pipeline(body.message, prior_messages=prior)
     await _persist_and_emit(conn, reply, user_id=user.id, session_id=session_id)
     return ChatResponse(message=reply)
 
@@ -493,9 +527,12 @@ async def chat_stream(
     starts, so a second device sees them appear atomically.
     """
     session_id = _session_id_from_request(request)
+    # Conversation memory — loaded before the current turn is persisted
+    # (persist happens after the pipeline below) so it isn't echoed back.
+    prior = await _load_session_memory(conn, user.id, session_id)
     # Slash command interception
     slash_reply = await _try_slash_command(conn, body.message)
-    reply = slash_reply if slash_reply else await _run_pipeline(body.message)
+    reply = slash_reply if slash_reply else await _run_pipeline(body.message, prior_messages=prior)
 
     user_msg = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",

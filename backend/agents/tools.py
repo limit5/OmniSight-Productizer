@@ -962,6 +962,109 @@ async def add_task_comment(task_id: str, content: str) -> str:
     return f"[OK] Comment added to task {task_id} by {author}"
 
 
+# The 9-value area whitelist the runner's capability_matrix recognises.
+# An unknown area silently dead-ends in an infinite pre-pickup loop
+# (feedback_runner_recognized_areas), so we validate hard here rather
+# than let a typo reach JIRA.
+_RUNNER_AREAS = {
+    "backend", "db", "devops", "docs", "embedded",
+    "frontend", "security", "tests", "tooling",
+}
+_JIRA_PRIORITIES = {"Highest", "High", "Medium", "Low", "Lowest"}
+
+
+@tool
+async def create_task(
+    title: str,
+    summary: str,
+    area: str,
+    acceptance_criteria: str = "",
+    capabilities: str = "",
+    priority: str = "",
+) -> str:
+    """File a runner-pickable JIRA Story from an understood user intent.
+
+    This is the bridge from a chat conversation to real autonomous work:
+    once the user has CONFIRMED what they want built, call this ONCE to
+    create the Story the runner fleet will execute. Do not call it to
+    explore options or before the user agrees on scope.
+
+    SAFETY — the Story is filed *gated*: it carries every discipline
+    label EXCEPT the ``class:*`` label the runner's PICKUP_JQL requires,
+    plus ``requires:operator-approval``. So it is visible and complete
+    but will NOT be auto-dispatched until a human releases it (by adding
+    e.g. ``class:subscription-claude``). Never tell the user work has
+    started — only that the task has been filed for their approval.
+
+    Args:
+        title: Short imperative title (e.g. "RK3588 板級健康檢查工具").
+        summary: What to build and why, in the user's own framing.
+        area: ONE of backend/db/devops/docs/embedded/frontend/security/
+            tests/tooling — the runner capability area. Pick the closest.
+        acceptance_criteria: How to know it's done. If omitted, a 4-AC
+            skeleton (Code/Deploy/Integration/Exercised) is inserted for
+            the operator to fill in.
+        capabilities: Comma-separated extra runner capabilities to enable
+            (e.g. "gerrit_push"). Most code tasks need none.
+        priority: Highest/High/Medium/Low/Lowest. Blank = project default.
+    """
+    area = (area or "").strip().lower()
+    if area not in _RUNNER_AREAS:
+        return (
+            f"[ERROR] area must be one of {sorted(_RUNNER_AREAS)} — got "
+            f"{area!r}. Pick the closest runner capability area."
+        )
+    if not title.strip() or not summary.strip():
+        return "[ERROR] title and summary are both required."
+
+    labels = [
+        "agent:auto",
+        "type:feature",
+        f"area:{area}",
+        "requires:operator-approval",
+        "op:orchestrator-filed",
+    ]
+    for cap in (c.strip() for c in capabilities.split(",")):
+        if cap:
+            labels.append(f"capability:enable={cap}")
+
+    ac = acceptance_criteria.strip() or (
+        "- [ ] Code: <implementation merged>\n"
+        "- [ ] Deploy: <where it runs / how it ships>\n"
+        "- [ ] Integration: <wired into the calling system>\n"
+        "- [ ] Exercised: <proven end-to-end on real input>"
+    )
+    description = (
+        f"{summary.strip()}\n\n"
+        f"h3. Acceptance Criteria (4-AC)\n{ac}\n\n"
+        f"----\n"
+        f"_Filed by the OmniSight orchestrator from a user chat session. "
+        f"GATED: add a class:* label (e.g. class:subscription-claude) to "
+        f"release it to the runner fleet._"
+    )
+    tagged_title = f"[OP][{area}] {title.strip()}"
+
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        ref = await adapter.create_story(
+            summary=tagged_title,
+            description=description,
+            labels=labels,
+            priority=priority if priority in _JIRA_PRIORITIES else "",
+        )
+    except Exception as exc:  # noqa: BLE001 — surface, never crash the graph
+        return f"[ERROR] Failed to create Story: {exc}"
+
+    return (
+        f"[OK] Filed gated Story {ref.ticket} — {tagged_title}\n"
+        f"  {ref.url}\n"
+        f"  labels: {', '.join(labels)}\n"
+        f"  ⚠ GATED — not yet dispatched to the runner. To release it, "
+        f"add a class:subscription-claude (or -codex) label."
+    )
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  7. Report generation tools
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2655,6 +2758,11 @@ GIT_TOOLS = [git_status, git_log, git_diff, git_diff_staged, git_branch, git_add
 BASH_TOOLS = [run_bash]
 REVIEW_TOOLS = [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
 TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
+# Orchestration tools are the user-facing planner's lever to turn an
+# understood intent into real runner work. Deliberately NOT folded into
+# ALL_TOOLS / TASK_TOOLS — only the user-facing guilds (general, devops)
+# may file Stories; specialists execute, they don't queue new work.
+ORCHESTRATION_TOOLS = [create_task]
 REPORT_TOOLS = [generate_artifact_report]
 SIMULATION_TOOLS = [run_simulation]
 
@@ -2662,7 +2770,7 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS}
 
 _ARCHITECT_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS
 _DESIGN_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS
@@ -2705,8 +2813,8 @@ _REVIEWER_TOOLS = (
     + [get_next_task, add_task_comment]
     + MEMORY_TOOLS
 )
-_GENERAL_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS
-_DEVOPS_TOOLS = ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS
+_GENERAL_TOOLS = ALL_TOOLS + ORCHESTRATION_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS
+_DEVOPS_TOOLS = ALL_TOOLS + ORCHESTRATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS
 _MECHANICAL_TOOLS = FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS
 # BP.N.4: WebSearch is opt-in for latest-knowledge guilds only.
 _INTEL_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS

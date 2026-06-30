@@ -3642,7 +3642,7 @@ async def insert_chat_message(conn, msg: dict) -> None:
 
 
 async def list_chat_messages(
-    conn, user_id: str, *, limit: int = 200,
+    conn, user_id: str, *, session_id: str | None = None, limit: int = 200,
 ) -> list[dict]:
     """Return the most-recent ``limit`` messages for ``user_id`` in
     chronological (oldest-first) order so the chat UI can ``setMessages``
@@ -3653,9 +3653,20 @@ async def list_chat_messages(
     Tenant scope is enforced via :func:`tenant_where_pg` so a
     cross-tenant token can't read another tenant's chat log even if
     the ``user_id`` matched.
+
+    When ``session_id`` is supplied the result is additionally pinned
+    to that conversation thread — this is the path the orchestrator
+    uses to load *just the current session's* prior turns as LLM
+    context (Gap-A memory wiring, dogfood 2026-06-30), so unrelated
+    threads under the same user don't bleed into the prompt. The
+    history view (``GET /chat/history``) keeps calling without it and
+    still gets the whole user log.
     """
     conditions: list[str] = ["user_id = $1"]
     params: list = [user_id]
+    if session_id:
+        params.append(session_id)
+        conditions.append(f"session_id = ${len(params)}")
     tenant_where_pg(conditions, params)
     params.append(int(limit))
     sql = (
