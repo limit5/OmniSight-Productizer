@@ -269,6 +269,57 @@ def _git_metadata_mounts(worktree_path: Path) -> tuple[Path, ...]:
     return tuple(mounts)
 
 
+def _git_alternates_mounts(worktree_path: Path) -> tuple[Path, ...]:
+    """Return external object stores this worktree borrows via *alternates*.
+
+    The runner clones the self-repo worktree with ``git clone --reference
+    <git-mirror>``, which leaves an ``objects/info/alternates`` file pointing
+    the clone's object store at the host mirror (e.g.
+    ``/home/user/git-mirror/omnisight.git/objects``). Those base objects live
+    OUTSIDE the worktree, so :func:`_git_metadata_mounts` (which only surfaces
+    the git-dir / common-dir) never binds them. Without them, ``git commit``
+    inside the jail cannot resolve the parent commit's objects and aborts —
+    the exact ``runner-blocked:gerrit-setup-fail`` seen on OP-2495 (2026-07-01).
+
+    These are RO by the caller: a commit only READS base objects from the
+    alternate; new objects are written into the worktree's own (RW-bound)
+    object dir. Customer-tenant clones use ``--no-local`` (no alternates) and
+    never reach here, so the L8-fs tenant-isolation contract is unaffected.
+    """
+    worktree_abs = worktree_path.resolve()
+    try:
+        objects_dir = Path(subprocess.run(
+            ["git", "-C", str(worktree_abs), "rev-parse", "--git-path", "objects"],
+            check=True, capture_output=True, text=True, timeout=5,
+        ).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return ()
+    if not objects_dir.is_absolute():
+        objects_dir = (worktree_abs / objects_dir).resolve()
+    alternates_file = objects_dir / "info" / "alternates"
+    if not alternates_file.exists():
+        return ()
+
+    mounts: list[Path] = []
+    try:
+        lines = alternates_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ()
+    for raw in lines:
+        raw = raw.strip()
+        if not raw or raw.startswith("#"):
+            continue
+        alt = Path(raw)
+        if not alt.is_absolute():
+            # Relative entries are resolved against the objects dir.
+            alt = (objects_dir / alt).resolve()
+        if not alt.exists() or _is_relative_to(alt, worktree_abs):
+            continue
+        if alt not in mounts:
+            mounts.append(alt)
+    return tuple(mounts)
+
+
 def _nvm_version_dir_of(node_path: Path) -> Path | None:
     """Return the ``.../versions/node/<ver>/`` dir containing ``node_path``.
 
@@ -801,6 +852,15 @@ def _build_bubblewrap_argv(
     for git_dir in _git_metadata_mounts(worktree_path):
         git_dir_abs = str(git_dir)
         argv += ["--bind", git_dir_abs, git_dir_abs]
+
+    # Borrowed object stores (git clone --reference / alternates) live outside
+    # the worktree and are RO — a commit reads parent objects from them but
+    # writes new objects into the worktree's own RW object dir. Without this,
+    # ``git commit`` for the self-repo aborts in the jail (OP-2495 gerrit-
+    # setup-fail, 2026-07-01).
+    for alt_dir in _git_alternates_mounts(worktree_path):
+        alt_abs = str(alt_dir)
+        argv += ["--ro-bind", alt_abs, alt_abs]
 
     # OP-1781 (1A.4): RO-bind the pre-warmed per-tenant dependency cache at the
     # package manager's default HOME-relative location so the build finds it
