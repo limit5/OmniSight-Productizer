@@ -2813,8 +2813,15 @@ _REVIEWER_TOOLS = (
     + [get_next_task, add_task_comment]
     + MEMORY_TOOLS
 )
-_GENERAL_TOOLS = ALL_TOOLS + ORCHESTRATION_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS
-_DEVOPS_TOOLS = ALL_TOOLS + ORCHESTRATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS
+# create_task (ORCHESTRATION_TOOLS) is deliberately NOT bound to the
+# specialist guilds. Filing happens ONLY on the conversational path
+# (conversation_node binds it via extra_tools), which surfaces the tool's
+# REAL result; the heavy specialist pipeline once hallucinated a fake
+# ticket id instead of calling the tool (dogfood 2026-06-30).
+# ORCHESTRATION_TOOLS stays in TOOL_MAP so conversation_node's executor
+# can still resolve create_task by name.
+_GENERAL_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + IMAGE_TOOLS
+_DEVOPS_TOOLS = ALL_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS
 _MECHANICAL_TOOLS = FILE_TOOLS + BASH_TOOLS + TASK_TOOLS + SIMULATION_TOOLS + MEMORY_TOOLS + ARTIFACT_TOOLS
 # BP.N.4: WebSearch is opt-in for latest-knowledge guilds only.
 _INTEL_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS

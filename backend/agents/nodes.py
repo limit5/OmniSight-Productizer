@@ -208,6 +208,33 @@ def _is_question(text: str) -> bool:
     return bool(_QUESTION_PATTERNS.search(text))
 
 
+# Deterministic "file a task" intent (dogfood 2026-06-30). create_task is
+# only reachable — and only surfaces its REAL result — on the conversational
+# path (conversation_node). Letting the LLM router decide was
+# non-deterministic and once landed on the heavy general-specialist path,
+# which hallucinated a fake ticket id (SORA-28) and timed out. A request
+# that pairs a create-verb with a task-noun (either order, EN or CJK) is
+# pinned to the conversational path here. Over-matching is harmless:
+# conversation_node only actually files when the model judges the user has
+# confirmed concrete scope.
+_TASK_CREATE_VERB = re.compile(
+    r"建立|建個|建成|新增|開票|開單|開個|開一[張個]|安排|登記|提交|"
+    r"create|file|open|raise|submit|log",
+    re.IGNORECASE,
+)
+_TASK_CREATE_NOUN = re.compile(
+    r"task|工作|任務|工單|票|ticket|story|issue|backlog",
+    re.IGNORECASE,
+)
+
+
+def _is_task_creation_intent(text: str) -> bool:
+    """True when the user is asking to create/file/arrange a task."""
+    if not text:
+        return False
+    return bool(_TASK_CREATE_VERB.search(text) and _TASK_CREATE_NOUN.search(text))
+
+
 # C2 audit (2026-04-19): before a previous-attempt error string is
 # concatenated into the next LLM invocation's system prompt, sanitize
 # it so attacker-controlled content in a tool output / exception
@@ -278,6 +305,17 @@ def orchestrator_node(state: GraphState) -> dict:
     secondary: list[str] = []
     is_conv = False
     route = "general"
+
+    # Deterministic short-circuit: a clear task-filing request always goes
+    # to the conversational path (the only reliable create_task route),
+    # bypassing the non-deterministic LLM router that once mis-routed it to
+    # the hallucinating general-specialist pipeline.
+    if _is_task_creation_intent(cmd):
+        emit_pipeline_phase("routing", "Conversational mode — task-filing request")
+        return {
+            "is_conversational": True,
+            "messages": [AIMessage(content="[ORCHESTRATOR] Entering conversational mode")],
+        }
 
     llm = _get_llm()
     if llm:
