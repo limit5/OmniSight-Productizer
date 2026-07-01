@@ -224,6 +224,28 @@ class SkillXpAward:
     branch_choice_required: bool
 
 
+@dataclass(frozen=True)
+class AtomicSkillXpAward:
+    """Return value of :meth:`PostgresSkillStateStore.award_delta_atomic`.
+
+    Mirrors the caller-visible surface of :class:`SkillXpAward` but adds
+    the ``inserted`` flag derived from Postgres's ``(xmax = 0)`` idiom,
+    so callers can tell whether this delivery won the insert race or
+    folded into a concurrent update. All XP / level fields are
+    recomputed from the returned absolute ``new_xp`` — no separate
+    read-modify-write against the row is performed.
+    """
+
+    agent_id: str
+    skill_id: str
+    applied_delta: int
+    new_xp: int
+    new_level: int
+    branch_choice: str | None
+    branch_choice_required: bool
+    inserted: bool
+
+
 # ── Pure helpers ────────────────────────────────────────────────────
 
 
@@ -501,6 +523,111 @@ class PostgresSkillStateStore:
             )
         for row in rows:
             yield _row_to_state(row)
+
+    async def award_delta_atomic(
+        self,
+        agent_id: str,
+        skill_id: str,
+        *,
+        base_delta: int,
+        outcome: str,
+        tier_l_plus: bool = False,
+    ) -> AtomicSkillXpAward:
+        """Award a skill-XP delta in ONE atomic Postgres statement.
+
+        The read-modify-write in :func:`award_skill_xp` (``get_state`` then
+        ``upsert_state``) loses updates when two runner slots deliver the
+        same ``(agent_id, skill_id)`` at once: both slots read no row,
+        both compute ``first_time_skill_use=True``, and the last upsert
+        clobbers the first. This helper folds the award into a single
+        ``INSERT ... ON CONFLICT DO UPDATE`` so the loser of the insert
+        race adds to the winner's row instead of overwriting it.
+
+        Because the applied delta depends on first-time-skill-use and
+        first-time-skill-use depends on insert-vs-update, both variants
+        are precomputed and threaded into the statement: ``first_delta``
+        lands in the ``VALUES`` clause (insert branch); ``repeat_delta``
+        lands in ``DO UPDATE SET skill_xp = ... + $repeat_delta``. The
+        RETURNING clause exposes ``(xmax = 0) AS inserted`` so the
+        caller can tell which branch fired.
+
+        ``level`` + :attr:`branch_choice_required` are recomputed in
+        Python from the returned absolute ``skill_xp``. This method
+        does NOT update the denormalised ``level`` column on the
+        conflict path (only ``skill_xp`` / ``xp``) — a future ticket
+        keeps ``level`` in sync when a caller is wired up. The store
+        currently ships inert (no caller).
+        """
+        _assert_skill_id_in_matrix(skill_id)
+        agent_id = _required("agent_id", agent_id)
+        skill_id = _required("skill_id", skill_id)
+        if isinstance(base_delta, bool) or not isinstance(base_delta, int):
+            raise TypeError("base_delta must be an int")
+        if base_delta < 0:
+            raise XPDeltaNegativeWithoutDecayContext(
+                "award_delta_atomic does not accept negative deltas; "
+                "use decay_idle_skills"
+            )
+
+        first_delta = compute_xp_delta(
+            base_delta,
+            outcome,
+            tier_l_plus=tier_l_plus,
+            first_time_skill_use=True,
+        )
+        repeat_delta = compute_xp_delta(
+            base_delta,
+            outcome,
+            tier_l_plus=tier_l_plus,
+            first_time_skill_use=False,
+        )
+        insert_level = compute_level(first_delta)
+        insert_mastery = list(_mastery_effects_for_level(insert_level))
+
+        async with _acquire(self._factory) as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO agent_skill_state (
+                    agent_id, skill_id, level, xp, skill_xp, branch_choice,
+                    last_active_at, last_used_at, last_taught_at, mastery_effects,
+                    created_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $4, NULL, NOW(), NOW(), NULL, $5,
+                        NOW(), NOW())
+                ON CONFLICT (agent_id, skill_id) DO UPDATE
+                    SET skill_xp = agent_skill_state.skill_xp + $6,
+                        xp = agent_skill_state.skill_xp + $6,
+                        last_active_at = NOW(),
+                        last_used_at = NOW(),
+                        updated_at = NOW()
+                RETURNING skill_xp, branch_choice, (xmax = 0) AS inserted
+                """,
+                agent_id,
+                skill_id,
+                insert_level,
+                first_delta,
+                insert_mastery,
+                repeat_delta,
+            )
+
+        new_xp = int(row["skill_xp"])
+        inserted = bool(row["inserted"])
+        branch_choice = row["branch_choice"]
+        new_level = compute_level(new_xp)
+        applied_delta = first_delta if inserted else repeat_delta
+        branch_required = (
+            new_level >= BRANCH_LOCK_LEVEL and branch_choice is None
+        )
+        return AtomicSkillXpAward(
+            agent_id=agent_id,
+            skill_id=skill_id,
+            applied_delta=applied_delta,
+            new_xp=new_xp,
+            new_level=new_level,
+            branch_choice=branch_choice,
+            branch_choice_required=branch_required,
+            inserted=inserted,
+        )
 
 
 # ── Public operations ───────────────────────────────────────────────
@@ -819,6 +946,7 @@ def _utc(value: datetime) -> datetime:
 # UI callers don't need to know it lives in skill_matrix.
 __all__ = [
     "ANTI_GRIND_MULTIPLIER",
+    "AtomicSkillXpAward",
     "BRANCH_LOCK_LEVEL",
     "DECAY_RATE_PER_WEEK",
     "FIRST_TIME_SKILL_MULTIPLIER",

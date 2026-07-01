@@ -17,16 +17,19 @@ Covers the 10 AC cases listed on OP-217:
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
 
 from backend.agents.skill_leveling import (
+    AtomicSkillXpAward,
     BRANCH_LOCK_LEVEL,
     DECAY_RATE_PER_WEEK,
     InMemorySkillStateStore,
     LEVEL_5_CAP_THRESHOLD,
     LEVEL_THRESHOLDS,
     LevelComputeOverflow,
+    PostgresSkillStateStore,
     SkillBranchAlreadyLocked,
     SkillIdNotInMatrix,
     SkillLevelingError,
@@ -430,3 +433,201 @@ def test_branch_lock_level_is_three():
 def test_level_thresholds_are_strictly_increasing():
     values = [LEVEL_THRESHOLDS[level] for level in sorted(LEVEL_THRESHOLDS)]
     assert all(values[i] < values[i + 1] for i in range(len(values) - 1))
+
+
+# ── PostgresSkillStateStore.award_delta_atomic (S1b, OP-2501) ───────
+
+
+class _FakeAtomicConn:
+    """Minimal asyncpg.Connection stand-in for atomic-award tests.
+
+    Records every ``fetchrow`` call and lets the test script scripted
+    responses that simulate what Postgres would return from the
+    ``INSERT ... ON CONFLICT DO UPDATE ... RETURNING skill_xp,
+    branch_choice, (xmax = 0) AS inserted`` statement.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, tuple[Any, ...]]] = []
+        self.fetchrow_returns: list[dict[str, Any]] = []
+
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
+        self.calls.append(("fetchrow", sql, args))
+        return self.fetchrow_returns.pop(0)
+
+
+class _FakeAcquireCM:
+    """Mimics ``async with pool.acquire() as conn``."""
+
+    def __init__(self, conn: _FakeAtomicConn) -> None:
+        self.conn = conn
+
+    async def __aenter__(self) -> _FakeAtomicConn:
+        return self.conn
+
+    async def __aexit__(self, *_args: Any) -> bool:
+        return False
+
+
+def _make_pg_store() -> tuple[PostgresSkillStateStore, _FakeAtomicConn]:
+    conn = _FakeAtomicConn()
+    store = PostgresSkillStateStore(conn_factory=lambda: _FakeAcquireCM(conn))
+    return store, conn
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_first_award_inserts_first_delta():
+    store, conn = _make_pg_store()
+    # 100 base * 1.0 (success) * 3.0 (first_time) = 300.
+    conn.fetchrow_returns.append(
+        {"skill_xp": 300, "branch_choice": None, "inserted": True}
+    )
+    result = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=100, outcome="success",
+    )
+    assert isinstance(result, AtomicSkillXpAward)
+    assert result.inserted is True
+    assert result.new_xp == 300
+    assert result.applied_delta == 300  # first_delta
+    assert result.new_level == compute_level(300)
+    assert result.branch_choice is None
+    # SQL shape: single INSERT ... ON CONFLICT DO UPDATE RETURNING xmax = 0
+    _, sql, args = conn.calls[0]
+    assert "INSERT INTO agent_skill_state" in sql
+    assert "ON CONFLICT (agent_id, skill_id) DO UPDATE" in sql
+    assert "RETURNING" in sql
+    assert "xmax = 0" in sql
+    # first_delta lands in VALUES, repeat_delta lands in DO UPDATE.
+    # For success outcome: first = 300, repeat = 100.
+    assert 300 in args
+    assert 100 in args
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_second_award_adds_repeat_delta():
+    store, conn = _make_pg_store()
+    # Update-branch return: previous row skill_xp=300 + repeat_delta=100 = 400.
+    conn.fetchrow_returns.append(
+        {"skill_xp": 400, "branch_choice": None, "inserted": False}
+    )
+    result = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=100, outcome="success",
+    )
+    assert result.inserted is False
+    assert result.new_xp == 400
+    assert result.applied_delta == 100  # repeat_delta
+    assert result.new_level == compute_level(400)
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_concurrent_awards_sum_without_loss():
+    """Two runner slots delivering the same character's ticket must
+    sum without loss even though both would naively see 'no row' at
+    the read stage. In the atomic path only one wins the INSERT and
+    the other folds into DO UPDATE with repeat_delta — the sum is
+    ``first_delta + repeat_delta`` and NEVER ``first_delta`` (which
+    is what the old read-modify-write yielded when the loser
+    clobbered the winner).
+    """
+    store, conn = _make_pg_store()
+    # Slot 1 wins the insert race: 300 (first_time).
+    conn.fetchrow_returns.append(
+        {"skill_xp": 300, "branch_choice": None, "inserted": True}
+    )
+    # Slot 2 folds into DO UPDATE: 300 + 100 (repeat) = 400.
+    conn.fetchrow_returns.append(
+        {"skill_xp": 400, "branch_choice": None, "inserted": False}
+    )
+    a = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=100, outcome="success",
+    )
+    b = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=100, outcome="success",
+    )
+    # inserted flag flips True → False across the two calls
+    assert (a.inserted, b.inserted) == (True, False)
+    # No lost update: the second call's absolute new_xp is the sum,
+    # not a re-application of first_delta.
+    assert b.new_xp == a.new_xp + b.applied_delta
+    assert b.applied_delta == 100  # repeat_delta, not first_delta
+    assert b.new_level == compute_level(b.new_xp)
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_level_matches_compute_level_from_returned_xp():
+    store, conn = _make_pg_store()
+    # 250 crosses Lv 4 threshold — regardless of what caller passed.
+    conn.fetchrow_returns.append(
+        {"skill_xp": 250, "branch_choice": None, "inserted": True}
+    )
+    result = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=50, outcome="success",
+    )
+    assert result.new_level == compute_level(250) == 4
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_branch_choice_required_when_lv3_and_unlocked():
+    store, conn = _make_pg_store()
+    conn.fetchrow_returns.append(
+        {"skill_xp": 150, "branch_choice": None, "inserted": False}
+    )
+    result = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=50, outcome="success",
+    )
+    assert result.new_level == 3
+    assert result.branch_choice_required is True
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_branch_choice_required_false_when_already_locked():
+    store, conn = _make_pg_store()
+    conn.fetchrow_returns.append(
+        {"skill_xp": 150, "branch_choice": "perf_tuning", "inserted": False}
+    )
+    result = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=50, outcome="success",
+    )
+    assert result.branch_choice == "perf_tuning"
+    assert result.branch_choice_required is False
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_precomputes_first_and_repeat_deltas():
+    """Both first-time and repeat multipliers are baked into the args
+    so the single statement can pick the right one via the conflict
+    branch. With tier_l_plus stacked: first = 100*1.0*2.0*3.0 = 600
+    and repeat = 100*1.0*2.0 = 200.
+    """
+    store, conn = _make_pg_store()
+    conn.fetchrow_returns.append(
+        {"skill_xp": 600, "branch_choice": None, "inserted": True}
+    )
+    await store.award_delta_atomic(
+        "agent-A",
+        SKILL_ID,
+        base_delta=100,
+        outcome="success",
+        tier_l_plus=True,
+    )
+    _, _sql, args = conn.calls[0]
+    assert 600 in args  # first_delta
+    assert 200 in args  # repeat_delta
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_rejects_negative_base_delta():
+    store, _conn = _make_pg_store()
+    with pytest.raises(XPDeltaNegativeWithoutDecayContext):
+        await store.award_delta_atomic(
+            "agent-A", SKILL_ID, base_delta=-1, outcome="success",
+        )
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_rejects_skill_id_not_in_matrix():
+    store, _conn = _make_pg_store()
+    with pytest.raises(SkillIdNotInMatrix):
+        await store.award_delta_atomic(
+            "agent-A", "does_not_exist", base_delta=10, outcome="success",
+        )
