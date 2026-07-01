@@ -36,16 +36,17 @@ except ModuleNotFoundError:  # pragma: no cover - import path used by tests
 
 # RPG un-weld: the character registry is the SSOT for character→(brain, tier).
 # Best-effort import (repo root on path) so --character validates against the
-# roster; if it can't import, --character is simply unavailable (choices empty).
+# roster; if it can't import, --character is simply unavailable. RECRUIT C2:
+# validation is DYNAMIC (character_registry.load_characters() merges the DB
+# character_def rows at call time) — no frozen-at-import argparse choices, so
+# a freshly recruited character files without a code change.
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 try:
     from backend.agents import character_registry
-    _CHARACTER_SLUGS = sorted(character_registry.CHARACTERS)
 except Exception:  # pragma: no cover - registry optional at filing time
     character_registry = None
-    _CHARACTER_SLUGS = []
 
 # RPG.W12 S1 (OP-2500): the skill matrix + Guild enum are the SSOT for the
 # per-character skill set. --skill validates at filing time that the requested
@@ -362,9 +363,11 @@ def build_parser() -> argparse.ArgumentParser:
     # tier at the character's ceiling, and tags the ticket so the persona owns it.
     parser.add_argument("--class", dest="cls", required=False, choices=sorted(VALID_CLASSES))
     parser.add_argument(
-        "--character", default=None, choices=_CHARACTER_SLUGS or None,
+        "--character", default=None,
         help="RPG character slug that OWNS this ticket; derives --class from its "
-             "brain and caps --tier at its ceiling (e.g. nova/pixel/sage/rex).",
+             "brain and caps --tier at its ceiling. Validated dynamically in "
+             "_apply_character against the DB-merged active roster (built-ins "
+             "nova/pixel/sage/rex plus recruited characters).",
     )
     parser.add_argument(
         "--skill",
@@ -447,7 +450,27 @@ def _apply_character(args: argparse.Namespace) -> None:
         return
     if character_registry is None:
         raise SystemExit("--character given but character_registry failed to import")
-    char = character_registry.resolve_character(args.character)
+    # RECRUIT C2: dynamic, ACTIVE-only validation — filing is for NEW work, so
+    # retired characters are excluded here even though runtime paths still
+    # resolve them for in-flight tickets.
+    roster = character_registry.load_characters()
+    db_loaded = character_registry.registry_db_loaded()
+    if not db_loaded:
+        print(
+            "WARN: character registry DB offline — built-in roster only; "
+            "DB-recruited characters cannot be validated",
+            file=sys.stderr,
+        )
+    char = roster.get(args.character)
+    if char is None:
+        offline_note = (
+            " (registry DB offline — if this is a DB-recruited character, "
+            "retry with DB access)" if not db_loaded else ""
+        )
+        raise SystemExit(
+            f"unknown or retired character {args.character!r}; known active "
+            f"characters: {sorted(roster)}{offline_note}"
+        )
     if args.cls and args.cls != char.brain:
         raise SystemExit(
             f"--class {args.cls} conflicts with character {args.character}'s "

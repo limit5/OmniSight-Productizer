@@ -1063,12 +1063,14 @@ async def create_task(
     char_def = None
     if character:
         from backend.agents import character_registry
-        try:
-            char_def = character_registry.resolve_character(character)
-        except character_registry.CharacterRegistryError:
+        # RECRUIT C2: filing is for NEW work — validate against the DB-merged
+        # ACTIVE roster (retired characters stay resolvable at runtime only).
+        roster = character_registry.load_characters()
+        char_def = roster.get(character)
+        if char_def is None:
             return (
-                f"[ERROR] unknown character {character!r} — known: "
-                f"{sorted(character_registry.CHARACTERS)}"
+                f"[ERROR] unknown character {character!r} — known active: "
+                f"{sorted(roster)}"
             )
         if not tier:
             # Default to M (the common chat-task size), but never above the

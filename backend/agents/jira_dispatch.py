@@ -434,6 +434,25 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
             )
             continue
 
+        # RECRUIT C2: retired characters take no NEW work, and a DB-only
+        # character on a stale-beyond-bound registry snapshot must not start
+        # (in-flight resolution is unaffected — pickup-only, like tier denial).
+        retired_denial = character_registry.character_retired_denial_from_labels(labels)
+        if retired_denial is not None:
+            log.info(
+                "runner_character_retired_refusal %s",
+                json.dumps(
+                    {
+                        "event": "runner_character_retired_refusal",
+                        "ticket_key": ticket_key,
+                        "reason": retired_denial,
+                        "runner_instance": _instance_id_from_env(),
+                    },
+                    sort_keys=True,
+                ),
+            )
+            continue
+
         quota_denial = capability_registry.quota_health_denial_from_labels(labels)
         if quota_denial is not None:
             log.info(
