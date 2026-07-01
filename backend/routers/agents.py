@@ -9,11 +9,13 @@ to ``_persist()`` and downstream ``db.*`` calls.
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
+import re
 import uuid
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
 
+from backend.agents import jira_dispatch
 from backend.agents.character_card import (
     CharacterCard,
     CharacterCardNotFoundError,
@@ -21,9 +23,12 @@ from backend.agents.character_card import (
     CharacterCardRosterEntry,
     CharacterCardSort,
     CharacterSkillEntry,
+    FirstTaskCharacterCard,
     PostgresCharacterCardStore,
     fetch_skill_entries,
 )
+from backend.agents.character_registry import CHARACTERS, CharacterDef, TIER_ORDER
+from backend.agents.guild_registry import GUILDS
 from backend.agents.achievement_registry import (
     AchievementMilestone,
     list_achievement_milestones,
@@ -696,6 +701,301 @@ async def complete_party_task_endpoint(
             for share in distribution.shares
         ],
     }
+
+
+# ── RECRUIT C3 (OP-2510): /agents/characters recruit/retire API ────
+# ⚠ ROUTE ORDER: these literal-path routes MUST stay declared BEFORE the
+# /{agent_id} catch-all below or FastAPI matches "characters" as an agent id.
+
+_CHARACTER_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+_CHARACTER_DEF_COLS = "slug, display_name, brain, guild, max_tier, blurb, active"
+_CHARACTER_PATCHABLE_FIELDS = frozenset({"display_name", "blurb", "max_tier", "active"})
+_CHARACTER_IMMUTABLE_FIELDS = ("slug", "brain", "guild")
+
+
+class PostgresCharacterDefStore:
+    """asyncpg CRUD for the ``character_def`` table (RECRUIT C1, alembic 0253).
+
+    Definition rows only — merge/caching semantics for runner pickup live in
+    the C2 registry loader; this store is the recruit API's write/read seam.
+    Column names in updates come exclusively from the
+    ``_CHARACTER_PATCHABLE_FIELDS`` allowlist (never from request keys).
+    """
+
+    def __init__(self, conn_factory) -> None:
+        self._factory = conn_factory
+
+    async def list_defs(self) -> list[dict[str, Any]]:
+        async with self._factory() as conn:
+            rows = await conn.fetch(
+                f"SELECT {_CHARACTER_DEF_COLS} FROM character_def ORDER BY slug"
+            )
+        return [dict(row) for row in rows]
+
+    async def insert_def(self, row: dict[str, Any]) -> dict[str, Any] | None:
+        """INSERT the definition; ``None`` when the slug already exists."""
+        async with self._factory() as conn:
+            created = await conn.fetchrow(
+                f"""
+                INSERT INTO character_def (
+                    slug, display_name, brain, guild, max_tier, blurb
+                )
+                VALUES ($1, $2, $3, $4, $5, $6)
+                ON CONFLICT (slug) DO NOTHING
+                RETURNING {_CHARACTER_DEF_COLS}
+                """,
+                row["slug"],
+                row["display_name"],
+                row["brain"],
+                row["guild"],
+                row["max_tier"],
+                row["blurb"],
+            )
+        return dict(created) if created is not None else None
+
+    async def update_def(
+        self, slug: str, values: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        """UPDATE allowlisted fields; ``None`` when the slug does not exist."""
+        assignments = ", ".join(
+            f"{field} = ${idx}" for idx, field in enumerate(values, start=2)
+        )
+        async with self._factory() as conn:
+            row = await conn.fetchrow(
+                f"""
+                UPDATE character_def
+                SET {assignments}, updated_at = NOW()
+                WHERE slug = $1
+                RETURNING {_CHARACTER_DEF_COLS}
+                """,
+                slug,
+                *values.values(),
+            )
+        return dict(row) if row is not None else None
+
+
+def get_character_def_store(
+    conn: asyncpg.Connection = Depends(get_conn),
+) -> PostgresCharacterDefStore:
+    """DI seam for character_def reads/writes (tests override with in-memory)."""
+    return PostgresCharacterDefStore(lambda: _borrowed_conn(conn))
+
+
+def _character_def_dict(
+    *,
+    slug: str,
+    display_name: str,
+    brain: str,
+    guild: str,
+    max_tier: str,
+    blurb: str,
+    active: bool,
+    built_in: bool,
+) -> dict[str, Any]:
+    return {
+        "slug": slug,
+        "display_name": display_name,
+        "brain": brain,
+        "guild": guild,
+        "max_tier": max_tier,
+        "blurb": blurb,
+        "active": bool(active),
+        "built_in": built_in,
+    }
+
+
+def _built_in_def_dict(char: CharacterDef) -> dict[str, Any]:
+    return _character_def_dict(
+        slug=char.slug,
+        display_name=char.display_name,
+        brain=char.brain,
+        guild=char.guild,
+        max_tier=char.max_tier,
+        blurb=char.blurb,
+        active=True,
+        built_in=True,
+    )
+
+
+def _db_def_dict(row: dict[str, Any]) -> dict[str, Any]:
+    return _character_def_dict(
+        slug=row["slug"],
+        display_name=row["display_name"],
+        brain=row["brain"],
+        guild=row["guild"],
+        max_tier=row["max_tier"],
+        blurb=row["blurb"],
+        active=row["active"],
+        built_in=False,
+    )
+
+
+@router.get("/characters")
+async def list_character_defs(
+    include_retired: bool = False,
+    store: PostgresCharacterDefStore = Depends(get_character_def_store),
+) -> list[dict[str, Any]]:
+    """RECRUIT C3: the roster as the registry sees it — built-ins + DB rows.
+
+    Built-in slugs are shadow-protected (same policy as the C2 loader): a DB
+    row colliding with a built-in never overrides the code constant. Retired
+    (``active=false``) characters are hidden unless ``include_retired=true``.
+    """
+    merged = {slug: _built_in_def_dict(char) for slug, char in CHARACTERS.items()}
+    for row in await store.list_defs():
+        if row["slug"] in CHARACTERS:
+            continue
+        merged[row["slug"]] = _db_def_dict(row)
+    return sorted(
+        (d for d in merged.values() if include_retired or d["active"]),
+        key=lambda d: d["slug"],
+    )
+
+
+@router.post("/characters", status_code=201)
+async def recruit_character(
+    body: dict,
+    store: PostgresCharacterDefStore = Depends(get_character_def_store),
+    registry: CharacterCardRegistry = Depends(get_character_card_registry),
+) -> dict[str, Any]:
+    """RECRUIT C3: recruit a new character (definition row + Lv1 card).
+
+    Validates like ``CharacterDef.__post_init__``; refuses slugs colliding
+    with a built-in or an existing row (409). The progression card is created
+    through the idempotent ``ensure_card_for_first_task`` upsert so recruiting
+    never clobbers pre-existing XP history for the same slug.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    slug = body.get("slug")
+    display_name = body.get("display_name")
+    brain = body.get("brain")
+    guild = body.get("guild")
+    max_tier = body.get("max_tier")
+    blurb = body.get("blurb", "")
+    if not isinstance(slug, str) or not _CHARACTER_SLUG_RE.fullmatch(slug):
+        raise HTTPException(
+            status_code=400, detail="slug must match ^[a-z][a-z0-9-]*$",
+        )
+    if not isinstance(display_name, str) or not display_name.strip():
+        raise HTTPException(status_code=400, detail="display_name is required")
+    if brain not in jira_dispatch._BASE_BOT_BY_CLASS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"brain {brain!r} is not a known agent_class "
+                f"{sorted(jira_dispatch._BASE_BOT_BY_CLASS)}"
+            ),
+        )
+    if guild not in GUILDS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"guild {guild!r} is not a known guild slug {sorted(GUILDS)}",
+        )
+    if max_tier not in TIER_ORDER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"max_tier {max_tier!r} not in {sorted(TIER_ORDER)}",
+        )
+    if not isinstance(blurb, str):
+        raise HTTPException(status_code=400, detail="blurb must be a string")
+    if slug in CHARACTERS:
+        raise HTTPException(
+            status_code=409,
+            detail=f"slug {slug!r} collides with a built-in character",
+        )
+
+    created = await store.insert_def(
+        {
+            "slug": slug,
+            "display_name": display_name.strip(),
+            "brain": brain,
+            "guild": guild,
+            "max_tier": max_tier,
+            "blurb": blurb,
+        }
+    )
+    if created is None:
+        raise HTTPException(
+            status_code=409, detail=f"character {slug!r} already exists",
+        )
+    await registry.ensure_card_for_first_task(
+        FirstTaskCharacterCard(agent_id=slug, agent_class=brain, task_area=guild)
+    )
+    return _db_def_dict(created)
+
+
+@router.patch("/characters/{slug}")
+async def patch_character(
+    slug: str,
+    body: dict,
+    store: PostgresCharacterDefStore = Depends(get_character_def_store),
+) -> dict[str, Any]:
+    """RECRUIT C3: patch display_name/blurb/max_tier/active for a recruit.
+
+    brain/guild/slug are immutable after creation (progression and skills are
+    guild-scoped, the card class is brain-derived — changing them would
+    orphan history): 400. Built-ins are shadow-protected constants: 403.
+    Retire = ``active=false`` — never a DELETE, the card/XP history stays.
+    """
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="body must be a JSON object")
+    if slug in CHARACTERS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"built-in character {slug!r} is not patchable",
+        )
+    immutable = [f for f in _CHARACTER_IMMUTABLE_FIELDS if f in body]
+    if immutable:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"immutable field(s) {immutable} — brain/guild/slug cannot "
+                f"change after recruit"
+            ),
+        )
+    unknown = sorted(k for k in body if k not in _CHARACTER_PATCHABLE_FIELDS)
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"unknown field(s) {unknown}; patchable: "
+                f"{sorted(_CHARACTER_PATCHABLE_FIELDS)}"
+            ),
+        )
+
+    values: dict[str, Any] = {}
+    if "display_name" in body:
+        display_name = body["display_name"]
+        if not isinstance(display_name, str) or not display_name.strip():
+            raise HTTPException(
+                status_code=400, detail="display_name must be a non-empty string",
+            )
+        values["display_name"] = display_name.strip()
+    if "blurb" in body:
+        if not isinstance(body["blurb"], str):
+            raise HTTPException(status_code=400, detail="blurb must be a string")
+        values["blurb"] = body["blurb"]
+    if "max_tier" in body:
+        if body["max_tier"] not in TIER_ORDER:
+            raise HTTPException(
+                status_code=400,
+                detail=f"max_tier {body['max_tier']!r} not in {sorted(TIER_ORDER)}",
+            )
+        values["max_tier"] = body["max_tier"]
+    if "active" in body:
+        if not isinstance(body["active"], bool):
+            raise HTTPException(status_code=400, detail="active must be a boolean")
+        values["active"] = body["active"]
+    if not values:
+        raise HTTPException(status_code=400, detail="no patchable fields provided")
+
+    row = await store.update_def(slug, values)
+    if row is None:
+        raise HTTPException(
+            status_code=404, detail=f"character {slug!r} not found",
+        )
+    return _db_def_dict(row)
 
 
 @router.get("/{agent_id}", response_model=Agent)
