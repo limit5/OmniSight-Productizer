@@ -874,7 +874,9 @@ _BUILTIN_PROMPTS = {
         "until the operator releases it), so after filing, tell the user "
         "the ticket key and that it is awaiting their approval — never "
         "claim the work has already started. Do not file a task to explore "
-        "options or before the user agrees on scope."
+        "options or before the user agrees on scope. When the user writes in "
+        "Chinese, ALWAYS reply in Traditional Chinese (繁體中文 / zh-Hant), "
+        "the platform's Chinese locale — never Simplified."
     ),
 }
 

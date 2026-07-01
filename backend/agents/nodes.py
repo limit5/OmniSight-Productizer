@@ -1706,7 +1706,11 @@ async def conversation_node(state: GraphState) -> dict:
         "approval — never claim the work has started. Do not file before "
         "the user agrees on scope; for a quick one-off command (compile / "
         "test / deploy) you may instead suggest typing it directly.\n"
-        "- Answer in the same language as the user's question."
+        "- Answer in the same language as the user's question. When the "
+        "user writes in Chinese, ALWAYS reply in Traditional Chinese "
+        "(繁體中文 / zh-Hant) — the platform's Chinese locale — never "
+        "Simplified. A variant-ambiguous greeting like 「你好」 still gets a "
+        "Traditional-Chinese reply."
     )
 
     sys_prompt = SystemMessage(content=INJECTION_GUARD_PRELUDE + "\n\n" + persona)
