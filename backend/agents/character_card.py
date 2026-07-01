@@ -417,6 +417,59 @@ class PostgresCharacterCardStore:
             raise CharacterCardNotFoundError(f"character card not found: {agent_id}")
         return _row_to_card(row)
 
+    async def award_xp_atomic(
+        self, agent_id: str, delta_xp: int
+    ) -> tuple[CharacterCard, int] | None:
+        """Atomically add ``delta_xp`` to the card's xp, then re-sync level.
+
+        The read-modify-write in :func:`_award_task_xp` (get_card then update_card)
+        loses updates when two runner slots deliver the same character's ticket at
+        once: both read the same xp and the last update clobbers the first. This
+        folds the increment into a single ``UPDATE ... SET xp = xp + $delta`` so
+        concurrent awards accumulate instead of overwriting. ``level`` is a
+        denormalised/derived column (xp is the source of truth), so it is re-synced
+        by a second statement on the same connection — the same two-statement
+        xp-add-then-level-sync pattern as the skill store (S2b). Returns
+        ``(updated_card, previous_level)`` or ``None`` when the card doesn't exist.
+        """
+        from backend.agents import xp_engine
+
+        agent_id = _required("agent_id", agent_id)
+        async with _acquire(self._factory) as conn:
+            bumped = await conn.fetchrow(
+                """
+                UPDATE agent_character_card
+                SET xp = xp + $2, updated_at = NOW()
+                WHERE agent_id = $1
+                RETURNING xp, level
+                """,
+                agent_id,
+                int(delta_xp),
+            )
+            if bumped is None:
+                return None
+            new_xp = int(bumped["xp"])
+            previous_level = int(bumped["level"])
+            new_level = xp_engine.level_for_xp(new_xp)
+            if new_level != previous_level:
+                row = await conn.fetchrow(
+                    f"""
+                    UPDATE agent_character_card
+                    SET level = $2, updated_at = NOW()
+                    WHERE agent_id = $1
+                    RETURNING {_CARD_RETURNING_COLS}
+                    """,
+                    agent_id,
+                    new_level,
+                )
+            else:
+                row = await conn.fetchrow(
+                    f"SELECT {_CARD_RETURNING_COLS} FROM agent_character_card "
+                    f"WHERE agent_id = $1",
+                    agent_id,
+                )
+        return _row_to_card(row), previous_level
+
     async def delete_card(self, agent_id: str) -> bool:
         agent_id = _required("agent_id", agent_id)
         async with _acquire(self._factory) as conn:
@@ -865,10 +918,6 @@ async def _award_task_xp(
     from backend.agents import xp_engine
 
     store = PostgresCharacterCardStore(conn_factory)
-    registry = CharacterCardRegistry(store)
-    card = await registry.get_card(agent_id, require_exists=False)
-    if card is None:
-        return None
     delta = xp_engine.award_xp(
         agent_id,
         {
@@ -877,11 +926,14 @@ async def _award_task_xp(
             "tier_l_plus": str(tier or "").upper() in {"L", "X"},
         },
     )
-    new_xp = card.xp + delta.xp
-    new_level = xp_engine.level_for_xp(new_xp)
-    updated = await registry.update_card(
-        agent_id, CharacterCardUpdate(xp=new_xp, level=new_level)
-    )
+    result = await store.award_xp_atomic(agent_id, delta.xp)
+    if result is None:
+        return None  # card doesn't exist yet — nothing to award to
+    updated, previous_level = result
+    # Preserve the RPG level-up / talent-fork events (previously fired by
+    # CharacterCardRegistry.update_card) now that the award is atomic.
+    if updated.level > previous_level:
+        _emit_level_up_safely(replace(updated, level=previous_level), updated)
     return delta, updated
 
 
