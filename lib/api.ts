@@ -1186,6 +1186,64 @@ export async function listAgentCards(filters: { guild?: string; sort_by?: "level
   return request<AgentCardSummary[]>(`/agents/cards${suffix}`)
 }
 
+export interface AgentCharacterDef {
+  slug: string
+  display_name: string
+  brain: string
+  guild: string
+  max_tier: "S" | "M" | "L" | "X" | string
+  blurb: string
+  active: boolean
+  built_in: boolean
+}
+
+export interface RecruitCharacterRequest {
+  slug: string
+  display_name: string
+  brain: string
+  guild: string
+  max_tier: "S" | "M" | "L" | "X"
+  blurb?: string
+}
+
+export interface PatchCharacterRequest {
+  display_name?: string
+  blurb?: string
+  max_tier?: "S" | "M" | "L" | "X"
+  active?: boolean
+}
+
+export async function listCharacters(
+  opts: { include_retired?: boolean } = {},
+): Promise<AgentCharacterDef[]> {
+  const qs = new URLSearchParams()
+  if (opts.include_retired) qs.set("include_retired", "true")
+  const suffix = qs.toString() ? `?${qs.toString()}` : ""
+  return request<AgentCharacterDef[]>(`/agents/characters${suffix}`)
+}
+
+export async function recruitCharacter(
+  body: RecruitCharacterRequest,
+): Promise<AgentCharacterDef> {
+  return request<AgentCharacterDef>("/agents/characters", {
+    method: "POST",
+    body: JSON.stringify(body),
+  })
+}
+
+export async function patchCharacter(
+  slug: string,
+  body: PatchCharacterRequest,
+): Promise<AgentCharacterDef> {
+  return request<AgentCharacterDef>(
+    `/agents/characters/${encodeURIComponent(slug)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    },
+  )
+}
+
 export interface AgentCardDetail {
   agent_id: string
   agent_class: string

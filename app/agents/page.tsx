@@ -21,14 +21,28 @@
 import { useCallback, useEffect, useMemo, useState } from "react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { ArrowLeft, ChevronRight, Loader2, RefreshCw, Users } from "lucide-react"
+import {
+  ArrowLeft,
+  ChevronRight,
+  Loader2,
+  RefreshCw,
+  RotateCcw,
+  UserMinus,
+  Users,
+} from "lucide-react"
 
 import { useAuth } from "@/lib/auth-context"
 import {
   listAgentCards,
   listAgentParties,
+  listCharacters,
+  patchCharacter,
+  recruitCharacter,
+  ApiError,
   type AgentCardSummary,
+  type AgentCharacterDef,
   type AgentPartyDto,
+  type RecruitCharacterRequest,
 } from "@/lib/api"
 import type { AgentGuild } from "@/components/omnisight/agents/CharacterCard"
 import { AgentRosterTour } from "@/components/omnisight/agents/AgentRosterTour"
@@ -36,6 +50,7 @@ import {
   GuildHall,
   type GuildHallGuild,
 } from "@/components/omnisight/agents/GuildHall"
+import { RecruitModal } from "@/components/omnisight/agents/RecruitModal"
 import {
   PartyHall,
   type Party,
@@ -73,9 +88,14 @@ function normaliseGuild(value: string | null | undefined): AgentGuild {
   return "generalist"
 }
 
-function aggregateGuilds(cards: AgentCardSummary[]): GuildHallGuild[] {
+function aggregateGuilds(
+  cards: AgentCardSummary[],
+  characters: Map<string, AgentCharacterDef>,
+): GuildHallGuild[] {
   const counts = new Map<AgentGuild, number>()
   for (const card of cards) {
+    const character = characters.get(card.agent_id)
+    if (character && !character.active) continue
     const guild = normaliseGuild(card.guild)
     counts.set(guild, (counts.get(guild) ?? 0) + 1)
   }
@@ -87,9 +107,13 @@ function aggregateGuilds(cards: AgentCardSummary[]): GuildHallGuild[] {
 
 function groupCardsByGuild(
   cards: AgentCardSummary[],
+  characters: Map<string, AgentCharacterDef>,
+  showRetired: boolean,
 ): Array<{ guild: AgentGuild; cards: AgentCardSummary[] }> {
   const buckets = new Map<AgentGuild, AgentCardSummary[]>()
   for (const card of cards) {
+    const character = characters.get(card.agent_id)
+    if (!showRetired && character && !character.active) continue
     const guild = normaliseGuild(card.guild)
     const bucket = buckets.get(guild) ?? []
     bucket.push(card)
@@ -105,9 +129,23 @@ function groupCardsByGuild(
   )
 }
 
-function cardDisplayName(card: AgentCardSummary): string {
+function cardDisplayName(
+  card: AgentCardSummary,
+  character?: AgentCharacterDef,
+): string {
+  if (character?.display_name?.trim()) return character.display_name.trim()
   const base = card.agent_class || card.agent_id
   return card.instance_suffix ? `${base} ${card.instance_suffix}` : base
+}
+
+function apiErrorMessage(err: unknown): string {
+  if (err instanceof ApiError) {
+    const detail = err.parsed?.detail
+    if (typeof detail === "string" && detail.trim()) return detail
+    return err.message
+  }
+  if (err instanceof Error) return err.message
+  return String(err)
 }
 
 function mapPartySynergy(
@@ -151,10 +189,16 @@ export default function AgentsRosterPage() {
   const auth = useAuth()
   const router = useRouter()
   const [cards, setCards] = useState<AgentCardSummary[]>([])
+  const [characters, setCharacters] = useState<AgentCharacterDef[]>([])
   const [parties, setParties] = useState<AgentPartyDto[]>([])
   const [loading, setLoading] = useState(true)
   const [cardsError, setCardsError] = useState<string | null>(null)
+  const [charactersError, setCharactersError] = useState<string | null>(null)
   const [partiesError, setPartiesError] = useState<string | null>(null)
+  const [recruitOpen, setRecruitOpen] = useState(false)
+  const [showRetired, setShowRetired] = useState(false)
+  const [characterActionError, setCharacterActionError] = useState<string | null>(null)
+  const [patchingSlug, setPatchingSlug] = useState<string | null>(null)
 
   useEffect(() => {
     if (auth.loading) return
@@ -170,9 +214,11 @@ export default function AgentsRosterPage() {
   const refresh = useCallback(async () => {
     setLoading(true)
     setCardsError(null)
+    setCharactersError(null)
     setPartiesError(null)
-    const [cardsRes, partiesRes] = await Promise.allSettled([
+    const [cardsRes, charactersRes, partiesRes] = await Promise.allSettled([
       listAgentCards(),
+      listCharacters({ include_retired: true }),
       listAgentParties(),
     ])
     if (cardsRes.status === "fulfilled") {
@@ -184,6 +230,16 @@ export default function AgentsRosterPage() {
           : String(cardsRes.reason)
       setCardsError(msg)
       setCards([])
+    }
+    if (charactersRes.status === "fulfilled") {
+      setCharacters(charactersRes.value)
+    } else {
+      const msg =
+        charactersRes.reason instanceof Error
+          ? charactersRes.reason.message
+          : String(charactersRes.reason)
+      setCharactersError(msg)
+      setCharacters([])
     }
     if (partiesRes.status === "fulfilled") {
       setParties(partiesRes.value)
@@ -207,8 +263,19 @@ export default function AgentsRosterPage() {
     return () => window.clearTimeout(timer)
   }, [auth.loading, auth.user, auth.authMode, refresh])
 
-  const guildSummaries = useMemo(() => aggregateGuilds(cards), [cards])
-  const grouped = useMemo(() => groupCardsByGuild(cards), [cards])
+  const charactersBySlug = useMemo(() => {
+    const map = new Map<string, AgentCharacterDef>()
+    for (const character of characters) map.set(character.slug, character)
+    return map
+  }, [characters])
+  const guildSummaries = useMemo(
+    () => aggregateGuilds(cards, charactersBySlug),
+    [cards, charactersBySlug],
+  )
+  const grouped = useMemo(
+    () => groupCardsByGuild(cards, charactersBySlug, showRetired),
+    [cards, charactersBySlug, showRetired],
+  )
   const cardLookup = useMemo(() => {
     const map = new Map<string, AgentCardSummary>()
     for (const card of cards) map.set(card.agent_id, card)
@@ -217,6 +284,35 @@ export default function AgentsRosterPage() {
   const partyViewModels = useMemo(
     () => parties.map((p) => mapParty(p, cardLookup)),
     [parties, cardLookup],
+  )
+  const retiredCount = useMemo(
+    () => characters.filter((character) => !character.active).length,
+    [characters],
+  )
+
+  const handleRecruit = useCallback(
+    async (payload: RecruitCharacterRequest) => {
+      await recruitCharacter(payload)
+      setRecruitOpen(false)
+      await refresh()
+    },
+    [refresh],
+  )
+
+  const handlePatchActive = useCallback(
+    async (character: AgentCharacterDef, active: boolean) => {
+      setPatchingSlug(character.slug)
+      setCharacterActionError(null)
+      try {
+        await patchCharacter(character.slug, { active })
+        await refresh()
+      } catch (err) {
+        setCharacterActionError(apiErrorMessage(err))
+      } finally {
+        setPatchingSlug(null)
+      }
+    },
+    [refresh],
   )
 
   if (auth.loading || (!auth.user && auth.authMode !== "open")) {
@@ -279,17 +375,50 @@ export default function AgentsRosterPage() {
           </div>
         )}
 
+        {charactersError && (
+          <div
+            className="mb-4 rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-3 text-xs font-mono text-[var(--destructive)]"
+            data-testid="agents-roster-characters-error"
+          >
+            Failed to load character definitions: {charactersError}
+          </div>
+        )}
+
         <section className="mb-8" data-testid="agents-roster-guild-hall">
-          <GuildHall guilds={guildSummaries} />
+          <GuildHall guilds={guildSummaries} onRecruit={() => setRecruitOpen(true)} />
         </section>
 
         <section className="mb-8" data-testid="agents-roster-grid">
-          <div className="mb-3">
-            <h2 className="text-lg font-semibold leading-tight">Agent roster</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Click an agent to open the Character Card detail view.
-            </p>
+          <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold leading-tight">Agent roster</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Click an agent to open the Character Card detail view.
+              </p>
+            </div>
+            <label className="inline-flex items-center gap-2 rounded border bg-card px-2.5 py-1.5 font-mono text-xs text-muted-foreground">
+              <input
+                type="checkbox"
+                checked={showRetired}
+                onChange={(event) => setShowRetired(event.target.checked)}
+                className="size-3.5"
+                data-testid="agents-roster-show-retired"
+              />
+              Show retired
+              <span className="rounded-sm bg-muted px-1.5 py-0.5 text-[10px]">
+                {retiredCount}
+              </span>
+            </label>
           </div>
+
+          {characterActionError ? (
+            <div
+              className="mb-3 rounded border border-[var(--destructive)]/40 bg-[var(--destructive)]/10 p-3 text-xs font-mono text-[var(--destructive)]"
+              data-testid="agents-roster-character-action-error"
+            >
+              {characterActionError}
+            </div>
+          ) : null}
 
           {loading && cards.length === 0 ? (
             <div className="rounded-md border border-dashed bg-muted/20 p-6 text-center text-xs font-mono text-muted-foreground">
@@ -314,24 +443,68 @@ export default function AgentsRosterPage() {
                   <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
                     {bucket.map((card) => (
                       <li key={card.agent_id}>
+                        {(() => {
+                          const character = charactersBySlug.get(card.agent_id)
+                          const isRetired = Boolean(character && !character.active)
+                          return (
                         <Link
                           href={`/agents/${encodeURIComponent(card.agent_id)}`}
                           data-testid="agents-roster-card-link"
                           data-agent-id={card.agent_id}
-                          className="flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 hover:border-primary/60 hover:bg-accent transition-colors"
+                          data-character-active={isRetired ? "false" : "true"}
+                          className={[
+                            "flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 hover:border-primary/60 hover:bg-accent transition-colors",
+                            isRetired ? "opacity-50 grayscale" : "",
+                          ].join(" ")}
                         >
                           <span className="min-w-0">
                             <span className="block truncate text-sm font-medium">
-                              {cardDisplayName(card)}
+                              {cardDisplayName(card, character)}
                             </span>
                             <span className="block truncate text-[10px] uppercase tracking-wider text-muted-foreground">
                               {card.specialization_label || card.agent_id}
                             </span>
                           </span>
-                          <span className="shrink-0 rounded-sm bg-muted px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-                            Lv {card.level}
+                          <span className="flex shrink-0 items-center gap-2">
+                            {isRetired ? (
+                              <span className="rounded-sm border border-muted-foreground/30 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                                Retired
+                              </span>
+                            ) : null}
+                            <span className="rounded-sm bg-muted px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+                              Lv {card.level}
+                            </span>
                           </span>
                         </Link>
+                          )
+                        })()}
+                        {(() => {
+                          const character = charactersBySlug.get(card.agent_id)
+                          if (!character || character.built_in) return null
+                          const isRetired = !character.active
+                          const busy = patchingSlug === character.slug
+                          return (
+                            <div className="mt-1 flex justify-end">
+                              <button
+                                type="button"
+                                onClick={() => void handlePatchActive(character, isRetired)}
+                                disabled={busy}
+                                className="inline-flex items-center gap-1 rounded border border-border bg-background px-2 py-1 font-mono text-[10px] text-muted-foreground hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                                data-testid="agents-roster-character-active-toggle"
+                                data-character-slug={character.slug}
+                              >
+                                {busy ? (
+                                  <Loader2 className="size-3 animate-spin" aria-hidden="true" />
+                                ) : isRetired ? (
+                                  <RotateCcw className="size-3" aria-hidden="true" />
+                                ) : (
+                                  <UserMinus className="size-3" aria-hidden="true" />
+                                )}
+                                {isRetired ? "Reactivate" : "Retire"}
+                              </button>
+                            </div>
+                          )
+                        })()}
                       </li>
                     ))}
                   </ul>
@@ -354,6 +527,12 @@ export default function AgentsRosterPage() {
           )}
         </section>
       </div>
+      <RecruitModal
+        open={recruitOpen}
+        guilds={KNOWN_GUILDS}
+        onClose={() => setRecruitOpen(false)}
+        onRecruit={handleRecruit}
+      />
     </main>
   )
 }
