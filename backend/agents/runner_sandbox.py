@@ -405,7 +405,29 @@ _GRADLE_CACHE_REL = Path(".gradle") / "caches"
 _CLI_CONFIG_DIRS: tuple[tuple[str, str], ...] = (
     ("CLAUDE_CONFIG_DIR", ".claude"),
     ("CODEX_HOME", ".codex"),
+    # Gemini/Antigravity `agy` keeps its OAuth token + install under ~/.gemini
+    # (incl. antigravity-cli/antigravity-oauth-token). Copy it into the jail's
+    # cli-home so a subscription-gemini ticket authenticates inside the jail.
+    ("GEMINI_HOME", ".gemini"),
 )
+
+
+# Agentic CLIs that are standalone binaries OUTSIDE the nvm node toolchain
+# (agy/grok install to ~/.local/bin). wrap_in_bubblewrap RO-binds these so the
+# jail can execvp them. Resolved via PATH; absent CLIs are simply skipped.
+_AGENTIC_CLI_NAMES: tuple[str, ...] = ("agy",)
+
+
+def _agentic_cli_binaries(env: "Mapping[str, str] | None" = None) -> tuple[str, ...]:
+    """Return resolvable standalone agentic-CLI binary paths to RO-bind."""
+    import shutil
+    path_env = (env or {}).get("PATH") if env else None
+    out: list[str] = []
+    for name in _AGENTIC_CLI_NAMES:
+        p = shutil.which(name, path=path_env) or shutil.which(name)
+        if p and p not in out:
+            out.append(p)
+    return tuple(out)
 
 
 # Agent-CLI config files that live at HOME root on the host (OP-1838), seeded
@@ -813,6 +835,16 @@ def _build_bubblewrap_argv(
     if toolchain is not None and toolchain.exists():
         tc_abs = str(toolchain)
         argv += ["--ro-bind", tc_abs, tc_abs]
+
+    # Gemini/Antigravity brain (dogfood 2026-07-01): the `agy` agentic CLI is a
+    # standalone ELF under ~/.local/bin (NOT an nvm-managed node shim), so the
+    # toolchain bind above doesn't cover it. RO-bind the binary when present so
+    # a subscription-gemini ticket can execvp it. Its OAuth creds ride in via
+    # prepare_cli_home's ~/.gemini copy (_CLI_CONFIG_DIRS); glibc + interpreter
+    # come from the /usr,/lib RO-binds already added. Absent on hosts without
+    # the CLI installed → no bind, no effect on claude/codex.
+    for _agy in _agentic_cli_binaries(env):
+        argv += ["--ro-bind", _agy, _agy]
 
     allowed_env = build_allowlisted_env(env)
     android_home = allowed_env.get("ANDROID_HOME", "").strip()

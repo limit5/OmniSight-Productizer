@@ -1505,6 +1505,10 @@ CLAUDE_WORKTREE = os.environ.get(
     "OMNISIGHT_CLAUDE_WORKTREE",
     _default_worktree_for("subscription-claude"),
 )
+GEMINI_WORKTREE = os.environ.get(
+    "OMNISIGHT_GEMINI_WORKTREE",
+    _default_worktree_for("subscription-claude"),  # falls back to claude wt path shape
+)
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
 
 
@@ -1625,6 +1629,24 @@ def _invoke_cli(
         # the worktree via subprocess.Popen — otherwise it inherits the
         # runner's cwd (main repo) and commits land outside the worktree,
         # causing "no new changes" rejections at push time.
+        cwd = str(effective_worktree)
+    elif agent_class == "subscription-gemini":
+        # Gemini/Antigravity brain (dogfood 2026-07-01). `agy` is the working
+        # agentic CLI (the legacy @google/gemini-cli free tier is deprecated).
+        # Flags mirror claude — `-p` headless + `--dangerously-skip-permissions`
+        # auto-approve — PLUS `--add-dir <wt>` because agy otherwise works in
+        # its own scratch project; --add-dir binds it to the ticket worktree so
+        # commits land where the runner can capture + push them. Pinned to cwd
+        # like claude. Auth (OAuth) rides in via prepare_cli_home's ~/.gemini
+        # copy; the binary is RO-bound by runner_sandbox.
+        if not os.path.isdir(GEMINI_WORKTREE):
+            print(f"[runner] gemini worktree missing: {GEMINI_WORKTREE}", file=sys.stderr)
+            return 2
+        sandbox_worktree = Path(GEMINI_WORKTREE)
+        effective_worktree = worktree_path or sandbox_worktree
+        import shutil as _shutil
+        agy_bin = _shutil.which("agy") or "agy"
+        cmd = [agy_bin, "--dangerously-skip-permissions", "--add-dir", str(effective_worktree), "-p", full_prompt]
         cwd = str(effective_worktree)
     elif agent_class.startswith("api-"):
         print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")
