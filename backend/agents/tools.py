@@ -1003,20 +1003,31 @@ async def create_task(
     acceptance_criteria: str = "",
     capabilities: str = "",
     priority: str = "",
+    character: str = "",
+    skill: str = "",
+    tier: str = "",
 ) -> str:
-    """File a runner-pickable JIRA Story from an understood user intent.
+    """File a JIRA Story from an understood user intent.
 
     This is the bridge from a chat conversation to real autonomous work:
     once the user has CONFIRMED what they want built, call this ONCE to
-    create the Story the runner fleet will execute. Do not call it to
-    explore options or before the user agrees on scope.
+    create the Story. Do not call it to explore options or before the user
+    agrees on scope.
 
-    SAFETY — the Story is filed *gated*: it carries every discipline
-    label EXCEPT the ``class:*`` label the runner's PICKUP_JQL requires,
-    plus ``requires:operator-approval``. So it is visible and complete
-    but will NOT be auto-dispatched until a human releases it (by adding
-    e.g. ``class:subscription-claude``). Never tell the user work has
-    started — only that the task has been filed for their approval.
+    TWO MODES:
+
+    * **Gated (default, no ``character``).** SAFETY — the Story carries every
+      discipline label EXCEPT the ``class:*`` label the runner's PICKUP_JQL
+      requires, plus ``requires:operator-approval``. Visible + complete but
+      NOT auto-dispatched until a human releases it. Never tell the user work
+      has started — only that the task was filed for approval.
+    * **Dispatched to a character (``character`` given).** The RPG un-weld:
+      when the user explicitly picks a character (nova/pixel/sage/rex), the
+      Story is dispatched to that persona — ``character:<slug>`` + the derived
+      ``class:<brain>`` (routes to that character's runner), tier capped at the
+      character's ceiling, optional in-guild ``skill:``. It IS runner-pickable.
+      Only pass ``character`` when the user names one; the Gerrit human +2 gate
+      still guards every merge.
 
     Args:
         title: Short imperative title (e.g. "RK3588 板級健康檢查工具").
@@ -1029,6 +1040,13 @@ async def create_task(
         capabilities: Comma-separated extra runner capabilities to enable
             (e.g. "gerrit_push"). Most code tasks need none.
         priority: Highest/High/Medium/Low/Lowest. Blank = project default.
+        character: OPTIONAL RPG character slug the user explicitly assigned
+            the work to (nova/pixel/sage/rex). When set, dispatches to that
+            character (see mode above); when blank, files gated.
+        skill: OPTIONAL skill_id to train (only with ``character``); must be
+            in the character's guild or it's rejected.
+        tier: OPTIONAL S/M/L/X (only with ``character``); defaults to the
+            character's ceiling and may not exceed it.
     """
     area = (area or "").strip().lower()
     if area not in _RUNNER_AREAS:
@@ -1039,15 +1057,60 @@ async def create_task(
     if not title.strip() or not summary.strip():
         return "[ERROR] title and summary are both required."
 
-    labels = [
-        "agent:auto",
-        "type:feature",
-        f"area:{area}",
-        "requires:operator-approval",
-        "op:orchestrator-filed",
-    ]
+    character = (character or "").strip().lower()
+    skill = (skill or "").strip()
+    tier = (tier or "").strip().upper()
+    char_def = None
+    if character:
+        from backend.agents import character_registry
+        try:
+            char_def = character_registry.resolve_character(character)
+        except character_registry.CharacterRegistryError:
+            return (
+                f"[ERROR] unknown character {character!r} — known: "
+                f"{sorted(character_registry.CHARACTERS)}"
+            )
+        if not tier:
+            # Default to M (the common chat-task size), but never above the
+            # character's ceiling (so rex/S defaults to S, not M).
+            tier = "M" if character_registry.tier_within_ceiling("M", char_def.max_tier) else char_def.max_tier
+        if tier not in character_registry.TIER_ORDER:
+            return f"[ERROR] tier must be one of S/M/L/X — got {tier!r}."
+        if not character_registry.tier_within_ceiling(tier, char_def.max_tier):
+            return (
+                f"[ERROR] tier {tier} exceeds character {character}'s ceiling "
+                f"{char_def.max_tier} — pick a lower tier or a stronger character."
+            )
+        if skill:
+            try:
+                from backend.agents.skill_matrix import load_skill_matrix
+                from backend.sandbox_tier import Guild
+                guild_skills = {
+                    d.skill_id
+                    for d in load_skill_matrix().get(Guild(char_def.guild), [])
+                }
+            except Exception:  # noqa: BLE001 — matrix optional; skip skill on failure
+                guild_skills = set()
+            if skill not in guild_skills:
+                return (
+                    f"[ERROR] skill {skill!r} is not in character {character}'s "
+                    f"guild ({char_def.guild}); allowed: {sorted(guild_skills)}."
+                )
+
+    labels = ["agent:auto", "type:feature", f"area:{area}", "op:orchestrator-filed"]
+    if char_def is not None:
+        # Dispatch to the chosen character: character: + derived class: routes it
+        # to that persona's runner; tier caps capability; optional in-guild skill.
+        labels += [f"character:{character}", f"class:{char_def.brain}", f"tier:{tier}"]
+        if skill:
+            labels.append(f"skill:{skill}")
+        if char_def.brain.startswith("subscription-"):
+            labels.append("capability:enable=gerrit_push")
+    else:
+        # Gated (safe default): no class: → not runner-pickable until a human releases.
+        labels.append("requires:operator-approval")
     for cap in (c.strip() for c in capabilities.split(",")):
-        if cap:
+        if cap and f"capability:enable={cap}" not in labels:
             labels.append(f"capability:enable={cap}")
 
     ac = acceptance_criteria.strip() or (
@@ -1056,13 +1119,23 @@ async def create_task(
         "- [ ] Integration: <wired into the calling system>\n"
         "- [ ] Exercised: <proven end-to-end on real input>"
     )
+    if char_def is not None:
+        footer = (
+            f"_Filed by the OmniSight orchestrator from a user chat session and "
+            f"DISPATCHED to character {char_def.display_name} "
+            f"({character}, {char_def.brain}, guild {char_def.guild}, tier {tier})._"
+        )
+    else:
+        footer = (
+            f"_Filed by the OmniSight orchestrator from a user chat session. "
+            f"GATED: add a class:* label (e.g. class:subscription-claude) to "
+            f"release it to the runner fleet._"
+        )
     description = (
         f"{summary.strip()}\n\n"
         f"h3. Acceptance Criteria (4-AC)\n{ac}\n\n"
         f"----\n"
-        f"_Filed by the OmniSight orchestrator from a user chat session. "
-        f"GATED: add a class:* label (e.g. class:subscription-claude) to "
-        f"release it to the runner fleet._"
+        f"{footer}"
     )
     tagged_title = f"[OP][{area}] {title.strip()}"
 
@@ -1101,12 +1174,20 @@ async def create_task(
         except Exception as exc:  # noqa: BLE001
             logger.warning("create_task: user↔ticket link not persisted for %s: %s", ref.ticket, exc)
 
+    if char_def is not None:
+        return (
+            f"[OK] Filed Story {ref.ticket} — {tagged_title}\n"
+            f"  {ref.url}\n"
+            f"  labels: {', '.join(labels)}\n"
+            f"  ▶ DISPATCHED to {char_def.display_name} ({character}) — the "
+            f"{char_def.brain} runner will pick it up. Merges still need a human +2."
+        )
     return (
         f"[OK] Filed gated Story {ref.ticket} — {tagged_title}\n"
         f"  {ref.url}\n"
         f"  labels: {', '.join(labels)}\n"
         f"  ⚠ GATED — not yet dispatched to the runner. To release it, "
-        f"add a class:subscription-claude (or -codex) label."
+        f"add a class:subscription-claude (or -codex) label, or re-file with a character."
     )
 
 
