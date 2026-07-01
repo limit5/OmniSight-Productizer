@@ -55,6 +55,7 @@ from backend.agents import (
     agent_feature_flags,
     capability_matrix,
     character_card,
+    character_registry,
     circuit_breaker,
     failure_graph,
     jira_authority_check,
@@ -217,21 +218,46 @@ def _ensure_runner_character_card(ticket_key: str) -> None:
     every exception so dispatch keeps moving even when the
     ``agent_character_card`` table is absent or unreachable.
     """
-    try:
-        agent_id = _bot_username()
-    except Exception as exc:  # noqa: BLE001 — never block pickup on identity resolution
-        log.warning(
-            "OP-1459 first-task character-card hook: bot_username resolve "
-            "failed ticket=%s err=%s",
-            ticket_key, exc,
-        )
-        return
     metric_meta = _LAST_TICKET_METADATA.get(ticket_key, {})
     task_area = metric_meta.get("area") or None
+
+    # RPG un-weld (character↔brain↔slot): when the ticket carries a
+    # character:<slug> label, the CHARACTER owns the card — agent_id is the slug
+    # (+ slug as instance_suffix for a stable, brain-scoped identity), so XP/stats
+    # accrue to the reusable persona regardless of which brain-slot ran it. Absent
+    # a character, fall back to the legacy per-instance bot identity (card == bot).
+    character_slug = metric_meta.get("character") or ""
+    if character_slug:
+        try:
+            char = character_registry.resolve_character(character_slug)
+        except character_registry.CharacterRegistryError as exc:
+            log.warning(
+                "character-card hook: unknown character %s on ticket=%s (%s); "
+                "falling back to bot identity",
+                character_slug, ticket_key, exc,
+            )
+            character_slug = ""
+    if character_slug:
+        agent_id = character_slug
+        card_class = char.brain
+        instance_suffix = character_slug
+    else:
+        try:
+            agent_id = _bot_username()
+        except Exception as exc:  # noqa: BLE001 — never block pickup on identity resolution
+            log.warning(
+                "OP-1459 first-task character-card hook: bot_username resolve "
+                "failed ticket=%s err=%s",
+                ticket_key, exc,
+            )
+            return
+        card_class = AGENT_CLASS
+        instance_suffix = _runner_instance_suffix()
+
     card = character_card.ensure_card_for_first_task_sync(
         agent_id=agent_id,
-        agent_class=AGENT_CLASS,
-        instance_suffix=_runner_instance_suffix(),
+        agent_class=card_class,
+        instance_suffix=instance_suffix,
         task_area=task_area,
     )
     if card is not None:
@@ -1306,10 +1332,15 @@ def _build_prompt(
         "cognee_recall": agent_feature_flags.cognee_recall.enabled(),
     }
     _LAST_RESOLVED_CAPABILITIES[key] = enabled_capabilities
+    _character = character_registry.character_from_labels(labels)
     _LAST_TICKET_METADATA[key] = {
         "ticket_type": ticket_type,
         "tier": tier,
         "area": ",".join(declared_areas) if declared_areas else "<none>",
+        # RPG un-weld: the character slug that OWNS this ticket (empty when the
+        # ticket carries only a bare class: label). Drives character-card
+        # ownership at pickup so XP/stats attach to the persona, not the bot.
+        "character": _character.slug if _character else "",
     }
     cap_lines = "\n  - ".join(sorted(enabled_capabilities)) or "(none)"
     capabilities_block = (

@@ -34,6 +34,19 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - import path used by tests
     from scripts.jira_mutex_auto_inject import auto_inject_for_filing
 
+# RPG un-weld: the character registry is the SSOT for character→(brain, tier).
+# Best-effort import (repo root on path) so --character validates against the
+# roster; if it can't import, --character is simply unavailable (choices empty).
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+try:
+    from backend.agents import character_registry
+    _CHARACTER_SLUGS = sorted(character_registry.CHARACTERS)
+except Exception:  # pragma: no cover - registry optional at filing time
+    character_registry = None
+    _CHARACTER_SLUGS = []
+
 VALID_AREAS = {
     "backend",
     "frontend",
@@ -51,6 +64,8 @@ VALID_TIERS = {"S", "M", "L", "X"}
 VALID_CLASSES = {
     "subscription-codex",
     "subscription-claude",
+    "subscription-gemini",
+    "subscription-grok",
     "api-anthropic",
     "api-openai",
 }
@@ -58,7 +73,12 @@ VALID_CLASSES = {
 # do not push. The capability:enable=gerrit_push label gates runner pickup
 # and is auto-added for subscription-* tickets unless --no-push-capability
 # is supplied (see feedback_capability_safe_default_leak memory).
-PUSH_CAPABLE_CLASSES = {"subscription-codex", "subscription-claude"}
+PUSH_CAPABLE_CLASSES = {
+    "subscription-codex",
+    "subscription-claude",
+    "subscription-gemini",
+    "subscription-grok",
+}
 DEFAULT_PUSH_CAPABILITY = "gerrit_push"
 
 # Areas accepted by the runner (auto-runner-jira.RECOGNISED_AREAS) but
@@ -209,6 +229,12 @@ def _labels(args: argparse.Namespace) -> list[str]:
             labels.append(label)
     if args.scope:
         labels.append(f"scope:{args.scope}")
+    # RPG un-weld: a character:<slug> label makes the persona OWN the ticket.
+    # args.cls was already derived from the character's brain in main(), so the
+    # class: label above still routes to the right runner/slot; this rides on top
+    # for ownership + stats accrual (character-card keyed by slug at pickup).
+    if getattr(args, "character", None):
+        labels.append(f"character:{args.character}")
     return labels
 
 
@@ -314,7 +340,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["Highest", "High", "Medium", "Low", "Lowest"],
     )
     parser.add_argument("--tier", required=True, choices=sorted(VALID_TIERS))
-    parser.add_argument("--class", dest="cls", required=True, choices=sorted(VALID_CLASSES))
+    # Exactly one of --class / --character is required (enforced in main()).
+    # --character is the RPG un-weld: it resolves to a brain (--class) + caps the
+    # tier at the character's ceiling, and tags the ticket so the persona owns it.
+    parser.add_argument("--class", dest="cls", required=False, choices=sorted(VALID_CLASSES))
+    parser.add_argument(
+        "--character", default=None, choices=_CHARACTER_SLUGS or None,
+        help="RPG character slug that OWNS this ticket; derives --class from its "
+             "brain and caps --tier at its ceiling (e.g. nova/pixel/sage/rex).",
+    )
     parser.add_argument("--type", default="bug", choices=["bug", "feature", "docs", "meta"])
     parser.add_argument("--areas", required=True, type=lambda s: [p.strip() for p in s.split(",") if p.strip()])
     parser.add_argument("--scope", default=None)
@@ -366,8 +400,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _apply_character(args: argparse.Namespace) -> None:
+    """Resolve --character → derive --class (brain) + cap --tier at its ceiling.
+
+    Enforces "exactly one of --class/--character". When a character is given, its
+    brain becomes the routing class (must agree if --class was also passed) and
+    the requested tier must be within the character's ceiling — this is what makes
+    varying-capability characters real (a cheap-brain persona can't take an L/X).
+    """
+    if not args.character:
+        if not args.cls:
+            raise SystemExit("one of --class or --character is required")
+        return
+    if character_registry is None:
+        raise SystemExit("--character given but character_registry failed to import")
+    char = character_registry.resolve_character(args.character)
+    if args.cls and args.cls != char.brain:
+        raise SystemExit(
+            f"--class {args.cls} conflicts with character {args.character}'s "
+            f"brain {char.brain}; omit --class when using --character"
+        )
+    args.cls = char.brain
+    if not character_registry.tier_within_ceiling(args.tier, char.max_tier):
+        raise SystemExit(
+            f"tier {args.tier} exceeds character {args.character}'s ceiling "
+            f"{char.max_tier} — pick a tier <= {char.max_tier} or a stronger character"
+        )
+
+
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
+    _apply_character(args)
     description_text = Path(args.description_file).read_text()
     if args.check:
         return _print_check(args, description_text)

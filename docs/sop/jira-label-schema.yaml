@@ -38,6 +38,15 @@ namespaces:
       - "A sub-task split cannot change it (jira-ticket-conventions §6) — class assignment is intentional."
     docs: [jira-ticket-conventions.md#2, jira-ticket-conventions.md#16]
 
+  character:                            # character:nova, character:sage, ... (RPG un-weld)
+    group: routing
+    required: false
+    multi: false
+    value: {pattern: '^[a-z][a-z0-9-]*$'}
+    side_effects:
+      - "RPG un-weld: the character persona OWNS the ticket (character-card keyed by slug at pickup). Rides on top of the derived class:<brain>; set by scripts/file_jira_ticket.py --character."
+    set_by: scripts/file_jira_ticket.py
+
   tier:
     group: routing
     required: true
