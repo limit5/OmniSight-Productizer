@@ -137,6 +137,37 @@ def tier_within_ceiling(tier: str, max_tier: str) -> bool:
     return t <= m
 
 
+def _tier_from_labels(labels) -> str | None:
+    for label in labels or ():
+        if isinstance(label, str) and label.startswith("tier:"):
+            return label.split(":", 1)[1].strip() or None
+    return None
+
+
+def character_tier_denial_from_labels(labels) -> str | None:
+    """Return a pickup-denial reason when a character: ticket exceeds its tier ceiling.
+
+    The filer (``--character``) already caps the tier at file time, but a ticket
+    can reach pickup via other paths (hand-edited labels, a re-tier, a bulk
+    import). This is the pickup-side enforcement of the varying-capability
+    contract: a character never executes a ticket above its ``max_tier``. Returns
+    ``None`` when there's no character label (nothing to enforce), the character
+    is unknown (fail-open — the bare class: label still routes it), the tier is
+    absent/unknown, or the tier is within the ceiling.
+    """
+    char = character_from_labels(labels)
+    if char is None:
+        return None
+    tier = _tier_from_labels(labels)
+    if tier is None or tier not in TIER_ORDER:
+        return None
+    if tier_within_ceiling(tier, char.max_tier):
+        return None
+    return (
+        f"character:{char.slug} tier {tier} exceeds ceiling {char.max_tier}"
+    )
+
+
 __all__ = [
     "CharacterDef",
     "CharacterRegistryError",
@@ -145,5 +176,6 @@ __all__ = [
     "resolve_character",
     "character_brain",
     "character_from_labels",
+    "character_tier_denial_from_labels",
     "tier_within_ceiling",
 ]

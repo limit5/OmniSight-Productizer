@@ -399,6 +399,9 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
     :mod:`backend.agents.model_deconfliction`). A
     ``runner_deconfliction_refusal`` audit line records the decision.
     """
+    # Lazy import: character_registry imports this module (for _BASE_BOT_BY_CLASS),
+    # so a top-level import here would be circular.
+    from backend.agents import character_registry
     jql = PICKUP_JQL_TEMPLATE.format(project=client.project_key, cls=client.agent_class)
     resp = _request(client, "POST", "/search/jql", {
         "jql": jql,
@@ -413,6 +416,22 @@ def fetch_pickable_tickets(client: DispatchClient, max_results: int = 50) -> lis
         refused, refusal_label = _runner_refuses_pickup(labels)
         if refused:
             _emit_runner_refusal_audit(ticket_key, refusal_label)
+            continue
+
+        tier_denial = character_registry.character_tier_denial_from_labels(labels)
+        if tier_denial is not None:
+            log.info(
+                "runner_character_tier_refusal %s",
+                json.dumps(
+                    {
+                        "event": "runner_character_tier_refusal",
+                        "ticket_key": ticket_key,
+                        "reason": tier_denial,
+                        "runner_instance": _instance_id_from_env(),
+                    },
+                    sort_keys=True,
+                ),
+            )
             continue
 
         quota_denial = capability_registry.quota_health_denial_from_labels(labels)
