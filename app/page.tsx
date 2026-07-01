@@ -528,6 +528,7 @@ export default function Home() {
             onCompleteTask={handleCompleteTask}
             externalMessages={orchestratorMessages}
             onSendCommand={handleCommand}
+            isStreaming={engine.isStreaming}
             tokenUsage={tokenUsage.length > 0 ? tokenUsage.map(t => ({
               model: t.model as string,
               inputTokens: t.input_tokens,
@@ -760,9 +761,13 @@ export default function Home() {
         </main>
 
         {/* ===== DESKTOP LAYOUT (>= 1024px) ===== */}
-        <main className="hidden lg:grid flex-1 grid-cols-[minmax(140px,180px)_minmax(140px,180px)_1fr_minmax(200px,240px)_minmax(140px,180px)_minmax(140px,180px)_minmax(160px,200px)_minmax(300px,360px)] gap-2 p-3 min-h-0 overflow-x-auto">
-          {/* Far Left: Host & Devices */}
-          <aside className="min-h-0 overflow-hidden">
+        {/* UI/UX #2: ORCHESTRATOR is the primary surface — give it a wide
+            column-1 spanning full height; the seven status panels stack into
+            two scrollable card columns (col 2 / col 3). Explicit grid-line
+            placement keeps every panel without touching their JSX. */}
+        <main className="hidden lg:grid flex-1 grid-cols-[minmax(460px,1.5fr)_minmax(230px,1fr)_minmax(300px,1.1fr)] grid-rows-[repeat(4,minmax(0,1fr))] gap-2 p-3 min-h-0 overflow-x-auto">
+          {/* col2 · row1 — Host & Devices */}
+          <aside className="col-start-2 row-start-1 min-h-0 overflow-y-auto overflow-x-hidden">
             <HostDevicePanel
               hostInfo={systemInfo ? {
                 hostname: systemInfo.hostname,
@@ -793,13 +798,13 @@ export default function Home() {
             />
           </aside>
 
-          {/* Left: SPEC Node */}
-          <aside className="min-h-0">
+          {/* col2 · row2 — SPEC Node */}
+          <aside className="col-start-2 row-start-2 min-h-0 overflow-y-auto overflow-x-hidden">
             <SpecNode spec={spec.length > 0 ? (spec as never) : undefined} onSpecChange={handleSpecChange} />
           </aside>
 
-          {/* Center: Agent Matrix Wall (+ OP-1476 Guild Hall entry card) */}
-          <section className="min-h-0 overflow-hidden flex flex-col gap-2">
+          {/* col2 · rows 3-4 — Agent Matrix Wall (+ Guild Hall entry card) */}
+          <section className="col-start-2 row-start-3 row-span-2 min-h-0 overflow-hidden flex flex-col gap-2">
             <AgentGuildHallCard />
             <div className="flex-1 min-h-0 overflow-hidden">
               <AgentMatrixWall
@@ -813,8 +818,8 @@ export default function Home() {
             </div>
           </section>
 
-          {/* Orchestrator AI - Central Coordinator & Command Hub */}
-          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
+          {/* col1 · full height — Orchestrator AI (primary surface, wide) */}
+          <aside className="col-start-1 row-start-1 row-span-4 min-h-0 overflow-y-auto overflow-x-hidden">
             <OrchestratorAI
               agents={agents}
               tasks={tasks}
@@ -824,6 +829,7 @@ export default function Home() {
               onUpdateAgentStatus={handleUpdateAgentFromTask}
               externalMessages={orchestratorMessages}
               onSendCommand={handleCommand}
+              isStreaming={engine.isStreaming}
               onCompleteTask={handleCompleteTask}
               tokenUsage={tokenUsage.length > 0 ? tokenUsage.map(t => ({
                 model: t.model as string,
@@ -855,8 +861,8 @@ export default function Home() {
             />
           </aside>
 
-          {/* Task Backlog */}
-          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
+          {/* col3 · row1 — Task Backlog */}
+          <aside className="col-start-3 row-start-1 min-h-0 overflow-y-auto overflow-x-hidden">
             <TaskBacklog
               agents={agents}
               tasks={tasks}
@@ -867,8 +873,8 @@ export default function Home() {
             />
           </aside>
 
-          {/* Source Control Matrix */}
-          <aside className="min-h-0 overflow-hidden">
+          {/* col3 · row2 — Source Control Matrix */}
+          <aside className="col-start-3 row-start-2 min-h-0 overflow-y-auto overflow-x-hidden">
             <SourceControlMatrix
               agents={agents}
               onTether={handleTether}
@@ -879,8 +885,8 @@ export default function Home() {
             />
           </aside>
 
-          {/* NPI Lifecycle Timeline */}
-          <aside className="min-h-0 overflow-y-auto overflow-x-hidden">
+          {/* col3 · row3 — NPI Lifecycle Timeline */}
+          <aside className="col-start-3 row-start-3 min-h-0 overflow-y-auto overflow-x-hidden">
             <NPITimeline
               data={engine.npiData}
               onBusinessModelChange={async (model) => {
@@ -901,7 +907,7 @@ export default function Home() {
 
           {/* Far Right: Ops + Decision Engine + Vitals & Artifacts.
               OpsSummary leads — it's the "is anything on fire?" glance. */}
-          <aside className="min-h-0 min-w-0 overflow-y-auto overflow-x-hidden space-y-3">
+          <aside className="col-start-3 row-start-4 min-h-0 min-w-0 overflow-y-auto overflow-x-hidden space-y-3">
             <OpsSummaryPanel />
             <OrchestrationPanel />
             <PipelineTimeline />

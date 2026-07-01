@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 import {
   Send,
+  Loader2,
   Bot, 
   User, 
   Sparkles,
@@ -90,6 +91,10 @@ interface OrchestratorAIProps {
   onCompleteTask?: (taskId: string) => void
   externalMessages?: OrchestratorMessage[]
   onSendCommand?: (command: string) => void
+  /** UI/UX #1: true while the orchestrator pipeline is running (send →
+   *  first token). Drives the "thinking…" bubble + disables the input so
+   *  rapid re-sends can't spawn colliding parallel pipelines. */
+  isStreaming?: boolean
   tokenUsage?: import("./token-usage-stats").ModelTokenUsage[]
   tokenBudget?: import("./token-usage-stats").TokenBudgetInfo | null
   /** Z.4 #293 checkbox 5 — per-provider balance envelopes polled on a
@@ -159,6 +164,7 @@ export function OrchestratorAI({
   onCompleteTask: _onCompleteTask,
   externalMessages = [],
   onSendCommand,
+  isStreaming = false,
   tokenUsage,
   tokenBudget,
   providerBalances,
@@ -450,6 +456,9 @@ export function OrchestratorAI({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!inputValue.trim()) return
+    // UI/UX #1: ignore a submit while a pipeline is still running — the
+    // engine also holds a ref-lock, this is the immediate UI-side guard.
+    if (isStreaming) return
 
     // Clear autocomplete immediately
     setSlashSuggestions([])
@@ -1019,6 +1028,26 @@ export function OrchestratorAI({
             )}
           </div>
         ))}
+        {/* UI/UX #1: thinking indicator — shown from send until the reply's
+            first token arrives (the full graph runs in that window, so the
+            user otherwise stares at nothing). Hidden once an orchestrator
+            bubble exists (i.e. tokens started streaming). */}
+        {isStreaming && messages[messages.length - 1]?.role === "user" && (
+          <div className="flex gap-2 justify-start" aria-live="polite">
+            <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-[var(--artifact-purple)]/20 text-[var(--artifact-purple)]">
+              <Bot size={12} />
+            </div>
+            <div className="bg-[var(--artifact-purple)]/10 text-[var(--muted-foreground)] rounded px-3 py-2 flex items-center gap-2">
+              <Loader2 size={12} className="animate-spin text-[var(--artifact-purple)]" />
+              <span className="font-mono text-xs">Orchestrator 思考中…</span>
+              <span className="inline-flex gap-0.5">
+                <span className="w-1 h-1 rounded-full bg-[var(--artifact-purple)] animate-bounce [animation-delay:-0.3s]" />
+                <span className="w-1 h-1 rounded-full bg-[var(--artifact-purple)] animate-bounce [animation-delay:-0.15s]" />
+                <span className="w-1 h-1 rounded-full bg-[var(--artifact-purple)] animate-bounce" />
+              </span>
+            </div>
+          </div>
+        )}
         <div ref={messagesEndRef} />
       </div>
       
@@ -1104,14 +1133,17 @@ export function OrchestratorAI({
                 }
               }}
               onBlur={() => setTimeout(() => { setSlashSuggestions([]); setSkillSuggestions([]) }, 150)}
-              placeholder="Ask or type /command ..."
-              className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none"
+              disabled={isStreaming}
+              placeholder={isStreaming ? "Orchestrator 思考中… 請稍候" : "Ask or type /command ..."}
+              className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             />
             <button
               type="submit"
-              className="p-1.5 rounded bg-[var(--artifact-purple)] text-white hover:bg-[var(--artifact-purple)]/80 transition-colors shrink-0"
+              disabled={isStreaming}
+              aria-busy={isStreaming}
+              className="p-1.5 rounded bg-[var(--artifact-purple)] text-white hover:bg-[var(--artifact-purple)]/80 transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
             >
-              <Send size={12} />
+              {isStreaming ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
             </button>
           </form>
         </div>

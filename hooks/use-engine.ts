@@ -125,6 +125,10 @@ export function useEngine() {
   const [messages, setMessages] = useState<OrchestratorMessage[]>([])
   const [connected, setConnected] = useState(false)
   const [isStreaming, setIsStreaming] = useState(false)
+  // Re-entry lock for sendCommand. State is async, so a rapid second
+  // submit could slip past an `isStreaming` check before React re-renders;
+  // a ref is synchronous and reliably serialises sends (UI/UX #1).
+  const sendingRef = useRef(false)
   const [systemStatus, setSystemStatus] = useState<api.SystemStatus | null>(null)
   const [systemInfo, setSystemInfo] = useState<api.SystemInfo | null>(null)
   const [devices, setDevices] = useState<api.SystemDevice[]>([])
@@ -1024,6 +1028,15 @@ export function useEngine() {
   // ── Chat / Command ──
 
   const sendCommand = useCallback(async (command: string) => {
+    // UI/UX #1: serialise sends. A reply is produced by the FULL graph
+    // (routing → LLM → tools) BEFORE the first streamed token, a 10–60s
+    // window. Without this lock a user firing off messages spawns parallel
+    // pipelines whose replies raced on a single shared "streaming" id and
+    // clobbered each other; now a second send is ignored until the first
+    // settles (the input is also disabled in the UI as the primary signal).
+    if (sendingRef.current) return
+    sendingRef.current = true
+
     // Add user message immediately
     const userMsg: OrchestratorMessage = {
       id: `msg-${Date.now()}`,
@@ -1033,57 +1046,65 @@ export function useEngine() {
     }
     setMessages(prev => [...prev, userMsg])
 
-    if (connected) {
-      try {
-        setIsStreaming(true)
-        // Use streaming endpoint
-        let accumulated = ""
-        for await (const chunk of api.streamChat(command)) {
-          if (chunk.event === "token") {
-            const { token } = chunk.data as { token: string }
-            accumulated += (accumulated ? " " : "") + token
-            // Update a temporary streaming message
-            setMessages(prev => {
-              const existing = prev.find(m => m.id === "streaming")
-              const streamMsg: OrchestratorMessage = {
-                id: "streaming",
-                role: "orchestrator",
-                content: accumulated,
-                timestamp: new Date().toISOString(),
-              }
-              return existing
-                ? prev.map(m => m.id === "streaming" ? streamMsg : m)
-                : [...prev, streamMsg]
-            })
-          } else if (chunk.event === "done") {
-            const data = chunk.data as api.ApiChatMessage
-            const finalMsg = mapChatMessage(data)
-            setMessages(prev => prev.filter(m => m.id !== "streaming").concat(finalMsg))
+    // Per-send unique id for the in-flight streaming bubble — never the
+    // shared literal "streaming" that two concurrent turns overwrote.
+    const streamId = `stream-${Date.now()}`
+    try {
+      if (connected) {
+        try {
+          setIsStreaming(true)
+          // Use streaming endpoint
+          let accumulated = ""
+          for await (const chunk of api.streamChat(command)) {
+            if (chunk.event === "token") {
+              const { token } = chunk.data as { token: string }
+              accumulated += (accumulated ? " " : "") + token
+              // Update this send's temporary streaming message
+              setMessages(prev => {
+                const existing = prev.find(m => m.id === streamId)
+                const streamMsg: OrchestratorMessage = {
+                  id: streamId,
+                  role: "orchestrator",
+                  content: accumulated,
+                  timestamp: new Date().toISOString(),
+                }
+                return existing
+                  ? prev.map(m => m.id === streamId ? streamMsg : m)
+                  : [...prev, streamMsg]
+              })
+            } else if (chunk.event === "done") {
+              const data = chunk.data as api.ApiChatMessage
+              const finalMsg = mapChatMessage(data)
+              setMessages(prev => prev.filter(m => m.id !== streamId).concat(finalMsg))
+            }
           }
+          return
+        } catch (e) {
+          console.error("[Engine] Stream failed, falling back to sync:", e)
+          // Drop any partial streaming bubble before the sync fallback.
+          setMessages(prev => prev.filter(m => m.id !== streamId))
         }
-        setIsStreaming(false)
-        return
-      } catch (e) {
-        console.error("[Engine] Stream failed, falling back to sync:", e)
-        setIsStreaming(false)
+
+        // Fallback to sync chat
+        try {
+          const res = await api.sendChat(command)
+          setMessages(prev => [...prev, mapChatMessage(res.message)])
+          return
+        } catch { /* fall through to offline */ }
       }
 
-      // Fallback to sync chat
-      try {
-        const res = await api.sendChat(command)
-        setMessages(prev => [...prev, mapChatMessage(res.message)])
-        return
-      } catch { /* fall through to offline */ }
+      // Offline fallback
+      const offlineMsg: OrchestratorMessage = {
+        id: `msg-${Date.now()}-offline`,
+        role: "orchestrator",
+        content: `[OFFLINE] Command received: "${command}". Backend not connected.`,
+        timestamp: new Date().toISOString(),
+      }
+      setMessages(prev => [...prev, offlineMsg])
+    } finally {
+      setIsStreaming(false)
+      sendingRef.current = false
     }
-
-    // Offline fallback
-    const offlineMsg: OrchestratorMessage = {
-      id: `msg-${Date.now()}-offline`,
-      role: "orchestrator",
-      content: `[OFFLINE] Command received: "${command}". Backend not connected.`,
-      timestamp: new Date().toISOString(),
-    }
-    setMessages(prev => [...prev, offlineMsg])
   }, [connected])
 
   // ── Invoke (Singularity Sync) ──
