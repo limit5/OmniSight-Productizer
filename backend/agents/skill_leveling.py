@@ -48,6 +48,9 @@ need "now" pass it explicitly so unit tests stay deterministic.
 
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
@@ -63,6 +66,8 @@ from backend.agents.skill_matrix import (
     canonical_skill_ids,
 )
 
+LOG = logging.getLogger(__name__)
+
 
 ConnFactory = Callable[[], Any]
 """Callable returning an async context manager yielding a connection."""
@@ -76,6 +81,17 @@ MAX_SKILL_LEVEL = 5
 # branches declared in ``skill_matrix.yaml`` and ``lock_branch_choice``
 # persists the operator's immutable pick.
 BRANCH_LOCK_LEVEL = 3
+# OP-2503 — RPG.W12 skill-xp-accrual EPIC S2 base token per delivery.
+# Deliberately NOT :data:`backend.agents.xp_engine.BASE_TASK_XP` (=100):
+# feeding 100 through ``compute_xp_delta`` produces 300 first-time /
+# 100 repeat, which instantly max-levels a skill against the
+# ``25 / 100 / 250 / 600`` curve. 25 is the ADR-0008 "task-success
+# token" so a single delivery lands 75 XP first-time / 25 repeat and
+# a real grind is required to progress. Callers of
+# :func:`award_skill_xp_from_env` (and its sync wrapper) MUST NOT
+# pre-multiply via ``skill_xp_delta_for`` — the store applies the
+# outcome / tier / first-time multiplier exactly once.
+BASE_SKILL_XP = 25
 TEACH_LEVEL = 5
 TEACH_COOLDOWN_DAYS = 7
 TEACH_INJECTION_XP = 25
@@ -862,6 +878,134 @@ async def decay_idle_skills(
     return tuple(touched)
 
 
+# ── Runner delivery integration (OP-2503) ──────────────────────────
+
+
+@asynccontextmanager
+async def _connect_skill_state_from_env() -> AsyncIterator[Any]:
+    """Open a single asyncpg connection from ``OMNISIGHT_DATABASE_URL``.
+
+    Mirrors :func:`backend.agents.character_card._connect_character_card_from_env`
+    so the runner's per-delivery skill-XP write reuses the same env-DSN
+    contract used by the character-card + telemetry paths:
+    ``OMNISIGHT_DATABASE_URL`` wins over the generic ``DATABASE_URL``;
+    ``asyncpg`` is imported lazily so non-DB-backed deployments do not
+    need the dependency at import time.
+    """
+    dsn = os.environ.get("OMNISIGHT_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("OMNISIGHT_DATABASE_URL or DATABASE_URL is not set")
+    from backend.db_url import parse as parse_db_url
+
+    parsed = parse_db_url(dsn)
+    if not parsed.is_postgres:
+        raise RuntimeError("agent_skill_state requires a Postgres database URL")
+    import asyncpg  # type: ignore[import-not-found]
+
+    conn = await asyncpg.connect(**parsed.asyncpg_connect_kwargs())
+    try:
+        yield conn
+    finally:
+        await conn.close()
+
+
+def _skill_xp_conn_passthrough(conn: Any) -> ConnFactory:
+    """Wrap an already-open connection as a ``ConnFactory`` for the store."""
+
+    @asynccontextmanager
+    async def _factory_cm() -> AsyncIterator[Any]:
+        yield conn
+
+    def _factory() -> Any:
+        return _factory_cm()
+
+    return _factory
+
+
+async def award_skill_xp_from_env(
+    *,
+    agent_id: str,
+    skill_id: str,
+    tier: str | None = None,
+    base_delta: int = BASE_SKILL_XP,
+    outcome_status: str = "success",
+    conn_factory: ConnFactory | None = None,
+) -> AtomicSkillXpAward | None:
+    """Award per-skill XP against the env-configured Postgres DSN (OP-2503).
+
+    The runner delivery hook: on a successful push of a character-owned
+    ticket that carries a valid in-guild ``skill:<skill_id>`` label, the
+    finalizer calls this so the persona's ``agent_skill_state`` row for
+    that skill accrues XP through :meth:`PostgresSkillStateStore.award_delta_atomic`
+    (S1b, OP-2501) — one atomic ``INSERT ... ON CONFLICT DO UPDATE`` so
+    two concurrent slots on the same ``(agent_id, skill_id)`` cannot
+    lose an award.
+
+    ``base_delta`` defaults to :data:`BASE_SKILL_XP` (=25), NOT
+    :data:`backend.agents.xp_engine.BASE_TASK_XP` (=100) — feeding 100
+    would instant-max a skill against the 25/100/250/600 curve. Callers
+    MUST NOT pre-multiply the delta via ``skill_xp_delta_for``: the
+    store applies the outcome / tier-L+ / first-time multiplier exactly
+    once. Fail-open — returns ``None`` on any error (no DSN, asyncpg
+    unavailable, schema not deployed, connection error) so a delivery
+    is never wedged by the RPG write; ``conn_factory`` is a test seam.
+    """
+    try:
+        if conn_factory is None:
+            async with _connect_skill_state_from_env() as conn:
+                store = PostgresSkillStateStore(_skill_xp_conn_passthrough(conn))
+                return await store.award_delta_atomic(
+                    agent_id,
+                    skill_id,
+                    base_delta=base_delta,
+                    outcome=outcome_status,
+                    tier_l_plus=str(tier or "").upper() in {"L", "X"},
+                )
+        store = PostgresSkillStateStore(conn_factory)
+        return await store.award_delta_atomic(
+            agent_id,
+            skill_id,
+            base_delta=base_delta,
+            outcome=outcome_status,
+            tier_l_plus=str(tier or "").upper() in {"L", "X"},
+        )
+    except Exception as exc:  # noqa: BLE001 — delivery must never wedge on RPG XP
+        LOG.warning(
+            "SkillXpAwardFailed agent_id=%s skill_id=%s outcome=%s err=%s",
+            agent_id,
+            skill_id,
+            outcome_status,
+            exc,
+        )
+        return None
+
+
+def award_skill_xp_sync(
+    *,
+    agent_id: str,
+    skill_id: str,
+    tier: str | None = None,
+    base_delta: int = BASE_SKILL_XP,
+    outcome_status: str = "success",
+) -> AtomicSkillXpAward | None:
+    """Synchronous wrapper for ``auto-runner-jira.py`` (mirrors the *_sync shape).
+
+    Drives a fresh :func:`asyncio.run` loop so the sync dispatch path
+    can call into the asyncpg-backed store without restructuring the
+    runner. Must not be invoked from inside an already-running event
+    loop.
+    """
+    return asyncio.run(
+        award_skill_xp_from_env(
+            agent_id=agent_id,
+            skill_id=skill_id,
+            tier=tier,
+            base_delta=base_delta,
+            outcome_status=outcome_status,
+        )
+    )
+
+
 # ── Internal helpers ────────────────────────────────────────────────
 
 
@@ -947,6 +1091,7 @@ def _utc(value: datetime) -> datetime:
 __all__ = [
     "ANTI_GRIND_MULTIPLIER",
     "AtomicSkillXpAward",
+    "BASE_SKILL_XP",
     "BRANCH_LOCK_LEVEL",
     "DECAY_RATE_PER_WEEK",
     "FIRST_TIME_SKILL_MULTIPLIER",
@@ -975,6 +1120,8 @@ __all__ = [
     "XPDeltaNegativeWithoutDecayContext",
     "apply_decay",
     "award_skill_xp",
+    "award_skill_xp_from_env",
+    "award_skill_xp_sync",
     "canonical_branches_for_skill",
     "compute_level",
     "compute_xp_delta",

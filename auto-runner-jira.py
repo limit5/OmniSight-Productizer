@@ -76,6 +76,8 @@ from backend.agents import (
     runner_tenant,
     runner_workspace_safety,
     scheduler,
+    skill_leveling,
+    skill_resolver,
 )
 from backend import db_context, sandbox_prewarm
 from backend.agents.pipeline_coordinator_capacity import (
@@ -128,6 +130,15 @@ RUNNER_BRANCH_SWEEP_DISABLED = (
 # helper logs an explicit "intentionally unset" line in that case.
 MEMORY_TOOL_DISABLED = (
     os.environ.get("OMNISIGHT_RUNNER_MEMORY_TOOL_DISABLED", "0").strip() == "1"
+)
+# OP-2503 — RPG.W12 skill-xp-accrual EPIC S2 dark-ship gate. When set to
+# "1", the successful-push finalizer routes a character-owned + valid
+# in-guild ``skill:`` ticket through ``_award_skill_xp`` so the persona's
+# per-skill row accrues XP. Default OFF — S2 ships DARK; flipping the flag
+# is the S3 activation step. The character-XP write (#1900) is unchanged
+# and untouched by this gate.
+SKILL_XP_ENABLED = (
+    os.environ.get("OMNISIGHT_RPG_SKILL_XP_ENABLED", "0").strip() == "1"
 )
 PRE_PICKUP_CAP_GATE_ENV = "OMNISIGHT_PRE_PICKUP_CAP_GATE"
 PRE_PICKUP_CAP_BLOCKED_TAG = "[runner-capability-pre-pickup-blocked]"
@@ -293,6 +304,54 @@ def _award_character_xp(ticket_key: str) -> None:
         print(
             f"[runner] character-xp +{delta.xp} agent_id={card.agent_id} "
             f"→ xp={card.xp} level={card.level}"
+        )
+
+
+def _award_skill_xp(ticket_key: str) -> None:
+    """RPG.W12 skill-xp-accrual EPIC S2 — award skill XP on delivery (OP-2503).
+
+    Gated behind ``OMNISIGHT_RPG_SKILL_XP_ENABLED`` (default OFF) so S2 ships
+    DARK; the character-XP write (#1900) is untouched. Only awards when the
+    ticket is character-owned AND carries a valid in-guild ``skill:`` label
+    (both are enforced by ``skill_resolver.resolve_skill_for_character`` in
+    ``_build_prompt``); a bare bot ticket, a missing character, or an
+    off-guild skill collapse to a no-op. The award routes through
+    ``PostgresSkillStateStore.award_delta_atomic`` (S1b, OP-2501) so the
+    delta is applied in a single ``INSERT ... ON CONFLICT DO UPDATE`` and
+    two concurrent slots delivering the same ``(agent_id, skill_id)`` do
+    not lose an award. Tier drives the Tier-L+ multiplier. Fail-open — a
+    delivery is never wedged by the RPG write.
+    """
+    if not SKILL_XP_ENABLED:
+        return
+    metric_meta = _LAST_TICKET_METADATA.get(ticket_key, {})
+    skill_id = metric_meta.get("skill") or ""
+    if not skill_id:
+        return
+    identity = _resolve_card_identity(ticket_key)
+    if identity is None:
+        return
+    agent_id, _card_class, _suffix = identity
+    # A bot-only ticket (no character) must not accrue skill XP even if a
+    # ``skill:`` label was present — the resolver already refuses those,
+    # but the double-check keeps the invariant local to this hook.
+    if agent_id == _bot_username():
+        return
+    tier = metric_meta.get("tier")
+    try:
+        result = skill_leveling.award_skill_xp_sync(
+            agent_id=agent_id, skill_id=skill_id, tier=tier,
+        )
+    except Exception as exc:  # noqa: BLE001 — delivery must never wedge on RPG XP
+        log.warning(
+            "skill-xp award failed ticket=%s skill=%s err=%s",
+            ticket_key, skill_id, exc,
+        )
+        return
+    if result is not None:
+        print(
+            f"[runner] skill-xp +{result.applied_delta} agent_id={result.agent_id} "
+            f"skill={result.skill_id} → xp={result.new_xp} level={result.new_level}"
         )
 
 
@@ -1362,6 +1421,13 @@ def _build_prompt(
     }
     _LAST_RESOLVED_CAPABILITIES[key] = enabled_capabilities
     _character = character_registry.character_from_labels(labels)
+    # OP-2503 — RPG.W12 skill-xp-accrual EPIC S2: capture the guild-validated
+    # skill_id (if any) so the successful-push finalizer can route XP to the
+    # persona's per-skill row. ``resolve_skill_for_character`` is fail-open
+    # (returns None on any bad label / off-guild / unknown character), so a
+    # bad label cannot wedge dispatch. The finalizer additionally gates on
+    # ``OMNISIGHT_RPG_SKILL_XP_ENABLED``.
+    _skill_id = skill_resolver.resolve_skill_for_character(labels) or ""
     _LAST_TICKET_METADATA[key] = {
         "ticket_type": ticket_type,
         "tier": tier,
@@ -1370,6 +1436,7 @@ def _build_prompt(
         # ticket carries only a bare class: label). Drives character-card
         # ownership at pickup so XP/stats attach to the persona, not the bot.
         "character": _character.slug if _character else "",
+        "skill": _skill_id,
     }
     cap_lines = "\n  - ".join(sorted(enabled_capabilities)) or "(none)"
     capabilities_block = (
@@ -2063,6 +2130,11 @@ def _finalize_successful_push(
     # RPG.W4: the delivery is complete (pushed + Under Review) — award XP so the
     # owning character/bot levels up from real work. Fail-open (never wedges).
     _award_character_xp(key)
+    # RPG.W12 S2 (OP-2503): additionally award per-skill XP when the ticket
+    # carries a valid in-guild ``skill:`` label AND
+    # ``OMNISIGHT_RPG_SKILL_XP_ENABLED=1``. Dark by default; the character-XP
+    # write above is unchanged whether the flag is on or off.
+    _award_skill_xp(key)
     _release_ticket_claim_if_acquired(client, key, claim)
     if push_result.post_push_warning:
         jira_dispatch.add_comment(
