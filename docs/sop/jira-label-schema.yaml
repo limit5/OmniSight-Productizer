@@ -47,6 +47,15 @@ namespaces:
       - "RPG un-weld: the character persona OWNS the ticket (character-card keyed by slug at pickup). Rides on top of the derived class:<brain>; set by scripts/file_jira_ticket.py --character."
     set_by: scripts/file_jira_ticket.py
 
+  skill:                                # skill:enterprise_web, skill:barcode_scanner, ... (RPG.W12 skill-xp-accrual EPIC S1, OP-2500)
+    group: routing
+    required: false
+    multi: false
+    value: {pattern: '^[a-z][a-z0-9_-]*$'}
+    side_effects:
+      - "RPG.W12 skill-xp-accrual EPIC S1 (OP-2500): backend/agents/skill_resolver.resolve_skill_for_character(labels) maps the ticket to a skill_id iff the character:'s guild owns the skill (skill matrix is guild-keyed). Inert at S1 — no accrual wired yet, no caller on the delivery/finalizer path; the label + resolver ship as a safe floor for a later stage to consume."
+    set_by: scripts/file_jira_ticket.py  # --skill requires --character and validates guild ownership at filing time.
+
   tier:
     group: routing
     required: true

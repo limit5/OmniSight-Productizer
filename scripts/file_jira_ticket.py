@@ -47,6 +47,17 @@ except Exception:  # pragma: no cover - registry optional at filing time
     character_registry = None
     _CHARACTER_SLUGS = []
 
+# RPG.W12 S1 (OP-2500): the skill matrix + Guild enum are the SSOT for the
+# per-character skill set. --skill validates at filing time that the requested
+# skill_id is in the character's guild's skill set; import is best-effort so a
+# stale checkout can still file without --skill.
+try:
+    from backend.agents.skill_matrix import load_skill_matrix
+    from backend.sandbox_tier import Guild as _Guild
+except Exception:  # pragma: no cover - matrix optional at filing time
+    load_skill_matrix = None
+    _Guild = None
+
 VALID_AREAS = {
     "backend",
     "frontend",
@@ -235,6 +246,12 @@ def _labels(args: argparse.Namespace) -> list[str]:
     # for ownership + stats accrual (character-card keyed by slug at pickup).
     if getattr(args, "character", None):
         labels.append(f"character:{args.character}")
+    # RPG.W12 S1 (OP-2500): skill:<slug> pairs with character:<slug> for the
+    # future skill-XP accrual pipeline. Guild-ownership was validated in
+    # _apply_character(); at S1 no runner consumer wires this yet, so the label
+    # ships inert.
+    if getattr(args, "skill", None):
+        labels.append(f"skill:{args.skill}")
     return labels
 
 
@@ -349,6 +366,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="RPG character slug that OWNS this ticket; derives --class from its "
              "brain and caps --tier at its ceiling (e.g. nova/pixel/sage/rex).",
     )
+    parser.add_argument(
+        "--skill",
+        default=None,
+        help="RPG.W12 S1 (OP-2500) skill_id to accrue XP against once the "
+             "later stage wires accrual. Requires --character and must be a "
+             "skill_id declared in backend/agents/skill_matrix.yaml under the "
+             "character's guild — off-guild picks are rejected at filing time "
+             "(the skill matrix is guild-keyed; a character trains only what "
+             "its guild owns). Inert at S1: emits the skill:<id> label but no "
+             "runner consumer reads it yet.",
+    )
     parser.add_argument("--type", default="bug", choices=["bug", "feature", "docs", "meta"])
     parser.add_argument("--areas", required=True, type=lambda s: [p.strip() for p in s.split(",") if p.strip()])
     parser.add_argument("--scope", default=None)
@@ -407,8 +435,13 @@ def _apply_character(args: argparse.Namespace) -> None:
     brain becomes the routing class (must agree if --class was also passed) and
     the requested tier must be within the character's ceiling — this is what makes
     varying-capability characters real (a cheap-brain persona can't take an L/X).
+    Also validates --skill (RPG.W12 S1, OP-2500) is in the character's guild's
+    skill set — the skill matrix is guild-keyed so a backend character never gets
+    to accrue XP into a frontend skill.
     """
     if not args.character:
+        if getattr(args, "skill", None):
+            raise SystemExit("--skill requires --character")
         if not args.cls:
             raise SystemExit("one of --class or --character is required")
         return
@@ -425,6 +458,43 @@ def _apply_character(args: argparse.Namespace) -> None:
         raise SystemExit(
             f"tier {args.tier} exceeds character {args.character}'s ceiling "
             f"{char.max_tier} — pick a tier <= {char.max_tier} or a stronger character"
+        )
+    if getattr(args, "skill", None):
+        _validate_skill_in_character_guild(args.skill, char)
+
+
+def _validate_skill_in_character_guild(skill_id: str, char) -> None:
+    """Reject a --skill that is not owned by the character's guild.
+
+    OP-2500 (RPG.W12 skill-xp-accrual S1). Fails at filing time so a
+    typo can't ship a ``skill:<x>`` label the future accrual path would
+    silently drop. The matrix is the source of truth: we do not
+    reimplement the guild eligibility here.
+    """
+    if load_skill_matrix is None or _Guild is None:
+        raise SystemExit(
+            "--skill given but skill_matrix/Guild failed to import; cannot "
+            "validate guild ownership"
+        )
+    try:
+        matrix = load_skill_matrix()
+    except Exception as exc:
+        raise SystemExit(f"--skill: cannot load canonical skill matrix: {exc}")
+    try:
+        guild = _Guild(char.guild)
+    except ValueError:
+        raise SystemExit(
+            f"--skill: character {char.slug}'s guild {char.guild!r} is not a "
+            "known Guild enum member"
+        )
+    guild_skills = matrix.get(guild) or ()
+    allowed = sorted(definition.skill_id for definition in guild_skills)
+    if skill_id not in allowed:
+        raise SystemExit(
+            f"--skill {skill_id!r} is off-guild for character {char.slug} "
+            f"(guild={char.guild}); the skill matrix is guild-keyed so a "
+            f"character trains only what its guild owns. "
+            f"Allowed skills for guild {char.guild!r}: {allowed or '(none declared)'}"
         )
 
 
