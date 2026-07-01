@@ -553,6 +553,10 @@ _GERRIT_AUTH_BY_CLASS: dict[str, tuple[str, Path]] = {
     "api-openai":          ("codex-bot",  Path("~/.config/omnisight/gerrit-codex-bot-ed25519").expanduser()),
     "subscription-claude": ("claude-bot", Path("~/.config/omnisight/gerrit-claude-bot-ed25519").expanduser()),
     "api-anthropic":       ("claude-bot", Path("~/.config/omnisight/gerrit-claude-bot-ed25519").expanduser()),
+    # Gemini/Antigravity brain (dogfood 2026-07-01). Without this entry,
+    # _gerrit_auth_for_bot("gemini-bot") raises "unknown Gerrit bot username"
+    # and backpressure_decide → open_ps_count_for aborts every gemini pickup.
+    "subscription-gemini": ("gemini-bot", Path("~/.config/omnisight/gerrit-gemini-bot-ed25519").expanduser()),
 }
 
 
@@ -596,7 +600,7 @@ def _gerrit_auth_for_bot(bot_username: str) -> tuple[str, Path]:
     for username, key_path in _GERRIT_AUTH_BY_CLASS.values():
         if username == bot_username:
             return username, key_path
-    if bot_username.startswith(("codex-bot-", "claude-bot-")):
+    if bot_username.startswith(("codex-bot-", "claude-bot-", "gemini-bot-")):
         return bot_username, _gerrit_ssh_key_for_bot(bot_username)
     raise ValueError(f"unknown Gerrit bot username: {bot_username}")
 
