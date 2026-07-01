@@ -271,11 +271,32 @@ class EventBus:
         data["_user_id"] = user_id or ""
         data_json = json.dumps(data)
 
-        # I10: try cross-worker delivery via Redis Pub/Sub
-        cross_worker = False
+        # Deliver to THIS worker's own SSE subscribers directly — ALWAYS,
+        # not only when the Redis relay is unavailable.
+        #
+        # Bug (dogfood 2026-07-01): the old code skipped this local fan-out
+        # whenever ``publish_cross_worker`` succeeded, relying on the Redis
+        # round-trip to feed local subscribers back via
+        # ``_on_cross_worker_event``. But that callback deliberately SKIPS
+        # the origin worker (to avoid a double-delivery that, under the old
+        # guard, never actually happened). Net effect with Redis up: the
+        # publishing worker's OWN subscribers received nothing. It stayed
+        # hidden because interactive chat replies reach the sender over the
+        # REST/stream body, not this bus; it only surfaced when the Gap-C
+        # delivery poller emitted a chat.message to a user whose SSE happened
+        # to live on the same replica → the "✅ done" line landed in PG but
+        # never live-pushed (needed a manual refresh).
+        #
+        # Correct topology: local subscribers get it directly here; OTHER
+        # workers get it via Redis → their ``_on_cross_worker_event`` (which
+        # skips this origin, so no double-delivery). Redis-down degrades to
+        # local-only — the same single-worker behaviour as before.
+        self._deliver_local(event, data_json, broadcast_scope, tenant_id, user_id)
+
+        # I10: relay to OTHER workers via Redis Pub/Sub (best-effort).
         try:
             from backend.shared_state import publish_cross_worker
-            cross_worker = publish_cross_worker("sse", {
+            publish_cross_worker("sse", {
                 "event": event,
                 "data_json": data_json,
                 "broadcast_scope": broadcast_scope,
@@ -285,9 +306,6 @@ class EventBus:
             })
         except Exception:
             pass
-
-        if not cross_worker:
-            self._deliver_local(event, data_json, broadcast_scope, tenant_id, user_id)
 
         # Persist important events asynchronously
         if event in _PERSIST_EVENT_TYPES:
