@@ -208,51 +208,52 @@ def _runner_instance_suffix() -> str:
     return INSTANCE_ID
 
 
-def _ensure_runner_character_card(ticket_key: str) -> None:
-    """Idempotent RPG.W1.2 first-task hook (OP-1459).
+def _resolve_card_identity(ticket_key: str) -> tuple[str, str, str] | None:
+    """Resolve the (agent_id, card_class, instance_suffix) that owns this ticket.
 
-    Composes the per-instance agent identity from the runner env
-    (``agent_id`` = bot_username so two instances of the same class
-    never collide on the row's primary key) and delegates to the
-    character-card store. Best-effort: the helper logs and swallows
-    every exception so dispatch keeps moving even when the
-    ``agent_character_card`` table is absent or unreachable.
+    RPG un-weld (character↔brain↔slot): when the ticket carries a
+    ``character:<slug>`` label, the CHARACTER owns the card — agent_id is the slug
+    (+ slug as instance_suffix for a stable, brain-scoped identity), so XP/stats
+    accrue to the reusable persona regardless of which brain-slot ran it. Absent a
+    character, fall back to the legacy per-instance bot identity (card == bot).
+    Returns ``None`` when even the bot identity can't be resolved. Shared by the
+    first-task hook and the XP-award hook so both key the SAME row.
     """
     metric_meta = _LAST_TICKET_METADATA.get(ticket_key, {})
-    task_area = metric_meta.get("area") or None
-
-    # RPG un-weld (character↔brain↔slot): when the ticket carries a
-    # character:<slug> label, the CHARACTER owns the card — agent_id is the slug
-    # (+ slug as instance_suffix for a stable, brain-scoped identity), so XP/stats
-    # accrue to the reusable persona regardless of which brain-slot ran it. Absent
-    # a character, fall back to the legacy per-instance bot identity (card == bot).
     character_slug = metric_meta.get("character") or ""
     if character_slug:
         try:
             char = character_registry.resolve_character(character_slug)
+            return character_slug, char.brain, character_slug
         except character_registry.CharacterRegistryError as exc:
             log.warning(
                 "character-card hook: unknown character %s on ticket=%s (%s); "
                 "falling back to bot identity",
                 character_slug, ticket_key, exc,
             )
-            character_slug = ""
-    if character_slug:
-        agent_id = character_slug
-        card_class = char.brain
-        instance_suffix = character_slug
-    else:
-        try:
-            agent_id = _bot_username()
-        except Exception as exc:  # noqa: BLE001 — never block pickup on identity resolution
-            log.warning(
-                "OP-1459 first-task character-card hook: bot_username resolve "
-                "failed ticket=%s err=%s",
-                ticket_key, exc,
-            )
-            return
-        card_class = AGENT_CLASS
-        instance_suffix = _runner_instance_suffix()
+    try:
+        return _bot_username(), AGENT_CLASS, _runner_instance_suffix()
+    except Exception as exc:  # noqa: BLE001 — never block dispatch on identity resolution
+        log.warning(
+            "character-card hook: bot_username resolve failed ticket=%s err=%s",
+            ticket_key, exc,
+        )
+        return None
+
+
+def _ensure_runner_character_card(ticket_key: str) -> None:
+    """Idempotent RPG.W1.2 first-task hook (OP-1459).
+
+    Ensures the character card row for whoever owns this ticket (character persona
+    or bot) exists. Best-effort: logs and swallows every exception so dispatch
+    keeps moving even when the ``agent_character_card`` table is absent/unreachable.
+    """
+    identity = _resolve_card_identity(ticket_key)
+    if identity is None:
+        return
+    agent_id, card_class, instance_suffix = identity
+    metric_meta = _LAST_TICKET_METADATA.get(ticket_key, {})
+    task_area = metric_meta.get("area") or None
 
     card = character_card.ensure_card_for_first_task_sync(
         agent_id=agent_id,
@@ -264,6 +265,34 @@ def _ensure_runner_character_card(ticket_key: str) -> None:
         print(
             f"[runner] character-card ensured agent_id={card.agent_id} "
             f"guild={card.guild} level={card.level}"
+        )
+
+
+def _award_character_xp(ticket_key: str) -> None:
+    """RPG.W4 progression hook — award XP to the ticket's owner on delivery.
+
+    Called from the successful-push finalizer so the persona/bot that owns the
+    ticket accrues XP and levels up per the ADR-0008 curve (a level increase
+    fires the RPG level-up event inside the registry). Best-effort + fail-open:
+    a delivery is never wedged by the RPG write. Tier drives the Tier-L+ bonus.
+    """
+    identity = _resolve_card_identity(ticket_key)
+    if identity is None:
+        return
+    agent_id, _card_class, _suffix = identity
+    tier = _LAST_TICKET_METADATA.get(ticket_key, {}).get("tier")
+    try:
+        result = character_card.award_task_xp_sync(
+            agent_id=agent_id, outcome_status="success", tier=tier,
+        )
+    except Exception as exc:  # noqa: BLE001 — delivery must never wedge on RPG XP
+        log.warning("character-xp award failed ticket=%s err=%s", ticket_key, exc)
+        return
+    if result is not None:
+        delta, card = result
+        print(
+            f"[runner] character-xp +{delta.xp} agent_id={card.agent_id} "
+            f"→ xp={card.xp} level={card.level}"
         )
 
 
@@ -2031,6 +2060,9 @@ def _finalize_successful_push(
         push_result.change_url,
         change_number=push_result.change_number,
     )
+    # RPG.W4: the delivery is complete (pushed + Under Review) — award XP so the
+    # owning character/bot levels up from real work. Fail-open (never wedges).
+    _award_character_xp(key)
     _release_ticket_claim_if_acquired(client, key, claim)
     if push_result.post_push_warning:
         jira_dispatch.add_comment(

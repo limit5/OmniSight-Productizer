@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, Literal, Protocol
 
 from backend.agents.guild_registry import GUILDS
+from backend.agents.xp_engine import BASE_TASK_XP
 
 LOG = logging.getLogger(__name__)
 
@@ -843,6 +844,104 @@ def ensure_card_for_first_task_sync(
             instance_suffix=instance_suffix,
             task_area=task_area,
             specialization_label=specialization_label,
+        )
+    )
+
+
+async def _award_task_xp(
+    conn_factory: ConnFactory,
+    *,
+    agent_id: str,
+    outcome_status: str,
+    tier: str | None,
+    base_xp: int,
+) -> tuple[Any, CharacterCard] | None:
+    """Core award: read card → xp_engine delta → persist new xp+level.
+
+    Uses :class:`CharacterCardRegistry.update_card` so a level increase fires the
+    RPG level-up / talent-fork events. Returns ``(XpDelta, updated_card)`` or
+    ``None`` when the card doesn't exist yet (nothing to award to).
+    """
+    from backend.agents import xp_engine
+
+    store = PostgresCharacterCardStore(conn_factory)
+    registry = CharacterCardRegistry(store)
+    card = await registry.get_card(agent_id, require_exists=False)
+    if card is None:
+        return None
+    delta = xp_engine.award_xp(
+        agent_id,
+        {
+            "status": outcome_status,
+            "base_xp": base_xp,
+            "tier_l_plus": str(tier or "").upper() in {"L", "X"},
+        },
+    )
+    new_xp = card.xp + delta.xp
+    new_level = xp_engine.level_for_xp(new_xp)
+    updated = await registry.update_card(
+        agent_id, CharacterCardUpdate(xp=new_xp, level=new_level)
+    )
+    return delta, updated
+
+
+async def award_task_xp_from_env(
+    *,
+    agent_id: str,
+    outcome_status: str = "success",
+    tier: str | None = None,
+    base_xp: int = BASE_TASK_XP,
+    conn_factory: ConnFactory | None = None,
+) -> tuple[Any, CharacterCard] | None:
+    """Award task-completion XP to an existing character card (RPG.W4).
+
+    The progression loop's missing link: the runner calls this on a successful
+    delivery so the CHARACTER (or bot) that owns the ticket accrues XP and levels
+    up per the ADR-0008 ``100·N^1.4`` curve. Fail-open — returns ``None`` on any
+    error (no DSN, card absent, schema not deployed) so a delivery is never
+    wedged by the RPG write. ``conn_factory`` is a test seam.
+    """
+    try:
+        if conn_factory is None:
+            async with _connect_character_card_from_env() as conn:
+                return await _award_task_xp(
+                    _conn_passthrough_factory(conn),
+                    agent_id=agent_id,
+                    outcome_status=outcome_status,
+                    tier=tier,
+                    base_xp=base_xp,
+                )
+        return await _award_task_xp(
+            conn_factory,
+            agent_id=agent_id,
+            outcome_status=outcome_status,
+            tier=tier,
+            base_xp=base_xp,
+        )
+    except Exception as exc:  # noqa: BLE001 — delivery must never wedge on RPG XP
+        LOG.warning(
+            "CharacterCardXpAwardFailed agent_id=%s outcome=%s err=%s",
+            agent_id,
+            outcome_status,
+            exc,
+        )
+        return None
+
+
+def award_task_xp_sync(
+    *,
+    agent_id: str,
+    outcome_status: str = "success",
+    tier: str | None = None,
+    base_xp: int = BASE_TASK_XP,
+) -> tuple[Any, CharacterCard] | None:
+    """Synchronous wrapper for ``auto-runner-jira.py`` (mirrors the *_sync shape)."""
+    return asyncio.run(
+        award_task_xp_from_env(
+            agent_id=agent_id,
+            outcome_status=outcome_status,
+            tier=tier,
+            base_xp=base_xp,
         )
     )
 
