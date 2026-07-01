@@ -441,10 +441,12 @@ def test_level_thresholds_are_strictly_increasing():
 class _FakeAtomicConn:
     """Minimal asyncpg.Connection stand-in for atomic-award tests.
 
-    Records every ``fetchrow`` call and lets the test script scripted
-    responses that simulate what Postgres would return from the
-    ``INSERT ... ON CONFLICT DO UPDATE ... RETURNING skill_xp,
-    branch_choice, (xmax = 0) AS inserted`` statement.
+    Records every ``fetchrow`` / ``execute`` call and lets the test
+    script scripted responses that simulate what Postgres would return
+    from the ``INSERT ... ON CONFLICT DO UPDATE ... RETURNING
+    skill_xp, branch_choice, (xmax = 0) AS inserted`` statement plus
+    the follow-up ``UPDATE ... SET level = ...`` that S2b (OP-2504)
+    fires on the conflict path.
     """
 
     def __init__(self) -> None:
@@ -454,6 +456,10 @@ class _FakeAtomicConn:
     async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
         self.calls.append(("fetchrow", sql, args))
         return self.fetchrow_returns.pop(0)
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        self.calls.append(("execute", sql, args))
+        return "UPDATE 1"
 
 
 class _FakeAcquireCM:
@@ -631,3 +637,138 @@ async def test_award_delta_atomic_rejects_skill_id_not_in_matrix():
         await store.award_delta_atomic(
             "agent-A", "does_not_exist", base_delta=10, outcome="success",
         )
+
+
+# ── S2b (OP-2504): conflict-path level-column sync ────────────────
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_conflict_path_syncs_level_column():
+    """Repeat award: after the ON CONFLICT DO UPDATE bumps skill_xp,
+    a follow-up UPDATE re-syncs the denormalised ``level`` column to
+    ``compute_level(new_skill_xp)`` so it does not stay frozen at the
+    prior row's level once accrual crosses a threshold.
+    """
+    store, conn = _make_pg_store()
+    # Repeat delivery landing at skill_xp=175 — crosses the Lv 3
+    # threshold (100) so the stored level must move to 3.
+    conn.fetchrow_returns.append(
+        {"skill_xp": 175, "branch_choice": None, "inserted": False}
+    )
+    result = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=100, outcome="success",
+    )
+    assert result.inserted is False
+    assert result.new_xp == 175
+    assert result.new_level == compute_level(175) == 3
+
+    execute_calls = [call for call in conn.calls if call[0] == "execute"]
+    assert len(execute_calls) == 1, (
+        "conflict path must fire exactly one follow-up UPDATE to sync level"
+    )
+    _, sql, args = execute_calls[0]
+    assert "UPDATE agent_skill_state" in sql
+    assert "SET level =" in sql
+    # Level is the first positional argument, then agent_id, skill_id.
+    assert args[0] == 3
+    assert args[1] == "agent-A"
+    assert args[2] == SKILL_ID
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_insert_path_does_not_issue_extra_update():
+    """First award: the VALUES clause already writes ``level`` at
+    insert time, so no follow-up UPDATE round-trip is needed. Guards
+    against accidentally always paying for the second statement.
+    """
+    store, conn = _make_pg_store()
+    conn.fetchrow_returns.append(
+        {"skill_xp": 300, "branch_choice": None, "inserted": True}
+    )
+    await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=100, outcome="success",
+    )
+    execute_calls = [call for call in conn.calls if call[0] == "execute"]
+    assert execute_calls == []
+
+
+class _StatefulAtomicConn:
+    """Stateful fake connection that mimics the DB round-trip.
+
+    Unlike :class:`_FakeAtomicConn` (which just replays scripted
+    ``fetchrow`` returns), this maintains the single ``(agent_id,
+    skill_id)`` row across calls so the ``INSERT ... ON CONFLICT DO
+    UPDATE`` + follow-up ``UPDATE ... SET level = ...`` sequence can
+    be exercised end-to-end. Used by the S2b integration criterion
+    ("stored level == compute_level(stored skill_xp) after any award").
+    """
+
+    def __init__(self) -> None:
+        self.row: dict[str, Any] | None = None
+
+    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any]:
+        agent_id, skill_id, insert_level, first_delta, _mastery, repeat_delta = args
+        if self.row is None:
+            self.row = {
+                "agent_id": agent_id,
+                "skill_id": skill_id,
+                "level": insert_level,
+                "skill_xp": first_delta,
+                "branch_choice": None,
+            }
+            return {
+                "skill_xp": self.row["skill_xp"],
+                "branch_choice": self.row["branch_choice"],
+                "inserted": True,
+            }
+        self.row["skill_xp"] += repeat_delta
+        return {
+            "skill_xp": self.row["skill_xp"],
+            "branch_choice": self.row["branch_choice"],
+            "inserted": False,
+        }
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        new_level, agent_id, skill_id = args
+        assert self.row is not None
+        assert self.row["agent_id"] == agent_id
+        assert self.row["skill_id"] == skill_id
+        self.row["level"] = new_level
+        return "UPDATE 1"
+
+
+@pytest.mark.asyncio
+async def test_award_delta_atomic_repeat_award_crossing_threshold_advances_stored_level():
+    """S2b integration AC: first award lands at Lv 2, a second award
+    that pushes accrued skill_xp past the Lv 3 entry threshold (100)
+    must leave the stored ``level`` column equal to
+    ``compute_level(stored skill_xp)`` — not frozen at 2.
+    """
+    conn = _StatefulAtomicConn()
+    store = PostgresSkillStateStore(conn_factory=lambda: _FakeAcquireCM(conn))
+
+    # First award: 25 base * 1.0 (success) * 3.0 (first_time) = 75
+    # → skill_xp=75 → Lv 2. Insert path already sets level in VALUES.
+    first = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=25, outcome="success",
+    )
+    assert first.inserted is True
+    assert first.new_xp == 75
+    assert first.new_level == 2
+    assert conn.row is not None
+    assert conn.row["skill_xp"] == 75
+    assert conn.row["level"] == 2
+
+    # Second award: 25 base * 1.0 (success) = 25 repeat_delta.
+    # Row moves 75 → 100 skill_xp, which crosses Lv 3.
+    second = await store.award_delta_atomic(
+        "agent-A", SKILL_ID, base_delta=25, outcome="success",
+    )
+    assert second.inserted is False
+    assert second.new_xp == 100
+    assert second.new_level == 3
+    # The stored level must NOT be frozen at 2 — the follow-up UPDATE
+    # advances it in lockstep with skill_xp.
+    assert conn.row["skill_xp"] == 100
+    assert conn.row["level"] == 3
+    assert conn.row["level"] == compute_level(conn.row["skill_xp"])

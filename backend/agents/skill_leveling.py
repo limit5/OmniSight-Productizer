@@ -568,11 +568,19 @@ class PostgresSkillStateStore:
         caller can tell which branch fired.
 
         ``level`` + :attr:`branch_choice_required` are recomputed in
-        Python from the returned absolute ``skill_xp``. This method
-        does NOT update the denormalised ``level`` column on the
-        conflict path (only ``skill_xp`` / ``xp``) — a future ticket
-        keeps ``level`` in sync when a caller is wired up. The store
-        currently ships inert (no caller).
+        Python from the returned absolute ``skill_xp``. On the
+        conflict (repeat-award) path the ``ON CONFLICT DO UPDATE``
+        clause only bumps ``skill_xp`` / ``xp``, so a second
+        ``UPDATE ... SET level = ...`` on the same connection re-syncs
+        the denormalised ``level`` column against
+        :func:`compute_level` of the new absolute ``skill_xp``.
+        Without that follow-up, once a repeat delivery crosses a
+        level threshold the row's ``level`` would stay frozen at the
+        pre-award value while ``skill_xp`` continued to accrue. xp
+        remains the source of truth; level is derived, so a
+        two-statement xp-add-then-level-sync within one connection
+        is acceptable per the S2b invariant ("stored level ==
+        compute_level(stored skill_xp) after any award").
         """
         _assert_skill_id_in_matrix(skill_id)
         agent_id = _required("agent_id", agent_id)
@@ -626,10 +634,29 @@ class PostgresSkillStateStore:
                 repeat_delta,
             )
 
-        new_xp = int(row["skill_xp"])
-        inserted = bool(row["inserted"])
-        branch_choice = row["branch_choice"]
-        new_level = compute_level(new_xp)
+            new_xp = int(row["skill_xp"])
+            inserted = bool(row["inserted"])
+            branch_choice = row["branch_choice"]
+            new_level = compute_level(new_xp)
+
+            if not inserted:
+                # OP-2504 (S2b): the ON CONFLICT DO UPDATE clause above only
+                # bumps skill_xp / xp — level is left frozen at whatever the
+                # prior row stored. Re-sync it against the new absolute
+                # skill_xp so a repeat award that crosses a threshold does
+                # not leave the denormalised level column stale.
+                await conn.execute(
+                    """
+                    UPDATE agent_skill_state
+                    SET level = $1,
+                        updated_at = NOW()
+                    WHERE agent_id = $2 AND skill_id = $3
+                    """,
+                    new_level,
+                    agent_id,
+                    skill_id,
+                )
+
         applied_delta = first_delta if inserted else repeat_delta
         branch_required = (
             new_level >= BRANCH_LOCK_LEVEL and branch_choice is None
