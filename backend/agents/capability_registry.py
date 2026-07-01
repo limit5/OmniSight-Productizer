@@ -20,6 +20,8 @@ AGENT_CLASS_PROFILE: Mapping[str, tuple[str, str]] = {
     "api-openai": ("openai-subscription", "<unknown>"),
     "subscription-claude": ("anthropic-subscription", "<unknown>"),
     "api-anthropic": ("anthropic-subscription", "<unknown>"),
+    # Gemini/Antigravity brain (dogfood 2026-07-01).
+    "subscription-gemini": ("gemini-subscription", "<unknown>"),
 }
 
 

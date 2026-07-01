@@ -179,6 +179,9 @@ _BASE_BOT_BY_CLASS = {
     "api-openai": "codex-bot",
     "subscription-claude": "claude-bot",
     "api-anthropic": "claude-bot",
+    # Gemini/Antigravity brain (dogfood 2026-07-01). Gerrit key resolves to
+    # ~/.config/omnisight/gerrit-gemini-bot-ed25519 via _gerrit_ssh_key_for_bot.
+    "subscription-gemini": "gemini-bot",
 }
 
 
@@ -239,6 +242,8 @@ def _cred_paths(agent_class: str, instance_id: str | None = None) -> tuple[Path,
     if instance_id == DEFAULT_INSTANCE_ID:
         if agent_class in ("subscription-codex", "api-openai"):
             return CRED_DIR / "jira-codex.env", CRED_DIR / "jira-codex-token"
+        if agent_class == "subscription-gemini":
+            return CRED_DIR / "jira-gemini.env", CRED_DIR / "jira-gemini-token"
         return CRED_DIR / "jira-claude.env", CRED_DIR / "jira-claude-token"
     bot_username = resolve_bot_username(agent_class, instance_id)
     return CRED_DIR / f"jira-{bot_username}.env", CRED_DIR / f"jira-{bot_username}-token"
