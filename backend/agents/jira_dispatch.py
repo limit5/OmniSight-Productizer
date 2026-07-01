@@ -2249,7 +2249,14 @@ def already_merged_in_gerrit(
         if change.get("type") == "stats":
             continue
         subject = str(change.get("subject") or "")
-        if jira_key not in subject and jira_key not in json.dumps(change):
+        # Gap D (dogfood 2026-07-01): match ONLY the change that IS for this
+        # ticket — its bracketed owning tag ``[OP-123]`` / ``[OP-123/foo]`` in
+        # the subject (the runner always stamps it). The old test accepted a
+        # bare ``jira_key`` anywhere in the subject OR the change JSON body, so
+        # a different ticket's merged change that merely referenced this key in
+        # prose falsely reported it "already merged" → H12 auto-walk to
+        # Published. A contextual mention is not ownership.
+        if not re.search(r"\[" + re.escape(jira_key) + r"(?:/[^\]]*)?\]", subject):
             continue
         number = str(change.get("number") or change.get("_number") or "")
         if number:

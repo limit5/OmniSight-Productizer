@@ -159,10 +159,13 @@ def test_extract_ticket_keys_property_bracketed_subject_dedupes_in_order(
 
 @settings(max_examples=75, deadline=None)
 @given(keys=st.lists(OP_KEYS, max_size=25))
-def test_extract_ticket_keys_property_plain_subject_dedupes_in_order(
+def test_extract_ticket_keys_property_bracketed_subject_dedupes_in_order(
     keys: list[str],
 ) -> None:
-    subject = " ".join(f"fix {key}" for key in keys)
+    # Gap D: only bracketed [OP-N] tags are owning keys; build the subject
+    # with brackets. A bare "fix OP-N" mention no longer extracts (that was
+    # the fallback that mis-attributed a prose mention as ownership).
+    subject = " ".join(f"[{key}] fix" for key in keys)
 
     assert bridge.extract_ticket_keys_from_subject(subject) == list(dict.fromkeys(keys))
 
@@ -315,7 +318,11 @@ def test_subject_matcher_covers_plain_slash_and_multi_key_edges() -> None:
     assert bridge.extract_ticket_keys_from_subject("[OP-19] title") == ["OP-19"]
     assert bridge.extract_ticket_keys_from_subject("[OP-19/backend] title") == ["OP-19"]
     assert bridge.extract_ticket_keys_from_subject("[OP-19] [OP-20] title") == ["OP-19", "OP-20"]
-    assert bridge.extract_ticket_keys_from_subject("fix OP-21 without bracket") == ["OP-21"]
+    # Gap D (dogfood 2026-07-01): a bare, unbracketed key is a contextual
+    # mention (e.g. "fix (OP-2495 gerrit-setup-fail)"), NOT the change's
+    # owning tag — it must NOT drive a bridge transition. Previously this
+    # returned ["OP-21"] via the removed fallback.
+    assert bridge.extract_ticket_keys_from_subject("fix OP-21 without bracket") == []
 
 
 def test_comment_change_url_matcher_extracts_runner_comment_only() -> None:

@@ -460,14 +460,22 @@ def extract_gerrit_change(event: dict[str, Any]) -> GerritChange:
 
 
 def extract_ticket_keys_from_subject(subject: str) -> list[str]:
-    """Extract OP keys from Gerrit commit subjects.
+    """Extract the OWNING OP key(s) from a Gerrit commit subject.
 
-    The primary convention is a leading ``[OP-123]`` or ``[OP-123/foo]``
-    prefix. If absent, fall back to any OP key in the subject.
+    ONLY the bracketed ``[OP-123]`` / ``[OP-123/foo]`` tag counts — this is
+    the tag the runner always stamps on the change it produces for a ticket
+    (e.g. ``feat(embedded): add … [OP-2495]``). The result drives the bridge's
+    Approved→Published force-walk, so it must identify the ticket the change
+    *is for*, not any ticket the message merely mentions.
+
+    Gap D (dogfood 2026-07-01): the old ``OP_KEY_RE.findall(subject)`` fallback
+    matched a bare ``OP-123`` anywhere in the subject — so a DIFFERENT ticket's
+    change that referenced ``OP-2495`` in prose (``…(OP-2495 gerrit-setup-fail)``)
+    merge-triggered a force-walk of OP-2495 to 公開済み while its own change was
+    still unmerged. A contextual mention is NOT ownership; the fallback is gone.
+    Same failure class as [[feedback_doc_commit_impl_key_h12_autowalk]].
     """
     hits = [m.group(1) for m in OP_BRACKET_RE.finditer(subject)]
-    if not hits:
-        hits = OP_KEY_RE.findall(subject)
     return list(dict.fromkeys(hits))
 
 
