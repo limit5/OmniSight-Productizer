@@ -26,14 +26,28 @@ the tier ceiling on top.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+import random
+import time
+from dataclasses import dataclass, replace
 from typing import Mapping
 
 from backend.agents import jira_dispatch
 from backend.agents.guild_registry import GUILDS
 
+log = logging.getLogger(__name__)
+
 # Tier ordering shared with capability_registry.TIER_ORDER (S<M<L<X).
 TIER_ORDER: Mapping[str, int] = {"S": 0, "M": 1, "L": 2, "X": 3}
+
+# DB-loader policy knobs (character-recruit design §C2, codex rounds 1+2).
+_DB_CONNECT_TIMEOUT_SECONDS = 3
+_DB_TTL_BASE_SECONDS = 30.0
+_DB_TTL_JITTER_SECONDS = 10.0
+# Past this bound a stale-if-error snapshot no longer authorises NEW pickups
+# of DB-only characters ("registry stale" denial); built-ins and in-flight
+# resolution keep working on the stale snapshot.
+MAX_STALE_AGE_SECONDS = 15 * 60.0
 
 
 class CharacterRegistryError(RuntimeError):
@@ -50,6 +64,9 @@ class CharacterDef:
     guild: str          # guild_registry slug
     max_tier: str       # capability ceiling S<M<L<X
     blurb: str = ""
+    # False = retired: still RESOLVABLE (in-flight card/skill/XP finalization
+    # keeps working) but denied for NEW pickups and hidden from filing paths.
+    active: bool = True
 
     def __post_init__(self) -> None:
         if self.brain not in jira_dispatch._BASE_BOT_BY_CLASS:
@@ -99,13 +116,197 @@ CHARACTERS: dict[str, CharacterDef] = {
 }
 
 
-def resolve_character(slug: str) -> CharacterDef:
-    """Return the CharacterDef for ``slug`` or raise CharacterRegistryError."""
+# ── DB-backed roster (RECRUIT C2) ─────────────────────────────────
+#
+# The effective roster is CHARACTERS (code built-ins) merged with the
+# ``character_def`` table, cached per process behind a jittered TTL with a
+# stale-if-error policy. See docs/architecture/2026-07-02-character-recruit-
+# epic-design.md §C2 — its policies are the spec.
+
+_DB_ROW_FIELDS = ("slug", "display_name", "brain", "guild", "max_tier", "blurb", "active")
+_SHADOW_COMPARE_FIELDS = ("display_name", "brain", "guild", "max_tier", "blurb", "active")
+
+
+@dataclass(frozen=True)
+class _RosterSnapshot:
+    characters: dict[str, CharacterDef]  # merged roster, retired-INCLUSIVE
+    db_loaded: bool                      # a character_def read ever succeeded
+    fetched_at: float | None             # monotonic ts of the last-good DB read
+    next_refresh_at: float               # jittered-TTL expiry (monotonic)
+
+
+_SNAPSHOT: _RosterSnapshot | None = None
+
+
+def _now() -> float:
+    return time.monotonic()
+
+
+def _next_refresh_at(now: float) -> float:
+    # Jittered TTL so concurrent runner processes never align into refresh
+    # bursts against the shared DB.
+    return now + _DB_TTL_BASE_SECONDS + random.uniform(
+        -_DB_TTL_JITTER_SECONDS, _DB_TTL_JITTER_SECONDS
+    )
+
+
+def _fetch_character_rows() -> list[dict]:
+    """Sync psycopg2 read of all ``character_def`` rows.
+
+    Raises on ANY failure (missing psycopg2, no DSN, connect/query error);
+    :func:`_current_snapshot` translates the failure into the stale-if-error /
+    built-ins-only policy — a registry consumer never sees a DB failure raise.
+    """
+    import psycopg2  # lazy: the registry must import fine without DB deps
+
+    # Same DSN resolution as the other sync runner-side reads.
+    from backend.agents.provider_quota_tracker import _resolve_dsn
+
+    dsn = _resolve_dsn()
+    if not dsn:
+        raise CharacterRegistryError(
+            "no PostgreSQL DSN via OMNISIGHT_DATABASE_URL / DATABASE_URL / "
+            "OMNI_TEST_PG_URL"
+        )
+    conn = psycopg2.connect(dsn, connect_timeout=_DB_CONNECT_TIMEOUT_SECONDS)
     try:
-        return CHARACTERS[slug]
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT slug, display_name, brain, guild, max_tier, blurb, "
+                    "active FROM character_def ORDER BY slug"
+                )
+                return [dict(zip(_DB_ROW_FIELDS, row)) for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def _merge_db_rows(rows: list[dict]) -> dict[str, CharacterDef]:
+    """Merge DB rows over the built-ins (shadow-protected, bad rows skipped)."""
+    merged = dict(CHARACTERS)
+    for row in rows:
+        slug = str(row.get("slug") or "").strip()
+        if not slug:
+            log.warning(
+                "character_registry: skipping character_def row with empty slug: %r",
+                row,
+            )
+            continue
+        if slug in CHARACTERS:
+            # Shadow-protected built-in: the code constant ALWAYS wins. An
+            # exact copy (the 0253 seed) is ignored silently; a divergent row
+            # is rejected loudly so a DB edit can never re-point a built-in.
+            builtin = CHARACTERS[slug]
+            divergent = sorted(
+                f for f in _SHADOW_COMPARE_FIELDS if row.get(f) != getattr(builtin, f)
+            )
+            if divergent:
+                log.warning(
+                    "character_registry: character_def row for built-in %r "
+                    "diverges in %s — row REJECTED, code constant wins "
+                    "(built-ins are shadow-protected)",
+                    slug, divergent,
+                )
+            continue
+        try:
+            merged[slug] = CharacterDef(
+                slug=slug,
+                display_name=str(row.get("display_name") or ""),
+                brain=str(row.get("brain") or ""),
+                guild=str(row.get("guild") or ""),
+                max_tier=str(row.get("max_tier") or ""),
+                blurb=str(row.get("blurb") or ""),
+                active=bool(row.get("active", True)),
+            )
+        except CharacterRegistryError as exc:
+            log.warning(
+                "character_registry: skipping bad character_def row %r: %s",
+                slug, exc,
+            )
+    return merged
+
+
+def _current_snapshot() -> _RosterSnapshot:
+    """Return the roster snapshot, refreshing from the DB when the TTL expired.
+
+    Stale-if-error: a refresh failure NEVER replaces a previously-good DB
+    roster with built-ins (a DB flap mid-poll must not silently convert
+    character-owned pickups into bot-owned work) — the last-good snapshot is
+    kept, its age logged, and the fetch retried next TTL. Built-ins-only
+    happens ONLY on cold start with no reachable DB.
+    """
+    global _SNAPSHOT
+    now = _now()
+    snap = _SNAPSHOT
+    if snap is not None and now < snap.next_refresh_at:
+        return snap
+    try:
+        rows = _fetch_character_rows()
+    except Exception as exc:  # noqa: BLE001 — any DB failure feeds the policy
+        if snap is not None and snap.db_loaded:
+            age = now - (snap.fetched_at or now)
+            log.warning(
+                "character_registry: character_def refresh failed (%s); keeping "
+                "last-good DB snapshot age=%.0fs%s",
+                exc, age,
+                " — BEYOND max stale age; DB-only characters are pickup-denied"
+                if age > MAX_STALE_AGE_SECONDS else "",
+            )
+            _SNAPSHOT = replace(snap, next_refresh_at=_next_refresh_at(now))
+        else:
+            log.warning(
+                "character_registry: character_def unavailable on cold start "
+                "(%s); built-in roster only", exc,
+            )
+            _SNAPSHOT = _RosterSnapshot(
+                characters=dict(CHARACTERS), db_loaded=False,
+                fetched_at=None, next_refresh_at=_next_refresh_at(now),
+            )
+    else:
+        _SNAPSHOT = _RosterSnapshot(
+            characters=_merge_db_rows(rows), db_loaded=True,
+            fetched_at=now, next_refresh_at=_next_refresh_at(now),
+        )
+    return _SNAPSHOT
+
+
+def load_characters(include_retired: bool = False) -> dict[str, CharacterDef]:
+    """Return the effective roster: built-ins merged with ``character_def``.
+
+    ``include_retired=False`` (the default) is the FILING view — only active
+    characters, the set new work may be assigned to. ``include_retired=True``
+    is the RESOLUTION view used by runtime paths serving work that already
+    started (card identity, skill/XP finalization, tier denial), so retiring a
+    character mid-flight never breaks the running ticket.
+    """
+    snap = _current_snapshot()
+    if include_retired:
+        return dict(snap.characters)
+    return {slug: c for slug, c in snap.characters.items() if c.active}
+
+
+def registry_db_loaded() -> bool:
+    """True when the current snapshot includes a successful character_def read.
+
+    False means built-ins-only (cold start with no reachable DB) — e.g. the
+    filer uses this to warn that DB-recruited characters cannot be validated.
+    """
+    return _current_snapshot().db_loaded
+
+
+def resolve_character(slug: str) -> CharacterDef:
+    """Return the CharacterDef for ``slug`` or raise CharacterRegistryError.
+
+    Retired-INCLUSIVE: resolution serves work that may already be in flight.
+    Callers gating NEW work must check ``.active`` (filing paths) or go
+    through :func:`character_retired_denial_from_labels` (pickup).
+    """
+    roster = load_characters(include_retired=True)
+    try:
+        return roster[slug]
     except KeyError:
         raise CharacterRegistryError(
-            f"unknown character {slug!r}; known: {sorted(CHARACTERS)}"
+            f"unknown character {slug!r}; known: {sorted(roster)}"
         ) from None
 
 
@@ -114,19 +315,24 @@ def character_brain(slug: str) -> str:
     return resolve_character(slug).brain
 
 
+def _character_slug_from_labels(labels) -> str | None:
+    for label in labels or ():
+        if isinstance(label, str) and label.startswith("character:"):
+            return label.split(":", 1)[1].strip()
+    return None
+
+
 def character_from_labels(labels) -> CharacterDef | None:
     """Extract the ``character:<slug>`` label → CharacterDef, or None.
 
     Unknown slugs return None (fail-open — routing falls back to the raw
     ``class:`` label) rather than raising, so a typo can never wedge pickup.
+    Retired-INCLUSIVE (see :func:`resolve_character`).
     """
-    for label in labels or ():
-        if isinstance(label, str) and label.startswith("character:"):
-            slug = label.split(":", 1)[1].strip()
-            if slug in CHARACTERS:
-                return CHARACTERS[slug]
-            return None
-    return None
+    slug = _character_slug_from_labels(labels)
+    if not slug:
+        return None
+    return load_characters(include_retired=True).get(slug)
 
 
 def tier_within_ceiling(tier: str, max_tier: str) -> bool:
@@ -168,14 +374,58 @@ def character_tier_denial_from_labels(labels) -> str | None:
     )
 
 
+def character_retired_denial_from_labels(labels) -> str | None:
+    """Return a pickup-denial reason when a character: ticket must not START.
+
+    Two pickup-only policies (design §C2 — in-flight resolution via
+    :func:`resolve_character` / :func:`character_from_labels` is unaffected):
+
+    * REGISTRY STALE: a DB-only character whose last-good snapshot is older
+      than :data:`MAX_STALE_AGE_SECONDS` is denied ("registry stale") — its
+      To-Do tickets safely wait for DB recovery instead of running on
+      arbitrarily old definitions. Built-ins are never stale-denied.
+    * RETIRED: a retired character takes no NEW work; the ticket waits until
+      it is reactivated or re-filed.
+
+    Fail-open like the tier denial: no character label, or a slug unknown to
+    the current snapshot, returns None (the bare ``class:`` label still
+    routes it — unchanged pickup behavior for class-only tickets).
+    """
+    slug = _character_slug_from_labels(labels)
+    if not slug:
+        return None
+    snap = _current_snapshot()
+    char = snap.characters.get(slug)
+    if char is None:
+        return None
+    if slug not in CHARACTERS and snap.fetched_at is not None:
+        age = _now() - snap.fetched_at
+        if age > MAX_STALE_AGE_SECONDS:
+            return (
+                f"character:{slug} registry stale (snapshot age {age:.0f}s > "
+                f"{MAX_STALE_AGE_SECONDS:.0f}s) — DB-only character pickup "
+                f"denied until the registry refreshes"
+            )
+    if not char.active:
+        return (
+            f"character:{slug} is retired — new pickups denied "
+            f"(in-flight work unaffected)"
+        )
+    return None
+
+
 __all__ = [
     "CharacterDef",
     "CharacterRegistryError",
     "CHARACTERS",
+    "MAX_STALE_AGE_SECONDS",
     "TIER_ORDER",
+    "load_characters",
+    "registry_db_loaded",
     "resolve_character",
     "character_brain",
     "character_from_labels",
+    "character_retired_denial_from_labels",
     "character_tier_denial_from_labels",
     "tier_within_ceiling",
 ]
