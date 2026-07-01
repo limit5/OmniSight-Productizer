@@ -53,6 +53,27 @@ skills:
         - branch_id: poe_focus
           display_name: PoE Focus
           summary: Bias toward Power-over-Ethernet budgeting and validation.
+  frontend:
+    - skill_id: web_ui
+      display_name: Web UI
+      summary: Web/UI implementation — layout, components, and client state.
+      branches:
+        - branch_id: responsive_focus
+          display_name: Responsive Focus
+          summary: Bias toward responsive layout and cross-viewport correctness.
+        - branch_id: interaction_focus
+          display_name: Interaction Focus
+          summary: Bias toward interactivity, client state, and live updates.
+    - skill_id: design_system
+      display_name: Design System
+      summary: Design tokens and reusable component-library work.
+      branches:
+        - branch_id: tokens_focus
+          display_name: Tokens Focus
+          summary: Bias toward design tokens, theming, and visual consistency.
+        - branch_id: components_focus
+          display_name: Components Focus
+          summary: Bias toward reusable component APIs and composition.
   hal:
     - skill_id: connectivity-ble
       display_name: BLE Connectivity
@@ -125,3 +146,24 @@ skills:
         - branch_id: control_focus
           display_name: Control Focus
           summary: Bias toward UVC control / extension-unit work.
+  sre:
+    - skill_id: observability
+      display_name: Observability
+      summary: Metrics, logging, tracing, and dashboards for running services.
+      branches:
+        - branch_id: metrics_focus
+          display_name: Metrics Focus
+          summary: Bias toward metrics, SLOs, and alerting.
+        - branch_id: tracing_focus
+          display_name: Tracing Focus
+          summary: Bias toward distributed tracing and structured logs.
+    - skill_id: deploy_automation
+      display_name: Deploy Automation
+      summary: CI/CD pipelines plus safe rollout and rollback.
+      branches:
+        - branch_id: pipeline_focus
+          display_name: Pipeline Focus
+          summary: Bias toward CI/CD pipeline build and release automation.
+        - branch_id: rollback_focus
+          display_name: Rollback Focus
+          summary: Bias toward safe rollout, canary, and rollback controls.
