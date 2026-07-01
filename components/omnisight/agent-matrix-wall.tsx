@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
-import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, ShieldCheck, Settings, Eye, Users } from "lucide-react"
+import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, ShieldCheck, Settings, Eye, Users, Brain } from "lucide-react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 
 export type AgentStatus = "idle" | "running" | "success" | "error" | "warning" | "booting" | "awaiting_confirmation" | "materializing"
@@ -74,6 +74,7 @@ export interface AgentComplianceBadge {
 export type AIModel = string
 
 interface ModelDisplayInfo { label: string; shortLabel: string; provider: string; color: string }
+interface BrainDisplayInfo { label: string; color: string }
 
 const KNOWN_MODELS: Record<string, ModelDisplayInfo> = {
   "claude-opus":   { label: "Claude Opus",   shortLabel: "Opus",    provider: "Anthropic", color: "#d97706" },
@@ -245,6 +246,9 @@ export interface Agent {
   progress: { current: number; total: number }
   thoughtChain: string
   aiModel?: AIModel
+  agentClass?: string
+  level?: number
+  xp?: number
   guild?: AgentGuildDimension | string
   compliance?: AgentComplianceState | AgentComplianceBadge
   subTasks?: SubTask[]
@@ -256,6 +260,24 @@ export interface Agent {
   cognitive?: AgentCognitiveHealth
   /** R3 (#309): Scratchpad offload signal — optional until first save. */
   scratchpad?: AgentScratchpadSummary
+}
+
+function getBrainInfo(agentClass: unknown): BrainDisplayInfo {
+  if (!agentClass || typeof agentClass !== "string") return { label: "Brain", color: "var(--muted-foreground)" }
+  const lower = agentClass.toLowerCase()
+  if (lower.includes("claude")) return { label: "Claude", color: "#f59e0b" }
+  if (lower.includes("codex") || lower.includes("gpt") || lower.includes("openai")) return { label: "Codex", color: "#10b981" }
+  if (lower.includes("gemini")) return { label: "Gemini", color: "#3b82f6" }
+  if (lower.includes("grok")) return { label: "Grok", color: "#ec4899" }
+  return {
+    label: lower
+      .replace(/^(subscription|api)[-_]/, "")
+      .split(/[-_\s]+/)
+      .filter(Boolean)
+      .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ") || "Brain",
+    color: "var(--muted-foreground)",
+  }
 }
 
 // Agent type configurations
@@ -887,6 +909,36 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
         {/* Row 2: Guild + Compliance + Role (subType) + AI Model */}
         <div className="flex items-center gap-1.5 mb-2 flex-wrap">
           <AgentDimensionBadges agent={agent} />
+          {agent.agentClass && (() => {
+            const info = getBrainInfo(agent.agentClass)
+            return (
+              <span
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono"
+                style={{
+                  backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
+                  color: info.color
+                }}
+                title={`Brain: ${agent.agentClass}`}
+                data-agent-brain={info.label.toLowerCase()}
+              >
+                <Brain size={8} />
+                {info.label}
+              </span>
+            )
+          })()}
+          {typeof agent.level === "number" && typeof agent.xp === "number" && (
+            <span
+              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono tabular-nums text-[var(--validation-emerald)]"
+              style={{
+                backgroundColor: "color-mix(in srgb, var(--validation-emerald,#10b981) 16%, transparent)",
+              }}
+              title={`Brain-strength: level ${agent.level}, ${agent.xp} xp`}
+              data-agent-strength={`${agent.level}:${agent.xp}`}
+            >
+              <Zap size={8} />
+              Lv {agent.level} · {agent.xp}xp
+            </span>
+          )}
           {agent.subType && (
             <span
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"

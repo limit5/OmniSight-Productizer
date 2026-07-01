@@ -24,6 +24,69 @@ function mapAgent(a: api.ApiAgent): Agent {
   }
 }
 
+function normalizeAgentStatus(status: string | null | undefined): AgentStatus {
+  switch (status) {
+    case "running":
+    case "success":
+    case "error":
+    case "warning":
+    case "booting":
+    case "awaiting_confirmation":
+    case "materializing":
+      return status
+    default:
+      return "idle"
+  }
+}
+
+function typeFromCard(card: api.AgentCardSummary): Agent["type"] {
+  const guild = card.guild?.toLowerCase()
+  if (guild === "reporter") return "reporter"
+  if (guild === "qa" || guild === "auditor" || guild === "red_team") return "validator"
+  if (guild === "bsp" || guild === "hal" || guild === "isp" || guild === "optical" || guild === "audio") return "firmware"
+  if (guild === "frontend" || guild === "backend" || guild === "sre" || guild === "gateway") return "software"
+  return "custom"
+}
+
+function mapAgentCard(card: api.AgentCardSummary, live?: Agent): Agent {
+  return {
+    id: card.agent_id,
+    name: card.agent_id,
+    type: live?.type ?? typeFromCard(card),
+    subType: card.specialization_label || live?.subType,
+    guild: card.guild || live?.guild,
+    status: live?.status ?? normalizeAgentStatus(card.status),
+    progress: live?.progress ?? { current: 0, total: 5 },
+    thoughtChain: live?.thoughtChain || card.specialization_label || "Idle",
+    aiModel: live?.aiModel,
+    agentClass: card.agent_class,
+    level: card.level,
+    xp: card.xp,
+    subTasks: live?.subTasks,
+    history: live?.history,
+    messages: live?.messages,
+    requiresConfirmation: live?.requiresConfirmation,
+    materializationPhase: live?.materializationPhase,
+    cognitive: live?.cognitive,
+    scratchpad: live?.scratchpad,
+  }
+}
+
+async function listMatrixAgents(): Promise<Agent[]> {
+  let cards: api.AgentCardSummary[] = []
+  try {
+    cards = await api.listAgentCards({ sort_by: "activity" })
+  } catch {
+    return []
+  }
+  const liveAgents = await api.listAgents().catch(() => [] as api.ApiAgent[])
+  const liveById = new Map(liveAgents.map((agent) => {
+    const mapped = mapAgent(agent)
+    return [mapped.id, mapped] as const
+  }))
+  return cards.map((card) => mapAgentCard(card, liveById.get(card.agent_id)))
+}
+
 function mapTask(t: api.ApiTask): Task {
   return {
     id: t.id,
@@ -246,11 +309,11 @@ export function useEngine() {
       // Phase 1: agents + tasks initial seed (best-effort)
       try {
         const [agentsRes, tasksRes] = await Promise.all([
-          api.listAgents(),
+          listMatrixAgents(),
           api.listTasks(),
         ])
         if (!cancelled) {
-          setAgents(agentsRes.map(mapAgent))
+          setAgents(agentsRes)
           setTasks(tasksRes.map(mapTask))
           setConnected(true)
         }
@@ -905,14 +968,14 @@ export function useEngine() {
       setUnreadCount(0)
       setProviderBalances(null)
       // Re-seed agents + tasks from the new tenant's authoritative state.
-      // listTasks / listAgents already include X-Tenant-Id via
+      // listTasks / listAgentCards already include X-Tenant-Id via
       // tenant-context.switchTenant() flipping the module-global before
       // this listener fires, so the requests below land on the new
       // tenant's rows without a manual header argument.
-      Promise.all([api.listAgents(), api.listTasks()])
+      Promise.all([listMatrixAgents(), api.listTasks()])
         .then(([agentsRes, tasksRes]) => {
           if (cancelled) return
-          setAgents(agentsRes.map(mapAgent))
+          setAgents(agentsRes)
           setTasks(tasksRes.map(mapTask))
         })
         .catch((e) => { console.warn("[Engine] Tenant switch refetch failed:", e) })
@@ -1218,10 +1281,10 @@ export function useEngine() {
     if (!connected) return
     try {
       const [agentsRes, tasksRes] = await Promise.all([
-        api.listAgents(),
+        listMatrixAgents(),
         api.listTasks(),
       ])
-      setAgents(agentsRes.map(mapAgent))
+      setAgents(agentsRes)
       setTasks(tasksRes.map(mapTask))
     } catch { /* swallow */ }
   }, [connected])
