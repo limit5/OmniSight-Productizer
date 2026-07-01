@@ -3722,6 +3722,77 @@ async def prune_chat_messages(conn, user_id: str, *, days: int = RETENTION_DAYS)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  orchestrator_tasks (Gap C — chat-filed ticket delivery loop, 0252)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+async def upsert_orchestrator_task(conn, data: dict) -> None:
+    """Record (or refresh) the user↔ticket link for a chat-filed Story.
+
+    Keyed on ``ticket_key`` (unique) so a re-file of the same ticket is an
+    upsert, not a duplicate. Timestamps are app-set epoch seconds.
+    """
+    await conn.execute(
+        "INSERT INTO orchestrator_tasks "
+        "(id, tenant_id, user_id, session_id, ticket_key, title, area, "
+        " browse_url, status, last_jira_status, filed_at) VALUES "
+        "($1,$2,$3,$4,$5,$6,$7,$8,'open','',$9) "
+        "ON CONFLICT (ticket_key) DO UPDATE SET "
+        "  user_id=EXCLUDED.user_id, session_id=EXCLUDED.session_id, "
+        "  title=EXCLUDED.title, area=EXCLUDED.area, "
+        "  browse_url=EXCLUDED.browse_url",
+        data["id"],
+        data.get("tenant_id") or tenant_insert_value(),
+        data["user_id"],
+        data.get("session_id", "") or "",
+        data["ticket_key"],
+        data.get("title", "") or "",
+        data.get("area", "") or "",
+        data.get("browse_url", "") or "",
+        float(data.get("filed_at") or 0),
+    )
+
+
+async def list_open_orchestrator_tasks(conn, *, limit: int = 200) -> list[dict]:
+    """Return still-open chat-filed tickets for the delivery poller.
+
+    NOT tenant-scoped: the poller is a system process that must see every
+    tenant's open rows (each row already carries its own tenant_id/user_id
+    for the fan-out target).
+    """
+    rows = await conn.fetch(
+        "SELECT id, tenant_id, user_id, session_id, ticket_key, title, "
+        "browse_url, last_jira_status FROM orchestrator_tasks "
+        "WHERE status = 'open' ORDER BY filed_at ASC LIMIT $1",
+        int(limit),
+    )
+    return [dict(r) for r in rows]
+
+
+async def claim_orchestrator_task_delivery(conn, ticket_key: str, *, at: float) -> bool:
+    """Atomically flip an open row → delivered. Returns True iff THIS caller
+    won the claim (so exactly one backend replica delivers the message).
+    """
+    row = await conn.fetchrow(
+        "UPDATE orchestrator_tasks SET status='delivered', delivered_at=$2 "
+        "WHERE ticket_key=$1 AND status='open' RETURNING id",
+        ticket_key, float(at),
+    )
+    return row is not None
+
+
+async def update_orchestrator_task_jira_status(
+    conn, ticket_key: str, jira_status: str,
+) -> None:
+    """Best-effort cache of the last-seen JIRA status (observability only)."""
+    await conn.execute(
+        "UPDATE orchestrator_tasks SET last_jira_status=$2 "
+        "WHERE ticket_key=$1 AND status='open'",
+        ticket_key, jira_status or "",
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Chat sessions (ZZ.B2 #304-2, checkbox 1)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #

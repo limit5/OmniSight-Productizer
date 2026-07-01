@@ -527,6 +527,11 @@ async def lifespan(app: FastAPI):
     # in-flight drain window.
     from backend import ha_observability as _hao
     _hao.mark_instance_up()
+    # Gap C: watch chat-filed tickets and notify the filer in-UI when the
+    # runner finishes them. Self-claiming per-ticket so the dual replicas
+    # never double-deliver; idles when JIRA isn't configured.
+    from backend import orchestrator_delivery as _od
+    delivery_task = asyncio.create_task(_od.delivery_poller())
     yield
     try:
         _hao.mark_instance_down()
@@ -548,6 +553,7 @@ async def lifespan(app: FastAPI):
         iq_task, ft_task, md_task, balance_task, subscription_monitor_task,
         cmek_revoke_task, drf_task, quota_task, drafts_gc_task,
         workspace_gc_task, host_metrics_task, host_ringbuf_task,
+        delivery_task,
         *((ai_core_probe_task,) if ai_core_probe_task is not None else ()),
     ):
         t.cancel()

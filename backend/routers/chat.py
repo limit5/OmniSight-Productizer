@@ -124,6 +124,18 @@ async def _load_session_memory(
         return []
 
 
+def _bind_chat_context(user_id: str, session_id: str) -> None:
+    """Bind the chat caller so create_task can record the user↔ticket link
+    (Gap C). Contextvars copy into the graph's task, so the tool sees it.
+    Best-effort — never break the chat path over an optional binding.
+    """
+    try:
+        from backend.agents.tools import set_chat_context
+        set_chat_context(user_id, session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("set_chat_context failed (non-fatal): %s", exc)
+
+
 async def _run_pipeline(
     user_msg: str, prior_messages: list[tuple[str, str]] | None = None,
 ) -> OrchestratorMessage:
@@ -491,6 +503,7 @@ async def chat(
     # Load conversation memory BEFORE persisting the current turn so the
     # injected history excludes the message we're about to answer.
     prior = await _load_session_memory(conn, user.id, session_id)
+    _bind_chat_context(user.id, session_id)
     user_message = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",
         role=MessageRole.user,
@@ -530,6 +543,7 @@ async def chat_stream(
     # Conversation memory — loaded before the current turn is persisted
     # (persist happens after the pipeline below) so it isn't echoed back.
     prior = await _load_session_memory(conn, user.id, session_id)
+    _bind_chat_context(user.id, session_id)
     # Slash command interception
     slash_reply = await _try_slash_command(conn, body.message)
     reply = slash_reply if slash_reply else await _run_pipeline(body.message, prior_messages=prior)

@@ -70,6 +70,28 @@ def get_active_agent_id() -> str | None:
     return _active_agent_id.get()
 
 
+# Chat request context (Gap C, 2026-07-01): the user-facing chat endpoint
+# sets (user_id, session_id, tenant_id) here before invoking the graph, so
+# ``create_task`` can record WHO filed a ticket and WHERE to deliver the
+# "done" notification back to. Contextvars propagate into the graph's task,
+# so the tool sees the caller even though run_graph doesn't thread it.
+_chat_context: contextvars.ContextVar[dict | None] = contextvars.ContextVar(
+    "_chat_context", default=None
+)
+
+
+def set_chat_context(user_id: str, session_id: str, tenant_id: str = "") -> None:
+    """Bind the current chat caller for tools that need it (create_task)."""
+    _chat_context.set(
+        {"user_id": user_id or "", "session_id": session_id or "", "tenant_id": tenant_id or ""}
+    )
+
+
+def get_chat_context() -> dict | None:
+    """Return the current chat caller context, or None outside a chat turn."""
+    return _chat_context.get()
+
+
 # ─── Safety ───
 
 _DANGEROUS_PATTERNS = re.compile(
@@ -1055,6 +1077,29 @@ async def create_task(
         )
     except Exception as exc:  # noqa: BLE001 — surface, never crash the graph
         return f"[ERROR] Failed to create Story: {exc}"
+
+    # Gap C: record the user↔ticket link so the delivery poller can notify
+    # the filer in their chat when the runner finishes. Best-effort — a
+    # persistence failure must never turn a successful file into an error.
+    ctx = get_chat_context()
+    if ctx and ctx.get("user_id"):
+        try:
+            import time as _t
+            from backend import db as _db
+            async with get_pool().acquire() as _conn:
+                await _db.upsert_orchestrator_task(_conn, {
+                    "id": f"otask-{__import__('uuid').uuid4().hex[:12]}",
+                    "tenant_id": ctx.get("tenant_id", ""),
+                    "user_id": ctx["user_id"],
+                    "session_id": ctx.get("session_id", ""),
+                    "ticket_key": ref.ticket,
+                    "title": tagged_title,
+                    "area": area,
+                    "browse_url": ref.url,
+                    "filed_at": _t.time(),
+                })
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("create_task: user↔ticket link not persisted for %s: %s", ref.ticket, exc)
 
     return (
         f"[OK] Filed gated Story {ref.ticket} — {tagged_title}\n"
