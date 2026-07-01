@@ -41,6 +41,11 @@ case "$CLASS" in
     subscription-codex|api-openai)
         DEFAULT_BOT="codex-bot"
         ;;
+    subscription-gemini)
+        # Gemini/Antigravity brain (dogfood 2026-07-01): clone + push as
+        # gemini-bot (key ~/.config/omnisight/gerrit-gemini-bot-ed25519).
+        DEFAULT_BOT="gemini-bot"
+        ;;
     *)
         DEFAULT_BOT="claude-bot"
         ;;
@@ -142,6 +147,7 @@ while true; do
     OMNISIGHT_RUNNER_LABEL_CLAIM_LEGACY=1 \
     OMNISIGHT_CODEX_WORKTREE="$workspace" \
     OMNISIGHT_CLAUDE_WORKTREE="$workspace" \
+    OMNISIGHT_GEMINI_WORKTREE="$workspace" \
     python3 -u "$workspace/auto-runner-jira.py" >> "$LOG" 2>&1
     rc=$?
     cd - >/dev/null 2>&1 || true
