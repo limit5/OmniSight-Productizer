@@ -46,6 +46,11 @@ case "$CLASS" in
         # gemini-bot (key ~/.config/omnisight/gerrit-gemini-bot-ed25519).
         DEFAULT_BOT="gemini-bot"
         ;;
+    subscription-grok)
+        # Grok/xAI brain (dogfood 2026-07-01): clone + push as
+        # grok-bot (key ~/.config/omnisight/gerrit-grok-bot-ed25519).
+        DEFAULT_BOT="grok-bot"
+        ;;
     *)
         DEFAULT_BOT="claude-bot"
         ;;
@@ -148,6 +153,7 @@ while true; do
     OMNISIGHT_CODEX_WORKTREE="$workspace" \
     OMNISIGHT_CLAUDE_WORKTREE="$workspace" \
     OMNISIGHT_GEMINI_WORKTREE="$workspace" \
+    OMNISIGHT_GROK_WORKTREE="$workspace" \
     python3 -u "$workspace/auto-runner-jira.py" >> "$LOG" 2>&1
     rc=$?
     cd - >/dev/null 2>&1 || true

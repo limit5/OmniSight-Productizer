@@ -22,6 +22,8 @@ AGENT_CLASS_PROFILE: Mapping[str, tuple[str, str]] = {
     "api-anthropic": ("anthropic-subscription", "<unknown>"),
     # Gemini/Antigravity brain (dogfood 2026-07-01).
     "subscription-gemini": ("gemini-subscription", "<unknown>"),
+    # Grok/xAI brain (dogfood 2026-07-01).
+    "subscription-grok": ("grok-subscription", "<unknown>"),
 }
 
 

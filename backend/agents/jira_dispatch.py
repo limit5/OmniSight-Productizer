@@ -182,6 +182,8 @@ _BASE_BOT_BY_CLASS = {
     # Gemini/Antigravity brain (dogfood 2026-07-01). Gerrit key resolves to
     # ~/.config/omnisight/gerrit-gemini-bot-ed25519 via _gerrit_ssh_key_for_bot.
     "subscription-gemini": "gemini-bot",
+    # Grok/xAI brain (dogfood 2026-07-01). Key ~/.config/omnisight/gerrit-grok-bot-ed25519.
+    "subscription-grok": "grok-bot",
 }
 
 
@@ -244,6 +246,8 @@ def _cred_paths(agent_class: str, instance_id: str | None = None) -> tuple[Path,
             return CRED_DIR / "jira-codex.env", CRED_DIR / "jira-codex-token"
         if agent_class == "subscription-gemini":
             return CRED_DIR / "jira-gemini.env", CRED_DIR / "jira-gemini-token"
+        if agent_class == "subscription-grok":
+            return CRED_DIR / "jira-grok.env", CRED_DIR / "jira-grok-token"
         return CRED_DIR / "jira-claude.env", CRED_DIR / "jira-claude-token"
     bot_username = resolve_bot_username(agent_class, instance_id)
     return CRED_DIR / f"jira-{bot_username}.env", CRED_DIR / f"jira-{bot_username}-token"
@@ -557,6 +561,8 @@ _GERRIT_AUTH_BY_CLASS: dict[str, tuple[str, Path]] = {
     # _gerrit_auth_for_bot("gemini-bot") raises "unknown Gerrit bot username"
     # and backpressure_decide → open_ps_count_for aborts every gemini pickup.
     "subscription-gemini": ("gemini-bot", Path("~/.config/omnisight/gerrit-gemini-bot-ed25519").expanduser()),
+    # Grok/xAI brain (dogfood 2026-07-01).
+    "subscription-grok": ("grok-bot", Path("~/.config/omnisight/gerrit-grok-bot-ed25519").expanduser()),
 }
 
 
@@ -600,7 +606,7 @@ def _gerrit_auth_for_bot(bot_username: str) -> tuple[str, Path]:
     for username, key_path in _GERRIT_AUTH_BY_CLASS.values():
         if username == bot_username:
             return username, key_path
-    if bot_username.startswith(("codex-bot-", "claude-bot-", "gemini-bot-")):
+    if bot_username.startswith(("codex-bot-", "claude-bot-", "gemini-bot-", "grok-bot-")):
         return bot_username, _gerrit_ssh_key_for_bot(bot_username)
     raise ValueError(f"unknown Gerrit bot username: {bot_username}")
 

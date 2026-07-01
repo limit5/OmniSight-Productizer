@@ -1509,6 +1509,12 @@ GEMINI_WORKTREE = os.environ.get(
     "OMNISIGHT_GEMINI_WORKTREE",
     _default_worktree_for("subscription-claude"),  # falls back to claude wt path shape
 )
+# Grok/xAI brain (dogfood 2026-07-01): own worktree so orphan_salvage + CLI
+# dispatch resolve the grok clone, not the claude fallback.
+GROK_WORKTREE = os.environ.get(
+    "OMNISIGHT_GROK_WORKTREE",
+    _default_worktree_for("subscription-claude"),  # falls back to claude wt path shape
+)
 TASK_TIMEOUT_S = int(os.environ.get("OMNISIGHT_RUNNER_TIMEOUT_S", "1800"))
 
 
@@ -1647,6 +1653,27 @@ def _invoke_cli(
         import shutil as _shutil
         agy_bin = _shutil.which("agy") or "agy"
         cmd = [agy_bin, "--dangerously-skip-permissions", "--add-dir", str(effective_worktree), "-p", full_prompt]
+        cwd = str(effective_worktree)
+    elif agent_class == "subscription-grok":
+        # Grok/xAI brain (dogfood 2026-07-01). `grok` is an agentic Build CLI
+        # (OAuth via grok.com, no API key). Flags: `-p` headless single-turn +
+        # `--always-approve` (auto-approve tool calls, like claude's skip-perms)
+        # + `--cwd <wt>` so it operates on + commits into the ticket worktree.
+        # Auth rides in via prepare_cli_home's ~/.grok copy (downloads/ excluded);
+        # the ELF is RO-bound by runner_sandbox. cmd[0] MUST be the resolved real
+        # binary path (grok on PATH is a symlink chain) so it matches the jail bind.
+        if not os.path.isdir(GROK_WORKTREE):
+            print(f"[runner] grok worktree missing: {GROK_WORKTREE}", file=sys.stderr)
+            return 2
+        sandbox_worktree = Path(GROK_WORKTREE)
+        effective_worktree = worktree_path or sandbox_worktree
+        import shutil as _shutil
+        _grok = _shutil.which("grok")
+        if not _grok:
+            print("[runner] grok CLI not on PATH", file=sys.stderr)
+            return 2
+        grok_bin = os.path.realpath(_grok)
+        cmd = [grok_bin, "-p", full_prompt, "--always-approve", "--cwd", str(effective_worktree)]
         cwd = str(effective_worktree)
     elif agent_class.startswith("api-"):
         print(f"[runner] agent_class={agent_class} requires SDK invocation, not CLI. Skipping invoke.")

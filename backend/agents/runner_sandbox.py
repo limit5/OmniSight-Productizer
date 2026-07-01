@@ -409,24 +409,46 @@ _CLI_CONFIG_DIRS: tuple[tuple[str, str], ...] = (
     # (incl. antigravity-cli/antigravity-oauth-token). Copy it into the jail's
     # cli-home so a subscription-gemini ticket authenticates inside the jail.
     ("GEMINI_HOME", ".gemini"),
+    # Grok/xAI `grok` keeps its OAuth (~/.grok/auth.json) + config/skills there.
+    # Copy it in so a subscription-grok ticket authenticates inside the jail. The
+    # 150M downloads/ subdir (the CLI binary itself) is EXCLUDED via
+    # _CLI_CONFIG_DIR_IGNORE — the ELF is RO-bound separately, not seeded.
+    ("GROK_HOME", ".grok"),
 )
+
+
+# Per-config-dir copytree exclusions (dogfood 2026-07-01). Some agent-CLI homes
+# carry large payloads irrelevant to auth (e.g. ~/.grok/downloads is the 150M CLI
+# binary, RO-bound at its real path instead). Keyed by the _CLI_CONFIG_DIRS rel
+# subdir; patterns are shutil.ignore_patterns globs applied during the seed copy.
+_CLI_CONFIG_DIR_IGNORE: dict[str, tuple[str, ...]] = {
+    ".grok": ("downloads",),
+}
 
 
 # Agentic CLIs that are standalone binaries OUTSIDE the nvm node toolchain
 # (agy/grok install to ~/.local/bin). wrap_in_bubblewrap RO-binds these so the
 # jail can execvp them. Resolved via PATH; absent CLIs are simply skipped.
-_AGENTIC_CLI_NAMES: tuple[str, ...] = ("agy",)
+_AGENTIC_CLI_NAMES: tuple[str, ...] = ("agy", "grok")
 
 
 def _agentic_cli_binaries(env: "Mapping[str, str] | None" = None) -> tuple[str, ...]:
-    """Return resolvable standalone agentic-CLI binary paths to RO-bind."""
+    """Return resolvable standalone agentic-CLI binary paths to RO-bind.
+
+    Paths are realpath-resolved so a symlinked launcher (e.g. `grok` →
+    ~/.grok/downloads/grok-linux-x86_64) binds the REAL ELF; binding the symlink
+    itself would dangle inside the jail (its target isn't mounted). Callers must
+    likewise invoke the CLI by its realpath so cmd[0] matches the bind.
+    """
     import shutil
     path_env = (env or {}).get("PATH") if env else None
     out: list[str] = []
     for name in _AGENTIC_CLI_NAMES:
         p = shutil.which(name, path=path_env) or shutil.which(name)
-        if p and p not in out:
-            out.append(p)
+        if p:
+            real = os.path.realpath(p)
+            if real not in out:
+                out.append(real)
     return tuple(out)
 
 
@@ -514,10 +536,13 @@ def prepare_cli_home(
         host_path = Path(host_raw)
         dest = cli_home / rel
         if host_path.is_dir():
+            ignore_pats = _CLI_CONFIG_DIR_IGNORE.get(rel)
+            ignore = shutil.ignore_patterns(*ignore_pats) if ignore_pats else None
             try:
                 shutil.copytree(
                     host_path, dest, dirs_exist_ok=True,
                     ignore_dangling_symlinks=True,
+                    ignore=ignore,
                 )
             except (shutil.Error, OSError) as exc:
                 # copytree copies everything it can and raises at the end with
