@@ -38,6 +38,7 @@
  */
 
 import {
+  AlertTriangle,
   Award,
   BrainCircuit,
   Code2,
@@ -56,12 +57,14 @@ import {
 } from "lucide-react"
 import type { LucideIcon } from "lucide-react"
 import type { ReactElement } from "react"
+import { useMemo, useState } from "react"
 
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
 import { SkillBranchTree } from "./SkillBranchTree"
+import { TalentForkModal } from "./TalentForkModal"
 
 export type AgentGuild =
   | "backend"
@@ -71,6 +74,7 @@ export type AgentGuild =
   | "data"
   | "mobile"
   | "embedded"
+  | "isp"
   | "generalist"
 
 export interface CharacterCardProps {
@@ -93,6 +97,7 @@ export interface CharacterCardProps {
   capstone?: CharacterCapstone | null
   onLockBranch?: (skillId: string, branchId: string) => void
   onLockTalent?: (milestoneLevel: number, talentId: string) => void
+  onTalentLocked?: () => void | Promise<void>
   onLockCapstone?: () => void
 }
 
@@ -288,6 +293,15 @@ const GUILD_VISUALS: Record<AgentGuild, GuildVisual> = {
     barClass: "bg-lime-500",
     portraitClass: "from-lime-500/20 via-zinc-500/10 to-background",
   },
+  isp: {
+    label: "ISP Guild",
+    crestLabel: "ISP",
+    Icon: Laptop,
+    toneClass:
+      "border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300",
+    barClass: "bg-teal-500",
+    portraitClass: "from-teal-500/20 via-fuchsia-500/10 to-background",
+  },
   generalist: {
     label: "Generalist Guild",
     crestLabel: "GN",
@@ -434,8 +448,10 @@ export function CharacterCard({
   capstone = null,
   onLockBranch,
   onLockTalent,
+  onTalentLocked,
   onLockCapstone,
 }: CharacterCardProps): ReactElement {
+  const [talentModalMilestone, setTalentModalMilestone] = useState<number | null>(null)
   const visual = GUILD_VISUALS[guild] ?? GUILD_VISUALS.generalist
   const progress = getLevelProgressPercent(xp, nextLevelXp)
   const GuildIcon = visual.Icon
@@ -447,6 +463,17 @@ export function CharacterCard({
     .filter((talent) => talent && Number.isFinite(talent.milestoneLevel))
     .slice()
     .sort((a, b) => a.milestoneLevel - b.milestoneLevel)
+  const pendingTalentMilestones = useMemo(
+    () =>
+      visibleTalents
+        .filter((talent) => Boolean(talent.choiceRequired) && !talent.chosenTalentId)
+        .map((talent) => talent.milestoneLevel),
+    [visibleTalents],
+  )
+  const activeTalentModalMilestone = talentModalMilestone !== null
+    && pendingTalentMilestones.includes(talentModalMilestone)
+      ? talentModalMilestone
+      : null
 
   return (
     <article
@@ -777,9 +804,15 @@ export function CharacterCard({
                             Choice locked
                           </span>
                         ) : needsPick ? (
-                          <span className="font-mono text-[10px] text-amber-700 dark:text-amber-300">
-                            Pick required
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setTalentModalMilestone(milestone.milestoneLevel)}
+                            className="inline-flex items-center gap-1 rounded border border-amber-500/45 bg-amber-500/10 px-2 py-0.5 font-mono text-[10px] text-amber-700 hover:bg-amber-500/20 dark:text-amber-300"
+                            data-testid="character-card-talent-pending"
+                          >
+                            <AlertTriangle className="size-3" aria-hidden="true" />
+                            Pick talent
+                          </button>
                         ) : (
                           <span className="font-mono text-[10px] text-muted-foreground">
                             Lv {milestone.milestoneLevel} milestone
@@ -933,6 +966,21 @@ export function CharacterCard({
           ) : null}
         </div>
       </div>
+      {activeTalentModalMilestone !== null ? (
+        <TalentForkModal
+          open
+          agentId={agentId}
+          agentDisplayName={displayName}
+          guild={guild}
+          agentLevel={level}
+          milestoneLevel={activeTalentModalMilestone}
+          onLocked={async () => {
+            await onTalentLocked?.()
+            setTalentModalMilestone(null)
+          }}
+          onCancel={() => setTalentModalMilestone(null)}
+        />
+      ) : null}
     </article>
   )
 }

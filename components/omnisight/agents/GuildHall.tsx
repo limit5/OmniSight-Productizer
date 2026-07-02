@@ -58,6 +58,7 @@ const GUILD_ORDER: AgentGuild[] = [
   "data",
   "mobile",
   "embedded",
+  "isp",
   "generalist",
 ]
 
@@ -116,6 +117,14 @@ const GUILD_VISUALS: Record<AgentGuild, GuildHallVisual> = {
     toneClass:
       "border-lime-500/30 bg-lime-500/10 text-lime-700 dark:text-lime-300",
     panelClass: "from-lime-500/10 via-background to-background",
+  },
+  isp: {
+    label: "ISP Guild",
+    description: "Image signal processing and camera pipeline specialists",
+    Icon: Laptop,
+    toneClass:
+      "border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300",
+    panelClass: "from-teal-500/10 via-background to-background",
   },
   generalist: {
     label: "Generalist Guild",
