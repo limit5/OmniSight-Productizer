@@ -21,6 +21,17 @@ skills:
         - branch_id: range_extension
           display_name: Range Extension
           summary: Bias toward long-range depth recovery and noise floor.
+  auditor:
+    - skill_id: security_audit
+      display_name: Security Audit
+      summary: Code and configuration security review, auth hardening, and audit evidence.
+      branches:
+        - branch_id: appsec_focus
+          display_name: AppSec Focus
+          summary: Bias toward code-level vulnerability review and auth/session hardening.
+        - branch_id: infra_hardening
+          display_name: Infra Hardening
+          summary: Bias toward deployment, sandbox, and secret-handling hardening.
   backend:
     - skill_id: enterprise_web
       display_name: Enterprise Web
@@ -146,6 +157,17 @@ skills:
         - branch_id: control_focus
           display_name: Control Focus
           summary: Bias toward UVC control / extension-unit work.
+  red_team:
+    - skill_id: adversarial_testing
+      display_name: Adversarial Testing
+      summary: Offensive probing of our own defenses — injection, jail, and perimeter.
+      branches:
+        - branch_id: prompt_injection_focus
+          display_name: Prompt Injection Focus
+          summary: Bias toward LLM/prompt-injection attack simulation against agent defenses.
+        - branch_id: perimeter_focus
+          display_name: Perimeter Focus
+          summary: Bias toward network/service perimeter probing and auth bypass attempts.
   sre:
     - skill_id: observability
       display_name: Observability
