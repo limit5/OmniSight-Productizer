@@ -22,6 +22,11 @@ if _FP:
     fm.fontManager.addfont(_FP); plt.rcParams['font.family']=fm.FontProperties(fname=_FP).get_name()
 
 OUT=Path(__file__).resolve().parent.parent/"docs"/"design"/"rpg"
+ICON_DIR=OUT/"characters"/"icon"
+def _icon(slug):
+    from matplotlib import image as mpimg
+    fp=ICON_DIR/f"{slug}.png"
+    return mpimg.imread(str(fp)) if fp.exists() else None
 GC={'backend':'#3b82f6','frontend':'#10b981','sre':'#8b5cf6','isp':'#f59e0b',
     'auditor':'#ef4444','mobile':'#ec4899','red_team':'#b91c1c',
     'algo_cv':'#9ca3af','bsp':'#9ca3af','hal':'#9ca3af'}
@@ -94,33 +99,39 @@ def draw_skilltree(guilds,holders,chars):
 
 def draw_roster(roster):
     n=len(roster); cols=2; rows=(n+1)//2
-    fig,ax=plt.subplots(figsize=(18, 1.9*rows+1)); ax.axis('off'); ax.set_xlim(0,18); ax.set_ylim(0,1.9*rows+1)
-    H=1.9*rows+1
+    fig,ax=plt.subplots(figsize=(18, 2.55*rows+1)); ax.axis('off'); ax.set_xlim(0,18); ax.set_ylim(0,2.55*rows+1)
+    H=2.55*rows+1
     ax.text(9,H-0.4,"OmniSight 角色總覽 — 等級 · 技能 · 天賦",ha='center',fontsize=21,weight='bold')
     ax.text(9,H-0.78,"⚡=待選天賦(過里程碑未選) · ★=已鎖技能分支",ha='center',fontsize=11,color='#555')
     cw=8.7
     for i,r in enumerate(roster):
-        col=i%2; row=i//2; x=0.3+col*9.1; y=H-1.3-row*1.85
+        col=i%2; row=i//2; x=0.3+col*9.1; y=H-1.5-row*2.5
         c=GC.get(r['guild'],'#9ca3af'); bc=BRAINC.get(r['brain'],'#666')
-        ax.add_patch(FancyBboxPatch((x,y-1.6),cw,1.6,boxstyle="round,pad=0.03",fc='#ffffff',ec=c,lw=2.2))
+        ax.add_patch(FancyBboxPatch((x,y-2.2),cw,2.2,boxstyle="round,pad=0.03",fc='#ffffff',ec=c,lw=2.2))
         ax.add_patch(FancyBboxPatch((x,y-0.44),cw,0.44,boxstyle="round,pad=0.02",fc=c,ec='none'))
-        ax.text(x+0.2,y-0.22,f"{r['name']}  ·  {r['slug']}",fontsize=13,weight='bold',color='white',va='center')
+        _av=_icon(r['slug'])
+        if _av is not None:
+            ax.imshow(_av, extent=(x+0.15, x+1.65, y-2.05, y-0.55), zorder=5, aspect='auto')
+            ax.add_patch(FancyBboxPatch((x+0.15,y-2.05),1.5,1.5,boxstyle="round,pad=0.0",fill=False,ec=c,lw=2,zorder=6))
+        _nx = x+1.85 if _av is not None else x+0.2
+        ax.text(_nx,y-0.22,f"{r['name']}  ·  {r['slug']}",fontsize=13,weight='bold',color='white',va='center')
         ax.text(x+cw-0.2,y-0.22,f"{GN.get(r['guild'],r['guild'])} / tier{r['tier']}",fontsize=9.5,color='white',va='center',ha='right')
         # brain chip
-        ax.add_patch(FancyBboxPatch((x+0.2,y-0.86),1.6,0.32,boxstyle="round,pad=0.02",fc=bc,ec='none',alpha=0.9))
-        ax.text(x+1.0,y-0.70,r['brain'],fontsize=9,color='white',ha='center',va='center',weight='bold')
-        ax.text(x+2.0,y-0.70,f"Lv {r['level']}   ·   {r['xp']} xp",fontsize=11,va='center',weight='bold',color='#222')
+        ax.add_patch(FancyBboxPatch((x+1.85,y-0.86),1.5,0.32,boxstyle="round,pad=0.02",fc=bc,ec='none',alpha=0.9))
+        ax.text(x+2.6,y-0.70,r['brain'],fontsize=9,color='white',ha='center',va='center',weight='bold')
+        ax.text(x+3.55,y-0.70,f"Lv {r['level']}   ·   {r['xp']} xp",fontsize=11,va='center',weight='bold',color='#222')
         if r['pending']:
             ax.add_patch(FancyBboxPatch((x+cw-2.2,y-0.86),2.0,0.32,boxstyle="round,pad=0.02",fc='#fde047',ec='#ca8a04'))
             ax.text(x+cw-1.2,y-0.70,f"⚡ 待選天賦 Lv{','.join(map(str,r['pending']))}",fontsize=8.2,ha='center',va='center',color='#713f12',weight='bold')
         sy=y-1.12
+        _sx = x+1.85 if _icon(r['slug']) is not None else x+0.3
         if r['skills']:
             for s in r['skills']:
                 br=f"  ★{s['branch_choice']}" if s['branch_choice'] else ""
-                ax.text(x+0.3,sy,f"◆ {s['skill_id']}  Lv{s['level']} ({s['skill_xp']}xp){br}",fontsize=9,va='center',color='#333')
+                ax.text(_sx,sy,f"◆ {s['skill_id']}  Lv{s['level']} ({s['skill_xp']}xp){br}",fontsize=9,va='center',color='#333')
                 sy-=0.24
         else:
-            ax.text(x+0.3,sy,"（尚無技能 — 交付 in-guild skill: 票即可開始練）",fontsize=9,va='center',color='#999',style='italic')
+            ax.text(_sx,sy,"（尚無技能 — 交付 in-guild skill: 票即可開始練）",fontsize=9,va='center',color='#999',style='italic')
     fig.savefig(OUT/'roster.svg',bbox_inches='tight',facecolor='white'); plt.close(fig)
 
 def main():
