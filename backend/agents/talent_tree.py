@@ -235,6 +235,11 @@ _DEFAULT_GUILD_TALENT_FOCI: Mapping[Guild, tuple[str, ...]] = MappingProxyType(
             "timeline", "translation", "runbook", "narrative", "executive",
             "operator", "archive",
         ),
+        Guild.mobile: (
+            "lifecycle", "offline", "battery", "startup", "gesture",
+            "permission", "crash", "deeplink", "notification", "storeops",
+            "device-matrix", "release-train",
+        ),
         Guild.custom: (
             "charter", "constraint", "routing", "template", "boundary",
             "handoff", "validation", "metric", "integration", "operator",
@@ -1264,6 +1269,13 @@ def _default_guild_talent_tree(guild: Guild) -> GuildTalentTree:
             summary=(
                 f"Dedicated Lv-80 capstone for the {_words(guild.value)} "
                 "Guild, reserved for high-context specialist execution."
+            ),
+            signature_label=f"{_slug(guild.value)}-capstone",
+            signature_prompt=(
+                f"Signature ability of the {_title(guild.value)} Guild: "
+                f"apply full {_words(guild.value)} specialist depth to "
+                "this task — state the plan, execute surgically, and "
+                "verify the outcome before handing off."
             ),
         ),
     )

@@ -31,6 +31,7 @@ from backend.agents.talent_tree import (
     InMemoryTalentChoiceStore,
     MILESTONE_LEVELS,
     MilestoneNotReached,
+    OPTIONS_PER_MILESTONE,
     PostgresTalentChoiceStore,
     ROUTING_WEIGHT_TALENT_MATCH,
     TalentAlreadyLocked,
@@ -106,6 +107,42 @@ def test_each_guild_declares_exactly_four_milestones_with_three_options():
                 f"{guild_tree.guild.value} Lv {milestone} must have 3 options"
             )
         assert guild_tree.capstone.ability_id
+
+
+def test_load_talent_tree_covers_every_guild_with_wellformed_capstone():
+    """OP-2515 drift guard: the default generator must produce a valid
+    tree (incl. a complete capstone) for EVERY Guild, not just the
+    YAML-curated backend/frontend."""
+    tree = load_talent_tree()
+    assert set(tree.keys()) == set(Guild)
+    for guild in Guild:
+        guild_tree = tree[guild]
+        assert guild_tree.guild is guild
+        assert set(guild_tree.options_by_milestone.keys()) == set(MILESTONE_LEVELS)
+        for milestone in MILESTONE_LEVELS:
+            options = guild_tree.options_by_milestone[milestone]
+            assert len(options) == OPTIONS_PER_MILESTONE, (
+                f"{guild.value} Lv {milestone} must have "
+                f"{OPTIONS_PER_MILESTONE} options"
+            )
+        capstone = guild_tree.capstone
+        assert capstone.ability_id.strip(), guild.value
+        assert capstone.signature_label.strip(), guild.value
+        assert capstone.signature_prompt.strip(), guild.value
+
+
+@pytest.mark.parametrize("guild", [Guild.isp, Guild.mobile, Guild.auditor])
+def test_available_talents_returns_three_options_for_defaulted_guilds(guild):
+    options = available_talents("iris", guild, 10)
+    assert len(options) == OPTIONS_PER_MILESTONE
+
+
+@pytest.mark.asyncio
+async def test_agent_talent_summary_for_defaulted_guild_agent_does_not_raise():
+    store = InMemoryTalentChoiceStore()
+    summary = await agent_talent_summary(store, "iris")
+    assert summary.agent_id == "iris"
+    assert summary.choices == ()
 
 
 def test_loaded_tree_top_level_mapping_is_immutable():
