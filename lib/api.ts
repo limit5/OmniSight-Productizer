@@ -1168,6 +1168,7 @@ export interface AgentCardSummary {
   agent_id: string
   agent_class: string
   instance_suffix: string | null
+  portrait_url?: string | null
   guild: string
   level: number
   xp: number
@@ -1248,6 +1249,7 @@ export interface AgentCardDetail {
   agent_id: string
   agent_class: string
   instance_suffix: string | null
+  portrait_url?: string | null
   guild: string
   level: number
   xp: number

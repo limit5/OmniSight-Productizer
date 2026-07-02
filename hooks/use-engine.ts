@@ -62,6 +62,7 @@ function mapAgentCard(card: api.AgentCardSummary, live?: Agent): Agent {
     agentClass: card.agent_class,
     level: card.level,
     xp: card.xp,
+    portraitUrl: card.portrait_url ?? live?.portraitUrl,
     subTasks: live?.subTasks,
     history: live?.history,
     messages: live?.messages,
