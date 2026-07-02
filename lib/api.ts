@@ -1281,6 +1281,92 @@ export async function getAgentAchievements(id: string) {
   return request<AgentAchievementsResponse>(`/agents/${encodeURIComponent(id)}/achievements`)
 }
 
+export interface AgentTalentChoice {
+  milestone_level: number
+  talent_id: string
+  chosen_at: string
+}
+
+export interface AgentTalentsResponse {
+  agent_id: string
+  agent_level: number
+  milestones: number[]
+  pending_milestone_forks: number[]
+  choices: AgentTalentChoice[]
+  capstone: {
+    ability_id: string
+    locked_at: string
+  } | null
+}
+
+export interface AgentTalentOption {
+  talent_id: string
+  display_name: string
+  summary: string | null
+  routing_label: string | null
+}
+
+export interface AgentTalentOptionsResponse {
+  agent_id: string
+  guild: string
+  milestone: number
+  options: AgentTalentOption[]
+}
+
+export interface LockTalentContext {
+  guild: string
+  agentLevel: number
+}
+
+export interface LockedTalentResponse {
+  agent_id: string
+  milestone_level: number
+  talent_id: string
+  chosen_at: string
+}
+
+export async function getAgentTalents(agentId: string): Promise<AgentTalentsResponse> {
+  return request<AgentTalentsResponse>(
+    `/agents/${encodeURIComponent(agentId)}/talents`,
+  )
+}
+
+export async function getTalentOptions(
+  agentId: string,
+  milestone: number,
+  guild?: string,
+): Promise<AgentTalentOptionsResponse> {
+  const qs = new URLSearchParams()
+  qs.set("milestone", String(milestone))
+  if (guild) qs.set("guild", guild)
+  return request<AgentTalentOptionsResponse>(
+    `/agents/${encodeURIComponent(agentId)}/talents/options?${qs.toString()}`,
+  )
+}
+
+export async function lockTalent(
+  agentId: string,
+  milestone: number,
+  talentId: string,
+  context?: LockTalentContext,
+): Promise<LockedTalentResponse> {
+  if (!context) {
+    throw new Error("lockTalent requires guild and agentLevel context")
+  }
+  return request<LockedTalentResponse>(
+    `/agents/${encodeURIComponent(agentId)}/talents/lock`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        guild: context.guild,
+        milestone,
+        talent_id: talentId,
+        agent_level: context.agentLevel,
+      }),
+    },
+  )
+}
+
 // ── RPG.W17 — Party Hall feed (matches backend `_party_to_dict`) ────
 export interface AgentPartyMemberDto {
   member_agent_id: string

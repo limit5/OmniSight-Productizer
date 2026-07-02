@@ -24,8 +24,10 @@ import {
   ApiError,
   getAgentAchievements,
   getAgentCard,
+  getAgentTalents,
   type AgentAchievementBadge,
   type AgentCardDetail,
+  type AgentTalentsResponse,
 } from "@/lib/api"
 import {
   CharacterCard,
@@ -33,6 +35,7 @@ import {
   type CharacterBadge,
   type CharacterBadgeKind,
   type CharacterBadgeRarity,
+  type CharacterTalentMilestone,
 } from "@/components/omnisight/agents/CharacterCard"
 
 const KNOWN_GUILDS: readonly AgentGuild[] = [
@@ -43,6 +46,7 @@ const KNOWN_GUILDS: readonly AgentGuild[] = [
   "data",
   "mobile",
   "embedded",
+  "isp",
   "generalist",
 ]
 
@@ -118,6 +122,21 @@ function achievementBadgeToCharacterBadge(badge: AgentAchievementBadge): Charact
   }
 }
 
+function talentsResponseToMilestones(
+  talents: AgentTalentsResponse,
+): CharacterTalentMilestone[] {
+  const choices = new Map(
+    talents.choices.map((choice) => [choice.milestone_level, choice.talent_id]),
+  )
+  const pending = new Set(talents.pending_milestone_forks)
+  return talents.milestones.map((milestone) => ({
+    milestoneLevel: milestone,
+    options: [],
+    chosenTalentId: choices.get(milestone) ?? null,
+    choiceRequired: pending.has(milestone),
+  }))
+}
+
 export default function AgentCharacterCardPage() {
   const auth = useAuth()
   const router = useRouter()
@@ -129,6 +148,7 @@ export default function AgentCharacterCardPage() {
 
   const [card, setCard] = useState<AgentCardDetail | null>(null)
   const [badges, setBadges] = useState<CharacterBadge[]>([])
+  const [talents, setTalents] = useState<CharacterTalentMilestone[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [notFound, setNotFound] = useState(false)
@@ -150,22 +170,26 @@ export default function AgentCharacterCardPage() {
     setError(null)
     setNotFound(false)
     try {
-      const [result, achievements] = await Promise.all([
+      const [result, achievements, talentSummary] = await Promise.all([
         getAgentCard(agentId),
         getAgentAchievements(agentId),
+        getAgentTalents(agentId),
       ])
       setCard(result)
       setBadges(achievements.unlocked.map(achievementBadgeToCharacterBadge))
+      setTalents(talentsResponseToMilestones(talentSummary))
     } catch (exc) {
       if (exc instanceof ApiError && exc.status === 404) {
         setNotFound(true)
         setCard(null)
         setBadges([])
+        setTalents([])
       } else {
         const msg = exc instanceof Error ? exc.message : String(exc)
         setError(msg)
         setCard(null)
         setBadges([])
+        setTalents([])
       }
     } finally {
       setLoading(false)
@@ -286,6 +310,8 @@ export default function AgentCharacterCardPage() {
             instanceSuffix={card.instance_suffix}
             styleFingerprint={card.style_fingerprint}
             badges={badges}
+            talents={talents}
+            onTalentLocked={refresh}
           />
         )}
       </div>

@@ -65,6 +65,7 @@ const GUILD_LABEL: Record<AgentGuild, string> = {
   data: "Data",
   mobile: "Mobile",
   embedded: "Embedded",
+  isp: "ISP",
   generalist: "Generalist",
 }
 
