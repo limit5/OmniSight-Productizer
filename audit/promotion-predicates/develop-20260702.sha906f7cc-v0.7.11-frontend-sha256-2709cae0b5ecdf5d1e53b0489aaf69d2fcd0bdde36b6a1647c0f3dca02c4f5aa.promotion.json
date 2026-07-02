@@ -1,0 +1,12 @@
+{
+  "actor": "sora",
+  "approval_refs": [
+    "rpg-characters-talents-906f7cc8"
+  ],
+  "bundle_id": "develop+20260702.sha906f7cc",
+  "from_env": "staging",
+  "image_ref": "sora.services:49160/omnisight/omnisight-productizer/frontend@sha256:2709cae0b5ecdf5d1e53b0489aaf69d2fcd0bdde36b6a1647c0f3dca02c4f5aa",
+  "parent_attestation": null,
+  "time": "2026-07-02T19:46:03Z",
+  "to_env": "v0.7.11"
+}
