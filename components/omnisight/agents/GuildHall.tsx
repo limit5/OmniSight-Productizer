@@ -16,6 +16,7 @@ import {
   ServerCog,
   Shield,
   Smartphone,
+  UserPlus,
   Users,
   Wrench,
 } from "lucide-react"
@@ -37,6 +38,7 @@ export interface GuildHallGuild {
 
 export interface GuildHallProps {
   guilds: GuildHallGuild[]
+  onRecruit?: () => void
   className?: string
 }
 
@@ -148,7 +150,11 @@ function summaryFor(guild: GuildHallGuild, fallback: string): string {
   return guild.summary?.trim() || fallback
 }
 
-export function GuildHall({ guilds, className }: GuildHallProps): ReactElement {
+export function GuildHall({
+  guilds,
+  onRecruit,
+  className,
+}: GuildHallProps): ReactElement {
   const countsByGuild = new Map(
     guilds.map((item) => [item.guild, normalizedMemberCount(item)]),
   )
@@ -163,13 +169,26 @@ export function GuildHall({ guilds, className }: GuildHallProps): ReactElement {
             Agent membership across the RPG guild roster
           </p>
         </div>
-        <Badge variant="outline" className="h-7 gap-1.5 px-2 text-xs">
-          <Users className="size-3.5" aria-hidden="true" />
-          {formatMemberCount(
-            GUILD_ORDER.reduce((total, guild) => total + (countsByGuild.get(guild) ?? 0), 0),
-          )}{" "}
-          total
-        </Badge>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline" className="h-7 gap-1.5 px-2 text-xs">
+            <Users className="size-3.5" aria-hidden="true" />
+            {formatMemberCount(
+              GUILD_ORDER.reduce((total, guild) => total + (countsByGuild.get(guild) ?? 0), 0),
+            )}{" "}
+            total
+          </Badge>
+          {onRecruit ? (
+            <button
+              type="button"
+              onClick={onRecruit}
+              className="inline-flex h-7 items-center justify-center gap-1 rounded border border-emerald-500/45 bg-emerald-500/10 px-2.5 font-mono text-xs text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
+              data-testid="guild-hall-recruit"
+            >
+              <UserPlus className="size-3.5" aria-hidden="true" />
+              Recruit
+            </button>
+          ) : null}
+        </div>
       </div>
 
       <div
