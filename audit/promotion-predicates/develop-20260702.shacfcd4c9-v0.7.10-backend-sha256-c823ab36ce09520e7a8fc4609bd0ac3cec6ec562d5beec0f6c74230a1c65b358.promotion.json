@@ -1,0 +1,14 @@
+{
+  "actor": "sora",
+  "approval_refs": [
+    "rpg-recruit-cfcd4c98",
+    "OP-2511",
+    "OP-2512"
+  ],
+  "bundle_id": "develop+20260702.shacfcd4c9",
+  "from_env": "staging",
+  "image_ref": "sora.services:49160/omnisight/omnisight-productizer/backend@sha256:c823ab36ce09520e7a8fc4609bd0ac3cec6ec562d5beec0f6c74230a1c65b358",
+  "parent_attestation": null,
+  "time": "2026-07-02T01:12:50Z",
+  "to_env": "v0.7.10"
+}
