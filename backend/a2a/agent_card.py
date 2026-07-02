@@ -96,6 +96,7 @@ _GUILD_DISPLAY_NAMES = MappingProxyType({
     Guild.forensics: "Forensics",
     Guild.intel: "Intel",
     Guild.reporter: "Reporter",
+    Guild.mobile: "Mobile",
     Guild.custom: "Custom",
 })
 
@@ -120,6 +121,7 @@ _GUILD_DESCRIPTIONS = MappingProxyType({
     Guild.forensics: "Post-incident root cause, log archaeology, and evidence preservation.",
     Guild.intel: "SecOps threat intelligence, CVE feed triage, and external signal monitoring.",
     Guild.reporter: "Human-facing reports, changelogs, release notes, and summary artifacts.",
+    Guild.mobile: "Android and iOS application implementation and device integration.",
     Guild.custom: "Operator-defined specialist slot with conservative default policy.",
 })
 

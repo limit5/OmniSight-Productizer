@@ -65,6 +65,7 @@ EXPECTED_MATRIX: dict[Guild, frozenset[SandboxTier]] = {
     ),
     Guild.intel: frozenset({SandboxTier.T0, SandboxTier.T2}),
     Guild.reporter: frozenset({SandboxTier.T0, SandboxTier.T2}),
+    Guild.mobile: frozenset({SandboxTier.T0, SandboxTier.T2}),
     Guild.custom: frozenset({SandboxTier.T0, SandboxTier.T2}),
 }
 
@@ -164,6 +165,7 @@ class TestSandboxTierMatrix:
             "forensics",
             "intel",
             "reporter",
+            "mobile",
             "custom",
         ]
 
@@ -192,8 +194,8 @@ class TestSandboxTierMatrix:
                 assert is_admitted(guild, tier) is expected
                 admitted += int(expected)
                 denied += int(not expected)
-        assert admitted == 40
-        assert denied == 44
+        assert admitted == 42
+        assert denied == 46
 
     def test_assert_admitted_names_forbidden_pair_and_permitted_tiers(self) -> None:
         with pytest.raises(GuildTierViolation) as exc:
@@ -217,7 +219,7 @@ class TestSandboxTierAuditDoc:
     def test_audit_doc_declares_one_row_per_guild(self) -> None:
         rows = _audit_doc_matrix()
         assert set(rows) == set(Guild)
-        assert len(rows) == 21
+        assert len(rows) == 22
 
     def test_audit_doc_admitted_tiers_match_runtime_matrix(self) -> None:
         assert _audit_doc_matrix() == EXPECTED_MATRIX

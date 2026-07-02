@@ -103,21 +103,23 @@ class SandboxTier(str, Enum):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Guild — 21-Guild taxonomy from BP.B.2
+#  Guild — 22-Guild taxonomy from BP.B.2
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class Guild(str, Enum):
-    """21 Guild definitions (mirror of BP.B.2 ``backend/agents/guilds/``).
+    """22 Guild definitions (mirror of BP.B.2 ``backend/agents/guilds/``).
 
     Slugs are lower-snake-case to match the eventual ``guild_id``
     column (TEXT) added by alembic 0019 (BP.B.1). BP.B is not yet
     landed; this module declares the taxonomy ahead so BP.S.1..S.6
     can ship in the foundation window without blocking on B.
 
-    Naming aligns with TODO.md line 153::
+    Naming aligns with TODO.md line 153 (plus the ``mobile`` Guild
+    added by OP-2513)::
 
         架構 / SA-SD / UX / PM / Gateway / BSP / HAL / Algo-CV /
         Optical / ISP / Audio / Frontend / Backend / SRE / QA /
-        Auditor / RedTeam / Forensics / Intel / Reporter / Custom
+        Auditor / RedTeam / Forensics / Intel / Reporter / Mobile /
+        Custom
     """
 
     #: Architect — system design, ADR, blueprint. Cloud brain only.
@@ -182,6 +184,10 @@ class Guild(str, Enum):
     #: Reporter — generate human-facing summaries / changelogs / docs.
     reporter = "reporter"
 
+    #: Mobile — Android / iOS application work (camviewpro,
+    #: UVCCamera_Qt-adjacent, mapar-ios).
+    mobile = "mobile"
+
     #: Custom — operator-defined Guild slot (escape hatch); admission
     #: defaults to T0+T2 (same as Frontend) — operator override via
     #: ``configs/sandbox_tier_policy.yaml`` is expected before use.
@@ -218,11 +224,11 @@ class Guild(str, Enum):
 #   compile = reproducible) and do NOT belong in T0 (they execute
 #   AI-generated build scripts).
 #
-# * **Networked-but-safe Guilds** (Backend / Frontend / Optical / Intel /
-#   QA) → T0 + T2. They need outbound network (npm registry, pip,
-#   threat-intel feeds, optical-lab references) but not direct hardware
-#   access. T0 is for the LangGraph reasoning portion that lives in the
-#   control plane.
+# * **Networked-but-safe Guilds** (Backend / Frontend / Mobile /
+#   Optical / Intel / QA) → T0 + T2. They need outbound network (npm
+#   registry, pip, Gradle / CocoaPods, threat-intel feeds, optical-lab
+#   references) but not direct hardware access. T0 is for the LangGraph
+#   reasoning portion that lives in the control plane.
 #
 # * **Adversarial / observability Guilds** (RedTeam / Forensics / SRE)
 #   → admitted to multiple tiers because their job is to probe across
@@ -263,6 +269,7 @@ _RAW_GUILD_TIER_ADMISSION_MATRIX: dict[Guild, FrozenSet[SandboxTier]] = {
     # Networked-but-safe Guilds
     Guild.frontend: frozenset({SandboxTier.T0, SandboxTier.T2}),
     Guild.backend: frozenset({SandboxTier.T0, SandboxTier.T2}),
+    Guild.mobile: frozenset({SandboxTier.T0, SandboxTier.T2}),
     Guild.optical: frozenset({SandboxTier.T0, SandboxTier.T2}),
     Guild.intel: frozenset({SandboxTier.T0, SandboxTier.T2}),
     Guild.qa: frozenset({SandboxTier.T0, SandboxTier.T2}),

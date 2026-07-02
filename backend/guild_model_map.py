@@ -1,4 +1,4 @@
-"""BP.F.2 -- default model mapping for the 21 BP.B Guilds.
+"""BP.F.2 -- default model mapping for the 22 BP.B Guilds.
 
 This module is the code-side default table for the Guild model choices
 declared in ``configs/model_mapping.yaml``. It is intentionally static:
@@ -42,6 +42,7 @@ _RAW_GUILD_DEFAULT_MODEL_MAP: dict[Guild, str] = {
     Guild.forensics: "google:gemini-1.5-pro",
     Guild.intel: "google:gemini-1.5-pro",
     Guild.reporter: "anthropic:claude-haiku-4-20250506",
+    Guild.mobile: "anthropic:claude-sonnet-4-20250514",
     Guild.custom: "anthropic:claude-sonnet-4-20250514",
 }
 

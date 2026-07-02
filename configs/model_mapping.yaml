@@ -70,6 +70,8 @@ guilds:
     model_spec: google:gemini-1.5-pro
   reporter:
     model_spec: anthropic:claude-haiku-4-20250506
+  mobile:
+    model_spec: anthropic:claude-sonnet-4-20250514
   custom:
     model_spec: anthropic:claude-sonnet-4-20250514
 

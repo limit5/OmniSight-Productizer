@@ -1,6 +1,6 @@
 """BP.B.2 -- canonical Guild definitions.
 
-This module owns the declarative metadata for the 21-Guild taxonomy.
+This module owns the declarative metadata for the 22-Guild taxonomy.
 The enum slugs remain owned by :mod:`backend.sandbox_tier`; this package
 adds the human-facing labels and concise domain summaries that downstream
 agent registries, routing views, and UI payloads consume.
@@ -132,6 +132,11 @@ GUILD_DEFINITIONS: Mapping[Guild, GuildDefinition] = MappingProxyType(
             guild=Guild.reporter,
             display_name="Reporter",
             summary="Human-facing reports, changelogs, release notes, and summaries.",
+        ),
+        Guild.mobile: GuildDefinition(
+            guild=Guild.mobile,
+            display_name="Mobile",
+            summary="Android and iOS application implementation and device integration.",
         ),
         Guild.custom: GuildDefinition(
             guild=Guild.custom,

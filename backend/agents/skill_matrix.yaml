@@ -157,6 +157,17 @@ skills:
         - branch_id: control_focus
           display_name: Control Focus
           summary: Bias toward UVC control / extension-unit work.
+  mobile:
+    - skill_id: mobile_app
+      display_name: Mobile App
+      summary: Android/iOS application implementation and device integration.
+      branches:
+        - branch_id: android_focus
+          display_name: Android Focus
+          summary: Bias toward Android app work (Kotlin/Java, camera, USB host).
+        - branch_id: ios_focus
+          display_name: iOS Focus
+          summary: Bias toward iOS app work (Swift, AVFoundation, ARKit).
   red_team:
     - skill_id: adversarial_testing
       display_name: Adversarial Testing

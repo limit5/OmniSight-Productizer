@@ -1,7 +1,7 @@
 # Sandbox-Tier Audit — Per-Guild × Per-Tier Security Properties + Compliance Claims
 
 > **BP.S.3 deliverable.** This document is the **human-readable audit doc** for
-> the 4-tier sandbox model + 21-Guild admission matrix declared in
+> the 4-tier sandbox model + 22-Guild admission matrix declared in
 > [`backend/sandbox_tier.py`](../../backend/sandbox_tier.py) (BP.S.1) and
 > narrowed at runtime by
 > [`configs/sandbox_tier_policy.yaml`](../../configs/sandbox_tier_policy.yaml)
@@ -139,6 +139,7 @@ hardware-affecting binaries.
 |-------|---------------|------------------------------|--------------------------------|
 | `frontend` | **T0, T2** | T0: LangGraph reasoning portion (component layout, hooks design). T2: npm registry + CDN for asset references; VPC-isolated. | OWASP ASVS V14 (configuration) — npm fetch is sandboxed; supply-chain attack on a frontend dep cannot reach internal LAN. ISO 27001 A.14.2 (security in development). |
 | `backend` | **T0, T2** | T0: FastAPI route reasoning, alembic migration drafting (no DB connection from T0). T2: pip / pypi / GitHub for upstream dep references. | OWASP ASVS V1 (architecture) + V14 (configuration). NIST SP 800-53 SC-7 (boundary protection — backend AI cannot pivot to internal LAN through T2). **Not** a claim that backend code is correct; only that the *generation* environment is sandboxed. |
+| `mobile` | **T0, T2** | T0: Android / iOS app reasoning (Kotlin / Swift design, camera + USB-host integration planning). T2: Gradle / Maven Central / CocoaPods / Swift Package registries for dependency references; VPC-isolated. | OWASP MASVS (mobile application security) — dependency fetch is sandboxed; a compromised mobile dep cannot reach internal LAN. ISO 27001 A.14.2 (security in development). **No claim** of on-device correctness — physical-device testing is out of sandbox scope. |
 | `optical` | **T0, T2** | T0: optics / lens / IR-cut / 3A tuning analysis. T2: optical reference DB lookup (lens MTF curves, sensor datasheets). | ISO 13485 §7.3.3 (design inputs — optical specs). |
 | `intel` | **T0, T2** | T0: SecOps reasoning over CVE feed + 0-day watch (BP.I). T2: outbound to MITRE / NVD / vendor PSIRT feeds; VPC-isolated from internal LAN so a compromised intel feed cannot pivot. | ISO 27001 A.12.6 (technical vulnerability management). NIST SP 800-53 RA-5 (vulnerability monitoring). |
 | `qa` | **T0, T2** | T0: test-plan reasoning, pytest fixture authoring. T2: fetch reference test vectors / ground-truth datasets from public repositories. | DO-178C Annex A Table A-6 (verification of verification — QA produces verification evidence; sandbox provides reproducibility of that evidence). ISO 26262 Part 8 §9 (verification). |
@@ -162,10 +163,10 @@ visibility into multiple Tiers.
 
 ---
 
-## 4. The 84 (Guild × Tier) cells — denial side
+## 4. The 88 (Guild × Tier) cells — denial side
 
-The 21 × 4 = 84 conceptual (Guild, Tier) cells minus the 53 admitted
-cells above = **31 cells where dispatch is denied** by the structural
+The 22 × 4 = 88 conceptual (Guild, Tier) cells minus the 42 admitted
+cells above = **46 cells where dispatch is denied** by the structural
 matrix. Each denial is a **policy bug indicator**, not just a routing
 failure: PEP Gateway (BP.S.4) raises `GuildTierViolation` with the
 offending pair + permitted set so the audit log is self-contained.
