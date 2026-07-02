@@ -18,6 +18,7 @@ overridden with in-memory fakes so no Postgres is required.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -31,6 +32,7 @@ from backend.agents.character_card import (
 )
 from backend.agents.character_registry import CHARACTERS
 from backend.routers.agents import (
+    _AVATAR_SLUGS,
     get_character_card_registry,
     get_character_def_store,
     router,
@@ -419,3 +421,67 @@ class TestPatchCharacter:
         self._recruit(client)
         resp = client.delete("/agents/characters/vulcan")
         assert resp.status_code == 405
+
+
+class TestPortraitUrl:
+    """UI B1 (OP-2517) — portrait_url in the card DTO + shipped PNGs."""
+
+    async def _seed_card(
+        self,
+        card_store: InMemoryCharacterCardStore,
+        agent_id: str,
+        agent_class: str = "subscription-claude",
+        guild: str = "backend",
+    ) -> None:
+        await card_store.create_card(
+            CharacterCardCreate(
+                agent_id=agent_id,
+                agent_class=agent_class,
+                guild=guild,
+            )
+        )
+
+    async def test_cards_return_avatar_url_for_designed_character(
+        self, client: TestClient, card_store: InMemoryCharacterCardStore
+    ):
+        await self._seed_card(card_store, "nova")
+        cards = client.get("/agents/cards").json()
+        nova = next(c for c in cards if c["agent_id"] == "nova")
+        assert nova["portrait_url"] == "/avatars/nova.png"
+
+    async def test_cards_return_null_portrait_for_bot_card(
+        self, client: TestClient, card_store: InMemoryCharacterCardStore
+    ):
+        await self._seed_card(card_store, "claude-bot-1", agent_class="claude-bot")
+        cards = client.get("/agents/cards").json()
+        bot = next(c for c in cards if c["agent_id"] == "claude-bot-1")
+        assert bot["portrait_url"] is None
+
+    async def test_all_designed_characters_get_avatar_urls(
+        self, client: TestClient, card_store: InMemoryCharacterCardStore
+    ):
+        for slug in sorted(_AVATAR_SLUGS):
+            await self._seed_card(card_store, slug)
+        cards = client.get("/agents/cards").json()
+        by_id = {c["agent_id"]: c for c in cards}
+        assert set(by_id) == set(_AVATAR_SLUGS)
+        for slug in _AVATAR_SLUGS:
+            assert by_id[slug]["portrait_url"] == f"/avatars/{slug}.png"
+
+    def test_every_avatar_slug_has_a_shipped_png(self):
+        # AC: 8 avatars in public/avatars/ — the URL derivation is only
+        # valid if the PNG the URL points at actually ships.
+        avatars_dir = Path(__file__).resolve().parents[2] / "public" / "avatars"
+        assert len(_AVATAR_SLUGS) == 8
+        for slug in _AVATAR_SLUGS:
+            assert (avatars_dir / f"{slug}.png").is_file(), (
+                f"missing public/avatars/{slug}.png for avatar slug {slug!r}"
+            )
+
+    def test_avatar_pngs_served_without_auth(self):
+        # AC: /avatars/<slug>.png reachable without auth — .png is on the
+        # static-asset suffix allowlist that bypasses the bootstrap gate.
+        from backend.middleware_allowlist import is_static_asset
+
+        for slug in _AVATAR_SLUGS:
+            assert is_static_asset(f"/avatars/{slug}.png") is True

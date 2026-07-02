@@ -8,7 +8,7 @@ to ``_persist()`` and downstream ``db.*`` calls.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Final
 import re
 import uuid
 
@@ -1116,6 +1116,18 @@ async def _borrowed_conn(conn: asyncpg.Connection) -> AsyncIterator[asyncpg.Conn
     yield conn
 
 
+# The 8 designed characters whose portrait PNGs ship in public/avatars/
+# (OP-2517). agent_id == slug for these; any other card (e.g. claude-bot-N)
+# has no icon and must get portrait_url=None so the UI fallback renders.
+_AVATAR_SLUGS: Final[frozenset[str]] = frozenset(
+    {"argus", "iris", "nova", "vega", "rex", "pixel", "kai", "sage"}
+)
+
+
+def _portrait_url(agent_id: str) -> str | None:
+    return f"/avatars/{agent_id}.png" if agent_id in _AVATAR_SLUGS else None
+
+
 def _card_to_dict(card: CharacterCard) -> dict:
     return {
         "agent_id": card.agent_id,
@@ -1127,6 +1139,7 @@ def _card_to_dict(card: CharacterCard) -> dict:
         "specialization_label": card.specialization_label,
         "style_fingerprint": card.style_fingerprint,
         "created_at": card.created_at,
+        "portrait_url": _portrait_url(card.agent_id),
     }
 
 
