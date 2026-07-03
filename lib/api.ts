@@ -1267,6 +1267,19 @@ export async function getAgentCard(id: string) {
   return request<AgentCardDetail>(`/agents/${encodeURIComponent(id)}/card`)
 }
 
+export interface AgentSkillEntry {
+  skill_id: string
+  level: number
+  xp: number
+  next_level_xp: number
+  branch_choice?: string | null
+}
+
+/** RPG.W12 per-skill state for one character (Skills tab / roster overview). */
+export async function getAgentSkills(id: string): Promise<AgentSkillEntry[]> {
+  return request<AgentSkillEntry[]>(`/agents/${encodeURIComponent(id)}/skills`)
+}
+
 export interface AgentAchievementBadge {
   id?: string
   kind: string

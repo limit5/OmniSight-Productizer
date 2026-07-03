@@ -40,7 +40,9 @@ import {
   listCharacters,
   patchCharacter,
   recruitCharacter,
+  getAgentSkills,
   ApiError,
+  type AgentSkillEntry,
   type AgentCardSummary,
   type AgentCharacterDef,
   type AgentPartyDto,
@@ -204,6 +206,9 @@ export default function AgentsRosterPage() {
   // Focus keeps the dense list. The Guild Hall is the roster's immersive home.
   const { immersive } = useUiMode()
   const [cards, setCards] = useState<AgentCardSummary[]>([])
+  // Per-character skill overview for the immersive gallery (fetched in parallel
+  // after the roster loads; fail-open per character).
+  const [skillsByAgent, setSkillsByAgent] = useState<Map<string, AgentSkillEntry[]>>(new Map())
   const [characters, setCharacters] = useState<AgentCharacterDef[]>([])
   const [parties, setParties] = useState<AgentPartyDto[]>([])
   const [loading, setLoading] = useState(true)
@@ -238,6 +243,16 @@ export default function AgentsRosterPage() {
     ])
     if (cardsRes.status === "fulfilled") {
       setCards(cardsRes.value)
+      // Fan out per-character skill fetches (parallel, fail-open) for the
+      // gallery's talent/skill overview — off the critical path, so the roster
+      // renders immediately and the chips fill in when ready.
+      void Promise.all(
+        cardsRes.value.map((c) =>
+          getAgentSkills(c.agent_id)
+            .then((s) => [c.agent_id, s] as const)
+            .catch(() => [c.agent_id, [] as AgentSkillEntry[]] as const),
+        ),
+      ).then((pairs) => setSkillsByAgent(new Map(pairs)))
     } else {
       const msg =
         cardsRes.reason instanceof Error
@@ -452,9 +467,39 @@ export default function AgentsRosterPage() {
                   data-testid={`agents-roster-guild-${guild}`}
                   data-agent-guild={guild}
                 >
-                  <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    {GUILD_LABEL[guild]} · {bucket.length}
-                  </h3>
+                  {immersive ? (
+                    // Guild banner with a 立繪牆 strip of the members' faces.
+                    <div className="mb-3 flex items-center gap-3 rounded-md border bg-gradient-to-r from-primary/10 via-background to-background px-3 py-2">
+                      <span className="flex size-8 shrink-0 items-center justify-center rounded-md border bg-primary/10 text-primary">
+                        <Users className="size-4" aria-hidden="true" />
+                      </span>
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-bold uppercase tracking-wider">
+                          {GUILD_LABEL[guild]}
+                        </div>
+                        <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                          {bucket.length} {bucket.length === 1 ? "member" : "members"}
+                        </div>
+                      </div>
+                      <div className="ml-auto flex -space-x-2 pl-2">
+                        {bucket.slice(0, 6).map((c) =>
+                          c.portrait_url ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              key={c.agent_id}
+                              src={c.portrait_url}
+                              alt=""
+                              className="size-7 rounded-full border-2 border-background object-cover"
+                            />
+                          ) : null,
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                      {GUILD_LABEL[guild]} · {bucket.length}
+                    </h3>
+                  )}
                   <ul className={immersive ? "grid gap-3 grid-cols-2 sm:grid-cols-3 xl:grid-cols-4" : "grid gap-2 sm:grid-cols-2 xl:grid-cols-3"}>
                     {bucket.map((card) => (
                       <li key={card.agent_id}>
@@ -503,6 +548,25 @@ export default function AgentsRosterPage() {
                                     Lv{card.level}
                                   </span>
                                 </div>
+                                {(() => {
+                                  // Talent/skill overview: the character's top skills as chips.
+                                  const sk = skillsByAgent.get(card.agent_id) ?? []
+                                  if (sk.length === 0) return null
+                                  const top = [...sk].sort((a, b) => b.level - a.level).slice(0, 3)
+                                  return (
+                                    <div className="flex flex-wrap gap-1 px-2 pb-2">
+                                      {top.map((s) => (
+                                        <span
+                                          key={s.skill_id}
+                                          className="rounded-sm bg-primary/10 px-1.5 py-0.5 font-mono text-[9px] text-primary"
+                                          title={`${s.skill_id} · Lv${s.level} · ${s.xp}xp`}
+                                        >
+                                          {s.skill_id} L{s.level}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )
+                                })()}
                               </Link>
                             ) : (
                             <Link
