@@ -151,6 +151,13 @@ RUN rm -rf /usr/local/lib/python3.12/site-packages/pip \
 # not part of the runtime contract.
 COPY backend/ ./backend/
 COPY configs/ ./configs/
+# The SINGULAR `config/` dir (distinct from `configs/` above) holds
+# runtime YAML read by app code at request time: `config/talent_tree.yaml`
+# (RPG talent forks — HARD-required, no fallback), plus `llm_pricing.yaml`
+# and `feature_flag_rollouts.yaml` (these degrade to built-in defaults).
+# Omitting it made `GET /agents/{id}/talents/options` 500 on FileNotFoundError
+# and silently ran pricing/flags on defaults instead of committed config.
+COPY config/ ./config/
 COPY scripts/ ./scripts/
 COPY CLAUDE.md ./
 COPY .env.example ./.env.example

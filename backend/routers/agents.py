@@ -411,6 +411,19 @@ async def get_agent_talent_options(
         options = available_talents(agent_id, guild, milestone)
     except TalentTreeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except OSError as exc:
+        # The talent tree YAML must be present in the image (packaged from
+        # the singular `config/` dir). If it is missing/unreadable, surface a
+        # deterministic 503 instead of an opaque 500 — a missing config file is
+        # a deployment fault, not a client error, and the operator needs a
+        # message that points at the cause rather than a bare stack trace.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "talent tree config is unavailable on the server "
+                "(config/talent_tree.yaml missing from the image)"
+            ),
+        ) from exc
     return {
         "agent_id": agent_id,
         "guild": guild,
