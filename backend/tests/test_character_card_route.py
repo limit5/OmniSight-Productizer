@@ -92,6 +92,7 @@ class TestGetAgentCard:
             "specialization_label": "schema-first",
             "style_fingerprint": "abc123",
             "created_at": T0.isoformat(),
+            "portrait_url": None,
         }
 
     async def test_response_shape_matches_adr_0008_l1_columns(
@@ -101,7 +102,8 @@ class TestGetAgentCard:
         resp = client.get("/agents/anthropic-beta/card")
         assert resp.status_code == 200
         # ADR-0008 §"Memory hierarchy" pins the L1 column set; the route
-        # must not silently drop or rename any of them.
+        # must not silently drop or rename any of them. portrait_url is a
+        # derived (non-L1) field added by OP-2517.
         assert set(resp.json().keys()) == {
             "agent_id",
             "agent_class",
@@ -112,6 +114,7 @@ class TestGetAgentCard:
             "specialization_label",
             "style_fingerprint",
             "created_at",
+            "portrait_url",
         }
 
     def test_missing_card_returns_404(self, client: TestClient):
