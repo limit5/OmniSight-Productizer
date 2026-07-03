@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, Fragment } from "react"
 import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, ShieldCheck, Settings, Eye, Users, Brain } from "lucide-react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
+import { useUiMode } from "@/hooks/use-ui-mode"
 
 export type AgentStatus = "idle" | "running" | "success" | "error" | "warning" | "booting" | "awaiting_confirmation" | "materializing"
 
@@ -899,7 +900,10 @@ interface AgentCardProps {
 
 function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardProps) {
   const [expanded, setExpanded] = useState(agent.status === "awaiting_confirmation" || agent.status === "success" || agent.status === "error")
-  
+  // RPG-UI dial: Immersive dials up the character showcase (big portrait, glow,
+  // XP bar); Focus keeps it compact + calm for a dense, professional read.
+  const { immersive } = useUiMode()
+
   const hasContent = agent.subTasks?.length || agent.history?.length || agent.messages?.length
   
   return (
@@ -920,14 +924,14 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
         <div className="flex items-start gap-2.5 mb-2">
           <div className="relative shrink-0">
             <div
-              className="w-20 h-20 rounded-lg overflow-hidden border-2 bg-[var(--secondary)]/30 transition-all duration-500"
+              className={`${immersive ? "w-20 h-20" : "w-12 h-12"} rounded-lg overflow-hidden border-2 bg-[var(--secondary)]/30 transition-all duration-500`}
               style={{
                 borderColor: getStatusColor(agent.status),
                 // The character art stays vivid ALWAYS (prominence = brand +
                 // immersion); STATUS is read from the glow: active statuses glow
-                // in their colour, idle is calm (no glow, muted ring). The live
-                // status dot + label carry the explicit read for legibility.
-                boxShadow: agent.status === "idle"
+                // in their colour, idle is calm. Focus mode drops the glow for a
+                // calmer, denser board; the ring + status dot still carry it.
+                boxShadow: !immersive || agent.status === "idle"
                   ? "none"
                   : `0 0 12px color-mix(in srgb, ${getStatusColor(agent.status)} 45%, transparent)`,
               }}
@@ -985,8 +989,9 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
             >
               {agent.status.replace(/_/g, " ")}
             </div>
-            {/* XP growth bar — fills the space + shows the character's progression */}
-            {typeof agent.level === "number" && typeof agent.xp === "number" && (() => {
+            {/* XP growth bar — Immersive only (the level chip beside the name
+                already carries the number in Focus). */}
+            {immersive && typeof agent.level === "number" && typeof agent.xp === "number" && (() => {
               const nextXp = Math.max(1, Math.trunc(agent.level) * 1000)
               const pct = Math.max(0, Math.min(100, (agent.xp / nextXp) * 100))
               return (
