@@ -493,11 +493,11 @@ export function CharacterCard({
       data-agent-guild={guild}
       data-testid="character-card"
     >
-      <div className={cn("grid gap-4 p-4", fullbodyUrl ? "sm:grid-cols-[12rem_1fr]" : "sm:grid-cols-[8rem_1fr]")}>
+      <div className={cn("grid gap-4 p-4", fullbodyUrl ? "sm:grid-cols-[18rem_1fr]" : "sm:grid-cols-[8rem_1fr]")}>
         <div
           className={cn(
             "relative flex items-center justify-center rounded-md border bg-gradient-to-br",
-            fullbodyUrl ? "min-h-72 overflow-hidden p-2" : "min-h-32 p-3",
+            fullbodyUrl ? "min-h-[27rem] overflow-hidden p-2" : "min-h-32 p-3",
             visual.portraitClass,
           )}
           data-testid="character-card-portrait"
@@ -509,7 +509,7 @@ export function CharacterCard({
             <img
               src={fullbodyUrl}
               alt={`${displayName} full-body`}
-              className="h-full max-h-80 w-full object-contain drop-shadow-lg"
+              className="h-full max-h-[30rem] w-full object-contain drop-shadow-lg"
               data-testid="character-card-fullbody"
             />
           ) : (
