@@ -33,6 +33,7 @@ import {
 } from "lucide-react"
 
 import { useAuth } from "@/lib/auth-context"
+import { useUiMode } from "@/hooks/use-ui-mode"
 import {
   listAgentCards,
   listAgentParties,
@@ -199,6 +200,9 @@ function mapParty(party: AgentPartyDto, lookup: Map<string, AgentCardSummary>): 
 export default function AgentsRosterPage() {
   const auth = useAuth()
   const router = useRouter()
+  // RPG-UI dial: Immersive turns the guild roster into a full-body 立繪 gallery;
+  // Focus keeps the dense list. The Guild Hall is the roster's immersive home.
+  const { immersive } = useUiMode()
   const [cards, setCards] = useState<AgentCardSummary[]>([])
   const [characters, setCharacters] = useState<AgentCharacterDef[]>([])
   const [parties, setParties] = useState<AgentPartyDto[]>([])
@@ -451,7 +455,7 @@ export default function AgentsRosterPage() {
                   <h3 className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                     {GUILD_LABEL[guild]} · {bucket.length}
                   </h3>
-                  <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  <ul className={immersive ? "grid gap-3 grid-cols-2 sm:grid-cols-3 xl:grid-cols-4" : "grid gap-2 sm:grid-cols-2 xl:grid-cols-3"}>
                     {bucket.map((card) => (
                       <li key={card.agent_id}>
                         {(() => {
@@ -459,6 +463,48 @@ export default function AgentsRosterPage() {
                           const isRetired = Boolean(character && !character.active)
                           const displayName = cardDisplayName(card, character)
                           return (
+                            immersive ? (
+                              // Immersive Guild Hall: a full-body 立繪 gallery card.
+                              <Link
+                                href={`/agents/${encodeURIComponent(card.agent_id)}`}
+                                data-testid="agents-roster-card-link"
+                                data-agent-id={card.agent_id}
+                                data-character-active={isRetired ? "false" : "true"}
+                                className={[
+                                  "group flex flex-col overflow-hidden rounded-lg border bg-card transition hover:border-primary/60 hover:shadow-lg",
+                                  isRetired ? "opacity-50 grayscale" : "",
+                                ].join(" ")}
+                              >
+                                <div className="relative flex aspect-[3/4] items-end justify-center overflow-hidden bg-gradient-to-b from-primary/10 via-background to-background">
+                                  {card.fullbody_url ? (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img
+                                      src={card.fullbody_url}
+                                      alt=""
+                                      className="h-full w-full object-contain drop-shadow-lg transition-transform duration-300 group-hover:scale-105"
+                                    />
+                                  ) : card.portrait_url ? (
+                                    // eslint-disable-next-line @next/next/no-img-element
+                                    <img src={card.portrait_url} alt="" className="size-20 rounded-md object-cover" />
+                                  ) : (
+                                    <span className="flex size-full items-center justify-center text-3xl font-bold text-muted-foreground">
+                                      {displayName ? initialsFor(displayName) : "?"}
+                                    </span>
+                                  )}
+                                  {isRetired ? (
+                                    <span className="absolute left-1.5 top-1.5 rounded-sm border border-muted-foreground/30 bg-background/70 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                                      Retired
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="flex items-center justify-between gap-2 px-2 py-1.5">
+                                  <span className="min-w-0 truncate text-sm font-medium">{displayName}</span>
+                                  <span className="shrink-0 rounded-sm bg-muted px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                                    Lv{card.level}
+                                  </span>
+                                </div>
+                              </Link>
+                            ) : (
                             <Link
                               href={`/agents/${encodeURIComponent(card.agent_id)}`}
                               data-testid="agents-roster-card-link"
@@ -505,6 +551,7 @@ export default function AgentsRosterPage() {
                                 </span>
                               </span>
                             </Link>
+                            )
                           )
                         })()}
                         {(() => {

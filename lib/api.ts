@@ -1169,6 +1169,7 @@ export interface AgentCardSummary {
   agent_class: string
   instance_suffix: string | null
   portrait_url?: string | null
+  fullbody_url?: string | null
   voice?: string | null
   guild: string
   level: number
