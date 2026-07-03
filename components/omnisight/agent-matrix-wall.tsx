@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, Fragment } from "react"
 import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, ShieldCheck, Settings, Eye, Users, Brain } from "lucide-react"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 
@@ -482,32 +482,40 @@ function complianceColor(status: AgentComplianceState): string {
   }
 }
 
+// Shared badge affordance: a subtle lift + brighten on hover so every badge
+// reads as inspectable (its title tooltip carries the detail). cursor-help
+// signals "hover me".
+const BADGE_FX = "transition-all duration-200 hover:scale-110 hover:brightness-125 hover:z-10 cursor-help"
+
 function AgentDimensionBadges({ agent }: { agent: Agent }) {
   const guild = deriveAgentGuild(agent)
   const guildInfo = guildDisplay(guild)
   const compliance = complianceBadge(agent, guild)
   const compColor = complianceColor(compliance.status)
+  // Compliance that needs attention pulses so the operator's eye is drawn to it.
+  const compPulse = compliance.status === "blocked" ? "pulse-red"
+    : compliance.status === "watch" ? "pulse-orange" : ""
   return (
     <>
       <span
-        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase ${BADGE_FX}`}
         style={{
           backgroundColor: `color-mix(in srgb, ${guildInfo.color} 16%, transparent)`,
           color: guildInfo.color
         }}
-        title={guildInfo.label}
+        title={`Guild: ${guildInfo.label} — this character's specialty lane`}
         data-agent-guild={guild}
       >
         <Users size={8} />
         {guildInfo.shortLabel}
       </span>
       <span
-        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase ${BADGE_FX} ${compPulse}`}
         style={{
           backgroundColor: `color-mix(in srgb, ${compColor} 16%, transparent)`,
           color: compColor
         }}
-        title={compliance.detail}
+        title={`Compliance · ${compliance.label}: ${compliance.detail}`}
         data-compliance-status={compliance.status}
       >
         <ShieldCheck size={8} />
@@ -574,24 +582,44 @@ function StatusIcon({ status }: { status: AgentStatus }) {
 }
 
 function TaskDots({ progress, status }: { progress: { current: number; total: number }; status: AgentStatus }) {
+  const total = Math.max(0, Math.trunc(progress.total))
+  if (total === 0) {
+    return <div className="h-2 text-[9px] font-mono text-[var(--muted-foreground)]/60 flex items-center">no steps</div>
+  }
+  // Hybrid "quest track": step pips connected by progress segments (a bar made
+  // of the steps), plus a compact n/N label. Done segments/pips fill emerald,
+  // the active step jumps in blue, future steps stay faint.
   return (
-    <div className="flex items-center gap-1">
-      {Array.from({ length: progress.total }).map((_, i) => {
-        const isDone = i < progress.current
-        const isCurrent = i === progress.current && status === "running"
-        return (
-          <div
-            key={i}
-            className={`w-2 h-2 rounded-full transition-all ${
-              isDone 
-                ? "bg-[var(--validation-emerald)]" 
-                : isCurrent 
-                  ? "bg-[var(--neural-blue)] dot-jump" 
-                  : "bg-[var(--muted-foreground)] opacity-30"
-            }`}
-          />
-        )
-      })}
+    <div className="flex items-center gap-1.5" title={`${progress.current} of ${total} steps done`}>
+      <div className="flex items-center flex-1 min-w-0">
+        {Array.from({ length: total }).map((_, i) => {
+          const isDone = i < progress.current
+          const isCurrent = i === progress.current && status === "running"
+          return (
+            <Fragment key={i}>
+              {i > 0 && (
+                <div
+                  className={`h-0.5 flex-1 rounded-full transition-all duration-500 ${
+                    i <= progress.current ? "bg-[var(--validation-emerald)]" : "bg-[var(--muted-foreground)]/25"
+                  }`}
+                />
+              )}
+              <div
+                className={`w-2.5 h-2.5 rounded-full shrink-0 border transition-all duration-300 ${
+                  isDone
+                    ? "bg-[var(--validation-emerald)] border-[var(--validation-emerald)]"
+                    : isCurrent
+                      ? "bg-[var(--neural-blue)] border-[var(--neural-blue)] dot-jump"
+                      : "bg-[var(--background)] border-[var(--muted-foreground)]/40"
+                }`}
+              />
+            </Fragment>
+          )
+        })}
+      </div>
+      <span className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums shrink-0">
+        {progress.current}/{total}
+      </span>
     </div>
   )
 }
@@ -989,14 +1017,15 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
             const info = getBrainInfo(agent.agentClass)
             return (
               <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono"
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${BADGE_FX}`}
                 style={{
                   backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
                   color: info.color
                 }}
-                title={`Brain: ${agent.agentClass}`}
+                title={`Brain: ${info.label} (${agent.agentClass}) — the model family that runs this character`}
                 data-agent-brain={info.label.toLowerCase()}
               >
+                <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: info.color }} />
                 <Brain size={8} />
                 {info.label}
               </span>
@@ -1006,11 +1035,12 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
               to avoid duplication. */}
           {agent.subType && (
             <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
+              className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase ${BADGE_FX}`}
               style={{
                 backgroundColor: `color-mix(in srgb, ${AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'} 15%, transparent)`,
                 color: AGENT_TYPES[agent.type]?.color || 'var(--muted-foreground)'
               }}
+              title={`Role: ${agent.subType}`}
             >
               <Shield size={8} />
               {agent.subType}
@@ -1020,11 +1050,12 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
             const info = getModelInfo(agent.aiModel)
             return (
               <span
-                className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono"
+                className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono ${BADGE_FX}`}
                 style={{
                   backgroundColor: `color-mix(in srgb, ${info.color} 20%, transparent)`,
                   color: info.color
                 }}
+                title={`Model: ${info.label} · ${info.provider}`}
               >
                 <Sparkles size={8} />
                 {info.shortLabel}

@@ -69,7 +69,7 @@ describe("AgentMatrixWall - BP.K guild dimension badges", () => {
 
     expect(badge).toBeInTheDocument()
     expect(badge.getAttribute("data-agent-guild")).toBe(guild)
-    expect(badge.getAttribute("title")).toBe(title)
+    expect(badge.getAttribute("title")).toContain(title)
     expect(badge.textContent).toContain(label)
   })
 
@@ -120,7 +120,7 @@ describe("AgentMatrixWall - BP.K guild dimension badges", () => {
 
     expect(badge.getAttribute("data-agent-guild")).toBe("partner_lab")
     expect(badge.textContent).toContain("Partner Lab")
-    expect(badge.getAttribute("title")).toBe("Partner Lab Guild")
+    expect(badge.getAttribute("title")).toContain("Partner Lab Guild")
   })
 
   it("rolls up top Guild chips in the header", () => {
@@ -156,7 +156,7 @@ describe("AgentMatrixWall - BP.K compliance badges", () => {
 
       expect(badge.getAttribute("data-compliance-status")).toBe(status)
       expect(badge.textContent).toContain(label)
-      expect(badge.getAttribute("title")).toBe("Compliance state supplied by agent runtime")
+      expect(badge.getAttribute("title")).toContain("Compliance state supplied by agent runtime")
     },
   )
 
@@ -172,7 +172,7 @@ describe("AgentMatrixWall - BP.K compliance badges", () => {
 
     expect(badge.getAttribute("data-compliance-status")).toBe("evidence")
     expect(badge.textContent).toContain("SOC2")
-    expect(badge.getAttribute("title")).toBe("SOC2 evidence bundle is attached")
+    expect(badge.getAttribute("title")).toContain("SOC2 evidence bundle is attached")
   })
 
   it.each([

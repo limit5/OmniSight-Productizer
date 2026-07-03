@@ -23,7 +23,7 @@ import { act, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 
 import { ApiErrorToastCenter } from "@/components/omnisight/api-error-toast-center"
-import { ApiError, getHealth } from "@/lib/api"
+import { ApiError, getHealth, resetTokenFreeze } from "@/lib/api"
 
 function mockFetchOnce(status: number, body: unknown, headers: Record<string, string> = {}) {
   const text = typeof body === "string" ? body : JSON.stringify(body)
@@ -56,12 +56,12 @@ describe("ApiErrorToastCenter — 403 forbidden (row 191)", () => {
     vi.useRealTimers()
   })
 
-  it("renders a warning toast「權限不足」on 403 response", async () => {
+  it("renders a warning toast「權限不足」on a MUTATION 403, naming the operation", async () => {
     render(<ApiErrorToastCenter />)
     mockFetchOnce(403, { detail: "nope" })
 
     await act(async () => {
-      await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+      await expect(resetTokenFreeze()).rejects.toBeInstanceOf(ApiError)
     })
 
     const toast = await screen.findByTestId("api-error-toast-forbidden")
@@ -69,7 +69,20 @@ describe("ApiErrorToastCenter — 403 forbidden (row 191)", () => {
     expect(screen.getByText("權限不足")).toBeInTheDocument()
     expect(screen.getByText("WARNING")).toBeInTheDocument()
     expect(screen.getByText("HTTP 403")).toBeInTheDocument()
-    expect(screen.getByText(/存取權限/)).toBeInTheDocument()
+    // the toast now NAMES the denied operation instead of a generic message
+    expect(screen.getByText(/更高權限/)).toBeInTheDocument()
+    expect(screen.getByText(/token-budget\/reset/)).toBeInTheDocument()
+  })
+
+  it("does NOT toast for a background READ (GET) 403 — harmless, degrades silently", async () => {
+    render(<ApiErrorToastCenter />)
+    mockFetchOnce(403, { detail: "nope" })
+
+    await act(async () => {
+      await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+    })
+
+    expect(screen.queryByTestId("api-error-toast-forbidden")).toBeNull()
   })
 
   it("auto-dismisses after 5 seconds", async () => {
@@ -77,7 +90,7 @@ describe("ApiErrorToastCenter — 403 forbidden (row 191)", () => {
     render(<ApiErrorToastCenter />)
     mockFetchOnce(403, { detail: "nope" })
     await act(async () => {
-      await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+      await expect(resetTokenFreeze()).rejects.toBeInstanceOf(ApiError)
     })
 
     expect(await screen.findByTestId("api-error-toast-forbidden")).toBeInTheDocument()
@@ -90,7 +103,7 @@ describe("ApiErrorToastCenter — 403 forbidden (row 191)", () => {
     render(<ApiErrorToastCenter />)
     mockFetchOnce(403, { detail: "nope" })
     await act(async () => {
-      await expect(getHealth()).rejects.toBeInstanceOf(ApiError)
+      await expect(resetTokenFreeze()).rejects.toBeInstanceOf(ApiError)
     })
 
     await screen.findByTestId("api-error-toast-forbidden")

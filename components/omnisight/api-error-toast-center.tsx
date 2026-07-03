@@ -69,12 +69,19 @@ interface ToastItem {
 
 function _itemFor(err: ApiError): ToastItem | null {
   if (err.kind === "forbidden") {
+    // A background READ (GET) that 403s is harmless — the page degrades
+    // gracefully (an optional panel just stays empty); alarming the operator
+    // with a "contact your admin" toast for it is noise. Only surface a denial
+    // for an action the operator actually took (a mutation), and name the
+    // operation so it is not a mysterious warning.
+    const method = (err.method || "GET").toUpperCase()
+    if (method === "GET") return null
     return {
       id: `forbidden-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       kind: "forbidden",
       variant: "warning",
       title: "權限不足",
-      description: "您沒有此操作的存取權限，請聯繫系統管理員。",
+      description: `此操作需要更高權限：${method} ${err.path}。請聯繫系統管理員。`,
       httpLabel: "HTTP 403",
       traceId: err.traceId,
       createdAt: Date.now(),
