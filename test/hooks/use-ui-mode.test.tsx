@@ -17,12 +17,12 @@ describe("ui-mode dial", () => {
     window.localStorage.clear()
   })
 
-  it("defaults to focus and persists a set", () => {
+  it("defaults to immersive and persists a set", () => {
     expect(getUiMode()).toBe(DEFAULT_UI_MODE)
-    expect(DEFAULT_UI_MODE).toBe("focus")
-    setUiMode("immersive")
-    expect(getUiMode()).toBe("immersive")
-    expect(window.localStorage.getItem("omnisight:ui-mode")).toBe("immersive")
+    expect(DEFAULT_UI_MODE).toBe("immersive")
+    setUiMode("focus")
+    expect(getUiMode()).toBe("focus")
+    expect(window.localStorage.getItem("omnisight:ui-mode")).toBe("focus")
   })
 
   it("notifies subscribers on same-tab change", () => {
@@ -39,16 +39,16 @@ describe("ui-mode dial", () => {
     const a = renderHook(() => useUiMode())
     const b = renderHook(() => useUiMode())
 
-    expect(a.result.current.mode).toBe("focus")
-    expect(a.result.current.immersive).toBe(false)
-
-    act(() => { a.result.current.toggle() })
     expect(a.result.current.mode).toBe("immersive")
     expect(a.result.current.immersive).toBe(true)
-    // the second instance picks the change up via the shared event bus
-    expect(b.result.current.mode).toBe("immersive")
 
-    act(() => { b.result.current.setMode("focus") })
+    act(() => { a.result.current.toggle() })
     expect(a.result.current.mode).toBe("focus")
+    expect(a.result.current.immersive).toBe(false)
+    // the second instance picks the change up via the shared event bus
+    expect(b.result.current.mode).toBe("focus")
+
+    act(() => { b.result.current.setMode("immersive") })
+    expect(a.result.current.mode).toBe("immersive")
   })
 })

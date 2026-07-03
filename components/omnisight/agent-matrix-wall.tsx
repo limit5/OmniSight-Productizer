@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, Fragment } from "react"
 import { ChevronDown, ChevronUp, AlertTriangle, Check, X, Loader2, Plus, Trash2, Clock, ThumbsUp, ThumbsDown, RotateCcw, Cpu, Code, TestTube, FileBarChart, Sparkles, Zap, Shield, ShieldCheck, Settings, Eye, Users, Brain } from "lucide-react"
+import Link from "next/link"
 import { PanelHelp } from "@/components/omnisight/panel-help"
 import { useUiMode } from "@/hooks/use-ui-mode"
 
@@ -251,6 +252,8 @@ export interface Agent {
   level?: number
   xp?: number
   portraitUrl?: string | null
+  /** RPG.W15 character voice/persona line — shown in Immersive mode. */
+  voice?: string | null
   guild?: AgentGuildDimension | string
   compliance?: AgentComplianceState | AgentComplianceBadge
   subTasks?: SubTask[]
@@ -922,41 +925,59 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
             pulses by status via getAgentPulseClass. Falls back to the status
             glyph for avatar-less bots. */}
         <div className="flex items-start gap-2.5 mb-2">
-          <div className="relative shrink-0">
-            <div
-              className={`${immersive ? "w-20 h-20" : "w-12 h-12"} rounded-lg overflow-hidden border-2 bg-[var(--secondary)]/30 transition-all duration-500`}
-              style={{
-                borderColor: getStatusColor(agent.status),
-                // The character art stays vivid ALWAYS (prominence = brand +
-                // immersion); STATUS is read from the glow: active statuses glow
-                // in their colour, idle is calm. Focus mode drops the glow for a
-                // calmer, denser board; the ring + status dot still carry it.
-                boxShadow: !immersive || agent.status === "idle"
-                  ? "none"
-                  : `0 0 12px color-mix(in srgb, ${getStatusColor(agent.status)} 45%, transparent)`,
-              }}
-              title={agent.portraitUrl ? `${agent.name} · ${agent.status.replace(/_/g, " ")}` : agent.status}
-            >
-              {agent.portraitUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={agent.portraitUrl}
-                  alt=""
-                  className={`size-full object-cover transition-all duration-500 ${agent.status === "idle" ? "opacity-90" : ""}`}
-                  data-testid="agent-matrix-avatar"
-                />
-              ) : (
-                <div className="size-full flex items-center justify-center" style={{ color: getStatusColor(agent.status) }}>
-                  <StatusIcon status={agent.status} />
+          {(() => {
+            const portraitInner = (
+              <>
+                <div
+                  className={`${immersive ? "w-24 h-24" : "w-10 h-10"} rounded-lg overflow-hidden border-2 bg-[var(--secondary)]/30 transition-all duration-500`}
+                  style={{
+                    borderColor: getStatusColor(agent.status),
+                    // Art vivid ALWAYS (brand + immersion); STATUS is read from
+                    // the glow — active statuses glow, idle is calm. Focus drops
+                    // the glow for a denser board; ring + status dot still carry it.
+                    boxShadow: !immersive || agent.status === "idle"
+                      ? "none"
+                      : `0 0 12px color-mix(in srgb, ${getStatusColor(agent.status)} 45%, transparent)`,
+                  }}
+                  title={agent.portraitUrl ? `${agent.name} · ${agent.status.replace(/_/g, " ")}` : agent.status}
+                >
+                  {agent.portraitUrl ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={agent.portraitUrl}
+                      alt=""
+                      className={`size-full object-cover transition-all duration-500 ${agent.status === "idle" ? "opacity-90" : ""}`}
+                      data-testid="agent-matrix-avatar"
+                    />
+                  ) : (
+                    <div className="size-full flex items-center justify-center" style={{ color: getStatusColor(agent.status) }}>
+                      <StatusIcon status={agent.status} />
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
-            {/* live status dot on the shoulder */}
-            <span
-              className="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-[var(--background)]"
-              style={{ backgroundColor: getStatusColor(agent.status) }}
-            />
-          </div>
+                {/* live status dot on the shoulder */}
+                <span
+                  className="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-[var(--background)]"
+                  style={{ backgroundColor: getStatusColor(agent.status) }}
+                />
+              </>
+            )
+            // A character (has a portrait) links to its full sheet; stop the
+            // click from toggling the card's expand. Other live agents (no
+            // portrait) are not clickable.
+            return agent.portraitUrl ? (
+              <Link
+                href={`/agents/${encodeURIComponent(agent.id)}`}
+                onClick={(e) => e.stopPropagation()}
+                title={`Open ${agent.name}'s character sheet`}
+                className="relative shrink-0 block rounded-lg transition hover:brightness-110"
+              >
+                {portraitInner}
+              </Link>
+            ) : (
+              <div className="relative shrink-0">{portraitInner}</div>
+            )
+          })()}
           <div className="flex-1 min-w-0 flex flex-col gap-1">
             {/* name + level chip (moved off the face) + expand */}
             <div className="flex items-center gap-1.5">
@@ -1012,6 +1033,13 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
             <div className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">
               {agent.progress.current}/{agent.progress.total} tasks
             </div>
+            {/* Immersive: the character's voice/persona line — the RPG showcase
+                that makes the roster feel alive (kept out of the dense Focus view). */}
+            {immersive && agent.voice && (
+              <p className="mt-0.5 border-l-2 border-[var(--artifact-purple)]/40 pl-1.5 font-mono text-[10px] italic leading-snug text-[var(--muted-foreground)] line-clamp-2">
+                {agent.voice}
+              </p>
+            )}
           </div>
         </div>
         

@@ -25,7 +25,9 @@ export type UiMode = "focus" | "immersive"
 
 const STORAGE_KEY = "omnisight:ui-mode"
 const EVENT = "omnisight:ui-mode-changed"
-export const DEFAULT_UI_MODE: UiMode = "focus"
+// Operator's call: lead with the RPG showcase (the product's signature); Focus
+// is one click away + persisted for a dense/professional read.
+export const DEFAULT_UI_MODE: UiMode = "immersive"
 
 function isMode(v: unknown): v is UiMode {
   return v === "focus" || v === "immersive"

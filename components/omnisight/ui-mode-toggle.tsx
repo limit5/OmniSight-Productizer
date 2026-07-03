@@ -23,10 +23,13 @@ export function UiModeToggle({ className }: { className?: string }) {
       className={`hidden sm:inline-flex items-center overflow-hidden rounded-md border border-[var(--border)] font-mono text-[10px] ${className ?? ""}`}
       data-ui-mode={immersive ? "immersive" : "focus"}
     >
+      {/* Icon-only to stay compact in a crowded header; the active segment
+          reveals its label so the current mode is still readable at a glance. */}
       <button
         type="button"
         onClick={() => setMode("focus")}
         aria-pressed={!immersive}
+        aria-label="Focus mode"
         title="Focus — clean, professional, dense"
         className={`flex items-center gap-1 px-1.5 py-1 transition-colors ${
           !immersive
@@ -34,13 +37,14 @@ export function UiModeToggle({ className }: { className?: string }) {
             : "text-[var(--muted-foreground)] hover:bg-[var(--secondary)]"
         }`}
       >
-        <LayoutGrid size={11} />
-        Focus
+        <LayoutGrid size={12} />
+        {!immersive && <span>Focus</span>}
       </button>
       <button
         type="button"
         onClick={() => setMode("immersive")}
         aria-pressed={immersive}
+        aria-label="Immersive mode"
         title="Immersive — the full RPG experience"
         className={`flex items-center gap-1 px-1.5 py-1 transition-colors ${
           immersive
@@ -48,8 +52,8 @@ export function UiModeToggle({ className }: { className?: string }) {
             : "text-[var(--muted-foreground)] hover:bg-[var(--secondary)]"
         }`}
       >
-        <Sparkles size={11} />
-        Immersive
+        <Sparkles size={12} />
+        {immersive && <span>Immersive</span>}
       </button>
     </span>
   )
