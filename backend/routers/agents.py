@@ -1150,6 +1150,16 @@ def _portrait_url(agent_id: str) -> str | None:
     return f"/avatars/{agent_id}.png" if agent_id in _AVATAR_SLUGS else None
 
 
+def _fullbody_url(agent_id: str) -> str | None:
+    """Full-body character 立繪 (transparent cutout) for the character sheet.
+
+    Same 8-slug gate as the head avatar; served statically from Next.js
+    ``public/full/<slug>.png``. None for avatar-less agents → the sheet keeps
+    the head avatar / initials fallback.
+    """
+    return f"/full/{agent_id}.png" if agent_id in _AVATAR_SLUGS else None
+
+
 def _character_voice(agent_id: str) -> str | None:
     """RPG.W15 cosmetic voice/persona for the card, or None.
 
@@ -1178,6 +1188,7 @@ def _card_to_dict(card: CharacterCard) -> dict:
         "style_fingerprint": card.style_fingerprint,
         "created_at": card.created_at,
         "portrait_url": _portrait_url(card.agent_id),
+        "fullbody_url": _fullbody_url(card.agent_id),
         "voice": _character_voice(card.agent_id),
     }
 

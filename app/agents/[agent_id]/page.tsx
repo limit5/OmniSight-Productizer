@@ -309,6 +309,7 @@ export default function AgentCharacterCardPage() {
             specialization={card.specialization_label}
             instanceSuffix={card.instance_suffix}
             portraitUrl={card.portrait_url ?? null}
+            fullbodyUrl={card.fullbody_url ?? null}
             voice={card.voice ?? null}
             styleFingerprint={card.style_fingerprint}
             badges={badges}

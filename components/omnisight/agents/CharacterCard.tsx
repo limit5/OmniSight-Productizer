@@ -87,6 +87,9 @@ export interface CharacterCardProps {
   specialization: string
   className?: string
   portraitUrl?: string | null
+  /** Full-body character 立繪 (transparent cutout); shown as the hero art on the
+   *  sheet in place of the square head avatar. Falls back to portraitUrl/initials. */
+  fullbodyUrl?: string | null
   /** RPG.W15 cosmetic voice/persona line (tone + 口頭禪), rendered under the name. */
   voice?: string | null
   instanceSuffix?: string | null
@@ -440,6 +443,7 @@ export function CharacterCard({
   specialization,
   className,
   portraitUrl,
+  fullbodyUrl,
   voice,
   instanceSuffix,
   styleFingerprint,
@@ -489,22 +493,35 @@ export function CharacterCard({
       data-agent-guild={guild}
       data-testid="character-card"
     >
-      <div className="grid gap-4 p-4 sm:grid-cols-[8rem_1fr]">
+      <div className={cn("grid gap-4 p-4", fullbodyUrl ? "sm:grid-cols-[12rem_1fr]" : "sm:grid-cols-[8rem_1fr]")}>
         <div
           className={cn(
-            "relative flex min-h-32 items-center justify-center rounded-md border bg-gradient-to-br p-3",
+            "relative flex items-center justify-center rounded-md border bg-gradient-to-br",
+            fullbodyUrl ? "min-h-72 overflow-hidden p-2" : "min-h-32 p-3",
             visual.portraitClass,
           )}
           data-testid="character-card-portrait"
         >
-          <Avatar className="size-24 rounded-md border bg-background shadow-sm">
-            {portraitUrl ? (
-              <AvatarImage src={portraitUrl} alt={`${displayName} portrait`} />
-            ) : null}
-            <AvatarFallback className="rounded-md text-xl font-semibold">
-              {initialsFor(displayName)}
-            </AvatarFallback>
-          </Avatar>
+          {fullbodyUrl ? (
+            // Full-body 立繪 as the sheet's hero art — object-contain so the whole
+            // figure shows; the transparent cutout sits on the guild-tinted panel.
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              src={fullbodyUrl}
+              alt={`${displayName} full-body`}
+              className="h-full max-h-80 w-full object-contain drop-shadow-lg"
+              data-testid="character-card-fullbody"
+            />
+          ) : (
+            <Avatar className="size-24 rounded-md border bg-background shadow-sm">
+              {portraitUrl ? (
+                <AvatarImage src={portraitUrl} alt={`${displayName} portrait`} />
+              ) : null}
+              <AvatarFallback className="rounded-md text-xl font-semibold">
+                {initialsFor(displayName)}
+              </AvatarFallback>
+            </Avatar>
+          )}
 
           <div
             aria-label={visual.label}
