@@ -28,6 +28,7 @@ import {
   RefreshCw,
   RotateCcw,
   UserMinus,
+  UserSquare2,
   Users,
 } from "lucide-react"
 
@@ -140,6 +141,14 @@ function cardDisplayName(
   return card.instance_suffix ? `${base} ${card.instance_suffix}` : base
 }
 
+function initialsFor(value: string): string {
+  const parts = value.trim().split(/\s+/).filter(Boolean)
+  if (parts.length >= 2) {
+    return `${parts[0]?.[0] ?? ""}${parts[1]?.[0] ?? ""}`.toUpperCase()
+  }
+  return (parts[0]?.slice(0, 2) || "AG").toUpperCase()
+}
+
 function apiErrorMessage(err: unknown): string {
   if (err instanceof ApiError) {
     const detail = err.parsed?.detail
@@ -181,7 +190,7 @@ function mapParty(party: AgentPartyDto, lookup: Map<string, AgentCardSummary>): 
           agentId: member.member_agent_id,
           displayName: card ? cardDisplayName(card) : null,
           guild: card ? normaliseGuild(card.guild) : null,
-          portraitUrl: null,
+          portraitUrl: card?.portrait_url ?? null,
         }
       }),
   }
@@ -448,36 +457,54 @@ export default function AgentsRosterPage() {
                         {(() => {
                           const character = charactersBySlug.get(card.agent_id)
                           const isRetired = Boolean(character && !character.active)
+                          const displayName = cardDisplayName(card, character)
                           return (
-                        <Link
-                          href={`/agents/${encodeURIComponent(card.agent_id)}`}
-                          data-testid="agents-roster-card-link"
-                          data-agent-id={card.agent_id}
-                          data-character-active={isRetired ? "false" : "true"}
-                          className={[
-                            "flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 hover:border-primary/60 hover:bg-accent transition-colors",
-                            isRetired ? "opacity-50 grayscale" : "",
-                          ].join(" ")}
-                        >
-                          <span className="min-w-0">
-                            <span className="block truncate text-sm font-medium">
-                              {cardDisplayName(card, character)}
-                            </span>
-                            <span className="block truncate text-[10px] uppercase tracking-wider text-muted-foreground">
-                              {card.specialization_label || card.agent_id}
-                            </span>
-                          </span>
-                          <span className="flex shrink-0 items-center gap-2">
-                            {isRetired ? (
-                              <span className="rounded-sm border border-muted-foreground/30 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                                Retired
+                            <Link
+                              href={`/agents/${encodeURIComponent(card.agent_id)}`}
+                              data-testid="agents-roster-card-link"
+                              data-agent-id={card.agent_id}
+                              data-character-active={isRetired ? "false" : "true"}
+                              className={[
+                                "flex items-center justify-between gap-3 rounded-md border bg-card px-3 py-2 hover:border-primary/60 hover:bg-accent transition-colors",
+                                isRetired ? "opacity-50 grayscale" : "",
+                              ].join(" ")}
+                            >
+                              <span
+                                className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-md border bg-muted text-xs font-semibold uppercase text-muted-foreground"
+                                aria-hidden="true"
+                              >
+                                {card.portrait_url ? (
+                                  // eslint-disable-next-line @next/next/no-img-element
+                                  <img
+                                    src={card.portrait_url}
+                                    alt=""
+                                    className="size-full object-cover"
+                                  />
+                                ) : displayName ? (
+                                  <span>{initialsFor(displayName)}</span>
+                                ) : (
+                                  <UserSquare2 className="size-4" aria-hidden="true" />
+                                )}
                               </span>
-                            ) : null}
-                            <span className="rounded-sm bg-muted px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-                              Lv {card.level}
-                            </span>
-                          </span>
-                        </Link>
+                              <span className="min-w-0">
+                                <span className="block truncate text-sm font-medium">
+                                  {displayName}
+                                </span>
+                                <span className="block truncate text-[10px] uppercase tracking-wider text-muted-foreground">
+                                  {card.specialization_label || card.agent_id}
+                                </span>
+                              </span>
+                              <span className="flex shrink-0 items-center gap-2">
+                                {isRetired ? (
+                                  <span className="rounded-sm border border-muted-foreground/30 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                                    Retired
+                                  </span>
+                                ) : null}
+                                <span className="rounded-sm bg-muted px-2 py-0.5 font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
+                                  Lv {card.level}
+                                </span>
+                              </span>
+                            </Link>
                           )
                         })()}
                         {(() => {

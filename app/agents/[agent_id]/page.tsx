@@ -308,6 +308,7 @@ export default function AgentCharacterCardPage() {
             nextLevelXp={deriveNextLevelXp(card.level)}
             specialization={card.specialization_label}
             instanceSuffix={card.instance_suffix}
+            portraitUrl={card.portrait_url ?? null}
             styleFingerprint={card.style_fingerprint}
             badges={badges}
             talents={talents}

@@ -249,6 +249,7 @@ export interface Agent {
   agentClass?: string
   level?: number
   xp?: number
+  portraitUrl?: string | null
   guild?: AgentGuildDimension | string
   compliance?: AgentComplianceState | AgentComplianceBadge
   subTasks?: SubTask[]
@@ -884,11 +885,22 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
       >
         {/* Row 1: Status + Name + Progress */}
         <div className="flex items-center gap-2 mb-2">
-          <span 
+          <span
             className="flex items-center justify-center w-5 h-5 rounded shrink-0"
             style={{ color: getStatusColor(agent.status), backgroundColor: `color-mix(in srgb, ${getStatusColor(agent.status)} 20%, transparent)` }}
+            title={agent.portraitUrl ? `${agent.name} avatar` : undefined}
           >
-            <StatusIcon status={agent.status} />
+            {agent.portraitUrl ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={agent.portraitUrl}
+                alt=""
+                className="size-full rounded object-cover"
+                data-testid="agent-matrix-avatar"
+              />
+            ) : (
+              <StatusIcon status={agent.status} />
+            )}
           </span>
           <span
             className="font-mono text-xs font-semibold flex-1 min-w-0 truncate"
