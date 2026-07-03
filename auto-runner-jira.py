@@ -1361,15 +1361,22 @@ def _build_character_enrichment_block(
             from backend.agents.character_card import (
                 _connect_character_card_from_env,
             )
-            from backend.agents.talent_tree import PostgresTalentChoiceStore
+            from backend.agents.talent_tree import (
+                PostgresCapstoneStore,
+                PostgresTalentChoiceStore,
+            )
             from backend.agents.prompt_builder import (
                 enrich_system_prompt_with_capstone,
                 enrich_system_prompt_with_talents,
             )
 
-            store = PostgresTalentChoiceStore(_connect_character_card_from_env)
-            choices = await store.list_choices(slug)
-            capstone = await store.get_capstone(slug)
+            # NB: list_choices + get_capstone live on SEPARATE Postgres stores
+            # (agent_talent_choice vs agent_capstone_ability), both keyed by the
+            # same conn factory.
+            talent_store = PostgresTalentChoiceStore(_connect_character_card_from_env)
+            capstone_store = PostgresCapstoneStore(_connect_character_card_from_env)
+            choices = await talent_store.list_choices(slug)
+            capstone = await capstone_store.get_capstone(slug)
             enriched = enrich_system_prompt_with_talents(
                 "", tuple(choices), guild=guild
             )

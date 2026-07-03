@@ -57,11 +57,17 @@ def test_happy_path_injects_talents_and_l2(monkeypatch) -> None:
     monkeypatch.setenv("OMNISIGHT_RPG_PROMPT_ENRICH", "1")
     mod = _load_runner()
 
-    # Fake talent store: return sentinel choices + a capstone.
-    class _FakeStore:
+    # Two SEPARATE fakes mirroring reality: list_choices lives on the talent
+    # store, get_capstone on the capstone store. A fake that had both would mask
+    # calling get_capstone on the wrong class (the bug the live run caught) — so
+    # the talent fake deliberately has NO get_capstone.
+    class _FakeTalentStore:
         def __init__(self, *_a, **_k) -> None: ...
         async def list_choices(self, agent_id):
             return ("choice",)
+
+    class _FakeCapstoneStore:
+        def __init__(self, *_a, **_k) -> None: ...
         async def get_capstone(self, agent_id):
             return "capstone"
 
@@ -70,7 +76,8 @@ def test_happy_path_injects_talents_and_l2(monkeypatch) -> None:
     import backend.agents.skill_memory as smem
     import backend.agents.rag_indexer as ri
 
-    monkeypatch.setattr(tt, "PostgresTalentChoiceStore", _FakeStore)
+    monkeypatch.setattr(tt, "PostgresTalentChoiceStore", _FakeTalentStore)
+    monkeypatch.setattr(tt, "PostgresCapstoneStore", _FakeCapstoneStore)
     monkeypatch.setattr(
         pb, "enrich_system_prompt_with_talents",
         lambda p, choices, *, guild=None: p + "\nTALENT-REMINDER",
