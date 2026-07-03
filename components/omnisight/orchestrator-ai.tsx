@@ -567,8 +567,12 @@ export function OrchestratorAI({
         </p>
       </div>
       
-      {/* Scrollable Content Area */}
-      <div className="flex-1 min-h-0 overflow-y-auto">
+      {/* Status / config zone (RPG-UX 2026-07-03): bounded-height, own scroll.
+          Split out from the chat so the operator sees status at the top AND the
+          conversation below without scrolling past everything. Caps at ~42% of
+          the column and scrolls internally when its content (provider selector,
+          token stats) is tall; shrinks to fit when short so chat gets the room. */}
+      <div className="shrink-0 max-h-[42%] overflow-y-auto border-b border-[var(--border)]">
 
       {/* ZZ.B1 #304-1 (2026-04-24): per-turn timeline cards — the
           "ccxray" signature UI. Mounted at the very top of the
@@ -995,6 +999,11 @@ export function OrchestratorAI({
         </div>
       )}
       
+      </div>{/* End Status / config zone */}
+
+      {/* Chat zone: flex-1 so it fills the rest of the column with its OWN
+          scroll — the conversation is reachable without scrolling past status. */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
       {/* Chat Messages */}
       <div className="p-3 space-y-2">
         {messages.map(message => (
