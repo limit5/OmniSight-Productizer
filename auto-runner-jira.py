@@ -1315,6 +1315,144 @@ def _build_reflection_rag_block(key: str, summary: str, description: str) -> str
     return "\n" + block.strip() + "\n"
 
 
+_RPG_ENRICH_TRUE = frozenset({"1", "true", "yes", "on"})
+
+
+def _rpg_prompt_enrich_enabled() -> bool:
+    """Call-time gate for RPG progression prompt enrichment (OP-2522).
+
+    Read on each pickup (not import-time) so an operator flip takes effect
+    without a runner restart — mirrors ``rpg_skill_flag.skill_xp_enabled`` and
+    the ``build_talent_prompt_enricher`` "no caching" philosophy.
+    """
+    raw = os.environ.get("OMNISIGHT_RPG_PROMPT_ENRICH")
+    return bool(raw) and raw.strip().lower() in _RPG_ENRICH_TRUE
+
+
+def _build_character_enrichment_block(
+    character: Any,
+    skill_id: str,
+    summary: str,
+    description: str,
+) -> str:
+    """RPG progression → prompt: inject the OWNING character's talents +
+    capstone + semantically-relevant distilled L2 skills, so a persona's growth
+    actually changes how it works this pickup (closes the distill→promote→
+    RETRIEVE loop for the runner CLI path).
+
+    Sync wrapper over one ``asyncio.run`` (pickup construction is sync). EVERY
+    section degrades to nothing on any error — runner pickup must stay usable
+    when the talent store / embedder / vector store is offline. Flag-gated
+    (default off) so it is inert until an operator activates it.
+    """
+    if character is None or not _rpg_prompt_enrich_enabled():
+        return ""
+
+    slug = getattr(character, "slug", "") or ""
+    guild = getattr(character, "guild", "") or None
+    if not slug:
+        return ""
+
+    async def _load() -> str:
+        parts: list[str] = []
+
+        # (1) Talents + capstone — the character's permanent RPG choices.
+        try:
+            from backend.agents.character_card import (
+                _connect_character_card_from_env,
+            )
+            from backend.agents.talent_tree import PostgresTalentChoiceStore
+            from backend.agents.prompt_builder import (
+                enrich_system_prompt_with_capstone,
+                enrich_system_prompt_with_talents,
+            )
+
+            store = PostgresTalentChoiceStore(_connect_character_card_from_env)
+            choices = await store.list_choices(slug)
+            capstone = await store.get_capstone(slug)
+            enriched = enrich_system_prompt_with_talents(
+                "", tuple(choices), guild=guild
+            )
+            enriched = enrich_system_prompt_with_capstone(
+                enriched, capstone, guild=guild
+            )
+            if enriched.strip():
+                parts.append(enriched.strip())
+        except Exception as exc:  # noqa: BLE001 — talents are best-effort
+            print(
+                f"[runner] rpg_enrich.talents_unavailable slug={slug} err={exc}",
+                file=sys.stderr,
+            )
+
+        # (2) Distilled L2 skills — semantically-matched to this task. Stored
+        # under the guild producer scope (kind=distilled_skill_summary), so
+        # retrieve by tenant + query_text (no agent_id filter) surfaces any
+        # relevant distilled knowledge regardless of which trajectory made it.
+        try:
+            from backend.agents import skill_memory
+            from backend.agents.rag_indexer import (
+                DEFAULT_TENANT_ID,
+                _build_embedder_from_env,
+                _build_store_from_env,
+            )
+
+            tenant_id = (
+                db_context.current_tenant_id()
+                or os.environ.get("OMNISIGHT_RAG_TENANT_ID", DEFAULT_TENANT_ID)
+            )
+            embedder = _build_embedder_from_env()
+            vstore, closeable = await _build_store_from_env()
+            try:
+                hits = await skill_memory.retrieve_distilled_skills(
+                    tenant_id=tenant_id,
+                    query_text=f"{summary}\n{description}"[:2000],
+                    embedder=embedder,
+                    store=vstore,
+                    top_k=3,
+                )
+            finally:
+                if closeable is not None:
+                    await closeable.close()
+            if hits:
+                lines = "\n".join(
+                    f"  - {h.skill_id}: {h.summary.strip()[:240]}" for h in hits
+                )
+                parts.append(
+                    "Distilled skills relevant to this task (RPG L2 — apply "
+                    "them where useful):\n" + lines
+                )
+        except Exception as exc:  # noqa: BLE001 — L2 recall is best-effort
+            print(
+                f"[runner] rpg_enrich.l2_unavailable slug={slug} err={exc}",
+                file=sys.stderr,
+            )
+
+        return "\n\n".join(parts)
+
+    try:
+        block = asyncio.run(_load())
+    except Exception as exc:  # noqa: BLE001 — degrade on any error
+        print(
+            f"[runner] rpg_enrich.unavailable slug={slug} err={exc}",
+            file=sys.stderr,
+        )
+        return ""
+    if not block:
+        return ""
+    print(
+        f"[runner] rpg_enrich.surfaced slug={slug} skill={skill_id or '<none>'}",
+        file=sys.stderr,
+    )
+    return (
+        "\n\n# Your character (RPG progression)\n\n"
+        f"You are **{slug}**"
+        + (f" of the {guild} guild" if guild else "")
+        + ". Your growth shapes how you work:\n\n"
+        + block.strip()
+        + "\n"
+    )
+
+
 def _build_antipattern_block(
     key: str, summary: str, description: str, declared_areas: list[str],
 ) -> str:
@@ -1528,6 +1666,12 @@ def _build_prompt(
     # (OP-1778 passes the bound tenant_id), so for a customer tenant it draws
     # from that tenant's own reflection store, never OmniSight's.
     reflection_block = _build_reflection_rag_block(key, summary, description)
+    # RPG progression → prompt (OP-2522): the owning character's talents +
+    # capstone + distilled L2 skills. Flag-gated + fail-open; empty for bare-bot
+    # tickets, un-progressed personas, or when the RPG stores are offline.
+    character_block = _build_character_enrichment_block(
+        _character, _skill_id, summary, description,
+    )
     if is_productizer_self:
         lessons_block = _build_lesson_recall_block(key, summary, description)
         antipattern_block = _build_antipattern_block(
@@ -1582,7 +1726,7 @@ If you find that completing this ticket requires touching an out-of-area
 domain, halt, write a discovered-dependency note to your report file (see
 below) and exit WITHOUT committing — the runner surfaces your note and reverts
 the ticket per docs/sop/jira-ticket-conventions.md §11.
-{capabilities_block}{fg_block}{ps_block}{ops_only_block}{reflection_block}{lessons_block}{antipattern_block}
+{capabilities_block}{fg_block}{ps_block}{ops_only_block}{reflection_block}{character_block}{lessons_block}{antipattern_block}
 {docrules_block}# Acceptance Criteria verification + reporting (REQUIRED before exit)
 
 You run inside a sandbox with NO JIRA credentials — you CANNOT call
