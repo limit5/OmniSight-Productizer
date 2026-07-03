@@ -892,10 +892,16 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
         <div className="flex items-start gap-2.5 mb-2">
           <div className="relative shrink-0">
             <div
-              className="w-16 h-16 rounded-lg overflow-hidden border-2 bg-[var(--secondary)]/30 transition-all duration-500"
+              className="w-20 h-20 rounded-lg overflow-hidden border-2 bg-[var(--secondary)]/30 transition-all duration-500"
               style={{
                 borderColor: getStatusColor(agent.status),
-                boxShadow: `0 0 10px color-mix(in srgb, ${getStatusColor(agent.status)} 40%, transparent)`,
+                // The character art stays vivid ALWAYS (prominence = brand +
+                // immersion); STATUS is read from the glow: active statuses glow
+                // in their colour, idle is calm (no glow, muted ring). The live
+                // status dot + label carry the explicit read for legibility.
+                boxShadow: agent.status === "idle"
+                  ? "none"
+                  : `0 0 12px color-mix(in srgb, ${getStatusColor(agent.status)} 45%, transparent)`,
               }}
               title={agent.portraitUrl ? `${agent.name} · ${agent.status.replace(/_/g, " ")}` : agent.status}
             >
@@ -904,7 +910,7 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
                 <img
                   src={agent.portraitUrl}
                   alt=""
-                  className={`size-full object-cover transition-all duration-500 ${agent.status === "idle" ? "grayscale opacity-50" : ""}`}
+                  className={`size-full object-cover transition-all duration-500 ${agent.status === "idle" ? "opacity-90" : ""}`}
                   data-testid="agent-matrix-avatar"
                 />
               ) : (
@@ -918,38 +924,60 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
               className="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-[var(--background)]"
               style={{ backgroundColor: getStatusColor(agent.status) }}
             />
-            {/* level chip — the character's growth, worn on the face */}
-            {typeof agent.level === "number" && (
-              <span
-                className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 px-1 rounded bg-[var(--background)] border border-[var(--border)] text-[9px] font-mono font-semibold tabular-nums leading-tight text-[var(--validation-emerald)]"
-                title={`Lv ${agent.level}${typeof agent.xp === "number" ? ` · ${agent.xp}xp` : ""}`}
-              >
-                Lv{agent.level}
-              </span>
-            )}
           </div>
-          <div className="flex-1 min-w-0">
+          <div className="flex-1 min-w-0 flex flex-col gap-1">
+            {/* name + level chip (moved off the face) + expand */}
             <div className="flex items-center gap-1.5">
               <span
-                className="font-mono text-sm font-semibold flex-1 min-w-0 truncate"
+                className="font-mono text-sm font-semibold min-w-0 truncate"
                 style={{ color: getStatusColor(agent.status) }}
               >
                 {agent.name}
               </span>
+              {typeof agent.level === "number" && (
+                <span
+                  className="shrink-0 inline-flex items-center gap-0.5 px-1 rounded text-[10px] font-mono font-semibold tabular-nums text-[var(--validation-emerald)]"
+                  style={{ backgroundColor: "color-mix(in srgb, var(--validation-emerald,#10b981) 18%, transparent)" }}
+                  title={`Lv ${agent.level}${typeof agent.xp === "number" ? ` · ${agent.xp}xp` : ""}`}
+                >
+                  <Zap size={9} />Lv{agent.level}
+                </span>
+              )}
+              <span className="flex-1" />
               {hasContent && (
                 <span className="shrink-0">
                   {expanded ? <ChevronUp size={12} className="text-[var(--muted-foreground)]" /> : <ChevronDown size={12} className="text-[var(--muted-foreground)]" />}
                 </span>
               )}
             </div>
+            {/* status */}
             <div
-              className="font-mono text-[10px] uppercase tracking-wider mt-0.5 truncate"
+              className="font-mono text-[10px] uppercase tracking-wider truncate"
               style={{ color: getStatusColor(agent.status) }}
             >
               {agent.status.replace(/_/g, " ")}
             </div>
-            <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5 tabular-nums">
-              {agent.progress.current}/{agent.progress.total}
+            {/* XP growth bar — fills the space + shows the character's progression */}
+            {typeof agent.level === "number" && typeof agent.xp === "number" && (() => {
+              const nextXp = Math.max(1, Math.trunc(agent.level) * 1000)
+              const pct = Math.max(0, Math.min(100, (agent.xp / nextXp) * 100))
+              return (
+                <div className="flex items-center gap-1.5" title={`${agent.xp} / ${nextXp} XP to next level`}>
+                  <div className="h-1.5 flex-1 rounded-full bg-[var(--secondary)]/60 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-[var(--validation-emerald)] transition-all duration-500"
+                      style={{ width: `${pct}%` }}
+                    />
+                  </div>
+                  <span className="font-mono text-[9px] text-[var(--muted-foreground)] tabular-nums shrink-0">
+                    {agent.xp}/{nextXp}xp
+                  </span>
+                </div>
+              )
+            })()}
+            {/* task progress */}
+            <div className="font-mono text-[10px] text-[var(--muted-foreground)] tabular-nums">
+              {agent.progress.current}/{agent.progress.total} tasks
             </div>
           </div>
         </div>
@@ -974,19 +1002,8 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
               </span>
             )
           })()}
-          {typeof agent.level === "number" && typeof agent.xp === "number" && (
-            <span
-              className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono tabular-nums text-[var(--validation-emerald)]"
-              style={{
-                backgroundColor: "color-mix(in srgb, var(--validation-emerald,#10b981) 16%, transparent)",
-              }}
-              title={`Brain-strength: level ${agent.level}, ${agent.xp} xp`}
-              data-agent-strength={`${agent.level}:${agent.xp}`}
-            >
-              <Zap size={8} />
-              Lv {agent.level} · {agent.xp}xp
-            </span>
-          )}
+          {/* Lv·xp now lives in the hero row (level chip + XP bar); removed here
+              to avoid duplication. */}
           {agent.subType && (
             <span
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono uppercase"
