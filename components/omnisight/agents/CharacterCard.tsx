@@ -87,6 +87,8 @@ export interface CharacterCardProps {
   specialization: string
   className?: string
   portraitUrl?: string | null
+  /** RPG.W15 cosmetic voice/persona line (tone + 口頭禪), rendered under the name. */
+  voice?: string | null
   instanceSuffix?: string | null
   styleFingerprint?: string | null
   buffs?: readonly CharacterBuff[]
@@ -438,6 +440,7 @@ export function CharacterCard({
   specialization,
   className,
   portraitUrl,
+  voice,
   instanceSuffix,
   styleFingerprint,
   buffs = [],
@@ -533,6 +536,15 @@ export function CharacterCard({
               <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
                 {agentId}
               </p>
+              {voice ? (
+                <p
+                  className="mt-1.5 border-l-2 border-primary/40 pl-2 text-xs italic leading-snug text-muted-foreground"
+                  data-testid="character-card-voice"
+                  title={voice}
+                >
+                  {voice}
+                </p>
+              ) : null}
             </div>
 
             <Badge

@@ -1169,6 +1169,7 @@ export interface AgentCardSummary {
   agent_class: string
   instance_suffix: string | null
   portrait_url?: string | null
+  voice?: string | null
   guild: string
   level: number
   xp: number
@@ -1194,6 +1195,7 @@ export interface AgentCharacterDef {
   guild: string
   max_tier: "S" | "M" | "L" | "X" | string
   blurb: string
+  voice?: string | null
   active: boolean
   built_in: boolean
 }
@@ -1250,6 +1252,7 @@ export interface AgentCardDetail {
   agent_class: string
   instance_suffix: string | null
   portrait_url?: string | null
+  voice?: string | null
   guild: string
   level: number
   xp: number

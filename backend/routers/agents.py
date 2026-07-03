@@ -27,7 +27,12 @@ from backend.agents.character_card import (
     PostgresCharacterCardStore,
     fetch_skill_entries,
 )
-from backend.agents.character_registry import CHARACTERS, CharacterDef, TIER_ORDER
+from backend.agents.character_registry import (
+    CHARACTERS,
+    CharacterDef,
+    TIER_ORDER,
+    load_characters,
+)
 from backend.agents.guild_registry import GUILDS
 from backend.agents.achievement_registry import (
     AchievementMilestone,
@@ -721,7 +726,7 @@ async def complete_party_task_endpoint(
 # /{agent_id} catch-all below or FastAPI matches "characters" as an agent id.
 
 _CHARACTER_SLUG_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-_CHARACTER_DEF_COLS = "slug, display_name, brain, guild, max_tier, blurb, active"
+_CHARACTER_DEF_COLS = "slug, display_name, brain, guild, max_tier, blurb, voice, active"
 _CHARACTER_PATCHABLE_FIELDS = frozenset({"display_name", "blurb", "max_tier", "active"})
 _CHARACTER_IMMUTABLE_FIELDS = ("slug", "brain", "guild")
 
@@ -804,6 +809,7 @@ def _character_def_dict(
     blurb: str,
     active: bool,
     built_in: bool,
+    voice: str = "",
 ) -> dict[str, Any]:
     return {
         "slug": slug,
@@ -812,6 +818,7 @@ def _character_def_dict(
         "guild": guild,
         "max_tier": max_tier,
         "blurb": blurb,
+        "voice": voice or None,
         "active": bool(active),
         "built_in": built_in,
     }
@@ -825,6 +832,7 @@ def _built_in_def_dict(char: CharacterDef) -> dict[str, Any]:
         guild=char.guild,
         max_tier=char.max_tier,
         blurb=char.blurb,
+        voice=char.voice,
         active=True,
         built_in=True,
     )
@@ -838,6 +846,7 @@ def _db_def_dict(row: dict[str, Any]) -> dict[str, Any]:
         guild=row["guild"],
         max_tier=row["max_tier"],
         blurb=row["blurb"],
+        voice=row.get("voice") or "",
         active=row["active"],
         built_in=False,
     )
@@ -1141,6 +1150,22 @@ def _portrait_url(agent_id: str) -> str | None:
     return f"/avatars/{agent_id}.png" if agent_id in _AVATAR_SLUGS else None
 
 
+def _character_voice(agent_id: str) -> str | None:
+    """RPG.W15 cosmetic voice/persona for the card, or None.
+
+    Resolved from the character registry (built-in constant or the recruited
+    ``character_def`` row) via the cached, retired-inclusive snapshot. Fail-open:
+    any registry/DB hiccup yields ``None`` so the card still renders — voice is
+    display-only and never gates behaviour.
+    """
+    try:
+        char = load_characters(include_retired=True).get(agent_id)
+    except Exception:  # noqa: BLE001 — cosmetic field, never break the card
+        return None
+    voice = (getattr(char, "voice", "") if char else "") or ""
+    return voice or None
+
+
 def _card_to_dict(card: CharacterCard) -> dict:
     return {
         "agent_id": card.agent_id,
@@ -1153,6 +1178,7 @@ def _card_to_dict(card: CharacterCard) -> dict:
         "style_fingerprint": card.style_fingerprint,
         "created_at": card.created_at,
         "portrait_url": _portrait_url(card.agent_id),
+        "voice": _character_voice(card.agent_id),
     }
 
 

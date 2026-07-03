@@ -64,6 +64,13 @@ class CharacterDef:
     guild: str          # guild_registry slug
     max_tier: str       # capability ceiling S<M<L<X
     blurb: str = ""
+    # RPG.W15 character voice/persona: a short human-facing tone + catchphrase
+    # line rendered on the Character Card. Cosmetic today (display only) — it is
+    # deliberately NOT injected into any task-execution prompt so a character's
+    # persona never colours the runner's professional work output. For built-ins
+    # the code constant is authoritative (voice is intentionally excluded from
+    # _SHADOW_COMPARE_FIELDS); recruited characters carry it in character_def.
+    voice: str = ""
     # False = retired: still RESOLVABLE (in-flight card/skill/XP finalization
     # keeps working) but denied for NEW pickups and hidden from filing paths.
     active: bool = True
@@ -96,21 +103,25 @@ CHARACTERS: dict[str, CharacterDef] = {
             slug="nova", display_name="Nova", brain="subscription-claude",
             guild="backend", max_tier="L",
             blurb="Elite backend architect — deep, high-tier work.",
+            voice="沉穩可靠的兄長，把複雜架構講得讓人安心。口頭禪:「交給哥哥，架構我來扛。」",
         ),
         CharacterDef(
             slug="pixel", display_name="Pixel", brain="subscription-codex",
             guild="frontend", max_tier="M",
             blurb="Frontend/UI specialist.",
+            voice="潮味十足的設計小子，講究每個像素好不好看。口頭禪:「這樣才夠潮，交給我調到發光。」",
         ),
         CharacterDef(
             slug="sage", display_name="Sage", brain="subscription-gemini",
             guild="backend", max_tier="M",
             blurb="Versatile backend generalist.",
+            voice="愛鑽研的小博學者，凡事先追根究柢。口頭禪:「讓我想想…啊，原來如此！」",
         ),
         CharacterDef(
             slug="rex", display_name="Rex", brain="subscription-grok",
             guild="sre", max_tier="S",
             blurb="Fast, cheap tooling/ops hand — small self-contained tasks.",
+            voice="風風火火的值班小快手，最愛把雜活秒殺。口頭禪:「包在我身上，三兩下搞定！」",
         ),
     )
 }
@@ -123,7 +134,10 @@ CHARACTERS: dict[str, CharacterDef] = {
 # stale-if-error policy. See docs/architecture/2026-07-02-character-recruit-
 # epic-design.md §C2 — its policies are the spec.
 
-_DB_ROW_FIELDS = ("slug", "display_name", "brain", "guild", "max_tier", "blurb", "active")
+_DB_ROW_FIELDS = ("slug", "display_name", "brain", "guild", "max_tier", "blurb", "voice", "active")
+# NB: ``voice`` is intentionally NOT shadow-compared — a built-in's voice is
+# code-authoritative, so a divergent DB voice for a built-in slug is silently
+# ignored (code wins) rather than logged as drift.
 _SHADOW_COMPARE_FIELDS = ("display_name", "brain", "guild", "max_tier", "blurb", "active")
 
 
@@ -174,7 +188,7 @@ def _fetch_character_rows() -> list[dict]:
             with conn.cursor() as cur:
                 cur.execute(
                     "SELECT slug, display_name, brain, guild, max_tier, blurb, "
-                    "active FROM character_def ORDER BY slug"
+                    "voice, active FROM character_def ORDER BY slug"
                 )
                 return [dict(zip(_DB_ROW_FIELDS, row)) for row in cur.fetchall()]
     finally:
@@ -216,6 +230,7 @@ def _merge_db_rows(rows: list[dict]) -> dict[str, CharacterDef]:
                 guild=str(row.get("guild") or ""),
                 max_tier=str(row.get("max_tier") or ""),
                 blurb=str(row.get("blurb") or ""),
+                voice=str(row.get("voice") or ""),
                 active=bool(row.get("active", True)),
             )
         except CharacterRegistryError as exc:
