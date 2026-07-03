@@ -883,39 +883,75 @@ function AgentCard({ agent, onRemove, onConfirm, onReject, onRetry }: AgentCardP
         className="p-3 cursor-pointer"
         onClick={() => hasContent && setExpanded(!expanded)}
       >
-        {/* Row 1: Status + Name + Progress */}
-        <div className="flex items-center gap-2 mb-2">
-          <span
-            className="flex items-center justify-center w-5 h-5 rounded shrink-0"
-            style={{ color: getStatusColor(agent.status), backgroundColor: `color-mix(in srgb, ${getStatusColor(agent.status)} 20%, transparent)` }}
-            title={agent.portraitUrl ? `${agent.name} avatar` : undefined}
-          >
-            {agent.portraitUrl ? (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={agent.portraitUrl}
-                alt=""
-                className="size-full rounded object-cover"
-                data-testid="agent-matrix-avatar"
-              />
-            ) : (
-              <StatusIcon status={agent.status} />
+        {/* Hero row (RPG-UX 2026-07-03): the character portrait is the STAR.
+            Status is read THROUGH the portrait — a status-coloured ring + glow +
+            a live status dot, greyed-out when idle — so the art IS the state,
+            not a badge (character = legibility engine). The whole card also
+            pulses by status via getAgentPulseClass. Falls back to the status
+            glyph for avatar-less bots. */}
+        <div className="flex items-start gap-2.5 mb-2">
+          <div className="relative shrink-0">
+            <div
+              className="w-16 h-16 rounded-lg overflow-hidden border-2 bg-[var(--secondary)]/30 transition-all duration-500"
+              style={{
+                borderColor: getStatusColor(agent.status),
+                boxShadow: `0 0 10px color-mix(in srgb, ${getStatusColor(agent.status)} 40%, transparent)`,
+              }}
+              title={agent.portraitUrl ? `${agent.name} · ${agent.status.replace(/_/g, " ")}` : agent.status}
+            >
+              {agent.portraitUrl ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={agent.portraitUrl}
+                  alt=""
+                  className={`size-full object-cover transition-all duration-500 ${agent.status === "idle" ? "grayscale opacity-50" : ""}`}
+                  data-testid="agent-matrix-avatar"
+                />
+              ) : (
+                <div className="size-full flex items-center justify-center" style={{ color: getStatusColor(agent.status) }}>
+                  <StatusIcon status={agent.status} />
+                </div>
+              )}
+            </div>
+            {/* live status dot on the shoulder */}
+            <span
+              className="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-[var(--background)]"
+              style={{ backgroundColor: getStatusColor(agent.status) }}
+            />
+            {/* level chip — the character's growth, worn on the face */}
+            {typeof agent.level === "number" && (
+              <span
+                className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 px-1 rounded bg-[var(--background)] border border-[var(--border)] text-[9px] font-mono font-semibold tabular-nums leading-tight text-[var(--validation-emerald)]"
+                title={`Lv ${agent.level}${typeof agent.xp === "number" ? ` · ${agent.xp}xp` : ""}`}
+              >
+                Lv{agent.level}
+              </span>
             )}
-          </span>
-          <span
-            className="font-mono text-xs font-semibold flex-1 min-w-0 truncate"
-            style={{ color: getStatusColor(agent.status) }}
-          >
-            {agent.name}
-          </span>
-          <span className="font-mono text-xs text-[var(--muted-foreground)] shrink-0">
-            {agent.progress.current}/{agent.progress.total}
-          </span>
-          {hasContent && (
-            <span className="shrink-0">
-              {expanded ? <ChevronUp size={12} className="text-[var(--muted-foreground)]" /> : <ChevronDown size={12} className="text-[var(--muted-foreground)]" />}
-            </span>
-          )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span
+                className="font-mono text-sm font-semibold flex-1 min-w-0 truncate"
+                style={{ color: getStatusColor(agent.status) }}
+              >
+                {agent.name}
+              </span>
+              {hasContent && (
+                <span className="shrink-0">
+                  {expanded ? <ChevronUp size={12} className="text-[var(--muted-foreground)]" /> : <ChevronDown size={12} className="text-[var(--muted-foreground)]" />}
+                </span>
+              )}
+            </div>
+            <div
+              className="font-mono text-[10px] uppercase tracking-wider mt-0.5 truncate"
+              style={{ color: getStatusColor(agent.status) }}
+            >
+              {agent.status.replace(/_/g, " ")}
+            </div>
+            <div className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5 tabular-nums">
+              {agent.progress.current}/{agent.progress.total}
+            </div>
+          </div>
         </div>
         
         {/* Row 2: Guild + Compliance + Role (subType) + AI Model */}
