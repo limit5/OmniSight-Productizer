@@ -46,6 +46,7 @@ import { UserMenu } from "@/components/omnisight/user-menu"
 import { TenantSwitcher } from "@/components/omnisight/tenant-switcher"
 import { ProjectSwitcher } from "@/components/omnisight/project-switcher"
 import { PresenceBadge } from "@/components/omnisight/presence-badge"
+import { UiModeToggle } from "@/components/omnisight/ui-mode-toggle"
 import { useAuth } from "@/lib/auth-context"
 import { useTenant } from "@/lib/tenant-context"
 import { useRouter } from "next/navigation"
@@ -734,6 +735,7 @@ export default function Home() {
               >
                 ⚡ Plan with All Providers
               </Button>
+              <UiModeToggle />
               <PresenceBadge />
               <TenantSwitcher />
               <ProjectSwitcher />
