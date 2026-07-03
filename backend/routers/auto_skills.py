@@ -407,4 +407,26 @@ async def promote_auto_skill(
         path=dest_file,
         actor=getattr(user, "email", "operator"),
     )
-    return {"skill": skill, "path": str(dest_file)}
+    # BP.M / ADR-0008 L2: feed the promoted skill into the dim (vector) memory
+    # so agents can retrieve it. Best-effort — a missing/unconfigured embedder
+    # (default provider needs sentence-transformers; openai needs a key) must
+    # never fail a successful promotion; the filesystem skill pack is the
+    # authoritative artefact and is already written.
+    vectorized = 0
+    try:
+        from backend.agents import skill_memory
+        from backend.db_pool import get_pool
+
+        vectorized = await skill_memory.vectorize_promoted_skill(
+            get_pool(),
+            tenant_id=skill["tenant_id"],
+            skill_id=slug,
+            summary=skill["markdown_content"],
+            source_skill_draft_id=skill["id"],
+        )
+    except Exception as exc:  # noqa: BLE001 — vectorisation is best-effort
+        logger.warning(
+            "L2 vectorisation of promoted skill %s skipped (%s): %s",
+            skill["id"], type(exc).__name__, exc,
+        )
+    return {"skill": skill, "path": str(dest_file), "vectorized": vectorized}

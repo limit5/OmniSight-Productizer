@@ -638,6 +638,19 @@ def _build_embedder_from_env() -> EmbeddingProvider:
     raise RuntimeError(f"unsupported OMNISIGHT_RAG_EMBEDDING_PROVIDER={provider!r}")
 
 
+def build_embedder_from_env() -> EmbeddingProvider:
+    """Public embedder factory shared with the BP.M dim-memory feed.
+
+    Honours the same ``OMNISIGHT_RAG_EMBEDDING_PROVIDER`` / model env the RAG
+    indexer uses, so distilled-skill vectorisation and RAG indexing embed with
+    one configured provider. Raises when no usable provider is configured
+    (default ``local`` needs ``sentence-transformers``; ``openai`` needs
+    ``OPENAI_API_KEY``) — callers that treat vectorisation as best-effort should
+    catch and degrade.
+    """
+    return _build_embedder_from_env()
+
+
 async def _build_store_from_env() -> tuple[VectorStore, AsyncCloseable | None]:
     provider = os.environ.get("OMNISIGHT_RAG_VECTOR_STORE", "pgvector").lower()
     if provider == "pgvector":

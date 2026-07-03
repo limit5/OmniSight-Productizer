@@ -149,6 +149,48 @@ class DistilledSkillSearchHit:
         }
 
 
+# A distilled skill is produced from a guild TRAJECTORY, not a single agent, so
+# its BP.M entry is scoped under this producer pseudo-agent (mirrors the
+# ``source: architect_guild`` frontmatter the distiller stamps). Retrieval by
+# tenant + query_text finds it regardless; the scope is a coarse metadata tag.
+DISTILLED_SKILL_PRODUCER_SCOPE = "architect_guild"
+
+
+async def vectorize_promoted_skill(
+    pool: Any,
+    *,
+    tenant_id: str,
+    skill_id: str,
+    summary: str,
+    source_skill_draft_id: str | None = None,
+    agent_id: str = DISTILLED_SKILL_PRODUCER_SCOPE,
+    embedder: EmbeddingProvider | None = None,
+    table: str = DEFAULT_PGVECTOR_TABLE,
+) -> int:
+    """Feed one promoted distilled skill into the BP.M (ADR-0008 L2) dim memory.
+
+    Builds a :class:`DistilledSkillMemoryEntry` and upserts it through
+    :func:`vectorize_distilled_skills` so agents can later retrieve the skill
+    via :func:`retrieve_distilled_skills`. When ``embedder`` is omitted it is
+    resolved from the shared env factory; the caller (the promote endpoint)
+    treats the whole call as best-effort and degrades if no embedder is
+    configured. Returns the number of summaries written (``0`` for empty input).
+    """
+    if embedder is None:
+        from backend.agents.rag_indexer import build_embedder_from_env
+
+        embedder = build_embedder_from_env()
+    entry = DistilledSkillMemoryEntry(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        skill_id=skill_id,
+        summary=summary,
+        source_skill_draft_id=source_skill_draft_id,
+    )
+    store = pgvector_skill_memory_store(pool, table=table)
+    return await vectorize_distilled_skills([entry], embedder=embedder, store=store)
+
+
 def pgvector_skill_memory_store(
     conn_or_pool: Any,
     *,
