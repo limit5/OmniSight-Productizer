@@ -5,7 +5,6 @@ import { PanelHelp } from "@/components/omnisight/panel-help"
 import {
   Send,
   Loader2,
-  Bot, 
   User, 
   Sparkles,
   Zap,
@@ -20,7 +19,6 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronUp,
-  Crown,
   Shield,
   History
 } from "lucide-react"
@@ -185,7 +183,7 @@ export function OrchestratorAI({
     {
       id: "sys-init",
       role: "system",
-      content: "ORCHESTRATOR ONLINE. Monitoring all agents and tasks.",
+      content: "Sora 上線囉 — 我在盯著所有 agent 跟任務，隨時找我。",
       timestamp: formatTime()
     },
     {
@@ -548,10 +546,17 @@ export function OrchestratorAI({
         <div className="flex items-center justify-between gap-1 relative z-10">
           <div className="flex items-center gap-1.5 min-w-0">
             <div className="w-2 h-2 rounded-full bg-[var(--artifact-purple)] pulse-purple pulse-ring shrink-0" />
-            <Crown size={12} className="text-[var(--artifact-purple)] text-glow-purple shrink-0" />
+            {/* Sora — the orchestrator's face (RPG-UI: the party leader you talk to) */}
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/avatars/sora.png"
+              alt="Sora"
+              className="size-6 rounded-full border border-[var(--artifact-purple)]/50 object-cover shrink-0 shadow-sm"
+            />
             <h2 className="font-sans text-xs font-semibold tracking-fui text-[var(--artifact-purple)] truncate">
-              ORCHESTRATOR
+              Sora
             </h2>
+            <span className="font-mono text-[9px] text-[var(--muted-foreground)] shrink-0">そら</span>
             <PanelHelp doc="panels-overview" />
           </div>
           <button
@@ -1012,13 +1017,19 @@ export function OrchestratorAI({
             className={`flex gap-2 ${message.role === "user" ? "justify-end" : "justify-start"}`}
           >
             {message.role !== "user" && (
-              <div className={`w-6 h-6 rounded-full flex items-center justify-center shrink-0 ${
-                message.role === "orchestrator" 
-                  ? "bg-[var(--artifact-purple)]/20 text-[var(--artifact-purple)]" 
-                  : "bg-[var(--secondary)] text-[var(--muted-foreground)]"
-              }`}>
-                {message.role === "orchestrator" ? <Bot size={12} /> : <Zap size={12} />}
-              </div>
+              message.role === "orchestrator" ? (
+                // Sora speaks — its face on every orchestrator reply.
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src="/avatars/sora.png"
+                  alt="Sora"
+                  className="w-6 h-6 rounded-full object-cover shrink-0 border border-[var(--artifact-purple)]/40"
+                />
+              ) : (
+                <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-[var(--secondary)] text-[var(--muted-foreground)]">
+                  <Zap size={12} />
+                </div>
+              )
             )}
             <div className={`max-w-[80%] ${
               message.role === "user" 
@@ -1043,12 +1054,12 @@ export function OrchestratorAI({
             bubble exists (i.e. tokens started streaming). */}
         {isStreaming && messages[messages.length - 1]?.role === "user" && (
           <div className="flex gap-2 justify-start" aria-live="polite">
-            <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-[var(--artifact-purple)]/20 text-[var(--artifact-purple)]">
-              <Bot size={12} />
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src="/avatars/sora.png" alt="Sora" className="w-6 h-6 rounded-full object-cover shrink-0 border border-[var(--artifact-purple)]/40" />
+
             <div className="bg-[var(--artifact-purple)]/10 text-[var(--muted-foreground)] rounded px-3 py-2 flex items-center gap-2">
               <Loader2 size={12} className="animate-spin text-[var(--artifact-purple)]" />
-              <span className="font-mono text-xs">Orchestrator 思考中…</span>
+              <span className="font-mono text-xs">Sora 思考中…</span>
               <span className="inline-flex gap-0.5">
                 <span className="w-1 h-1 rounded-full bg-[var(--artifact-purple)] animate-bounce [animation-delay:-0.3s]" />
                 <span className="w-1 h-1 rounded-full bg-[var(--artifact-purple)] animate-bounce [animation-delay:-0.15s]" />
@@ -1143,7 +1154,7 @@ export function OrchestratorAI({
               }}
               onBlur={() => setTimeout(() => { setSlashSuggestions([]); setSkillSuggestions([]) }, 150)}
               disabled={isStreaming}
-              placeholder={isStreaming ? "Orchestrator 思考中… 請稍候" : "Ask or type /command ..."}
+              placeholder={isStreaming ? "Sora 思考中… 請稍候" : "問 Sora，或輸入 /指令 …"}
               className="flex-1 min-w-0 bg-transparent font-mono text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus-visible:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
             />
             <button
