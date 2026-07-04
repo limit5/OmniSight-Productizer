@@ -60,7 +60,7 @@ describe("OrchestratorAI skill mentions", () => {
 
   it("accepts command-palette skill insert events", async () => {
     renderOrchestrator()
-    const input = screen.getByPlaceholderText("Ask or type /command ...") as HTMLInputElement
+    const input = screen.getByPlaceholderText("問 Sora，或輸入 /指令 …") as HTMLInputElement
 
     fireEvent(
       window,
@@ -74,7 +74,7 @@ describe("OrchestratorAI skill mentions", () => {
 
   it("offers @skill-name suggestions from the effective registry", async () => {
     renderOrchestrator()
-    const input = screen.getByPlaceholderText("Ask or type /command ...") as HTMLInputElement
+    const input = screen.getByPlaceholderText("問 Sora，或輸入 /指令 …") as HTMLInputElement
 
     await waitFor(() => expect(listEffectiveSkills).toHaveBeenCalled())
     fireEvent.change(input, { target: { value: "please @fl" } })
