@@ -13,6 +13,7 @@
  * brain-colour system (amber/green/indigo/pink) to mark her as the coordinator.
  */
 
+import Link from "next/link"
 import { Crown, Headphones, Sparkles } from "lucide-react"
 import type { ReactElement } from "react"
 
@@ -29,6 +30,7 @@ const SORA = {
     "戰隊隊長／主控。站在所有公會之上，負責調度、路由與拆解問題——你在 Orchestrator 面板對話的就是我。",
   persona: ["溫和有耐心", "冷靜不高冷", "鬼才鬼點子 · 守規則", "熱愛工作 · 不輕易放棄"],
   fullbody: "/full/sora.png",
+  panel: "/full/sora-panel.png",
   avatar: "/avatars/sora.png",
 } as const
 
@@ -55,8 +57,19 @@ export function GuildLeaderHero({ immersive = false, className }: GuildLeaderHer
 
       {immersive ? (
         <div className="flex items-stretch gap-4 p-4 md:gap-6 md:p-6">
-          {/* full-body 立繪 */}
-          <div className="group relative shrink-0 self-end">
+          {/* full-body 立繪 + command-panel aura (her signature orchestration motif) */}
+          <Link
+            href="/agents/sora"
+            aria-label="Open Sora's character sheet"
+            className="group relative shrink-0 self-end"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={SORA.panel}
+              alt=""
+              aria-hidden="true"
+              className="pointer-events-none absolute -left-3 top-1 w-32 rotate-[-6deg] opacity-25 blur-[0.5px] mix-blend-screen md:w-44"
+            />
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-3/4 rounded-full bg-[var(--neural-blue)]/20 blur-2xl" />
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
@@ -64,7 +77,7 @@ export function GuildLeaderHero({ immersive = false, className }: GuildLeaderHer
               alt="Sora — Guild Leader"
               className="relative h-56 w-auto object-contain drop-shadow-[0_8px_24px_rgba(56,189,248,0.25)] transition-transform duration-300 group-hover:scale-[1.03] md:h-72"
             />
-          </div>
+          </Link>
 
           {/* identity */}
           <div className="flex min-w-0 flex-col justify-center gap-3 py-2">
@@ -95,19 +108,26 @@ export function GuildLeaderHero({ immersive = false, className }: GuildLeaderHer
                 </span>
               ))}
             </div>
+
+            <Link
+              href="/agents/sora"
+              className="mt-1 inline-flex w-fit items-center gap-1 rounded border border-[var(--neural-blue)]/40 bg-[var(--neural-blue)]/10 px-3 py-1.5 font-mono text-xs text-[var(--neural-blue)] transition-colors hover:bg-[var(--neural-blue)]/20"
+            >
+              查看角色卡
+            </Link>
           </div>
         </div>
       ) : (
         // Focus: compact leader row
         <div className="flex items-center gap-3 p-3">
-          <div className="shrink-0">
+          <Link href="/agents/sora" className="shrink-0" aria-label="Open Sora's character sheet">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src={SORA.avatar}
               alt="Sora"
               className="size-11 rounded-full border border-[var(--neural-blue)]/50 object-cover ring-1 ring-[var(--neural-blue)]/20"
             />
-          </div>
+          </Link>
           <div className="min-w-0">
             <div className="flex items-baseline gap-1.5">
               <span className="truncate font-semibold text-[var(--foreground)]">{SORA.displayName}</span>
