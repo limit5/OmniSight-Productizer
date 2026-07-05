@@ -54,6 +54,7 @@ import {
   GuildHall,
   type GuildHallGuild,
 } from "@/components/omnisight/agents/GuildHall"
+import { GuildLeaderHero } from "@/components/omnisight/agents/GuildLeaderHero"
 import { RecruitModal } from "@/components/omnisight/agents/RecruitModal"
 import {
   PartyHall,
@@ -413,6 +414,10 @@ export default function AgentsRosterPage() {
             Failed to load character definitions: {charactersError}
           </div>
         )}
+
+        <section className="mb-6" data-testid="agents-roster-guild-leader">
+          <GuildLeaderHero immersive={immersive} />
+        </section>
 
         <section className="mb-8" data-testid="agents-roster-guild-hall">
           <GuildHall guilds={guildSummaries} onRecruit={() => setRecruitOpen(true)} />
