@@ -551,7 +551,7 @@ export function OrchestratorAI({
             <img
               src="/avatars/sora.png"
               alt="Sora"
-              className="size-6 rounded-full border border-[var(--artifact-purple)]/50 object-cover shrink-0 shadow-sm"
+              className="size-11 rounded-full border border-[var(--artifact-purple)]/50 object-cover shrink-0 shadow-sm ring-1 ring-[var(--artifact-purple)]/20"
             />
             <h2 className="font-sans text-xs font-semibold tracking-fui text-[var(--artifact-purple)] truncate">
               Sora
@@ -1023,7 +1023,7 @@ export function OrchestratorAI({
                 <img
                   src="/avatars/sora.png"
                   alt="Sora"
-                  className="w-6 h-6 rounded-full object-cover shrink-0 border border-[var(--artifact-purple)]/40"
+                  className="w-8 h-8 rounded-full object-cover shrink-0 border border-[var(--artifact-purple)]/40"
                 />
               ) : (
                 <div className="w-6 h-6 rounded-full flex items-center justify-center shrink-0 bg-[var(--secondary)] text-[var(--muted-foreground)]">
@@ -1055,7 +1055,7 @@ export function OrchestratorAI({
         {isStreaming && messages[messages.length - 1]?.role === "user" && (
           <div className="flex gap-2 justify-start" aria-live="polite">
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src="/avatars/sora.png" alt="Sora" className="w-6 h-6 rounded-full object-cover shrink-0 border border-[var(--artifact-purple)]/40" />
+            <img src="/avatars/sora.png" alt="Sora" className="w-8 h-8 rounded-full object-cover shrink-0 border border-[var(--artifact-purple)]/40" />
 
             <div className="bg-[var(--artifact-purple)]/10 text-[var(--muted-foreground)] rounded px-3 py-2 flex items-center gap-2">
               <Loader2 size={12} className="animate-spin text-[var(--artifact-purple)]" />
