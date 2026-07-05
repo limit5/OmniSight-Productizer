@@ -12,13 +12,79 @@
  * Palette is blue-white — deliberately off the worker brain-colour system.
  */
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import Link from "next/link"
-import { ArrowLeft, ChevronRight, Crown, Headphones, Sparkles, BrainCircuit } from "lucide-react"
+import {
+  ArrowLeft,
+  ChevronRight,
+  Crown,
+  Headphones,
+  Sparkles,
+  BrainCircuit,
+  Users,
+  Boxes,
+  TrendingUp,
+  ShieldAlert,
+  Radio,
+  Route,
+  MessageSquarePlus,
+  UsersRound,
+  Brain,
+  Send,
+} from "lucide-react"
 
 import { useAuth } from "@/lib/auth-context"
 import { useUiMode } from "@/hooks/use-ui-mode"
 import { cn } from "@/lib/utils"
+import {
+  listAgentCards,
+  getOrchestratorCommandStats,
+  type AgentCardSummary,
+  type OrchestratorCommandStats,
+} from "@/lib/api"
+
+// Mirror backend/agents/xp_engine.py: level_threshold(L)=ceil(100·L^1.4), MAX_LEVEL=80.
+// Sora's 統帥 Lv = the level the whole org's cumulative XP maps to (always ≥ her top member).
+const LEVEL_BASE_XP = 100
+const LEVEL_EXP = 1.4
+const MAX_LEVEL = 80
+function levelThreshold(level: number): number {
+  return Math.ceil(LEVEL_BASE_XP * Math.pow(level, LEVEL_EXP))
+}
+function levelForXp(totalXp: number): number {
+  let level = 1
+  while (level < MAX_LEVEL && totalXp >= levelThreshold(level + 1)) level += 1
+  return level
+}
+
+const BRAIN_LABEL: Record<string, string> = {
+  claude: "諾亞 / Claude",
+  codex: "Codex",
+  gemini: "Gemini",
+  grok: "Grok",
+}
+
+function StatTile({
+  icon: Icon,
+  label,
+  value,
+  sub,
+}: {
+  icon: typeof Users
+  label: string
+  value: string
+  sub?: string
+}) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--background)]/40 p-2.5">
+      <p className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">
+        <Icon size={11} /> {label}
+      </p>
+      <p className="mt-0.5 text-lg font-semibold leading-tight">{value}</p>
+      {sub ? <p className="truncate font-mono text-[10px] text-[var(--muted-foreground)]">{sub}</p> : null}
+    </div>
+  )
+}
 
 const EXPRESSIONS = [
   { id: "gentle", label: "溫和微笑", en: "Gentle Smile", note: "平時待人——溫和有耐心。" },
@@ -52,6 +118,61 @@ export default function SoraCharacterSheetPage() {
   const auth = useAuth()
   const { immersive } = useUiMode()
   const [mood, setMood] = useState<ExpressionId>("gentle")
+
+  // 統帥 data: the roster she commands (Phase 1, derived) + real delivery
+  // track-record (Phase 2, backend). Both fail-open — the sheet never breaks
+  // if the API 401s / errors, it just hides the numbers.
+  const [cards, setCards] = useState<AgentCardSummary[] | null>(null)
+  const [stats, setStats] = useState<OrchestratorCommandStats | null>(null)
+
+  useEffect(() => {
+    if (auth.loading) return
+    if (!auth.user && auth.authMode !== "open") return
+    let alive = true
+    void listAgentCards().then((c) => alive && setCards(c)).catch(() => {})
+    void getOrchestratorCommandStats().then((s) => alive && setStats(s)).catch(() => {})
+    return () => {
+      alive = false
+    }
+  }, [auth.loading, auth.user, auth.authMode])
+
+  const command = useMemo(() => {
+    if (!cards || cards.length === 0) return null
+    const totalXp = cards.reduce((s, c) => s + (c.xp ?? 0), 0)
+    const guilds = new Set(cards.map((c) => c.guild).filter(Boolean))
+    const top = cards.reduce((a, b) => ((b.level ?? 0) > (a.level ?? 0) ? b : a))
+    const active = cards.filter((c) => (c.status ?? "").toLowerCase() === "active").length
+    const commanderLevel = levelForXp(totalXp)
+    const cur = levelThreshold(commanderLevel)
+    const next = commanderLevel >= MAX_LEVEL ? cur : levelThreshold(commanderLevel + 1)
+    const pct = next > cur ? Math.min(100, Math.round(((totalXp - cur) / (next - cur)) * 100)) : 100
+    return {
+      totalXp,
+      commanderLevel,
+      guildCount: guilds.size,
+      memberCount: cards.length,
+      top,
+      active,
+      pct,
+      toNext: Math.max(0, next - totalXp),
+    }
+  }, [cards])
+
+  // Coordination kit — Sora's REAL orchestrator functions (not guild skills).
+  // Proficiency scales with the org she coordinates where that's meaningful;
+  // the conversational/memory abilities are core (mastered) capabilities.
+  const kit = useMemo(() => {
+    const members = command?.memberCount ?? 0
+    const guilds = command?.guildCount ?? 0
+    const dots = (n: number) => Math.max(1, Math.min(5, n))
+    return [
+      { icon: Send, label: "任務調度", en: "Dispatch", level: dots(Math.ceil(members / 2)), note: `統領 ${members} 名角色` },
+      { icon: Route, label: "能力匹配路由", en: "Capability Routing", level: dots(guilds), note: `覆蓋 ${guilds} 個公會` },
+      { icon: MessageSquarePlus, label: "對話理解建單", en: "Conversational Filing", level: 5, note: "create_task · 核心能力" },
+      { icon: UsersRound, label: "隊伍編成", en: "Party Assembly", level: 4, note: "synergy 編隊" },
+      { icon: Brain, label: "對話記憶 / 上下文", en: "Chat Memory", level: 5, note: "per-session 記憶 · 核心" },
+    ]
+  }, [command])
 
   const current = EXPRESSIONS.find((e) => e.id === mood) ?? EXPRESSIONS[0]
 
@@ -145,6 +266,140 @@ export default function SoraCharacterSheetPage() {
                   </span>
                 ))}
               </div>
+            </div>
+          </div>
+        </section>
+
+        {/* 統帥面板 — Sora's level/skills come from the org she commands (Phase 1,
+            live-derived) + her real delivery track-record (Phase 2, backend). */}
+        <section
+          className="mb-6 rounded-xl border border-[var(--neural-blue)]/30 bg-[var(--card)] p-5"
+          data-testid="sora-command-panel"
+        >
+          <h2 className="mb-4 flex items-center gap-1.5 text-sm font-semibold">
+            <Crown size={14} className="text-[var(--neural-blue)]" /> 統帥面板
+          </h2>
+
+          <div className="grid gap-5 md:grid-cols-2">
+            {/* Left: derived commander stats */}
+            <div>
+              <div className="flex items-end gap-3">
+                <div className="flex size-16 shrink-0 flex-col items-center justify-center rounded-xl border border-[var(--neural-blue)]/40 bg-[var(--neural-blue)]/10">
+                  <span className="font-mono text-[9px] uppercase tracking-wider text-[var(--muted-foreground)]">統帥</span>
+                  <span className="text-2xl font-bold leading-none text-[var(--neural-blue)]">
+                    {command ? command.commanderLevel : "—"}
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs text-[var(--muted-foreground)]">
+                    等級 ＝ 整支戰隊累積交付經驗的總和換算（永遠 ≥ 最資深部屬）。
+                  </p>
+                  {command && (
+                    <div className="mt-1.5">
+                      <div className="h-1.5 overflow-hidden rounded-full bg-[var(--secondary)]">
+                        <div
+                          className="h-full rounded-full bg-[var(--neural-blue)]"
+                          style={{ width: `${command.pct}%` }}
+                        />
+                      </div>
+                      <p className="mt-1 font-mono text-[10px] text-[var(--muted-foreground)]">
+                        全隊累計 {command.totalXp.toLocaleString()} XP
+                        {command.commanderLevel < MAX_LEVEL && ` · 距下一級 ${command.toNext.toLocaleString()}`}
+                      </p>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <dl className="mt-4 grid grid-cols-2 gap-2">
+                <StatTile icon={Users} label="統領規模" value={command ? `${command.memberCount} 名` : "—"} sub={command ? `${command.guildCount} 個公會` : ""} />
+                <StatTile icon={TrendingUp} label="最資深部屬" value={command ? `Lv${command.top.level}` : "—"} sub={command ? command.top.agent_id : ""} />
+                <StatTile icon={Radio} label="現役 / 待命" value={command ? `${command.active} / ${command.memberCount - command.active}` : "—"} sub="協調中" />
+                <StatTile icon={Boxes} label="全隊累計交付" value={command ? command.totalXp.toLocaleString() : "—"} sub="XP" />
+              </dl>
+
+              {/* coordination kit */}
+              <p className="mb-2 mt-5 font-mono text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                協調技能組
+              </p>
+              <ul className="space-y-1.5">
+                {kit.map((s) => (
+                  <li key={s.en} className="flex items-center gap-2">
+                    <s.icon size={13} className="shrink-0 text-[var(--neural-blue)]" />
+                    <span className="w-28 shrink-0 truncate text-xs">{s.label}</span>
+                    <span className="flex gap-0.5">
+                      {Array.from({ length: 5 }).map((_, i) => (
+                        <span
+                          key={i}
+                          className={cn(
+                            "h-1.5 w-1.5 rounded-full",
+                            i < s.level ? "bg-[var(--neural-blue)]" : "bg-[var(--secondary)]",
+                          )}
+                        />
+                      ))}
+                    </span>
+                    <span className="ml-auto truncate font-mono text-[10px] text-[var(--muted-foreground)]">{s.note}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            {/* Right: real delivery track-record (Phase 2, backend) */}
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--background)]/40 p-4">
+              <p className="mb-3 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-[var(--neural-blue)]">
+                <Send size={11} /> 統帥交付戰功
+                <span className="ml-auto normal-case text-[var(--muted-foreground)]">真實 runner 數據</span>
+              </p>
+
+              {stats ? (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-3xl font-bold text-[var(--foreground)]">{stats.delivered_total}</span>
+                    <span className="text-xs text-[var(--muted-foreground)]">筆成功交付</span>
+                  </div>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {stats.by_brain.map((b) => (
+                      <span
+                        key={b.brain}
+                        className="inline-flex items-center gap-1 rounded-full border border-[var(--border)] px-2 py-0.5 font-mono text-[10px] text-[var(--muted-foreground)]"
+                      >
+                        {BRAIN_LABEL[b.brain] ?? b.brain} · {b.count}
+                      </span>
+                    ))}
+                  </div>
+
+                  <dl className="mt-4 space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <dt className="flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">
+                        <ShieldAlert size={11} /> 近 30 天事故
+                      </dt>
+                      <dd className="text-sm">{stats.incidents_30d.toLocaleString()}</dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">平均交付耗時</dt>
+                      <dd className="text-sm">
+                        {stats.avg_seconds != null ? `${Math.round(stats.avg_seconds / 60)} 分` : "—"}
+                      </dd>
+                    </div>
+                    <div className="flex items-center justify-between gap-2">
+                      <dt className="font-mono text-[10px] uppercase tracking-wider text-[var(--muted-foreground)]">最近交付</dt>
+                      <dd className="truncate text-sm">
+                        {stats.latest?.ticket_key ? (
+                          <span className="text-[var(--neural-blue)]">{stats.latest.ticket_key} ✓</span>
+                        ) : (
+                          "—"
+                        )}
+                      </dd>
+                    </div>
+                  </dl>
+
+                  <p className="mt-3 border-t border-[var(--border)] pt-2 font-mono text-[9px] leading-relaxed text-[var(--muted-foreground)]">
+                    交付＝runner 成功完成的 run；事故為獨立事件流（含基建雜訊），故不併成單一成功率——只呈現實數。
+                  </p>
+                </>
+              ) : (
+                <p className="font-mono text-[10px] text-[var(--muted-foreground)]">交付數據載入中／不可用。</p>
+              )}
             </div>
           </div>
         </section>

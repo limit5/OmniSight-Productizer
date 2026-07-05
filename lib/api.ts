@@ -1189,6 +1189,21 @@ export async function listAgentCards(filters: { guild?: string; sort_by?: "level
   return request<AgentCardSummary[]>(`/agents/cards${suffix}`)
 }
 
+export interface OrchestratorCommandStats {
+  delivered_total: number
+  by_brain: Array<{ brain: string; count: number }>
+  avg_seconds: number | null
+  latest: { ticket_key: string | null; brain: string | null; at: string | null } | null
+  incidents_30d: number
+  incidents_total: number
+  top_incident_classes: Array<{ failure_class: string; count: number }>
+}
+
+// Sora's 統帥交付戰功 — real runner-delivery counts (not a fabricated rate).
+export async function getOrchestratorCommandStats() {
+  return request<OrchestratorCommandStats>(`/agents/orchestrator/command-stats`)
+}
+
 export interface AgentCharacterDef {
   slug: string
   display_name: string

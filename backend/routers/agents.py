@@ -257,6 +257,104 @@ async def get_guild_hall_roster(
     raise HTTPException(status_code=404, detail="Guild not found")
 
 
+_BRAIN_BY_AGENT_CLASS: Final[dict[str, str]] = {
+    "subscription-claude": "claude",
+    "subscription-codex": "codex",
+    "subscription-gemini": "gemini",
+    "subscription-grok": "grok",
+}
+
+
+@router.get("/orchestrator/command-stats")
+async def get_orchestrator_command_stats(
+    conn: asyncpg.Connection = Depends(get_conn),
+):
+    """Sora（會長 / Orchestrator）command track-record — REAL delivery counts.
+
+    Sora is not a worker Character, so she has no XP/skill rows. Her
+    "統帥交付戰功" is instead the org she coordinates: successful runner
+    deliveries (``runner_metrics``, outcome=success, grouped by brain) plus
+    recent incidents (``runner_incidents``). Deliberately COUNTS, not a
+    success-rate — successes and failures live in separate tables with
+    non-commensurable scopes, so a percentage would be fabricated precision.
+
+    Fail-open: if the runner telemetry tables are absent (e.g. a fresh
+    staging DB) every figure degrades to 0 rather than 500-ing the sheet.
+    """
+    delivered_total = 0
+    by_brain: list[dict[str, Any]] = []
+    avg_seconds: float | None = None
+    latest: dict[str, Any] | None = None
+    incidents_30d = 0
+    incidents_total = 0
+    top_incident_classes: list[dict[str, Any]] = []
+
+    try:
+        rows = await conn.fetch(
+            "SELECT agent_class, count(*) AS n, "
+            "avg(time_to_complete_seconds) AS avg_s "
+            "FROM runner_metrics WHERE outcome = 'success' "
+            "GROUP BY agent_class"
+        )
+        weighted = 0.0
+        for r in rows:
+            n = int(r["n"])
+            delivered_total += n
+            brain = _BRAIN_BY_AGENT_CLASS.get(r["agent_class"], r["agent_class"] or "other")
+            by_brain.append({"brain": brain, "count": n})
+            if r["avg_s"] is not None:
+                weighted += float(r["avg_s"]) * n
+        if delivered_total:
+            avg_seconds = round(weighted / delivered_total, 1)
+        by_brain.sort(key=lambda d: d["count"], reverse=True)
+
+        row = await conn.fetchrow(
+            "SELECT ticket_key, agent_class, completed_at "
+            "FROM runner_metrics WHERE outcome = 'success' "
+            "ORDER BY completed_at DESC NULLS LAST LIMIT 1"
+        )
+        if row is not None:
+            latest = {
+                "ticket_key": row["ticket_key"],
+                "brain": _BRAIN_BY_AGENT_CLASS.get(row["agent_class"], row["agent_class"]),
+                "at": row["completed_at"].isoformat() if row["completed_at"] else None,
+            }
+    except asyncpg.PostgresError:
+        pass
+
+    try:
+        incidents_total = int(
+            await conn.fetchval("SELECT count(*) FROM runner_incidents") or 0
+        )
+        incidents_30d = int(
+            await conn.fetchval(
+                "SELECT count(*) FROM runner_incidents "
+                "WHERE created_at > now() - interval '30 days'"
+            )
+            or 0
+        )
+        cls_rows = await conn.fetch(
+            "SELECT failure_class, count(*) AS n FROM runner_incidents "
+            "GROUP BY failure_class ORDER BY n DESC LIMIT 6"
+        )
+        top_incident_classes = [
+            {"failure_class": r["failure_class"] or "UNKNOWN", "count": int(r["n"])}
+            for r in cls_rows
+        ]
+    except asyncpg.PostgresError:
+        pass
+
+    return {
+        "delivered_total": delivered_total,
+        "by_brain": by_brain,
+        "avg_seconds": avg_seconds,
+        "latest": latest,
+        "incidents_30d": incidents_30d,
+        "incidents_total": incidents_total,
+        "top_incident_classes": top_incident_classes,
+    }
+
+
 @router.get("/{agent_id}/card")
 async def get_agent_card(
     agent_id: str,
