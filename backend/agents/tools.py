@@ -3270,7 +3270,11 @@ async def supervisor_list_transitions(ticket_key: str) -> str:
 
 # Defined after the observe bundle literal (it groups with the transition tool);
 # register it into the read-only observe set + TOOL_MAP (built later) here.
+# NOTE: SORA_SUPERVISOR_TOOLS (line ~3083) was concatenated BEFORE this append,
+# so it doesn't see list_transitions via SUPERVISOR_OBSERVE_TOOLS — append to
+# BOTH so Sora actually gets it bound in her conversational tool set.
 SUPERVISOR_OBSERVE_TOOLS.append(supervisor_list_transitions)
+SORA_SUPERVISOR_TOOLS.append(supervisor_list_transitions)
 
 
 @tool

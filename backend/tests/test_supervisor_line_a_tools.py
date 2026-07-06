@@ -226,3 +226,15 @@ def test_guild_capabilities_non_empty():
     # at least a couple of the real guild descriptions surface
     assert "Backend" in out and "-" in out
     assert len(out) > 100
+
+
+def test_sora_supervisor_bundle_includes_all_observe_tools():
+    # Regression: list_transitions was appended to SUPERVISOR_OBSERVE_TOOLS AFTER
+    # SORA_SUPERVISOR_TOOLS was concatenated, so it wasn't bound to Sora's chat.
+    from backend.agents.tools import (
+        SORA_SUPERVISOR_TOOLS, SUPERVISOR_OBSERVE_TOOLS, search_past_solutions,
+    )
+    bound = {t.name for t in SORA_SUPERVISOR_TOOLS}
+    for t in SUPERVISOR_OBSERVE_TOOLS:
+        assert t.name in bound, f"{t.name} not bound to Sora (SORA_SUPERVISOR_TOOLS)"
+    assert search_past_solutions.name in bound
