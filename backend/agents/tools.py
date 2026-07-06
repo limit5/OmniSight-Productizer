@@ -2984,6 +2984,122 @@ SUPERVISOR_OBSERVE_TOOLS = [
 SORA_SUPERVISOR_TOOLS = SUPERVISOR_OBSERVE_TOOLS + [search_past_solutions]
 
 
+# ── Sora supervisor SAFE ACTIONS (P3, supervisor roadmap) ──────────────
+# Reversible, idempotent, SELF-VERIFYING: each tool acts THEN re-reads to
+# confirm the world reached the intended state, returning "[OK ...verified]"
+# or "[FAILED ...]" — never claims success unverified. Scoped to OP-* JIRA
+# tickets only; NO deploy / force-push / delete (those stay GATED for P5).
+# Reuses the prod JIRA write path (backend.jira_adapter, same as create_task).
+
+_SUP_TICKET_RE = re.compile(r"^OP-\d+$")
+
+
+def _is_stale_runner_label(label: str) -> bool:
+    return (
+        label == "stoploss"
+        or label.startswith("claim:")
+        or label.startswith("runner-blocked:")
+    )
+
+
+@tool
+async def supervisor_requeue_ticket(ticket_key: str) -> str:
+    """(Sora supervisor) Re-queue a stuck ticket by clearing its assignee so the
+    runner PICKUP_JQL (which requires assignee EMPTY) can re-grab it. Reversible
+    (re-assign) + self-verifying. Use for a ticket idling with a bot still assigned.
+
+    Args:
+        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        st, _ = await adapter._api("PUT", f"/rest/api/2/issue/{key}/assignee", {"accountId": None})
+        if not (200 <= st < 300):
+            return f"[FAILED] {key}: clear-assignee returned HTTP {st}."
+        st2, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=assignee")
+        assignee = (body.get("fields") or {}).get("assignee") if isinstance(body, dict) else "?"
+        if assignee is None:
+            return f"[OK] {key} re-queued — assignee cleared (verified); runner can re-pick."
+        return f"[FAILED] {key}: assignee still set after clear."
+    except Exception as exc:  # noqa: BLE001
+        return f"[FAILED] {key}: requeue error: {exc}"
+
+
+@tool
+async def supervisor_strip_stale_labels(ticket_key: str) -> str:
+    """(Sora supervisor) Remove stale runner labels (claim:*, stoploss,
+    runner-blocked:*) that wedge a ticket. Idempotent (no-op if none) + reversible
+    + self-verifying. Use when a reverted/stuck ticket won't re-pick.
+
+    Args:
+        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")
+        labels = list((body.get("fields") or {}).get("labels") or []) if isinstance(body, dict) else []
+        stale = [l for l in labels if _is_stale_runner_label(l)]
+        if not stale:
+            return f"[OK] {key}: no stale runner labels present (nothing to strip)."
+        kept = [l for l in labels if not _is_stale_runner_label(l)]
+        st2, _ = await adapter._api("PUT", f"/rest/api/2/issue/{key}", {"fields": {"labels": kept}})
+        if not (200 <= st2 < 300):
+            return f"[FAILED] {key}: label update returned HTTP {st2}."
+        st3, body3 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")
+        now = list((body3.get("fields") or {}).get("labels") or []) if isinstance(body3, dict) else []
+        still = [l for l in now if _is_stale_runner_label(l)]
+        if not still:
+            return f"[OK] {key}: stripped {len(stale)} stale label(s) {stale} (verified)."
+        return f"[FAILED] {key}: stale labels remain after strip: {still}."
+    except Exception as exc:  # noqa: BLE001
+        return f"[FAILED] {key}: strip-labels error: {exc}"
+
+
+@tool
+async def supervisor_comment_ticket(ticket_key: str, text: str) -> str:
+    """(Sora supervisor) Post a comment on an OP-* ticket (e.g. explain a rescue
+    or leave a note). Self-verifying via the returned comment id.
+
+    Args:
+        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
+        text: the comment body.
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
+    if not (text or "").strip():
+        return "[SUPERVISOR] refused: empty comment text."
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        res = await adapter.comment(key, text)
+        cid = res.get("id") if isinstance(res, dict) else None
+        if not cid:
+            return f"[FAILED] {key}: comment call returned no id."
+        return f"[OK] {key}: comment posted (id={cid}, verified)."
+    except Exception as exc:  # noqa: BLE001
+        return f"[FAILED] {key}: comment error: {exc}"
+
+
+# Bound to Sora's chat behind OMNISIGHT_ORCHESTRATOR_ACTION_TOOLS (default on).
+# save_solution (L3 write) rides here so Sora can remember a verified rescue —
+# the P1-deferred write, safe now that actions self-verify.
+SORA_ACTION_TOOLS = [
+    supervisor_requeue_ticket,
+    supervisor_strip_stale_labels,
+    supervisor_comment_ticket,
+    save_solution,
+]
+
+
 TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
 # Orchestration tools are the user-facing planner's lever to turn an
 # understood intent into real runner work. Deliberately NOT folded into
@@ -2997,7 +3113,7 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS + SUPERVISOR_OBSERVE_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS + SUPERVISOR_OBSERVE_TOOLS + SORA_ACTION_TOOLS}
 
 _ARCHITECT_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS
 _DESIGN_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS

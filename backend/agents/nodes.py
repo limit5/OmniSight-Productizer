@@ -53,7 +53,7 @@ from typing import Any, Awaitable, Callable
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
-from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
+from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -1680,7 +1680,16 @@ async def conversation_node(state: GraphState) -> dict:
     _sup_on = os.environ.get(
         "OMNISIGHT_ORCHESTRATOR_SUPERVISOR_TOOLS", "1",
     ).lower() not in ("0", "false", "no")
-    orch_tools = list(ORCHESTRATION_TOOLS) + (list(SORA_SUPERVISOR_TOOLS) if _sup_on else [])
+    # P3: reversible, self-verifying safe actions (re-queue / strip stale labels /
+    # comment / L3 save). Default-on; env kill-switch keeps Sora look-but-don't-touch.
+    _act_on = os.environ.get(
+        "OMNISIGHT_ORCHESTRATOR_ACTION_TOOLS", "1",
+    ).lower() not in ("0", "false", "no")
+    orch_tools = (
+        list(ORCHESTRATION_TOOLS)
+        + (list(SORA_SUPERVISOR_TOOLS) if _sup_on else [])
+        + (list(SORA_ACTION_TOOLS) if _act_on else [])
+    )
     llm_tools = _get_llm(
         bind_tools_for=None, model_name=effective_model,
         extra_tools=orch_tools,
@@ -1765,6 +1774,19 @@ async def conversation_node(state: GraphState) -> dict:
         "search_past_solutions to recall how a similar problem was solved "
         "before. Use them to ground your answer in real state — then reply "
         "in natural language; never dump raw tool output.\n"
+        "- You can take SAFE, reversible rescue actions on a stuck ticket: "
+        "supervisor_requeue_ticket (clear assignee so the runner re-picks), "
+        "supervisor_strip_stale_labels (remove wedging claim:/stoploss/"
+        "runner-blocked labels), supervisor_comment_ticket (leave a note). "
+        "Each self-verifies and returns [OK ...verified] or [FAILED ...]; "
+        "trust that verdict — report [OK] as done, and if a tool returns "
+        "[FAILED], say so plainly, do NOT retry the same action more than "
+        "once, and escalate to the operator after a second identical failure. "
+        "After a successful verified rescue you may call save_solution to "
+        "remember it. Only act when the operator asked you to fix/rescue "
+        "something or clearly wants it; when unsure, propose the action and "
+        "ask first. You have NO deploy / force-push / destructive powers — "
+        "for those, tell the operator to run it.\n"
         "- You are the user's orchestrator. When the user wants real work "
         "done (build / fix / implement / a tool or feature) AND has "
         "confirmed the scope, CALL the create_task tool ONCE to file it as "
