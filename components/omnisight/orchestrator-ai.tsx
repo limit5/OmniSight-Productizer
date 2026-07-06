@@ -206,12 +206,22 @@ export function OrchestratorAI({
     }
   ])
   
-  // Merge external messages into local state
+  // Merge external messages into local state.
+  // Dedup by id OR (role + content): the current tab already rendered its own
+  // message optimistically (user turn) or via the token stream (orchestrator
+  // reply), then the cross-device `chat.message` broadcast arrives with a
+  // DIFFERENT backend id — an id-only check missed it and rendered the same
+  // message twice. Matching role+content suppresses that self-echo while still
+  // letting genuinely-new messages (other devices) through.
   useEffect(() => {
     if (externalMessages.length > 0) {
       const lastExternal = externalMessages[externalMessages.length - 1]
-      // Check if this message is already in our state
-      if (!messages.find(m => m.id === lastExternal.id)) {
+      const already = messages.some(
+        m =>
+          m.id === lastExternal.id ||
+          (m.role === lastExternal.role && m.content === lastExternal.content),
+      )
+      if (!already) {
         setMessages(prev => [...prev, lastExternal]) // eslint-disable-line react-hooks/set-state-in-effect -- syncing external prop to local state
       }
     }
