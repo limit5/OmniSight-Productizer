@@ -38,7 +38,8 @@ class _FakeAdapter:
 
     def __init__(self, *, status="To Do", assignee="bot-1", labels=None,
                  issuelinks=None, comments=None, summary="Do the thing",
-                 transitions=None):
+                 transitions=None, transitions_status=200):
+        self.transitions_status = transitions_status
         self.status = status
         self.assignee = assignee
         self.labels = list(labels or [])
@@ -55,6 +56,8 @@ class _FakeAdapter:
 
     async def _api(self, method, path, body=None):
         if method == "GET" and path.endswith("/transitions"):
+            if not (200 <= self.transitions_status < 300):
+                return (self.transitions_status, {})
             return (200, {"transitions": [{"name": n, "id": i}
                                           for n, (i, _s) in self.transitions.items()]})
         if method == "POST" and path.endswith("/transitions"):
@@ -83,7 +86,16 @@ class _FakeAdapter:
             self.assignee = None
             return (204, {})
         if method == "PUT":  # full-issue edit (labels)
-            self.labels = list((body.get("fields") or {}).get("labels") or [])
+            body = body or {}
+            update = body.get("update") or {}
+            if "labels" in update:  # incremental add/remove ops (atomic path)
+                for op in update["labels"]:
+                    if "add" in op and op["add"] not in self.labels:
+                        self.labels.append(op["add"])
+                    if "remove" in op and op["remove"] in self.labels:
+                        self.labels.remove(op["remove"])
+            elif "labels" in (body.get("fields") or {}):  # full replacement
+                self.labels = list(body["fields"]["labels"] or [])
             return (204, {})
         return (200, {})
 
@@ -141,6 +153,15 @@ def test_list_transitions(monkeypatch):
     out = asyncio.run(supervisor_list_transitions.ainvoke({"ticket_key": "OP-2530"}))
     assert out.startswith("[SUPERVISOR]")
     assert "進行中" in out and "Won't Do" in out
+
+
+def test_list_transitions_http_error_surfaced(monkeypatch):
+    # audit: a non-2xx transitions read must NOT be silently treated as
+    # "no transitions" — it must surface the HTTP status.
+    _patch(monkeypatch, _FakeAdapter(transitions_status=404))
+    out = asyncio.run(supervisor_list_transitions.ainvoke({"ticket_key": "OP-2530"}))
+    assert "HTTP 404" in out
+    assert "no transitions available" not in out
 
 
 # ── transition_ticket (workflow-aware: list actual transitions + match) ─
@@ -204,6 +225,17 @@ def test_set_labels_idempotent(monkeypatch):
         {"ticket_key": "OP-2530", "add": ["area:backend"], "remove": ["ghost"]}))
     assert out.startswith("[OK]")
     assert fake.labels == ["area:backend"]
+
+
+def test_set_labels_contradictory_add_wins(monkeypatch):
+    # audit: same label in BOTH add and remove is contradictory — ADD wins,
+    # never emit conflicting/order-dependent ops. Label must end up present.
+    fake = _FakeAdapter(labels=["area:backend"])
+    _patch(monkeypatch, fake)
+    out = asyncio.run(supervisor_set_labels.ainvoke(
+        {"ticket_key": "OP-2530", "add": ["keep-me"], "remove": ["keep-me"]}))
+    assert out.startswith("[OK]")
+    assert "keep-me" in fake.labels
 
 
 def test_set_labels_refuses_empty(monkeypatch):

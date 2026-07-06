@@ -42,6 +42,7 @@ model should prefer `invoke_chat` / `tool_call` instead):
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterable, Sequence
 
@@ -99,6 +100,10 @@ __all__ = [
 #  missing one provider's extras doesn't fail to import the adapter.
 # ──────────────────────────────────────────────────────────────────
 
+# Per-request HTTP timeout for the Anthropic client (seconds). Bounds a
+# single stuck call; the SDK's max_retries backoff bounds the total.
+_ANTHROPIC_REQUEST_TIMEOUT_S = float(os.getenv("OMNISIGHT_ANTHROPIC_TIMEOUT_S", "60"))
+
 
 def build_chat_model(
     provider: str,
@@ -139,13 +144,18 @@ def build_chat_model(
             "model": actual_model,
             "max_tokens": max_tokens or 4096,
             "max_retries": max_retries,
+            # Audit 2026-07-06: bound each HTTP request so a stuck Anthropic
+            # call can't hang a metered supervisor turn forever (the tool loop
+            # can't wrap the sync .invoke in asyncio.wait_for). Worst case is
+            # max_retries × timeout, which the SDK backoff already bounds.
+            "default_request_timeout": _ANTHROPIC_REQUEST_TIMEOUT_S,
         }
         # OP-709 + OP-2530: Anthropic deprecated `temperature` for its
         # extended-thinking families — the Opus 4.x line (claude-opus-4-*)
         # and Fable 5 (claude-fable-*). Including the parameter raises
         # 400 invalid_request_error ("`temperature` is deprecated for this
         # model.") at messages.create time. Sonnet / Haiku still accept it.
-        if not actual_model.startswith(("claude-opus-4-", "claude-fable-")):
+        if not actual_model.startswith(("claude-opus-4", "claude-fable-")):
             kwargs["temperature"] = temperature
         if api_key:
             kwargs["anthropic_api_key"] = api_key

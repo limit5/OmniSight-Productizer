@@ -43,6 +43,7 @@ State conventions
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -54,6 +55,21 @@ from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_PLANNING_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
+
+# Audit-hardening (OP-2530): the set of Sora tools with SIDE EFFECTS — deduped
+# per-turn in _run_tool_rounds so an identical write can't double-fire or burn
+# repeat LLM calls. Read-only observe tools (SORA_SUPERVISOR_TOOLS) are excluded
+# so the act↔verify pattern keeps getting fresh reads.
+_WRITE_TOOL_NAMES = frozenset(
+    t.name for t in (*ORCHESTRATION_TOOLS, *SORA_ACTION_TOOLS, *SORA_PLANNING_TOOLS)
+)
+
+# Hard bounds for the multi-round tool loop (metered API + write-capable
+# supervisor). Module-level so they're tunable AND patchable in tests.
+MAX_TOOL_CALLS_PER_ROUND = 8   # a real fan-out is ≤ a handful; refuse the rest
+TOOL_TIMEOUT_S = 30.0          # no single tool may hang the whole turn
+MAX_TOOL_OUTPUT_CHARS = 6000   # cap context fed back per tool result
+MAX_WRITE_CALLS_PER_TURN = 12  # total distinct WRITE invocations allowed / turn
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -236,6 +252,45 @@ def _is_task_creation_intent(text: str) -> bool:
     return bool(_TASK_CREATE_VERB.search(text) and _TASK_CREATE_NOUN.search(text))
 
 
+# Deterministic "supervisor intent" pre-guard (audit 2026-07-06, codex#1).
+# Ticket-inspection / rescue and fleet-observability belong to Sora's OWN
+# supervisor tools on the conversational path — routing them to a specialist
+# lets it fall back to raw shell (the OP-2533 → run_bash → PEP HOLD incident).
+# The LLM router already prefers CONVERSATIONAL for these, but it's
+# non-deterministic and metered; this closes the door BEFORE any LLM call.
+_OP_TICKET_RE = re.compile(r"\bOP-[0-9]{2,}\b", re.IGNORECASE)
+_SUPERVISOR_VERB_RE = re.compile(
+    r"看|檢查|確認|查看|查一下|查一查|再看|看看|瞧|狀態|卡住|卡在|卡了|"
+    r"修好|修一下|修復|救|拉回|重新排|重排|重新佇列|排隊|去除|清掉|清除|"
+    r"標籤|留言|評論|轉換|轉移|狀態流|處理|排查|診斷|為什麼|怎麼了|發生|"
+    r"怎麼回事|解卡|解鎖|解除|檢視|"
+    r"look|check|verify|inspect|re-?check|status|stuck|wedged|fix|rescue|"
+    r"unwedge|unstick|unblock|requeue|re-?queue|strip|label|comment|"
+    r"transition|triage|investigate|why is|what happened|diagnose|resolve",
+    re.IGNORECASE,
+)
+_FLEET_OBSERVE_RE = re.compile(
+    r"車隊|艦隊|fleet|配額|額度|quota|事故|incident|交付|deliver|"
+    r"runner|worker|agent.?狀態|agent.?status",
+    re.IGNORECASE,
+)
+
+
+def _is_supervisor_intent(text: str) -> bool:
+    """True when the user wants Sora to inspect/rescue a ticket or the fleet.
+
+    Two triggers: (a) an OP-NNN reference paired with a supervisor verb, or
+    (b) a fleet/quota/incident/delivery observability ask. Either pins the
+    turn to the conversational (own-tools) path. Over-matching is safe:
+    conversation_node only acts when Sora's model judges the ask concrete.
+    """
+    if not text:
+        return False
+    if _OP_TICKET_RE.search(text) and _SUPERVISOR_VERB_RE.search(text):
+        return True
+    return bool(_FLEET_OBSERVE_RE.search(text))
+
+
 # C2 audit (2026-04-19): before a previous-attempt error string is
 # concatenated into the next LLM invocation's system prompt, sanitize
 # it so attacker-controlled content in a tool output / exception
@@ -313,6 +368,16 @@ def orchestrator_node(state: GraphState) -> dict:
     # the hallucinating general-specialist pipeline.
     if _is_task_creation_intent(cmd):
         emit_pipeline_phase("routing", "Conversational mode — task-filing request")
+        return {
+            "is_conversational": True,
+            "messages": [AIMessage(content="[ORCHESTRATOR] Entering conversational mode")],
+        }
+
+    # Deterministic supervisor-intent short-circuit (audit codex#1): ticket
+    # inspection/rescue + fleet observability are Sora's own-tool territory;
+    # never let the LLM router send them to a shell-capable specialist.
+    if _is_supervisor_intent(cmd):
+        emit_pipeline_phase("routing", "Conversational mode — supervisor request")
         return {
             "is_conversational": True,
             "messages": [AIMessage(content="[ORCHESTRATOR] Entering conversational mode")],
@@ -1663,19 +1728,38 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
     step-per-round chain of 4 when the model acts sequentially — a cap of 3
     dropped the trailing comment (OP-2533 test); 5 leaves margin.
 
-    SAFETY: ``create_task`` is deduped by (args) so a re-emitted identical file
-    can't double-create a Story. Observe/action tools DO re-run — fresh reads +
-    the act↔verify pattern need it, and the action tools are idempotent +
-    self-verifying. Returns the final assistant message.
+    SAFETY (audit-hardened): every WRITE tool (create_task + supervisor actions +
+    planning) is deduped by (name, args) within the turn — a re-emitted identical
+    write returns the cached result instead of re-running, so it can't
+    double-create a Story, double-post a comment, double-save L3, or re-link
+    Blocks, AND a model that keeps re-requesting the same (even failed) write
+    burns no extra calls. Read-only observe tools (ticket_detail, list_*, quota…)
+    are NOT deduped — the act↔verify pattern needs fresh reads. Returns the final
+    assistant message.
     """
-    from langchain_core.messages import ToolMessage
+    from backend.llm_adapter import AIMessage, ToolMessage  # N4 firewall: via adapter
+
+    # Hard bounds (module-level, patchable) — metered API + write-capable
+    # supervisor: every edge is closed so a confused model can't run away on
+    # cost or hang the turn. Read them via module lookup so tests can override.
+    max_calls_per_round = MAX_TOOL_CALLS_PER_ROUND
+    tool_timeout_s = TOOL_TIMEOUT_S
+    max_output_chars = MAX_TOOL_OUTPUT_CHARS
 
     convo = list(convo)
-    filed: dict[str, str] = {}
+    write_cache: dict[str, str] = {}  # (name,args) -> result for WRITE tools this turn
+    write_call_budget = MAX_WRITE_CALLS_PER_TURN  # total WRITE invocations / turn
     rounds = 0
     while getattr(resp, "tool_calls", None) and rounds < max_rounds:
         rounds += 1
-        tool_calls = resp.tool_calls
+        tool_calls = list(resp.tool_calls)
+        if len(tool_calls) > max_calls_per_round:
+            # Runaway guard: keep the first N, refuse the rest with an error
+            # ToolMessage so the model still gets a well-formed turn.
+            dropped = tool_calls[max_calls_per_round:]
+            tool_calls = tool_calls[:max_calls_per_round]
+        else:
+            dropped = []
         _names = [
             (c.get("name") if isinstance(c, dict) else getattr(c, "name", ""))
             for c in tool_calls
@@ -1688,30 +1772,72 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
         convo.append(resp)
         for call in tool_calls:
             name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
-            args = (call.get("args") if isinstance(call, dict) else getattr(call, "args", {})) or {}
+            args = (call.get("args") if isinstance(call, dict) else getattr(call, "args", {}))
             cid = (call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or name
-            dedup_key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
-            if name == "create_task" and dedup_key in filed:
-                out = filed[dedup_key]  # don't double-file the same Story
+            # Malformed tool_call — no name, or args not a dict → don't invoke,
+            # feed back a structured error so the loop stays well-formed.
+            if not name or not isinstance(args, dict):
+                out = f"[ERROR] Malformed tool call (name={name!r}); skipped."
+                emit_tool_progress(str(name) or "?", "error", out)
+                convo.append(ToolMessage(content=out, tool_call_id=cid))
+                continue
+            try:
+                dedup_key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+            except (TypeError, ValueError):
+                dedup_key = f"{name}:{id(call)}"  # unserializable args → never dedup
+            is_write = name in _WRITE_TOOL_NAMES
+            if is_write and dedup_key in write_cache:
+                out = write_cache[dedup_key]  # don't repeat an identical write this turn
+            elif is_write and write_call_budget <= 0:
+                out = f"[ERROR] {name} skipped: write budget exhausted this turn."
             else:
                 fn = TOOL_MAP.get(name)
                 if fn is None:
                     out = f"[ERROR] Unknown tool: {name}"
                 else:
+                    if is_write:
+                        write_call_budget -= 1
                     try:
-                        out = await fn.ainvoke(args)
+                        out = await asyncio.wait_for(
+                            fn.ainvoke(args), timeout=tool_timeout_s,
+                        )
+                    except asyncio.TimeoutError:
+                        out = f"[ERROR] {name} timed out after {tool_timeout_s:.0f}s."
                     except Exception as tool_exc:  # noqa: BLE001
                         out = f"[ERROR] {name} failed: {tool_exc}"
-                if name == "create_task":
-                    filed[dedup_key] = str(out)
+                if is_write:
+                    write_cache[dedup_key] = str(out)
+            out_str = str(out)
+            if len(out_str) > max_output_chars:
+                out_str = out_str[:max_output_chars] + "\n…[truncated]"
             emit_tool_progress(
-                name, "done" if str(out).startswith("[OK]") else "error", str(out),
+                name, "done" if out_str.startswith("[OK]") else "error", out_str,
             )
-            convo.append(ToolMessage(content=str(out), tool_call_id=cid))
-        resp = (llm_tools or llm).invoke(convo)
+            convo.append(ToolMessage(content=out_str, tool_call_id=cid))
+        for call in dropped:
+            cid = (call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or "?"
+            convo.append(ToolMessage(
+                content=f"[ERROR] Too many tool calls this round (>{max_calls_per_round}); skipped.",
+                tool_call_id=cid,
+            ))
+        try:
+            resp = (llm_tools or llm).invoke(convo)
+        except Exception as llm_exc:  # noqa: BLE001
+            logger.warning("tool-round LLM invoke failed: %s", llm_exc)
+            return AIMessage(content=(
+                "抱歉，我在整理工具結果時發生了問題，這一輪先停在這裡。"
+                "剛才的操作結果已經在上面，你可以再問我一次或換個方式描述。"
+            ))
     # Hit the round cap but still requesting tools → force a tool-free answer.
     if getattr(resp, "tool_calls", None):
-        resp = llm.invoke(convo)
+        try:
+            resp = llm.invoke(convo)
+        except Exception as llm_exc:  # noqa: BLE001
+            logger.warning("tool-round final invoke failed: %s", llm_exc)
+            return AIMessage(content=(
+                "抱歉，我這一輪的工具操作已完成，但整理最終回覆時出了點狀況。"
+                "請看上方的操作結果，或再問我一次。"
+            ))
     return resp
 
 

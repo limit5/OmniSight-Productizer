@@ -3090,7 +3090,7 @@ SORA_SUPERVISOR_TOOLS = SUPERVISOR_OBSERVE_TOOLS + [search_past_solutions]
 # tickets only; NO deploy / force-push / delete (those stay GATED for P5).
 # Reuses the prod JIRA write path (backend.jira_adapter, same as create_task).
 
-_SUP_TICKET_RE = re.compile(r"^OP-\d+$")
+_SUP_TICKET_RE = re.compile(r"^OP-[0-9]+$")  # ASCII digits only (\d accepts Unicode)
 
 
 def _is_stale_runner_label(label: str) -> bool:
@@ -3157,8 +3157,13 @@ async def supervisor_strip_stale_labels(ticket_key: str) -> str:
         stale = [l for l in labels if _is_stale_runner_label(l)]
         if not stale:
             return f"[OK] {key}: no stale runner labels present (nothing to strip)."
-        kept = [l for l in labels if not _is_stale_runner_label(l)]
-        st2, _ = await adapter._api("PUT", f"/rest/api/2/issue/{key}", {"fields": {"labels": kept}})
+        # Use JIRA incremental update.labels REMOVE ops (not fields.labels full
+        # replacement) so a label added concurrently between our GET and write
+        # is NOT wiped (audit: full-replace could clobber a fresh claim:* mutex).
+        st2, _ = await adapter._api(
+            "PUT", f"/rest/api/2/issue/{key}",
+            {"update": {"labels": [{"remove": l} for l in stale]}},
+        )
         if not (200 <= st2 < 300):
             return (
                 f"[FAILED] {key}: label update returned HTTP {st2} — check the ticket "
@@ -3260,9 +3265,14 @@ async def supervisor_list_transitions(ticket_key: str) -> str:
         from backend.jira_adapter import build_default_jira_adapter
         adapter = build_default_jira_adapter()
         st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}/transitions")
-        names = [t.get("name") for t in (body.get("transitions") or [])] if isinstance(body, dict) else []
+        if not (200 <= st < 300) or not isinstance(body, dict):
+            return (
+                f"[SUPERVISOR] {key}: transitions read returned HTTP {st} — check the "
+                f"ticket exists; try supervisor_ticket_detail first."
+            )
+        names = [t.get("name") for t in (body.get("transitions") or [])]
         if not names:
-            return f"[SUPERVISOR] {key}: no transitions available (check the key)."
+            return f"[SUPERVISOR] {key}: no transitions available (may be terminal/closed)."
         return f"[SUPERVISOR] {key} available transitions: {names}"
     except Exception as exc:  # noqa: BLE001
         return f"[SUPERVISOR] {key}: transitions unavailable: {exc}"
@@ -3310,6 +3320,21 @@ async def supervisor_transition_ticket(ticket_key: str, target: str) -> str:
                 f"[FAILED] {key}: no transition matching '{target}'. Available now: "
                 f"{list(available)}. Pick one of those (workflows differ per project)."
             )
+        # Guard (audit): never let a loose intent word (e.g. "done") select a
+        # TERMINAL/destructive transition (Force Close / Archive / Won't Do) —
+        # closing/archiving must be named explicitly by the operator.
+        # Normalize underscores→spaces so explicit intent words like "wont_do"
+        # count as an explicit terminal request (matches "wont do" below).
+        _tl = (target or "").strip().lower().replace("_", " ")
+        _DESTRUCTIVE = ("force close", "archive", "won't do", "wont do", "cancel", "reject")
+        if any(d in match.lower() for d in _DESTRUCTIVE) and not (
+            any(d in _tl for d in _DESTRUCTIVE) or _tl == match.lower()
+        ):
+            return (
+                f"[SUPERVISOR] refused: '{target}' resolved to the terminal transition "
+                f"{match!r} (close/archive). To close/archive, pass the exact name "
+                f"'{match}' explicitly. Available: {list(available)}."
+            )
         sp, _ = await adapter._api("POST", f"/rest/api/2/issue/{key}/transitions", {"transition": {"id": available[match]}})
         if not (200 <= sp < 300):
             return f"[FAILED] {key}: transition '{match}' POST returned HTTP {sp}."
@@ -3344,7 +3369,12 @@ async def supervisor_set_labels(
     if not _SUP_TICKET_RE.match(key):
         return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
     add_set = [l for l in (add or []) if l]
-    rem_set = [l for l in (remove or []) if l]
+    # A label in BOTH add and remove is contradictory — let ADD win (drop it
+    # from remove) so we never emit conflicting/order-dependent JIRA ops.
+    rem_set = [l for l in (remove or []) if l and l not in add_set]
+    # de-dupe within each set (JIRA rejects duplicate ops on some versions)
+    add_set = list(dict.fromkeys(add_set))
+    rem_set = list(dict.fromkeys(rem_set))
     if not add_set and not rem_set:
         return "[SUPERVISOR] refused: nothing to do (both add and remove empty)."
     try:
@@ -3356,12 +3386,15 @@ async def supervisor_set_labels(
                 f"[FAILED] {key}: label read returned HTTP {st} — check the ticket "
                 f"exists; try supervisor_ticket_detail first."
             )
-        current = list((body.get("fields") or {}).get("labels") or [])
-        desired = [l for l in current if l not in rem_set]
-        for l in add_set:
-            if l not in desired:
-                desired.append(l)
-        st2, _ = await adapter._api("PUT", f"/rest/api/2/issue/{key}", {"fields": {"labels": desired}})
+        # (read above doubles as an existence/permission check)
+        # Use JIRA incremental update.labels ADD/REMOVE ops (not fields.labels
+        # full replacement) so a label changed concurrently between our GET and
+        # write is NOT clobbered (audit: full-replace could wipe a fresh claim:*
+        # mutex or another supervisor's edit).
+        ops = [{"remove": l} for l in rem_set] + [{"add": l} for l in add_set]
+        st2, _ = await adapter._api(
+            "PUT", f"/rest/api/2/issue/{key}", {"update": {"labels": ops}},
+        )
         if not (200 <= st2 < 300):
             return f"[FAILED] {key}: label update returned HTTP {st2}."
         st3, body3 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")

@@ -34,7 +34,16 @@ class _FakeAdapter:
             self.assignee = None
             return (204, {})
         if method == "PUT" and "?" not in path:  # full-issue edit (labels)
-            self.labels = list((body.get("fields") or {}).get("labels") or [])
+            body = body or {}
+            update = body.get("update") or {}
+            if "labels" in update:  # incremental add/remove ops (atomic path)
+                for op in update["labels"]:
+                    if "add" in op and op["add"] not in self.labels:
+                        self.labels.append(op["add"])
+                    if "remove" in op and op["remove"] in self.labels:
+                        self.labels.remove(op["remove"])
+            elif "labels" in (body.get("fields") or {}):  # full replacement
+                self.labels = list(body["fields"]["labels"] or [])
             return (204, {})
         if method == "GET" and "fields=assignee" in path:
             return (200, {"fields": {"assignee": self.assignee}})
