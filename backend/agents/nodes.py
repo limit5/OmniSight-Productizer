@@ -1623,6 +1623,21 @@ def _resolve_orchestrator_model(explicit_model: str, last_user_text: str) -> tup
         return "", "auto_route_error"
 
 
+def _trim_to_last_user_turn(messages: list) -> list:
+    """Drop trailing non-user messages so the sequence ends with the user's turn.
+
+    Newer Anthropic models reject an "assistant prefill" (a message list ending
+    in an assistant/tool message → 400 "The conversation must end with a user
+    message."). A router node can leave a trailing AIMessage on the state; this
+    keeps everything up to and including the last HumanMessage. Returns the list
+    unchanged if it already ends with a user message or has no user message.
+    """
+    out = list(messages)
+    while out and out[-1].__class__.__name__ != "HumanMessage":
+        out = out[:-1]
+    return out if out else list(messages)
+
+
 async def conversation_node(state: GraphState) -> dict:
     """Answer general questions without tool execution.
 
@@ -1851,6 +1866,13 @@ async def conversation_node(state: GraphState) -> dict:
             send_messages = list(state.messages)
     else:
         send_messages = list(state.messages)
+
+    # Newer Anthropic models (Sonnet 4.6 / Opus 4.8 / Fable 5 …) reject an
+    # "assistant prefill" — a message list ending in an assistant/tool message
+    # ("The conversation must end with a user message."). A prior router node
+    # can leave a trailing AIMessage on state.messages; the old prod default
+    # (Sonnet 4.5) tolerated it, the P2-routed models do NOT.
+    send_messages = _trim_to_last_user_turn(send_messages)
 
     emit_pipeline_phase("conversation", "Generating conversational response")
     try:
