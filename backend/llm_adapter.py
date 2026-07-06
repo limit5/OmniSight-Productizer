@@ -140,11 +140,12 @@ def build_chat_model(
             "max_tokens": max_tokens or 4096,
             "max_retries": max_retries,
         }
-        # OP-709: Anthropic deprecated `temperature` for the Opus 4.x
-        # extended-thinking family (claude-opus-4-*). Including the
-        # parameter raises 400 invalid_request_error at messages.create
-        # time. Sonnet / Haiku still accept it.
-        if not actual_model.startswith("claude-opus-4-"):
+        # OP-709 + OP-2530: Anthropic deprecated `temperature` for its
+        # extended-thinking families — the Opus 4.x line (claude-opus-4-*)
+        # and Fable 5 (claude-fable-*). Including the parameter raises
+        # 400 invalid_request_error ("`temperature` is deprecated for this
+        # model.") at messages.create time. Sonnet / Haiku still accept it.
+        if not actual_model.startswith(("claude-opus-4-", "claude-fable-")):
             kwargs["temperature"] = temperature
         if api_key:
             kwargs["anthropic_api_key"] = api_key

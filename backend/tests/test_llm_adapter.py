@@ -590,6 +590,23 @@ class TestBuildChatModel:
                 f"deprecated it for Opus 4.x; passing it raises 400 at API call"
             )
 
+    def test_anthropic_fable_5_omits_temperature(self, monkeypatch):
+        """OP-2530: Fable 5 (claude-fable-*) also deprecated `temperature`
+        ('`temperature` is deprecated for this model.' 400). A dropdown-pinned
+        Fable 5 broke Sora's chat until the adapter dropped the kwarg for it."""
+        fake_cls = MagicMock(return_value=MagicMock(spec=BaseChatModel))
+        import langchain_anthropic
+        monkeypatch.setattr(langchain_anthropic, "ChatAnthropic", fake_cls, raising=True)
+        for fable_variant in ("claude-fable-5", "claude-fable-5-20260101"):
+            fake_cls.reset_mock()
+            build_chat_model("anthropic", model=fable_variant, api_key="sk-a",
+                             temperature=0.7)
+            kwargs = fake_cls.call_args.kwargs
+            assert kwargs["model"] == fable_variant
+            assert "temperature" not in kwargs, (
+                f"temperature must be dropped for {fable_variant}"
+            )
+
     def test_anthropic_haiku_keeps_temperature(self, monkeypatch):
         """Sanity: only Opus 4.x is affected — Haiku/Sonnet still accept
         temperature, so don't accidentally over-broaden the OP-709 fix."""
