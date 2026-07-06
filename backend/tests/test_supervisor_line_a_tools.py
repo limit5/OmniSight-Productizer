@@ -198,6 +198,36 @@ def test_transition_op_guard():
     assert out.startswith("[SUPERVISOR] refused")
 
 
+def test_transition_post_2xx_but_status_unchanged_is_failed(monkeypatch):
+    # audit r2 codex#1: POST returns 2xx but the re-read shows the status did
+    # NOT actually move → must be [FAILED], never a false [OK].
+    class _NoopTransition(_FakeAdapter):
+        async def _api(self, method, path, body=None):
+            if method == "POST" and path.endswith("/transitions"):
+                return (204, {})           # JIRA "accepts" but does nothing
+            return await super()._api(method, path, body)
+    fake = _NoopTransition(status="To Do")
+    _patch(monkeypatch, fake)
+    out = asyncio.run(supervisor_transition_ticket.ainvoke(
+        {"ticket_key": "OP-2530", "target": "in_progress"}))
+    assert out.startswith("[FAILED]")
+    assert "unchanged" in out and "do not assume it moved" in out.lower()
+
+
+def test_transition_verify_read_error_is_failed(monkeypatch):
+    # audit r2 codex#1: POST 2xx but the verification GET fails → [FAILED], not [OK].
+    class _BadVerify(_FakeAdapter):
+        async def _api(self, method, path, body=None):
+            if method == "GET" and "fields=status" in path:
+                return (503, {})           # verify read unavailable
+            return await super()._api(method, path, body)
+    fake = _BadVerify(status="To Do")
+    _patch(monkeypatch, fake)
+    out = asyncio.run(supervisor_transition_ticket.ainvoke(
+        {"ticket_key": "OP-2530", "target": "in_progress"}))
+    assert out.startswith("[FAILED]") and "could not confirm" in out
+
+
 def test_transition_empty_target(monkeypatch):
     _patch(monkeypatch, _FakeAdapter())
     out = asyncio.run(supervisor_transition_ticket.ainvoke(

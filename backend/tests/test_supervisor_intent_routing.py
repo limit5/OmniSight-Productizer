@@ -67,3 +67,39 @@ class TestNonSupervisor:
     def test_empty(self):
         assert not _is_supervisor_intent("")
         assert not _is_supervisor_intent(None)
+
+
+class TestBuildCommandsNotHijacked:
+    """Audit r2 codex#3 regression: bare runner/worker/fleet nouns inside a BUILD
+    command must NOT be pinned to conversational — they belong to a specialist."""
+
+    def test_fix_runner_bug(self):
+        assert not _is_supervisor_intent("fix the runner dispatch bug")
+
+    def test_build_worker_test(self):
+        assert not _is_supervisor_intent("build the worker pool test")
+
+    def test_run_tests_runner_page(self):
+        assert not _is_supervisor_intent("run tests for the runner status page")
+
+    def test_implement_fleet_report(self):
+        assert not _is_supervisor_intent("implement the fleet delivery report generator")
+
+    def test_refactor_worker(self):
+        assert not _is_supervisor_intent("refactor the worker sandbox")
+
+    def test_compile_runner_binary(self):
+        assert not _is_supervisor_intent("compile the runner agent binary")
+
+
+class TestFleetObserveStillCaught:
+    """The narrowing must NOT lose genuine fleet-observability asks."""
+
+    def test_runner_how_busy(self):
+        assert _is_supervisor_intent("runner 現在多忙")
+
+    def test_how_many_runners(self):
+        assert _is_supervisor_intent("how many runners are active")
+
+    def test_worker_status_overview(self):
+        assert _is_supervisor_intent("give me an overview of worker status")

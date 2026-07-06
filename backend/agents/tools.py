@@ -1141,6 +1141,35 @@ async def create_task(
     )
     tagged_title = f"[OP][{area}] {title.strip()}"
 
+    # Cross-turn idempotency (audit r2 codex#2): if THIS session already filed a
+    # Story with this exact title in the last N minutes, return it instead of
+    # creating a duplicate (metered: a refresh / double-submit / "file that
+    # again" must not multiply GATED tickets). Fail-OPEN — any dedup-check error
+    # falls through to a normal create, never blocking a legitimate file.
+    _ctx = get_chat_context()
+    if _ctx and _ctx.get("session_id"):
+        try:
+            import os as _os
+            import time as _t2
+            from backend import db as _db2
+            _window = float(_os.getenv("OMNISIGHT_ORCH_DEDUP_WINDOW_S", "600"))
+            async with get_pool().acquire() as _c2:
+                _dup = await _db2.find_recent_orchestrator_task_by_title(
+                    _c2,
+                    tenant_id=_ctx.get("tenant_id", "") or "",
+                    session_id=_ctx.get("session_id", ""),
+                    title=tagged_title,
+                    since=_t2.time() - _window,
+                )
+            if _dup and _dup.get("ticket_key"):
+                return (
+                    f"[OK] Already filed as {_dup['ticket_key']} moments ago "
+                    f"({_dup.get('browse_url') or 'no url'}) — not creating a "
+                    f"duplicate. Tell the user it's already on the board."
+                )
+        except Exception as _dexc:  # noqa: BLE001 — fail open
+            logger.debug("create_task dedup check skipped: %s", _dexc)
+
     try:
         from backend.jira_adapter import build_default_jira_adapter
         adapter = build_default_jira_adapter()
@@ -1182,14 +1211,16 @@ async def create_task(
             f"  {ref.url}\n"
             f"  labels: {', '.join(labels)}\n"
             f"  ▶ DISPATCHED to {char_def.display_name} ({character}) — the "
-            f"{char_def.brain} runner will pick it up. Merges still need a human +2."
+            f"{char_def.brain} runner will pick it up. Merges still need a human +2.\n"
+            f"  ticket={ref.ticket}"  # machine-parseable (audit r2 rank 4): use for link_blocks
         )
     return (
         f"[OK] Filed gated Story {ref.ticket} — {tagged_title}\n"
         f"  {ref.url}\n"
         f"  labels: {', '.join(labels)}\n"
         f"  ⚠ GATED — not yet dispatched to the runner. To release it, "
-        f"add a class:subscription-claude (or -codex) label, or re-file with a character."
+        f"add a class:subscription-claude (or -codex) label, or re-file with a character.\n"
+        f"  ticket={ref.ticket}"  # machine-parseable (audit r2 rank 4): use for link_blocks
     )
 
 
@@ -2906,7 +2937,7 @@ async def supervisor_quota_status() -> str:
                 "FROM provider_quota_state ORDER BY provider"
             )
     except Exception as exc:  # noqa: BLE001
-        return f"[SUPERVISOR] quota state unavailable: {exc}"
+        return f"[FAILED] quota state unavailable: {exc}"
     if not rows:
         return "[SUPERVISOR] no provider quota state recorded."
     lines = ["[SUPERVISOR] provider quota / circuit:"]
@@ -2939,7 +2970,7 @@ async def supervisor_recent_incidents(days: int = 7) -> str:
                 "GROUP BY failure_class ORDER BY n DESC LIMIT 8", d,
             )
     except Exception as exc:  # noqa: BLE001
-        return f"[SUPERVISOR] incident data unavailable: {exc}"
+        return f"[FAILED] incident data unavailable: {exc}"
     if not total:
         return f"[SUPERVISOR] no runner incidents in the last {d} day(s)."
     lines = [f"[SUPERVISOR] {total} incident(s) in the last {d} day(s):"]
@@ -2966,7 +2997,7 @@ async def supervisor_delivery_summary() -> str:
                 "WHERE outcome = 'success' ORDER BY completed_at DESC NULLS LAST LIMIT 1"
             )
     except Exception as exc:  # noqa: BLE001
-        return f"[SUPERVISOR] delivery data unavailable: {exc}"
+        return f"[FAILED] delivery data unavailable: {exc}"
     total = sum(int(r["n"]) for r in rows)
     if not total:
         return "[SUPERVISOR] no successful deliveries recorded yet."
@@ -2987,7 +3018,7 @@ async def supervisor_ticket_detail(ticket_key: str) -> str:
     """
     key = (ticket_key or "").strip().upper()
     if not _SUP_TICKET_RE.match(key):
-        return f"[SUPERVISOR] '{ticket_key}' is not an OP-NNN ticket key."
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
     try:
         from backend.jira_adapter import build_default_jira_adapter
         adapter = build_default_jira_adapter()
@@ -2997,7 +3028,7 @@ async def supervisor_ticket_detail(ticket_key: str) -> str:
             "?fields=status,assignee,labels,issuelinks,summary",
         )
         if not (200 <= st < 300) or not isinstance(body, dict):
-            return f"[SUPERVISOR] {key}: fetch returned HTTP {st}."
+            return f"[FAILED] {key}: fetch returned HTTP {st}."
         fields = body.get("fields") or {}
         summary = fields.get("summary") or "(no summary)"
         status = ((fields.get("status") or {}).get("name")) or "?"
@@ -3043,7 +3074,7 @@ async def supervisor_ticket_detail(ticket_key: str) -> str:
         ]
         return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
-        return f"[SUPERVISOR] {key}: detail unavailable: {exc}"
+        return f"[FAILED] {key}: detail unavailable: {exc}"
 
 
 @tool
@@ -3069,7 +3100,7 @@ async def supervisor_guild_capabilities() -> str:
         names = ", ".join(sorted(GUILDS))
         return f"[SUPERVISOR] worker guilds: {names}"
     except Exception as exc:  # noqa: BLE001
-        return f"[SUPERVISOR] guild list unavailable: {exc}"
+        return f"[FAILED] guild list unavailable: {exc}"
 
 
 # Bound to Sora's chat (nodes.conversation_node): read-only observe + L3 recall.
@@ -3093,12 +3124,34 @@ SORA_SUPERVISOR_TOOLS = SUPERVISOR_OBSERVE_TOOLS + [search_past_solutions]
 _SUP_TICKET_RE = re.compile(r"^OP-[0-9]+$")  # ASCII digits only (\d accepts Unicode)
 
 
+# The REAL pickup-blocking wedge labels a rescue must clear (audit r2 rank 1
+# BLOCKER). The circuit-trip gate is ``runner-stoploss:circuit-tripped-*``
+# (pre_pickup_stoploss_ok refuses on it); ``runner-stoploss:revert-*`` is the
+# §11-revert history that re-trips the breaker, so clearing the trip without it
+# just re-arms on the next pickup. ``claim:*`` is the OP-977 fencing token that a
+# self-revert leaves stale. We deliberately do NOT match the coordinator/bridge
+# AUTO-MANAGED ``runner-blocked:*`` markers (waiting-/fe-be-mismatch/
+# repo-unresolved/gerrit-setup-fail) — stripping those causes marker churn /
+# duplicate incidents; use supervisor_set_labels for a specific one. (Bare
+# "stoploss" was a DEAD branch — production only ever writes runner-stoploss:*.)
 def _is_stale_runner_label(label: str) -> bool:
-    return (
-        label == "stoploss"
-        or label.startswith("claim:")
-        or label.startswith("runner-blocked:")
+    if not isinstance(label, str):
+        return False
+    from backend.agents.runner_stoploss import (
+        REVERT_LABEL_PREFIX, TRIPPED_LABEL_PREFIX,
     )
+    return (
+        label.startswith(TRIPPED_LABEL_PREFIX)   # runner-stoploss:circuit-tripped-*
+        or label.startswith(REVERT_LABEL_PREFIX)  # runner-stoploss:revert-*
+        or label.startswith("claim:")             # OP-977 fencing token
+    )
+
+
+def _labels_include_circuit_trip(labels) -> bool:
+    """True if any label is a circuit-trip gate (so the rescue can warn that
+    resetting an unfixed trip re-arms the pickup→§11-revert loop)."""
+    from backend.agents.runner_stoploss import TRIPPED_LABEL_PREFIX
+    return any(isinstance(l, str) and l.startswith(TRIPPED_LABEL_PREFIX) for l in (labels or []))
 
 
 @tool
@@ -3122,13 +3175,32 @@ async def supervisor_requeue_ticket(ticket_key: str) -> str:
                 f"[FAILED] {key}: clear-assignee returned HTTP {st} — check the "
                 f"ticket exists and you have permission; try supervisor_ticket_detail first."
             )
-        st2, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=assignee")
-        assignee = (body.get("fields") or {}).get("assignee") if isinstance(body, dict) else "?"
-        if assignee is None:
+        # Verify assignee cleared AND check the OTHER pickup gates in the SAME read
+        # (audit r2 rank 3): PICKUP_JQL needs status=To Do + a class:* label + NOT
+        # tier:X + no circuit-trip. Clearing the assignee is necessary but NOT
+        # sufficient — don't assert "runner can re-pick" while ignoring 6 of 7 gates.
+        st2, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=assignee,status,labels")
+        if not (200 <= st2 < 300) or not isinstance(body, dict):
+            return (
+                f"[FAILED] {key}: assignee-clear could not be verified (read HTTP "
+                f"{st2}); re-check with supervisor_ticket_detail."
+            )
+        fields = body.get("fields") or {}
+        assignee = fields.get("assignee")
+        if assignee is not None:
+            return (
+                f"[FAILED] {key}: assignee still set after clear — try "
+                f"supervisor_ticket_detail first to inspect the ticket."
+            )
+        status = ((fields.get("status") or {}).get("name")) or ""
+        labels = list(fields.get("labels") or [])
+        blockers = _residual_pickup_blockers(status, labels)
+        if not blockers:
             return f"[OK] {key} re-queued — assignee cleared (verified); runner can re-pick."
         return (
-            f"[FAILED] {key}: assignee still set after clear — try "
-            f"supervisor_ticket_detail first to inspect the ticket."
+            f"[OK] {key}: assignee cleared (verified) — but ⚠ STILL NOT PICKABLE. "
+            f"Residual blocker(s): {'; '.join(b for b, _ in blockers)}. "
+            f"Next: {' / '.join(r for _, r in blockers)}. (requeue alone is not enough here.)"
         )
     except Exception as exc:  # noqa: BLE001
         return (
@@ -3137,11 +3209,36 @@ async def supervisor_requeue_ticket(ticket_key: str) -> str:
         )
 
 
+def _residual_pickup_blockers(status: str, labels: list) -> list[tuple[str, str]]:
+    """Return [(blocker, remediation)] for why a ticket (assignee already empty)
+    still won't be picked, per PICKUP_JQL + the stoploss gate. Empty = pickable."""
+    labels = [l for l in labels if isinstance(l, str)]
+    out: list[tuple[str, str]] = []
+    if status not in {"To Do"}:
+        out.append((f"status is {status!r} (needs 'To Do')",
+                    "move it to To Do with supervisor_transition_ticket"))
+    if _labels_include_circuit_trip(labels):
+        out.append(("carries a runner-stoploss:circuit-tripped-* label",
+                    "clear it with supervisor_strip_stale_labels (or supervisor_rescue_ticket)"))
+    if "tier:X" in labels:
+        out.append(("labelled tier:X (human-only)",
+                    "an operator must handle tier:X work"))
+    if not any(l.startswith("class:") for l in labels):
+        out.append(("no class:* label (GATED Story)",
+                    "a human must add a class:* label to release it to the fleet"))
+    return out
+
+
 @tool
 async def supervisor_strip_stale_labels(ticket_key: str) -> str:
-    """(Sora supervisor) Remove stale runner labels (claim:*, stoploss,
-    runner-blocked:*) that wedge a ticket. Idempotent (no-op if none) + reversible
-    + self-verifying. Use when a reverted/stuck ticket won't re-pick.
+    """(Sora supervisor) Remove the runner labels that WEDGE a ticket — the
+    circuit-trip gate (runner-stoploss:circuit-tripped-*) + its §11-revert
+    history (runner-stoploss:revert-*) + stale OP-977 fencing tokens (claim:*).
+    Idempotent (no-op if none) + reversible + self-verifying. Use when a
+    reverted / circuit-tripped / stuck ticket won't re-pick. Does NOT touch the
+    coordinator's auto-managed runner-blocked:* markers (use supervisor_set_labels
+    for a specific one). NOTE: clearing a circuit-trip re-arms the ticket — if the
+    ROOT CAUSE isn't fixed it will just trip again.
 
     Args:
         ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
@@ -3153,8 +3250,21 @@ async def supervisor_strip_stale_labels(ticket_key: str) -> str:
         from backend.jira_adapter import build_default_jira_adapter
         adapter = build_default_jira_adapter()
         st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")
-        labels = list((body.get("fields") or {}).get("labels") or []) if isinstance(body, dict) else []
+        # Guard the READ (audit r2 rank 2): a 404/429/5xx returns an error body,
+        # NOT a raise — an unchecked empty label list would be a false "nothing
+        # to strip" / false verify on the exact wedged tickets this exists to fix.
+        if not (200 <= st < 300) or not isinstance(body, dict):
+            return (
+                f"[FAILED] {key}: label read returned HTTP {st} — check the ticket "
+                f"exists and you have permission; try supervisor_ticket_detail first."
+            )
+        labels = list((body.get("fields") or {}).get("labels") or [])
         stale = [l for l in labels if _is_stale_runner_label(l)]
+        _trip_note = (
+            " (⚠ a circuit-trip was cleared — if the root cause isn't fixed it will "
+            "re-trip; consider inspecting WHY it tripped before releasing.)"
+            if _labels_include_circuit_trip(stale) else ""
+        )
         if not stale:
             return f"[OK] {key}: no stale runner labels present (nothing to strip)."
         # Use JIRA incremental update.labels REMOVE ops (not fields.labels full
@@ -3170,12 +3280,21 @@ async def supervisor_strip_stale_labels(ticket_key: str) -> str:
                 f"exists and you have permission; try supervisor_ticket_detail first."
             )
         st3, body3 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")
-        now = list((body3.get("fields") or {}).get("labels") or []) if isinstance(body3, dict) else []
-        still = [l for l in now if _is_stale_runner_label(l)]
+        if not (200 <= st3 < 300) or not isinstance(body3, dict):
+            return (
+                f"[FAILED] {key}: stripped but could NOT verify (read returned HTTP "
+                f"{st3}); re-check with supervisor_ticket_detail before relying on it."
+            )
+        now = list((body3.get("fields") or {}).get("labels") or [])
+        # Target-SCOPED verify (audit r2 rank 7): confirm the labels WE removed are
+        # gone — not a global "no stale label of any kind exists" scan, which would
+        # false-[FAILED] on a claim:* a runner legitimately added between our reads
+        # (and provoke a cross-turn re-strip that wipes the LIVE fencing token).
+        still = [l for l in stale if l in now]
         if not still:
-            return f"[OK] {key}: stripped {len(stale)} stale label(s) {stale} (verified)."
+            return f"[OK] {key}: stripped {len(stale)} stale label(s) {stale} (verified).{_trip_note}"
         return (
-            f"[FAILED] {key}: stale labels remain after strip: {still} — try "
+            f"[FAILED] {key}: targeted labels remain after strip: {still} — try "
             f"supervisor_ticket_detail first to inspect the ticket."
         )
     except Exception as exc:  # noqa: BLE001
@@ -3215,6 +3334,86 @@ async def supervisor_comment_ticket(ticket_key: str, text: str) -> str:
             f"[FAILED] {key}: comment error: {exc} — check the ticket exists and you "
             f"have permission; try supervisor_ticket_detail first."
         )
+
+
+@tool
+async def supervisor_rescue_ticket(ticket_key: str, comment_text: str = "") -> str:
+    """(Sora supervisor) ONE-SHOT rescue of a STUCK ticket — do the whole
+    unwedge chain in a single call and return ONE combined verdict.
+
+    Runs: inspect → strip the wedge labels (runner-stoploss:circuit-tripped-* /
+    revert-* + stale claim:* fencing) → clear the assignee → (optional) post an
+    audit comment → each sub-step self-verifies. PREFER THIS over chaining
+    strip_stale_labels + requeue_ticket + comment_ticket yourself: it is cheaper
+    (one call, not a 3-4 round chain), it won't leave the ticket half-fixed, and
+    it reports exactly what changed — INCLUDING an honest "still not pickable"
+    warning when a NON-label gate remains (wrong status, no class:* label, tier:X)
+    that this tool deliberately will NOT touch. Reversible; it NEVER changes status
+    or closes the ticket. Use ONLY when the operator says a ticket is stuck/idle —
+    do not run it on a ticket a runner is actively working (it clears a live claim).
+
+    Args:
+        ticket_key: e.g. "OP-2533" (only OP-NNN accepted).
+        comment_text: optional audit note to post after the rescue (skip if "").
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
+
+    def _short(msg: str) -> str:
+        # keep the status tag + the meaningful clause, drop the redundant key echo
+        s = str(msg).replace(f"{key}: ", "").replace(f"{key} ", "").strip()
+        return s.split(" — ")[0][:160]
+
+    steps: list[str] = []
+    all_ok = True
+    # 1) inspect (also confirms the ticket exists + surfaces what we're fixing)
+    detail = await supervisor_ticket_detail.ainvoke({"ticket_key": key})
+    if str(detail).startswith(("[FAILED]", "[SUPERVISOR] ")) and "not an OP" not in str(detail):
+        # a read failure here means we can't safely proceed
+        if not str(detail).startswith("[SUPERVISOR] OP"):
+            return (
+                f"[FAILED] {key} rescue aborted: could not read the ticket "
+                f"({_short(detail)}). Check it exists and you have permission."
+            )
+    # 2) strip stale runner labels (idempotent — no-op if none)
+    strip = await supervisor_strip_stale_labels.ainvoke({"ticket_key": key})
+    steps.append(f"labels: {_short(strip)}")
+    if str(strip).startswith("[FAILED]"):
+        all_ok = False
+    # 3) clear assignee so PICKUP_JQL can re-grab (idempotent if already empty)
+    requeue = await supervisor_requeue_ticket.ainvoke({"ticket_key": key})
+    steps.append(f"requeue: {_short(requeue)}")
+    requeue_str = str(requeue)
+    if requeue_str.startswith("[FAILED]"):
+        all_ok = False
+    # requeue may succeed on the assignee-clear yet report the ticket is STILL NOT
+    # PICKABLE because of a gate this tool won't touch (status/class:*/tier:X).
+    not_pickable = "STILL NOT PICKABLE" in requeue_str
+    # 4) optional audit comment
+    if (comment_text or "").strip():
+        cm = await supervisor_comment_ticket.ainvoke({"ticket_key": key, "text": comment_text})
+        steps.append(f"comment: {_short(cm)}")
+        if str(cm).startswith("[FAILED]"):
+            all_ok = False
+    body = "\n  • ".join(steps)
+    if all_ok and not not_pickable:
+        return f"[OK] {key} rescued (all steps verified):\n  • {body}"
+    if all_ok and not_pickable:
+        # every write succeeded, but a non-label gate still blocks pickup — report
+        # honestly so Sora tells the operator instead of claiming full success.
+        return (
+            f"[OK] {key}: labels cleared + assignee cleared (verified), BUT the "
+            f"ticket is STILL NOT PICKABLE — see the requeue line for the residual "
+            f"gate (status / class:* / tier:X) and its remediation. The un-wedge "
+            f"succeeded; the ticket needs that further step (which this tool won't "
+            f"do automatically):\n  • {body}"
+        )
+    return (
+        f"[FAILED] {key} rescue INCOMPLETE — at least one step failed:\n  • {body}\n"
+        f"Inspect with supervisor_ticket_detail and retry only the failed step; "
+        f"do NOT blindly re-run the whole rescue."
+    )
 
 
 # Intent word → candidate transition-name substrings, matched against the
@@ -3267,7 +3466,7 @@ async def supervisor_list_transitions(ticket_key: str) -> str:
         st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}/transitions")
         if not (200 <= st < 300) or not isinstance(body, dict):
             return (
-                f"[SUPERVISOR] {key}: transitions read returned HTTP {st} — check the "
+                f"[FAILED] {key}: transitions read returned HTTP {st} — check the "
                 f"ticket exists; try supervisor_ticket_detail first."
             )
         names = [t.get("name") for t in (body.get("transitions") or [])]
@@ -3275,7 +3474,7 @@ async def supervisor_list_transitions(ticket_key: str) -> str:
             return f"[SUPERVISOR] {key}: no transitions available (may be terminal/closed)."
         return f"[SUPERVISOR] {key} available transitions: {names}"
     except Exception as exc:  # noqa: BLE001
-        return f"[SUPERVISOR] {key}: transitions unavailable: {exc}"
+        return f"[FAILED] {key}: transitions unavailable: {exc}"
 
 
 # Defined after the observe bundle literal (it groups with the transition tool);
@@ -3340,9 +3539,24 @@ async def supervisor_transition_ticket(ticket_key: str, target: str) -> str:
             return f"[FAILED] {key}: transition '{match}' POST returned HTTP {sp}."
         st1, b1 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=status")
         after = ((b1.get("fields") or {}).get("status") or {}).get("name") if isinstance(b1, dict) else None
-        if after and after != before:
+        # Verification integrity (audit r2 codex#1): the POST returned 2xx, but
+        # do NOT claim success unless the re-read CONFIRMS the status moved. A
+        # failed/malformed verify read, or an unchanged status, is [FAILED] —
+        # never a false [OK] (a write-capable supervisor must not tell the
+        # operator a transition happened when it did not).
+        if not (200 <= st1 < 300) or after is None:
+            return (
+                f"[FAILED] {key}: transition '{match}' POSTed but the status re-read "
+                f"returned HTTP {st1} (could not confirm). Re-check with "
+                f"supervisor_ticket_detail before relying on it."
+            )
+        if after != before:
             return f"[OK] {key}: transitioned via '{match}' — status {before!r} → {after!r} (verified)."
-        return f"[OK] {key}: transitioned via '{match}' (status now {after!r})."
+        return (
+            f"[FAILED] {key}: transition '{match}' POSTed but status is still "
+            f"{after!r} (unchanged) — it may already be satisfied, or the move did "
+            f"not apply. Verify with supervisor_ticket_detail; do not assume it moved."
+        )
     except Exception as exc:  # noqa: BLE001
         return (
             f"[FAILED] {key}: transition error: {exc} — try "
@@ -3417,6 +3631,7 @@ async def supervisor_set_labels(
 # save_solution (L3 write) rides here so Sora can remember a verified rescue —
 # the P1-deferred write, safe now that actions self-verify.
 SORA_ACTION_TOOLS = [
+    supervisor_rescue_ticket,       # compound one-shot (prefer for stuck-ticket rescue)
     supervisor_requeue_ticket,
     supervisor_strip_stale_labels,
     supervisor_comment_ticket,
@@ -3453,6 +3668,18 @@ async def supervisor_link_blocks(blocker_key: str, blocked_key: str) -> str:
         from backend.jira_adapter import build_default_jira_adapter
         adapter = build_default_jira_adapter()
 
+        async def _summary(k: str) -> str:
+            # Echo each ticket's title so a WRONG-KEY link is human-visible (audit
+            # r2 rank 4: link_blocks otherwise self-verifies a link onto whatever
+            # keys it was given — including a mis-scraped/invented real ticket).
+            try:
+                _st, bd = await adapter._api("GET", f"/rest/api/2/issue/{k}?fields=summary")
+                if not (200 <= _st < 300) or not isinstance(bd, dict):
+                    return "?"
+                return (((bd.get("fields") or {}).get("summary")) or "?")[:60]
+            except Exception:  # noqa: BLE001
+                return "?"
+
         async def _linked() -> bool:
             _st, body = await adapter._api("GET", f"/rest/api/2/issue/{b}?fields=issuelinks")
             links = (body.get("fields") or {}).get("issuelinks") or [] if isinstance(body, dict) else []
@@ -3464,7 +3691,8 @@ async def supervisor_link_blocks(blocker_key: str, blocked_key: str) -> str:
             return False
 
         if await _linked():
-            return f"[OK] {a} already blocks {b} (verified, no-op)."
+            sa, sb = await _summary(a), await _summary(b)
+            return f"[OK] {a} «{sa}» already blocks {b} «{sb}» (verified, no-op). If those aren't the intended stories, unlink."
         # inwardIssue = BLOCKER, outwardIssue = BLOCKED (SOP §Blocks links;
         # this direction is a known trap — hence the verify below).
         st, _ = await adapter._api("POST", "/rest/api/2/issueLink", {
@@ -3475,7 +3703,8 @@ async def supervisor_link_blocks(blocker_key: str, blocked_key: str) -> str:
         if not (200 <= st < 300):
             return f"[FAILED] link {a}->{b}: issueLink POST returned HTTP {st}."
         if await _linked():
-            return f"[OK] {a} now blocks {b} (verified)."
+            sa, sb = await _summary(a), await _summary(b)
+            return f"[OK] {a} «{sa}» now blocks {b} «{sb}» (verified). If those aren't the intended stories, unlink."
         return f"[FAILED] {a}->{b}: link not present after POST (check direction)."
     except Exception as exc:  # noqa: BLE001
         return f"[FAILED] link {a}->{b}: {exc}"

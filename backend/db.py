@@ -3753,6 +3753,27 @@ async def upsert_orchestrator_task(conn, data: dict) -> None:
     )
 
 
+async def find_recent_orchestrator_task_by_title(
+    conn, *, tenant_id: str, session_id: str, title: str, since: float,
+) -> dict | None:
+    """Cross-turn idempotency for chat-filed Stories (audit r2 codex#2).
+
+    Return the most recent orchestrator-filed row with the SAME exact title in
+    the SAME tenant + session filed at/after ``since`` (epoch seconds), else
+    None. Lets create_task return an already-filed ticket instead of creating a
+    duplicate when the user refreshes / double-submits / says "file that again"
+    within the window. Deliberately tight (exact title + same session) so it
+    never swallows a genuinely-distinct request.
+    """
+    row = await conn.fetchrow(
+        "SELECT ticket_key, browse_url, title FROM orchestrator_tasks "
+        "WHERE tenant_id=$1 AND session_id=$2 AND title=$3 AND filed_at >= $4 "
+        "ORDER BY filed_at DESC LIMIT 1",
+        tenant_id, session_id or "", title, float(since),
+    )
+    return dict(row) if row else None
+
+
 async def list_open_orchestrator_tasks(conn, *, limit: int = 200) -> list[dict]:
     """Return still-open chat-filed tickets for the delivery poller.
 

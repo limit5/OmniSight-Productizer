@@ -39,7 +39,10 @@ def test_bundle_includes_l3_recall_and_is_readonly_set():
 )
 def test_fail_open_without_pool(tool):
     # No initialised DB pool → get_pool() raises → tool must catch and return
-    # a friendly [SUPERVISOR] string, never propagate the exception.
+    # a friendly string, never propagate the exception. The unavailable path is
+    # a FAILURE, so it now carries the [FAILED] status token (audit r2 rank 9:
+    # the loop's telemetry/breaker classify by prefix, so a real failure must
+    # NOT masquerade as a [SUPERVISOR] success).
     out = asyncio.run(tool.ainvoke({}))
     assert isinstance(out, str)
-    assert out.startswith("[SUPERVISOR]")
+    assert out.startswith("[FAILED]") and "unavailable" in out

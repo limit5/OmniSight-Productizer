@@ -76,3 +76,63 @@ def test_unknown_character_rejected():
     out, labels = _run(None, character="ghost")
     assert out.startswith("[ERROR]") and "unknown character" in out
     assert labels is None
+
+
+# ── cross-turn idempotency (audit r2 codex#2) ─────────────────────────
+class _FakeConn:
+    pass
+
+
+class _FakePool:
+    def acquire(self):
+        class _Ctx:
+            async def __aenter__(self_):
+                return _FakeConn()
+            async def __aexit__(self_, *a):
+                return False
+        return _Ctx()
+
+
+def test_create_task_dedupes_same_title_same_session(monkeypatch):
+    """A refresh/double-submit in the same session within the window returns the
+    existing ticket instead of filing a duplicate — the adapter is NOT called."""
+    from backend import db as _db
+
+    created = {"count": 0}
+
+    class _NoCreateAdapter:
+        async def create_story(self, **kw):
+            created["count"] += 1
+            return _Ref()
+
+    monkeypatch.setattr(tools, "get_chat_context",
+                        lambda: {"session_id": "s1", "tenant_id": "t1", "user_id": "u1"})
+    monkeypatch.setattr(tools, "get_pool", lambda: _FakePool())
+    monkeypatch.setattr(ja, "build_default_jira_adapter", lambda: _NoCreateAdapter())
+
+    async def _fake_find(conn, *, tenant_id, session_id, title, since):
+        return {"ticket_key": "OP-DUP", "browse_url": "http://x/OP-DUP", "title": title}
+    monkeypatch.setattr(_db, "find_recent_orchestrator_task_by_title", _fake_find)
+
+    out = asyncio.run(tools.create_task.coroutine("Title", "why", "backend"))
+    assert out.startswith("[OK]") and "OP-DUP" in out and "duplicate" in out
+    assert created["count"] == 0        # never hit the JIRA create path
+
+
+def test_create_task_files_when_no_recent_duplicate(monkeypatch):
+    """No recent duplicate → normal create proceeds (dedup fails open too)."""
+    from backend import db as _db
+
+    ad = _CapturingAdapter()
+    monkeypatch.setattr(tools, "get_chat_context",
+                        lambda: {"session_id": "s2", "tenant_id": "t1", "user_id": "u1"})
+    monkeypatch.setattr(tools, "get_pool", lambda: _FakePool())
+    monkeypatch.setattr(ja, "build_default_jira_adapter", lambda: ad)
+
+    async def _none(conn, **kw):
+        return None
+    monkeypatch.setattr(_db, "find_recent_orchestrator_task_by_title", _none)
+
+    out = asyncio.run(tools.create_task.coroutine("Fresh", "why", "backend"))
+    assert "GATED" in out
+    assert ad.labels is not None        # the create actually happened

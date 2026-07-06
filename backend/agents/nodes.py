@@ -64,12 +64,34 @@ _WRITE_TOOL_NAMES = frozenset(
     t.name for t in (*ORCHESTRATION_TOOLS, *SORA_ACTION_TOOLS, *SORA_PLANNING_TOOLS)
 )
 
+def _is_tool_failure(out_str: str) -> bool:
+    """True if a tool result indicates failure — the SINGLE source of truth for
+    both the no-progress breaker and the telemetry classifier (audit r2 ranks
+    6+9). PURELY PREFIX-BASED so it can NEVER be fooled by free-text content
+    (codex cross-check: a ticket SUMMARY on line 1, e.g. "[SUPERVISOR] OP-1 —
+    fix connection refused / HTTP 503 bug", must NOT read as a failure).
+    Contract: WRITE tools return [OK]/[FAILED]; observe tools return
+    [SUPERVISOR] <key>…/[L3]… on SUCCESS and [FAILED]…/[SUPERVISOR] refused…
+    on failure. Success always has the KEY right after "[SUPERVISOR] " — never
+    the literal "refused" — so the prefix check below is collision-free.
+    """
+    head = (out_str or "").split("\n", 1)[0]
+    if head.startswith(("[ERROR]", "[FAILED]")):
+        return True
+    if head.startswith("[SUPERVISOR] refused"):
+        return True
+    return False
+
+
 # Hard bounds for the multi-round tool loop (metered API + write-capable
 # supervisor). Module-level so they're tunable AND patchable in tests.
 MAX_TOOL_CALLS_PER_ROUND = 8   # a real fan-out is ≤ a handful; refuse the rest
 TOOL_TIMEOUT_S = 30.0          # no single tool may hang the whole turn
 MAX_TOOL_OUTPUT_CHARS = 6000   # cap context fed back per tool result
-MAX_WRITE_CALLS_PER_TURN = 12  # total distinct WRITE invocations allowed / turn
+# Total distinct WRITE invocations allowed per turn. 24 comfortably covers a
+# realistic GATED decomposition (≤ ~10 Stories + their Blocks links) while still
+# bounding a runaway; a bigger epic spans multiple turns (audit r2 codex#6).
+MAX_WRITE_CALLS_PER_TURN = 24
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -269,9 +291,28 @@ _SUPERVISOR_VERB_RE = re.compile(
     r"transition|triage|investigate|why is|what happened|diagnose|resolve",
     re.IGNORECASE,
 )
-_FLEET_OBSERVE_RE = re.compile(
-    r"車隊|艦隊|fleet|配額|額度|quota|事故|incident|交付|deliver|"
-    r"runner|worker|agent.?狀態|agent.?status",
+# Fleet nouns alone are NOT enough (audit r2 codex#3): bare "runner"/"worker"
+# also appear in real BUILD commands ("fix the runner dispatch bug", "build the
+# worker pool test"). A fleet-OBSERVABILITY ask pairs a fleet noun with an
+# observe/question SHAPE and carries NO build/execute verb.
+_FLEET_NOUN_RE = re.compile(
+    r"車隊|艦隊|fleet|配額|額度|quota|事故|incident|交付|deliver|runner|worker|agent",
+    re.IGNORECASE,
+)
+_OBSERVE_SHAPE_RE = re.compile(
+    r"狀況|狀態|情況|怎樣|怎麼樣|如何|多少|幾[個筆條]|還?剩|摘要|清單|列表|"
+    r"看一下|看看|查一下|最近|目前|現在|健康|有沒有|哪些|多忙|忙不忙|"
+    r"status|health|summary|how\s+many|how\s+much|how'?s|how\s+are|list|show|"
+    r"recent|latest|current|overview|\bany\b|which|\?",
+    re.IGNORECASE,
+)
+# Specialist WORK verbs — if present, this is execution, NOT observation/rescue.
+_BUILD_EXECUTE_RE = re.compile(
+    r"實作|實現|建置|編譯|開發|重構|部署|寫(一?個)?(程式|測試|函式|code)?|"
+    r"修.{0,6}(bug|錯誤|問題)|加.{0,4}功能|新增.{0,4}功能|跑.{0,4}測試|"
+    r"\bbuild\b|\bcompile\b|\bimplement\b|\bdevelop\b|\brefactor\b|\bdeploy\b|"
+    r"run\s+(the\s+)?tests?|write\s+(a\s+|the\s+)?(test|code|function|driver)|"
+    r"fix\s+.*\bbug\b|add\s+.*\bfeature\b",
     re.IGNORECASE,
 )
 
@@ -279,16 +320,21 @@ _FLEET_OBSERVE_RE = re.compile(
 def _is_supervisor_intent(text: str) -> bool:
     """True when the user wants Sora to inspect/rescue a ticket or the fleet.
 
-    Two triggers: (a) an OP-NNN reference paired with a supervisor verb, or
-    (b) a fleet/quota/incident/delivery observability ask. Either pins the
-    turn to the conversational (own-tools) path. Over-matching is safe:
-    conversation_node only acts when Sora's model judges the ask concrete.
+    Two triggers, both pinning the turn to the conversational (own-tools) path:
+    (a) an OP-NNN reference paired with a supervisor verb, or (b) a genuine
+    fleet-observability ask — a fleet noun + an observe/question shape and NO
+    build/execute verb. (b) deliberately does NOT fire on bare "runner"/"worker"
+    inside a build command (audit r2 codex#3 regression fix). Over-matching is
+    still safe: conversation_node only acts when Sora judges the ask concrete;
+    anything narrowed out here simply falls through to the LLM router.
     """
     if not text:
         return False
     if _OP_TICKET_RE.search(text) and _SUPERVISOR_VERB_RE.search(text):
         return True
-    return bool(_FLEET_OBSERVE_RE.search(text))
+    if _BUILD_EXECUTE_RE.search(text):
+        return False  # a build/execute command is specialist work, never a fleet ask
+    return bool(_FLEET_NOUN_RE.search(text) and _OBSERVE_SHAPE_RE.search(text))
 
 
 # C2 audit (2026-04-19): before a previous-attempt error string is
@@ -1749,10 +1795,31 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
     convo = list(convo)
     write_cache: dict[str, str] = {}  # (name,args) -> result for WRITE tools this turn
     write_call_budget = MAX_WRITE_CALLS_PER_TURN  # total WRITE invocations / turn
+    failed_sigs: set[str] = set()  # (name,args) that FAILED this turn (audit r2 codex#4)
     rounds = 0
     while getattr(resp, "tool_calls", None) and rounds < max_rounds:
         rounds += 1
-        tool_calls = list(resp.tool_calls)
+        # No-progress breaker: if a whole round re-requests ONLY calls that
+        # already FAILED identically this turn, the model is stuck — stop paying
+        # LLM rounds (a failing read/write re-tried verbatim yields nothing). We
+        # snapshot the failed set at round start so a fresh/succeeding call still
+        # counts as progress (act↔verify re-reads after a state change survive).
+        prior_failed = set(failed_sigs)
+        made_progress = False
+        all_calls = list(resp.tool_calls)
+        # Same-round create+link is corrupting (audit r2 rank 4): create_task keys
+        # are assigned server-side, so a supervisor_link_blocks batched WITH a
+        # create_task this round can only run on model-INVENTED keys → a
+        # self-verified Blocks edge onto whatever real ticket that key happens to
+        # be. Defer links to the NEXT round. Computed over the FULL request set
+        # (BEFORE the per-round cap) so a create_task in the dropped tail still
+        # defers a link that survived into the kept slice (codex cross-check).
+        _all_names = [
+            (c.get("name") if isinstance(c, dict) else getattr(c, "name", ""))
+            for c in all_calls
+        ]
+        defer_links = "create_task" in _all_names
+        tool_calls = all_calls
         if len(tool_calls) > max_calls_per_round:
             # Runaway guard: keep the first N, refuse the rest with an error
             # ToolMessage so the model still gets a well-formed turn.
@@ -1780,16 +1847,36 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
                 out = f"[ERROR] Malformed tool call (name={name!r}); skipped."
                 emit_tool_progress(str(name) or "?", "error", out)
                 convo.append(ToolMessage(content=out, tool_call_id=cid))
+                made_progress = True  # rare; don't let a malformed call trip the breaker
+                continue
+            if name == "supervisor_link_blocks" and defer_links:
+                out = (
+                    "[ERROR] link deferred: a supervisor_link_blocks was requested in "
+                    "the SAME round as a create_task, so the target keys are not yet "
+                    "assigned (JIRA assigns them server-side). File the Stories this "
+                    "round, then wire links NEXT round using the real 'ticket=OP-NNN' "
+                    "keys from each create_task result."
+                )
+                emit_tool_progress(name, "error", out)
+                convo.append(ToolMessage(content=out, tool_call_id=cid))
+                made_progress = True  # this IS progress (the creates ran); don't break
                 continue
             try:
                 dedup_key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
             except (TypeError, ValueError):
                 dedup_key = f"{name}:{id(call)}"  # unserializable args → never dedup
+            if dedup_key not in prior_failed:
+                made_progress = True  # a new call, or re-running a call that DIDN'T fail
             is_write = name in _WRITE_TOOL_NAMES
             if is_write and dedup_key in write_cache:
                 out = write_cache[dedup_key]  # don't repeat an identical write this turn
             elif is_write and write_call_budget <= 0:
-                out = f"[ERROR] {name} skipped: write budget exhausted this turn."
+                out = (
+                    f"[FAILED] {name} skipped: this turn's write budget "
+                    f"({MAX_WRITE_CALLS_PER_TURN}) is used up. Do NOT keep retrying — "
+                    f"tell the operator what was done so far and that the remaining "
+                    f"items need a follow-up turn."
+                )
             else:
                 fn = TOOL_MAP.get(name)
                 if fn is None:
@@ -1810,9 +1897,19 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
             out_str = str(out)
             if len(out_str) > max_output_chars:
                 out_str = out_str[:max_output_chars] + "\n…[truncated]"
-            emit_tool_progress(
-                name, "done" if out_str.startswith("[OK]") else "error", out_str,
-            )
+            # ONE failure predicate drives BOTH the breaker and the telemetry
+            # (audit r2 ranks 6+9): a failing result is recorded so an identical
+            # re-request next round counts as no-progress; a NON-failing result
+            # clears any prior failure (recovery) AND counts as progress this
+            # round; and the UI/log classification matches (successful observe
+            # reads no longer surface as red errors).
+            is_failure = _is_tool_failure(out_str)
+            if is_failure:
+                failed_sigs.add(dedup_key)
+            else:
+                failed_sigs.discard(dedup_key)
+                made_progress = True
+            emit_tool_progress(name, "error" if is_failure else "done", out_str)
             convo.append(ToolMessage(content=out_str, tool_call_id=cid))
         for call in dropped:
             cid = (call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or "?"
@@ -1820,6 +1917,12 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
                 content=f"[ERROR] Too many tool calls this round (>{max_calls_per_round}); skipped.",
                 tool_call_id=cid,
             ))
+        if tool_calls and not made_progress:
+            # Whole round was re-runs of already-failed calls → the model is
+            # stuck; break to the forced tool-free answer instead of paying more
+            # rounds. (resp still holds tool_calls, so the post-loop guard fires.)
+            logger.debug("tool-round no-progress breaker: round %d all-failed-repeats", rounds)
+            break
         try:
             resp = (llm_tools or llm).invoke(convo)
         except Exception as llm_exc:  # noqa: BLE001
@@ -2003,14 +2106,22 @@ async def conversation_node(state: GraphState) -> dict:
         "so you act on real state, not a guess. You can chain tools in one turn "
         "— observe → act → re-check to verify — so gather what you need, act, "
         "then confirm before you reply.\n"
-        "- You can take SAFE, reversible rescue actions on a stuck ticket: "
-        "supervisor_requeue_ticket (clear assignee so the runner re-picks), "
-        "supervisor_strip_stale_labels (remove wedging claim:/stoploss/"
-        "runner-blocked labels), supervisor_transition_ticket (move status: "
-        "todo/in_progress/review/done), supervisor_set_labels (add/remove "
-        "labels), supervisor_comment_ticket (leave a note). "
-        "Each self-verifies and returns [OK ...verified] or [FAILED ...]; "
-        "trust that verdict — report [OK] as done, and if a tool returns "
+        "- You can take SAFE, reversible rescue actions on a stuck ticket. "
+        "For the common 'un-wedge a stuck ticket' job PREFER the one-shot "
+        "supervisor_rescue_ticket(ticket_key, comment_text='') — it inspects, "
+        "clears the wedge labels (runner-stoploss:circuit-tripped-* / revert-* + "
+        "stale claim:* fencing), clears the assignee, optionally comments, and "
+        "returns ONE verdict (cheaper + won't leave the ticket half-fixed). The "
+        "primitives still exist if you need one: supervisor_requeue_ticket (clear "
+        "assignee), supervisor_strip_stale_labels (clear the wedge labels), "
+        "supervisor_transition_ticket (move status: todo/in_progress/review/done), "
+        "supervisor_set_labels (add/remove labels), supervisor_comment_ticket "
+        "(leave a note). Each self-verifies and returns [OK ...verified] or "
+        "[FAILED ...]; trust that verdict — report [OK] as done. NOTE: a rescue "
+        "may report the un-wedge succeeded but the ticket is 'STILL NOT PICKABLE' "
+        "because of a gate the tool won't touch (wrong status, no class:* label = "
+        "a GATED Story a human must release, or tier:X) — relay that honestly and "
+        "name the next step, don't call it fully done. If a tool returns "
         "[FAILED], say so plainly, do NOT retry the same action more than "
         "once, and escalate to the operator after a second identical failure. "
         "After a successful verified rescue you may call save_solution to "
