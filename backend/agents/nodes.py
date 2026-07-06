@@ -1885,7 +1885,19 @@ async def conversation_node(state: GraphState) -> dict:
         tool_calls = getattr(resp, "tool_calls", None) or []
         if tool_calls:
             from langchain_core.messages import ToolMessage
-            emit_pipeline_phase("conversation", f"Filing {len(tool_calls)} task(s)")
+            # Accurate progress label: Sora now binds observe/action/planning
+            # tools too, not just create_task — "Filing N task(s)" was wrong for
+            # a fleet query. Say "Filing" only when a Story is actually filed.
+            _names = [
+                (c.get("name") if isinstance(c, dict) else getattr(c, "name", ""))
+                for c in tool_calls
+            ]
+            _phase = (
+                f"Filing {len(tool_calls)} task(s)"
+                if "create_task" in _names
+                else f"Running {len(tool_calls)} tool(s)"
+            )
+            emit_pipeline_phase("conversation", _phase)
             followup = [sys_prompt, *send_messages, resp]
             for call in tool_calls:
                 name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
