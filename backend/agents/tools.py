@@ -3100,6 +3100,64 @@ SORA_ACTION_TOOLS = [
 ]
 
 
+# ── Sora supervisor PLANNING (P4, supervisor roadmap) ──────────────────
+# Decomposition is persona-driven (Sora files N GATED Stories via create_task
+# per the epic-decomposition SOP granularity rules); the one WRITE primitive
+# planning needs is wiring the dependency graph between the filed Stories.
+
+
+@tool
+async def supervisor_link_blocks(blocker_key: str, blocked_key: str) -> str:
+    """(Sora supervisor / planning) Create a JIRA "Blocks" dependency: blocker_key
+    BLOCKS blocked_key (blocked_key waits for blocker_key). Self-verifying +
+    idempotent. Use to wire dependencies between decomposed Stories (schema-first
+    lands before its consumers, etc.).
+
+    Args:
+        blocker_key: the ticket that must land first (e.g. "OP-2540").
+        blocked_key: the ticket that waits (e.g. "OP-2541").
+    """
+    a = (blocker_key or "").strip().upper()
+    b = (blocked_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(a) or not _SUP_TICKET_RE.match(b):
+        return f"[SUPERVISOR] refused: both keys must be OP-NNN (got {blocker_key!r}, {blocked_key!r})."
+    if a == b:
+        return f"[SUPERVISOR] refused: a ticket cannot block itself ({a})."
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+
+        async def _linked() -> bool:
+            _st, body = await adapter._api("GET", f"/rest/api/2/issue/{b}?fields=issuelinks")
+            links = (body.get("fields") or {}).get("issuelinks") or [] if isinstance(body, dict) else []
+            for lk in links:
+                if (lk.get("type") or {}).get("name") != "Blocks":
+                    continue
+                if (lk.get("inwardIssue") or {}).get("key") == a:  # b is blocked BY a
+                    return True
+            return False
+
+        if await _linked():
+            return f"[OK] {a} already blocks {b} (verified, no-op)."
+        # inwardIssue = BLOCKER, outwardIssue = BLOCKED (SOP §Blocks links;
+        # this direction is a known trap — hence the verify below).
+        st, _ = await adapter._api("POST", "/rest/api/2/issueLink", {
+            "type": {"name": "Blocks"},
+            "inwardIssue": {"key": a},
+            "outwardIssue": {"key": b},
+        })
+        if not (200 <= st < 300):
+            return f"[FAILED] link {a}->{b}: issueLink POST returned HTTP {st}."
+        if await _linked():
+            return f"[OK] {a} now blocks {b} (verified)."
+        return f"[FAILED] {a}->{b}: link not present after POST (check direction)."
+    except Exception as exc:  # noqa: BLE001
+        return f"[FAILED] link {a}->{b}: {exc}"
+
+
+SORA_PLANNING_TOOLS = [supervisor_link_blocks]
+
+
 TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
 # Orchestration tools are the user-facing planner's lever to turn an
 # understood intent into real runner work. Deliberately NOT folded into
@@ -3113,7 +3171,7 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS + SUPERVISOR_OBSERVE_TOOLS + SORA_ACTION_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS + SUPERVISOR_OBSERVE_TOOLS + SORA_ACTION_TOOLS + SORA_PLANNING_TOOLS}
 
 _ARCHITECT_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS
 _DESIGN_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS

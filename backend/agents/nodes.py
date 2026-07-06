@@ -53,7 +53,7 @@ from typing import Any, Awaitable, Callable
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
-from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
+from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_PLANNING_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -1685,10 +1685,16 @@ async def conversation_node(state: GraphState) -> dict:
     _act_on = os.environ.get(
         "OMNISIGHT_ORCHESTRATOR_ACTION_TOOLS", "1",
     ).lower() not in ("0", "false", "no")
+    # P4: planning — decomposition is persona-driven (N GATED Stories via
+    # create_task); the one write primitive is wiring Blocks deps between them.
+    _plan_on = os.environ.get(
+        "OMNISIGHT_ORCHESTRATOR_PLANNING_TOOLS", "1",
+    ).lower() not in ("0", "false", "no")
     orch_tools = (
         list(ORCHESTRATION_TOOLS)
         + (list(SORA_SUPERVISOR_TOOLS) if _sup_on else [])
         + (list(SORA_ACTION_TOOLS) if _act_on else [])
+        + (list(SORA_PLANNING_TOOLS) if _plan_on else [])
     )
     llm_tools = _get_llm(
         bind_tools_for=None, model_name=effective_model,
@@ -1798,6 +1804,19 @@ async def conversation_node(state: GraphState) -> dict:
         "approval — never claim the work has started. Do not file before "
         "the user agrees on scope; for a quick one-off command (compile / "
         "test / deploy) you may instead suggest typing it directly.\n"
+        "- For a BIG or multi-part goal (an epic, a feature spanning several "
+        "files/areas, or 'build me X' that is really many deliverables), do "
+        "NOT file one giant vague Story. DECOMPOSE it: reason out the pieces, "
+        "then file MULTIPLE GATED Stories via create_task — one per coherent, "
+        "independently-testable, area-coherent, independently-revertable "
+        "deliverable, each with crisp acceptance criteria and a clear MUST-NOT "
+        "boundary. Land data-model/schema changes FIRST (disabled). Then wire "
+        "the dependency graph with supervisor_link_blocks(blocker, blocked) — "
+        "schema Story blocks its consumers. Report the whole set + that they "
+        "await the operator's release (the operator's review of the GATED set "
+        "IS the audit gate). Keep each Story worker-sized; if the "
+        "decomposition itself is huge, propose it in text and confirm before "
+        "filing.\n"
         "- Answer in the same language as the user's question. When the "
         "user writes in Chinese, ALWAYS reply in Traditional Chinese "
         "(繁體中文 / zh-Hant) — the platform's Chinese locale — never "
