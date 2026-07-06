@@ -53,7 +53,7 @@ from typing import Any, Awaitable, Callable
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
-from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, TOOL_MAP, set_active_workspace
+from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -1671,13 +1671,19 @@ async def conversation_node(state: GraphState) -> dict:
     llm = _get_llm(bind_tools_for=None, model_name=effective_model)
     # Gap-② routing fix (2026-06-30): the conversational path is where the
     # user actually talks to the orchestrator, so it — not just the
-    # specialist task nodes — must be able to FILE work. Bind just
-    # ``create_task`` here (the gated Story filer); everything else stays
-    # tool-free. ``llm`` (no tools) is still used for the offline fallback
-    # and for summarising a tool result without re-triggering the tool.
+    # specialist task nodes — must be able to FILE work. Bind ``create_task``
+    # (the gated Story filer) + the P1 supervisor observe/recall tools
+    # (read-only: fleet quota / incidents / deliveries + L3 past-solution
+    # recall). ``llm`` (no tools) still drives the offline fallback and the
+    # single-round tool-result summary. Supervisor tools default-on; the
+    # env kill-switch keeps Sora chat-only if ops needs to.
+    _sup_on = os.environ.get(
+        "OMNISIGHT_ORCHESTRATOR_SUPERVISOR_TOOLS", "1",
+    ).lower() not in ("0", "false", "no")
+    orch_tools = list(ORCHESTRATION_TOOLS) + (list(SORA_SUPERVISOR_TOOLS) if _sup_on else [])
     llm_tools = _get_llm(
         bind_tools_for=None, model_name=effective_model,
-        extra_tools=ORCHESTRATION_TOOLS,
+        extra_tools=orch_tools,
     ) if llm else None
 
     # Retrieve relevant docs (classification-gated) — runs even without
@@ -1751,6 +1757,14 @@ async def conversation_node(state: GraphState) -> dict:
         "- If retrieved docs don't answer the question, say so and "
         "suggest where the operator might look (without inventing a "
         "doc path).\n"
+        "- You can SEE the fleet (read-only): call supervisor_quota_status "
+        "(provider quota / circuit health), supervisor_recent_incidents "
+        "(recent runner failures by class), or supervisor_delivery_summary "
+        "(shipped deliveries by brain) when the operator asks about fleet "
+        "health, throughput, failures, or capacity. And call "
+        "search_past_solutions to recall how a similar problem was solved "
+        "before. Use them to ground your answer in real state — then reply "
+        "in natural language; never dump raw tool output.\n"
         "- You are the user's orchestrator. When the user wants real work "
         "done (build / fix / implement / a tool or feature) AND has "
         "confirmed the scope, CALL the create_task tool ONCE to file it as "

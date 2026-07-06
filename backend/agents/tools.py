@@ -2885,6 +2885,105 @@ FILE_TOOLS = [read_file, write_file, list_directory, read_yaml, write_yaml, sear
 GIT_TOOLS = [git_status, git_log, git_diff, git_diff_staged, git_branch, git_add, git_commit, git_checkout_branch, git_push, git_remote_list, create_pr, git_add_remote]
 BASH_TOOLS = [run_bash]
 REVIEW_TOOLS = [gerrit_get_diff, gerrit_post_comment, gerrit_submit_review]
+# ── Sora supervisor observability (P1, docs/design/rpg/sora-supervisor-roadmap.md) ──
+# Read-only "sight" tools bound to the orchestrator chat so Sora can see fleet
+# health in-conversation. All fail-open (absent telemetry → a friendly note,
+# never an exception) and touch NO worker/prod state.
+
+
+@tool
+async def supervisor_quota_status() -> str:
+    """(Sora supervisor) Provider LLM quota + circuit-breaker health. Read-only.
+
+    Returns each provider's 5h / weekly token counters and circuit state
+    (closed=healthy, open=tripped). Use when asked about provider capacity,
+    rate limits, or "are we throttled".
+    """
+    try:
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT provider, rolling_5h_tokens, weekly_tokens, circuit_state "
+                "FROM provider_quota_state ORDER BY provider"
+            )
+    except Exception as exc:  # noqa: BLE001
+        return f"[SUPERVISOR] quota state unavailable: {exc}"
+    if not rows:
+        return "[SUPERVISOR] no provider quota state recorded."
+    lines = ["[SUPERVISOR] provider quota / circuit:"]
+    for r in rows:
+        lines.append(
+            f"  {r['provider']}: circuit={r['circuit_state']} "
+            f"5h={r['rolling_5h_tokens']} weekly={r['weekly_tokens']}"
+        )
+    return "\n".join(lines)
+
+
+@tool
+async def supervisor_recent_incidents(days: int = 7) -> str:
+    """(Sora supervisor) Recent runner incidents grouped by failure class. Read-only.
+
+    Args:
+        days: Lookback window in days (default 7).
+    Use when asked what's failing / breaking, or to diagnose fleet health.
+    """
+    try:
+        d = max(1, min(int(days), 90))
+        async with get_pool().acquire() as conn:
+            total = await conn.fetchval(
+                "SELECT count(*) FROM runner_incidents "
+                "WHERE created_at > now() - make_interval(days => $1)", d,
+            )
+            rows = await conn.fetch(
+                "SELECT failure_class, count(*) AS n FROM runner_incidents "
+                "WHERE created_at > now() - make_interval(days => $1) "
+                "GROUP BY failure_class ORDER BY n DESC LIMIT 8", d,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return f"[SUPERVISOR] incident data unavailable: {exc}"
+    if not total:
+        return f"[SUPERVISOR] no runner incidents in the last {d} day(s)."
+    lines = [f"[SUPERVISOR] {total} incident(s) in the last {d} day(s):"]
+    for r in rows:
+        lines.append(f"  {r['failure_class'] or 'UNKNOWN'}: {r['n']}")
+    return "\n".join(lines)
+
+
+@tool
+async def supervisor_delivery_summary() -> str:
+    """(Sora supervisor) Successful runner deliveries by brain + latest. Read-only.
+
+    Use when asked how much the team has shipped, throughput, or per-brain
+    delivery counts.
+    """
+    try:
+        async with get_pool().acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT agent_class, count(*) AS n FROM runner_metrics "
+                "WHERE outcome = 'success' GROUP BY agent_class ORDER BY n DESC"
+            )
+            latest = await conn.fetchrow(
+                "SELECT ticket_key, completed_at FROM runner_metrics "
+                "WHERE outcome = 'success' ORDER BY completed_at DESC NULLS LAST LIMIT 1"
+            )
+    except Exception as exc:  # noqa: BLE001
+        return f"[SUPERVISOR] delivery data unavailable: {exc}"
+    total = sum(int(r["n"]) for r in rows)
+    if not total:
+        return "[SUPERVISOR] no successful deliveries recorded yet."
+    parts = ", ".join(f"{r['agent_class']}={r['n']}" for r in rows)
+    tail = f" · latest {latest['ticket_key']}" if latest and latest["ticket_key"] else ""
+    return f"[SUPERVISOR] {total} successful deliveries ({parts}){tail}"
+
+
+# Bound to Sora's chat (nodes.conversation_node): read-only observe + L3 recall.
+SUPERVISOR_OBSERVE_TOOLS = [
+    supervisor_quota_status,
+    supervisor_recent_incidents,
+    supervisor_delivery_summary,
+]
+SORA_SUPERVISOR_TOOLS = SUPERVISOR_OBSERVE_TOOLS + [search_past_solutions]
+
+
 TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
 # Orchestration tools are the user-facing planner's lever to turn an
 # understood intent into real runner work. Deliberately NOT folded into
@@ -2898,7 +2997,7 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS + SUPERVISOR_OBSERVE_TOOLS}
 
 _ARCHITECT_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS
 _DESIGN_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS
