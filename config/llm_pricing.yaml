@@ -30,10 +30,13 @@
 providers:
   # Anthropic — https://www.anthropic.com/pricing
   anthropic:
+    claude-fable-5:             {input:  5.00, output: 25.00}  # ⚠ PROXY (Opus tier) — NO official price yet; confirm before billing
+    claude-opus-4-8:            {input:  5.00, output: 25.00}  # ⚠ PROXY from Opus 4.7 — confirm official 4.8 price
     claude-opus-4-7:            {input:  5.00, output: 25.00}  # Opus 4.7 (released 2026-04-15)
     claude-opus-4-20250514:     {input: 15.00, output: 75.00}  # Opus 4.0 legacy
+    claude-sonnet-4-6:          {input:  3.00, output: 15.00}  # Sonnet 4.6 (Sora default / router medium)
     claude-sonnet-4-20250514:   {input:  3.00, output: 15.00}  # Sonnet 4
-    claude-haiku-4-5:           {input:  1.00, output:  5.00}  # Haiku 4.5
+    claude-haiku-4-5:           {input:  1.00, output:  5.00}  # Haiku 4.5 (Sora chat / router small)
     _default:                   {input:  3.00, output: 15.00}  # assume Sonnet tier
 
   # OpenAI — https://openai.com/api/pricing/

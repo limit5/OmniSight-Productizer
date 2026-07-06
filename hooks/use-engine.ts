@@ -1092,7 +1092,7 @@ export function useEngine() {
 
   // ── Chat / Command ──
 
-  const sendCommand = useCallback(async (command: string) => {
+  const sendCommand = useCallback(async (command: string, model?: string) => {
     // UI/UX #1: serialise sends. A reply is produced by the FULL graph
     // (routing → LLM → tools) BEFORE the first streamed token, a 10–60s
     // window. Without this lock a user firing off messages spawns parallel
@@ -1120,7 +1120,7 @@ export function useEngine() {
           setIsStreaming(true)
           // Use streaming endpoint
           let accumulated = ""
-          for await (const chunk of api.streamChat(command)) {
+          for await (const chunk of api.streamChat(command, model)) {
             if (chunk.event === "token") {
               const { token } = chunk.data as { token: string }
               accumulated += (accumulated ? " " : "") + token
@@ -1152,7 +1152,7 @@ export function useEngine() {
 
         // Fallback to sync chat
         try {
-          const res = await api.sendChat(command)
+          const res = await api.sendChat(command, model)
           setMessages(prev => [...prev, mapChatMessage(res.message)])
           return
         } catch { /* fall through to offline */ }

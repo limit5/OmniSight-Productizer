@@ -231,6 +231,10 @@ class OrchestratorMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str
+    # P2 (supervisor roadmap): optional UI-pinned model for the orchestrator
+    # turn (e.g. "anthropic:claude-opus-4-8"). Empty / omitted = "Auto" →
+    # backend auto-routes by prompt complexity.
+    model: str = ""
 
 
 class ChatResponse(BaseModel):

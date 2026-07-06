@@ -1692,10 +1692,12 @@ export interface ApiChatMessage {
   } | null
 }
 
-export async function sendChat(message: string) {
+export async function sendChat(message: string, model?: string) {
   return request<{ message: ApiChatMessage }>("/chat", {
     method: "POST",
-    body: JSON.stringify({ message }),
+    // `model` pins which LLM the orchestrator uses; "" / omitted = "Auto"
+    // (backend auto-routes by complexity). See ChatRequest.model contract.
+    body: JSON.stringify({ message, ...(model ? { model } : {}) }),
   })
 }
 
@@ -1703,7 +1705,8 @@ export async function sendChat(message: string) {
  * SSE streaming chat — yields tokens as they arrive.
  */
 export async function* streamChat(
-  message: string
+  message: string,
+  model?: string
 ): AsyncGenerator<{ event: string; data: unknown }> {
   const res = await fetch(`${API_V1}/chat/stream`, {
     method: "POST",
@@ -1716,7 +1719,8 @@ export async function* streamChat(
       "X-CSRF-Token": readCookie("omnisight_csrf") ?? "",
       ...getFrontendCompatHeaders(),
     },
-    body: JSON.stringify({ message }),
+    // `model` pins the LLM; "" / omitted = "Auto" (backend auto-routes).
+    body: JSON.stringify({ message, ...(model ? { model } : {}) }),
   })
   if (!res.ok || !res.body) throw new Error(`Stream error: ${res.status}`)
 

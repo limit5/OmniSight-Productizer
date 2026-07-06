@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -1587,6 +1588,41 @@ def _build_state_summary() -> str:
         return "System state unavailable."
 
 
+# Sora（會長 / orchestrator）model auto-routing — P2 of the supervisor roadmap
+# (docs/design/rpg/sora-supervisor-roadmap.md). Maps the edit-complexity
+# classifier's bucket onto Sora's OWN model tiers (distinct from the worker
+# edit-router targets): cheap/fast Haiku for chat, Sonnet default, Opus for
+# heavy planning/refactor. Fable 5 is reserved for manual pin (the top flagship).
+_SORA_ROUTE_MODEL: dict[str, str] = {
+    "small": "anthropic:claude-haiku-4-5",
+    "medium": "anthropic:claude-sonnet-4-6",
+    "large": "anthropic:claude-opus-4-8",
+}
+
+
+def _resolve_orchestrator_model(explicit_model: str, last_user_text: str) -> tuple[str, str]:
+    """Return ``(effective_model_name, reason)`` for the orchestrator turn.
+
+    Precedence: a non-empty, non-"auto" ``explicit_model`` (the operator's
+    UI pin) ALWAYS wins. Otherwise, when auto-route is enabled
+    (``OMNISIGHT_ORCHESTRATOR_AUTO_ROUTE`` != "0"), classify the user's
+    message and map the bucket → Sora's model tier. Fail-open: any error
+    falls back to the empty spec so ``_get_llm`` uses the configured default.
+    """
+    pin = (explicit_model or "").strip()
+    if pin and pin.lower() != "auto":
+        return pin, "manual_override"
+    if os.environ.get("OMNISIGHT_ORCHESTRATOR_AUTO_ROUTE", "1").lower() in ("0", "false", "no"):
+        return "", "auto_route_disabled"
+    try:
+        from backend.edit_complexity_router import classify_prompt
+        bucket, _signals, _reasons = classify_prompt(last_user_text or "")
+        return _SORA_ROUTE_MODEL.get(bucket, _SORA_ROUTE_MODEL["medium"]), f"auto:{bucket}"
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("orchestrator auto-route skipped (%s)", exc)
+        return "", "auto_route_error"
+
+
 async def conversation_node(state: GraphState) -> dict:
     """Answer general questions without tool execution.
 
@@ -1611,22 +1647,11 @@ async def conversation_node(state: GraphState) -> dict:
          etc.) is replaced with ``[REDACTED:<kind>]``.
     """
     state_summary = _build_state_summary()
-    llm = _get_llm(bind_tools_for=None, model_name=state.model_name)
-    # Gap-② routing fix (2026-06-30): the conversational path is where the
-    # user actually talks to the orchestrator, so it — not just the
-    # specialist task nodes — must be able to FILE work. Bind just
-    # ``create_task`` here (the gated Story filer); everything else stays
-    # tool-free. ``llm`` (no tools) is still used for the offline fallback
-    # and for summarising a tool result without re-triggering the tool.
-    llm_tools = _get_llm(
-        bind_tools_for=None, model_name=state.model_name,
-        extra_tools=ORCHESTRATION_TOOLS,
-    ) if llm else None
 
     # R20 Phase 0: pull last user message (if any) for RAG + injection
-    # detection. If there's no user message, skip retrieval and run
-    # plain — the coach path can call this with only an AI/system
-    # message and we don't want to retrieve on it.
+    # detection AND model auto-routing (needs the text before we build the
+    # LLM). If there's no user message, skip retrieval and run plain — the
+    # coach path can call this with only an AI/system message.
     last_user_text = ""
     for msg in reversed(state.messages):
         # Use class name string check to avoid importing all message types.
@@ -1634,6 +1659,26 @@ async def conversation_node(state: GraphState) -> dict:
             last_user_text = (msg.content or "") if hasattr(msg, "content") else ""
             break
     last_user_text = str(last_user_text) if last_user_text else ""
+
+    # P2 (supervisor roadmap): pick Sora's model. A UI-pinned model wins;
+    # otherwise auto-route by prompt complexity (Haiku=chat / Sonnet=default /
+    # Opus=heavy planning). Empty spec → ``_get_llm`` uses the configured default.
+    effective_model, route_reason = _resolve_orchestrator_model(
+        state.model_name, last_user_text,
+    )
+    logger.debug("orchestrator model: %s (%s)", effective_model or "<default>", route_reason)
+
+    llm = _get_llm(bind_tools_for=None, model_name=effective_model)
+    # Gap-② routing fix (2026-06-30): the conversational path is where the
+    # user actually talks to the orchestrator, so it — not just the
+    # specialist task nodes — must be able to FILE work. Bind just
+    # ``create_task`` here (the gated Story filer); everything else stays
+    # tool-free. ``llm`` (no tools) is still used for the offline fallback
+    # and for summarising a tool result without re-triggering the tool.
+    llm_tools = _get_llm(
+        bind_tools_for=None, model_name=effective_model,
+        extra_tools=ORCHESTRATION_TOOLS,
+    ) if llm else None
 
     # Retrieve relevant docs (classification-gated) — runs even without
     # an LLM so the offline fallback can still cite something useful.

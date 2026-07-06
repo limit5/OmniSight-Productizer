@@ -384,7 +384,7 @@ export default function Home() {
   // handleAddAgent → engine.addAgent() → backend API for consistency.
 
   // Command handler — sends to backend via engine
-  const handleCommand = useCallback(async (command: string) => {
+  const handleCommand = useCallback(async (command: string, model?: string) => {
     const cmd = command.toLowerCase().trim()
 
     // Local-only commands that don't need the backend
@@ -397,8 +397,9 @@ export default function Home() {
       return
     }
 
-    // Send everything else to the backend orchestrator
-    await engine.sendCommand(command)
+    // Send everything else to the backend orchestrator. `model` pins the LLM
+    // ("" / undefined = Auto → backend auto-routes by complexity).
+    await engine.sendCommand(command, model)
   }, [engine])
 
   const handleSpecChange = useCallback(async (path: string[], newValue: string | number | boolean) => {

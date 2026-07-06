@@ -32,6 +32,18 @@ import { TurnTimeline } from "./turn-timeline"
 import { PromptVersionDrawer } from "./prompt-version-drawer"
 import { listEffectiveSkills, type EffectiveSkill } from "@/lib/api"
 
+// Model selector (RPG-UX 2026-07-06): lets the operator pin which LLM Sora
+// uses, or leave it on "Auto" ("" → backend auto-routes by complexity). The
+// value is threaded into every chat send as ChatRequest.model.
+const SORA_MODEL_STORAGE_KEY = "omnisight.sora.model"
+const SORA_MODEL_OPTIONS: { label: string; value: string }[] = [
+  { label: "Auto", value: "" },
+  { label: "Haiku 4.5", value: "anthropic:claude-haiku-4-5" },
+  { label: "Sonnet 4.6", value: "anthropic:claude-sonnet-4-6" },
+  { label: "Opus 4.8", value: "anthropic:claude-opus-4-8" },
+  { label: "Fable 5", value: "anthropic:claude-fable-5" },
+]
+
 // Orchestrator message types
 export interface OrchestratorMessage {
   id: string
@@ -88,7 +100,7 @@ interface OrchestratorAIProps {
   onUpdateAgentStatus?: (agentId: string, status: AgentStatus) => void
   onCompleteTask?: (taskId: string) => void
   externalMessages?: OrchestratorMessage[]
-  onSendCommand?: (command: string) => void
+  onSendCommand?: (command: string, model?: string) => void
   /** UI/UX #1: true while the orchestrator pipeline is running (send →
    *  first token). Drives the "thinking…" bubble + disables the input so
    *  rapid re-sends can't spawn colliding parallel pipelines. */
@@ -222,7 +234,22 @@ export function OrchestratorAI({
   // button. Drawer is portal-positioned (fixed inset-0), so it overlays
   // the rest of the panel without disturbing scroll state.
   const [showPromptDrawer, setShowPromptDrawer] = useState(false)
-  
+  // Model pin (default "" = Auto). Initialised from localStorage on mount
+  // (client-only) so the operator's choice survives reloads.
+  const [selectedModel, setSelectedModel] = useState("")
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    try {
+      const stored = window.localStorage.getItem(SORA_MODEL_STORAGE_KEY)
+      if (stored !== null) setSelectedModel(stored)
+    } catch { /* localStorage unavailable — keep Auto */ }
+  }, [])
+  const handleModelChange = useCallback((value: string) => {
+    setSelectedModel(value)
+    if (typeof window === "undefined") return
+    try { window.localStorage.setItem(SORA_MODEL_STORAGE_KEY, value) } catch { /* ignore */ }
+  }, [])
+
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -470,7 +497,7 @@ export function OrchestratorAI({
     }
     // All / commands and everything else → send to backend (slash handler or LLM)
     else if (onSendCommand) {
-      onSendCommand(inputValue)
+      onSendCommand(inputValue, selectedModel)
     } else {
       processCommand(inputValue)
     }
@@ -559,13 +586,31 @@ export function OrchestratorAI({
             <span className="font-mono text-[9px] text-[var(--muted-foreground)] shrink-0">そら</span>
             <PanelHelp doc="panels-overview" />
           </div>
-          <button
-            onClick={(e) => { e.stopPropagation(); setIsAnalyzing(true); generateSuggestions(); onRefresh?.(); setTimeout(() => setIsAnalyzing(false), 1000); }}
-            className={`relative z-20 p-1.5 rounded transition-colors cursor-pointer shrink-0 ${isAnalyzing ? "bg-[var(--artifact-purple)]/40 text-[var(--artifact-purple)]" : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--artifact-purple)]"}`}
-            title="Analyze and suggest"
-          >
-            <RefreshCw size={12} className={isAnalyzing ? "animate-spin" : ""} />
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {/* Model pin — "" (Auto) lets the backend auto-route by complexity;
+                a non-empty value forces that LLM for every chat send. */}
+            <select
+              value={selectedModel}
+              onChange={(e) => handleModelChange(e.target.value)}
+              onClick={(e) => e.stopPropagation()}
+              aria-label="Sora model"
+              title="Pin the LLM Sora uses (Auto = backend routes by complexity)"
+              className="relative z-20 font-mono text-[10px] rounded border border-[var(--border)] bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--neural-blue)] px-1 py-0.5 cursor-pointer max-w-[7rem] focus:outline-none focus:border-[var(--neural-blue)]"
+            >
+              {SORA_MODEL_OPTIONS.map(opt => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={(e) => { e.stopPropagation(); setIsAnalyzing(true); generateSuggestions(); onRefresh?.(); setTimeout(() => setIsAnalyzing(false), 1000); }}
+              className={`relative z-20 p-1.5 rounded transition-colors cursor-pointer shrink-0 ${isAnalyzing ? "bg-[var(--artifact-purple)]/40 text-[var(--artifact-purple)]" : "bg-[var(--secondary)] text-[var(--muted-foreground)] hover:text-[var(--artifact-purple)]"}`}
+              title="Analyze and suggest"
+            >
+              <RefreshCw size={12} className={isAnalyzing ? "animate-spin" : ""} />
+            </button>
+          </div>
         </div>
         <p className="font-mono text-[10px] text-[var(--muted-foreground)] mt-0.5">
           Central AI Coordinator

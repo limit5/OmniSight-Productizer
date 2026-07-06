@@ -138,12 +138,19 @@ def _bind_chat_context(user_id: str, session_id: str) -> None:
 
 async def _run_pipeline(
     user_msg: str, prior_messages: list[tuple[str, str]] | None = None,
+    model_name: str = "",
 ) -> OrchestratorMessage:
-    """Run the LangGraph pipeline. Emits real-time events via the event bus."""
+    """Run the LangGraph pipeline. Emits real-time events via the event bus.
+
+    ``model_name`` (P2) is the operator's UI-pinned model for this turn;
+    empty = auto-route (decided inside the conversation node).
+    """
     try:
         emit_pipeline_phase("start", f"Processing: {user_msg[:80]}")
         add_system_log(f"Command received: {user_msg[:60]}", "info")
-        result = await run_graph(user_msg, prior_messages=prior_messages)
+        result = await run_graph(
+            user_msg, prior_messages=prior_messages, model_name=model_name,
+        )
         add_system_log(f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s)", "info")
         emit_pipeline_phase("complete", f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s) used")
         suggestion = _build_suggestion(result)
@@ -516,7 +523,7 @@ async def chat(
     if slash_reply:
         await _persist_and_emit(conn, slash_reply, user_id=user.id, session_id=session_id)
         return ChatResponse(message=slash_reply)
-    reply = await _run_pipeline(body.message, prior_messages=prior)
+    reply = await _run_pipeline(body.message, prior_messages=prior, model_name=body.model)
     await _persist_and_emit(conn, reply, user_id=user.id, session_id=session_id)
     return ChatResponse(message=reply)
 
@@ -546,7 +553,7 @@ async def chat_stream(
     _bind_chat_context(user.id, session_id)
     # Slash command interception
     slash_reply = await _try_slash_command(conn, body.message)
-    reply = slash_reply if slash_reply else await _run_pipeline(body.message, prior_messages=prior)
+    reply = slash_reply if slash_reply else await _run_pipeline(body.message, prior_messages=prior, model_name=body.model)
 
     user_msg = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",

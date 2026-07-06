@@ -23,6 +23,8 @@
 anthropic:
   # Claude 4 family — 1M context window (Opus 4.7 released 2026-04-15,
   # Sonnet 4.6 / Haiku 4.5 share the 1M tier).
+  claude-fable-5: 1000000        # ⚠ assumed 1M — confirm official
+  claude-opus-4-8: 1000000       # ⚠ assumed 1M (same as 4.7) — confirm official
   claude-opus-4-7: 1000000
   claude-sonnet-4-6: 1000000
   claude-haiku-4-5: 1000000
