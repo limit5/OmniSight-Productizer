@@ -3773,6 +3773,132 @@ async def supervisor_link_blocks(blocker_key: str, blocked_key: str) -> str:
 SORA_PLANNING_TOOLS = [supervisor_link_blocks]
 
 
+# ── Sora P5: propose-and-approve gate for DANGEROUS actions ────────────
+# Sora can only PROPOSE (deploy / promote / restart / rollback) — a proposal is
+# persisted as 'pending' and a HUMAN must approve before anything runs, and
+# execution always goes through the existing reversible machinery (release-train
+# / systemctl), never raw shell. These tools NEVER execute. The execution path is
+# a separate, operator-gated, supervised step. Kept behind
+# OMNISIGHT_ORCHESTRATOR_P5_PROPOSE (default on — proposing is harmless: it only
+# files a record a human must then act on).
+
+_P5_ACTION_KINDS: dict[str, tuple[str, str]] = {
+    # kind: (preview template hint, blast-radius)
+    "deploy": (
+        "run the GATED release-train to deploy the given tag/digest to prod "
+        "(candidate → staging → canary → promote → zero-downtime rolling deploy)",
+        "prod backend+frontend, zero-downtime rolling; REVERSIBLE by redeploying "
+        "the previous validated digest",
+    ),
+    "promote": (
+        "promote a validated staging bundle to a release tag (cosign-signed); "
+        "registry retag only — no prod change until a subsequent deploy",
+        "registry tag only; no live prod impact on its own",
+    ),
+    "restart": (
+        "restart a systemd service via `systemctl --user restart <service>`",
+        "the named service only; a critical service (backend/caddy) means a brief "
+        "disruption — a non-critical one (slo-monitor, staging) is low-impact",
+    ),
+    "rollback": (
+        "redeploy the PREVIOUS validated prod image digest (RT-20 image-tag-only "
+        "rollback)",
+        "prod rolling redeploy back to a known-good digest; REVERSIBLE",
+    ),
+}
+
+
+@tool
+async def propose_action(action_kind: str, params_json: str = "{}", rationale: str = "") -> str:
+    """(Sora P5) PROPOSE a dangerous operation for HUMAN approval — deploy /
+    promote / restart / rollback. This does NOT execute anything: it files a
+    pending proposal (with a preview + blast-radius) that the operator must
+    approve; only then does it run, and only through the existing reversible
+    release-train / systemctl machinery. Use when the operator asks you to
+    deploy/restart/etc. — you PREPARE it, they approve it. NEVER claim the action
+    ran; say it's filed and awaiting approval.
+
+    Args:
+        action_kind: one of deploy / promote / restart / rollback.
+        params_json: JSON string of specifics, e.g. '{"tag":"v0.7.34"}' (deploy),
+            '{"service":"omnisight-slo-monitor"}' (restart), '{"to_tag":"v0.7.33"}'
+            (rollback). Keep it minimal and concrete.
+        rationale: one line on WHY (shown to the operator on the approval card).
+    """
+    import json
+    kind = (action_kind or "").strip().lower()
+    if kind not in _P5_ACTION_KINDS:
+        return (
+            f"[SUPERVISOR] refused: unknown action_kind {action_kind!r}; "
+            f"allowed: {sorted(_P5_ACTION_KINDS)}."
+        )
+    try:
+        params = json.loads(params_json) if params_json else {}
+        if not isinstance(params, dict):
+            return "[SUPERVISOR] refused: params_json must be a JSON object."
+    except (ValueError, TypeError):
+        return f"[SUPERVISOR] refused: params_json is not valid JSON: {params_json!r}"
+
+    preview_hint, blast = _P5_ACTION_KINDS[kind]
+    # a compact, human-readable title + preview for the approval card
+    _p = ", ".join(f"{k}={v}" for k, v in params.items()) or "(no params)"
+    title = f"{kind}: {_p}"
+    preview = f"On approval, Sora will {preview_hint}. Params: {_p}."
+    if rationale.strip():
+        preview += f"\nWhy: {rationale.strip()}"
+
+    try:
+        import time as _t
+        import uuid as _uuid
+        from backend import db as _db
+        ctx = get_chat_context() or {}
+        pid = f"pa-{_uuid.uuid4().hex[:12]}"
+        async with get_pool().acquire() as conn:
+            await _db.insert_proposed_action(conn, {
+                "id": pid,
+                "tenant_id": ctx.get("tenant_id", ""),
+                "user_id": ctx.get("user_id", ""),
+                "session_id": ctx.get("session_id", ""),
+                "action_kind": kind,
+                "params": json.dumps(params, sort_keys=True),
+                "title": title,
+                "preview": preview,
+                "blast_radius": blast,
+                "proposed_by": "sora",
+                "proposed_at": _t.time(),
+            })
+        return (
+            f"[OK] Proposal filed (id={pid}) — AWAITING OPERATOR APPROVAL. "
+            f"Nothing has been executed.\n  action: {title}\n  blast radius: {blast}\n"
+            f"  Tell the operator this is proposed, NOT done; it runs only after "
+            f"they approve it."
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"[FAILED] could not file the proposal: {exc}"
+
+
+@tool
+async def list_pending_actions() -> str:
+    """(Sora P5) READ-ONLY: list the dangerous-action proposals still AWAITING
+    operator approval (deploy/promote/restart/rollback Sora has proposed). Pure
+    read — no side effects."""
+    try:
+        from backend import db as _db
+        async with get_pool().acquire() as conn:
+            rows = await _db.list_proposed_actions(conn, status="pending", limit=25)
+        if not rows:
+            return "[SUPERVISOR] no pending action proposals."
+        lines = [f"[SUPERVISOR] {len(rows)} pending proposal(s) awaiting approval:"]
+        for r in rows:
+            lines.append(f"  • {r.get('id')} — {r.get('title')} (by {r.get('proposed_by')})")
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        return f"[FAILED] pending-actions list unavailable: {exc}"
+
+
+SORA_P5_PROPOSE_TOOLS = [propose_action, list_pending_actions]
+
+
 TASK_TOOLS = [get_next_task, update_task_status, add_task_comment]
 # Orchestration tools are the user-facing planner's lever to turn an
 # understood intent into real runner work. Deliberately NOT folded into
@@ -3786,7 +3912,7 @@ SIMULATION_TOOLS = [run_simulation]
 ALL_TOOLS = FILE_TOOLS + GIT_TOOLS + BASH_TOOLS + TASK_TOOLS
 
 # Complete registry of every tool for executor lookup (must include ALL tool categories)
-TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS + SUPERVISOR_OBSERVE_TOOLS + SORA_ACTION_TOOLS + SORA_PLANNING_TOOLS}
+TOOL_MAP = {t.name: t for t in ALL_TOOLS + ORCHESTRATION_TOOLS + REVIEW_TOOLS + REPORT_TOOLS + SIMULATION_TOOLS + PLATFORM_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + DEPLOY_TOOLS + ARTIFACT_TOOLS + MCP_TOOLS + WEB_SEARCH_TOOLS + IMAGE_TOOLS + SUPERVISOR_OBSERVE_TOOLS + SORA_ACTION_TOOLS + SORA_PLANNING_TOOLS + SORA_P5_PROPOSE_TOOLS}
 
 _ARCHITECT_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS + WEB_SEARCH_TOOLS
 _DESIGN_TOOLS = ALL_TOOLS + MEMORY_TOOLS + EPISODIC_TOOLS

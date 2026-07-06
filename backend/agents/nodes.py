@@ -54,7 +54,7 @@ from typing import Any, Awaitable, Callable
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
-from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_PLANNING_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
+from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_P5_PROPOSE_TOOLS, SORA_PLANNING_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
 
 # Audit-hardening (OP-2530): the set of Sora tools with SIDE EFFECTS — deduped
 # per-turn in _run_tool_rounds so an identical write can't double-fire or burn
@@ -62,7 +62,7 @@ from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, 
 # so the act↔verify pattern keeps getting fresh reads.
 _WRITE_TOOL_NAMES = frozenset(
     t.name for t in (*ORCHESTRATION_TOOLS, *SORA_ACTION_TOOLS, *SORA_PLANNING_TOOLS)
-)
+) | {"propose_action"}  # P5: filing a proposal is a WRITE (dedup + budget it)
 
 def _is_tool_failure(out_str: str) -> bool:
     """True if a tool result indicates failure — the SINGLE source of truth for
@@ -2011,11 +2011,19 @@ async def conversation_node(state: GraphState) -> dict:
     _plan_on = os.environ.get(
         "OMNISIGHT_ORCHESTRATOR_PLANNING_TOOLS", "1",
     ).lower() not in ("0", "false", "no")
+    # P5: propose-and-approve gate for DANGEROUS actions. Sora can only PROPOSE
+    # (deploy/promote/restart/rollback) — a human must approve before anything
+    # runs. Default-on because proposing is harmless (files a pending record a
+    # human must act on); the env flag lets ops disable the surface entirely.
+    _p5_on = os.environ.get(
+        "OMNISIGHT_ORCHESTRATOR_P5_PROPOSE", "1",
+    ).lower() not in ("0", "false", "no")
     orch_tools = (
         list(ORCHESTRATION_TOOLS)
         + (list(SORA_SUPERVISOR_TOOLS) if _sup_on else [])
         + (list(SORA_ACTION_TOOLS) if _act_on else [])
         + (list(SORA_PLANNING_TOOLS) if _plan_on else [])
+        + (list(SORA_P5_PROPOSE_TOOLS) if _p5_on else [])
     )
     llm_tools = _get_llm(
         bind_tools_for=None, model_name=effective_model,
@@ -2127,8 +2135,16 @@ async def conversation_node(state: GraphState) -> dict:
         "After a successful verified rescue you may call save_solution to "
         "remember it. Only act when the operator asked you to fix/rescue "
         "something or clearly wants it; when unsure, propose the action and "
-        "ask first. You have NO deploy / force-push / destructive powers — "
-        "for those, tell the operator to run it.\n"
+        "ask first.\n"
+        "- DANGEROUS ops (deploy / promote / restart / rollback): you do NOT run "
+        "these yourself. When the operator asks for one, use propose_action to "
+        "file a PROPOSAL (it stores a pending approval card with a preview + "
+        "blast-radius) and tell them it's filed and AWAITING THEIR APPROVAL — "
+        "NEVER say it ran or is done. A human approves before anything executes, "
+        "and only through the reversible release-train / systemctl path. Use "
+        "list_pending_actions to show what's awaiting approval, and "
+        "supervisor_release_status to WATCH the prod deploy state (read-only). "
+        "You still have NO force-push / raw-shell / Gerrit-bypass powers.\n"
         "- SCOPE of 'rescue / 修好 a stuck ticket' = UNWEDGE it (strip stale "
         "labels, and requeue if a bot is still assigned) — that alone usually "
         "un-sticks it. Do NOT change its workflow status or close/archive it "

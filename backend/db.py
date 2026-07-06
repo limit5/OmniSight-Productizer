@@ -3814,6 +3814,87 @@ async def update_orchestrator_task_jira_status(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  proposed_actions — Sora P5 propose-and-approve gate (0256)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_proposed_action(conn, data: dict) -> None:
+    """Persist a PENDING dangerous-action proposal. Sora NEVER executes — a human
+    must approve first. Durable so a proposal survives a restart (a human may
+    decide minutes later)."""
+    await conn.execute(
+        "INSERT INTO proposed_actions "
+        "(id, tenant_id, user_id, session_id, action_kind, params, title, "
+        " preview, blast_radius, status, proposed_by, proposed_at) VALUES "
+        "($1,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11)",
+        data["id"],
+        data.get("tenant_id") or "",
+        data.get("user_id") or "",
+        data.get("session_id") or "",
+        data["action_kind"],
+        data.get("params") or "{}",
+        data.get("title") or "",
+        data.get("preview") or "",
+        data.get("blast_radius") or "",
+        data.get("proposed_by") or "sora",
+        float(data.get("proposed_at") or 0),
+    )
+
+
+async def get_proposed_action(conn, action_id: str) -> dict | None:
+    row = await conn.fetchrow(
+        "SELECT id, action_kind, params, title, preview, blast_radius, status, "
+        "proposed_by, proposed_at, decided_by, decided_at, result "
+        "FROM proposed_actions WHERE id=$1",
+        action_id,
+    )
+    return dict(row) if row else None
+
+
+async def list_proposed_actions(conn, *, status: str | None = None, limit: int = 50) -> list[dict]:
+    """List proposals, newest-first, optionally filtered by status (e.g. 'pending')."""
+    if status:
+        rows = await conn.fetch(
+            "SELECT id, action_kind, title, blast_radius, status, proposed_by, "
+            "proposed_at FROM proposed_actions WHERE status=$1 "
+            "ORDER BY proposed_at DESC LIMIT $2",
+            status, int(limit),
+        )
+    else:
+        rows = await conn.fetch(
+            "SELECT id, action_kind, title, blast_radius, status, proposed_by, "
+            "proposed_at FROM proposed_actions ORDER BY proposed_at DESC LIMIT $1",
+            int(limit),
+        )
+    return [dict(r) for r in rows]
+
+
+async def decide_proposed_action(
+    conn, action_id: str, *, decision: str, decided_by: str, at: float,
+) -> bool:
+    """Operator gate: flip a PENDING proposal → 'approved' or 'rejected'. Atomic
+    (only transitions from 'pending', so a double-decide / race can't re-decide).
+    Returns True iff THIS caller won the transition."""
+    if decision not in {"approved", "rejected"}:
+        raise ValueError(f"decision must be approved|rejected, got {decision!r}")
+    row = await conn.fetchrow(
+        "UPDATE proposed_actions SET status=$2, decided_by=$3, decided_at=$4 "
+        "WHERE id=$1 AND status='pending' RETURNING id",
+        action_id, decision, decided_by or "", float(at),
+    )
+    return row is not None
+
+
+async def set_proposed_action_result(
+    conn, action_id: str, *, status: str, result: str, at: float,
+) -> None:
+    """Record an execution outcome ('executing'/'executed'/'failed'/'canceled')."""
+    await conn.execute(
+        "UPDATE proposed_actions SET status=$2, result=$3, decided_at=$4 WHERE id=$1",
+        action_id, status, (result or "")[:2000], float(at),
+    )
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Chat sessions (ZZ.B2 #304-2, checkbox 1)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #
