@@ -3103,6 +3103,65 @@ async def supervisor_guild_capabilities() -> str:
         return f"[FAILED] guild list unavailable: {exc}"
 
 
+@tool
+async def supervisor_release_status() -> str:
+    """(Sora supervisor / P5-observe) READ-ONLY view of the prod release + deploy
+    state: the currently-deployed prod tag, any in-flight deploy, the latest
+    canary/rollout result, and the last few releases. Use to answer "what's on
+    prod / is a deploy running / was the last canary green / what shipped
+    recently". Pure read — NO side effects, NEVER triggers a deploy. This is the
+    watch-only precursor to the (human-approved) deploy actions; on its own it can
+    only look, not touch.
+    """
+    import asyncio as _asyncio
+
+    def _gather() -> str:
+        from backend import release_dashboard as rd
+        cur = rd.current_prod_tag()
+        try:
+            inflight = rd.in_flight_deploys()
+        except Exception:  # noqa: BLE001
+            inflight = []
+        try:
+            canary = rd.canary_snapshot()
+        except Exception:  # noqa: BLE001
+            canary = None
+        try:
+            hist = rd.release_history(limit=5)
+        except Exception:  # noqa: BLE001
+            hist = []
+        lines = ["[SUPERVISOR] prod release status:"]
+        lines.append(f"  current prod tag: {cur or 'unknown'}")
+        if inflight:
+            lines.append(
+                "  ⏳ in-flight deploy(s): "
+                + "; ".join(
+                    f"{d.get('tag')} ({d.get('status')}, {d.get('progress_percent')}%)"
+                    for d in inflight
+                )
+            )
+        else:
+            lines.append("  in-flight deploy: none")
+        if canary:
+            lines.append(
+                f"  latest canary/rollout: {canary.get('status')} "
+                f"(id {canary.get('rollout_id')}, stage {canary.get('stage_index')})"
+            )
+        else:
+            lines.append("  latest canary/rollout: (no active rollout state)")
+        if hist:
+            lines.append("  recent releases:")
+            for h in hist[-5:]:
+                lines.append(f"    • {h.get('summary')}")
+        return "\n".join(lines)
+
+    try:
+        # dashboard readers are sync (file/DB stores) — run off the event loop.
+        return await _asyncio.to_thread(_gather)
+    except Exception as exc:  # noqa: BLE001
+        return f"[FAILED] release status unavailable: {exc}"
+
+
 # Bound to Sora's chat (nodes.conversation_node): read-only observe + L3 recall.
 SUPERVISOR_OBSERVE_TOOLS = [
     supervisor_quota_status,
@@ -3110,6 +3169,7 @@ SUPERVISOR_OBSERVE_TOOLS = [
     supervisor_delivery_summary,
     supervisor_ticket_detail,
     supervisor_guild_capabilities,
+    supervisor_release_status,     # P5 watch-only: prod release/deploy state (read-only)
 ]
 SORA_SUPERVISOR_TOOLS = SUPERVISOR_OBSERVE_TOOLS + [search_past_solutions]
 
