@@ -1638,7 +1638,7 @@ def _trim_to_last_user_turn(messages: list) -> list:
     return out if out else list(messages)
 
 
-async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 3):
+async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 5):
     """BP.LA.1 — BOUNDED MULTI-ROUND tool loop for Sora's conversational turn.
 
     Lets Sora chain observe → decide → act → verify in a SINGLE turn (a
@@ -1647,6 +1647,9 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
     Tools stay bound across rounds so she can keep going; capped at
     ``max_rounds``, after which a tool-FREE ``llm`` call forces a
     natural-language answer (never loops unbounded / returns a bare tool call).
+    Default 5: a full rescue (ticket_detail → strip → requeue → comment) is a
+    step-per-round chain of 4 when the model acts sequentially — a cap of 3
+    dropped the trailing comment (OP-2533 test); 5 leaves margin.
 
     SAFETY: ``create_task`` is deduped by (args) so a re-emitted identical file
     can't double-create a Story. Observe/action tools DO re-run — fresh reads +
