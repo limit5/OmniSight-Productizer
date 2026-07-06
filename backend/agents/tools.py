@@ -2975,11 +2975,110 @@ async def supervisor_delivery_summary() -> str:
     return f"[SUPERVISOR] {total} successful deliveries ({parts}){tail}"
 
 
+@tool
+async def supervisor_ticket_detail(ticket_key: str) -> str:
+    """(Sora supervisor) Read one OP-* ticket's full state — status, assignee,
+    labels, Blocks/blocked-by links, and the latest comment — so Sora can SEE a
+    ticket before deciding to act. Read-only; fails open with a "[SUPERVISOR] ..."
+    note on any error.
+
+    Args:
+        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] '{ticket_key}' is not an OP-NNN ticket key."
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        st, body = await adapter._api(
+            "GET",
+            f"/rest/api/2/issue/{key}"
+            "?fields=status,assignee,labels,issuelinks,summary",
+        )
+        if not (200 <= st < 300) or not isinstance(body, dict):
+            return f"[SUPERVISOR] {key}: fetch returned HTTP {st}."
+        fields = body.get("fields") or {}
+        summary = fields.get("summary") or "(no summary)"
+        status = ((fields.get("status") or {}).get("name")) or "?"
+        assignee_obj = fields.get("assignee")
+        assignee = (
+            (assignee_obj.get("displayName") or assignee_obj.get("name") or "?")
+            if isinstance(assignee_obj, dict) else "unassigned"
+        )
+        labels = list(fields.get("labels") or [])
+        blocks, blocked_by = [], []
+        for lk in fields.get("issuelinks") or []:
+            if not isinstance(lk, dict):
+                continue
+            if (lk.get("type") or {}).get("name") != "Blocks":
+                continue
+            out = lk.get("outwardIssue")
+            inw = lk.get("inwardIssue")
+            if isinstance(out, dict) and out.get("key"):
+                blocks.append(out["key"])  # this ticket blocks -> outward
+            if isinstance(inw, dict) and inw.get("key"):
+                blocked_by.append(inw["key"])  # this ticket blocked by -> inward
+        # Latest comment.
+        last_comment = "none"
+        cst, cbody = await adapter._api(
+            "GET", f"/rest/api/2/issue/{key}/comment",
+        )
+        if 200 <= cst < 300 and isinstance(cbody, dict):
+            comments = cbody.get("comments") or []
+            if comments:
+                c = comments[-1]
+                author = (
+                    (c.get("author") or {}).get("displayName")
+                    or (c.get("author") or {}).get("name") or "?"
+                )
+                snippet = " ".join((c.get("body") or "").split())[:160]
+                last_comment = f"{author}: {snippet}"
+        lines = [
+            f"[SUPERVISOR] {key} — {summary}",
+            f"  status: {status} | assignee: {assignee}",
+            f"  labels: {labels or '[]'}",
+            f"  blocks: {blocks or '[]'} | blocked by: {blocked_by or '[]'}",
+            f"  last comment: {last_comment}",
+        ]
+        return "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001
+        return f"[SUPERVISOR] {key}: detail unavailable: {exc}"
+
+
+@tool
+async def supervisor_guild_capabilities() -> str:
+    """(Sora supervisor) List the worker guilds and what each does, so Sora can
+    pick the right guild when filing a task. Read-only; fails open.
+    """
+    try:
+        from backend.a2a.agent_card import (
+            _GUILD_DISPLAY_NAMES,
+            _GUILD_DESCRIPTIONS,
+        )
+        lines = ["[SUPERVISOR] worker guilds:"]
+        for guild, desc in _GUILD_DESCRIPTIONS.items():
+            name = _GUILD_DISPLAY_NAMES.get(guild, getattr(guild, "value", guild))
+            lines.append(f"  - {name}: {desc}")
+        if len(lines) > 1:
+            return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from backend.agents.guild_registry import GUILDS
+        names = ", ".join(sorted(GUILDS))
+        return f"[SUPERVISOR] worker guilds: {names}"
+    except Exception as exc:  # noqa: BLE001
+        return f"[SUPERVISOR] guild list unavailable: {exc}"
+
+
 # Bound to Sora's chat (nodes.conversation_node): read-only observe + L3 recall.
 SUPERVISOR_OBSERVE_TOOLS = [
     supervisor_quota_status,
     supervisor_recent_incidents,
     supervisor_delivery_summary,
+    supervisor_ticket_detail,
+    supervisor_guild_capabilities,
 ]
 SORA_SUPERVISOR_TOOLS = SUPERVISOR_OBSERVE_TOOLS + [search_past_solutions]
 
@@ -3019,14 +3118,23 @@ async def supervisor_requeue_ticket(ticket_key: str) -> str:
         adapter = build_default_jira_adapter()
         st, _ = await adapter._api("PUT", f"/rest/api/2/issue/{key}/assignee", {"accountId": None})
         if not (200 <= st < 300):
-            return f"[FAILED] {key}: clear-assignee returned HTTP {st}."
+            return (
+                f"[FAILED] {key}: clear-assignee returned HTTP {st} — check the "
+                f"ticket exists and you have permission; try supervisor_ticket_detail first."
+            )
         st2, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=assignee")
         assignee = (body.get("fields") or {}).get("assignee") if isinstance(body, dict) else "?"
         if assignee is None:
             return f"[OK] {key} re-queued — assignee cleared (verified); runner can re-pick."
-        return f"[FAILED] {key}: assignee still set after clear."
+        return (
+            f"[FAILED] {key}: assignee still set after clear — try "
+            f"supervisor_ticket_detail first to inspect the ticket."
+        )
     except Exception as exc:  # noqa: BLE001
-        return f"[FAILED] {key}: requeue error: {exc}"
+        return (
+            f"[FAILED] {key}: requeue error: {exc} — check the ticket exists and you "
+            f"have permission; try supervisor_ticket_detail first."
+        )
 
 
 @tool
@@ -3052,15 +3160,24 @@ async def supervisor_strip_stale_labels(ticket_key: str) -> str:
         kept = [l for l in labels if not _is_stale_runner_label(l)]
         st2, _ = await adapter._api("PUT", f"/rest/api/2/issue/{key}", {"fields": {"labels": kept}})
         if not (200 <= st2 < 300):
-            return f"[FAILED] {key}: label update returned HTTP {st2}."
+            return (
+                f"[FAILED] {key}: label update returned HTTP {st2} — check the ticket "
+                f"exists and you have permission; try supervisor_ticket_detail first."
+            )
         st3, body3 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")
         now = list((body3.get("fields") or {}).get("labels") or []) if isinstance(body3, dict) else []
         still = [l for l in now if _is_stale_runner_label(l)]
         if not still:
             return f"[OK] {key}: stripped {len(stale)} stale label(s) {stale} (verified)."
-        return f"[FAILED] {key}: stale labels remain after strip: {still}."
+        return (
+            f"[FAILED] {key}: stale labels remain after strip: {still} — try "
+            f"supervisor_ticket_detail first to inspect the ticket."
+        )
     except Exception as exc:  # noqa: BLE001
-        return f"[FAILED] {key}: strip-labels error: {exc}"
+        return (
+            f"[FAILED] {key}: strip-labels error: {exc} — check the ticket exists and "
+            f"you have permission; try supervisor_ticket_detail first."
+        )
 
 
 @tool
@@ -3083,10 +3200,123 @@ async def supervisor_comment_ticket(ticket_key: str, text: str) -> str:
         res = await adapter.comment(key, text)
         cid = res.get("id") if isinstance(res, dict) else None
         if not cid:
-            return f"[FAILED] {key}: comment call returned no id."
+            return (
+                f"[FAILED] {key}: comment call returned no id — check the ticket "
+                f"exists and you have permission; try supervisor_ticket_detail first."
+            )
         return f"[OK] {key}: comment posted (id={cid}, verified)."
     except Exception as exc:  # noqa: BLE001
-        return f"[FAILED] {key}: comment error: {exc}"
+        return (
+            f"[FAILED] {key}: comment error: {exc} — check the ticket exists and you "
+            f"have permission; try supervisor_ticket_detail first."
+        )
+
+
+_TRANSITION_TARGETS = {
+    "todo": "backlog",
+    "in_progress": "in_progress",
+    "review": "reviewing",
+    "done": "done",
+}
+
+
+@tool
+async def supervisor_transition_ticket(ticket_key: str, target: str) -> str:
+    """(Sora supervisor) Move an OP-* ticket to a workflow state. Self-verifying:
+    transitions THEN re-reads status to confirm. Reject unknown target.
+
+    Args:
+        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
+        target: one of "todo", "in_progress", "review", "done".
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
+    tgt = (target or "").strip().lower()
+    if tgt not in _TRANSITION_TARGETS:
+        return (
+            f"[SUPERVISOR] refused: unknown target '{target}' "
+            f"(use one of {sorted(_TRANSITION_TARGETS)})."
+        )
+    try:
+        from backend.intent_source import IntentStatus
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        intent = IntentStatus(_TRANSITION_TARGETS[tgt])
+        await adapter.update_status(key, intent)
+        expected = adapter._status_name(intent)
+        st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=status")
+        name = None
+        if 200 <= st < 300 and isinstance(body, dict):
+            name = ((body.get("fields") or {}).get("status") or {}).get("name")
+        if name and str(name).lower() == str(expected).lower():
+            return f"[OK] {key} → {tgt} (verified: status now {name!r})."
+        return (
+            f"[FAILED] {key}: status is {name!r}, expected {expected!r} after "
+            f"transition — check the workflow allows this move; "
+            f"try supervisor_ticket_detail first."
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"[FAILED] {key}: transition error: {exc} — check the ticket exists, "
+            f"the target is reachable, and you have permission; "
+            f"try supervisor_ticket_detail first."
+        )
+
+
+@tool
+async def supervisor_set_labels(
+    ticket_key: str,
+    add: list[str] | None = None,
+    remove: list[str] | None = None,
+) -> str:
+    """(Sora supervisor) Add and/or remove labels on an OP-* ticket. Idempotent
+    (adding an existing / removing an absent label is a no-op) + self-verifying
+    (re-reads labels to confirm). Refuses if both add and remove are empty.
+
+    Args:
+        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
+        add: labels to add (optional).
+        remove: labels to remove (optional).
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
+    add_set = [l for l in (add or []) if l]
+    rem_set = [l for l in (remove or []) if l]
+    if not add_set and not rem_set:
+        return "[SUPERVISOR] refused: nothing to do (both add and remove empty)."
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")
+        if not (200 <= st < 300) or not isinstance(body, dict):
+            return (
+                f"[FAILED] {key}: label read returned HTTP {st} — check the ticket "
+                f"exists; try supervisor_ticket_detail first."
+            )
+        current = list((body.get("fields") or {}).get("labels") or [])
+        desired = [l for l in current if l not in rem_set]
+        for l in add_set:
+            if l not in desired:
+                desired.append(l)
+        st2, _ = await adapter._api("PUT", f"/rest/api/2/issue/{key}", {"fields": {"labels": desired}})
+        if not (200 <= st2 < 300):
+            return f"[FAILED] {key}: label update returned HTTP {st2}."
+        st3, body3 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=labels")
+        now = list((body3.get("fields") or {}).get("labels") or []) if isinstance(body3, dict) else []
+        ok = all(l in now for l in add_set) and all(l not in now for l in rem_set)
+        if ok:
+            return f"[OK] {key}: labels now {now} (verified)."
+        return (
+            f"[FAILED] {key}: labels are {now} after update, expected add={add_set} "
+            f"remove={rem_set} to hold; try supervisor_ticket_detail first."
+        )
+    except Exception as exc:  # noqa: BLE001
+        return (
+            f"[FAILED] {key}: set-labels error: {exc} — check the ticket exists and "
+            f"you have permission; try supervisor_ticket_detail first."
+        )
 
 
 # Bound to Sora's chat behind OMNISIGHT_ORCHESTRATOR_ACTION_TOOLS (default on).
@@ -3096,6 +3326,8 @@ SORA_ACTION_TOOLS = [
     supervisor_requeue_ticket,
     supervisor_strip_stale_labels,
     supervisor_comment_ticket,
+    supervisor_transition_ticket,
+    supervisor_set_labels,
     save_solution,
 ]
 

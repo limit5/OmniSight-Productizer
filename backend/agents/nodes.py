@@ -1638,6 +1638,68 @@ def _trim_to_last_user_turn(messages: list) -> list:
     return out if out else list(messages)
 
 
+async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 3):
+    """BP.LA.1 — BOUNDED MULTI-ROUND tool loop for Sora's conversational turn.
+
+    Lets Sora chain observe → decide → act → verify in a SINGLE turn (a
+    supervisor's core workflow) instead of one round. ``resp`` is the first
+    tool-bound reply; ``convo`` is the message list it was produced from.
+    Tools stay bound across rounds so she can keep going; capped at
+    ``max_rounds``, after which a tool-FREE ``llm`` call forces a
+    natural-language answer (never loops unbounded / returns a bare tool call).
+
+    SAFETY: ``create_task`` is deduped by (args) so a re-emitted identical file
+    can't double-create a Story. Observe/action tools DO re-run — fresh reads +
+    the act↔verify pattern need it, and the action tools are idempotent +
+    self-verifying. Returns the final assistant message.
+    """
+    from langchain_core.messages import ToolMessage
+
+    convo = list(convo)
+    filed: dict[str, str] = {}
+    rounds = 0
+    while getattr(resp, "tool_calls", None) and rounds < max_rounds:
+        rounds += 1
+        tool_calls = resp.tool_calls
+        _names = [
+            (c.get("name") if isinstance(c, dict) else getattr(c, "name", ""))
+            for c in tool_calls
+        ]
+        emit_pipeline_phase(
+            "conversation",
+            f"Filing {len(tool_calls)} task(s)" if "create_task" in _names
+            else f"Running {len(tool_calls)} tool(s)",
+        )
+        convo.append(resp)
+        for call in tool_calls:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
+            args = (call.get("args") if isinstance(call, dict) else getattr(call, "args", {})) or {}
+            cid = (call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or name
+            dedup_key = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+            if name == "create_task" and dedup_key in filed:
+                out = filed[dedup_key]  # don't double-file the same Story
+            else:
+                fn = TOOL_MAP.get(name)
+                if fn is None:
+                    out = f"[ERROR] Unknown tool: {name}"
+                else:
+                    try:
+                        out = await fn.ainvoke(args)
+                    except Exception as tool_exc:  # noqa: BLE001
+                        out = f"[ERROR] {name} failed: {tool_exc}"
+                if name == "create_task":
+                    filed[dedup_key] = str(out)
+            emit_tool_progress(
+                name, "done" if str(out).startswith("[OK]") else "error", str(out),
+            )
+            convo.append(ToolMessage(content=str(out), tool_call_id=cid))
+        resp = (llm_tools or llm).invoke(convo)
+    # Hit the round cap but still requesting tools → force a tool-free answer.
+    if getattr(resp, "tool_calls", None):
+        resp = llm.invoke(convo)
+    return resp
+
+
 async def conversation_node(state: GraphState) -> dict:
     """Answer general questions without tool execution.
 
@@ -1795,10 +1857,17 @@ async def conversation_node(state: GraphState) -> dict:
         "search_past_solutions to recall how a similar problem was solved "
         "before. Use them to ground your answer in real state — then reply "
         "in natural language; never dump raw tool output.\n"
+        "- Before you act on a ticket, INSPECT it with supervisor_ticket_detail "
+        "(one ticket's status / assignee / labels / Blocks-deps / last comment) "
+        "so you act on real state, not a guess. You can chain tools in one turn "
+        "— observe → act → re-check to verify — so gather what you need, act, "
+        "then confirm before you reply.\n"
         "- You can take SAFE, reversible rescue actions on a stuck ticket: "
         "supervisor_requeue_ticket (clear assignee so the runner re-picks), "
         "supervisor_strip_stale_labels (remove wedging claim:/stoploss/"
-        "runner-blocked labels), supervisor_comment_ticket (leave a note). "
+        "runner-blocked labels), supervisor_transition_ticket (move status: "
+        "todo/in_progress/review/done), supervisor_set_labels (add/remove "
+        "labels), supervisor_comment_ticket (leave a note). "
         "Each self-verifies and returns [OK ...verified] or [FAILED ...]; "
         "trust that verdict — report [OK] as done, and if a tool returns "
         "[FAILED], say so plainly, do NOT retry the same action more than "
@@ -1812,7 +1881,10 @@ async def conversation_node(state: GraphState) -> dict:
         "done (build / fix / implement / a tool or feature) AND has "
         "confirmed the scope, CALL the create_task tool ONCE to file it as "
         "a runner Story — pick the closest area and write crisp acceptance "
-        "criteria. Refer back to earlier turns in this conversation for the "
+        "criteria. If unsure which guild/area fits, call "
+        "supervisor_guild_capabilities first and match the work to the guild "
+        "that does it (capability-matched dispatch raises delivery success). "
+        "Refer back to earlier turns in this conversation for the "
         "details instead of re-asking what the user already told you. The "
         "Story is filed GATED (it will not dispatch until the operator "
         "releases it), so report the ticket key and that it awaits their "
@@ -1877,45 +1949,7 @@ async def conversation_node(state: GraphState) -> dict:
     emit_pipeline_phase("conversation", "Generating conversational response")
     try:
         resp = (llm_tools or llm).invoke([sys_prompt, *send_messages])
-        # Gap-② routing fix: if the model decided to file work, run the
-        # tool(s) it requested (only create_task is bound here), then let
-        # the plain (tool-free) LLM turn the result into a natural-language
-        # reply. Bounded to a single tool round — the summary LLM has no
-        # tools, so it cannot re-trigger create_task into a loop.
-        tool_calls = getattr(resp, "tool_calls", None) or []
-        if tool_calls:
-            from langchain_core.messages import ToolMessage
-            # Accurate progress label: Sora now binds observe/action/planning
-            # tools too, not just create_task — "Filing N task(s)" was wrong for
-            # a fleet query. Say "Filing" only when a Story is actually filed.
-            _names = [
-                (c.get("name") if isinstance(c, dict) else getattr(c, "name", ""))
-                for c in tool_calls
-            ]
-            _phase = (
-                f"Filing {len(tool_calls)} task(s)"
-                if "create_task" in _names
-                else f"Running {len(tool_calls)} tool(s)"
-            )
-            emit_pipeline_phase("conversation", _phase)
-            followup = [sys_prompt, *send_messages, resp]
-            for call in tool_calls:
-                name = call.get("name") if isinstance(call, dict) else getattr(call, "name", "")
-                args = (call.get("args") if isinstance(call, dict) else getattr(call, "args", {})) or {}
-                cid = (call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or name
-                fn = TOOL_MAP.get(name)
-                if fn is None:
-                    out = f"[ERROR] Unknown tool: {name}"
-                else:
-                    try:
-                        out = await fn.ainvoke(args)
-                    except Exception as tool_exc:  # noqa: BLE001
-                        out = f"[ERROR] {name} failed: {tool_exc}"
-                emit_tool_progress(
-                    name, "done" if str(out).startswith("[OK]") else "error", str(out),
-                )
-                followup.append(ToolMessage(content=str(out), tool_call_id=cid))
-            resp = llm.invoke(followup)
+        resp = await _run_tool_rounds(resp, [sys_prompt, *send_messages], llm_tools, llm)
         answer = resp.content  # type: ignore[union-attr]
         # R20 Phase 0: redact accidentally-leaked secrets from the
         # LLM's output BEFORE it reaches the chat / SSE / audit log.
