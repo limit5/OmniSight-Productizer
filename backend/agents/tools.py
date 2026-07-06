@@ -3212,55 +3212,112 @@ async def supervisor_comment_ticket(ticket_key: str, text: str) -> str:
         )
 
 
-_TRANSITION_TARGETS = {
-    "todo": "backlog",
-    "in_progress": "in_progress",
-    "review": "reviewing",
-    "done": "done",
+# Intent word → candidate transition-name substrings, matched against the
+# ticket's ACTUAL available transitions (JIRA workflows vary per project — this
+# one uses 進行中 / 作業開始 / Won't Do / Force Close, NOT a generic "Done").
+_TRANSITION_ALIASES: dict[str, tuple[str, ...]] = {
+    "todo": ("to do", "backlog", "todo", "open", "reopen"),
+    "in_progress": ("進行中", "in progress", "作業開始", "start", "in_progress"),
+    "review": ("review", "submit", "審", "レビュー"),
+    # "done" = genuine completion only — deliberately NOT "close"/"force close"
+    # (those Archive the ticket, discouraged here). If a workflow has no real
+    # done transition, target="done" honestly returns the available list.
+    "done": ("done", "公開", "approve", "deploy", "完了", "resolve"),
+    "wont_do": ("won't do", "wont do", "will not", "cancel", "reject", "force close"),
 }
 
 
-@tool
-async def supervisor_transition_ticket(ticket_key: str, target: str) -> str:
-    """(Sora supervisor) Move an OP-* ticket to a workflow state. Self-verifying:
-    transitions THEN re-reads status to confirm. Reject unknown target.
+def _match_transition_name(target: str, available: dict[str, str]) -> str | None:
+    """Return the available transition NAME matching ``target`` (a real name,
+    an intent word, or a substring), else None. ``available`` = {name: id}."""
+    t = (target or "").strip().lower()
+    # 1) exact (case-insensitive) transition name
+    for name in available:
+        if name.lower() == t:
+            return name
+    # 2) intent-word alias → substring against available names
+    for sub in _TRANSITION_ALIASES.get(t.replace(" ", "_"), ()):
+        for name in available:
+            if sub.lower() in name.lower():
+                return name
+    # 3) target itself as a loose substring
+    for name in available:
+        if t and t in name.lower():
+            return name
+    return None
 
-    Args:
-        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
-        target: one of "todo", "in_progress", "review", "done".
+
+@tool
+async def supervisor_list_transitions(ticket_key: str) -> str:
+    """(Sora supervisor) List the workflow transitions actually available on an
+    OP-* ticket RIGHT NOW. Read-only. Call this BEFORE supervisor_transition_ticket
+    if unsure — workflows differ per project (this one has no generic "Done").
     """
     key = (ticket_key or "").strip().upper()
     if not _SUP_TICKET_RE.match(key):
         return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
-    tgt = (target or "").strip().lower()
-    if tgt not in _TRANSITION_TARGETS:
-        return (
-            f"[SUPERVISOR] refused: unknown target '{target}' "
-            f"(use one of {sorted(_TRANSITION_TARGETS)})."
-        )
     try:
-        from backend.intent_source import IntentStatus
         from backend.jira_adapter import build_default_jira_adapter
         adapter = build_default_jira_adapter()
-        intent = IntentStatus(_TRANSITION_TARGETS[tgt])
-        await adapter.update_status(key, intent)
-        expected = adapter._status_name(intent)
-        st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=status")
-        name = None
-        if 200 <= st < 300 and isinstance(body, dict):
-            name = ((body.get("fields") or {}).get("status") or {}).get("name")
-        if name and str(name).lower() == str(expected).lower():
-            return f"[OK] {key} → {tgt} (verified: status now {name!r})."
-        return (
-            f"[FAILED] {key}: status is {name!r}, expected {expected!r} after "
-            f"transition — check the workflow allows this move; "
-            f"try supervisor_ticket_detail first."
-        )
+        st, body = await adapter._api("GET", f"/rest/api/2/issue/{key}/transitions")
+        names = [t.get("name") for t in (body.get("transitions") or [])] if isinstance(body, dict) else []
+        if not names:
+            return f"[SUPERVISOR] {key}: no transitions available (check the key)."
+        return f"[SUPERVISOR] {key} available transitions: {names}"
+    except Exception as exc:  # noqa: BLE001
+        return f"[SUPERVISOR] {key}: transitions unavailable: {exc}"
+
+
+# Defined after the observe bundle literal (it groups with the transition tool);
+# register it into the read-only observe set + TOOL_MAP (built later) here.
+SUPERVISOR_OBSERVE_TOOLS.append(supervisor_list_transitions)
+
+
+@tool
+async def supervisor_transition_ticket(ticket_key: str, target: str) -> str:
+    """(Sora supervisor) Move an OP-* ticket to another workflow state. Reads the
+    ticket's ACTUAL available transitions and matches ``target`` against them
+    (real transition name, or an intent word: todo/in_progress/review/done/
+    wont_do), then self-verifies the status changed. Fail-closed with the
+    available list on no match. NOTE: closing a ticket is often a MULTI-STEP path
+    in this project — do NOT assume a single "done" closes it; call
+    supervisor_list_transitions if unsure.
+
+    Args:
+        ticket_key: e.g. "OP-2530" (only OP-NNN accepted).
+        target: a real transition name (e.g. "進行中", "Won't Do") or an intent
+            word (todo / in_progress / review / done / wont_do).
+    """
+    key = (ticket_key or "").strip().upper()
+    if not _SUP_TICKET_RE.match(key):
+        return f"[SUPERVISOR] refused: '{ticket_key}' is not an OP-NNN ticket key."
+    if not (target or "").strip():
+        return "[SUPERVISOR] refused: empty target."
+    try:
+        from backend.jira_adapter import build_default_jira_adapter
+        adapter = build_default_jira_adapter()
+        st0, b0 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=status")
+        before = ((b0.get("fields") or {}).get("status") or {}).get("name") if isinstance(b0, dict) else None
+        stt, tbody = await adapter._api("GET", f"/rest/api/2/issue/{key}/transitions")
+        available = {t["name"]: t["id"] for t in (tbody.get("transitions") or [])} if isinstance(tbody, dict) else {}
+        match = _match_transition_name(target, available)
+        if not match:
+            return (
+                f"[FAILED] {key}: no transition matching '{target}'. Available now: "
+                f"{list(available)}. Pick one of those (workflows differ per project)."
+            )
+        sp, _ = await adapter._api("POST", f"/rest/api/2/issue/{key}/transitions", {"transition": {"id": available[match]}})
+        if not (200 <= sp < 300):
+            return f"[FAILED] {key}: transition '{match}' POST returned HTTP {sp}."
+        st1, b1 = await adapter._api("GET", f"/rest/api/2/issue/{key}?fields=status")
+        after = ((b1.get("fields") or {}).get("status") or {}).get("name") if isinstance(b1, dict) else None
+        if after and after != before:
+            return f"[OK] {key}: transitioned via '{match}' — status {before!r} → {after!r} (verified)."
+        return f"[OK] {key}: transitioned via '{match}' (status now {after!r})."
     except Exception as exc:  # noqa: BLE001
         return (
-            f"[FAILED] {key}: transition error: {exc} — check the ticket exists, "
-            f"the target is reachable, and you have permission; "
-            f"try supervisor_ticket_detail first."
+            f"[FAILED] {key}: transition error: {exc} — try "
+            f"supervisor_list_transitions first to see valid moves."
         )
 
 

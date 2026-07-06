@@ -14,36 +14,38 @@ import asyncio
 import pytest
 
 import backend.jira_adapter as _ja
-from backend.jira_adapter import DEFAULT_JIRA_STATUS_MAP
-from backend.intent_source import IntentStatus
 from backend.agents.tools import (
     SORA_ACTION_TOOLS,
     SUPERVISOR_OBSERVE_TOOLS,
     TOOL_MAP,
     supervisor_ticket_detail,
     supervisor_transition_ticket,
+    supervisor_list_transitions,
     supervisor_set_labels,
     supervisor_guild_capabilities,
 )
 
 
 class _FakeAdapter:
+    # This project's real workflow (no plain "Done"): name -> (id, resulting_status)
+    _DEFAULT_TRANSITIONS = {
+        "To Do": ("11", "To Do"),
+        "進行中": ("21", "進行中"),
+        "作業開始": ("31", "進行中"),
+        "Won't Do": ("41", "Archived"),
+        "Force Close": ("51", "Archived"),
+    }
+
     def __init__(self, *, status="To Do", assignee="bot-1", labels=None,
-                 issuelinks=None, comments=None, summary="Do the thing"):
+                 issuelinks=None, comments=None, summary="Do the thing",
+                 transitions=None):
         self.status = status
         self.assignee = assignee
         self.labels = list(labels or [])
         self.issuelinks = list(issuelinks or [])
         self.comments = list(comments or [])
         self.summary = summary
-
-    # ── the write path the tool exercises ──
-    def _status_name(self, status):
-        return DEFAULT_JIRA_STATUS_MAP.get(status, status.value)
-
-    async def update_status(self, ticket, status, *, comment=""):
-        self.status = self._status_name(status)
-        return {"ok": True, "jira_status": self.status}
+        self.transitions = dict(transitions or self._DEFAULT_TRANSITIONS)
 
     async def comment(self, ticket, body):
         cid = str(len(self.comments) + 1)
@@ -52,6 +54,16 @@ class _FakeAdapter:
         return {"id": cid}
 
     async def _api(self, method, path, body=None):
+        if method == "GET" and path.endswith("/transitions"):
+            return (200, {"transitions": [{"name": n, "id": i}
+                                          for n, (i, _s) in self.transitions.items()]})
+        if method == "POST" and path.endswith("/transitions"):
+            tid = ((body or {}).get("transition") or {}).get("id")
+            for _n, (i, result) in self.transitions.items():
+                if i == tid:
+                    self.status = result
+                    return (204, {})
+            return (400, {})
         if method == "GET" and path.endswith("/comment"):
             return (200, {"comments": self.comments})
         if method == "GET" and "fields=status" in path and "assignee" not in path:
@@ -123,43 +135,53 @@ def test_ticket_detail_rejects_non_op():
     assert out.startswith("[SUPERVISOR]") and "not an OP" in out
 
 
-# ── transition_ticket ─────────────────────────────────────────────────
-@pytest.mark.parametrize("target,expected", [
-    ("todo", "To Do"),
-    ("in_progress", "In Progress"),
-    ("review", "In Review"),
-    ("done", "Done"),
+# ── list_transitions (new observe tool) ───────────────────────────────
+def test_list_transitions(monkeypatch):
+    _patch(monkeypatch, _FakeAdapter())
+    out = asyncio.run(supervisor_list_transitions.ainvoke({"ticket_key": "OP-2530"}))
+    assert out.startswith("[SUPERVISOR]")
+    assert "進行中" in out and "Won't Do" in out
+
+
+# ── transition_ticket (workflow-aware: list actual transitions + match) ─
+@pytest.mark.parametrize("target,used,expected_status", [
+    ("in_progress", "進行中", "進行中"),      # intent word → alias substring
+    ("進行中", "進行中", "進行中"),            # real transition name (exact)
+    ("Won't Do", "Won't Do", "Archived"),  # real name → archive
+    ("wont_do", "Won't Do", "Archived"),   # intent word → abandon
 ])
-def test_transition_acts_and_verifies(monkeypatch, target, expected):
-    fake = _FakeAdapter(status="Backlog")
+def test_transition_matches_real_workflow(monkeypatch, target, used, expected_status):
+    fake = _FakeAdapter(status="To Do")
     _patch(monkeypatch, fake)
     out = asyncio.run(supervisor_transition_ticket.ainvoke(
         {"ticket_key": "OP-2530", "target": target}))
-    assert out.startswith("[OK]") and "verified" in out
-    assert fake.status == expected
+    assert out.startswith("[OK]") and "verified" in out and used in out
+    assert fake.status == expected_status
 
 
-def test_transition_bad_target(monkeypatch):
-    _patch(monkeypatch, _FakeAdapter())
+def test_transition_no_match_returns_available(monkeypatch):
+    # This workflow has no plain "Done" — target 'done' must NOT silently
+    # Force-Close; it returns the available list, fail-closed.
+    fake = _FakeAdapter(status="To Do")
+    _patch(monkeypatch, fake)
     out = asyncio.run(supervisor_transition_ticket.ainvoke(
-        {"ticket_key": "OP-2530", "target": "archived"}))
-    assert out.startswith("[SUPERVISOR] refused") and "unknown target" in out
+        {"ticket_key": "OP-2530", "target": "done"}))
+    assert out.startswith("[FAILED]") and "no transition matching 'done'" in out
+    assert "Won't Do" in out and "進行中" in out   # surfaces the real options
+    assert fake.status == "To Do"                  # unchanged
 
 
 def test_transition_op_guard():
     out = asyncio.run(supervisor_transition_ticket.ainvoke(
-        {"ticket_key": "nope", "target": "done"}))
+        {"ticket_key": "nope", "target": "進行中"}))
     assert out.startswith("[SUPERVISOR] refused")
 
 
-def test_transition_fail_closed_when_status_wrong(monkeypatch):
-    class _Stuck(_FakeAdapter):
-        async def update_status(self, ticket, status, *, comment=""):
-            return {"ok": True}  # pretend success but DON'T move status
-    _patch(monkeypatch, _Stuck(status="To Do"))
+def test_transition_empty_target(monkeypatch):
+    _patch(monkeypatch, _FakeAdapter())
     out = asyncio.run(supervisor_transition_ticket.ainvoke(
-        {"ticket_key": "OP-2530", "target": "done"}))
-    assert out.startswith("[FAILED]")
+        {"ticket_key": "OP-2530", "target": "  "}))
+    assert out.startswith("[SUPERVISOR] refused")
 
 
 # ── set_labels ────────────────────────────────────────────────────────
