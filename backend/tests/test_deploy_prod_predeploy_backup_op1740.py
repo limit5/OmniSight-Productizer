@@ -32,6 +32,7 @@ with no docker daemon.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -43,6 +44,7 @@ DEPLOY_SH = REPO_ROOT / "scripts" / "deploy-prod.sh"
 VERIFIER = REPO_ROOT / "scripts" / "check_deploy_ref.sh"
 
 GOOD_DIGEST = "sha256:" + "a" * 64
+FRONTEND_DIGEST = "sha256:" + "b" * 64
 TEST_PASSPHRASE = "op1740-test-passphrase-not-a-real-secret"
 
 # A fake backup helper: it records ONLY whether the passphrase reached it
@@ -72,6 +74,26 @@ def _make_sandbox(tmp_path: Path, *, with_backup_helper: bool) -> Path:
     scripts.mkdir(parents=True)
     shutil.copy2(DEPLOY_SH, scripts / "deploy-prod.sh")
     shutil.copy2(VERIFIER, scripts / "check_deploy_ref.sh")
+    # PS2 (review fix): with --bundle now required, deploy-prod.sh reaches the
+    # overlay-write step before the backup checks under test — the sandbox needs
+    # the overlay writer present (a no-op stub; backup logic doesn't read the lock).
+    overlay_stub = sandbox / "repo" / "scripts" / "write_deploy_overlay_lock.py"
+    if not overlay_stub.parent.exists():
+        overlay_stub = sandbox / "scripts" / "write_deploy_overlay_lock.py"
+    overlay_stub.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n", encoding="utf-8")
+    overlay_stub.chmod(0o755)
+    (sandbox / "bundle.json").write_text(
+        json.dumps(
+            {
+                "git_sha": "3f1c0a4e0000000000000000000000000000abcd",
+                "images": {
+                    "backend": {"digest": GOOD_DIGEST},
+                    "frontend": {"digest": FRONTEND_DIGEST},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     (sandbox / ".env").write_text("", encoding="utf-8")
     if with_backup_helper:
         helper = scripts / "backup_prod_db.sh"
@@ -91,7 +113,13 @@ def _run_deploy(sandbox: Path, *args: str, env_extra: dict[str, str]) -> subproc
     env["OMNISIGHT_REGISTRY"] = "reg.example/ns"
     env.update(env_extra)
     return subprocess.run(
-        ["bash", str(sandbox / "scripts" / "deploy-prod.sh"), f"--digest={GOOD_DIGEST}", *args],
+        [
+            "bash", str(sandbox / "scripts" / "deploy-prod.sh"),
+            f"--digest={GOOD_DIGEST}",
+            f"--frontend-digest={FRONTEND_DIGEST}",
+            "--bundle=bundle.json",
+            *args,
+        ],
         capture_output=True,
         text=True,
         cwd=str(sandbox),

@@ -16,15 +16,18 @@
 #   # images, each with its own digest, so one digest cannot pin the pair
 #   # (OP-1696). Pass per-image digests:
 #   ./scripts/deploy-prod.sh --backend-digest=sha256:<64hex> \
-#                            --frontend-digest=sha256:<64hex>
+#                            --frontend-digest=sha256:<64hex> \
+#                            --bundle=artifacts/bundle-vX.Y.Z.json
 #   # (--digest=sha256:<64hex> is kept as a back-compat alias for
 #   #  --backend-digest; on its own it pins ONLY the backend — pass
 #   #  --frontend-digest too for a fully digest-pinned deploy.)
 #   ./scripts/deploy-prod.sh --backend-digest=sha256:<64hex> \
-#                            --frontend-digest=sha256:<64hex> --dry-run
+#                            --frontend-digest=sha256:<64hex> \
+#                            --bundle=artifacts/bundle-vX.Y.Z.json --dry-run
 #                                                    # 只印步驟不執行
 #   ./scripts/deploy-prod.sh --backend-digest=sha256:<64hex> \
-#                            --frontend-digest=sha256:<64hex> --alembic-mode=pg-clone
+#                            --frontend-digest=sha256:<64hex> \
+#                            --bundle=artifacts/bundle-vX.Y.Z.json --alembic-mode=pg-clone
 #                                                    # 在 PG clone 上 dry-validate migrations
 #   # (digest 部署本就 --skip-build：image 已建好並 cosign 驗證過，
 #   #  沒有 git ref 要 fetch/checkout、沒有 source 要 build。)
@@ -62,8 +65,9 @@ BACKUP_DR_ENV="${OMNISIGHT_BACKUP_DR_ENV:-/etc/omnisight/backup-dr.env}"
 # from (override OMNISIGHT_PROD_CHECKOUT for tests / non-standard hosts).
 RELEASE_SHA=""
 PROD_CHECKOUT="${OMNISIGHT_PROD_CHECKOUT:-/home/user/omnisight-prod}"
-# OP-1646/RT-08: optional candidate bundle used to verify tag-vs-digest
-# equality and write the deploy-overlay lock consumed by /api/version.
+# OP-1646/RT-08/OP-2543: required candidate bundle used to verify
+# tag-vs-digest equality and write the deploy-overlay lock consumed by
+# /api/version and /api/v1/project-state.
 CANDIDATE_BUNDLE="${OMNISIGHT_CANDIDATE_BUNDLE:-}"
 OVERLAY_LOCK_WRITER="${OMNISIGHT_OVERLAY_LOCK_WRITER:-scripts/write_deploy_overlay_lock.py}"
 OVERLAY_STATE_DIR="${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/prod/overlay}"
@@ -119,7 +123,7 @@ for arg in "$@"; do
         --alembic-mode=*) ALEMBIC_MODE="${arg#*=}" ;;
         --alembic-pg-clone) ALEMBIC_MODE="pg-clone" ;;
         --help|-h)
-            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> [--bundle=<bundle.json>] [--release-sha=<git-sha>] [--skip-build] [--skip-backup] [--dry-run] [--alembic-mode=apply|pg-clone]"
+            echo "Usage: $0 --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex> --bundle=<bundle.json> [--release-sha=<git-sha>] [--skip-build] [--skip-backup] [--dry-run] [--alembic-mode=apply|pg-clone]"
             echo "       (--release-sha advances the release-SHA-pinned prod compose checkout ($PROD_CHECKOUT) BEFORE the deploy by delegating to scripts/advance_prod_checkout.sh — fail-closed on a dirty tree. It only moves the compose-file pin; the deploy identity is still the image digest. See docs/sop/deploy-prod-runbook.md.)"
             echo "       (--skip-backup deploys WITHOUT a pre-deploy backup — NOT recommended; the backup is otherwise fail-closed.)"
             echo "       (--digest=sha256:<64hex> is a back-compat alias for --backend-digest; pass both --backend-digest and --frontend-digest to pin both images by digest)"
@@ -154,6 +158,9 @@ if [ -n "$TAG" ] && [ "$DIGEST_DEPLOY" = true ]; then
 fi
 if [ -z "$TAG" ] && [ "$DIGEST_DEPLOY" = false ]; then
     err "release-train (RT-20, image-tag-only): a final deploy identity is required — pass a digest deploy pinning BOTH images: --backend-digest=sha256:<64hex> --frontend-digest=sha256:<64hex>. (--tag/v* git-tag deploys are retired; branch deploys and the implicit main default were removed in RT-07a.)"
+fi
+if [ "$DIGEST_DEPLOY" = true ] && [ -z "$CANDIDATE_BUNDLE" ]; then
+    err "release-train prod deploys require --bundle=<bundle.json> (or OMNISIGHT_CANDIDATE_BUNDLE) so the RT-08 deploy-overlay lock is written before replicas are touched."
 fi
 
 # RT-20 (image-tag-only): --tag is NOT a production deploy identity. No v*
@@ -279,9 +286,7 @@ PY
 
 _write_prod_overlay_lock() {
     if [ -z "$CANDIDATE_BUNDLE" ]; then
-        warn "deploy-overlay: no --bundle / OMNISIGHT_CANDIDATE_BUNDLE; /api/version overlay remains whatever the current host lock contains"
-        export OMNISIGHT_RUNNING_IMAGE_DIGEST_BACKEND="${BACKEND_DIGEST:-}"
-        return 0
+        err "deploy-overlay: no --bundle / OMNISIGHT_CANDIDATE_BUNDLE; refusing prod deploy without writing the overlay lock"
     fi
     if [ ! -f "$CANDIDATE_BUNDLE" ]; then
         err "candidate bundle not found: $CANDIDATE_BUNDLE"
@@ -752,6 +757,7 @@ echo "  Caddy:    :443 → round-robin"
 echo "  Status:   $(curl -sf http://localhost:8000/api/v1/health 2>/dev/null | python3 -c "import sys,json; print(json.load(sys.stdin).get('status','unknown'))" 2>/dev/null || echo 'checking...')"
 echo ""
 echo -e "${BOLD}Rollback（release-train RT-20 — redeploy the previous validated digest）：${NC}"
-echo "  $0 --backend-digest=sha256:<prev-64hex> --frontend-digest=sha256:<prev-64hex>"
+echo "  $0 --backend-digest=sha256:<prev-64hex> --frontend-digest=sha256:<prev-64hex> --bundle=<previous-bundle.json>"
 echo "  # (--tag rollback is retired under RT-20 image-tag-only; redeploy the"
-echo "  #  previous release's validated backend + frontend image digests.)"
+echo "  #  previous release's validated backend + frontend image digests with"
+echo "  #  its sealed bundle so the deploy-overlay lock is rewritten.)"

@@ -170,6 +170,27 @@ def test_deploy_sh_tag_and_digest_are_mutually_exclusive() -> None:
     assert "mutually exclusive" in proc.stdout + proc.stderr
 
 
+def test_deploy_sh_requires_bundle_for_digest_deploy() -> None:
+    env = dict(os.environ)
+    env.pop("OMNISIGHT_CANDIDATE_BUNDLE", None)
+    proc = subprocess.run(
+        [
+            "bash", str(DEPLOY_SH),
+            "--backend-digest=sha256:" + "a" * 64,
+            "--frontend-digest=sha256:" + "b" * 64,
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        env=env,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "require --bundle=<bundle.json>" in out
+    assert "deploy-overlay lock is written" in out
+
+
 # ─── Verifier subprocess behaviour ──────────────────────────────────
 
 
@@ -382,6 +403,7 @@ def test_deploy_usage_and_help_show_digest_form() -> None:
     assert proc.returncode == 0, out
     assert "--backend-digest=sha256:<64hex>" in out
     assert "--frontend-digest=sha256:<64hex>" in out
+    assert "--bundle=<bundle.json>" in out
     # The usage header (script source) must not advertise a `--tag=` deploy
     # example any more — that was the trap.
     text = _deploy_sh_text()
@@ -397,6 +419,7 @@ def test_rollback_hint_is_digest_only() -> None:
     text = _deploy_sh_text()
     # The rollback section must offer the per-image digest redeploy…
     assert "--backend-digest=sha256:<prev-64hex>" in text
+    assert "--bundle=<previous-bundle.json>" in text
     # …and must NOT instruct a --tag rollback redeploy.
     assert "--tag=<previous" not in text, (
         "OP-1734 regression: rollback hint still suggests `--tag=<previous>`."

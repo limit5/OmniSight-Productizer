@@ -8,7 +8,7 @@ Covers the 10 cases listed in the AC test plan:
 4. Causal axis times out → ``null`` for that axis, others present.
 5. All axes fail → 200 with all-null payload.
 6. Cache hit — second call against the same (ticket, sha) reads cache.
-7. Cache invalidation on develop merge / webhook.
+7. Cache invalidation on webhook; SHA changes miss naturally via the cache key.
 8. Per-axis budget guard — slow fetchers do not exceed their slice.
 9. Auth rejection — missing bearer/session → 401.
 10. Malformed ticket key + response-shape stability.
@@ -125,8 +125,98 @@ async def _raising(_ticket: str) -> dict[str, Any]:
 def _reset_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     cache_mod.default_cache.clear()
     agg.reset_jira_negative_cache()
+    monkeypatch.delenv("OMNISIGHT_BUILD_GIT_SHA", raising=False)
     monkeypatch.delenv("OMNISIGHT_PROJECT_STATE_JIRA_PULL", raising=False)
     asyncio.run(agg.clear_traces())
+
+
+# ── develop_sha source order ───────────────────────────────────────
+
+
+def test_resolve_develop_sha_prefers_deploy_overlay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "3f1c0a4e0000000000000000000000000000abcd"
+    monkeypatch.setattr(
+        router_mod.versioning,
+        "get_deploy_overlay",
+        lambda: {"build_git_sha": sha},
+    )
+    monkeypatch.setenv("OMNISIGHT_BUILD_GIT_SHA", "4" * 40)
+
+    def _raise_if_git_runs(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("git fallback should not run when overlay has a SHA")
+
+    monkeypatch.setattr(router_mod.subprocess, "run", _raise_if_git_runs)
+
+    resolved = router_mod._resolve_develop_sha()
+
+    assert resolved == sha
+    assert router_mod._FULL_GIT_SHA_RE.fullmatch(resolved)
+
+
+def test_resolve_develop_sha_uses_env_when_overlay_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "4" * 40
+    monkeypatch.setattr(router_mod.versioning, "get_deploy_overlay", lambda: None)
+    monkeypatch.setenv("OMNISIGHT_BUILD_GIT_SHA", sha)
+
+    def _raise_if_git_runs(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("git fallback should not run when env has a SHA")
+
+    monkeypatch.setattr(router_mod.subprocess, "run", _raise_if_git_runs)
+
+    assert router_mod._resolve_develop_sha() == sha
+
+
+def test_resolve_develop_sha_uses_env_when_overlay_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "5" * 40
+    monkeypatch.setattr(
+        router_mod.versioning,
+        "get_deploy_overlay",
+        lambda: {"deployed_tag": "v1.2.3"},
+    )
+    monkeypatch.setenv("OMNISIGHT_BUILD_GIT_SHA", sha)
+
+    assert router_mod._resolve_develop_sha() == sha
+
+
+def test_resolve_develop_sha_falls_back_to_dev_checkout_git(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sha = "6" * 40
+    calls: list[list[str]] = []
+    monkeypatch.setattr(router_mod.versioning, "get_deploy_overlay", lambda: None)
+
+    def _git_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        calls.append(cmd)
+        return SimpleNamespace(stdout=f"{sha}\n")
+
+    monkeypatch.setattr(router_mod.subprocess, "run", _git_run)
+
+    assert router_mod._resolve_develop_sha() == sha
+    assert calls == [["git", "rev-parse", "HEAD"]]
+
+
+def test_resolve_develop_sha_rejects_non_40_hex_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        router_mod.versioning,
+        "get_deploy_overlay",
+        lambda: {"build_git_sha": "abc123"},
+    )
+    monkeypatch.setenv("OMNISIGHT_BUILD_GIT_SHA", "not-a-sha")
+    monkeypatch.setattr(
+        router_mod.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="1234\n"),
+    )
+
+    assert router_mod._resolve_develop_sha() == "unknown"
 
 
 # ── 1. Happy path ───────────────────────────────────────────────────
@@ -889,22 +979,6 @@ def test_invalidate_for_webhook_drops_ticket_entries() -> None:
     assert cache_mod.default_cache.get(("OP-700", "sha-A")) is not None
     assert cache_mod.default_cache.get(("OP-904", "sha-A")) is None
     assert cache_mod.default_cache.get(("OP-904", "sha-B")) is None
-
-
-def test_invalidate_for_develop_merge_clears_cache() -> None:
-    cache_mod.default_cache.set(
-        ("OP-904", "sha-A"),
-        {
-            "ticket": "OP-904",
-            "structural": {},
-            "temporal": {"status": "unavailable"},
-            "causal": {},
-            "generated_at": "2026-05-11T00:00:00+00:00",
-        },
-    )
-    assert cache_mod.default_cache.stats()["size"] >= 1
-    router_mod.invalidate_for_develop_merge()
-    assert cache_mod.default_cache.stats()["size"] == 0
 
 
 # ── 8. Per-axis budget guard — match spec values ───────────────────

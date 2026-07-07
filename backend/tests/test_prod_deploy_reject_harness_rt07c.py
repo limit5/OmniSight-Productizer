@@ -40,6 +40,7 @@ real process boundary is the point.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -57,6 +58,7 @@ DEPLOY_SH = REPO_ROOT / "scripts" / "deploy-prod.sh"
 COMPOSE = REPO_ROOT / "docker-compose.prod.yml"
 
 GOOD_DIGEST = "sha256:" + "a" * 64
+FRONTEND_DIGEST = "sha256:" + "b" * 64
 
 # Compose required-var contract (RT-07b + OP-1515 + OP-1699). To isolate
 # the fail-closed assertion on ONE var, every OTHER required var must be
@@ -103,6 +105,23 @@ def _run_deploy(*args: str) -> subprocess.CompletedProcess:
         text=True,
         cwd=str(REPO_ROOT),
     )
+
+
+def _write_bundle(tmp_path: Path) -> Path:
+    bundle = tmp_path / "bundle.json"
+    bundle.write_text(
+        json.dumps(
+            {
+                "git_sha": "3f1c0a4e0000000000000000000000000000abcd",
+                "images": {
+                    "backend": {"digest": GOOD_DIGEST},
+                    "frontend": {"digest": FRONTEND_DIGEST},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return bundle
 
 
 def _docker_compose_available() -> bool:
@@ -270,8 +289,15 @@ def test_deploy_tag_and_digest_mutually_exclusive() -> None:
     assert "mutually exclusive" in proc.stdout + proc.stderr
 
 
-def test_deploy_rejects_bad_alembic_mode() -> None:
-    proc = _run_deploy(f"--digest={GOOD_DIGEST}", "--alembic-mode=wipe", "--dry-run")
+def test_deploy_rejects_bad_alembic_mode(tmp_path: Path) -> None:
+    bundle = _write_bundle(tmp_path)
+    proc = _run_deploy(
+        f"--digest={GOOD_DIGEST}",
+        f"--frontend-digest={FRONTEND_DIGEST}",
+        f"--bundle={bundle}",
+        "--alembic-mode=wipe",
+        "--dry-run",
+    )
     assert proc.returncode != 0
     assert "alembic-mode" in proc.stdout + proc.stderr
 
@@ -289,10 +315,16 @@ def test_well_formed_digest_accepts_full_verification() -> None:
     assert "well-formed image digest" in proc.stderr
 
 
-def test_deploy_digest_dry_run_passes_end_to_end() -> None:
+def test_deploy_digest_dry_run_passes_end_to_end(tmp_path: Path) -> None:
     """Operator entrypoint, digest identity, full --dry-run: the gate
     accepts and the script walks every step without touching prod."""
-    proc = _run_deploy(f"--digest={GOOD_DIGEST}", "--dry-run")
+    bundle = _write_bundle(tmp_path)
+    proc = _run_deploy(
+        f"--digest={GOOD_DIGEST}",
+        f"--frontend-digest={FRONTEND_DIGEST}",
+        f"--bundle={bundle}",
+        "--dry-run",
+    )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "well-formed image digest" in proc.stdout + proc.stderr
 
