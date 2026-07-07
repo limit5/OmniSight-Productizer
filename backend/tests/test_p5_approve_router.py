@@ -42,8 +42,9 @@ def _seed(monkeypatch, row, *, decide=True):
         return decide
     async def _mark(conn, aid, *, at):
         calls["executing"] = True
-    async def _setres(conn, aid, *, status, result, at):
+    async def _setres(conn, aid, *, status, result, at, expected_prior=None):
         calls["result"] = (status, result)
+        calls["expected_prior"] = expected_prior
     monkeypatch.setattr(db, "get_proposed_action", _get)
     monkeypatch.setattr(db, "decide_proposed_action", _decide)
     monkeypatch.setattr(db, "mark_proposed_action_executing", _mark)
@@ -59,10 +60,28 @@ def test_approve_restart_flag_off_is_dry_run(client, monkeypatch):
     assert r.status_code == 200, r.text
     body = r.json()
     assert calls["decide"] == "approved"
-    assert calls["executing"] is True              # write-ahead 'executing' marker fired (SR-1)
+    # audit r5 DRR-01: a dry-run / flag-off restart must NOT enter 'executing'
+    # (else the host could pick it up + really restart, defeating the off-switch).
+    assert calls["executing"] is False
     assert body["status"] == "approved"           # dry-run → stays approved, not executed
     assert body["execution"]["dry_run"] is True and body["execution"]["executed"] is False
     assert calls["result"][0] == "approved"        # persisted status
+    assert calls["expected_prior"] == "approved"   # CIR-02 compare-and-set guard
+
+
+def test_approve_restart_flag_on_defers_to_host(client, monkeypatch):
+    # flag ON + allowlisted restart → deferred to the host agent: status stays
+    # 'executing' (the write-ahead), and the API does NOT write a terminal result.
+    monkeypatch.setenv("OMNISIGHT_P5_EXECUTE", "1")
+    row = {"id": "pa-9", "action_kind": "restart", "params": '{"service":"omnisight-slo-monitor.service"}', "status": "pending"}
+    calls = _seed(monkeypatch, row)
+    r = client.post("/proposed-actions/pa-9/approve", data={"reason": "supervised first restart"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "executing"
+    assert body["execution"].get("deferred_to_host") is True
+    assert calls["executing"] is True          # write-ahead fired
+    assert calls["result"] is None             # NO terminal result written (host will)
 
 
 def test_approve_deploy_never_executes(client, monkeypatch):
@@ -73,6 +92,25 @@ def test_approve_deploy_never_executes(client, monkeypatch):
     assert r.status_code == 200
     ex = r.json()["execution"]
     assert ex["executed"] is False and "not auto-executed" in ex["detail"]
+
+
+def test_approve_off_allowlist_restart_is_refused(client, monkeypatch):
+    # audit r5 DRR-05: an off-allowlist restart → distinct 'refused' status, and
+    # (DRR-01) it must NEVER enter 'executing'.
+    monkeypatch.setenv("OMNISIGHT_P5_EXECUTE", "1")
+    row = {"id": "pa-x", "action_kind": "restart", "params": '{"service":"sshd.service"}', "status": "pending"}
+    calls = _seed(monkeypatch, row)
+    r = client.post("/proposed-actions/pa-x/approve", data={"reason": "x"})
+    assert r.status_code == 200 and r.json()["status"] == "refused"
+    assert calls["executing"] is False
+
+
+def test_approve_deploy_stays_approved_not_refused(client, monkeypatch):
+    # proposal-only (deploy) → 'approved' (intent recorded), NOT 'refused'
+    row = {"id": "pa-d", "action_kind": "deploy", "params": '{"tag":"v9"}', "status": "pending"}
+    calls = _seed(monkeypatch, row)
+    r = client.post("/proposed-actions/pa-d/approve", data={"reason": "x"})
+    assert r.json()["status"] == "approved" and calls["executing"] is False
 
 
 def test_approve_requires_reason(client, monkeypatch):
@@ -122,14 +160,12 @@ def test_dry_run_via_form_is_honored(monkeypatch):
     monkeypatch.setenv("OMNISIGHT_P5_EXECUTE", "1")
     row = {"id": "pa-1", "action_kind": "restart", "params": '{"service":"omnisight-slo-monitor.service"}', "status": "pending"}
     _seed(monkeypatch, row)
-    import backend.agents.action_executor as ex
-    ran = {"n": 0}
-    monkeypatch.setattr(ex, "_do_restart", lambda s, timeout=30.0: ran.__setitem__("n", ran["n"] + 1) or (True, "rc=0"))
     c = TestClient(app)
     r = c.post("/proposed-actions/pa-1/approve", data={"reason": "test", "dry_run": "true"})
     assert r.status_code == 200
-    assert r.json()["execution"]["dry_run"] is True
-    assert ran["n"] == 0        # form dry_run honored → real restart NOT called
+    ex_res = r.json()["execution"]
+    # form dry_run honored → dry-run (NOT deferred to host, NOT executed)
+    assert ex_res["dry_run"] is True and not ex_res.get("deferred_to_host")
 
 
 def test_bot_principal_cannot_approve(monkeypatch):

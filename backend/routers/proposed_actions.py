@@ -98,11 +98,6 @@ async def approve_action(
         if not won:
             raise HTTPException(status_code=409, detail=f"proposal {action_id} is not pending (already decided)")
 
-    # Write-ahead the 'executing' intent BEFORE the side effect (r3 SR-1) so a
-    # crash in the restart window is recoverable, not an ambiguous 'approved'.
-    async with get_pool().acquire() as conn:
-        await db.mark_proposed_action_executing(conn, action_id, at=time.time())
-
     # Execute (narrow + gated). ``row`` carries action_kind/params. Any executor
     # raise (r3 EXEC-01) is caught so the row never strands without a result.
     try:
@@ -110,19 +105,37 @@ async def approve_action(
     except Exception as exc:  # noqa: BLE001
         result = {"ok": False, "executed": False, "dry_run": False, "detail": f"executor error: {exc}"}
 
-    # Map the execution outcome to the durable status. A result that did NOT
-    # execute (dry-run / disabled / proposal-only 'run via release-train' /
-    # off-allowlist refusal) stays 'approved' — the detail explains; only a real
-    # run distinguishes executed vs failed.
-    if result.get("executed") and result.get("ok"):
-        new_status = "executed"
-    elif result.get("executed") and not result.get("ok"):
-        new_status = "failed"
+    # DEFER path (audit r5 DRR-01 — the important fix): ONLY a real, enabled,
+    # allowlisted restart is deferred to the host. We mark 'executing' HERE —
+    # AFTER the gate decided to defer — NOT unconditionally before it. So a
+    # dry-run / OMNISIGHT_P5_EXECUTE-off / refused approval can NEVER transiently
+    # sit in 'executing' and be picked up + really restarted by the host (which
+    # would defeat the dry-run flag AND the master off-switch). Post-fix,
+    # 'executing'+action_kind='restart' means EXACTLY "a real deferred restart the
+    # host should run". A crash before this mark leaves the row 'approved' → the
+    # host never touches it (fail-safe).
+    if result.get("deferred_to_host"):
+        async with get_pool().acquire() as conn:
+            await db.mark_proposed_action_executing(conn, action_id, at=time.time())
+        return JSONResponse({
+            "id": action_id, "approved_by": user.email, "reason": reason_text,
+            "status": "executing", "execution": result,
+        })
+
+    # Non-deferred → a terminal status written FROM 'approved' (r5 CIR-02: the
+    # expected_prior guard means this can never clobber a host-written terminal).
+    # Distinguish a genuine REFUSAL (off-allowlist / bad-param / executor error)
+    # from a benign dry-run or a proposal-only 'run via release-train' (r5 DRR-05).
+    if result.get("dry_run") or result.get("proposal_only"):
+        new_status = "approved"          # intent recorded; nothing ran here
+    elif not result.get("ok"):
+        new_status = "refused"           # off-allowlist / bad param / executor error
     else:
         new_status = "approved"
     async with get_pool().acquire() as conn:
         await db.set_proposed_action_result(
-            conn, action_id, status=new_status, result=result.get("detail", ""), at=time.time())
+            conn, action_id, status=new_status, result=result.get("detail", ""),
+            at=time.time(), expected_prior="approved")
 
     return JSONResponse({
         "id": action_id, "approved_by": user.email, "reason": reason_text,

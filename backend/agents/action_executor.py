@@ -33,9 +33,11 @@ import os
 # Non-critical, reversible user units a restart proposal may target. Override
 # with OMNISIGHT_P5_RESTART_ALLOWLIST (comma-separated). Deliberately excludes
 # anything whose restart risks prod availability.
+# Kept EXACTLY in sync with the host executor's hardcoded _ALLOWED_UNITS (audit
+# r4 — a unit the container defers but the host refuses is a confusing dead-end).
+# scripts/p5_host_executor.py is the FINAL gate; this is the container-side match.
 _DEFAULT_RESTART_ALLOWLIST = frozenset({
     "omnisight-slo-monitor.service",
-    "omnisight-staging-compose.service",
     "pipeline-coordinator.service",
 })
 
@@ -57,36 +59,19 @@ def is_execute_enabled() -> bool:
     return os.environ.get("OMNISIGHT_P5_EXECUTE", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-async def _do_restart(service: str, timeout: float = 30.0) -> tuple[bool, str]:
-    # Cancellable child (audit r3 EXEC-04): a wedged systemctl is KILLED on
-    # timeout rather than leaking a to_thread worker; `--` ends option parsing
-    # (EXEC-03) so a service token can never be read as a flag. argv list, no
-    # shell — no injection path from the (already allowlisted) service name.
-    proc = await asyncio.create_subprocess_exec(
-        "systemctl", "--user", "restart", "--", service,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        _out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-            await proc.wait()
-        except ProcessLookupError:
-            pass
-        return False, f"timed out after {timeout:.0f}s (killed)"
-    ok = proc.returncode == 0
-    stderr = (err or b"").decode(errors="replace").strip()[:200]
-    detail = f"rc={proc.returncode}" + (f" stderr={stderr}" if not ok else "")
-    return ok, detail
-
-
 async def execute_approved_action(action: dict, *, actor: str, dry_run: bool = False) -> dict:
-    """Execute an APPROVED proposal. ``action`` is a proposed_actions row dict.
+    """Resolve an APPROVED proposal. ``action`` is a proposed_actions row dict.
 
-    Returns ``{ok, executed, dry_run, detail}``. Never raises for an expected
-    refusal (bad kind / off-allowlist / disabled) — those return ok=False. Only
-    a genuinely unexpected failure surfaces as ok=False with the exception text.
+    IMPORTANT: the backend runs in a container with NO systemd (verified
+    2026-07-07: no systemctl, no DBus, no socket mounts), so a real restart is
+    NOT run here — it is DEFERRED to a strictly-scoped HOST agent
+    (scripts/p5_host_executor.py) that owns the actual `systemctl --user restart`.
+    This module only gates (allowlist + flag + dry-run) and decides between:
+      * dry-run / disabled / off-allowlist / proposal-only → a terminal result, or
+      * a real allowlisted restart → ``deferred_to_host=True`` (the API leaves the
+        row 'executing' for the host agent; nothing runs in the container).
+    Returns ``{ok, executed, dry_run, [deferred_to_host], detail}``. Never raises
+    for an expected refusal.
     """
     kind = (action.get("action_kind") or "").strip().lower()
     try:
@@ -99,7 +84,7 @@ async def execute_approved_action(action: dict, *, actor: str, dry_run: bool = F
     # deploy / promote / rollback are never auto-executed here.
     if kind in PROPOSAL_ONLY_KINDS:
         return {
-            "ok": False, "executed": False, "dry_run": False,
+            "ok": False, "executed": False, "dry_run": False, "proposal_only": True,
             "detail": (
                 f"{kind} is not auto-executed by the P5 gate — approve records intent, "
                 f"but an operator must run it via the sanctioned release-train / "
@@ -130,15 +115,14 @@ async def execute_approved_action(action: dict, *, actor: str, dry_run: bool = F
         why = "dry_run requested" if dry_run else "OMNISIGHT_P5_EXECUTE is off"
         return {
             "ok": True, "executed": False, "dry_run": True,
-            "detail": f"[dry-run: {why}] would `systemctl --user restart {service}` (in allowlist).",
+            "detail": f"[dry-run: {why}] would restart {service} (in allowlist) via the host agent.",
         }
-    try:
-        ok, detail = await _do_restart(service)   # timeout + kill are internal now
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "executed": True, "dry_run": False,
-                "detail": f"restart {service} errored: {exc}"}
+    # Real, allowlisted, enabled restart → DEFER to the host agent. The container
+    # cannot run systemctl; the API keeps the row 'executing' and the host
+    # executor (scripts/p5_host_executor.py) performs + records it.
     return {
-        "ok": ok, "executed": True, "dry_run": False,
-        "detail": (f"restarted {service} ({detail}) by {actor}" if ok
-                   else f"restart {service} FAILED ({detail})"),
+        "ok": True, "executed": False, "deferred_to_host": True, "dry_run": False,
+        "detail": (f"restart {service} approved + queued for the HOST executor "
+                   f"(allowlisted); the row stays 'executing' until the host agent "
+                   f"completes it. Requested by {actor}."),
     }

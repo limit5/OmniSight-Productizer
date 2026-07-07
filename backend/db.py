@@ -3899,14 +3899,24 @@ async def mark_proposed_action_executing(conn, action_id: str, *, at: float) -> 
 
 async def set_proposed_action_result(
     conn, action_id: str, *, status: str, result: str, at: float,
+    expected_prior: str | None = None,
 ) -> None:
-    """Record an execution outcome ('executing'/'executed'/'failed'/'canceled').
+    """Record an execution outcome ('executing'/'executed'/'failed'/'refused'…).
     Writes ``executed_at`` (NOT decided_at, r3 RS-2 — decided_at stays the durable
-    operator-decision time)."""
-    await conn.execute(
-        "UPDATE proposed_actions SET status=$2, result=$3, executed_at=$4 WHERE id=$1",
-        action_id, status, (result or "")[:2000], float(at),
-    )
+    operator-decision time). If ``expected_prior`` is given, this is a compare-and-
+    set that only writes when the row is still in that status (r5 CIR-02 — so the
+    container's terminal write can never clobber a host-written terminal)."""
+    if expected_prior is not None:
+        await conn.execute(
+            "UPDATE proposed_actions SET status=$2, result=$3, executed_at=$4 "
+            "WHERE id=$1 AND status=$5",
+            action_id, status, (result or "")[:2000], float(at), expected_prior,
+        )
+    else:
+        await conn.execute(
+            "UPDATE proposed_actions SET status=$2, result=$3, executed_at=$4 WHERE id=$1",
+            action_id, status, (result or "")[:2000], float(at),
+        )
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

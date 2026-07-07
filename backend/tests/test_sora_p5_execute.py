@@ -21,55 +21,29 @@ def _run(coro):
 # ── executor: default OFF → dry-run, nothing runs ─────────────────────
 def test_restart_allowlisted_flag_off_is_dry_run(monkeypatch):
     monkeypatch.delenv("OMNISIGHT_P5_EXECUTE", raising=False)
-    ran = {"n": 0}
-    async def _fake_restart(svc, timeout=30.0):
-        ran["n"] = ran.get("n", 0) + 1
-        return (True, "rc=0")
-    monkeypatch.setattr(ex, "_do_restart", _fake_restart)
     action = {"action_kind": "restart", "params": '{"service":"omnisight-slo-monitor.service"}'}
     r = _run(ex.execute_approved_action(action, actor="op@x"))
-    assert r["ok"] and r["dry_run"] and not r["executed"]
+    assert r["ok"] and r["dry_run"] and not r["executed"] and not r.get("deferred_to_host")
     assert "dry-run" in r["detail"] and "OMNISIGHT_P5_EXECUTE is off" in r["detail"]
-    assert ran["n"] == 0        # the real restart was NEVER called
 
 
-def test_restart_allowlisted_flag_on_executes(monkeypatch):
+def test_restart_allowlisted_flag_on_defers_to_host(monkeypatch):
     monkeypatch.setenv("OMNISIGHT_P5_EXECUTE", "1")
-    ran = {"svc": None}
-    async def _fake(svc, timeout=30.0):
-        ran["svc"] = svc
-        return True, "rc=0"
-    monkeypatch.setattr(ex, "_do_restart", _fake)
     action = {"action_kind": "restart", "params": '{"service":"pipeline-coordinator.service"}'}
     r = _run(ex.execute_approved_action(action, actor="op@x"))
-    assert r["ok"] and r["executed"] and not r["dry_run"]
-    assert ran["svc"] == "pipeline-coordinator.service"
-    assert "restarted" in r["detail"] and "op@x" in r["detail"]
+    # the container has NO systemd — a real allowlisted restart is DEFERRED to
+    # the host agent, NOT run here.
+    assert r["ok"] and r.get("deferred_to_host") is True and not r["executed"] and not r["dry_run"]
+    assert "queued for the HOST executor" in r["detail"]
 
 
 def test_restart_off_allowlist_refused_even_with_flag_on(monkeypatch):
     monkeypatch.setenv("OMNISIGHT_P5_EXECUTE", "1")
-    ran = {"n": 0}
-    async def _fake_restart(svc, timeout=30.0):
-        ran["n"] = ran.get("n", 0) + 1
-        return (True, "rc=0")
-    monkeypatch.setattr(ex, "_do_restart", _fake_restart)
-    # the prod backend container is NOT in the allowlist — must be refused
+    # the prod backend container is NOT in the allowlist — must be refused (never deferred)
     action = {"action_kind": "restart", "params": '{"service":"omnisight-productizer-backend-a-1"}'}
     r = _run(ex.execute_approved_action(action, actor="op@x"))
-    assert not r["ok"] and not r["executed"]
+    assert not r["ok"] and not r["executed"] and not r.get("deferred_to_host")
     assert "not in the restart allowlist".lower() in r["detail"].lower()
-    assert ran["n"] == 0        # never touched the real restart
-
-
-def test_restart_failure_reports_failed(monkeypatch):
-    monkeypatch.setenv("OMNISIGHT_P5_EXECUTE", "1")
-    async def _fail(svc, timeout=30.0):
-        return (False, "rc=1 stderr=Unit not found")
-    monkeypatch.setattr(ex, "_do_restart", _fail)
-    action = {"action_kind": "restart", "params": '{"service":"omnisight-slo-monitor.service"}'}
-    r = _run(ex.execute_approved_action(action, actor="op@x"))
-    assert not r["ok"] and r["executed"] and "FAILED" in r["detail"]
 
 
 def test_deploy_promote_rollback_never_auto_executed(monkeypatch):
@@ -101,16 +75,11 @@ def test_allowlist_rejects_dash_leading_entries(monkeypatch):
     assert ex.restart_allowlist() == frozenset({"good.service"})
 
 
-def test_explicit_dry_run_never_executes_even_with_flag_on(monkeypatch):
+def test_explicit_dry_run_never_defers_or_executes(monkeypatch):
     monkeypatch.setenv("OMNISIGHT_P5_EXECUTE", "1")
-    ran = {"n": 0}
-    async def _fake_restart(svc, timeout=30.0):
-        ran["n"] = ran.get("n", 0) + 1
-        return (True, "rc=0")
-    monkeypatch.setattr(ex, "_do_restart", _fake_restart)
     action = {"action_kind": "restart", "params": '{"service":"omnisight-slo-monitor.service"}'}
     r = _run(ex.execute_approved_action(action, actor="op@x", dry_run=True))
-    assert r["dry_run"] and not r["executed"] and ran["n"] == 0
+    assert r["dry_run"] and not r["executed"] and not r.get("deferred_to_host")
 
 
 def test_allowlist_env_override(monkeypatch):
