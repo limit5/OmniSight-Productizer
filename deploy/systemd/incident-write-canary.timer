@@ -1,0 +1,16 @@
+; [OP-2544] Daily 04:30 UTC trigger for incident-write-canary.service.
+;
+; Mirrors the cognee-drift-detect.timer daily oneshot pattern. Persistent=true
+; runs the canary after boot if the host missed the scheduled firing.
+
+[Unit]
+Description=Daily trigger for OmniSight incident write-rate canary (OP-2544)
+
+[Timer]
+Unit=incident-write-canary.service
+OnCalendar=*-*-* 04:30:00 UTC
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

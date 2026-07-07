@@ -1,0 +1,34 @@
+; [OP-2544] Daily runner_incidents durable-write canary.
+;
+; Install:
+;   cp deploy/systemd/incident-write-canary.service ~/.config/systemd/user/
+;   cp deploy/systemd/incident-write-canary.timer   ~/.config/systemd/user/
+;   systemctl --user daemon-reload
+;   systemctl --user enable --now incident-write-canary.timer
+;
+; deployed:
+;   systemctl --user status incident-write-canary.timer
+;
+; Reads the prod checkout and prod DSN. The service only counts rows and
+; files/updates one JIRA escalation ticket when runner_metrics shows fleet
+; activity but runner_incidents has zero live-v1/uuid writes in the window.
+; It does not restart, roll back, or remediate any service.
+
+[Unit]
+Description=OmniSight incident write-rate canary (OP-2544)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/user/omnisight-prod
+Environment=PYTHONPATH=/home/user/omnisight-prod
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=-/home/user/.config/omnisight/audit-db.env
+ExecStart=/usr/bin/python3 /home/user/omnisight-prod/scripts/incident_write_canary.py
+StandardOutput=append:/home/user/work/sora/logs/canary/incident-write-canary.log
+StandardError=append:/home/user/work/sora/logs/canary/incident-write-canary.log
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target
