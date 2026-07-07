@@ -17,6 +17,7 @@ Covers the 10 cases listed in the AC test plan:
 from __future__ import annotations
 
 import asyncio
+import builtins
 from typing import Any
 
 import pytest
@@ -178,6 +179,123 @@ async def test_temporal_axis_returns_pinned_unavailable_shape() -> None:
     payload = await agg.fetch_temporal_axis("OP-2539")
 
     assert payload == {"status": "unavailable"}
+
+
+def test_blocking_cognee_lookup_searches_code_then_lesson_kinds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents import cognee_integration as ci
+
+    calls: list[dict[str, Any]] = []
+
+    class _Hit:
+        identifier = "backend/agents/project_state_aggregator.py"
+        score = 0.87501
+        kind = ci.SOURCE_KIND_CODE
+
+    class _Adapter:
+        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
+            calls.append({"query": query, "kinds": kinds, "top_k": top_k})
+            return (_Hit(),)
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
+
+    payload = agg._blocking_cognee_lookup("OP-2540")
+
+    assert calls == [
+        {
+            "query": "ticket neighbours for OP-2540",
+            "kinds": (ci.SOURCE_KIND_CODE, ci.SOURCE_KIND_LESSON),
+            "top_k": 5,
+        }
+    ]
+    assert payload == {
+        "kg_source": "live",
+        "kg_neighbours": [
+            {
+                "identifier": "backend/agents/project_state_aggregator.py",
+                "score": 0.875,
+                "kind": ci.SOURCE_KIND_CODE,
+            }
+        ],
+    }
+
+
+def test_blocking_cognee_lookup_marks_empty_success_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents import cognee_integration as ci
+
+    class _Adapter:
+        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
+            return ()
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
+
+    payload = agg._blocking_cognee_lookup("OP-2540")
+
+    assert payload == {"kg_source": "live", "kg_neighbours": []}
+
+
+@pytest.mark.parametrize("exc_name", ["CogneeNotInstalled", "Neo4jPasswordDefault"])
+def test_blocking_cognee_lookup_maps_unconfigured_cognee_to_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    exc_name: str,
+) -> None:
+    from backend.agents import cognee_integration as ci
+
+    exc_type = getattr(ci, exc_name)
+
+    def _raise():
+        raise exc_type("unconfigured")
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", _raise)
+
+    payload = agg._blocking_cognee_lookup("OP-2540")
+
+    assert payload == {"kg_source": "disabled"}
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        asyncio.TimeoutError(),
+        RuntimeError("store failed"),
+    ],
+)
+def test_blocking_cognee_lookup_maps_query_failures_to_degraded(
+    monkeypatch: pytest.MonkeyPatch,
+    exc: BaseException,
+) -> None:
+    from backend.agents import cognee_integration as ci
+
+    class _Adapter:
+        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
+            raise exc
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
+
+    payload = agg._blocking_cognee_lookup("OP-2540")
+
+    assert payload == {"kg_source": "degraded"}
+
+
+@pytest.mark.asyncio
+async def test_structural_cognee_maps_module_import_failure_to_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def _import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
+        if name == "backend.agents" and "cognee_integration" in fromlist:
+            raise ImportError("missing cognee integration module")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+    payload = await agg._structural_cognee("OP-2540")
+
+    assert payload == {"kg_source": "unavailable"}
 
 
 # ── 2/3/4. Per-axis timeout — null for that axis, others returned ──

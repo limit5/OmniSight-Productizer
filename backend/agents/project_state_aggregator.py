@@ -244,7 +244,7 @@ async def fetch_structural_axis(ticket_key: str) -> dict[str, Any]:
     """Compose JIRA issuelinks + Cognee KG neighbours.
 
     The JIRA half answers "what META, what blockers, what siblings."
-    The Cognee half answers "which other code/JIRA entities share the
+    The Cognee half answers "which other code/lesson entities share the
     semantic neighbourhood." Both halves degrade to empty lists on
     backing-store outage.
     """
@@ -339,21 +339,35 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
 
     try:
         adapter = cognee_integration.CogneeAdapter.from_env()
-    except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+    except (
+        cognee_integration.CogneeNotInstalled,
+        cognee_integration.Neo4jPasswordDefault,
+    ) as exc:
         log.info(
-            "project_state.structural.cognee_adapter_unavailable ticket=%s "
+            "project_state.structural.cognee_adapter_disabled ticket=%s "
             "err=%s: %s",
             ticket_key,
             type(exc).__name__,
             exc,
         )
-        return {"kg_source": "unavailable"}
+        return {"kg_source": "disabled"}
+    except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+        log.info(
+            "project_state.structural.cognee_adapter_degrade ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
+        return {"kg_source": "degraded"}
 
     async def _search() -> Any:
         return await asyncio.wait_for(
             adapter.search(
                 f"ticket neighbours for {ticket_key}",
-                kinds=(cognee_integration.SOURCE_KIND_JIRA,),
+                kinds=(
+                    cognee_integration.SOURCE_KIND_CODE,
+                    cognee_integration.SOURCE_KIND_LESSON,
+                ),
                 top_k=5,
             ),
             timeout=inner_budget_sec,
