@@ -109,10 +109,10 @@ def test_cli_rc_failure_revert_clears_assignee_and_releases_claim(monkeypatch) -
 
     def fake_transition(client, key, reason, **kwargs):
         # R3.2 (OP-2542): terminals also thread failure_class= + claim_token=.
-        transitions.append(reason)
-
-    def fake_clear_assignee(client, key):
+        # jira_dispatch.transition_back_to_todo owns reverted-ticket cleanup
+        # via cleanup_reverted_ticket_claims_and_assignee().
         nonlocal assignee
+        transitions.append(reason)
         assignee = None
 
     def fake_release(client, key, instance_id, token=None, **kwargs):
@@ -125,7 +125,6 @@ def test_cli_rc_failure_revert_clears_assignee_and_releases_claim(monkeypatch) -
         "transition_back_to_todo",
         fake_transition,
     )
-    monkeypatch.setattr(runner.jira_dispatch, "clear_assignee", fake_clear_assignee)
     monkeypatch.setattr(runner.jira_dispatch, "release_ticket_claim", fake_release)
 
     runner._revert_cli_failure_to_todo("client", "OP-1410", 1, claim)
@@ -206,7 +205,7 @@ def test_enumerated_exit_paths_release_after_claim() -> None:
     assert source.count("_release_ticket_claim_if_acquired") >= 9
 
 
-def test_audited_revert_paths_clear_assignee_before_release() -> None:
+def test_audited_revert_paths_release_before_transition_cleanup() -> None:
     source = (REPO_ROOT / "auto-runner-jira.py").read_text().split(
         "# OP-836 post-CLI verify", 1
     )[1]
@@ -214,16 +213,16 @@ def test_audited_revert_paths_clear_assignee_before_release() -> None:
     # revert path — surfacing-without-revert is the fix for the OP-1647 silent
     # re-pickup loop. See ``test_gerrit_push_setup_fail_does_not_revert``.
     markers = [
-        "[runner-workspace-tampered]",
+        'print(f"[runner] workspace tampered',
         'print(f"[runner] CLI produced no commits:',
         'print(f"[runner] CLI left worktree dirty:',
     ]
     for marker in markers:
         block = source.split(marker, 1)[1].split("return 1", 1)[0]
-        assert "_clear_assignee_after_revert(client, snapshot.key)" in block
         assert "_release_ticket_claim_if_acquired(client, snapshot.key, claim)" in block
-        assert block.index("_clear_assignee_after_revert") < block.index(
-            "_release_ticket_claim_if_acquired"
+        assert "transition_back_to_todo(" in block
+        assert block.index("_release_ticket_claim_if_acquired") < block.index(
+            "transition_back_to_todo("
         )
 
 

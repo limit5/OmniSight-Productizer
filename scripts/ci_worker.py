@@ -499,7 +499,7 @@ def _build_pytest_argv(
             raise ValueError("'affected' policy requires test_files")
         return [*base, "-x", *test_files]
     if policy == "full":
-        return [*base, "backend/tests"]
+        return [*base, "backend/tests", "tests"]
     raise ValueError(f"_build_pytest_argv called with non-test policy {policy}")
 
 
