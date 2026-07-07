@@ -48,6 +48,7 @@ import logging
 import os
 import re
 import subprocess
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -78,6 +79,41 @@ DEFAULT_REPO_MAP_TOP_N = 50
 DEFAULT_LESSON_TOP_K = 3
 DEFAULT_ANTIPATTERN_TOP_K = 2
 DEFAULT_REPO_MAP_TOKEN_BUDGET = 1000
+
+# OP-2550 (R1.1) — writable-store root. When set (prod: `/cognee-data`,
+# a per-replica named volume), the cognee SDK's system + data roots are
+# pointed under it BEFORE any SDK operation; unset keeps the SDK's
+# defaults (today's behavior). The volume must be writable by the
+# image's runtime user app:app (65532:65532) — see
+# docs/operations/cognee-runbook.md §8 for the ownership-init one-liner.
+# Operators should also set HOME=<root> alongside this env: the SDK's
+# telemetry-id write goes to $HOME, which warns on the read-only
+# /home/app rootfs (cosmetic only — spike R1.0, 2026-07-07).
+DATA_ROOT_ENV = "OMNISIGHT_COGNEE_DATA_ROOT"
+
+_data_root_lock = threading.Lock()
+_data_root_applied = False
+
+
+def _configure_cognee_data_root(cognee_module: Any) -> None:
+    """Point cognee's writable stores under ``OMNISIGHT_COGNEE_DATA_ROOT``.
+
+    Applied exactly once per process (idempotent, thread-safe) — the
+    stores back a single sqlite file, so re-pointing mid-flight would
+    split state. No-op when the env var is unset or blank.
+    """
+    global _data_root_applied
+    root = os.environ.get(DATA_ROOT_ENV, "").strip()
+    if not root or _data_root_applied:
+        return
+    with _data_root_lock:
+        if _data_root_applied:
+            return
+        base = Path(root)
+        cognee_module.config.system_root_directory(str(base / "system"))
+        cognee_module.config.data_root_directory(str(base / "data"))
+        _data_root_applied = True
+
 
 # ECL source kinds (AC #2). Each kind maps to its own dataset namespace
 # in the underlying graph store so multi-tenant filtering (AC test #7) is
@@ -276,6 +312,12 @@ class CogneeAdapter:
         self.config.validate_password()
         if cognee_module is None:
             cognee_module = _import_cognee_module()
+        else:
+            # Injected modules (tests / wrappers) bypass _import_cognee_module,
+            # so the data-root seam must also fire here — every SDK operation
+            # goes through the adapter, keeping the "configured before any SDK
+            # op" invariant (OP-2550).
+            _configure_cognee_data_root(cognee_module)
         self._cognee = cognee_module
 
     @classmethod
@@ -915,7 +957,9 @@ def healthcheck(config: CogneeConfig | None = None) -> CogneeHealthcheckResult:
 def _import_cognee_module() -> Any:
     try:
         _patch_starlette_status_for_cognee()
-        return importlib.import_module("cognee")
+        module = importlib.import_module("cognee")
+        _configure_cognee_data_root(module)
+        return module
     except ImportError as exc:
         raise CogneeNotInstalled(
             f"{COGNEE_NOT_INSTALLED}: install via "
@@ -1046,8 +1090,6 @@ def _run_async(coro: Any) -> Any:
         running = None
     if running is None:
         return asyncio.run(coro)
-    import threading
-
     result: dict[str, Any] = {}
 
     def _runner() -> None:

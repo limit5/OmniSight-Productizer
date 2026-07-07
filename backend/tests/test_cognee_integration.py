@@ -751,3 +751,124 @@ def test_retrieve_antipatterns_against_real_cookbook() -> None:
     surfaced = {m.record.pattern_id for m in matches}
     assert "10" in surfaced
     assert any(m.matched_domains for m in matches)
+
+
+# ── OP-2550 (R1.1) — writable-store config seam ────────────────────────
+#
+# When env OMNISIGHT_COGNEE_DATA_ROOT is set the adapter must call
+# cognee.config.system_root_directory("<root>/system") +
+# data_root_directory("<root>/data") exactly once per process, before any
+# SDK operation; unset env keeps today's behavior (SDK defaults).
+
+
+class _FakeCogneeConfig:
+    def __init__(self) -> None:
+        self.system_roots: list[str] = []
+        self.data_roots: list[str] = []
+
+    def system_root_directory(self, path: str) -> None:
+        self.system_roots.append(path)
+
+    def data_root_directory(self, path: str) -> None:
+        self.data_roots.append(path)
+
+
+class _FakeCogneeWithConfig(_FakeCognee):
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.config = _FakeCogneeConfig()
+
+
+@pytest.fixture
+def data_root_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Isolate the process-global called-once flag + env between tests."""
+    monkeypatch.setattr(ci, "_data_root_applied", False)
+    monkeypatch.delenv("OMNISIGHT_COGNEE_DATA_ROOT", raising=False)
+
+
+def test_data_root_env_set_points_both_roots(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    fake = _FakeCogneeWithConfig()
+    _adapter(fake)
+    assert fake.config.system_roots == ["/cognee-data/system"]
+    assert fake.config.data_roots == ["/cognee-data/data"]
+
+
+def test_data_root_env_unset_keeps_sdk_defaults(data_root_seam: None) -> None:
+    fake = _FakeCogneeWithConfig()
+    _adapter(fake)
+    assert fake.config.system_roots == []
+    assert fake.config.data_roots == []
+    assert ci._data_root_applied is False
+
+
+def test_data_root_blank_env_is_treated_as_unset(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "   ")
+    fake = _FakeCogneeWithConfig()
+    _adapter(fake)
+    assert fake.config.system_roots == []
+    assert fake.config.data_roots == []
+
+
+def test_data_root_configured_exactly_once_across_adapters(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    fake = _FakeCogneeWithConfig()
+    _adapter(fake)
+    _adapter(fake)
+    ci._configure_cognee_data_root(fake)
+    assert fake.config.system_roots == ["/cognee-data/system"]
+    assert fake.config.data_roots == ["/cognee-data/data"]
+
+
+def test_data_root_applied_before_any_sdk_operation(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # search() (the first SDK op) must observe the roots already set.
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    fake = _FakeCogneeWithConfig(search_response=[])
+    adapter = _adapter(fake)
+    assert fake.config.system_roots  # configured at adapter construction
+    asyncio.run(adapter.search("q", kinds=[ci.SOURCE_KIND_CODE]))
+    assert fake.config.system_roots == ["/cognee-data/system"]
+
+
+def test_data_root_configure_is_thread_safe(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    fake = _FakeCogneeWithConfig()
+    barrier = threading.Barrier(8)
+
+    def _race() -> None:
+        barrier.wait()
+        ci._configure_cognee_data_root(fake)
+
+    threads = [threading.Thread(target=_race) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert fake.config.system_roots == ["/cognee-data/system"]
+    assert fake.config.data_roots == ["/cognee-data/data"]
+
+
+def test_data_root_applied_on_import_path_too(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # healthcheck() and CogneeAdapter.from_env() resolve the real module
+    # via _import_cognee_module — the seam must fire there as well.
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    fake = _FakeCogneeWithConfig()
+    with patch.object(ci.importlib, "import_module", return_value=fake):
+        module = ci._import_cognee_module()
+    assert module is fake
+    assert fake.config.system_roots == ["/cognee-data/system"]
+    assert fake.config.data_roots == ["/cognee-data/data"]

@@ -262,12 +262,76 @@ Compare the two outputs per probe and record the verdict (Cognee
 better / parity / fallback-needed) in the JIRA ticket comment as the
 DoD evidence.
 
-## 8. References
+## 8. Prod writable store — per-replica volumes (OP-2550, R1.1)
+
+The prod backend replicas run with `read_only: true` rootfs, so cognee's
+sqlite-backed system/data stores need a dedicated writable volume. Each
+replica gets its OWN named volume (`cognee-data-a` / `cognee-data-b`,
+mounted at `/cognee-data`) — **never one shared volume**: two writers on
+one sqlite file corrupts it. `OMNISIGHT_COGNEE_DATA_ROOT=/cognee-data`
+makes the adapter (`backend/agents/cognee_integration.py::
+_configure_cognee_data_root`) point
+`cognee.config.system_root_directory()` / `data_root_directory()` under
+that path exactly once, before any SDK operation.
+
+### 8.1 One-time volume ownership init (REQUIRED before first use)
+
+Docker creates fresh named volumes root-owned; the image runs as
+**app:app (65532:65532)**, so cognee's first write raises
+`PermissionError` / `unable to open database file` until the volumes are
+chown'd. Run once, before the recreate that first mounts them:
+
+```bash
+# Volume names carry the compose project prefix — verify with
+# `docker volume ls | grep cognee` (default project: omnisight-productizer).
+for v in cognee-data-a cognee-data-b; do
+  docker run --rm -v "omnisight-productizer_$v":/cognee-data alpine:3.19 \
+    chown 65532:65532 /cognee-data
+done
+```
+
+### 8.2 Sequenced recreate (activation)
+
+Roll one replica at a time so the pool never loses both backends:
+
+```bash
+# 1. Verify what will change BEFORE touching containers — expect only the
+#    cognee-data volume mounts + OMNISIGHT_COGNEE_DATA_ROOT /
+#    EMBEDDING_PROVIDER / EMBEDDING_API_KEY env additions.
+docker compose -f docker-compose.prod.yml config > /tmp/compose-new.yml
+diff <(docker compose -f docker-compose.prod.yml config --no-interpolate) /tmp/compose-new.yml || true
+# (or compare against the last-known-good rendered config kept by deploy-prod.sh)
+
+# 2. Recreate backend-a, wait until ready.
+docker compose -f docker-compose.prod.yml up -d --no-deps backend-a
+until curl -sf http://127.0.0.1:8000/readyz; do sleep 2; done
+
+# 3. Then backend-b.
+docker compose -f docker-compose.prod.yml up -d --no-deps backend-b
+until curl -sf http://127.0.0.1:8001/readyz; do sleep 2; done
+```
+
+### 8.3 Post-activation verification
+
+* `kg_source` on `/api/v1/project-state` responses flips from
+  `degraded` to `live` (an empty store returning `live` + empty list is
+  the honest pass — ingest is the nightly job's concern, not the
+  serving replicas').
+* After ~20 prod calls: `docker compose logs backend-a backend-b |
+  grep -Ei "PermissionError|unable to open database file"` returns
+  nothing cognee-related.
+* Least privilege: the serving replicas carry `EMBEDDING_PROVIDER=openai`
+  + `EMBEDDING_API_KEY` only — query-time search is pure vector
+  retrieval and needs **no** `LLM_API_KEY` (cognify/ingest does, but
+  that runs in the nightly job, not here).
+
+## 9. References
 
 * Spec: `docs/audit/2026-05-11-sprint-abc-master-plan.md` §3.4
 * Adapter: `backend/agents/cognee_integration.py`
 * Tests: `backend/tests/test_cognee_integration.py`
 * Compose service: `docker-compose.yml` `neo4j` (under `cognee` profile)
+* Prod writable store (OP-2550, R1.1): `docker-compose.prod.yml` `cognee-data-a` / `cognee-data-b` + §8 above
 * Path migration runbook (OP-1493, 2026-05-18 cutover): [`neo4j-path-migration-2026-05-18.md`](neo4j-path-migration-2026-05-18.md)
 * B8 baseline (still wired): `backend/agents/repo_map.py`
 * B10 baseline (still wired): `backend/agents/lesson_retrieval.py`

@@ -177,6 +177,14 @@ services:
       - omnisight-data:/app/data
       - omnisight-artifacts:/app/.artifacts
       - omnisight-sdks:/app/.sdks
+      # OP-2550 (R1.1): cognee writable store — PER-REPLICA named volume
+      # (backend-a → cognee-data-a, backend-b → cognee-data-b). NEVER a
+      # single shared volume: cognee's store is sqlite-backed and two
+      # writers on one sqlite file corrupts it. read_only: true rootfs
+      # stays — this volume is the only writable cognee surface. Must be
+      # chown'd to the image's runtime user app:app (65532:65532) before
+      # first use — see docs/operations/cognee-runbook.md §8.
+      - cognee-data-a:/cognee-data
       # OP-1646/RT-08: deploy-prod.sh writes the deploy-overlay lock before
       # bring-up so /api/version reports the pinned backend/frontend digests.
       - ${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/prod/overlay}:/etc/omnisight:ro
@@ -211,6 +219,23 @@ services:
       - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
       - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
       - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}
+      # OP-2550 (R1.1): cognee writable-store root — the adapter points
+      # cognee.config.{system,data}_root_directory under this path exactly
+      # once at first SDK use (backend/agents/cognee_integration.py).
+      - OMNISIGHT_COGNEE_DATA_ROOT=/cognee-data
+      # OP-2550 guidance: operators MAY also set HOME=/cognee-data here —
+      # cognee's telemetry-id write to $HOME warns on the read-only
+      # /home/app rootfs. Cosmetic only (spike R1.0), so it is not set
+      # by default.
+      # OP-2550: query-time search needs ONLY the embedder (vector
+      # retrieval) — deliberately NO LLM_API_KEY on the serving replicas
+      # (least privilege; cognify/ingest is the nightly job's concern,
+      # sibling ticket T12). Embedder = openai per the L2 production
+      # precedent; cognee 1.0.9 env names. Empty default keeps compose
+      # bring-up working without the key — searches then degrade per the
+      # adapter's fallback contract instead of failing the stack.
+      - EMBEDDING_PROVIDER=openai
+      - EMBEDDING_API_KEY=${OPENAI_API_KEY:-}
       # C1 fix: route Docker-API traffic through the allowlisted proxy
       # (see docker-socket-proxy service). The Python SDK in
       # host_metrics.py honours DOCKER_HOST; if/when backend/container.py
@@ -326,6 +351,10 @@ services:
       - omnisight-data:/app/data
       - omnisight-artifacts:/app/.artifacts
       - omnisight-sdks:/app/.sdks
+      # OP-2550 (R1.1): backend-b's OWN cognee store — never share
+      # backend-a's volume (two writers on one sqlite corrupts). See
+      # backend-a's note + docs/operations/cognee-runbook.md §8.
+      - cognee-data-b:/cognee-data
       # OP-1646/RT-08: see backend-a.
       - ${OMNISIGHT_DEPLOY_OVERLAY_DIR:-/var/lib/omnisight/prod/overlay}:/etc/omnisight:ro
       # Audit C1 (2026-04-19): host socket mount REMOVED — was a Tier-0
@@ -349,6 +378,12 @@ services:
       - OMNISIGHT_COGNEE_NEO4J_URI=${OMNISIGHT_COGNEE_NEO4J_URI:-bolt://neo4j:7687}
       - OMNISIGHT_COGNEE_NEO4J_USER=${OMNISIGHT_COGNEE_NEO4J_USER:-neo4j}
       - OMNISIGHT_COGNEE_NEO4J_PASSWORD=${OMNISIGHT_COGNEE_NEO4J_PASSWORD:-${NEO4J_PASSWORD:-}}
+      # OP-2550 (R1.1): cognee writable store + query-time embedder —
+      # same contract as backend-a (see its notes): per-replica root,
+      # openai embedder only, NO LLM_API_KEY on serving replicas.
+      - OMNISIGHT_COGNEE_DATA_ROOT=/cognee-data
+      - EMBEDDING_PROVIDER=openai
+      - EMBEDDING_API_KEY=${OPENAI_API_KEY:-}
       - DOCKER_HOST=tcp://docker-socket-proxy:2375
       # See backend-a's note above — internal docker URL for Step-5
       # parallel-health-check frontend probe, avoiding CF tunnel loop.
@@ -929,6 +964,15 @@ services:
 
 volumes:
   omnisight-data:
+    driver: local
+  # OP-2550 (R1.1): per-replica cognee writable stores. TWO volumes by
+  # design — cognee's store is sqlite-backed, and a shared volume would
+  # put two writers on one sqlite file (corruption). One-time ownership
+  # init (chown to the image's app:app = 65532:65532) is REQUIRED before
+  # first use — docs/operations/cognee-runbook.md §8.
+  cognee-data-a:
+    driver: local
+  cognee-data-b:
     driver: local
   omnisight-artifacts:
     driver: local
