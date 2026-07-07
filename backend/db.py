@@ -3843,8 +3843,8 @@ async def insert_proposed_action(conn, data: dict) -> None:
 async def get_proposed_action(conn, action_id: str) -> dict | None:
     row = await conn.fetchrow(
         "SELECT id, action_kind, params, title, preview, blast_radius, status, "
-        "proposed_by, proposed_at, decided_by, decided_at, result "
-        "FROM proposed_actions WHERE id=$1",
+        "proposed_by, proposed_at, decided_by, decided_at, decision_reason, "
+        "executed_at, result FROM proposed_actions WHERE id=$1",
         action_id,
     )
     return dict(row) if row else None
@@ -3855,41 +3855,56 @@ async def list_proposed_actions(conn, *, status: str | None = None, limit: int =
     if status:
         rows = await conn.fetch(
             "SELECT id, action_kind, title, blast_radius, status, proposed_by, "
-            "proposed_at FROM proposed_actions WHERE status=$1 "
+            "proposed_at, decided_by, decision_reason FROM proposed_actions WHERE status=$1 "
             "ORDER BY proposed_at DESC LIMIT $2",
             status, int(limit),
         )
     else:
         rows = await conn.fetch(
             "SELECT id, action_kind, title, blast_radius, status, proposed_by, "
-            "proposed_at FROM proposed_actions ORDER BY proposed_at DESC LIMIT $1",
+            "proposed_at, decided_by, decision_reason FROM proposed_actions "
+            "ORDER BY proposed_at DESC LIMIT $1",
             int(limit),
         )
     return [dict(r) for r in rows]
 
 
 async def decide_proposed_action(
-    conn, action_id: str, *, decision: str, decided_by: str, at: float,
+    conn, action_id: str, *, decision: str, decided_by: str, at: float, reason: str = "",
 ) -> bool:
     """Operator gate: flip a PENDING proposal → 'approved' or 'rejected'. Atomic
     (only transitions from 'pending', so a double-decide / race can't re-decide).
-    Returns True iff THIS caller won the transition."""
+    Persists the operator's ``reason`` in the same write for durable audit
+    (r3 fix). Returns True iff THIS caller won the transition."""
     if decision not in {"approved", "rejected"}:
         raise ValueError(f"decision must be approved|rejected, got {decision!r}")
     row = await conn.fetchrow(
-        "UPDATE proposed_actions SET status=$2, decided_by=$3, decided_at=$4 "
-        "WHERE id=$1 AND status='pending' RETURNING id",
-        action_id, decision, decided_by or "", float(at),
+        "UPDATE proposed_actions SET status=$2, decided_by=$3, decided_at=$4, "
+        "decision_reason=$5 WHERE id=$1 AND status='pending' RETURNING id",
+        action_id, decision, decided_by or "", float(at), (reason or "")[:1000],
     )
     return row is not None
+
+
+async def mark_proposed_action_executing(conn, action_id: str, *, at: float) -> None:
+    """Write-ahead the 'executing' intent BEFORE the real side effect (r3 SR-1),
+    so a crash in the restart window leaves a recoverable 'executing' row rather
+    than an ambiguous 'approved' one. Only flips an 'approved' row."""
+    await conn.execute(
+        "UPDATE proposed_actions SET status='executing', executed_at=$2 "
+        "WHERE id=$1 AND status='approved'",
+        action_id, float(at),
+    )
 
 
 async def set_proposed_action_result(
     conn, action_id: str, *, status: str, result: str, at: float,
 ) -> None:
-    """Record an execution outcome ('executing'/'executed'/'failed'/'canceled')."""
+    """Record an execution outcome ('executing'/'executed'/'failed'/'canceled').
+    Writes ``executed_at`` (NOT decided_at, r3 RS-2 — decided_at stays the durable
+    operator-decision time)."""
     await conn.execute(
-        "UPDATE proposed_actions SET status=$2, result=$3, decided_at=$4 WHERE id=$1",
+        "UPDATE proposed_actions SET status=$2, result=$3, executed_at=$4 WHERE id=$1",
         action_id, status, (result or "")[:2000], float(at),
     )
 

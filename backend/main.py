@@ -1635,6 +1635,8 @@ from backend.api import release_approval as _release_approval_api_router  # OP-9
 _include_versioned_router(_release_approval_api_router.router)
 from backend.api import release_state as _release_state_api_router  # OP-943 G7 pending-releases aggregator
 _include_versioned_router(_release_state_api_router.router)
+from backend.routers import proposed_actions as _proposed_actions_router  # OP-2530 P5 propose-and-approve operator gate
+_include_versioned_router(_proposed_actions_router.router)
 
 # Final mount: attach the aggregate v1 + v2 routers to the app. The
 # routers themselves were populated above via _include_versioned_router

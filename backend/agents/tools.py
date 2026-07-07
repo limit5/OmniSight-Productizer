@@ -3105,59 +3105,53 @@ async def supervisor_guild_capabilities() -> str:
 
 @tool
 async def supervisor_release_status() -> str:
-    """(Sora supervisor / P5-observe) READ-ONLY view of the prod release + deploy
-    state: the currently-deployed prod tag, any in-flight deploy, the latest
-    canary/rollout result, and the last few releases. Use to answer "what's on
-    prod / is a deploy running / was the last canary green / what shipped
-    recently". Pure read — NO side effects, NEVER triggers a deploy. This is the
-    watch-only precursor to the (human-approved) deploy actions; on its own it can
-    only look, not touch.
+    """(Sora supervisor / P5-observe) READ-ONLY view of the prod deploy state: the
+    currently-deployed version (tag / git-sha / promotion-audit-id) plus any dangerous-action
+    proposals awaiting approval. Use to answer "what's on prod / is anything
+    pending approval". Pure read — NO side effects, NEVER triggers a deploy.
+
+    Sourced from the deploy-overlay lock (the backend's own deployed identity,
+    a cheap file read) + the proposed_actions table via the async pool — NOT the
+    release_dashboard sync readers, which do async DB I/O through a sync engine
+    and raise MissingGreenlet in this async context (audit r3 watch-tool fix).
     """
-    import asyncio as _asyncio
-
-    def _gather() -> str:
-        from backend import release_dashboard as rd
-        cur = rd.current_prod_tag()
-        try:
-            inflight = rd.in_flight_deploys()
-        except Exception:  # noqa: BLE001
-            inflight = []
-        try:
-            canary = rd.canary_snapshot()
-        except Exception:  # noqa: BLE001
-            canary = None
-        try:
-            hist = rd.release_history(limit=5)
-        except Exception:  # noqa: BLE001
-            hist = []
-        lines = ["[SUPERVISOR] prod release status:"]
-        lines.append(f"  current prod tag: {cur or 'unknown'}")
-        if inflight:
-            lines.append(
-                "  ⏳ in-flight deploy(s): "
-                + "; ".join(
-                    f"{d.get('tag')} ({d.get('status')}, {d.get('progress_percent')}%)"
-                    for d in inflight
-                )
-            )
-        else:
-            lines.append("  in-flight deploy: none")
-        if canary:
-            lines.append(
-                f"  latest canary/rollout: {canary.get('status')} "
-                f"(id {canary.get('rollout_id')}, stage {canary.get('stage_index')})"
-            )
-        else:
-            lines.append("  latest canary/rollout: (no active rollout state)")
-        if hist:
-            lines.append("  recent releases:")
-            for h in hist[-5:]:
-                lines.append(f"    • {h.get('summary')}")
-        return "\n".join(lines)
-
     try:
-        # dashboard readers are sync (file/DB stores) — run off the event loop.
-        return await _asyncio.to_thread(_gather)
+        lines = ["[SUPERVISOR] prod deploy state (read-only):"]
+        # 1) currently-deployed version — cheap overlay-lock read (no DB)
+        try:
+            from backend import api_versioning
+            ov = api_versioning.get_deploy_overlay() or {}
+            tag = ov.get("deployed_tag") or "unknown"
+            sha = (ov.get("build_git_sha") or "")[:12] or "?"
+            # promotion_audit_id IS an overlay field (bundle_id is NOT — r3 WATCH-1)
+            audit = ov.get("promotion_audit_id") or "?"
+            drift = ""  # reconcile the deploy LOCK vs the actually-running image (r3 WATCH-2)
+            try:
+                running = api_versioning.get_running_image_digest_backend()
+                locked = ov.get("deployed_digest_backend")
+                if running and locked and running != locked:
+                    drift = "  ⚠ running backend image != deploy lock (DEPLOY DRIFT — verify)"
+            except Exception:  # noqa: BLE001
+                pass
+            lines.append(f"  deployed (per lock): tag={tag} sha={sha} audit={audit}")
+            if drift:
+                lines.append(drift)
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"  deployed: (version unavailable: {exc})")
+        # 2) dangerous-action proposals awaiting approval (async pool)
+        try:
+            from backend import db as _db
+            async with get_pool().acquire() as conn:
+                pend = await _db.list_proposed_actions(conn, status="pending", limit=10)
+            if pend:
+                lines.append(f"  ⏳ {len(pend)} action proposal(s) AWAITING APPROVAL:")
+                for p in pend:
+                    lines.append(f"    • {p.get('id')} — {p.get('title')} (by {p.get('proposed_by')})")
+            else:
+                lines.append("  no action proposals awaiting approval.")
+        except Exception as exc:  # noqa: BLE001
+            lines.append(f"  pending proposals: (unavailable: {exc})")
+        return "\n".join(lines)
     except Exception as exc:  # noqa: BLE001
         return f"[FAILED] release status unavailable: {exc}"
 
