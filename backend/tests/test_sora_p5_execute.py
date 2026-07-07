@@ -145,6 +145,37 @@ def test_release_status_reports_version_and_pending(monkeypatch):
     assert "AWAITING APPROVAL" in out and "pa-1" in out
 
 
+def test_release_status_uses_running_digest_when_no_overlay(monkeypatch):
+    # prod case: the deploy-overlay lock isn't mounted → get_deploy_overlay() is
+    # empty, but the running image digest IS available and is authoritative.
+    import backend.api_versioning as av
+    from backend import db
+    monkeypatch.setattr(av, "get_deploy_overlay", lambda: None)
+    monkeypatch.setattr(av, "get_running_image_digest_backend",
+                        lambda: "sha256:5f1f1c9abfdb28dec644461b4965904c980de8d3ef1914b9f128d0")
+    async def _list(conn, *, status, limit): return []
+    monkeypatch.setattr(db, "list_proposed_actions", _list)
+    monkeypatch.setattr(tools, "get_pool", lambda: _FakePool())
+    out = _run(supervisor_release_status.ainvoke({}))
+    assert out.startswith("[SUPERVISOR]")
+    assert "running backend image" in out and "sha256:5f1f1c9a" in out
+    assert "authoritative" in out
+
+
+def test_release_status_drift_warning(monkeypatch):
+    # overlay present but running digest != lock → deploy-drift warning
+    import backend.api_versioning as av
+    from backend import db
+    monkeypatch.setattr(av, "get_deploy_overlay",
+                        lambda: {"deployed_tag": "v0.7.35", "build_git_sha": "aaaa", "deployed_digest_backend": "sha256:LOCKED"})
+    monkeypatch.setattr(av, "get_running_image_digest_backend", lambda: "sha256:DIFFERENT")
+    async def _list(conn, *, status, limit): return []
+    monkeypatch.setattr(db, "list_proposed_actions", _list)
+    monkeypatch.setattr(tools, "get_pool", lambda: _FakePool())
+    out = _run(supervisor_release_status.ainvoke({}))
+    assert "DEPLOY DRIFT" in out
+
+
 def test_release_status_fail_open_on_overlay_error(monkeypatch):
     import backend.api_versioning as av
     from backend import db

@@ -3117,25 +3117,31 @@ async def supervisor_release_status() -> str:
     """
     try:
         lines = ["[SUPERVISOR] prod deploy state (read-only):"]
-        # 1) currently-deployed version — cheap overlay-lock read (no DB)
+        # 1) currently-deployed version. The AUTHORITATIVE source is the actually-
+        # running image digest (works even when the deploy-overlay lock isn't
+        # mounted, as on prod). The overlay lock, WHEN present, adds the tag /
+        # git-sha / promotion-audit + a drift check; when absent we still report
+        # the running digest instead of a useless "unknown".
         try:
             from backend import api_versioning
-            ov = api_versioning.get_deploy_overlay() or {}
-            tag = ov.get("deployed_tag") or "unknown"
-            sha = (ov.get("build_git_sha") or "")[:12] or "?"
-            # promotion_audit_id IS an overlay field (bundle_id is NOT — r3 WATCH-1)
-            audit = ov.get("promotion_audit_id") or "?"
-            drift = ""  # reconcile the deploy LOCK vs the actually-running image (r3 WATCH-2)
             try:
                 running = api_versioning.get_running_image_digest_backend()
+            except Exception:  # noqa: BLE001
+                running = None
+            ov = api_versioning.get_deploy_overlay() or {}
+            if ov:
+                tag = ov.get("deployed_tag") or "unknown"
+                sha = (ov.get("build_git_sha") or "")[:12] or "?"
+                audit = ov.get("promotion_audit_id") or "?"
+                lines.append(f"  deployed (per lock): tag={tag} sha={sha} audit={audit}")
                 locked = ov.get("deployed_digest_backend")
                 if running and locked and running != locked:
-                    drift = "  ⚠ running backend image != deploy lock (DEPLOY DRIFT — verify)"
-            except Exception:  # noqa: BLE001
-                pass
-            lines.append(f"  deployed (per lock): tag={tag} sha={sha} audit={audit}")
-            if drift:
-                lines.append(drift)
+                    lines.append("  ⚠ running backend image != deploy lock (DEPLOY DRIFT — verify)")
+            elif running:
+                lines.append(f"  running backend image: {running[:23]}… "
+                             f"(no deploy-overlay lock; the running digest is authoritative)")
+            else:
+                lines.append("  deployed version: unavailable (no overlay lock + no running digest)")
         except Exception as exc:  # noqa: BLE001
             lines.append(f"  deployed: (version unavailable: {exc})")
         # 2) dangerous-action proposals awaiting approval (async pool)
