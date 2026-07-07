@@ -173,6 +173,13 @@ async def test_structural_axis_adds_source_markers_for_degraded_halves(
     assert payload["kg_neighbours"] == []
 
 
+@pytest.mark.asyncio
+async def test_temporal_axis_returns_pinned_unavailable_shape() -> None:
+    payload = await agg.fetch_temporal_axis("OP-2539")
+
+    assert payload == {"status": "unavailable"}
+
+
 # ── 2/3/4. Per-axis timeout — null for that axis, others returned ──
 
 
@@ -195,7 +202,7 @@ async def test_structural_axis_timeout_returns_null_for_that_axis() -> None:
 
 
 @pytest.mark.asyncio
-async def test_temporal_axis_timeout_returns_null_for_that_axis() -> None:
+async def test_temporal_axis_timeout_returns_null_for_that_axis_not_fake_empty() -> None:
     budgets = agg.ProjectStateBudgets(
         structural_sec=0.5, temporal_sec=0.01, causal_sec=0.5, total_sec=2.0
     )
@@ -208,6 +215,11 @@ async def test_temporal_axis_timeout_returns_null_for_that_axis() -> None:
         "OP-904", develop_sha="x", fetchers=fetchers, budgets=budgets
     )
     assert payload["temporal"] is None
+    assert payload["temporal"] != {
+        "prior_similar_tickets": [],
+        "avg_completion_seconds": None,
+        "recent_events": [],
+    }
     assert payload["structural"]["parent_meta"] == "OP-900"
     assert payload["causal"]["neighbours"]
 
@@ -231,7 +243,7 @@ async def test_causal_axis_timeout_returns_null_for_that_axis() -> None:
 
 
 @pytest.mark.asyncio
-async def test_trace_axis_content_classifies_degraded_unavailable_and_empty() -> None:
+async def test_trace_axis_content_classifies_degraded_and_unavailable() -> None:
     async def _unavailable_structural(_ticket: str) -> dict[str, Any]:
         return {
             "ticket": _ticket,
@@ -240,12 +252,9 @@ async def test_trace_axis_content_classifies_degraded_unavailable_and_empty() ->
             "kg_source": "unavailable",
         }
 
-    async def _empty_temporal(_ticket: str) -> dict[str, Any]:
-        return {"ticket": _ticket, "recent_events": []}
-
     fetchers = agg.ProjectStateAxisFetchers(
         structural=_unavailable_structural,
-        temporal=_empty_temporal,
+        temporal=agg.fetch_temporal_axis,
         causal=_raising,
     )
     payload = await agg.aggregate_project_state(
@@ -257,7 +266,7 @@ async def test_trace_axis_content_classifies_degraded_unavailable_and_empty() ->
     trace = traces[-1]
     assert trace.axis_content == {
         "structural": "unavailable",
-        "temporal": "empty",
+        "temporal": "unavailable",
         "causal": "degraded",
     }
     assert trace.source_markers == {
@@ -330,7 +339,7 @@ def test_invalidate_for_webhook_drops_ticket_entries() -> None:
         {
             "ticket": "OP-904",
             "structural": {},
-            "temporal": {},
+            "temporal": {"status": "unavailable"},
             "causal": {},
             "generated_at": "2026-05-11T00:00:00+00:00",
         },
@@ -340,7 +349,7 @@ def test_invalidate_for_webhook_drops_ticket_entries() -> None:
         {
             "ticket": "OP-904",
             "structural": {},
-            "temporal": {},
+            "temporal": {"status": "unavailable"},
             "causal": {},
             "generated_at": "2026-05-11T00:00:00+00:00",
         },
@@ -350,7 +359,7 @@ def test_invalidate_for_webhook_drops_ticket_entries() -> None:
         {
             "ticket": "OP-700",
             "structural": {},
-            "temporal": {},
+            "temporal": {"status": "unavailable"},
             "causal": {},
             "generated_at": "2026-05-11T00:00:00+00:00",
         },
@@ -368,7 +377,7 @@ def test_invalidate_for_develop_merge_clears_cache() -> None:
         {
             "ticket": "OP-904",
             "structural": {},
-            "temporal": {},
+            "temporal": {"status": "unavailable"},
             "causal": {},
             "generated_at": "2026-05-11T00:00:00+00:00",
         },

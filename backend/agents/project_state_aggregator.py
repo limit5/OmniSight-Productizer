@@ -72,6 +72,9 @@ AXIS_STRUCTURAL = "structural"
 AXIS_TEMPORAL = "temporal"
 AXIS_CAUSAL = "causal"
 ALL_AXES: tuple[str, ...] = (AXIS_STRUCTURAL, AXIS_TEMPORAL, AXIS_CAUSAL)
+TEMPORAL_UNAVAILABLE_PAYLOAD: dict[str, str] = {"status": "unavailable"}
+
+log.info("project_state.temporal.graphiti_unavailable status=unavailable")
 
 
 # ── Error catalog ───────────────────────────────────────────────────
@@ -262,15 +265,9 @@ async def fetch_structural_axis(ticket_key: str) -> dict[str, Any]:
 
 
 async def fetch_temporal_axis(ticket_key: str) -> dict[str, Any]:
-    """Query Graphiti MCP for prior similar tickets + recent events."""
+    """Return the pinned temporal-unavailable payload."""
 
-    timeline = await _temporal_graphiti(ticket_key)
-    return {
-        "ticket": ticket_key,
-        "prior_similar_tickets": timeline.get("prior_similar_tickets") or [],
-        "avg_completion_seconds": timeline.get("avg_completion_seconds"),
-        "recent_events": timeline.get("recent_events") or [],
-    }
+    return await _temporal_graphiti(ticket_key)
 
 
 async def fetch_causal_axis(ticket_key: str) -> dict[str, Any]:
@@ -422,35 +419,9 @@ async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
 
 
 async def _temporal_graphiti(ticket_key: str) -> dict[str, Any]:
-    """Graphiti MCP timeline fetch with silent degrade."""
-    try:
-        from backend.agents import graphiti_mcp_client
-    except ImportError:
-        return {}
-    # The runner injects the actual dispatcher; when unavailable, return
-    # a no-context payload rather than fail the whole aggregator.
-    dispatcher = getattr(
-        graphiti_mcp_client, "_DEFAULT_DISPATCHER", None
-    )
-    if dispatcher is None:
-        return {}
-    try:
-        timeline = graphiti_mcp_client.dispatch_graphiti_temporal_query(
-            "getTicketTimeline",
-            {"ticket": ticket_key},
-            dispatcher=dispatcher,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.info(
-            "project_state.temporal.graphiti_degrade ticket=%s err=%s: %s",
-            ticket_key,
-            type(exc).__name__,
-            exc,
-        )
-        return {}
-    if not isinstance(timeline, dict):
-        return {}
-    return timeline
+    """Graphiti MCP timeline is intentionally unavailable for R5."""
+    del ticket_key
+    return dict(TEMPORAL_UNAVAILABLE_PAYLOAD)
 
 
 async def _causal_failure_neighbours(ticket_key: str) -> dict[str, Any]:
