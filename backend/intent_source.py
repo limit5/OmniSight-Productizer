@@ -387,6 +387,11 @@ async def audit_outbound(*, vendor: str, action: str, ticket: str,
 # ``HttpCall`` at construction time; the default is a ``curl``-subprocess
 # implementation so production doesn't need a new dependency, and tests
 # inject a pure-Python fake.
+#
+# Transport seam (OP-2536): implementations MAY additionally accept a
+# keyword-only ``timeout_s: float | None`` for a per-call deadline.
+# Adapters only pass it when the caller supplied one, so plain
+# 4-positional-arg fakes keep working unchanged.
 
 
 HttpCall = Callable[
@@ -399,6 +404,8 @@ async def curl_json_call(
     method: str, url: str,
     headers: Mapping[str, str] | None = None,
     body: bytes | None = None,
+    *,
+    timeout_s: float | None = None,
 ) -> tuple[int, bytes, dict[str, str]]:
     """Default HTTP transport — wraps ``curl`` via subprocess.
 
@@ -406,6 +413,11 @@ async def curl_json_call(
     status does NOT raise — the caller is responsible for mapping it to
     an ``AdapterError``.  Network errors (curl rc != 0) return
     ``(0, stderr, {})`` so the caller can decide whether to retry.
+
+    ``timeout_s`` (OP-2536) sets a per-call ``--max-time`` for curl plus a
+    proportionally scaled outer ``wait_for`` (default 30 s / 35 s outer).
+    The subprocess is killed on timeout AND on task cancellation so no
+    orphan curl lingers.
     """
     import asyncio
     import tempfile
@@ -413,11 +425,14 @@ async def curl_json_call(
     hdr = dict(headers or {})
     hdr.setdefault("Accept", "application/json")
 
+    max_time = 30.0 if timeout_s is None else float(timeout_s)
+    outer_timeout = max_time * 35.0 / 30.0
+
     argv: list[str] = [
         "curl", "-sS", "-X", method.upper(),
         "-o", "-",  # body to stdout
         "-w", "\n__HTTP_STATUS__=%{http_code}\n",
-        "--max-time", "30",
+        "--max-time", f"{max_time:g}",
         url,
     ]
     for k, v in hdr.items():
@@ -439,12 +454,16 @@ async def curl_json_call(
         )
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=35,
+                proc.communicate(), timeout=outer_timeout,
             )
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             return (0, b"curl: timeout", {})
+        except asyncio.CancelledError:
+            proc.kill()
+            await proc.wait()
+            raise
 
         if proc.returncode != 0:
             return (0, stderr or b"curl failed", {})

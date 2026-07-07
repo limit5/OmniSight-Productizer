@@ -28,6 +28,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
+from urllib.parse import quote
 
 from backend.intent_source import (
     AdapterError,
@@ -170,11 +171,17 @@ class JiraAdapter:
         return f"Bearer {self.token}"
 
     async def _api(self, method: str, path: str,
-                   body: Any | None = None) -> tuple[int, Any]:
+                   body: Any | None = None, *,
+                   timeout_s: float | None = None) -> tuple[int, Any]:
         """Hit a JIRA REST endpoint.  Returns (status, decoded_json).
 
         When the response isn't valid JSON we return the raw string so
         the caller can report context in an ``AdapterError``.
+
+        ``timeout_s`` (OP-2536) is a per-call deadline forwarded to the
+        transport.  It is only passed through when set, so 4-arg
+        ``HttpCall`` fakes and today's default request shape stay
+        byte-identical when absent.
         """
         url = self.base_url + path
         headers = {
@@ -189,7 +196,13 @@ class JiraAdapter:
         if body is not None:
             encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
 
-        status, raw, _ = await self.http_call(method, url, headers, encoded)
+        if timeout_s is None:
+            status, raw, _ = await self.http_call(method, url, headers,
+                                                  encoded)
+        else:
+            status, raw, _ = await self.http_call(method, url, headers,
+                                                  encoded,
+                                                  timeout_s=timeout_s)
         try:
             decoded: Any = json.loads(raw.decode("utf-8")) if raw else {}
         except Exception:
@@ -201,12 +214,28 @@ class JiraAdapter:
 
     # ─── IntentSource surface ─────────────────────────────────────
 
-    async def fetch_story(self, ticket: str) -> IntentStory:
+    async def fetch_story(self, ticket: str, *,
+                          fields: str | None = None,
+                          timeout_s: float | None = None) -> IntentStory:
+        """Fetch one issue.  OP-2536 transport seam:
+
+        ``fields``
+            Comma-string forwarded verbatim as the JIRA ``fields=``
+            query param (e.g. ``"issuelinks,parent,status,summary"``).
+            Absent → no ``fields=`` in the URL (full issue, as today).
+        ``timeout_s``
+            Per-call deadline threaded to the transport
+            (``--max-time`` + proportional outer ``wait_for`` on the
+            default curl transport).  Absent → 30/35 s defaults.
+        """
         _require_ticket(ticket)
-        status, body = await self._api("GET", f"/rest/api/2/issue/{ticket}")
+        path = f"/rest/api/2/issue/{ticket}"
+        if fields:
+            path += "?fields=" + quote(fields, safe=",")
+        status, body = await self._api("GET", path, timeout_s=timeout_s)
         await audit_outbound(
             vendor=self.vendor, action="fetch_story", ticket=ticket,
-            request={"method": "GET", "path": f"/rest/api/2/issue/{ticket}"},
+            request={"method": "GET", "path": path},
             response=body, status_code=status,
         )
         if status < 200 or status >= 300 or not isinstance(body, dict):
