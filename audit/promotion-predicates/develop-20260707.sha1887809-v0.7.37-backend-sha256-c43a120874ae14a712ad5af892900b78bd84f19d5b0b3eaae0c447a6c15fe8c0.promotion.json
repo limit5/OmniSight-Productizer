@@ -1,0 +1,12 @@
+{
+  "actor": "sora",
+  "approval_refs": [
+    "OP-2530"
+  ],
+  "bundle_id": "develop+20260707.sha1887809",
+  "from_env": "staging",
+  "image_ref": "sora.services:49160/omnisight/omnisight-productizer/backend@sha256:c43a120874ae14a712ad5af892900b78bd84f19d5b0b3eaae0c447a6c15fe8c0",
+  "parent_attestation": null,
+  "time": "2026-07-07T05:05:26Z",
+  "to_env": "v0.7.37"
+}
