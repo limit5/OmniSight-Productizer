@@ -16,6 +16,8 @@ def test_canonical_agent_flags_are_defined() -> None:
         "coord_skip",
         "cognee_recall",
         "antipattern_inject",
+        "reflection_rag_prompt",
+        "project_state_jira_pull",
     ]
     assert flags.failure_graph.env_name == "OMNISIGHT_FAILURE_GRAPH_ENABLED"
     assert flags.project_state.env_name == "OMNISIGHT_PROJECT_STATE_INJECT"
@@ -23,6 +25,11 @@ def test_canonical_agent_flags_are_defined() -> None:
     assert flags.coord_skip.env_name == "OMNISIGHT_COORD_SKIP"
     assert flags.cognee_recall.env_name == "OMNISIGHT_COGNEE_RECALL"
     assert flags.antipattern_inject.env_name == "OMNISIGHT_ANTIPATTERN_INJECT"
+    assert flags.reflection_rag_prompt.env_name == "OMNISIGHT_REFLECTION_RAG_PROMPT"
+    assert (
+        flags.project_state_jira_pull.env_name
+        == "OMNISIGHT_PROJECT_STATE_JIRA_PULL"
+    )
 
 
 def test_agent_flags_default_values(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -35,6 +42,18 @@ def test_agent_flags_default_values(monkeypatch: pytest.MonkeyPatch) -> None:
     assert flags.coord_skip.enabled() is False
     assert flags.cognee_recall.enabled() is False
     assert flags.antipattern_inject.enabled() is False
+    assert flags.reflection_rag_prompt.enabled() is False
+    assert flags.project_state_jira_pull.enabled() is True
+
+
+def test_project_state_jira_pull_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(flags.project_state_jira_pull.env_name, "0")
+    assert flags.project_state_jira_pull.enabled() is False
+
+    monkeypatch.setenv(flags.project_state_jira_pull.env_name, "1")
+    assert flags.project_state_jira_pull.enabled() is True
 
 
 @pytest.mark.parametrize(
