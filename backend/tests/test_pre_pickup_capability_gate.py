@@ -8,7 +8,6 @@ from typing import Any
 
 import pytest
 
-from backend.agents import runner_comment_dedupe
 from backend.agents import scheduler
 
 
@@ -164,21 +163,31 @@ def test_gate_off_via_env_flag_skips_check(monkeypatch: pytest.MonkeyPatch) -> N
     assert matrix.calls == []
 
 
-def test_gate_emits_dedupe_safe_comment_via_OP_1150_library(
+def test_gate_emits_idempotent_daily_comment_for_same_reason(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     mod = _load_jira_runner()
     client = _Client()
     snapshot = _snapshot(("area:docs", "tier:S", "type:docs"))
-    runner_comment_dedupe._reset_for_tests()
-    monkeypatch.setenv(runner_comment_dedupe.COMMENT_DEDUPE_ENABLED_ENV, "1")
+    raw_idem_keys: list[str | None] = []
+    posted_comments: list[tuple[str, str, str | None]] = []
+    seen_idem_keys: set[str] = set()
 
-    def fake_request(_client: Any, method: str, path: str) -> dict[str, Any]:
-        assert method == "GET"
-        assert path == "/issue/OP-1165/comment?orderBy=-created&maxResults=50"
-        return {"comments": []}
+    def fake_add_comment(
+        _client: Any,
+        key: str,
+        text: str,
+        idem_key: str | None = None,
+    ) -> None:
+        raw_idem_keys.append(idem_key)
+        assert idem_key is not None
+        if idem_key in seen_idem_keys:
+            return
+        seen_idem_keys.add(idem_key)
+        posted_comments.append((key, text, idem_key))
 
-    monkeypatch.setattr(mod.jira_dispatch, "_request", fake_request)
+    monkeypatch.setattr(mod.jira_dispatch, "add_comment", fake_add_comment)
 
     mod._post_pre_pickup_capability_block(
         client, snapshot, "capability-mismatch: need=code_edit have=mcp_search"
@@ -187,6 +196,10 @@ def test_gate_emits_dedupe_safe_comment_via_OP_1150_library(
         client, snapshot, "capability-mismatch: need=code_edit have=mcp_search"
     )
 
-    assert len(client.posts) == 1
-    assert client.posts[0][0] == "OP-1165"
-    assert client.posts[0][1].startswith(mod.PRE_PICKUP_CAP_BLOCKED_TAG)
+    assert len(posted_comments) == 1
+    assert posted_comments[0][0] == "OP-1165"
+    assert posted_comments[0][1].startswith(mod.PRE_PICKUP_CAP_BLOCKED_TAG)
+    assert posted_comments[0][2].startswith("capability-blocked-OP-1165-")
+    assert raw_idem_keys == [posted_comments[0][2], posted_comments[0][2]]
+    out = capsys.readouterr().out
+    assert out.count("[runner] pre-pickup capability blocked OP-1165:") == 2
