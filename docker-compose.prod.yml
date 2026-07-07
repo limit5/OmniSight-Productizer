@@ -223,6 +223,20 @@ services:
       # cognee.config.{system,data}_root_directory under this path exactly
       # once at first SDK use (backend/agents/cognee_integration.py).
       - OMNISIGHT_COGNEE_DATA_ROOT=/cognee-data
+      # OP-2552: cognee's NATIVE root env vars. cognee 1.0.9's BaseConfig
+      # (pydantic-settings, no env_prefix) reads SYSTEM_ROOT_DIRECTORY /
+      # DATA_ROOT_DIRECTORY whenever the config is first built — and the
+      # lru-cached relational config freezes the sqlite db_path from
+      # system_root_directory at first touch. On the serving path cognee
+      # is imported at backend startup BEFORE the adapter's programmatic
+      # setter runs, so without these the store lands on the read-only
+      # site-packages default (.cognee_system → "unable to open database
+      # file", kg_source=degraded, v0.7.38 prod). MUST match the
+      # <root>/system + <root>/data layout the adapter derives from
+      # OMNISIGHT_COGNEE_DATA_ROOT above. The programmatic setter stays
+      # as belt-and-braces.
+      - SYSTEM_ROOT_DIRECTORY=/cognee-data/system
+      - DATA_ROOT_DIRECTORY=/cognee-data/data
       # OP-2550 guidance: operators MAY also set HOME=/cognee-data here —
       # cognee's telemetry-id write to $HOME warns on the read-only
       # /home/app rootfs. Cosmetic only (spike R1.0), so it is not set
@@ -382,6 +396,11 @@ services:
       # same contract as backend-a (see its notes): per-replica root,
       # openai embedder only, NO LLM_API_KEY on serving replicas.
       - OMNISIGHT_COGNEE_DATA_ROOT=/cognee-data
+      # OP-2552: cognee native root env vars — same contract as backend-a
+      # (see its notes); must be set at container level so the root is
+      # right no matter what imports cognee first.
+      - SYSTEM_ROOT_DIRECTORY=/cognee-data/system
+      - DATA_ROOT_DIRECTORY=/cognee-data/data
       - EMBEDDING_PROVIDER=openai
       - EMBEDDING_API_KEY=${OPENAI_API_KEY:-}
       - DOCKER_HOST=tcp://docker-socket-proxy:2375

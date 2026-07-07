@@ -91,8 +91,38 @@ DEFAULT_REPO_MAP_TOKEN_BUDGET = 1000
 # /home/app rootfs (cosmetic only — spike R1.0, 2026-07-07).
 DATA_ROOT_ENV = "OMNISIGHT_COGNEE_DATA_ROOT"
 
+# OP-2552 — cognee 1.0.9's NATIVE root env vars. BaseConfig is a
+# pydantic-settings model (no env_prefix) whose ``system_root_directory``
+# / ``data_root_directory`` fields resolve from these names whenever the
+# (lru-cached) config is first built. The relational config then freezes
+# its sqlite db_path from system_root_directory at first touch — which
+# is why the programmatic setters below arrive TOO LATE on the serving
+# path (cognee is imported at backend startup before any adapter runs;
+# v0.7.38 prod: database_path stuck on the read-only site-packages
+# default, kg_source=degraded). The authoritative fix is setting these
+# at the container level (docker-compose.prod.yml); the export here is
+# belt-and-braces for non-compose entrypoints (scripts, staging spikes).
+NATIVE_SYSTEM_ROOT_ENV = "SYSTEM_ROOT_DIRECTORY"
+NATIVE_DATA_ROOT_ENV = "DATA_ROOT_DIRECTORY"
+
 _data_root_lock = threading.Lock()
 _data_root_applied = False
+
+
+def _export_native_root_env() -> None:
+    """Mirror ``OMNISIGHT_COGNEE_DATA_ROOT`` into cognee's native env vars.
+
+    ``setdefault`` — operator-provided values (e.g. the compose-level
+    OP-2552 wiring) always win. No-op when the omnisight var is unset.
+    Must run BEFORE ``import cognee`` so every config cognee builds
+    (base, relational, …) resolves under the writable root.
+    """
+    root = os.environ.get(DATA_ROOT_ENV, "").strip()
+    if not root:
+        return
+    base = Path(root)
+    os.environ.setdefault(NATIVE_SYSTEM_ROOT_ENV, str(base / "system"))
+    os.environ.setdefault(NATIVE_DATA_ROOT_ENV, str(base / "data"))
 
 
 def _configure_cognee_data_root(cognee_module: Any) -> None:
@@ -103,6 +133,7 @@ def _configure_cognee_data_root(cognee_module: Any) -> None:
     split state. No-op when the env var is unset or blank.
     """
     global _data_root_applied
+    _export_native_root_env()
     root = os.environ.get(DATA_ROOT_ENV, "").strip()
     if not root or _data_root_applied:
         return
@@ -957,6 +988,9 @@ def healthcheck(config: CogneeConfig | None = None) -> CogneeHealthcheckResult:
 def _import_cognee_module() -> Any:
     try:
         _patch_starlette_status_for_cognee()
+        # OP-2552: native root env vars must be in place BEFORE the import —
+        # cognee's lru-cached configs freeze paths at first instantiation.
+        _export_native_root_env()
         module = importlib.import_module("cognee")
         _configure_cognee_data_root(module)
         return module
