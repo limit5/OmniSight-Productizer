@@ -37,6 +37,7 @@ ENV:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -67,7 +68,6 @@ from backend.agents import (
     outcomes_grader,
     jira_dispatch,
     orphan_salvage,
-    runner_comment_dedupe,
     runner_metrics_recorder,
     runner_failure_classifier,
     runner_progress,
@@ -980,10 +980,12 @@ def _post_pre_pickup_capability_block(
     print(f"[runner] pre-pickup capability blocked {snapshot.key}: {reason}")
     if DRY_RUN:
         return
-    runner_comment_dedupe.maybe_post_comment(
+    date_bucket = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    reason_key = hashlib.sha256(reason.encode("utf-8")).hexdigest()[:12]
+    idem_key = f"capability-blocked-{snapshot.key}-{reason_key}-{date_bucket}"
+    jira_dispatch.add_comment(
         client,
         snapshot.key,
-        PRE_PICKUP_CAP_BLOCKED_TAG,
         (
             f"{PRE_PICKUP_CAP_BLOCKED_TAG}\n\n"
             "Pre-pickup capability gate failed; CLI was not invoked.\n\n"
@@ -992,6 +994,7 @@ def _post_pre_pickup_capability_block(
             "ticket type / area / tier, or use `capability:enable=` for a "
             "one-shot override."
         ),
+        idem_key=idem_key,
     )
 
 
