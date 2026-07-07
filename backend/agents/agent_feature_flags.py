@@ -75,6 +75,11 @@ reflection_rag_prompt = AgentFeatureFlag(
     env_name="OMNISIGHT_REFLECTION_RAG_PROMPT",
     default=False,
 )
+project_state_jira_pull = AgentFeatureFlag(
+    name="project_state_jira_pull",
+    env_name="OMNISIGHT_PROJECT_STATE_JIRA_PULL",
+    default=True,
+)
 
 ALL_FLAGS = (
     failure_graph,
@@ -84,6 +89,7 @@ ALL_FLAGS = (
     cognee_recall,
     antipattern_inject,
     reflection_rag_prompt,
+    project_state_jira_pull,
 )
 
 
@@ -102,5 +108,6 @@ __all__ = [
     "is_project_state_inject_enabled_sync",
     "ops_only",
     "project_state",
+    "project_state_jira_pull",
     "reflection_rag_prompt",
 ]

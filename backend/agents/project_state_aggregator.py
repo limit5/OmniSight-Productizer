@@ -40,11 +40,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from backend.agents import agent_feature_flags
 
 log = logging.getLogger(__name__)
 
@@ -245,12 +249,32 @@ async def fetch_structural_axis(ticket_key: str) -> dict[str, Any]:
 
     The JIRA half answers "what META, what blockers, what siblings."
     The Cognee half answers "which other code/lesson entities share the
-    semantic neighbourhood." Both halves degrade to empty lists on
+    semantic neighbourhood." Both halves run concurrently under
+    never-raising wrappers (OP-2541) and degrade to empty lists on
     backing-store outage.
     """
 
-    jira_view = await _structural_jira(ticket_key)
-    cognee_view = await _structural_cognee(ticket_key)
+    async def _half(
+        fetch: Callable[[str], Awaitable[dict[str, Any]]],
+        source_key: str,
+    ) -> dict[str, Any]:
+        try:
+            return await fetch(ticket_key)
+        except Exception as exc:  # noqa: BLE001 — a half must never raise
+            log.info(
+                "project_state.structural.half_degrade half=%s ticket=%s "
+                "err=%s: %s",
+                source_key,
+                ticket_key,
+                type(exc).__name__,
+                exc,
+            )
+            return {source_key: "degraded"}
+
+    jira_view, cognee_view = await asyncio.gather(
+        _half(_structural_jira, "jira_source"),
+        _half(_structural_cognee, "kg_source"),
+    )
     return {
         "ticket": ticket_key,
         "jira_source": jira_view.get("jira_source") or "unavailable",
@@ -276,18 +300,163 @@ async def fetch_causal_axis(ticket_key: str) -> dict[str, Any]:
     return await _causal_failure_neighbours(ticket_key)
 
 
-async def _structural_jira(ticket_key: str) -> dict[str, Any]:
-    """Pull issuelinks + parent from JIRA. Degrades to ``{}`` on outage.
+# ── JIRA half (OP-2541 / R2b part 2) ────────────────────────────────
+# Pinned contracts (see the sibling OP-2536 transport seam):
+# * ``fields=`` comma-string, forwarded verbatim to ``fetch_story``.
+#   ``labels`` is deliberately NOT requested — nothing consumes it, so
+#   ``phase`` stays null. ``description`` is never requested and never
+#   read (prompt-injection surface).
+# * inner fence 0.6 s = axis budget 0.8 − 0.2 margin (mirrors the
+#   cognee half); ``timeout_s=1.5`` on the transport is the backstop
+#   that also kills the curl subprocess.
+JIRA_PULL_FIELDS = "issuelinks,parent,status,summary"
+JIRA_TRANSPORT_TIMEOUT_SEC: float = 1.5
+JIRA_INNER_BUDGET_SEC: float = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
+JIRA_SUMMARY_MAX_CHARS = 200
 
-    Implemented as a degrade-silent shim so the F1 (Graphiti MCP) +
-    F4 (Cognee KG) tickets can land independently. The runner's main
-    consumer is the prompt builder; an empty structural payload is
-    rendered as "no known META / blockers" rather than blocking pickup.
+JIRA_NEGATIVE_CACHE_MAX_ENTRIES = 512
+JIRA_NEGATIVE_CACHE_TTL_SEC: float = 600.0
+_JIRA_NEGATIVE_CACHE_KEY_MAX_CHARS = 64
+
+# 404-only negative cache: ticket-key → monotonic expiry. 429/5xx are
+# transient and must NOT poison the cache. The counter is CUMULATIVE
+# for the process lifetime; each trace snapshots the running total.
+_jira_negative_cache: OrderedDict[str, float] = OrderedDict()
+_jira_negative_cache_hits: int = 0
+
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _build_jira_adapter() -> Any:
+    """Injectable module seam — tests monkeypatch this symbol."""
+    from backend.jira_adapter import build_default_jira_adapter
+
+    return build_default_jira_adapter()
+
+
+def reset_jira_negative_cache() -> None:
+    """Test helper — clear the 404 negative cache and its counter."""
+    global _jira_negative_cache_hits
+    _jira_negative_cache.clear()
+    _jira_negative_cache_hits = 0
+
+
+def _jira_negative_cache_key(ticket_key: str) -> str:
+    return ticket_key.strip().upper()[:_JIRA_NEGATIVE_CACHE_KEY_MAX_CHARS]
+
+
+def _jira_negative_cache_check(ticket_key: str) -> bool:
+    """True when ``ticket_key`` has a live 404 entry (increments counter)."""
+    global _jira_negative_cache_hits
+    key = _jira_negative_cache_key(ticket_key)
+    expiry = _jira_negative_cache.get(key)
+    if expiry is None:
+        return False
+    if time.monotonic() >= expiry:
+        _jira_negative_cache.pop(key, None)
+        return False
+    _jira_negative_cache_hits += 1
+    return True
+
+
+def _jira_negative_cache_put(ticket_key: str) -> None:
+    global _jira_negative_cache_hits
+    key = _jira_negative_cache_key(ticket_key)
+    _jira_negative_cache[key] = time.monotonic() + JIRA_NEGATIVE_CACHE_TTL_SEC
+    _jira_negative_cache.move_to_end(key)
+    while len(_jira_negative_cache) > JIRA_NEGATIVE_CACHE_MAX_ENTRIES:
+        _jira_negative_cache.popitem(last=False)
+    # A fresh 404 counts alongside cached ones — the counter tracks
+    # "JIRA said this ticket does not exist" events, not dict lookups.
+    _jira_negative_cache_hits += 1
+
+
+def _sanitize_jira_text(value: Any, max_chars: int = JIRA_SUMMARY_MAX_CHARS) -> str:
+    if not isinstance(value, str):
+        return ""
+    return _CONTROL_CHARS_RE.sub("", value)[:max_chars]
+
+
+def _jira_link_entry(issue: Any) -> dict[str, str] | None:
+    """Allowlisted ``{key, status, summary}`` projection of a linked issue."""
+    if not isinstance(issue, dict):
+        return None
+    key = _sanitize_jira_text(issue.get("key"), _JIRA_NEGATIVE_CACHE_KEY_MAX_CHARS)
+    if not key:
+        return None
+    fields = issue.get("fields")
+    if not isinstance(fields, dict):
+        fields = {}
+    status = fields.get("status")
+    status_name = status.get("name") if isinstance(status, dict) else ""
+    return {
+        "key": key,
+        "status": _sanitize_jira_text(status_name),
+        "summary": _sanitize_jira_text(fields.get("summary")),
+    }
+
+
+def _map_jira_story(story: Any) -> dict[str, Any]:
+    """Map the raw issue body onto the pinned structural half.
+
+    Only ``Blocks``-type issuelinks are considered: ``inwardIssue`` is
+    what blocks us (→ ``blockers``), ``outwardIssue`` is what we block
+    (→ ``blocking``). ``parent`` → ``parent_meta``. Every entry carries
+    only the allowlisted key / status-name / summary triple.
     """
+    raw = getattr(story, "raw", None)
+    fields = raw.get("fields") if isinstance(raw, dict) else None
+    if not isinstance(fields, dict):
+        fields = {}
+
+    blockers: list[dict[str, str]] = []
+    blocking: list[dict[str, str]] = []
+    links = fields.get("issuelinks")
+    for link in links if isinstance(links, list) else ():
+        if not isinstance(link, dict):
+            continue
+        link_type = link.get("type")
+        type_name = link_type.get("name") if isinstance(link_type, dict) else ""
+        if type_name != "Blocks":
+            continue
+        inward = _jira_link_entry(link.get("inwardIssue"))
+        if inward is not None:
+            blockers.append(inward)
+        outward = _jira_link_entry(link.get("outwardIssue"))
+        if outward is not None:
+            blocking.append(outward)
+
+    return {
+        "jira_source": "live",
+        "parent_meta": _jira_link_entry(fields.get("parent")),
+        "blockers": blockers,
+        "blocking": blocking,
+    }
+
+
+async def _structural_jira(ticket_key: str) -> dict[str, Any]:
+    """Real JIRA pull for the structural half (OP-2541).
+
+    ONE ``fetch_story`` call per cache-miss, budget-fenced so a slow
+    JIRA yields ``jira_source: "degraded"`` with a present-but-marked
+    payload — the axis never nulls out from a slow half. Kill-switch
+    OFF → ``"disabled"`` with zero adapter calls; adapter import /
+    construction failure → ``"unavailable"``; 404 (fresh or cached via
+    the negative cache) → ``"degraded"``.
+    """
+    if not agent_feature_flags.project_state_jira_pull.enabled():
+        return {"jira_source": "disabled"}
+
+    if _jira_negative_cache_check(ticket_key):
+        log.info(
+            "project_state.structural.jira_negative_cache_hit ticket=%s",
+            ticket_key,
+        )
+        return {"jira_source": "degraded"}
 
     try:
-        from backend.agents import jira_dispatch
-    except ImportError as exc:
+        adapter = _build_jira_adapter()
+    except Exception as exc:  # noqa: BLE001 — import/construction miswire
         log.info(
             "project_state.structural.jira_unavailable ticket=%s err=%s: %s",
             ticket_key,
@@ -296,19 +465,27 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
         )
         return {"jira_source": "unavailable"}
 
-    def _sync_pull() -> dict[str, Any]:
-        try:
-            client = jira_dispatch.make_client(
-                jira_dispatch.resolve_bot_username.__defaults__ or ()  # type: ignore[arg-type]
-            ) if False else None  # bot-class resolution is the runner's job
-            del client
-        except Exception:  # noqa: BLE001 — bot-class miswire degrades silently
-            pass
-        return {"jira_source": "unavailable"}
-
     try:
-        return await asyncio.to_thread(_sync_pull)
+        story = await asyncio.wait_for(
+            adapter.fetch_story(
+                ticket_key,
+                fields=JIRA_PULL_FIELDS,
+                timeout_s=JIRA_TRANSPORT_TIMEOUT_SEC,
+            ),
+            timeout=JIRA_INNER_BUDGET_SEC,
+        )
+    except asyncio.TimeoutError:
+        log.warning(
+            "project_state.structural.jira_inner_timeout ticket=%s "
+            "inner_budget_sec=%.3f outer_budget_sec=%.3f",
+            ticket_key,
+            JIRA_INNER_BUDGET_SEC,
+            STRUCTURAL_BUDGET_SEC,
+        )
+        return {"jira_source": "degraded"}
     except Exception as exc:  # noqa: BLE001 — degrade-on-anything
+        if getattr(exc, "status_code", None) == 404:
+            _jira_negative_cache_put(ticket_key)
         log.info(
             "project_state.structural.jira_degrade ticket=%s err=%s: %s",
             ticket_key,
@@ -316,6 +493,8 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
             exc,
         )
         return {"jira_source": "degraded"}
+
+    return _map_jira_story(story)
 
 
 def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
@@ -690,7 +869,7 @@ async def aggregate_project_state(
         axis_error={name: r.error for name, r in results.items() if r.error},
         axis_content=_classify_axis_content(results),
         source_markers=_structural_source_markers(payload.get(AXIS_STRUCTURAL)),
-        jira_negative_cache_hits=0,
+        jira_negative_cache_hits=_jira_negative_cache_hits,
         budget_exceeded=budget_exceeded,
     )
     await record_trace(trace)
@@ -794,6 +973,12 @@ __all__ = [
     "AxisResult",
     "CAUSAL_BUDGET_SEC",
     "CAUSAL_OWN_INCIDENT_CAP",
+    "JIRA_INNER_BUDGET_SEC",
+    "JIRA_NEGATIVE_CACHE_MAX_ENTRIES",
+    "JIRA_NEGATIVE_CACHE_TTL_SEC",
+    "JIRA_PULL_FIELDS",
+    "JIRA_SUMMARY_MAX_CHARS",
+    "JIRA_TRANSPORT_TIMEOUT_SEC",
     "ProjectStateAllAxesFailed",
     "ProjectStateAxisFetchers",
     "ProjectStateAxisTimeout",
@@ -811,5 +996,6 @@ __all__ = [
     "fetch_structural_axis",
     "fetch_temporal_axis",
     "record_trace",
+    "reset_jira_negative_cache",
     "tail_traces",
 ]

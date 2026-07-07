@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import time
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,6 +30,7 @@ from backend import auth
 from backend.agents import project_state_aggregator as agg
 from backend.agents import project_state_cache as cache_mod
 from backend.api import project_state as router_mod
+from backend.intent_source import AdapterError
 
 
 # ── Test helpers ────────────────────────────────────────────────────
@@ -119,8 +122,10 @@ async def _raising(_ticket: str) -> dict[str, Any]:
 
 
 @pytest.fixture(autouse=True)
-def _reset_module_state() -> None:
+def _reset_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
     cache_mod.default_cache.clear()
+    agg.reset_jira_negative_cache()
+    monkeypatch.delenv("OMNISIGHT_PROJECT_STATE_JIRA_PULL", raising=False)
     asyncio.run(agg.clear_traces())
 
 
@@ -296,6 +301,403 @@ async def test_structural_cognee_maps_module_import_failure_to_unavailable(
     payload = await agg._structural_cognee("OP-2540")
 
     assert payload == {"kg_source": "unavailable"}
+
+
+# ── OP-2541 — structural-JIRA real pull ─────────────────────────────
+
+
+_BLOCKS_TYPE = {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"}
+
+
+def _linked_issue(key: str, status: str, summary: str) -> dict[str, Any]:
+    return {"key": key, "fields": {"status": {"name": status}, "summary": summary}}
+
+
+class _FakeJiraAdapter:
+    def __init__(
+        self,
+        body: dict[str, Any] | None = None,
+        exc: Exception | None = None,
+        delay_sec: float = 0.0,
+    ) -> None:
+        self.body = body if body is not None else {"fields": {}}
+        self.exc = exc
+        self.delay_sec = delay_sec
+        self.calls: list[dict[str, Any]] = []
+
+    async def fetch_story(
+        self,
+        ticket: str,
+        *,
+        fields: str | None = None,
+        timeout_s: float | None = None,
+    ) -> Any:
+        self.calls.append(
+            {"ticket": ticket, "fields": fields, "timeout_s": timeout_s}
+        )
+        if self.delay_sec:
+            await asyncio.sleep(self.delay_sec)
+        if self.exc is not None:
+            raise self.exc
+        return SimpleNamespace(raw=self.body)
+
+
+def _jira_http_error(status_code: int) -> AdapterError:
+    return AdapterError(
+        "jira",
+        "fetch_story",
+        f"HTTP {status_code}",
+        status_code=status_code,
+        response={},
+    )
+
+
+def test_jira_half_contract_pins_match_spec() -> None:
+    # OP-2541 pinned contracts — fields comma-string (no labels, no
+    # description), inner fence = axis budget − 0.2 margin, transport
+    # backstop 1.5 s, negative cache 512 entries / 600 s / 404-only.
+    assert agg.JIRA_PULL_FIELDS == "issuelinks,parent,status,summary"
+    assert "labels" not in agg.JIRA_PULL_FIELDS
+    assert "description" not in agg.JIRA_PULL_FIELDS
+    assert agg.JIRA_INNER_BUDGET_SEC == pytest.approx(
+        agg.STRUCTURAL_BUDGET_SEC - 0.2
+    )
+    assert agg.JIRA_TRANSPORT_TIMEOUT_SEC == 1.5
+    assert agg.JIRA_NEGATIVE_CACHE_MAX_ENTRIES == 512
+    assert agg.JIRA_NEGATIVE_CACHE_TTL_SEC == 600.0
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_maps_blocks_links_directionally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    body = {
+        "key": "OP-2541",
+        "fields": {
+            "summary": "self summary",
+            "status": {"name": "In Progress"},
+            "parent": _linked_issue("OP-2500", "To Do", "parent meta"),
+            "issuelinks": [
+                {
+                    "type": _BLOCKS_TYPE,
+                    "inwardIssue": _linked_issue(
+                        "OP-2540", "公開済み", "blocks us"
+                    ),
+                },
+                {
+                    "type": _BLOCKS_TYPE,
+                    "outwardIssue": _linked_issue(
+                        "OP-2543", "To Do", "we block it"
+                    ),
+                },
+                {
+                    "type": {"name": "Relates"},
+                    "inwardIssue": _linked_issue("OP-999", "Done", "unrelated"),
+                },
+            ],
+        },
+    }
+    adapter = _FakeJiraAdapter(body=body)
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+
+    view = await agg._structural_jira("OP-2541")
+
+    assert view["jira_source"] == "live"
+    assert view["blockers"] == [
+        {"key": "OP-2540", "status": "公開済み", "summary": "blocks us"}
+    ]
+    assert view["blocking"] == [
+        {"key": "OP-2543", "status": "To Do", "summary": "we block it"}
+    ]
+    assert view["parent_meta"] == {
+        "key": "OP-2500",
+        "status": "To Do",
+        "summary": "parent meta",
+    }
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_pins_fields_string_and_transport_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeJiraAdapter()
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+
+    await agg._structural_jira("OP-2541")
+
+    assert adapter.calls == [
+        {
+            "ticket": "OP-2541",
+            "fields": "issuelinks,parent,status,summary",
+            "timeout_s": 1.5,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_structural_axis_makes_one_jira_call_per_miss(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeJiraAdapter()
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+
+    async def _kg_stub(_ticket: str) -> dict[str, Any]:
+        return {"kg_source": "live", "kg_neighbours": []}
+
+    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+
+    payload = await agg.fetch_structural_axis("OP-2541")
+
+    assert len(adapter.calls) == 1
+    assert payload["jira_source"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_structural_halves_run_concurrently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _slow_jira(_ticket: str) -> dict[str, Any]:
+        await asyncio.sleep(0.15)
+        return {"jira_source": "live"}
+
+    async def _slow_kg(_ticket: str) -> dict[str, Any]:
+        await asyncio.sleep(0.15)
+        return {"kg_source": "live", "kg_neighbours": []}
+
+    monkeypatch.setattr(agg, "_structural_jira", _slow_jira)
+    monkeypatch.setattr(agg, "_structural_cognee", _slow_kg)
+
+    start = time.monotonic()
+    payload = await agg.fetch_structural_axis("OP-2541")
+    elapsed = time.monotonic() - start
+
+    # Sequential halves would need >= 0.30 s; gather keeps it ~0.15 s.
+    assert elapsed < 0.27
+    assert payload["jira_source"] == "live"
+    assert payload["kg_source"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_structural_half_exception_degrades_instead_of_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _boom(_ticket: str) -> dict[str, Any]:
+        raise RuntimeError("jira half blew up")
+
+    async def _kg_stub(_ticket: str) -> dict[str, Any]:
+        return {"kg_source": "live", "kg_neighbours": []}
+
+    monkeypatch.setattr(agg, "_structural_jira", _boom)
+    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+
+    payload = await agg.fetch_structural_axis("OP-2541")
+
+    assert payload["jira_source"] == "degraded"
+    assert payload["kg_source"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_inner_fence_degrades_axis_stays_non_null(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeJiraAdapter(delay_sec=0.3)
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+    monkeypatch.setattr(agg, "JIRA_INNER_BUDGET_SEC", 0.05)
+
+    async def _kg_stub(_ticket: str) -> dict[str, Any]:
+        return {"kg_source": "live", "kg_neighbours": []}
+
+    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+
+    payload = await agg.fetch_structural_axis("OP-2541")
+
+    # Slow JIRA must degrade the half, never null the whole axis.
+    assert payload is not None
+    assert payload["jira_source"] == "degraded"
+    assert payload["kg_source"] == "live"
+    assert payload["blockers"] == []
+    assert payload["blocking"] == []
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_kill_switch_off_makes_zero_adapter_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built = {"n": 0}
+    adapter = _FakeJiraAdapter()
+
+    def _seam() -> _FakeJiraAdapter:
+        built["n"] += 1
+        return adapter
+
+    monkeypatch.setattr(agg, "_build_jira_adapter", _seam)
+
+    monkeypatch.setenv("OMNISIGHT_PROJECT_STATE_JIRA_PULL", "0")
+    view = await agg._structural_jira("OP-2541")
+    assert view == {"jira_source": "disabled"}
+    assert built["n"] == 0
+    assert adapter.calls == []
+
+    monkeypatch.setenv("OMNISIGHT_PROJECT_STATE_JIRA_PULL", "1")
+    view = await agg._structural_jira("OP-2541")
+    assert view["jira_source"] == "live"
+    assert built["n"] == 1
+    assert len(adapter.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_adapter_failure_maps_to_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _seam() -> Any:
+        raise ImportError("jira adapter missing")
+
+    monkeypatch.setattr(agg, "_build_jira_adapter", _seam)
+
+    view = await agg._structural_jira("OP-2541")
+
+    assert view == {"jira_source": "unavailable"}
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_sanitizes_entries_and_never_reads_description(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hostile_summary = "evil\x00\x1b[31m" + "x" * 300
+    body = {
+        "fields": {
+            "description": "TOPLEVEL-DESCRIPTION-BODY",
+            "issuelinks": [
+                {
+                    "type": _BLOCKS_TYPE,
+                    "inwardIssue": {
+                        "key": "OP-1",
+                        "fields": {
+                            "status": {"name": "Done\x07"},
+                            "summary": hostile_summary,
+                            "description": "LINKED-DESCRIPTION-BODY",
+                            "assignee": {"name": "someone"},
+                        },
+                    },
+                }
+            ],
+        },
+    }
+    adapter = _FakeJiraAdapter(body=body)
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+
+    view = await agg._structural_jira("OP-2541")
+
+    (entry,) = view["blockers"]
+    assert set(entry) == {"key", "status", "summary"}
+    assert entry["status"] == "Done"
+    assert len(entry["summary"]) <= 200
+    assert "\x00" not in entry["summary"]
+    assert "\x1b" not in entry["summary"]
+    assert entry["summary"].startswith("evil")
+    assert "description" not in adapter.calls[0]["fields"].split(",")
+    assert "DESCRIPTION-BODY" not in repr(view)
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_404_negative_cache_hit_and_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeJiraAdapter(exc=_jira_http_error(404))
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+
+    first = await agg._structural_jira("OP-4041")
+    assert first == {"jira_source": "degraded"}
+    assert len(adapter.calls) == 1
+    assert agg._jira_negative_cache_hits == 1
+
+    # Key is normalized (strip + upper) → cached, no second adapter call.
+    second = await agg._structural_jira(" op-4041 ")
+    assert second == {"jira_source": "degraded"}
+    assert len(adapter.calls) == 1
+    assert agg._jira_negative_cache_hits == 2
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_negative_cache_ttl_expires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeJiraAdapter(exc=_jira_http_error(404))
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+    monkeypatch.setattr(agg, "JIRA_NEGATIVE_CACHE_TTL_SEC", 0.01)
+
+    await agg._structural_jira("OP-4041")
+    await asyncio.sleep(0.03)
+    await agg._structural_jira("OP-4041")
+
+    # Expired entry re-consults JIRA instead of serving stale 404.
+    assert len(adapter.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_structural_jira_negative_cache_bounded_eviction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeJiraAdapter(exc=_jira_http_error(404))
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+    monkeypatch.setattr(agg, "JIRA_NEGATIVE_CACHE_MAX_ENTRIES", 2)
+
+    for ticket in ("OP-1", "OP-2", "OP-3"):
+        await agg._structural_jira(ticket)
+
+    assert len(agg._jira_negative_cache) == 2
+    assert "OP-1" not in agg._jira_negative_cache  # oldest evicted
+
+    await agg._structural_jira("OP-1")
+    assert len(adapter.calls) == 4  # eviction → real call again
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+async def test_structural_jira_transient_errors_not_negative_cached(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    adapter = _FakeJiraAdapter(exc=_jira_http_error(status_code))
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+
+    first = await agg._structural_jira("OP-2541")
+    second = await agg._structural_jira("OP-2541")
+
+    assert first == second == {"jira_source": "degraded"}
+    assert len(adapter.calls) == 2  # never served from negative cache
+    assert agg._jira_negative_cache_hits == 0
+    assert not agg._jira_negative_cache
+
+
+@pytest.mark.asyncio
+async def test_trace_snapshots_cumulative_negative_cache_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _FakeJiraAdapter(exc=_jira_http_error(404))
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+
+    async def _kg_stub(_ticket: str) -> dict[str, Any]:
+        return {"kg_source": "live", "kg_neighbours": []}
+
+    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+
+    fetchers = agg.ProjectStateAxisFetchers(
+        structural=agg.fetch_structural_axis,
+        temporal=_ok_temporal,
+        causal=_ok_causal,
+    )
+    await agg.aggregate_project_state(
+        "OP-4041", develop_sha="x", fetchers=fetchers
+    )
+    await agg.aggregate_project_state(
+        "OP-4041", develop_sha="x", fetchers=fetchers
+    )
+
+    traces = await agg.tail_traces()
+    assert traces[-2].jira_negative_cache_hits == 1  # fresh 404
+    assert traces[-1].jira_negative_cache_hits == 2  # cumulative snapshot
+    assert len(adapter.calls) == 1  # second run served by negative cache
 
 
 # ── 2/3/4. Per-axis timeout — null for that axis, others returned ──
