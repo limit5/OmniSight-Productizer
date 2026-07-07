@@ -107,7 +107,8 @@ def test_cli_rc_failure_revert_clears_assignee_and_releases_claim(monkeypatch) -
         claim_token="default:tok-a",
     )
 
-    def fake_transition(client, key, reason):
+    def fake_transition(client, key, reason, **kwargs):
+        # R3.2 (OP-2542): terminals also thread failure_class= + claim_token=.
         transitions.append(reason)
 
     def fake_clear_assignee(client, key):
@@ -183,8 +184,9 @@ def test_enumerated_exit_paths_release_after_claim() -> None:
         # OP-1647 regression without tripping this audit.
         "except Exception as e:\n"
         "            # OP-2484: push-setup failure (rebase / Change-Id stamp)",
-        "except outcomes_consumer.OutcomesGraderRefused:\n"
-        "                _release_ticket_claim_if_acquired(client, snapshot.key, claim)",
+        # R3.2 (OP-2542): the refusal terminal now records an incident
+        # (WritebackRequest seam) before releasing the claim.
+        "except outcomes_consumer.OutcomesGraderRefused as refusal:",
         "if outcomes_status == \"fail\":",
         "_handle_gerrit_push_failure(\n"
         "                client,\n"
@@ -193,6 +195,13 @@ def test_enumerated_exit_paths_release_after_claim() -> None:
     ]
     for needle in required:
         assert needle in source
+
+    # R3.2 (OP-2542): the grader-refusal terminal must still release the
+    # claim before exiting (release fires after the incident writeback).
+    refused_block = source.split(
+        "except outcomes_consumer.OutcomesGraderRefused as refusal:", 1
+    )[1].split("return 1", 1)[0]
+    assert "_release_ticket_claim_if_acquired(client, snapshot.key, claim)" in refused_block
 
     assert source.count("_release_ticket_claim_if_acquired") >= 9
 
