@@ -38,39 +38,10 @@ def test_bundle_includes_l3_recall_and_is_readonly_set():
 def test_release_status_registered_and_in_observe_set():
     assert supervisor_release_status in SUPERVISOR_OBSERVE_TOOLS
     assert supervisor_release_status.name in TOOL_MAP
-
-
-def test_release_status_formats_dashboard(monkeypatch):
-    import backend.release_dashboard as rd
-    monkeypatch.setattr(rd, "current_prod_tag", lambda **k: "v0.7.33")
-    monkeypatch.setattr(rd, "in_flight_deploys", lambda *a, **k: [])
-    monkeypatch.setattr(rd, "canary_snapshot", lambda: {"status": "green", "rollout_id": "r1", "stage_index": 2})
-    monkeypatch.setattr(rd, "release_history", lambda **k: [{"summary": "sora deployed v0.7.33 at 01:41"}])
-    out = asyncio.run(supervisor_release_status.ainvoke({}))
-    assert out.startswith("[SUPERVISOR]")
-    assert "v0.7.33" in out and "in-flight deploy: none" in out
-    assert "green" in out and "sora deployed v0.7.33" in out
-
-
-def test_release_status_reports_inflight(monkeypatch):
-    import backend.release_dashboard as rd
-    monkeypatch.setattr(rd, "current_prod_tag", lambda **k: "v0.7.32")
-    monkeypatch.setattr(rd, "in_flight_deploys", lambda *a, **k: [
-        {"tag": "v0.7.33", "status": "deploying", "progress_percent": 60}])
-    monkeypatch.setattr(rd, "canary_snapshot", lambda: None)
-    monkeypatch.setattr(rd, "release_history", lambda **k: [])
-    out = asyncio.run(supervisor_release_status.ainvoke({}))
-    assert "⏳ in-flight deploy" in out and "v0.7.33" in out and "deploying" in out
-
-
-def test_release_status_fails_open(monkeypatch):
-    # a dashboard error must NOT raise — read-only tool returns a [FAILED] string
-    import backend.release_dashboard as rd
-    def _boom(**k):
-        raise RuntimeError("store unavailable")
-    monkeypatch.setattr(rd, "current_prod_tag", _boom)
-    out = asyncio.run(supervisor_release_status.ainvoke({}))
-    assert out.startswith("[FAILED]") and "unavailable" in out
+    # NOTE: behavioural coverage for supervisor_release_status (deployed version +
+    # pending proposals, per-section fail-open) lives in test_sora_p5_execute.py —
+    # the tool was rewritten off release_dashboard (greenlet bug) onto
+    # api_versioning.get_deploy_overlay + the proposed_actions async pool.
 
 
 @pytest.mark.parametrize(
