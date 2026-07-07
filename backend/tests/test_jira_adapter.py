@@ -119,6 +119,201 @@ async def test_fetch_story_http_error(monkeypatch):
 
 
 # ──────────────────────────────────────────────────────────────
+#  fetch_story — OP-2536 transport seams (fields= / timeout_s=)
+# ──────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_fetch_story_fields_param_emits_pinned_query_string(monkeypatch):
+    """PINNED: fields= comma-string is forwarded verbatim in the URL."""
+    fake = FakeJiraHttp()
+    fake.set(
+        "GET",
+        "https://jira.example.com/rest/api/2/issue/PROJ-42"
+        "?fields=issuelinks,parent,status,summary",
+        200, {"key": "PROJ-42", "fields": {"summary": "s"}},
+    )
+    monkeypatch.setattr("backend.intent_source.audit_outbound", _noop_audit)
+    adapter = _adapter(fake)
+    story = await adapter.fetch_story(
+        "PROJ-42", fields="issuelinks,parent,status,summary",
+    )
+    assert story.summary == "s"
+    method, url, _headers, body = fake.calls[-1]
+    assert method == "GET"
+    assert url == (
+        "https://jira.example.com/rest/api/2/issue/PROJ-42"
+        "?fields=issuelinks,parent,status,summary"
+    )
+    assert body is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_story_default_request_shape_unchanged(monkeypatch):
+    """Regression: no params → byte-identical request shape to today.
+
+    ``FakeJiraHttp.__call__`` only accepts the 4 positional args, so this
+    also proves the adapter does NOT pass ``timeout_s=`` when absent.
+    """
+    fake = FakeJiraHttp()
+    fake.set("GET", "https://jira.example.com/rest/api/2/issue/PROJ-42",
+             200, {"key": "PROJ-42", "fields": {"summary": "s"}})
+    monkeypatch.setattr("backend.intent_source.audit_outbound", _noop_audit)
+    adapter = _adapter(fake)
+    await adapter.fetch_story("PROJ-42")
+    assert fake.calls == [(
+        "GET",
+        "https://jira.example.com/rest/api/2/issue/PROJ-42",
+        {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": "Bearer T",
+        },
+        None,
+    )]
+
+
+@pytest.mark.asyncio
+async def test_fetch_story_timeout_s_threads_to_http_call(monkeypatch):
+    seen: dict[str, Any] = {}
+
+    async def fake_call(method, url, headers, body, *, timeout_s=None):
+        seen["timeout_s"] = timeout_s
+        return (200, json.dumps(
+            {"key": "PROJ-42", "fields": {"summary": "s"}}).encode(), {})
+
+    monkeypatch.setattr("backend.intent_source.audit_outbound", _noop_audit)
+    adapter = JiraAdapter(
+        base_url="https://jira.example.com", token="T",
+        field_map=JiraFieldMap(), http_call=fake_call,
+    )
+    await adapter.fetch_story("PROJ-42", timeout_s=5.0)
+    assert seen["timeout_s"] == 5.0
+
+
+# ──────────────────────────────────────────────────────────────
+#  curl_json_call — OP-2536 per-call --max-time + kill semantics
+# ──────────────────────────────────────────────────────────────
+
+
+class _FakeProc:
+    def __init__(self, stdout: bytes = b"", hang: bool = False):
+        self.returncode = 0
+        self.killed = False
+        self._stdout = stdout
+        self._hang = hang
+
+    async def communicate(self):
+        if self._hang:
+            import asyncio
+            await asyncio.Event().wait()
+        return self._stdout, b""
+
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
+def _patch_subprocess(monkeypatch, proc: _FakeProc) -> dict[str, Any]:
+    """Capture curl argv + the outer wait_for timeout."""
+    import asyncio
+    captured: dict[str, Any] = {}
+
+    async def fake_exec(*argv, **kwargs):
+        captured["argv"] = list(argv)
+        return proc
+
+    orig_wait_for = asyncio.wait_for
+
+    async def spy_wait_for(aw, timeout=None):
+        captured["wait_for_timeout"] = timeout
+        return await orig_wait_for(aw, timeout)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(asyncio, "wait_for", spy_wait_for)
+    return captured
+
+
+_CURL_OK = b'{"ok":1}\n__HTTP_STATUS__=200\n'
+
+
+@pytest.mark.asyncio
+async def test_curl_json_call_default_argv_pinned(monkeypatch):
+    """Regression: no timeout_s → --max-time 30 / outer wait_for 35."""
+    from backend.intent_source import curl_json_call
+
+    proc = _FakeProc(stdout=_CURL_OK)
+    captured = _patch_subprocess(monkeypatch, proc)
+    status, raw, _hdrs = await curl_json_call(
+        "GET", "https://jira.example.com/x",
+    )
+    assert status == 200
+    assert raw == b'{"ok":1}'
+    assert captured["argv"] == [
+        "curl", "-sS", "-X", "GET",
+        "-o", "-",
+        "-w", "\n__HTTP_STATUS__=%{http_code}\n",
+        "--max-time", "30",
+        "https://jira.example.com/x",
+        "-H", "Accept: application/json",
+    ]
+    assert captured["wait_for_timeout"] == 35
+
+
+@pytest.mark.asyncio
+async def test_curl_json_call_timeout_s_sets_max_time_and_outer(monkeypatch):
+    """timeout_s=6 → --max-time 6 in argv, outer wait_for 6*35/30 = 7."""
+    from backend.intent_source import curl_json_call
+
+    proc = _FakeProc(stdout=_CURL_OK)
+    captured = _patch_subprocess(monkeypatch, proc)
+    status, _raw, _hdrs = await curl_json_call(
+        "GET", "https://jira.example.com/x", timeout_s=6,
+    )
+    assert status == 200
+    argv = captured["argv"]
+    i = argv.index("--max-time")
+    assert argv[i + 1] == "6"
+    assert captured["wait_for_timeout"] == pytest.approx(7.0)
+
+
+@pytest.mark.asyncio
+async def test_curl_json_call_kills_subprocess_on_timeout(monkeypatch):
+    from backend.intent_source import curl_json_call
+
+    proc = _FakeProc(hang=True)
+    _patch_subprocess(monkeypatch, proc)
+    status, raw, _hdrs = await curl_json_call(
+        "GET", "https://jira.example.com/x", timeout_s=0.01,
+    )
+    assert status == 0
+    assert raw == b"curl: timeout"
+    assert proc.killed is True
+
+
+@pytest.mark.asyncio
+async def test_curl_json_call_kills_subprocess_on_cancel(monkeypatch):
+    import asyncio
+
+    from backend.intent_source import curl_json_call
+
+    proc = _FakeProc(hang=True)
+    _patch_subprocess(monkeypatch, proc)
+    task = asyncio.create_task(
+        curl_json_call("GET", "https://jira.example.com/x", timeout_s=60),
+    )
+    for _ in range(10):  # let it reach the communicate() await
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert proc.killed is True
+
+
+# ──────────────────────────────────────────────────────────────
 #  create_subtasks — bulk endpoint + custom field mapping
 # ──────────────────────────────────────────────────────────────
 
