@@ -698,6 +698,8 @@ def _deliver_routed(
         _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         jira_dispatch.transition_back_to_todo(
             client, snapshot.key, f"[runner-routed-cli-failed] rc={cli_rc}",
+            failure_class="OTHER",
+            claim_token=_incident_claim_token(claim),
         )
         return cli_rc
     try:
@@ -712,6 +714,8 @@ def _deliver_routed(
         _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         jira_dispatch.transition_back_to_todo(
             client, snapshot.key, "[runner-routed-no-commits]",
+            failure_class="OTHER",
+            claim_token=_incident_claim_token(claim),
         )
         return 1
     if not push.success:
@@ -729,6 +733,8 @@ def _deliver_routed(
         _release_ticket_claim_if_acquired(client, snapshot.key, claim)
         jira_dispatch.transition_back_to_todo(
             client, snapshot.key, "[runner-routed-push-failed]",
+            failure_class="OTHER",
+            claim_token=_incident_claim_token(claim),
         )
         return 1
     print(
@@ -1025,6 +1031,8 @@ def _require_runner_capability(
                 jira_dispatch.transition_back_to_todo(
                     client, snapshot.key,
                     f"[runner-capability-blocked] {capability!r} not permitted",
+                    failure_class="OTHER",
+                    claim_token=_incident_claim_token(claim),
                 )
             except Exception as revert_err:  # noqa: BLE001 — log + continue
                 print(
@@ -2228,6 +2236,74 @@ def _finalize_under_review(
               f"comment posted, transition skipped")
 
 
+# ── R3.2 (OP-2542) — terminal→failure_class matrix ───────────────────
+#
+# Every terminal failure path below threads ``failure_class`` AND the
+# OP-977 claim fencing token into the OP-2537 durable incident writer
+# (``record_incident_durable``), reached through exactly two pinned
+# seams — ``jira_dispatch.transition_back_to_todo(..., failure_class=,
+# claim_token=)`` for the revert terminals and
+# ``WritebackRequest(claim_token=)`` (via ``_run_memory_writeback``)
+# for the terminals that do not transition. Pre-claim terminals (no
+# fencing token minted yet) pass ``claim_token=None``.
+#
+#   terminal                                        failure_class
+#   ── pre-claim (claim_token=None) ──────────────────────────────────
+#   bad tenant label                                OTHER
+#   tenant workspace alloc fail                     OTHER
+#   capability matrix invalid                       OTHER
+#   unknown area label                              UNKNOWN_AREA_LABEL
+#   cwd-unsafe launch refusal                       OTHER
+#   ── post-claim (claim_token=ClaimResult.claim_token) ──────────────
+#   capability gate refusal (gerrit_push)           OTHER
+#   workspace tampered post-CLI                     WORKTREE_DIRTY
+#   AC-evidence strict fail                         AC_EVIDENCE_STRICT_FAIL
+#   CLI-failure revert (rc!=0)                      OTHER (rc=124 → RUNNER_TIMEOUT)
+#   API agent_class unsupported (rc==99)            OTHER
+#   zero-commit revert (no-commits-from-cli)        OTHER
+#   dirty-worktree revert                           WORKTREE_DIRTY
+#   push-fail revert (merge_conflict category)      MERGE_CONFLICT
+#   push-fail revert (other categories)             OTHER
+#   push-fail force-publish → no committable        OTHER
+#   push-fail retry-exhausted / escalate (paused)   OTHER
+#   gerrit push-setup fail (left In Progress)       OTHER
+#   toctou abort revert                             OTHER
+#   ops-only transition refusal                     OPS_ONLY_TRANSITION_REFUSED
+#   grader refusal (OutcomesGraderRefused, paused)  OUTCOMES_GRADER_REFUSED
+#   grader fail verdict (+ _abandon_gerrit_change)  OUTCOMES_GRADER_REFUSED
+#   runner-detected-shipped forward-walk fail       RUNNER_DETECTED_SHIPPED_FORWARD_FAIL
+#   routed CLI failure / no-commits / push-fail     OTHER
+#
+# Only pre-existing failure_class values appear here (R3.2 MUST NOT
+# invent new ones): the FailureClass enum members plus the non-enum
+# strings this file already used before R3.2 (AC_EVIDENCE_STRICT_FAIL,
+# OPS_ONLY_TRANSITION_REFUSED, RUNNER_DETECTED_SHIPPED_FORWARD_FAIL),
+# which FailureClass.coerce maps to OTHER at write time while the raw
+# string survives in the writeback summary/log.
+
+# Push-failure classifier category → failure_class for the revert-action
+# branch of ``_handle_gerrit_push_failure`` (matrix rows above).
+_PUSH_FAIL_CATEGORY_TO_FAILURE_CLASS: dict[str, str] = {
+    "merge_conflict": "MERGE_CONFLICT",
+}
+
+
+def _incident_claim_token(
+    claim: "jira_dispatch.ClaimResult | None",
+) -> str | None:
+    """OP-977 fencing-token value threaded into the incident seams (R3.2).
+
+    Returns the full ``ClaimResult.claim_token`` (``{INSTANCE_ID}:{token}``)
+    the runner minted at claim time — the same value across every seam so
+    the OP-2537 ``live-v1-`` dedup collapses multi-seam reports of one
+    terminal into one durable row. ``None`` when there is no won claim
+    (pre-claim terminals).
+    """
+    if claim is None or not claim.ok or not claim.claim_token:
+        return None
+    return claim.claim_token
+
+
 def _claim_token_suffix(
     claim: "jira_dispatch.ClaimResult | None",
 ) -> str | None:
@@ -2319,6 +2395,10 @@ def _revert_cli_failure_to_todo(
         client,
         key,
         f"CLI exited {rc}; needs operator review.",
+        # rc=124 is the _invoke_cli TASK_TIMEOUT_S kill — the one CLI exit
+        # code with a faithful enum member (R3.2 matrix).
+        failure_class="RUNNER_TIMEOUT" if rc == 124 else "OTHER",
+        claim_token=_incident_claim_token(claim),
     )
     _clear_assignee_after_revert(client, key)
 
@@ -2620,6 +2700,7 @@ def _run_memory_writeback(
     raw_traceback: str = "",
     mutex_label: str | None = None,
     area: str | None = None,
+    claim_token: str | None = None,
 ) -> None:
     """OP-906 (F8) — fan write-back across Memory Tool / incidents / Cognee.
 
@@ -2638,6 +2719,7 @@ def _run_memory_writeback(
             raw_traceback=raw_traceback,
             mutex_label=mutex_label,
             area=area,
+            claim_token=claim_token,
             runner_class=AGENT_CLASS,
         )
         result = memory_writeback.MemoryWriteback(
@@ -2993,6 +3075,8 @@ def _handle_runner_detected_shipped(
                 key,
                 "[runner-detected-shipped] forward-walk failed; reverting "
                 "for operator triage.",
+                failure_class="RUNNER_DETECTED_SHIPPED_FORWARD_FAIL",
+                claim_token=_incident_claim_token(claim),
             )
         except Exception as revert_err:  # noqa: BLE001
             print(
@@ -3063,6 +3147,8 @@ def _handle_gerrit_push_failure(
                 client,
                 key,
                 "CLI produced no committable changes; reverting for re-pickup.",
+                failure_class="OTHER",
+                claim_token=_incident_claim_token(claim),
             )
         return category, action
 
@@ -3072,6 +3158,10 @@ def _handle_gerrit_push_failure(
             client,
             key,
             f"[runner-push-fail:{category}] {detail[:200]}",
+            failure_class=_PUSH_FAIL_CATEGORY_TO_FAILURE_CLASS.get(
+                category, "OTHER",
+            ),
+            claim_token=_incident_claim_token(claim),
         )
         return category, action
 
@@ -3085,6 +3175,17 @@ def _handle_gerrit_push_failure(
                 f"human triage.\n\n{detail[:500]}"
             ),
         )
+        # R3.2: retry-exhausted is a terminal for this tick (no transition
+        # fires) — the incident lands through the WritebackRequest seam.
+        _run_memory_writeback(
+            client,
+            key,
+            outcome=memory_writeback.OUTCOME_FAILURE,
+            summary=f"gerrit push retries exhausted ({category})",
+            failure_class="OTHER",
+            raw_traceback=detail[:2000],
+            claim_token=_incident_claim_token(claim),
+        )
         return category, action
 
     jira_dispatch.add_comment(
@@ -3093,6 +3194,17 @@ def _handle_gerrit_push_failure(
         f"[runner-push-fail:unknown] Manual review needed:\n{detail[:500]}",
     )
     jira_dispatch.add_label(client, key, "runner-loop-paused-pending-review")
+    # R3.2: escalate pauses the loop (circuit-trip terminal, no transition)
+    # — the incident lands through the WritebackRequest seam.
+    _run_memory_writeback(
+        client,
+        key,
+        outcome=memory_writeback.OUTCOME_FAILURE,
+        summary=f"gerrit push escalated for manual review ({category})",
+        failure_class="OTHER",
+        raw_traceback=detail[:2000],
+        claim_token=_incident_claim_token(claim),
+    )
     return category, action
 
 
@@ -3193,7 +3305,11 @@ def _handle_toctou_abort(
     if recheck.action in ("abort_reverted", "abort_already_advanced"):
         return 1
     try:
-        jira_dispatch.transition_back_to_todo(client, key, audit)
+        jira_dispatch.transition_back_to_todo(
+            client, key, audit,
+            failure_class="OTHER",
+            claim_token=_incident_claim_token(claim),
+        )
     except Exception as exc:  # noqa: BLE001
         print(
             f"[runner] toctou revert failed for {key}: "
@@ -3523,6 +3639,8 @@ def _main_impl() -> int:
             jira_dispatch.transition_back_to_todo(
                 client, snapshot.key,
                 f"[runner-bad-tenant-label] {e}",
+                failure_class="OTHER",
+                claim_token=None,  # pre-claim terminal (R3.2)
             )
         return 1
     db_context.set_tenant_id(tenant_id)
@@ -3602,6 +3720,8 @@ def _main_impl() -> int:
                 jira_dispatch.transition_back_to_todo(
                     client, snapshot.key,
                     f"[runner-tenant-workspace-fail] {type(e).__name__}: {e}",
+                    failure_class="OTHER",
+                    claim_token=None,  # pre-claim terminal (R3.2)
                 )
                 return 1
         try:
@@ -3749,6 +3869,8 @@ def _main_impl() -> int:
             jira_dispatch.transition_back_to_todo(
                 client, snapshot.key,
                 f"[runner-capability-matrix-invalid] {e}",
+                failure_class="OTHER",
+                claim_token=None,  # pre-claim terminal (R3.2)
             )
         return 1
     except UnknownAreaLabelError as e:
@@ -3768,6 +3890,8 @@ def _main_impl() -> int:
             jira_dispatch.transition_back_to_todo(
                 client, snapshot.key,
                 f"Unknown area label(s) {e.unknown}; awaiting operator label correction.",
+                failure_class="UNKNOWN_AREA_LABEL",
+                claim_token=None,  # pre-claim terminal (R3.2)
             )
         return 1
 
@@ -3815,6 +3939,8 @@ def _main_impl() -> int:
         jira_dispatch.transition_back_to_todo(
             client, snapshot.key,
             "[runner-cwd-unsafe] Launch refused; main repo writable.",
+            failure_class="OTHER",
+            claim_token=None,  # pre-claim terminal (R3.2)
         )
         return 1
 
@@ -3976,6 +4102,8 @@ def _main_impl() -> int:
             jira_dispatch.transition_back_to_todo(
                 client, snapshot.key,
                 f"[runner-workspace-tampered] {e}",
+                failure_class="WORKTREE_DIRTY",
+                claim_token=_incident_claim_token(claim),
             )
         except Exception as revert_err:
             print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
@@ -3994,6 +4122,7 @@ def _main_impl() -> int:
             summary="workspace tampered post-CLI",
             failure_class="WORKTREE_DIRTY",
             area=metric_meta.get("area"),
+            claim_token=_incident_claim_token(claim),
         )
         # OP-1524: claim was released ABOVE (before the revert comment).
         # OP-1109: ``release_ticket_claim`` also releases the coordination
@@ -4118,6 +4247,7 @@ def _main_impl() -> int:
                         f"{strict_result.reasons[0] if strict_result.reasons else 'evidence failed'}"[:500],
                         failure_class="AC_EVIDENCE_STRICT_FAIL",
                         area=metric_meta.get("area"),
+                        claim_token=_incident_claim_token(claim),
                     )
                 except Exception as revert_err:  # noqa: BLE001
                     print(
@@ -4132,6 +4262,7 @@ def _main_impl() -> int:
                     summary="ac-evidence-strict refused",
                     failure_class="AC_EVIDENCE_STRICT_FAIL",
                     area=metric_meta.get("area"),
+                    claim_token=_incident_claim_token(claim),
                 )
                 return 1
             push_result = jira_dispatch.push_to_gerrit_for_review(
@@ -4181,6 +4312,7 @@ def _main_impl() -> int:
                     summary="ops-only forward-transition (0 commits, label-tagged)",
                     failure_class=None if rc_fwd == 0 else "OPS_ONLY_TRANSITION_REFUSED",
                     area=metric_meta.get("area"),
+                    claim_token=_incident_claim_token(claim),
                 )
                 _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return rc_fwd
@@ -4221,6 +4353,7 @@ def _main_impl() -> int:
                         else "RUNNER_DETECTED_SHIPPED_FORWARD_FAIL"
                     ),
                     area=metric_meta.get("area"),
+                    claim_token=_incident_claim_token(claim),
                 )
                 _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return rc_shipped
@@ -4244,6 +4377,8 @@ def _main_impl() -> int:
                 jira_dispatch.transition_back_to_todo(
                     client, snapshot.key,
                     "[runner-no-commits-from-cli] CLI exited without committing.",
+                    failure_class="OTHER",
+                    claim_token=_incident_claim_token(claim),
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
@@ -4269,6 +4404,8 @@ def _main_impl() -> int:
                 jira_dispatch.transition_back_to_todo(
                     client, snapshot.key,
                     "[runner-dirty-worktree] CLI exited without committing.",
+                    failure_class="WORKTREE_DIRTY",
+                    claim_token=_incident_claim_token(claim),
                 )
             except Exception as revert_err:
                 print(f"[runner] revert-to-TODO also failed: {revert_err}", file=sys.stderr)
@@ -4327,6 +4464,19 @@ def _main_impl() -> int:
                 f"fix). Operator: investigate the underlying cause, strip "
                 f"the label, and transition back to To Do to re-queue.",
             )
+            # R3.2: gerrit-setup-fail is a terminal for this tick (ticket
+            # deliberately left In Progress, no transition fires) — the
+            # incident lands through the WritebackRequest seam.
+            _run_memory_writeback(
+                client,
+                snapshot.key,
+                outcome=memory_writeback.OUTCOME_FAILURE,
+                summary=f"gerrit push setup failed: {type(e).__name__}",
+                failure_class="OTHER",
+                raw_traceback=str(e)[:2000],
+                area=metric_meta.get("area"),
+                claim_token=_incident_claim_token(claim),
+            )
             # OP-1524: release our claim label so the operator's recovery
             # (label-strip + transition-to-TODO) is not blocked by a stale
             # ``claim:{INSTANCE_ID}:*``. Status / assignee are intentionally
@@ -4364,7 +4514,20 @@ def _main_impl() -> int:
                     sync_result.develop_sha,
                     push_result.change_number,
                 )
-            except outcomes_consumer.OutcomesGraderRefused:
+            except outcomes_consumer.OutcomesGraderRefused as refusal:
+                # R3.2: grader refusal pauses the ticket for operator review
+                # (circuit-trip terminal, no transition fires) — the incident
+                # lands through the WritebackRequest seam.
+                _run_memory_writeback(
+                    client,
+                    snapshot.key,
+                    outcome=memory_writeback.OUTCOME_FAILURE,
+                    summary="outcomes-grader refused; paused for operator review",
+                    failure_class="OUTCOMES_GRADER_REFUSED",
+                    raw_traceback=str(refusal)[:2000],
+                    area=metric_meta.get("area"),
+                    claim_token=_incident_claim_token(claim),
+                )
                 _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 1
             if outcomes_status == "fail":
@@ -4376,6 +4539,7 @@ def _main_impl() -> int:
                     summary="outcomes-grader refused",
                     failure_class="OUTCOMES_GRADER_REFUSED",
                     area=metric_meta.get("area"),
+                    claim_token=_incident_claim_token(claim),
                 )
                 _release_ticket_claim_if_acquired(client, snapshot.key, claim)
                 return 0
@@ -4423,7 +4587,12 @@ def _main_impl() -> int:
         # posted inside ``transition_back_to_todo`` so the next pickup is
         # not blocked by a stale ``claim:{INSTANCE_ID}:*``.
         _release_ticket_claim_if_acquired(client, snapshot.key, claim)
-        jira_dispatch.transition_back_to_todo(client, snapshot.key, "API agent_class not yet supported in auto-runner-jira.py MVP")
+        jira_dispatch.transition_back_to_todo(
+            client, snapshot.key,
+            "API agent_class not yet supported in auto-runner-jira.py MVP",
+            failure_class="OTHER",
+            claim_token=_incident_claim_token(claim),
+        )
     else:
         print(f"[runner] {snapshot.key} CLI failed rc={rc}; reverting ticket")
         _revert_cli_failure_to_todo(client, snapshot.key, rc, claim)
@@ -4432,7 +4601,11 @@ def _main_impl() -> int:
             snapshot.key,
             outcome=memory_writeback.OUTCOME_FAILURE,
             summary=f"CLI exited rc={rc}",
+            # Mirror _revert_cli_failure_to_todo's class so both seams
+            # dedup to one live-v1 durable row (R3.2).
+            failure_class="RUNNER_TIMEOUT" if rc == 124 else "OTHER",
             area=metric_meta.get("area"),
+            claim_token=_incident_claim_token(claim),
         )
     return rc
 
