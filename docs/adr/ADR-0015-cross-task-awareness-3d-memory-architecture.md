@@ -202,3 +202,84 @@ This ADR does not approve a runtime rollout by itself. It records the
 architecture chosen by Sprint F. It also does not pre-judge canary success,
 ontology drift frequency, real agent drift, or live LLM cost; those are
 release-retrospective facts.
+
+## 2026-07-08 amendment — OP-2545 Phase R reality lock
+
+This amendment narrows the production reading of ADR-0015 after the Phase R
+repair work. The original three-axis architecture remains the target model,
+but the shipped contract must be read honestly:
+
+- **Structural axis:** available when JIRA fields, gathered links, and Cognee
+  neighbours can be fetched inside budget.
+- **Temporal axis:** explicitly unavailable until U5. The payload shape IS
+  `{"status": "unavailable"}` (OP-2539 replaced the legacy fake-empty shape
+  entirely); the runner renderer omits the axis from prompts. No caller should
+  infer that Graphiti-backed recent-history recall is live before U5 ships.
+- **Causal axis:** available only from the durable incident/failure-memory
+  paths that are actually populated. Empty causal context means "no usable
+  causal recall for this pickup", not proof that no causal risk exists.
+
+### `develop_sha` Semantics
+
+`develop_sha` is the release build SHA carried by the deploy/version overlay,
+not an on-demand `git rev-parse origin/develop` probe from the serving
+container's current working directory. In production, it identifies the code
+revision used to build the deployed artifact whose `/api/v1/project-state`
+response is being served. Local development and incomplete overlays may still
+fall back to `"unknown"`; that is an explicit degraded identity state, not a
+cache key with release meaning.
+
+### Cache And Invalidation Reality
+
+The live cache contract is simpler than the future invalidation machine:
+
+- process-local LRU cache, capped per replica;
+- TTL expiry, after which an entry is a miss;
+- no durable shared cache across replicas;
+- no guaranteed cross-replica invalidation fanout;
+- replica restart drops that replica's slice.
+
+Therefore two replicas may briefly serve different project-state snapshots for
+the same `(ticket_key, develop_sha)` pair, and a non-status JIRA edit may not
+force immediate invalidation everywhere. The current operator-safe statement is
+"bounded TTL plus per-replica divergence", not "globally coherent event-driven
+cache".
+
+Webhook invalidation and stale-while-revalidate remain deferred because they
+need real API and test work: stale entries must be representable instead of
+deleted as misses, refresh races need an explicit state model, and JIRA
+webhook routing must invalidate on the edits that affect structural context
+rather than only on status-oriented paths. Until that work lands, audit reports
+and runbooks should describe the cache as TTL-governed best effort.
+
+### R2 Decision Record
+
+R2 deliberately chose runner-side field enrichment over an API-side cache
+machine for the Phase R repair. The reason is the zero-round-trip pickup
+argument: the runner already has the live JIRA ticket payload during dispatch,
+so parent/blocker/sibling/label/status fields can be mapped into the prompt
+without forcing an additional `/api/v1/project-state` cold path to be correct
+and fast before pickup can proceed.
+
+That choice descopes the API-side webhook/SWR cache machine from R2. It does
+not reject the machine permanently; it records that the machine needs its own
+design, implementation, and tests before ADR-0015 can claim event-driven cache
+coherence.
+
+### Per-half Source Markers
+
+Each structural half carries a source-health marker (the SHIPPED contract,
+OP-2535/OP-2540/OP-2541):
+
+- **`structural.jira_source`** — the JIRA-pull half (issuelinks/parent/status);
+- **`structural.kg_source`** — the Cognee knowledge-graph half;
+- both ∈ `live | degraded | disabled | unavailable`, where `live` means the
+  source answered (even with empty content), `degraded` = attempted but
+  failed/timed out, `disabled` = switched off (kill-switch / unconfigured),
+  `unavailable` = machinery absent. Traces additionally expose per-axis
+  `axis_content` and the cumulative `jira_negative_cache_hits` counter.
+
+These markers are the anti-hollow contract: a populated-looking structural
+axis is not sufficient unless consumers can tell each half's health. An empty
+list with `live` is honest emptiness; an empty list WITHOUT a marker is
+degraded provenance and must be treated as such.
