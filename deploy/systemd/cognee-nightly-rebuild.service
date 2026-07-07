@@ -1,22 +1,36 @@
-; [OP-899] Nightly Cognee KG full rebuild.
+; [OP-2551] Nightly Cognee KG full rebuild.
 ;
 ; Install:
 ;   sudo cp deploy/systemd/cognee-nightly-rebuild.service /etc/systemd/system/
 ;   sudo cp deploy/systemd/cognee-nightly-rebuild.timer   /etc/systemd/system/
 ;   sudo systemctl daemon-reload
 ;   sudo systemctl enable --now cognee-nightly-rebuild.timer
+;
+; Key sourcing: LLM_API_KEY falls back to OPENAI_API_KEY from the prod .env
+; (loaded via EnvironmentFile). /etc/omnisight/cognee.env may override any
+; LLM_*/EMBEDDING_* value — optional, not required for activation.
+;
+; deployed:
+;   sudo systemctl status cognee-nightly-rebuild.timer
+;   sudo journalctl -u cognee-nightly-rebuild.service -n 100 --no-pager
+;
+; Runs one-shot rebuild containers against each per-replica Cognee data
+; volume. The serving backend containers are not exec'd or reused.
 
 [Unit]
-Description=OmniSight Cognee nightly full rebuild (OP-899)
+Description=OmniSight Cognee nightly full rebuild (OP-2551)
 After=network-online.target docker.service
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/omnisight
+Restart=no
+WorkingDirectory=/home/user/omnisight-prod
+Environment=COMPOSE_PROJECT_NAME=omnisight-productizer
 EnvironmentFile=-/etc/omnisight/cognee.env
-Environment=PYTHONPATH=/opt/omnisight
-ExecStart=/usr/bin/python3 -m scripts.cognee_full_rebuild --repo-root /opt/omnisight
+EnvironmentFile=-/home/user/omnisight-prod/.env
+ExecStart=/usr/bin/bash -lc 'set -euo pipefail; export LLM_API_KEY="${LLM_API_KEY:-${OMNISIGHT_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}}"; export EMBEDDING_API_KEY="${EMBEDDING_API_KEY:-${LLM_API_KEY:-}}"; export LLM_PROVIDER="${LLM_PROVIDER:-openai}"; export LLM_MODEL="${LLM_MODEL:-gpt-4o-mini}"; export EMBEDDING_PROVIDER="${EMBEDDING_PROVIDER:-openai}"; export EMBEDDING_MODEL="${EMBEDDING_MODEL:-openai/text-embedding-3-large}"; image="${OMNISIGHT_BACKEND_IMAGE_REF:-${OMNISIGHT_REGISTRY:?OMNISIGHT_REGISTRY required}/backend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG required}}"; exec /usr/bin/docker run --rm --name omnisight-cognee-rebuild-a --network "${COMPOSE_PROJECT_NAME:-omnisight-productizer}_default" --cpus 2 -m 2g -e PYTHONPATH=/app -e OMNISIGHT_COGNEE_DATA_ROOT=/cognee-data -e LLM_API_KEY -e LLM_PROVIDER -e LLM_MODEL -e EMBEDDING_API_KEY -e EMBEDDING_PROVIDER -e EMBEDDING_MODEL -e OMNISIGHT_COGNEE_NEO4J_URI -e OMNISIGHT_COGNEE_NEO4J_USER -e OMNISIGHT_COGNEE_NEO4J_PASSWORD -v cognee-data-a:/cognee-data -w /app "$image" python3 -m scripts.cognee_full_rebuild --repo-root /app'
+ExecStart=/usr/bin/bash -lc 'set -euo pipefail; export LLM_API_KEY="${LLM_API_KEY:-${OMNISIGHT_OPENAI_API_KEY:-${OPENAI_API_KEY:-}}}"; export EMBEDDING_API_KEY="${EMBEDDING_API_KEY:-${LLM_API_KEY:-}}"; export LLM_PROVIDER="${LLM_PROVIDER:-openai}"; export LLM_MODEL="${LLM_MODEL:-gpt-4o-mini}"; export EMBEDDING_PROVIDER="${EMBEDDING_PROVIDER:-openai}"; export EMBEDDING_MODEL="${EMBEDDING_MODEL:-openai/text-embedding-3-large}"; image="${OMNISIGHT_BACKEND_IMAGE_REF:-${OMNISIGHT_REGISTRY:?OMNISIGHT_REGISTRY required}/backend:${OMNISIGHT_IMAGE_TAG:?OMNISIGHT_IMAGE_TAG required}}"; exec /usr/bin/docker run --rm --name omnisight-cognee-rebuild-b --network "${COMPOSE_PROJECT_NAME:-omnisight-productizer}_default" --cpus 2 -m 2g -e PYTHONPATH=/app -e OMNISIGHT_COGNEE_DATA_ROOT=/cognee-data -e LLM_API_KEY -e LLM_PROVIDER -e LLM_MODEL -e EMBEDDING_API_KEY -e EMBEDDING_PROVIDER -e EMBEDDING_MODEL -e OMNISIGHT_COGNEE_NEO4J_URI -e OMNISIGHT_COGNEE_NEO4J_USER -e OMNISIGHT_COGNEE_NEO4J_PASSWORD -v cognee-data-b:/cognee-data -w /app "$image" python3 -m scripts.cognee_full_rebuild --repo-root /app'
 StandardOutput=append:/var/log/omnisight/cognee-nightly-rebuild.log
 StandardError=append:/var/log/omnisight/cognee-nightly-rebuild.log
 TimeoutStartSec=7200

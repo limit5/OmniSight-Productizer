@@ -1,7 +1,16 @@
-; [OP-899] Daily 03:00 UTC trigger for cognee-nightly-rebuild.service.
+; [OP-2551] Daily 03:00 UTC trigger for cognee-nightly-rebuild.service.
+;
+; Install:
+;   sudo cp deploy/systemd/cognee-nightly-rebuild.service /etc/systemd/system/
+;   sudo cp deploy/systemd/cognee-nightly-rebuild.timer   /etc/systemd/system/
+;   sudo systemctl daemon-reload
+;   sudo systemctl enable --now cognee-nightly-rebuild.timer
+;
+; deployed:
+;   sudo systemctl list-timers cognee-nightly-rebuild.timer
 
 [Unit]
-Description=Daily trigger for OmniSight Cognee full rebuild (OP-899)
+Description=Daily trigger for OmniSight Cognee full rebuild (OP-2551)
 
 [Timer]
 Unit=cognee-nightly-rebuild.service
