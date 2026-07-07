@@ -28,6 +28,29 @@ from backend.agents.provider_quota_tracker import QuotaState
 
 JIRA_CREDS_PRESENT = (Path("~/.config/omnisight/jira-claude-token").expanduser()).is_file()
 
+
+@pytest.fixture(autouse=True)
+def _isolate_durable_incident_writer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """OP-2537 safety: ``transition_back_to_todo`` now feeds the durable
+    incident writer — every test must be PHYSICALLY UNABLE to reach the
+    prod DSN in the dev host's real ``~/.config/omnisight/audit-db.env``.
+    """
+    from backend.agents import incident_recorder
+
+    monkeypatch.delenv("OMNISIGHT_DATABASE_URL", raising=False)
+    monkeypatch.setenv(
+        "OMNISIGHT_AUDIT_DB_ENV_FILE", str(tmp_path / "audit-db.env")
+    )
+    monkeypatch.setenv(
+        "OMNISIGHT_INCIDENT_WRITE_FAIL_COUNTER",
+        str(tmp_path / "incident_write_failures.count"),
+    )
+    incident_recorder.reset_for_tests()
+    yield
+    incident_recorder.reset_for_tests()
+
 SAFE_TEXT = st.text(
     alphabet=st.characters(blacklist_categories=("Cs",)),
     max_size=2048,
@@ -1368,6 +1391,100 @@ def test_transition_back_to_todo_clean_ticket_does_not_send_cleanup_put(
         if call[0] == "PUT" and call[1] == "/issue/OP-1858"
     ]
     assert put_calls == []
+
+
+# ── OP-2537: claim-token passthrough + cross-seam dedup ────────────
+
+
+def _make_incidents_sqlite(tmp_path: Path) -> tuple[str, Path]:
+    """tmp sqlite DSN with ``runner_incidents`` created from the 0206 DDL."""
+    import importlib.util
+    import sqlite3
+
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "alembic" / "versions" / "0206_runner_incidents.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "_alembic_0206_for_jd_tests", migration
+    )
+    module = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    sys.modules["_alembic_0206_for_jd_tests"] = module
+    spec.loader.exec_module(module)  # type: ignore[union-attr]
+    db_path = tmp_path / "runner_incidents.sqlite"
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(module._SQLITE_TABLE_DDL)
+        conn.commit()
+    finally:
+        conn.close()
+    return f"sqlite:///{db_path}", db_path
+
+
+def test_transition_back_to_todo_same_claim_token_dedups_across_both_seams(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """OP-2537 seam-unify AC: the SAME claim token reported through the
+    jira_dispatch revert seam AND the memory_writeback seam lands as
+    exactly ONE ``live-v1-`` row in ``runner_incidents``.
+    """
+    import sqlite3
+
+    from backend.agents import incident_recorder, memory_writeback
+
+    dsn, db_path = _make_incidents_sqlite(tmp_path)
+    monkeypatch.setenv("OMNISIGHT_DATABASE_URL", dsn)
+
+    fake = _RevertCleanupFakeJira(labels=("area:backend",), assignee=None)
+    from backend.agents import runner_stoploss
+
+    monkeypatch.setattr(jd, "_request", fake.request)
+    monkeypatch.setattr(runner_stoploss, "register_revert", lambda *a, **kw: None)
+
+    token = "claim-tok-cross-seam"
+
+    # Seam 1: jira_dispatch revert with an incident classification.
+    jd.transition_back_to_todo(
+        _fake_dispatch_client(),
+        "OP-2537",
+        "pytest failed: assert",
+        failure_class="TEST_FAILURE",
+        raw_traceback="E  assert",
+        area="backend",
+        claim_token=token,
+    )
+
+    # Seam 2: memory writeback for the same completion, same token.
+    memory_writeback.MemoryWriteback(memory_tool=None).write(
+        memory_writeback.WritebackRequest(
+            ticket_key="OP-2537",
+            attempt_n=1,
+            outcome=memory_writeback.OUTCOME_FAILURE,
+            summary="pytest failed: assert",
+            failure_class="TEST_FAILURE",
+            raw_traceback="E  assert",
+            area="backend",
+            claim_token=token,
+        )
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = list(
+            conn.execute(
+                "SELECT incident_id, ticket_key, failure_class "
+                "FROM runner_incidents"
+            )
+        )
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert rows[0][0].startswith("live-v1-")
+    assert rows[0][1] == "OP-2537"
+    assert rows[0][2] == "TEST_FAILURE"
+    # The in-memory recall cache dedups by incident_id too.
+    assert len(incident_recorder.get_runner_incidents(ticket_key="OP-2537")) == 1
+    memory_writeback.reset_for_tests()
 
 
 def _snapshot(

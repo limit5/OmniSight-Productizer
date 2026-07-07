@@ -34,13 +34,16 @@ Recall contract (C2 AC #3)
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import threading
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Mapping
+from pathlib import Path
+from typing import Any, Deque, Mapping
 
 from backend.agents.failure_class import (
     FailureClass,
@@ -55,14 +58,28 @@ log = logging.getLogger(__name__)
 __all__ = [
     "FailureClass",
     "IncidentRecord",
+    "LIVE_INCIDENT_ID_PREFIX",
     "RunnerIncidentRecord",
     "get_recorded_events",
     "get_runner_incidents",
+    "record_incident_durable",
     "record_memory_recall_audit",
     "record_runner_incident",
     "recall_similar_incidents",
     "reset_for_tests",
 ]
+
+
+# ── Durable-writer configuration (OP-2537 / R3.1+R3.4) ─────────────
+
+DATABASE_URL_ENV = "OMNISIGHT_DATABASE_URL"
+AUDIT_DB_ENV_FILE_ENV = "OMNISIGHT_AUDIT_DB_ENV_FILE"
+DEFAULT_AUDIT_DB_ENV_FILE = Path("~/.config/omnisight/audit-db.env")
+WRITE_FAIL_COUNTER_ENV = "OMNISIGHT_INCIDENT_WRITE_FAIL_COUNTER"
+DEFAULT_WRITE_FAIL_COUNTER = Path(
+    "~/.local/state/omnisight/incident_write_failures.count"
+)
+LIVE_INCIDENT_ID_PREFIX = "live-v1-"
 
 
 # ── Data shapes ────────────────────────────────────────────────────
@@ -229,6 +246,184 @@ def _persist_runner_incident(record: RunnerIncidentRecord) -> None:
         _runner_buffer.append(record)
 
 
+# ── Durable writer (OP-2537 R3.1+R3.4) ─────────────────────────────
+
+
+_engine_lock = threading.Lock()
+_engine_cache: dict[str, Any] = {}
+
+
+# Mirrors scripts/backfill_runner_incidents.py's statement shape, minus
+# ``created_at`` which is left to the DB default (NOW() / CURRENT_TIMESTAMP).
+_DURABLE_INSERT_SQL = """
+    INSERT INTO runner_incidents (
+        incident_id, ticket_key, failure_class, summary, raw_traceback,
+        runner_class, mutex_label, area
+    )
+    VALUES (
+        :incident_id, :ticket_key, :failure_class, :summary, :raw_traceback,
+        :runner_class, :mutex_label, :area
+    )
+    ON CONFLICT (incident_id) DO NOTHING
+"""
+
+
+def _get_engine(dsn: str):
+    """Module-cached SQLAlchemy engine per DSN."""
+    from sqlalchemy import create_engine
+
+    with _engine_lock:
+        engine = _engine_cache.get(dsn)
+        if engine is None:
+            engine = create_engine(dsn, future=True)
+            _engine_cache[dsn] = engine
+        return engine
+
+
+def _resolve_dsn() -> str:
+    """DSN precedence: ``OMNISIGHT_DATABASE_URL`` env (literal, only this
+    name), else the ``OMNISIGHT_DATABASE_URL`` key from the KEY=VALUE env
+    file at ``OMNISIGHT_AUDIT_DB_ENV_FILE``.
+    """
+    url = os.environ.get(DATABASE_URL_ENV)
+    if url:
+        return url
+    env_file = Path(
+        os.environ.get(AUDIT_DB_ENV_FILE_ENV) or DEFAULT_AUDIT_DB_ENV_FILE
+    ).expanduser()
+    for line in env_file.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip() == DATABASE_URL_ENV:
+            value = value.strip().strip('"').strip("'")
+            if value:
+                return value
+    raise LookupError(
+        f"no {DATABASE_URL_ENV} entry in env file {env_file}"
+    )
+
+
+def _increment_write_fail_counter() -> None:
+    """Bump the single-int counter file. Best-effort — never raises."""
+    try:
+        path = Path(
+            os.environ.get(WRITE_FAIL_COUNTER_ENV) or DEFAULT_WRITE_FAIL_COUNTER
+        ).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current = int(path.read_text(encoding="utf-8").strip() or "0")
+        except (OSError, ValueError):
+            current = 0
+        path.write_text(f"{current + 1}\n", encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001 — counter is best-effort too
+        log.debug("incident_recorder.write_fail_counter_bump_failed err=%s", exc)
+
+
+def _note_durable_write_failure(
+    record: RunnerIncidentRecord, stage: str, exc: Exception
+) -> None:
+    """ONE structured log line + counter bump per failed durable write."""
+    log.warning(
+        "incident_recorder.durable_write_failed stage=%s incident_id=%s "
+        "ticket=%s failure_class=%s err=%s",
+        stage,
+        record.incident_id,
+        record.ticket_key,
+        record.failure_class.value,
+        exc,
+    )
+    _increment_write_fail_counter()
+
+
+def _insert_durable(record: RunnerIncidentRecord) -> None:
+    """Best-effort INSERT into ``runner_incidents``. Never raises."""
+    try:
+        dsn = _resolve_dsn()
+    except Exception as exc:  # noqa: BLE001 — no-DSN is a soft failure
+        _note_durable_write_failure(record, "resolve_dsn", exc)
+        return
+    try:
+        from sqlalchemy import text
+
+        engine = _get_engine(dsn)
+        with engine.begin() as conn:
+            conn.execute(
+                text(_DURABLE_INSERT_SQL),
+                {
+                    "incident_id": record.incident_id,
+                    "ticket_key": record.ticket_key,
+                    "failure_class": record.failure_class.value,
+                    "summary": record.summary,
+                    "raw_traceback": record.raw_traceback,
+                    "runner_class": record.runner_class,
+                    "mutex_label": record.mutex_label,
+                    "area": record.area,
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 — insert is best-effort
+        _note_durable_write_failure(record, "insert", exc)
+
+
+def record_incident_durable(
+    ticket_key: str,
+    failure_class: FailureClass | str,
+    *,
+    claim_token: str | None = None,
+    summary: str = "",
+    raw_traceback: str = "",
+    runner_class: str = "",
+    mutex_label: str | None = "",
+    area: str | None = "",
+) -> RunnerIncidentRecord:
+    """Durable incident writer (OP-2537 pinned contract).
+
+    * ``failure_class`` is coerced like :func:`record_runner_incident`;
+      the dedup hash uses the COERCED ``.value``.
+    * ``claim_token`` present → deterministic
+      ``live-v1-<sha256(f"{ticket_key}|{failure_class.value}|{claim_token}")>``
+      id, so the same failure reported through multiple seams dedups to
+      one row via ``ON CONFLICT (incident_id) DO NOTHING``.
+    * ``claim_token=None`` → fresh ``uuid4().hex`` id, no dedup.
+    * Empty-string kwargs normalize to NULL at write for the nullable
+      columns (``mutex_label``, ``area``); the NOT NULL columns keep
+      their DB-default empty-string semantics per the 0206 DDL.
+    * ``created_at`` is left to the DB default.
+    * The record ALWAYS lands in the in-memory deque (recall read-cache,
+      dedup by ``incident_id``) even when the DB write fails; the DB
+      write is best-effort — this helper NEVER raises.
+    """
+    if isinstance(failure_class, FailureClass):
+        klass = failure_class
+    else:
+        klass = FailureClass.coerce(failure_class)
+
+    if claim_token is not None:
+        digest = hashlib.sha256(
+            f"{ticket_key}|{klass.value}|{claim_token}".encode("utf-8")
+        ).hexdigest()
+        incident_id = LIVE_INCIDENT_ID_PREFIX + digest
+    else:
+        incident_id = uuid.uuid4().hex
+
+    record = RunnerIncidentRecord(
+        incident_id=incident_id,
+        ticket_key=ticket_key,
+        failure_class=klass,
+        summary=summary or "",
+        raw_traceback=raw_traceback or "",
+        runner_class=runner_class or "",
+        mutex_label=mutex_label or None,
+        area=area or None,
+    )
+    with _buffer_lock:
+        if not any(r.incident_id == incident_id for r in _runner_buffer):
+            _runner_buffer.append(record)
+    _insert_durable(record)
+    return record
+
+
 def get_runner_incidents(
     *,
     failure_class: FailureClass | None = None,
@@ -323,7 +518,14 @@ def recall_similar_incidents(
 
 
 def reset_for_tests() -> None:
-    """Clear both in-memory buffers. Test-only seam (see conftest.py)."""
+    """Clear in-memory buffers + engine cache. Test-only seam."""
     with _buffer_lock:
         _buffer.clear()
         _runner_buffer.clear()
+    with _engine_lock:
+        for engine in _engine_cache.values():
+            try:
+                engine.dispose()
+            except Exception:  # noqa: BLE001 — best-effort teardown
+                pass
+        _engine_cache.clear()
