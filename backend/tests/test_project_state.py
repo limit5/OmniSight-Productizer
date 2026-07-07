@@ -65,6 +65,8 @@ def _build_client_strict_auth() -> TestClient:
 async def _ok_structural(_ticket: str) -> dict[str, Any]:
     return {
         "ticket": _ticket,
+        "jira_source": "live",
+        "kg_source": "live",
         "parent_meta": "OP-900",
         "phase": "F6",
         "blockers": ["OP-902"],
@@ -136,6 +138,40 @@ async def test_happy_path_returns_all_three_axes() -> None:
     assert payload["causal"]["neighbours"][0]["ticket"] == "OP-700"
     assert "generated_at" in payload
 
+    traces = await agg.tail_traces()
+    trace = traces[-1]
+    assert trace.axis_content == {
+        "structural": "non_empty",
+        "temporal": "non_empty",
+        "causal": "non_empty",
+    }
+    assert trace.source_markers == {
+        "jira_source": "live",
+        "kg_source": "live",
+    }
+    assert trace.jira_negative_cache_hits == 0
+
+
+@pytest.mark.asyncio
+async def test_structural_axis_adds_source_markers_for_degraded_halves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _jira_stub(_ticket: str) -> dict[str, Any]:
+        return {}
+
+    async def _kg_stub(_ticket: str) -> dict[str, Any]:
+        return {}
+
+    monkeypatch.setattr(agg, "_structural_jira", _jira_stub)
+    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+
+    payload = await agg.fetch_structural_axis("OP-2535")
+
+    assert payload["jira_source"] == "unavailable"
+    assert payload["kg_source"] == "degraded"
+    assert payload["blockers"] == []
+    assert payload["kg_neighbours"] == []
+
 
 # ── 2/3/4. Per-axis timeout — null for that axis, others returned ──
 
@@ -192,6 +228,42 @@ async def test_causal_axis_timeout_returns_null_for_that_axis() -> None:
     assert payload["causal"] is None
     assert payload["structural"]["parent_meta"] == "OP-900"
     assert payload["temporal"]["avg_completion_seconds"] == 3600
+
+
+@pytest.mark.asyncio
+async def test_trace_axis_content_classifies_degraded_unavailable_and_empty() -> None:
+    async def _unavailable_structural(_ticket: str) -> dict[str, Any]:
+        return {
+            "ticket": _ticket,
+            "status": "unavailable",
+            "jira_source": "disabled",
+            "kg_source": "unavailable",
+        }
+
+    async def _empty_temporal(_ticket: str) -> dict[str, Any]:
+        return {"ticket": _ticket, "recent_events": []}
+
+    fetchers = agg.ProjectStateAxisFetchers(
+        structural=_unavailable_structural,
+        temporal=_empty_temporal,
+        causal=_raising,
+    )
+    payload = await agg.aggregate_project_state(
+        "OP-2535", develop_sha="x", fetchers=fetchers
+    )
+
+    assert payload["causal"] is None
+    traces = await agg.tail_traces()
+    trace = traces[-1]
+    assert trace.axis_content == {
+        "structural": "unavailable",
+        "temporal": "empty",
+        "causal": "degraded",
+    }
+    assert trace.source_markers == {
+        "jira_source": "disabled",
+        "kg_source": "unavailable",
+    }
 
 
 # ── 5. All axes fail — 200 with all-null body ──────────────────────
@@ -433,6 +505,9 @@ def test_metrics_endpoint_exposes_axis_latency_and_cache_stats(
     assert "axis_latency_sec" in trace
     assert "cache_hit" in trace
     assert "budget_exceeded" in trace
+    assert trace["axis_content"] == {}
+    assert trace["source_markers"] == {}
+    assert trace["jira_negative_cache_hits"] == 0
 
 
 # ── Cache corruption — invalidate + recompute (AC error catalog) ───

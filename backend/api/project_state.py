@@ -184,6 +184,9 @@ async def project_state_metrics(
                     k: round(v, 4) for k, v in t.axis_latency_sec.items()
                 },
                 "axis_error": dict(t.axis_error),
+                "axis_content": dict(t.axis_content),
+                "source_markers": dict(t.source_markers),
+                "jira_negative_cache_hits": t.jira_negative_cache_hits,
                 "budget_exceeded": t.budget_exceeded,
                 "captured_at": t.captured_at.isoformat(),
             }

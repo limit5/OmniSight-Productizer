@@ -186,6 +186,9 @@ class ProjectStateTrace:
     total_latency_sec: float
     axis_latency_sec: dict[str, float] = field(default_factory=dict)
     axis_error: dict[str, str] = field(default_factory=dict)
+    axis_content: dict[str, str] = field(default_factory=dict)
+    source_markers: dict[str, str] = field(default_factory=dict)
+    jira_negative_cache_hits: int = 0
     budget_exceeded: bool = False
     captured_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
@@ -247,6 +250,8 @@ async def fetch_structural_axis(ticket_key: str) -> dict[str, Any]:
     cognee_view = await _structural_cognee(ticket_key)
     return {
         "ticket": ticket_key,
+        "jira_source": jira_view.get("jira_source") or "unavailable",
+        "kg_source": cognee_view.get("kg_source") or "degraded",
         "parent_meta": jira_view.get("parent_meta"),
         "phase": jira_view.get("phase"),
         "blockers": jira_view.get("blockers") or [],
@@ -292,7 +297,7 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
             type(exc).__name__,
             exc,
         )
-        return {}
+        return {"jira_source": "unavailable"}
 
     def _sync_pull() -> dict[str, Any]:
         try:
@@ -302,7 +307,7 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
             del client
         except Exception:  # noqa: BLE001 — bot-class miswire degrades silently
             pass
-        return {}
+        return {"jira_source": "unavailable"}
 
     try:
         return await asyncio.to_thread(_sync_pull)
@@ -313,7 +318,7 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
             type(exc).__name__,
             exc,
         )
-        return {}
+        return {"jira_source": "degraded"}
 
 
 def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
@@ -345,7 +350,7 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
             type(exc).__name__,
             exc,
         )
-        return {}
+        return {"kg_source": "unavailable"}
 
     async def _search() -> Any:
         return await asyncio.wait_for(
@@ -367,7 +372,7 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
             inner_budget_sec,
             STRUCTURAL_BUDGET_SEC,
         )
-        return {}
+        return {"kg_source": "degraded"}
     except Exception as exc:  # noqa: BLE001 — degrade per AC #3
         log.info(
             "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
@@ -375,8 +380,9 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
             type(exc).__name__,
             exc,
         )
-        return {}
+        return {"kg_source": "degraded"}
     return {
+        "kg_source": "live",
         "kg_neighbours": [
             {
                 "identifier": h.identifier,
@@ -402,7 +408,7 @@ async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
     try:
         from backend.agents import cognee_integration  # noqa: F401 — import probe
     except ImportError:
-        return {}
+        return {"kg_source": "unavailable"}
     try:
         return await asyncio.to_thread(_blocking_cognee_lookup, ticket_key)
     except Exception as exc:  # noqa: BLE001 — degrade per AC #3
@@ -412,7 +418,7 @@ async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
             type(exc).__name__,
             exc,
         )
-        return {}
+        return {"kg_source": "degraded"}
 
 
 async def _temporal_graphiti(ticket_key: str) -> dict[str, Any]:
@@ -697,6 +703,9 @@ async def aggregate_project_state(
         total_latency_sec=total_latency,
         axis_latency_sec={name: r.latency_sec for name, r in results.items()},
         axis_error={name: r.error for name, r in results.items() if r.error},
+        axis_content=_classify_axis_content(results),
+        source_markers=_structural_source_markers(payload.get(AXIS_STRUCTURAL)),
+        jira_negative_cache_hits=0,
         budget_exceeded=budget_exceeded,
     )
     await record_trace(trace)
@@ -756,6 +765,40 @@ def _payload(results: dict[str, AxisResult], axis: str) -> Any | None:
     if result is None:
         return None
     return result.payload
+
+
+def _classify_axis_content(results: dict[str, AxisResult]) -> dict[str, str]:
+    return {axis: _classify_payload(_payload(results, axis)) for axis in ALL_AXES}
+
+
+def _classify_payload(payload: Any | None) -> str:
+    if payload is None:
+        return "degraded"
+    if isinstance(payload, dict):
+        if payload.get("status") == "unavailable":
+            return "unavailable"
+        if _dict_has_content(payload):
+            return "non_empty"
+        return "empty"
+    return "non_empty" if payload else "empty"
+
+
+def _dict_has_content(payload: dict[str, Any]) -> bool:
+    for key, value in payload.items():
+        if key in {"ticket", "jira_source", "kg_source"}:
+            continue
+        if value not in (None, "", [], {}):
+            return True
+    return False
+
+
+def _structural_source_markers(payload: Any | None) -> dict[str, str]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        "jira_source": str(payload.get("jira_source") or "unavailable"),
+        "kg_source": str(payload.get("kg_source") or "unavailable"),
+    }
 
 
 __all__ = [
