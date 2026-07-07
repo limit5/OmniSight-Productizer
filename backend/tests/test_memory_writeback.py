@@ -48,6 +48,25 @@ def _reset_buffers() -> Iterator[None]:
     incident_recorder.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_durable_writer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> Iterator[None]:
+    """OP-2537 safety: the default incident writer is now the durable
+    Postgres writer — every test must be PHYSICALLY UNABLE to reach the
+    prod DSN in the dev host's real ``~/.config/omnisight/audit-db.env``.
+    """
+    monkeypatch.delenv("OMNISIGHT_DATABASE_URL", raising=False)
+    monkeypatch.setenv(
+        "OMNISIGHT_AUDIT_DB_ENV_FILE", str(tmp_path / "audit-db.env")
+    )
+    monkeypatch.setenv(
+        "OMNISIGHT_INCIDENT_WRITE_FAIL_COUNTER",
+        str(tmp_path / "incident_write_failures.count"),
+    )
+    yield
+
+
 @pytest.fixture
 def memory_tool(tmp_path: Path) -> MemoryToolHandler:
     storage = tmp_path / "fleet"
@@ -88,7 +107,6 @@ def test_success_writeback_appends_lesson_and_tickles_cognee(
     wb = MemoryWriteback(
         memory_tool=memory_tool,
         cognee_emitter=cognee_emitter,
-        incident_queue_dir=tmp_path / "queue",
     )
     request = WritebackRequest(
         ticket_key="OP-906",
@@ -126,7 +144,6 @@ def test_failure_writeback_inserts_incident_and_tickles_cognee(
     wb = MemoryWriteback(
         memory_tool=memory_tool,
         cognee_emitter=cognee_emitter,
-        incident_queue_dir=tmp_path / "queue",
     )
     request = WritebackRequest(
         ticket_key="OP-906",
@@ -168,7 +185,6 @@ def test_idempotent_rewrite_returns_cached_result(
     wb = MemoryWriteback(
         memory_tool=memory_tool,
         cognee_emitter=cognee_emitter,
-        incident_queue_dir=tmp_path / "queue",
     )
     request = WritebackRequest(
         ticket_key="OP-906",
@@ -211,7 +227,6 @@ def test_store_down_degrades_gracefully(tmp_path: Path) -> None:
         memory_tool=None,  # no memory tool — exercises the unset path
         cognee_emitter=emit,
         incident_writer=boom_incident_writer,
-        incident_queue_dir=tmp_path / "queue",
     )
     request = WritebackRequest(
         ticket_key="OP-906",
@@ -228,10 +243,9 @@ def test_store_down_degrades_gracefully(tmp_path: Path) -> None:
     assert STORE_COGNEE not in result.stores_failed
     assert result.cognee_tickled is True
     assert result.incident_id is None
-    # Recovery: failed incident insert is queued to disk for hourly retry.
-    queued = list((tmp_path / "queue").glob("*.json"))
-    assert len(queued) == 1
-    assert "OP-906" in queued[0].name
+    # OP-2537: the disk retry-queue is gone — a failed incident insert is
+    # best-effort (the durable writer's own counter + log line cover it).
+    assert not (tmp_path / "queue").exists()
 
 
 # ── Case 5: AC error-catalog lesson classification fallback ────────────
@@ -246,7 +260,6 @@ def test_lesson_classification_falls_back_when_no_keyword_matches(
     wb = MemoryWriteback(
         memory_tool=memory_tool,
         cognee_emitter=cognee_emitter,
-        incident_queue_dir=tmp_path / "queue",
     )
     request = WritebackRequest(
         ticket_key="OP-906",
@@ -319,7 +332,6 @@ def test_cognee_tickle_is_fire_and_forget(tmp_path: Path) -> None:
         cognee_emitter=slow_emitter,
         incident_writer=fast_incident_writer,
         cognee_budget_s=0.1,
-        incident_queue_dir=tmp_path / "queue",
     )
     request = WritebackRequest(
         ticket_key="OP-906",
@@ -364,7 +376,6 @@ def test_success_outcome_positive_feedback_writes_incident_row(
     wb = MemoryWriteback(
         memory_tool=memory_tool,
         cognee_emitter=cognee_emitter,
-        incident_queue_dir=tmp_path / "queue",
     )
     request = WritebackRequest(
         ticket_key="OP-906",
@@ -382,3 +393,78 @@ def test_success_outcome_positive_feedback_writes_incident_row(
     rows = incident_recorder.get_runner_incidents(ticket_key="OP-906")
     assert len(rows) == 1
     assert SUCCESS_OUTCOME_FAILURE_CLASS in rows[0].summary
+
+
+# ── Case 8: OP-2537 claim-token passthrough to the durable writer ─────
+
+
+def test_claim_token_flows_to_durable_writer_and_yields_live_v1_id(
+    cognee_emitter: Callable[[str], None],
+) -> None:
+    """``WritebackRequest.claim_token`` is delegated to
+    ``record_incident_durable`` so the incident row gets the
+    deterministic ``live-v1-`` id (dedup key across seams).
+    """
+    seen: list[dict[str, Any]] = []
+
+    def spying_writer(**kwargs: Any) -> RunnerIncidentRecord:
+        seen.append(kwargs)
+        return incident_recorder.record_incident_durable(
+            kwargs["ticket_key"],
+            kwargs["failure_class"],
+            claim_token=kwargs["claim_token"],
+            summary=kwargs["summary"],
+            raw_traceback=kwargs["raw_traceback"],
+            runner_class=kwargs["runner_class"],
+            mutex_label=kwargs["mutex_label"],
+            area=kwargs["area"],
+        )
+
+    wb = MemoryWriteback(
+        memory_tool=None,
+        cognee_emitter=cognee_emitter,
+        incident_writer=spying_writer,
+    )
+    request = WritebackRequest(
+        ticket_key="OP-2537",
+        attempt_n=1,
+        outcome=OUTCOME_FAILURE,
+        summary="pytest failed",
+        raw_traceback="E  assert",
+        area="backend",
+        claim_token="claim-tok-wb",
+    )
+
+    result = wb.write(request)
+
+    assert len(seen) == 1
+    assert seen[0]["claim_token"] == "claim-tok-wb"
+    assert result.incident_id is not None
+    assert result.incident_id.startswith("live-v1-")
+
+
+def test_default_incident_writer_is_the_durable_helper(
+    cognee_emitter: Callable[[str], None],
+) -> None:
+    """No injected writer → ``record_incident_durable`` runs: the row
+    lands in the deque with a ``live-v1-`` id even though no DSN is
+    reachable (isolation fixture), because the helper never raises.
+    """
+    wb = MemoryWriteback(memory_tool=None, cognee_emitter=cognee_emitter)
+    request = WritebackRequest(
+        ticket_key="OP-2537",
+        attempt_n=2,
+        outcome=OUTCOME_FAILURE,
+        summary="pytest failed",
+        raw_traceback="E  assert",
+        area="backend",
+        claim_token="claim-tok-default",
+    )
+
+    result = wb.write(request)
+
+    assert STORE_INCIDENTS not in result.stores_failed
+    rows = incident_recorder.get_runner_incidents(ticket_key="OP-2537")
+    assert len(rows) == 1
+    assert rows[0].incident_id == result.incident_id
+    assert rows[0].incident_id.startswith("live-v1-")

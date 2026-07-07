@@ -9,7 +9,10 @@ to three backing stores in parallel with per-store timeouts:
 * **runner_incidents (C2)** — insert a row with classified
   ``failure_class`` + summary + ``mutex_label`` on failure; on success
   with ``record_success_outcome=True`` write a positive-feedback row
-  (``failure_class=SUCCESS_OUTCOME``).
+  (``failure_class=SUCCESS_OUTCOME``). Since OP-2537 the insert goes
+  through :func:`backend.agents.incident_recorder.record_incident_durable`
+  (best-effort Postgres write, no retry queue — failed writes land in
+  the durable writer's failure counter + log line instead).
 * **Cognee KG (C3)** — fire-and-forget tickle so the ticket + lesson are
   re-indexed on next ingest pass.
 
@@ -27,15 +30,11 @@ finishes; that keeps the JIRA-dispatch boundary in one place.
 
 from __future__ import annotations
 
-import json
 import logging
-import os
 import re
 import threading
 import time
-import uuid
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from backend.agents.failure_class import (
@@ -44,7 +43,7 @@ from backend.agents.failure_class import (
 )
 from backend.agents.incident_recorder import (
     RunnerIncidentRecord,
-    record_runner_incident,
+    record_incident_durable,
 )
 from backend.agents.memory_tool_handler import (
     MEMORY_PATH_PREFIX,
@@ -92,12 +91,6 @@ _SUCCESS_SUMMARY_PREFIX = f"[{SUCCESS_OUTCOME_FAILURE_CLASS}]"
 BUDGET_MEMORY_TOOL_S = 2.0
 BUDGET_INCIDENTS_S = 1.0
 BUDGET_COGNEE_S = 2.0
-
-# Disk-queue location for incident-insert retries (AC recovery section).
-# Each line is one JSON-encoded WritebackRequest payload. Hourly retry
-# is the operator's cron job; this module is the producer side only.
-DEFAULT_INCIDENT_QUEUE_DIR = Path("/var/omnisight/memory/incident_queue")
-INCIDENT_QUEUE_DIR_ENV = "OMNISIGHT_INCIDENT_QUEUE_DIR"
 
 # Lesson classifier — minimal heuristic. The runner can override the
 # default by passing ``lesson_id``/``lesson_content`` directly on the
@@ -164,6 +157,12 @@ class WritebackRequest:
     mutex_label: str | None = None
     area: str | None = None
     runner_class: str = "unknown"
+
+    # OP-2537 (R3.1): claim token threaded from the runner pickup. When
+    # present, the durable incident writer derives a deterministic
+    # ``live-v1-`` incident id from it so the jira_dispatch revert seam
+    # and this seam dedup to one runner_incidents row.
+    claim_token: str | None = None
 
     # Optional pre-classified lesson. When omitted on success outcomes,
     # ``classify_lesson`` derives one from ``summary``/``raw_traceback``.
@@ -301,22 +300,16 @@ class MemoryWriteback:
         memory_tool: MemoryToolHandler | None = None,
         cognee_emitter: CogneeEmitter | None = None,
         incident_writer: Callable[..., RunnerIncidentRecord] | None = None,
-        incident_queue_dir: Path | None = None,
         memory_tool_budget_s: float = BUDGET_MEMORY_TOOL_S,
         incidents_budget_s: float = BUDGET_INCIDENTS_S,
         cognee_budget_s: float = BUDGET_COGNEE_S,
     ) -> None:
         self._memory_tool = memory_tool
         self._cognee_emitter = cognee_emitter or _default_cognee_emitter
-        self._incident_writer = incident_writer or record_runner_incident
+        self._incident_writer = incident_writer or record_incident_durable
         self._memory_tool_budget = memory_tool_budget_s
         self._incidents_budget = incidents_budget_s
         self._cognee_budget = cognee_budget_s
-        env_dir = os.environ.get(INCIDENT_QUEUE_DIR_ENV)
-        self._incident_queue_dir = (
-            incident_queue_dir
-            or (Path(env_dir) if env_dir else DEFAULT_INCIDENT_QUEUE_DIR)
-        )
 
     # — Public API —
 
@@ -398,11 +391,6 @@ class MemoryWriteback:
             )
             if failed
         )
-
-        # Recovery: when the incident insert critical-path failed, queue
-        # the request to disk for the hourly retry job (spec §recovery).
-        if STORE_INCIDENTS in stores_failed:
-            self._enqueue_incident_for_retry(request)
 
         result = WritebackResult(
             ticket_key=request.ticket_key,
@@ -488,6 +476,7 @@ class MemoryWriteback:
         record = self._incident_writer(
             ticket_key=request.ticket_key,
             failure_class=klass,
+            claim_token=request.claim_token,
             summary=summary,
             raw_traceback=request.raw_traceback,
             runner_class=request.runner_class,
@@ -575,28 +564,6 @@ class MemoryWriteback:
         with _state_lock:
             _seen_keys.add(key)
             _results_by_ticket.setdefault(key[0], []).append(result)
-
-    # — Recovery queue —
-
-    def _enqueue_incident_for_retry(self, request: WritebackRequest) -> None:
-        try:
-            self._incident_queue_dir.mkdir(parents=True, exist_ok=True)
-            path = self._incident_queue_dir / (
-                f"{request.ticket_key}-{request.attempt_n}-{uuid.uuid4().hex[:8]}.json"
-            )
-            payload = asdict(request)
-            path.write_text(json.dumps(payload), encoding="utf-8")
-            log.info(
-                "memory_writeback.incident_queued path=%s ticket=%s",
-                path,
-                request.ticket_key,
-            )
-        except OSError as exc:
-            log.warning(
-                "memory_writeback.incident_queue_failed ticket=%s err=%s",
-                request.ticket_key,
-                exc,
-            )
 
 
 # ── Helpers ─────────────────────────────────────────────────────────

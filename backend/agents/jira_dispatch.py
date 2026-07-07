@@ -2684,6 +2684,7 @@ def transition_back_to_todo(
     raw_traceback: str = "",
     mutex_label: str | None = None,
     area: str | None = None,
+    claim_token: str | None = None,
 ) -> None:
     """In Progress → TODO with reason comment + cleanup ownership markers.
 
@@ -2703,6 +2704,13 @@ def transition_back_to_todo(
     the ticket is attempted. Recording is best-effort — a recorder
     fault never blocks the JIRA transition (the operator still needs
     the ticket reverted even if the audit shim is wedged).
+
+    OP-2537 (R3.1): ``claim_token`` is a pure passthrough to
+    :func:`backend.agents.incident_recorder.record_incident_durable` —
+    it does NOT participate in claim/pickup logic here. When present,
+    the incident row gets a deterministic ``live-v1-`` id so the same
+    failure reported through the memory-writeback seam dedups to one
+    durable row.
     """
     base_key = idem_key or f"transition-{key}-back-to-todo-{uuid.uuid4().hex[:12]}"
     if failure_class is not None:
@@ -2710,11 +2718,12 @@ def transition_back_to_todo(
             # Local import keeps jira_dispatch importable without the
             # incident_recorder + failure_class chain (e.g. early-boot
             # JQL-only smoke tests).
-            from backend.agents.incident_recorder import record_runner_incident
+            from backend.agents.incident_recorder import record_incident_durable
 
-            record_runner_incident(
-                ticket_key=key,
-                failure_class=failure_class,
+            record_incident_durable(
+                key,
+                failure_class,
+                claim_token=claim_token,
                 summary=reason.splitlines()[0] if reason else "",
                 raw_traceback=raw_traceback,
                 runner_class=getattr(client, "agent_class", "unknown"),
