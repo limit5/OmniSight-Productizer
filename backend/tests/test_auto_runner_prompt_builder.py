@@ -709,3 +709,151 @@ def test_explicit_self_tenant_label_retains_sop(runner, fake_client, monkeypatch
 
     assert _DOCRULES_HEADER in prompt
     assert _LESSON_HEADER in prompt
+
+
+# ── OP-2538 (R2a): issuelinks/parent in the pickup GET + compact renderer ──
+#
+# The ONE issue GET in _build_prompt now also requests `issuelinks,parent`
+# and a compact `Blockers / Blocking / Parent` block is rendered from those
+# fields — no extra JIRA request. Direction per JIRA REST semantics:
+# inwardIssue on a Blocks link = the blocker of this ticket.
+
+_LINKS_HEADER = "# Blockers / Blocking / Parent (OP-2538 pickup enrichment)"
+
+
+def _blocks_link(direction: str, key: str, summary: str, status: str = "To Do") -> dict:
+    return {
+        "type": {"name": "Blocks", "inward": "is blocked by", "outward": "blocks"},
+        f"{direction}Issue": {
+            "key": key,
+            "fields": {"summary": summary, "status": {"name": status}},
+        },
+    }
+
+
+def _patch_issue_with_links(monkeypatch, issuelinks=None, parent=None):
+    payload = {
+        "fields": {
+            "summary": "linked ticket",
+            "labels": ["area:backend", "tier:M"],
+            "components": [],
+            "issuelinks": issuelinks or [],
+            **({"parent": parent} if parent is not None else {}),
+        }
+    }
+    captured: list = []
+
+    def _request(client, method, path, *a, **kw):  # noqa: ARG001
+        captured.append(path)
+        return payload
+
+    monkeypatch.setattr(jira_dispatch, "_request", _request)
+    return captured
+
+
+def test_pickup_get_requests_issuelinks_and_parent(runner, fake_client, monkeypatch):
+    """The single issue GET's fields list gains `issuelinks,parent` — and stays ONE call."""
+    captured = _patch_issue_with_links(monkeypatch)
+    runner._build_prompt(fake_client, "OP-2538-get", "body")
+    assert len(captured) == 1, "must remain a single JIRA request"
+    assert "fields=summary,labels,components,issuetype,issuelinks,parent" in captured[0]
+
+
+def test_issuelink_direction_inward_is_blocker(runner, fake_client, monkeypatch):
+    """Dedicated direction test: inwardIssue → Blockers, outwardIssue → Blocking."""
+    _patch_issue_with_links(
+        monkeypatch,
+        issuelinks=[
+            _blocks_link("inward", "OP-100", "the upstream dependency", "In Progress"),
+            _blocks_link("outward", "OP-200", "the downstream consumer", "Open"),
+        ],
+    )
+    prompt = runner._build_prompt(fake_client, "OP-2538-dir", "body")
+    block = prompt.split(_LINKS_HEADER, 1)[1].split("\n#", 1)[0]
+    assert "Blockers: OP-100 [In Progress] the upstream dependency" in block
+    assert "Blocking: OP-200 [Open] the downstream consumer" in block
+    # Direction must never be swapped.
+    assert "Blockers: OP-200" not in block
+    assert "Blocking: OP-100" not in block
+
+
+def test_links_block_pinned_output_with_parent(runner, fake_client, monkeypatch):
+    """Pinned prompt-output: exact block text for links + parent, ≤10 lines."""
+    _patch_issue_with_links(
+        monkeypatch,
+        issuelinks=[_blocks_link("inward", "OP-1", "blocker summary", "Done")],
+        parent={"key": "OP-META", "fields": {"summary": "phase epic", "status": {"name": "Open"}}},
+    )
+    prompt = runner._build_prompt(fake_client, "OP-2538-pin", "body")
+    expected = (
+        "\n# Blockers / Blocking / Parent (OP-2538 pickup enrichment)\n\n"
+        "Blockers: OP-1 [Done] blocker summary\n"
+        "Parent: OP-META [Open] phase epic\n"
+    )
+    assert expected in prompt
+    assert len(expected.strip("\n").split("\n")) <= 10
+    assert prompt.index(_LINKS_HEADER) < prompt.index(_AC_MARKER)
+
+
+def test_links_block_absent_when_no_links_or_parent(runner, fake_client, monkeypatch):
+    _patch_issue_with_links(monkeypatch, issuelinks=[])
+    prompt = runner._build_prompt(fake_client, "OP-2538-none", "body")
+    assert _LINKS_HEADER not in prompt
+
+
+def test_links_block_ignores_non_blocks_link_types(runner, fake_client, monkeypatch):
+    """A Relates-type link is neither a blocker nor blocking."""
+    relates = {
+        "type": {"name": "Relates", "inward": "relates to", "outward": "relates to"},
+        "inwardIssue": {"key": "OP-300", "fields": {"summary": "x", "status": {"name": "Open"}}},
+    }
+    _patch_issue_with_links(monkeypatch, issuelinks=[relates])
+    prompt = runner._build_prompt(fake_client, "OP-2538-rel", "body")
+    assert _LINKS_HEADER not in prompt
+    assert "OP-300" not in prompt
+
+
+def test_link_summary_sanitized_and_capped_at_200(runner, fake_client, monkeypatch):
+    """Summaries are whitespace-collapsed and truncated to ≤200 chars."""
+    noisy = "line1\nline2\t\ttabbed   spaced " + "x" * 300
+    _patch_issue_with_links(
+        monkeypatch, issuelinks=[_blocks_link("inward", "OP-9", noisy)],
+    )
+    prompt = runner._build_prompt(fake_client, "OP-2538-san", "body")
+    block = prompt.split(_LINKS_HEADER, 1)[1].split("\n#", 1)[0]
+    line = next(l for l in block.splitlines() if l.startswith("Blockers:"))
+    rendered_summary = line.split("[To Do] ", 1)[1]
+    assert "\n" not in rendered_summary and "\t" not in rendered_summary
+    assert rendered_summary.startswith("line1 line2 tabbed spaced")
+    assert len(rendered_summary) <= 200
+
+
+# ── OP-2538 (R5b): temporal-unavailable omit in the project-state block ──
+
+
+def test_temporal_unavailable_axis_omitted_from_project_state(runner):
+    """Pinned contract: temporal == {"status": "unavailable"} → key omitted."""
+    payload = {
+        "ticket": "OP-2538",
+        "structural": {"blockers": []},
+        "temporal": {"status": "unavailable"},
+        "causal": None,
+    }
+    block = runner._render_project_state_block(payload)
+    assert "temporal" not in block
+    assert '"structural"' in block
+    # Preamble reflects the omit semantics.
+    assert "Treat null or absent axes as 'no context'" in block
+    # Input payload must not be mutated.
+    assert payload["temporal"] == {"status": "unavailable"}
+
+
+def test_temporal_with_real_data_still_rendered(runner):
+    """Only the exact pinned unavailable-shape is omitted — real data stays."""
+    payload = {
+        "ticket": "OP-2538",
+        "temporal": {"recent_events": ["e1"], "status": "ok"},
+    }
+    block = runner._render_project_state_block(payload)
+    assert '"temporal"' in block
+    assert '"recent_events"' in block

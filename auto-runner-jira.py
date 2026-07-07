@@ -1127,13 +1127,68 @@ def _render_project_state_block(payload: dict) -> str:
     The aggregator already shapes the three-axis dict; we serialise it as
     indented JSON so the downstream CLI sees stable, copy-pasteable
     context rather than a flattened bullet list that loses field names.
+
+    OP-2538 (R5b) pinned contract: the temporal axis may arrive as exactly
+    ``{"status": "unavailable"}`` — omit the key rather than render noise.
     """
+    if payload.get("temporal") == {"status": "unavailable"}:
+        payload = {k: v for k, v in payload.items() if k != "temporal"}
     rendered = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
     return (
         "\n# Project context (OP-905 cross-task awareness)\n\n"
         "The /api/v1/project-state aggregator returned the following payload\n"
-        "for this ticket at pickup time. Treat null axes as 'no context'.\n\n"
+        "for this ticket at pickup time. Treat null or absent axes as 'no context'.\n\n"
         f"```json\n{rendered}\n```\n"
+    )
+
+
+_LINK_SUMMARY_MAX = 200
+
+
+def _sanitize_link_summary(summary: object) -> str:
+    """Collapse whitespace/control chars and cap at 200 chars (pinned contract)."""
+    return " ".join(str(summary or "").split())[:_LINK_SUMMARY_MAX]
+
+
+def _render_issue_links_block(fields: dict) -> str:
+    """Compact ``Blockers / Blocking / Parent`` block from the pickup GET (OP-2538).
+
+    Direction per JIRA REST semantics (matches live_state_check): on a
+    ``Blocks``-type link the ``inwardIssue`` is the issue that blocks THIS
+    ticket (a blocker); the ``outwardIssue`` is one this ticket blocks.
+    Renders keys + status + sanitized summaries from the single issue GET —
+    never issues an extra JIRA request. Empty string when nothing to show.
+    """
+    def _fmt(issue: dict) -> str:
+        lf = issue.get("fields") or {}
+        status = (lf.get("status") or {}).get("name") or "?"
+        return f"{issue.get('key', '?')} [{status}] {_sanitize_link_summary(lf.get('summary'))}".rstrip()
+
+    blockers: list[str] = []
+    blocking: list[str] = []
+    for link in fields.get("issuelinks") or ():
+        if not isinstance(link, dict):
+            continue
+        if (link.get("type") or {}).get("name") != "Blocks":
+            continue
+        if isinstance(link.get("inwardIssue"), dict):
+            blockers.append(_fmt(link["inwardIssue"]))
+        elif isinstance(link.get("outwardIssue"), dict):
+            blocking.append(_fmt(link["outwardIssue"]))
+    lines: list[str] = []
+    if blockers:
+        lines.append("Blockers: " + "; ".join(blockers))
+    if blocking:
+        lines.append("Blocking: " + "; ".join(blocking))
+    parent = fields.get("parent")
+    if isinstance(parent, dict):
+        lines.append("Parent: " + _fmt(parent))
+    if not lines:
+        return ""
+    return (
+        "\n# Blockers / Blocking / Parent (OP-2538 pickup enrichment)\n\n"
+        + "\n".join(lines)
+        + "\n"
     )
 
 
@@ -1536,7 +1591,8 @@ def _build_prompt(
     incident context into the prompt before AC.
     """
     issue = jira_dispatch._request(
-        client, "GET", f"/issue/{key}?fields=summary,labels,components,issuetype",
+        client, "GET",
+        f"/issue/{key}?fields=summary,labels,components,issuetype,issuelinks,parent",
     )
     f = issue["fields"]
     summary = f.get("summary", "<no summary>")
@@ -1601,6 +1657,10 @@ def _build_prompt(
         rendered = failure_graph.render_pickup_context(fg, key)
         if rendered:
             fg_block = "\n\n" + rendered + "\n"
+
+    # OP-2538 (R2a) — compact Blockers / Blocking / Parent block rendered
+    # from the issuelinks/parent fields of the single pickup GET above.
+    links_block = _render_issue_links_block(f)
 
     # OP-905 (F7) — inject cross-task awareness payload from the
     # /api/v1/project-state aggregator. Gated by the feature flag + skip
@@ -1733,7 +1793,7 @@ If you find that completing this ticket requires touching an out-of-area
 domain, halt, write a discovered-dependency note to your report file (see
 below) and exit WITHOUT committing — the runner surfaces your note and reverts
 the ticket per docs/sop/jira-ticket-conventions.md §11.
-{capabilities_block}{fg_block}{ps_block}{ops_only_block}{reflection_block}{character_block}{lessons_block}{antipattern_block}
+{capabilities_block}{fg_block}{links_block}{ps_block}{ops_only_block}{reflection_block}{character_block}{lessons_block}{antipattern_block}
 {docrules_block}# Acceptance Criteria verification + reporting (REQUIRED before exit)
 
 You run inside a sandbox with NO JIRA credentials — you CANNOT call
