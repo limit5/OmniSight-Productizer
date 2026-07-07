@@ -34,6 +34,7 @@ on a host with no docker daemon.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -66,6 +67,18 @@ def _make_sandbox(tmp_path: Path, *, env_seed: str) -> Path:
     scripts.mkdir(parents=True)
     shutil.copy2(DEPLOY_SH, scripts / "deploy-prod.sh")
     shutil.copy2(VERIFIER, scripts / "check_deploy_ref.sh")
+    (sandbox / "bundle.json").write_text(
+        json.dumps(
+            {
+                "git_sha": "3f1c0a4e0000000000000000000000000000abcd",
+                "images": {
+                    "backend": {"digest": BACKEND_DIGEST},
+                    "frontend": {"digest": FRONTEND_DIGEST},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     (sandbox / ".env").write_text(env_seed, encoding="utf-8")
     return sandbox
 
@@ -84,6 +97,7 @@ def _run_deploy(sandbox: Path, *args: str, dry_run: bool = False) -> subprocess.
             "bash", str(sandbox / "scripts" / "deploy-prod.sh"),
             f"--backend-digest={BACKEND_DIGEST}",
             f"--frontend-digest={FRONTEND_DIGEST}",
+            "--bundle=bundle.json",
             *extra, *args,
         ],
         capture_output=True, text=True, cwd=str(sandbox), env=env,

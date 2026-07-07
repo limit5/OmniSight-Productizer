@@ -10,7 +10,7 @@ Contract reminders (per the AC):
 * hard 2 s total budget, per-axis budgets of 800/600/600 ms
 * per-axis timeout → ``null`` for that axis; the response is still 200
 * 5-minute TTL cache keyed on ``(ticket, develop_sha)`` with invalidation
-  on JIRA webhook + develop merge (see :func:`invalidate_for_webhook`)
+  on JIRA webhook (see :func:`invalidate_for_webhook`)
 * every call logs axis-by-axis latency + cache hit/miss to the operator
   metrics surface (``/api/v1/project-state/metrics``)
 
@@ -22,6 +22,7 @@ The router is mounted from ``backend.main`` via
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import time
@@ -31,6 +32,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend import auth
+from backend import api_versioning as versioning
 from backend.agents import project_state_aggregator as agg
 from backend.agents import project_state_cache as cache_mod
 
@@ -44,6 +46,7 @@ router = APIRouter(prefix="/project-state", tags=["project-state"])
 # enforced by docs/sop/jira-ticket-conventions.md §2 (ticket keys look
 # like ``OP-<N>`` with an optional alphanumeric suffix).
 _TICKET_RE = re.compile(r"^OP-[A-Z0-9]+$", re.IGNORECASE)
+_FULL_GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$", re.IGNORECASE)
 
 
 def _normalise_ticket(raw: str | None) -> str:
@@ -63,19 +66,35 @@ def _normalise_ticket(raw: str | None) -> str:
     return candidate
 
 
+def _clean_git_sha(raw: object) -> str | None:
+    candidate = str(raw or "").strip()
+    if _FULL_GIT_SHA_RE.fullmatch(candidate):
+        return candidate.lower()
+    return None
+
+
 def _resolve_develop_sha() -> str:
-    """Return the current ``origin/develop`` SHA, or ``unknown``.
+    """Return the deployed build SHA, dev checkout SHA, or ``unknown``.
 
     The cache is keyed on this string so a fresh merge to ``develop``
     invalidates every cached entry naturally — the next call computes
-    against the new SHA and writes a new slot. When the repo is not
-    available (CI containers without a git tree, tests) we fall back
-    to ``unknown`` so the cache still works but with no SHA-based
-    invalidation.
+    against the new SHA and writes a new slot. Deployed containers read
+    the deploy overlay first, then the build env var. Only dev checkouts
+    fall back to forking ``git``; CI/deploy paths without any SHA source
+    return ``unknown`` so the cache still works.
     """
+    overlay = versioning.get_deploy_overlay() or {}
+    overlay_sha = _clean_git_sha(overlay.get("build_git_sha"))
+    if overlay_sha:
+        return overlay_sha
+
+    env_sha = _clean_git_sha(os.environ.get("OMNISIGHT_BUILD_GIT_SHA"))
+    if env_sha:
+        return env_sha
+
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "origin/develop"],
+            ["git", "rev-parse", "HEAD"],
             cwd=Path.cwd(),
             capture_output=True,
             text=True,
@@ -84,7 +103,7 @@ def _resolve_develop_sha() -> str:
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"
-    return proc.stdout.strip() or "unknown"
+    return _clean_git_sha(proc.stdout) or "unknown"
 
 
 @router.get("", response_model=None)
@@ -206,20 +225,8 @@ def invalidate_for_webhook(ticket_key: str) -> int:
     return cache_mod.default_cache.invalidate_ticket(ticket_key.strip().upper())
 
 
-def invalidate_for_develop_merge() -> None:
-    """Drop the entire cache on a develop-merge event (AC #4).
-
-    The cache key embeds the develop SHA, so the next request after a
-    merge would have already missed; the explicit clear shaves the
-    cold-tail of in-flight callers still holding the old SHA so they
-    get the new view on their next call.
-    """
-    cache_mod.default_cache.clear()
-
-
 __all__ = [
     "get_project_state",
-    "invalidate_for_develop_merge",
     "invalidate_for_webhook",
     "project_state_metrics",
     "router",

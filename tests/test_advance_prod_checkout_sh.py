@@ -25,6 +25,7 @@ temp repo stand in as "the canonical pinned checkout".
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -215,6 +216,18 @@ def _deploy_sandbox(tmp_path: Path) -> Path:
         dst = checkout / "scripts" / name
         dst.write_bytes((REPO_ROOT / "scripts" / name).read_bytes())
         dst.chmod(0o755)
+    (checkout / "bundle.json").write_text(
+        json.dumps(
+            {
+                "git_sha": "3f1c0a4e0000000000000000000000000000abcd",
+                "images": {
+                    "backend": {"digest": "sha256:" + "a" * 64},
+                    "frontend": {"digest": "sha256:" + "b" * 64},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     (checkout / ".env").write_text("", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(checkout)], check=True)
     _git(checkout, "config", "commit.gpgsign", "false")
@@ -239,6 +252,7 @@ def test_deploy_prod_release_sha_advances_before_deploy(tmp_path: Path) -> None:
          f"--release-sha={sha}",
          f"--backend-digest=sha256:{'a' * 64}",
          f"--frontend-digest=sha256:{'b' * 64}",
+         "--bundle=bundle.json",
          "--dry-run"],
         capture_output=True, text=True, cwd=str(checkout), env=env,
     )
