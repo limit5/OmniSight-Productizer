@@ -905,6 +905,31 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # OP-2557 — /api/v1/project-state axis-health surface. Counters are
+    # emitted at the ROUTER boundary (all three served-200 paths, so
+    # cache hits count too); the latency histogram is observed at the
+    # aggregator's measurement point (the router payload carries no
+    # per-axis latency).
+    project_state_axis_total = Counter(
+        "omnisight_project_state_axis_total",
+        "project-state axes served on 200 responses, by axis and content class",
+        labelnames=("axis", "content"),  # content: non_empty|empty|unavailable|degraded
+        registry=REGISTRY,
+    )
+    project_state_structural_half_total = Counter(
+        "omnisight_project_state_structural_half_total",
+        "project-state structural halves served, by half (jira|kg) and usefulness",
+        labelnames=("half", "useful"),  # useful: "true"|"false"
+        registry=REGISTRY,
+    )
+    project_state_axis_latency_seconds = Histogram(
+        "omnisight_project_state_axis_latency_seconds",
+        "Per-axis project-state fetch latency measured in the aggregator",
+        labelnames=("axis",),
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 2.0),
+        registry=REGISTRY,
+    )
+
 else:
     # No-op stubs so callers don't have to guard every increment.
     class _NoOp:
@@ -1027,6 +1052,10 @@ else:
     dag_executor_up = _NoOp()  # type: ignore
     dag_executor_heartbeat_total = _NoOp()  # type: ignore
     dag_executor_last_heartbeat_timestamp_seconds = _NoOp()  # type: ignore
+    # OP-2557 — project-state axis-health surface
+    project_state_axis_total = _NoOp()  # type: ignore
+    project_state_structural_half_total = _NoOp()  # type: ignore
+    project_state_axis_latency_seconds = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1586,6 +1615,9 @@ def reset_for_tests() -> None:
     # OP-1665 — DAG executor heartbeat / liveness surface
     global dag_executor_up, dag_executor_heartbeat_total
     global dag_executor_last_heartbeat_timestamp_seconds
+    # OP-2557 — project-state axis-health surface
+    global project_state_axis_total, project_state_structural_half_total
+    global project_state_axis_latency_seconds
     billing_llm_calls_total = Counter(
         "omnisight_billing_llm_calls_total",
         "LLM calls fan-outed to billing, by tenant/project/product_line/provider/model",
@@ -1672,5 +1704,24 @@ def reset_for_tests() -> None:
         "omnisight_dag_executor_last_heartbeat_timestamp_seconds",
         "Unix timestamp of the most recent DAG executor heartbeat, by instance",
         labelnames=("instance_id",),
+        registry=REGISTRY,
+    )
+    project_state_axis_total = Counter(
+        "omnisight_project_state_axis_total",
+        "project-state axes served on 200 responses, by axis and content class",
+        labelnames=("axis", "content"),
+        registry=REGISTRY,
+    )
+    project_state_structural_half_total = Counter(
+        "omnisight_project_state_structural_half_total",
+        "project-state structural halves served, by half (jira|kg) and usefulness",
+        labelnames=("half", "useful"),
+        registry=REGISTRY,
+    )
+    project_state_axis_latency_seconds = Histogram(
+        "omnisight_project_state_axis_latency_seconds",
+        "Per-axis project-state fetch latency measured in the aggregator",
+        labelnames=("axis",),
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 2.0),
         registry=REGISTRY,
     )

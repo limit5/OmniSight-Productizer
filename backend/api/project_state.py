@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from backend import auth
 from backend import api_versioning as versioning
+from backend import metrics
 from backend.agents import project_state_aggregator as agg
 from backend.agents import project_state_cache as cache_mod
 
@@ -106,6 +107,38 @@ def _resolve_develop_sha() -> str:
     return _clean_git_sha(proc.stdout) or "unknown"
 
 
+def _emit_axis_metrics(payload: dict[str, Any]) -> None:
+    """OP-2557 — axis-health counters, emitted before every served 200.
+
+    Sits at the router boundary (NOT in ``record_trace``, which carries
+    no axis payload on cache hits) so cache-hit responses count too.
+    Content classification reuses the aggregator's classifier so the
+    counter enum can never drift from the trace surface. Best-effort:
+    never raises, O(1), no I/O.
+    """
+    try:
+        for axis in agg.ALL_AXES:
+            content = agg._classify_payload(payload.get(axis))
+            metrics.project_state_axis_total.labels(axis=axis, content=content).inc()
+
+        structural = payload.get("structural")
+        if isinstance(structural, dict):
+            jira_useful = bool(
+                structural.get("blockers") or structural.get("parent_meta")
+            )
+            kg_useful = bool(structural.get("kg_neighbours"))
+            metrics.project_state_structural_half_total.labels(
+                half="jira", useful="true" if jira_useful else "false"
+            ).inc()
+            metrics.project_state_structural_half_total.labels(
+                half="kg", useful="true" if kg_useful else "false"
+            ).inc()
+        # structural is None (e.g. all-axes-failed): skip the half
+        # counters — axis_total above already recorded the degraded axis.
+    except Exception:  # noqa: BLE001 — metrics must never break serving
+        log.debug("project_state.metrics_emit_failed", exc_info=True)
+
+
 @router.get("", response_model=None)
 async def get_project_state(
     ticket: str = Query(..., description="JIRA ticket key (e.g. OP-904)"),
@@ -138,6 +171,7 @@ async def get_project_state(
             ticket_key,
             develop_sha[:12],
         )
+        _emit_axis_metrics(cached)
         return cached
 
     started = time.monotonic()
@@ -156,7 +190,7 @@ async def get_project_state(
         # Per AC error catalog: return 200 with all-null axes so the
         # runner prompt-builder degrades silently rather than blocking
         # pickup on a backing-store outage.
-        return agg.assemble_response(
+        fallback = agg.assemble_response(
             ticket_key=ticket_key,
             develop_sha=develop_sha,
             results={
@@ -166,6 +200,8 @@ async def get_project_state(
                 for axis in agg.ALL_AXES
             },
         )
+        _emit_axis_metrics(fallback)
+        return fallback
 
     if _structural_cacheable(payload):
         cache_mod.default_cache.set(cache_key, payload)
@@ -185,6 +221,7 @@ async def get_project_state(
             structural.get("jira_source") if isinstance(structural, dict) else None,
             structural.get("kg_source") if isinstance(structural, dict) else None,
         )
+    _emit_axis_metrics(payload)
     return payload
 
 

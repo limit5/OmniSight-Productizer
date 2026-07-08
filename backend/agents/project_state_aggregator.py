@@ -50,6 +50,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from backend import metrics
 from backend.agents import agent_feature_flags, lesson_retrieval
 
 log = logging.getLogger(__name__)
@@ -877,6 +878,7 @@ async def aggregate_project_state(
                 task.cancel()
 
     total_latency = time.monotonic() - start
+    _observe_axis_latency(results)
     payload = assemble_response(
         ticket_key=ticket_key,
         develop_sha=develop_sha,
@@ -928,6 +930,25 @@ async def aggregate_project_state(
         )
 
     return payload
+
+
+def _observe_axis_latency(results: dict[str, AxisResult]) -> None:
+    """OP-2557 — feed the Prometheus latency histogram.
+
+    The histogram MUST be observed here, at the measurement point: the
+    router payload carries no per-axis latency, so a router-side observe
+    would ship a registered-but-never-observed (dead) histogram.
+    Covers every outcome — success, timeout, failure, and total-budget
+    cancellation — mirroring the trace's ``axis_latency_sec``.
+    Best-effort: never raises.
+    """
+    try:
+        for name, result in results.items():
+            metrics.project_state_axis_latency_seconds.labels(axis=name).observe(
+                result.latency_sec
+            )
+    except Exception:  # noqa: BLE001 — metrics must never break aggregation
+        log.debug("project_state.axis_latency_observe_failed", exc_info=True)
 
 
 def assemble_response(
