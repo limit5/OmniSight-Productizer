@@ -167,14 +167,44 @@ async def get_project_state(
             },
         )
 
-    cache_mod.default_cache.set(cache_key, payload)
-    log.info(
-        "project_state.cache_write ticket=%s develop_sha=%s total_latency_sec=%.3f",
-        ticket_key,
-        develop_sha[:12],
-        time.monotonic() - started,
-    )
+    if _structural_cacheable(payload):
+        cache_mod.default_cache.set(cache_key, payload)
+        log.info(
+            "project_state.cache_write ticket=%s develop_sha=%s total_latency_sec=%.3f",
+            ticket_key,
+            develop_sha[:12],
+            time.monotonic() - started,
+        )
+    else:
+        structural = payload.get("structural") or {}
+        log.info(
+            "project_state.cache_skip_degraded_structural ticket=%s "
+            "develop_sha=%s jira_source=%s kg_source=%s",
+            ticket_key,
+            develop_sha[:12],
+            structural.get("jira_source") if isinstance(structural, dict) else None,
+            structural.get("kg_source") if isinstance(structural, dict) else None,
+        )
     return payload
+
+
+def _structural_cacheable(payload: dict[str, Any]) -> bool:
+    """OP-2555 (audit F4) — never latch a degraded structural into the TTL cache.
+
+    A cached degraded/null structural pins ``kg_source=degraded`` (or a
+    NULL axis) for the full 5-minute TTL even though the background KG
+    refresh typically completes within seconds — the next uncached call
+    would already serve ``live``. Stable markers
+    (``live/disabled/unavailable``) stay cacheable; only the transient
+    ``degraded`` marker and a missing axis skip the write.
+    """
+    structural = payload.get("structural")
+    if not isinstance(structural, dict):
+        return False
+    return "degraded" not in (
+        structural.get("jira_source"),
+        structural.get("kg_source"),
+    )
 
 
 @router.get("/metrics", response_model=None)

@@ -444,6 +444,37 @@ class CogneeAdapter:
         return [self._dataset_for(k) for k in kinds]
 
 
+# ── Shared adapter singleton (OP-2555) ────────────────────────────────
+# LanceDB enforces a single-writer file lock on the store. Building a
+# fresh CogneeAdapter (and with it a fresh LanceDB client) per call made
+# concurrent aggregator calls race for the lock ("Could not set lock on
+# file .../*.lbug"). One warm client per process removes the contention
+# and the per-call construction cost. Construction failures are NOT
+# cached so a fixed env/config is picked up on the next call.
+
+_shared_adapter: "CogneeAdapter | None" = None
+_shared_adapter_lock = threading.Lock()
+
+
+def get_shared_adapter() -> "CogneeAdapter":
+    """Return the process-wide :class:`CogneeAdapter` (lazily built once)."""
+    global _shared_adapter
+    adapter = _shared_adapter
+    if adapter is not None:
+        return adapter
+    with _shared_adapter_lock:
+        if _shared_adapter is None:
+            _shared_adapter = CogneeAdapter.from_env()
+        return _shared_adapter
+
+
+def reset_shared_adapter() -> None:
+    """Test helper — drop the process-wide adapter singleton."""
+    global _shared_adapter
+    with _shared_adapter_lock:
+        _shared_adapter = None
+
+
 # ── ECL source collectors (AC #2) ──────────────────────────────────────
 
 
@@ -740,7 +771,7 @@ def build_repo_map_via_cognee(
     try:
         seed = ticket_text or _ticket_seed_default(repo_root)
         try:
-            adapter = adapter or CogneeAdapter.from_env()
+            adapter = adapter or get_shared_adapter()
         except CogneeNotInstalled as exc:
             log.info("cognee_repo_map_fallback: %s", exc)
             return _b8_fallback(repo_root, ticket_text, token_budget, top_n)
@@ -781,7 +812,7 @@ def retrieve_lessons_via_cognee(
     if not query:
         return ()
     try:
-        adapter = adapter or CogneeAdapter.from_env()
+        adapter = adapter or get_shared_adapter()
     except CogneeNotInstalled as exc:
         log.info("cognee_lessons_fallback: %s", exc)
         return _b10_fallback(lessons_dir, ticket_title, acceptance_criteria, top_k)
@@ -836,7 +867,7 @@ def retrieve_antipatterns_via_cognee(
     ranked: list[AntipatternRecord] = []
     if query:
         try:
-            adapter = adapter or CogneeAdapter.from_env()
+            adapter = adapter or get_shared_adapter()
             hits = _run_async(
                 adapter.search(
                     query,
@@ -917,7 +948,7 @@ async def run_ecl_pipeline(
     the nightly full-rebuild (called by ``scripts/cognee_full_rebuild.py``).
     """
     if adapter is None:
-        adapter = CogneeAdapter.from_env()
+        adapter = get_shared_adapter()
     if incremental_paths is not None:
         wanted = {str(p) for p in incremental_paths}
         code_sources = [

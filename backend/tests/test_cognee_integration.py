@@ -105,6 +105,55 @@ def _adapter(cognee: _FakeCognee, *, tenant_id: str = "t-default", timeout: floa
     return ci.CogneeAdapter(config, cognee_module=cognee)
 
 
+# ── OP-2555 — process-wide shared adapter singleton ────────────────────
+
+
+@pytest.fixture()
+def _fresh_shared_adapter():
+    ci.reset_shared_adapter()
+    yield
+    ci.reset_shared_adapter()
+
+
+def test_get_shared_adapter_returns_same_instance(
+    monkeypatch: pytest.MonkeyPatch, _fresh_shared_adapter: None
+) -> None:
+    built = {"n": 0}
+
+    def _from_env() -> Any:
+        built["n"] += 1
+        return _adapter(_FakeCognee())
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", _from_env)
+
+    first = ci.get_shared_adapter()
+    second = ci.get_shared_adapter()
+
+    assert first is second
+    assert built["n"] == 1
+
+
+def test_get_shared_adapter_does_not_cache_construction_failure(
+    monkeypatch: pytest.MonkeyPatch, _fresh_shared_adapter: None
+) -> None:
+    attempts = {"n": 0}
+    good = _adapter(_FakeCognee())
+
+    def _from_env() -> Any:
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise ci.CogneeNotInstalled("not yet configured")
+        return good
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", _from_env)
+
+    with pytest.raises(ci.CogneeNotInstalled):
+        ci.get_shared_adapter()
+    # A fixed env is picked up on the next call — failure is not latched.
+    assert ci.get_shared_adapter() is good
+    assert attempts["n"] == 2
+
+
 # ── Repo fixtures ──────────────────────────────────────────────────────
 
 

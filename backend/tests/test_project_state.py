@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
 
@@ -123,8 +125,12 @@ async def _raising(_ticket: str) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def _reset_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    from backend.agents import cognee_integration as ci
+
     cache_mod.default_cache.clear()
     agg.reset_jira_negative_cache()
+    agg.reset_kg_cache()
+    ci.reset_shared_adapter()
     monkeypatch.delenv("OMNISIGHT_BUILD_GIT_SHA", raising=False)
     monkeypatch.delenv("OMNISIGHT_PROJECT_STATE_JIRA_PULL", raising=False)
     asyncio.run(agg.clear_traces())
@@ -655,6 +661,326 @@ def test_cold_cognee_timeout_preserves_structural_jira_half(
         }
 
     asyncio.run(_run())
+
+
+# ── OP-2555 — cognee off the hot path (cache + single-flight refresh) ─
+
+
+def test_kg_offpath_contract_pins_match_spec() -> None:
+    # OP-2555 pinned contracts — the KG search runs on the refresh path
+    # under its own generous budget; the hot-path half fence is
+    # unchanged. If these values change, the runbook must follow.
+    assert agg.KG_REFRESH_BUDGET_SEC == 15.0
+    assert agg.KG_CACHE_TTL_SEC == 1800.0
+    assert agg.KG_CACHE_MAX_ENTRIES == 256
+    assert agg.STRUCTURAL_HALF_BUDGET_SEC == pytest.approx(0.6)
+
+
+def test_blocking_cognee_lookup_survives_search_slower_than_half_fence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The OP-2555 regression: on a populated store the search takes
+    # longer than the 0.6 s half fence. The lookup's inner budget is now
+    # KG_REFRESH_BUDGET_SEC, so a search slower than the (scaled) fence
+    # must still come back live instead of degrading.
+    from backend.agents import cognee_integration as ci
+
+    class _Adapter:
+        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
+            await asyncio.sleep(0.1)  # slower than the scaled fence below
+            return ()
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
+    monkeypatch.setattr(agg, "STRUCTURAL_HALF_BUDGET_SEC", 0.03)
+
+    payload = agg._blocking_cognee_lookup("OP-2555")
+
+    assert payload == {"kg_source": "live", "kg_neighbours": []}
+
+
+def test_blocking_cognee_lookup_reuses_one_adapter_per_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents import cognee_integration as ci
+
+    built = {"n": 0}
+
+    class _Adapter:
+        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
+            return ()
+
+    def _from_env() -> _Adapter:
+        built["n"] += 1
+        return _Adapter()
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", _from_env)
+
+    agg._blocking_cognee_lookup("OP-2555")
+    agg._blocking_cognee_lookup("OP-2556")
+
+    assert built["n"] == 1  # one warm client per process, not per call
+
+
+def test_blocking_cognee_lookup_serializes_store_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # LanceDB is single-writer: concurrent per-call searches raced for
+    # the store file lock ("Could not set lock on file .../*.lbug").
+    from backend.agents import cognee_integration as ci
+
+    state = {"active": 0, "max_active": 0}
+    guard = threading.Lock()
+
+    class _Adapter:
+        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
+            with guard:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+            time.sleep(0.05)  # sync store access, like the real SDK
+            with guard:
+                state["active"] -= 1
+            return ()
+
+    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(agg._blocking_cognee_lookup, ["OP-1", "OP-2"]))
+
+    assert state["max_active"] == 1
+    assert results == [{"kg_source": "live", "kg_neighbours": []}] * 2
+
+
+@pytest.mark.asyncio
+async def test_populated_store_slow_search_degrades_once_then_serves_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # End-to-end OP-2555 behaviour: cold call degrades (hot path never
+    # blocks on the slow search), the shielded background refresh lands
+    # the result in the cache, the next call serves kg_source=live with
+    # ONE store search total — and the JIRA half is never regressed.
+    calls = {"n": 0}
+    neighbours = [{"identifier": "L-OP-2549.md", "score": 0.91, "kind": "lesson"}]
+
+    def _slow_lookup(_ticket: str) -> dict[str, Any]:
+        calls["n"] += 1
+        time.sleep(0.1)  # populated-store search, slower than the fence
+        return {"kg_source": "live", "kg_neighbours": list(neighbours)}
+
+    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _slow_lookup)
+    monkeypatch.setattr(agg, "STRUCTURAL_HALF_BUDGET_SEC", 0.03)
+
+    async def _jira_stub(_ticket: str) -> dict[str, Any]:
+        return {"jira_source": "live", "blockers": [{"key": "OP-2549"}]}
+
+    monkeypatch.setattr(agg, "_structural_jira", _jira_stub)
+
+    first = await agg.fetch_structural_axis("OP-2555")
+    assert first["jira_source"] == "live"
+    assert first["blockers"] == [{"key": "OP-2549"}]
+    assert first["kg_source"] == "degraded"  # cold call degrades once
+
+    task = agg._kg_refresh_tasks.get("OP-2555")
+    assert task is not None  # refresh survived the hot-path timeout
+    await task
+
+    second = await agg.fetch_structural_axis("OP-2555")
+    assert second["kg_source"] == "live"
+    assert second["kg_neighbours"] == neighbours
+    assert calls["n"] == 1  # cache hit — no second store search
+
+
+@pytest.mark.asyncio
+async def test_structural_cognee_single_flight_joins_inflight_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Concurrent aggregator calls must join ONE refresh task instead of
+    # each spawning a search thread (the orphaned-to_thread pile-up that
+    # starved the pool and blew the next call's 0.8 s axis budget).
+    calls = {"n": 0}
+
+    def _slow_lookup(_ticket: str) -> dict[str, Any]:
+        calls["n"] += 1
+        time.sleep(0.05)
+        return {"kg_source": "live", "kg_neighbours": []}
+
+    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _slow_lookup)
+
+    a, b = await asyncio.gather(
+        agg._structural_cognee("OP-2555"),
+        agg._structural_cognee("OP-2555"),
+    )
+
+    assert calls["n"] == 1
+    assert a["kg_source"] == b["kg_source"] == "live"
+
+
+@pytest.mark.asyncio
+async def test_kg_cache_never_stores_degraded_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"n": 0}
+
+    def _degraded_lookup(_ticket: str) -> dict[str, Any]:
+        calls["n"] += 1
+        return {"kg_source": "degraded"}
+
+    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _degraded_lookup)
+
+    first = await agg._structural_cognee("OP-2555")
+    second = await agg._structural_cognee("OP-2555")
+
+    assert first == second == {"kg_source": "degraded"}
+    assert calls["n"] == 2  # degraded is retried, never latched
+    assert not agg._kg_cache
+
+
+@pytest.mark.asyncio
+async def test_kg_cache_ttl_expiry_triggers_fresh_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(agg, "KG_CACHE_TTL_SEC", 0.01)
+    calls = {"n": 0}
+
+    def _lookup(_ticket: str) -> dict[str, Any]:
+        calls["n"] += 1
+        return {"kg_source": "live", "kg_neighbours": []}
+
+    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _lookup)
+
+    await agg._structural_cognee("OP-2555")
+    await asyncio.sleep(0.03)
+    await agg._structural_cognee("OP-2555")
+
+    assert calls["n"] == 2  # expired entry re-searches the store
+
+
+@pytest.mark.asyncio
+async def test_kg_cache_hit_returns_defensive_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    neighbours = [{"identifier": "a.py", "score": 1.0, "kind": "code"}]
+
+    def _lookup(_ticket: str) -> dict[str, Any]:
+        return {"kg_source": "live", "kg_neighbours": list(neighbours)}
+
+    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _lookup)
+
+    await agg._structural_cognee("OP-2555")  # fills the cache
+    hit = await agg._structural_cognee("OP-2555")
+    hit["kg_neighbours"].clear()  # consumer mutation must not corrupt
+
+    again = await agg._structural_cognee("OP-2555")
+    assert again["kg_neighbours"] == neighbours
+
+
+def test_router_skips_caching_degraded_kg_until_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Audit F4 — a degraded structural latched into the 5-minute payload
+    # cache kept kg_source stuck degraded even after the background
+    # refresh completed. Degraded is not cached; the first live payload is.
+    client = _build_client(monkeypatch)
+    n = {"n": 0}
+
+    async def _agg(ticket_key: str, **kw: Any) -> dict[str, Any]:
+        n["n"] += 1
+        kg = "degraded" if n["n"] == 1 else "live"
+        return {
+            "ticket": ticket_key,
+            "develop_sha": kw["develop_sha"],
+            "structural": {"jira_source": "live", "kg_source": kg, "kg_neighbours": []},
+            "temporal": {"status": "unavailable"},
+            "causal": {"neighbours": []},
+            "generated_at": "2026-07-08T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(router_mod.agg, "aggregate_project_state", _agg)
+
+    first = client.get("/project-state", params={"ticket": "OP-2555"})
+    second = client.get("/project-state", params={"ticket": "OP-2555"})
+    third = client.get("/project-state", params={"ticket": "OP-2555"})
+
+    assert first.json()["structural"]["kg_source"] == "degraded"
+    assert second.json()["structural"]["kg_source"] == "live"
+    assert third.json()["structural"]["kg_source"] == "live"
+    assert n["n"] == 2  # degraded not cached; live cached
+
+
+def test_router_skips_caching_degraded_jira_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _build_client(monkeypatch)
+    n = {"n": 0}
+
+    async def _agg(ticket_key: str, **kw: Any) -> dict[str, Any]:
+        n["n"] += 1
+        return {
+            "ticket": ticket_key,
+            "develop_sha": kw["develop_sha"],
+            "structural": {"jira_source": "degraded", "kg_source": "live"},
+            "temporal": {"status": "unavailable"},
+            "causal": {"neighbours": []},
+            "generated_at": "2026-07-08T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(router_mod.agg, "aggregate_project_state", _agg)
+
+    client.get("/project-state", params={"ticket": "OP-2555"})
+    client.get("/project-state", params={"ticket": "OP-2555"})
+
+    assert n["n"] == 2
+
+
+def test_router_skips_caching_null_structural(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _build_client(monkeypatch)
+    n = {"n": 0}
+
+    async def _agg(ticket_key: str, **kw: Any) -> dict[str, Any]:
+        n["n"] += 1
+        return {
+            "ticket": ticket_key,
+            "develop_sha": kw["develop_sha"],
+            "structural": None,
+            "temporal": {"status": "unavailable"},
+            "causal": {"neighbours": []},
+            "generated_at": "2026-07-08T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(router_mod.agg, "aggregate_project_state", _agg)
+
+    client.get("/project-state", params={"ticket": "OP-2555"})
+    client.get("/project-state", params={"ticket": "OP-2555"})
+
+    assert n["n"] == 2  # NULL structural never latches for the TTL
+
+
+def test_router_caches_stable_disabled_and_unavailable_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # disabled/unavailable are stable config states, not transients —
+    # recomputing them every call would buy nothing.
+    client = _build_client(monkeypatch)
+    n = {"n": 0}
+
+    async def _agg(ticket_key: str, **kw: Any) -> dict[str, Any]:
+        n["n"] += 1
+        return {
+            "ticket": ticket_key,
+            "develop_sha": kw["develop_sha"],
+            "structural": {"jira_source": "disabled", "kg_source": "unavailable"},
+            "temporal": {"status": "unavailable"},
+            "causal": {"neighbours": []},
+            "generated_at": "2026-07-08T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(router_mod.agg, "aggregate_project_state", _agg)
+
+    client.get("/project-state", params={"ticket": "OP-2555"})
+    client.get("/project-state", params={"ticket": "OP-2555"})
+
+    assert n["n"] == 1
 
 
 @pytest.mark.asyncio

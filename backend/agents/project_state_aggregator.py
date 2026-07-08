@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
@@ -60,6 +61,18 @@ STRUCTURAL_BUDGET_SEC: float = 0.8
 TEMPORAL_BUDGET_SEC: float = 0.6
 CAUSAL_BUDGET_SEC: float = 0.6
 STRUCTURAL_HALF_BUDGET_SEC: float = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
+
+# OP-2555 — the cognee search on a POPULATED LanceDB store reliably
+# exceeds the 0.6 s hot-path half budget (observed >0.6 s on 94 lessons,
+# prod v0.7.39), so fencing the search itself at the half budget left
+# kg_source permanently degraded. The search is moved OFF the request
+# hot path: a per-ticket single-flight background refresh runs it under
+# its own generous budget and lands the result in a process-local TTL
+# cache the hot path reads in O(1). The first (cold) call degrades once;
+# every following call within the TTL serves ``kg_source: live``.
+KG_REFRESH_BUDGET_SEC: float = 15.0
+KG_CACHE_TTL_SEC: float = 1800.0
+KG_CACHE_MAX_ENTRIES: int = 256
 
 # OP-1454 — Cap the per-incident BFS loop in ``_causal_failure_neighbours``
 # to the N most-recent own-incidents. OP-1450/1452 fixed the SQL + driver
@@ -512,6 +525,55 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
     return _map_jira_story(story)
 
 
+# OP-2555 — process-local KG neighbour cache + single-flight refresh
+# registry. Both are only touched from the event loop (the cache write
+# happens inside the refresh task); the search gate is a *threading*
+# lock because the actual store access runs in worker threads and
+# LanceDB is single-writer — concurrent per-call clients raced for the
+# file lock ("Could not set lock on file .../*.lbug").
+_kg_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
+_kg_refresh_tasks: dict[str, "asyncio.Task[dict[str, Any]]"] = {}
+_cognee_search_gate = threading.Lock()
+
+
+def reset_kg_cache() -> None:
+    """Test helper — clear the KG cache and the refresh-task registry."""
+    _kg_cache.clear()
+    _kg_refresh_tasks.clear()
+
+
+def _kg_cache_get(ticket_key: str) -> dict[str, Any] | None:
+    entry = _kg_cache.get(ticket_key)
+    if entry is None:
+        return None
+    expires_at, payload = entry
+    if time.monotonic() >= expires_at:
+        _kg_cache.pop(ticket_key, None)
+        return None
+    _kg_cache.move_to_end(ticket_key)
+    return _kg_snapshot(payload)
+
+
+def _kg_cache_put(ticket_key: str, payload: dict[str, Any]) -> None:
+    _kg_cache[ticket_key] = (
+        time.monotonic() + KG_CACHE_TTL_SEC,
+        _kg_snapshot(payload),
+    )
+    _kg_cache.move_to_end(ticket_key)
+    while len(_kg_cache) > KG_CACHE_MAX_ENTRIES:
+        _kg_cache.popitem(last=False)
+
+
+def _kg_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    """Copy in/out of the cache so consumers can never mutate an entry."""
+    return {
+        "kg_source": payload.get("kg_source"),
+        "kg_neighbours": [
+            dict(n) for n in (payload.get("kg_neighbours") or ())
+        ],
+    }
+
+
 def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
     """Synchronous Cognee KG fetch executed in a worker thread.
 
@@ -524,15 +586,21 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
     event loop, freezes every concurrent axis. The fix is to run the
     whole adapter interaction in its own thread via
     :func:`asyncio.to_thread`. The worker thread drives the async
-    ``adapter.search`` through a private ``asyncio.run`` so the OP-1449
-    inner timeout still applies for any await-points inside the adapter.
+    ``adapter.search`` through a private ``asyncio.run``.
+
+    OP-2555: the lookup now runs on the *refresh* path (never the hot
+    path), so its inner budget is the generous
+    :data:`KG_REFRESH_BUDGET_SEC`, not the 0.6 s half fence that killed
+    every search on a populated store. The adapter is the process-wide
+    singleton and the actual search is serialised through
+    :data:`_cognee_search_gate` (LanceDB single-writer).
     """
     from backend.agents import cognee_integration
 
-    inner_budget_sec = STRUCTURAL_HALF_BUDGET_SEC
+    inner_budget_sec = KG_REFRESH_BUDGET_SEC
 
     try:
-        adapter = cognee_integration.CogneeAdapter.from_env()
+        adapter = cognee_integration.get_shared_adapter()
     except (
         cognee_integration.CogneeNotInstalled,
         cognee_integration.Neo4jPasswordDefault,
@@ -568,7 +636,8 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
         )
 
     try:
-        hits = asyncio.run(_search())
+        with _cognee_search_gate:
+            hits = asyncio.run(_search())
     except asyncio.TimeoutError:
         log.warning(
             "project_state.structural.cognee_inner_timeout ticket=%s "
@@ -599,23 +668,82 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
     }
 
 
-async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
-    """Best-effort Cognee KG neighbour fetch. Degrades to ``{}``.
+async def _kg_refresh(ticket_key: str) -> dict[str, Any]:
+    """Single-flight background KG refresh for ``ticket_key`` (OP-2555).
 
-    Delegates the actual adapter work to :func:`_blocking_cognee_lookup`
-    running in a worker thread so the event loop stays free for the
-    concurrent causal / temporal axes — see OP-1456 root-cause analysis
-    on OP-214 (structural axis 7.2 s, causal cancelled at 2 s budget
-    despite only needing 321 ms). The graceful-degrade contract from
-    OP-1449 (return ``{}`` so :func:`fetch_structural_axis` still emits a
-    well-formed dict with ``kg_neighbours=[]``) is preserved end-to-end.
+    Runs :func:`_blocking_cognee_lookup` in a worker thread under the
+    generous :data:`KG_REFRESH_BUDGET_SEC` and lands a ``live`` result in
+    the process-local cache. Never raises. The task deliberately outlives
+    the hot-path half budget — the caller stops *waiting*, not the work.
+    """
+    start = time.monotonic()
+    try:
+        try:
+            payload = await asyncio.wait_for(
+                asyncio.to_thread(_blocking_cognee_lookup, ticket_key),
+                # Backstop above the lookup's own inner budget — only a
+                # wedged worker thread (e.g. a stuck store lock) hits it.
+                timeout=KG_REFRESH_BUDGET_SEC + 2.0,
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "project_state.structural.kg_refresh_timeout ticket=%s "
+                "budget_sec=%.3f",
+                ticket_key,
+                KG_REFRESH_BUDGET_SEC + 2.0,
+            )
+            return {"kg_source": "degraded"}
+        except Exception as exc:  # noqa: BLE001 — degrade per AC #3
+            log.info(
+                "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
+                ticket_key,
+                type(exc).__name__,
+                exc,
+            )
+            return {"kg_source": "degraded"}
+        if payload.get("kg_source") == "live":
+            _kg_cache_put(ticket_key, payload)
+        log.info(
+            "project_state.structural.kg_refresh_done ticket=%s kg_source=%s "
+            "latency_sec=%.3f",
+            ticket_key,
+            payload.get("kg_source"),
+            time.monotonic() - start,
+        )
+        return payload
+    finally:
+        _kg_refresh_tasks.pop(ticket_key, None)
+
+
+async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
+    """Best-effort Cognee KG neighbour fetch. Degrades, never raises.
+
+    OP-2555: the hot path reads the process-local KG cache; on a miss it
+    joins (or starts) the per-ticket single-flight refresh task and waits
+    only as long as the caller's half budget allows — the outer
+    ``wait_for`` in :func:`fetch_structural_axis` cancels this coroutine,
+    while :func:`asyncio.shield` keeps the refresh itself running so the
+    NEXT call is served ``live`` from the cache. This also ends the
+    orphaned-``to_thread`` pile-up that starved the pool and blew the
+    following call's 0.8 s axis budget (audit F5 realised): concurrent
+    calls join ONE task instead of each spawning a search thread.
     """
     try:
         from backend.agents import cognee_integration  # noqa: F401 — import probe
     except ImportError:
         return {"kg_source": "unavailable"}
+    cached = _kg_cache_get(ticket_key)
+    if cached is not None:
+        log.info(
+            "project_state.structural.kg_cache_hit ticket=%s", ticket_key
+        )
+        return cached
     try:
-        return await asyncio.to_thread(_blocking_cognee_lookup, ticket_key)
+        task = _kg_refresh_tasks.get(ticket_key)
+        if task is None or task.done():
+            task = asyncio.create_task(_kg_refresh(ticket_key))
+            _kg_refresh_tasks[ticket_key] = task
+        return dict(await asyncio.shield(task))
     except Exception as exc:  # noqa: BLE001 — degrade per AC #3
         log.info(
             "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
@@ -994,6 +1122,9 @@ __all__ = [
     "JIRA_PULL_FIELDS",
     "JIRA_SUMMARY_MAX_CHARS",
     "JIRA_TRANSPORT_TIMEOUT_SEC",
+    "KG_CACHE_MAX_ENTRIES",
+    "KG_CACHE_TTL_SEC",
+    "KG_REFRESH_BUDGET_SEC",
     "ProjectStateAllAxesFailed",
     "ProjectStateAxisFetchers",
     "ProjectStateAxisTimeout",
@@ -1013,5 +1144,6 @@ __all__ = [
     "fetch_temporal_axis",
     "record_trace",
     "reset_jira_negative_cache",
+    "reset_kg_cache",
     "tail_traces",
 ]
