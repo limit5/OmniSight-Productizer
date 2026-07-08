@@ -62,6 +62,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -116,6 +117,19 @@ DEFAULT_HTTP_TIMEOUT_SECONDS = 15.0
 DEFAULT_SMOKE_SUBSET = "dag1"
 DEFAULT_SMOKE_TIMEOUT_SECONDS = 600
 
+# OP-2558 — authed project-state probe folded into the canary suite. The probe
+# hits ``/api/v1/project-state?ticket=<fixture>`` with a bearer and REQUIRES the
+# structural axis be dual-half LIVE (``jira_source=live`` AND ``kg_source=live``
+# with NON-EMPTY ``kg_neighbours``). It fails CLOSED — a missing bearer, a
+# staging JIRA that can never be ``live``, or a hollow/degraded half is a LOUD
+# red canary line, never a silent pass. It ACTIVATES only when the fixture
+# ticket env is set, so it does not wedge existing staging promotions on the day
+# it lands (existing /healthz+/readyz probes are untouched when it is unset).
+DEFAULT_PROJECT_STATE_PATH = "/api/v1/project-state"
+ENV_STAGING_GATE_BEARER = "OMNISIGHT_STAGING_GATE_BEARER"
+ENV_STAGING_GATE_FIXTURE_TICKET = "OMNISIGHT_STAGING_GATE_FIXTURE_TICKET"
+ENV_STAGING_GATE_PROJECT_STATE_PATH = "OMNISIGHT_STAGING_GATE_PROJECT_STATE_PATH"
+
 AUDIT_ACTION = {
     SUITE_CANARY: "release.staging_gate_canary",
     SUITE_SMOKE: "release.staging_gate_smoke",
@@ -125,6 +139,10 @@ AUDIT_ACTION = {
 # ``backend.agents.auto_promote_main``).
 Runner = Callable[..., "subprocess.CompletedProcess[str]"]
 HttpOpener = Callable[[str, float], tuple[int, str]]
+# Header-aware opener for the authed project-state probe (OP-2558). Returns the
+# same ``(status, body)`` shape; a connection/URL error surfaces as status 0 so
+# the caller can retry the transient JIRA HTTP-0 once.
+AuthHttpOpener = Callable[[str, float, dict[str, str]], tuple[int, str]]
 Sleeper = Callable[[float], None]
 Clock = Callable[[], datetime]
 AuditSink = Callable[[str, dict[str, Any]], None]
@@ -447,6 +465,169 @@ def smoke_probe(
     return False, f"prod_smoke_test.py exit {proc.returncode}: {tail_text}"
 
 
+# ─────────────────── authed project-state probe (OP-2558) ───────────────
+
+
+def _default_authed_http_opener(
+    url: str, timeout: float, headers: dict[str, str]
+) -> tuple[int, str]:
+    """GET ``url`` with extra ``headers`` and return ``(status, body)``.
+
+    Unlike :func:`_default_http_opener` this returns the *body* on an HTTP
+    error too (a 401 body can be actionable) and maps a transport failure
+    (``URLError`` with no HTTP status — the "HTTP-0" the caller retries once)
+    to status ``0`` rather than raising, so the probe never crashes the gate.
+    """
+    req = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"User-Agent": "omnisight-staging-gate", **headers},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read(65536).decode("utf-8", "replace")
+            return int(resp.status), body
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read(65536).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            body = ""
+        return int(exc.code), body
+    except urllib.error.URLError as exc:
+        # No HTTP status — connection reset / DNS / refused. Treat as HTTP-0.
+        return 0, f"{type(exc.reason).__name__ if exc.reason else 'URLError'}: {exc}"
+
+
+@dataclass(frozen=True)
+class ProjectStateProbeResult:
+    ok: bool
+    detail: str
+    markers: dict[str, Any]
+
+
+def project_state_probe(
+    *,
+    base_url: str,
+    fixture_ticket: str,
+    bearer: str | None,
+    path: str,
+    timeout: float,
+    opener: AuthHttpOpener,
+) -> ProjectStateProbeResult:
+    """Probe authed ``/api/v1/project-state?ticket=<fixture>`` for a dual-half
+    LIVE structural axis. Fails CLOSED on every ambiguous / degraded outcome.
+
+    Pass requires ALL of: ``jira_source == "live"`` AND ``kg_source == "live"``
+    AND a NON-EMPTY ``kg_neighbours`` (a "live" kg with 0 neighbours is hollow).
+
+    Failure taxonomy (all → not-ok = red canary line via :func:`run_gate`):
+
+    * **config-error** — the bearer env is absent, or ``jira_source != "live"``
+      (a JIRA-less staging can never be ``live``). These are LOUD reds, never a
+      silent "kg-only pass"; the kg-only view is a separate non-gating
+      diagnostic (see the MUST-NOT in OP-2558).
+    * **auth-error** — the endpoint rejected the bearer (401/403).
+    * **degraded** — the kg half is not ``live`` or its neighbours are empty.
+
+    The observed markers (source markers + neighbour count + the outcome class)
+    are always returned so :func:`run_gate`'s evidence JSON is self-describing.
+    A transient transport failure (status 0 — the "JIRA HTTP-0") is retried once.
+    """
+    markers: dict[str, Any] = {"project_state_fixture_ticket": fixture_ticket}
+
+    # Fail CLOSED — no bearer means we cannot make the authed call at all; that
+    # is a config-error red, never a silent pass (OP-2558 MUST-NOT).
+    if not (bearer or "").strip():
+        markers["project_state_probe"] = "config_error"
+        markers["project_state_config_error"] = "bearer_absent"
+        return ProjectStateProbeResult(
+            False,
+            f"project-state probe config-error: {ENV_STAGING_GATE_BEARER} unset "
+            "(fail-closed — canary red, never a silent pass)",
+            markers,
+        )
+
+    url = (
+        base_url.rstrip("/")
+        + path
+        + "?"
+        + urllib.parse.urlencode({"ticket": fixture_ticket})
+    )
+    request_headers = {"Authorization": f"Bearer {bearer.strip()}"}
+
+    status, body = opener(url, timeout, request_headers)
+    if status == 0:
+        # Transient JIRA HTTP-0 — retry exactly once (OP-2558).
+        markers["project_state_retried_http_0"] = True
+        status, body = opener(url, timeout, request_headers)
+    markers["project_state_http_status"] = status
+
+    if status in (401, 403):
+        markers["project_state_probe"] = "auth_error"
+        return ProjectStateProbeResult(
+            False,
+            f"project-state probe: HTTP {status} — bearer rejected by staging auth",
+            markers,
+        )
+    if not (200 <= status < 300):
+        markers["project_state_probe"] = "http_error"
+        return ProjectStateProbeResult(
+            False, f"project-state probe: HTTP {status}", markers
+        )
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as exc:
+        markers["project_state_probe"] = "bad_json"
+        return ProjectStateProbeResult(
+            False, f"project-state probe: response was not JSON: {exc}", markers
+        )
+    structural = payload.get("structural") if isinstance(payload, dict) else None
+    if not isinstance(structural, dict):
+        markers["project_state_probe"] = "no_structural"
+        return ProjectStateProbeResult(
+            False, "project-state probe: response carried no structural axis", markers
+        )
+
+    jira_source = structural.get("jira_source")
+    kg_source = structural.get("kg_source")
+    kg_neighbours = structural.get("kg_neighbours")
+    kg_count = len(kg_neighbours) if isinstance(kg_neighbours, list) else 0
+    markers["observed_jira_source"] = jira_source
+    markers["observed_kg_source"] = kg_source
+    markers["observed_kg_neighbours_count"] = kg_count
+
+    # JIRA half. A JIRA-less / non-live staging is a config-error red — NOT a
+    # silent kg-only pass (OP-2558 MUST-NOT: do not weaken to "jira OR kg").
+    if jira_source != "live":
+        markers["project_state_probe"] = "config_error"
+        markers["project_state_config_error"] = f"jira_source={jira_source!r}"
+        return ProjectStateProbeResult(
+            False,
+            f"project-state probe config-error: jira_source={jira_source!r} != 'live' "
+            "(staging JIRA not live → gate red, not a kg-only diagnostic pass)",
+            markers,
+        )
+
+    # KG half. "live" with zero neighbours is a hollow candidate → red.
+    if kg_source != "live" or kg_count == 0:
+        markers["project_state_probe"] = "degraded"
+        return ProjectStateProbeResult(
+            False,
+            f"project-state probe: kg half degraded (kg_source={kg_source!r}, "
+            f"kg_neighbours={kg_count}) — dual-half LIVE required",
+            markers,
+        )
+
+    markers["project_state_probe"] = "ok"
+    return ProjectStateProbeResult(
+        True,
+        f"project-state probe OK: jira_source=live, kg_source=live, "
+        f"kg_neighbours={kg_count}",
+        markers,
+    )
+
+
 # ───────────────────────── audit sink (§6) ──────────────────────────────
 
 
@@ -549,19 +730,61 @@ def run_gate(
 # ───────────────────────── CLI ──────────────────────────────────────────
 
 
-def _build_canary_probe(args: argparse.Namespace) -> SuiteProbe:
+def _build_canary_probe(
+    args: argparse.Namespace,
+) -> tuple[SuiteProbe, dict[str, Any]]:
+    """Build the canary suite probe and return it with a shared markers holder.
+
+    The holder is mutated in place when the project-state probe runs so the
+    evidence probe (which runs after the suite probe in :func:`run_gate`) can
+    fold the observed markers into the JSONL evidence. It stays empty — and no
+    project-state keys reach the evidence — when the probe is not activated.
+    """
     paths = tuple(
         p.strip() for p in (args.canary_paths or "").split(",") if p.strip()
     ) or DEFAULT_CANARY_PATHS
-    return lambda: http_probe(
-        base_url=args.base_url,
-        paths=paths,
-        attempts=args.canary_attempts,
-        interval=args.canary_interval,
-        timeout=args.http_timeout,
-        opener=_default_http_opener,
-        sleeper=time.sleep,
-    )
+
+    def health() -> tuple[bool, str]:
+        return http_probe(
+            base_url=args.base_url,
+            paths=paths,
+            attempts=args.canary_attempts,
+            interval=args.canary_interval,
+            timeout=args.http_timeout,
+            opener=_default_http_opener,
+            sleeper=time.sleep,
+        )
+
+    markers_holder: dict[str, Any] = {}
+    fixture = (args.project_state_fixture_ticket or "").strip()
+    if not fixture:
+        # OP-2558 [3] — probe activates ONLY with a fixture ticket set, so it
+        # does not wedge every existing staging promotion on the day it lands.
+        log.info(
+            "staging-gate: project-state probe SKIPPED (%s unset); "
+            "running /healthz+/readyz canary only",
+            ENV_STAGING_GATE_FIXTURE_TICKET,
+        )
+        return health, markers_holder
+
+    # Bearer is read from env ONLY — never a CLI literal, never hardcoded.
+    bearer = os.environ.get(ENV_STAGING_GATE_BEARER)
+
+    def canary_with_project_state() -> tuple[bool, str]:
+        ok, detail = health()
+        result = project_state_probe(
+            base_url=args.base_url,
+            fixture_ticket=fixture,
+            bearer=bearer,
+            path=args.project_state_path,
+            timeout=args.http_timeout,
+            opener=_default_authed_http_opener,
+        )
+        markers_holder.clear()
+        markers_holder.update(result.markers)
+        return (ok and result.ok), f"{detail}; {result.detail}"
+
+    return canary_with_project_state, markers_holder
 
 
 def _build_smoke_probe(args: argparse.Namespace) -> SuiteProbe:
@@ -573,14 +796,24 @@ def _build_smoke_probe(args: argparse.Namespace) -> SuiteProbe:
     )
 
 
-def _build_evidence_probe(args: argparse.Namespace) -> EvidenceProbe:
-    return lambda: api_version_evidence(
-        base_url=args.base_url,
-        timeout=args.http_timeout,
-        opener=_default_http_opener,
-        expected_backend_digest=args.expected_backend_digest,
-        expected_frontend_digest=args.expected_frontend_digest,
-    )
+def _build_evidence_probe(
+    args: argparse.Namespace, extra_markers: dict[str, Any] | None = None
+) -> EvidenceProbe:
+    def _probe() -> dict[str, Any]:
+        evidence = api_version_evidence(
+            base_url=args.base_url,
+            timeout=args.http_timeout,
+            opener=_default_http_opener,
+            expected_backend_digest=args.expected_backend_digest,
+            expected_frontend_digest=args.expected_frontend_digest,
+        )
+        # OP-2558 — record the project-state probe's observed markers in the
+        # gate evidence JSON (empty holder → no keys added when not activated).
+        if extra_markers:
+            evidence.update(extra_markers)
+        return evidence
+
+    return _probe
 
 
 def _emit_status_line(record: GateRecord) -> None:
@@ -644,6 +877,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=os.environ.get("OMNISIGHT_CANARY_EXPECTED_FRONTEND_DIGEST") or None,
         help="candidate frontend image digest; see --expected-backend-digest",
     )
+    # OP-2558 project-state probe (canary suite). Activates ONLY when the
+    # fixture ticket is set. The bearer is read from env
+    # OMNISIGHT_STAGING_GATE_BEARER only — deliberately NOT a CLI flag, so a
+    # secret can never be passed as a literal on the command line.
+    p.add_argument(
+        "--project-state-fixture-ticket",
+        default=os.environ.get(ENV_STAGING_GATE_FIXTURE_TICKET) or None,
+        help="fixture JIRA ticket for the authed /api/v1/project-state canary "
+        f"probe (default: ${ENV_STAGING_GATE_FIXTURE_TICKET}). When unset the "
+        "probe is skipped and only /healthz+/readyz run. The bearer is read "
+        f"from ${ENV_STAGING_GATE_BEARER} (never a CLI literal).",
+    )
+    p.add_argument(
+        "--project-state-path",
+        default=os.environ.get(ENV_STAGING_GATE_PROJECT_STATE_PATH, DEFAULT_PROJECT_STATE_PATH),
+        help="path of the project-state aggregator (default: %(default)s)",
+    )
     # Smoke knobs.
     p.add_argument("--smoke-subset", default=os.environ.get("OMNISIGHT_STAGING_SMOKE_SUBSET", DEFAULT_SMOKE_SUBSET))
     p.add_argument("--smoke-timeout", type=int, default=int(os.environ.get("OMNISIGHT_STAGING_SMOKE_TIMEOUT", str(DEFAULT_SMOKE_TIMEOUT_SECONDS))))
@@ -677,7 +927,12 @@ def main(argv: list[str] | None = None) -> int:
             log.error("cannot resolve develop tip from Gerrit: %s", exc)
             return 3
 
-    probe = _build_canary_probe(args) if args.suite == SUITE_CANARY else _build_smoke_probe(args)
+    if args.suite == SUITE_CANARY:
+        probe, ps_markers = _build_canary_probe(args)
+        evidence_probe = _build_evidence_probe(args, ps_markers)
+    else:
+        probe = _build_smoke_probe(args)
+        evidence_probe = _build_evidence_probe(args)
     audit_sink: AuditSink = (lambda *_a, **_k: None) if args.no_audit else _write_audit
 
     result = run_gate(
@@ -686,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
         probe=probe,
         out_path=out_path,
         audit_sink=audit_sink,
-        evidence_probe=_build_evidence_probe(args),
+        evidence_probe=evidence_probe,
     )
     if result.record is not None:
         _emit_status_line(result.record)
