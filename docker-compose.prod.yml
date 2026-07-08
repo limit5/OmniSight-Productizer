@@ -856,6 +856,7 @@ services:
       - "9090:9090"
     volumes:
       - ./configs/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/prometheus:/etc/prometheus/obs-rules:ro
       - omnisight-prom:/prometheus
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
