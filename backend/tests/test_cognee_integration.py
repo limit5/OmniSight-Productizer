@@ -15,6 +15,7 @@ The 8 cases mirror the master plan §3.4 test plan:
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Sequence
@@ -784,6 +785,12 @@ def data_root_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """Isolate the process-global called-once flag + env between tests."""
     monkeypatch.setattr(ci, "_data_root_applied", False)
     monkeypatch.delenv("OMNISIGHT_COGNEE_DATA_ROOT", raising=False)
+    # OP-2552 — the seam now also exports cognee's native root env vars.
+    # setenv-then-delenv (not plain delenv) so the monkeypatch teardown
+    # removes any value the code under test writes DURING the test.
+    for native in (ci.NATIVE_SYSTEM_ROOT_ENV, ci.NATIVE_DATA_ROOT_ENV):
+        monkeypatch.setenv(native, "isolation-sentinel")
+        monkeypatch.delenv(native)
 
 
 def test_data_root_env_set_points_both_roots(
@@ -872,3 +879,63 @@ def test_data_root_applied_on_import_path_too(
     assert module is fake
     assert fake.config.system_roots == ["/cognee-data/system"]
     assert fake.config.data_roots == ["/cognee-data/data"]
+
+
+# ── OP-2552 — native env export (belt-and-braces for the compose fix) ──
+#
+# cognee 1.0.9's BaseConfig (pydantic-settings) reads SYSTEM_ROOT_DIRECTORY
+# / DATA_ROOT_DIRECTORY when first built, and the lru-cached relational
+# config freezes the sqlite db_path from system_root_directory at first
+# touch — so the roots must be in the environment BEFORE `import cognee`.
+# The authoritative wiring is docker-compose.prod.yml (see
+# test_compose_cognee_data_root.py); the adapter mirrors the omnisight
+# root into the native names for non-compose entrypoints.
+
+
+def test_native_env_exported_from_omnisight_root(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    _adapter(_FakeCogneeWithConfig())
+    assert os.environ[ci.NATIVE_SYSTEM_ROOT_ENV] == "/cognee-data/system"
+    assert os.environ[ci.NATIVE_DATA_ROOT_ENV] == "/cognee-data/data"
+
+
+def test_native_env_export_does_not_clobber_operator_values(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Compose-level (operator) values always win — setdefault semantics.
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    monkeypatch.setenv(ci.NATIVE_SYSTEM_ROOT_ENV, "/operator/system")
+    monkeypatch.setenv(ci.NATIVE_DATA_ROOT_ENV, "/operator/data")
+    _adapter(_FakeCogneeWithConfig())
+    assert os.environ[ci.NATIVE_SYSTEM_ROOT_ENV] == "/operator/system"
+    assert os.environ[ci.NATIVE_DATA_ROOT_ENV] == "/operator/data"
+
+
+def test_native_env_not_exported_when_omnisight_root_unset(
+    data_root_seam: None,
+) -> None:
+    _adapter(_FakeCogneeWithConfig())
+    assert ci.NATIVE_SYSTEM_ROOT_ENV not in os.environ
+    assert ci.NATIVE_DATA_ROOT_ENV not in os.environ
+
+
+def test_native_env_exported_before_cognee_import(
+    data_root_seam: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The env must already be set at the moment importlib imports cognee —
+    # cognee's configs freeze paths at first instantiation during import.
+    monkeypatch.setenv("OMNISIGHT_COGNEE_DATA_ROOT", "/cognee-data")
+    fake = _FakeCogneeWithConfig()
+    seen_at_import: dict[str, str | None] = {}
+
+    def _fake_import(name: str) -> Any:
+        seen_at_import["system"] = os.environ.get(ci.NATIVE_SYSTEM_ROOT_ENV)
+        seen_at_import["data"] = os.environ.get(ci.NATIVE_DATA_ROOT_ENV)
+        return fake
+
+    with patch.object(ci.importlib, "import_module", side_effect=_fake_import):
+        ci._import_cognee_module()
+    assert seen_at_import["system"] == "/cognee-data/system"
+    assert seen_at_import["data"] == "/cognee-data/data"
