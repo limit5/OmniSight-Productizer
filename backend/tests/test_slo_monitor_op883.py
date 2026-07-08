@@ -35,6 +35,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field
 from typing import Callable
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -425,24 +426,6 @@ def test_p95_and_error_rate_breaches_are_independent(sse_spy):
             "project_state_api_p95_ms_max",
             2100.0,
         ),
-        (
-            "cognee_query_p95",
-            "cognee_query_p95_ms",
-            "cognee_query_p95_ms_max",
-            900.0,
-        ),
-        (
-            "graphiti_query_p95",
-            "graphiti_query_p95_ms",
-            "graphiti_query_p95_ms_max",
-            700.0,
-        ),
-        (
-            "failure_recall_p95",
-            "failure_recall_p95_ms",
-            "failure_recall_p95_ms_max",
-            600.0,
-        ),
     ],
 )
 def test_cross_task_awareness_breach_triggers_canary_rollback(
@@ -489,9 +472,6 @@ def test_status_event_exposes_cross_task_axes_for_dashboard(status_spy):
     assert result.action == sm.TickAction.ok
     assert set(result.axis_status) == {
         "project_state_api_p95",
-        "cognee_query_p95",
-        "graphiti_query_p95",
-        "failure_recall_p95",
     }
     assert len(status_spy.events) == 1
     _, payload = status_spy.events[0]
@@ -501,6 +481,78 @@ def test_status_event_exposes_cross_task_axes_for_dashboard(status_spy):
         "threshold_ms": 2000.0,
         "ok": True,
     }
+
+
+def test_dead_memory_slos_are_retired_from_live_axis_registry():
+    """OP-2559 -- absent exporter SLOs must not stay green by default."""
+    retired_names = {
+        "cognee_query_p95",
+        "graphiti_query_p95",
+        "failure_recall_p95",
+    }
+    retired_sample_attrs = {
+        "cognee_query_p95_ms",
+        "graphiti_query_p95_ms",
+        "failure_recall_p95_ms",
+    }
+    retired_threshold_attrs = {
+        "cognee_query_p95_ms_max",
+        "graphiti_query_p95_ms_max",
+        "failure_recall_p95_ms_max",
+    }
+
+    names = {name for name, _sample_attr, _threshold_attr in sm.CROSS_TASK_SLOS}
+    sample_attrs = {
+        sample_attr for _name, sample_attr, _threshold_attr in sm.CROSS_TASK_SLOS
+    }
+    threshold_attrs = {
+        threshold_attr for _name, _sample_attr, threshold_attr in sm.CROSS_TASK_SLOS
+    }
+
+    assert names == {"project_state_api_p95"}
+    assert retired_names.isdisjoint(names)
+    assert retired_sample_attrs.isdisjoint(sm.SloSample.__dataclass_fields__)
+    assert retired_sample_attrs.isdisjoint(sample_attrs)
+    assert retired_threshold_attrs.isdisjoint(sm.SloThresholds.__dataclass_fields__)
+    assert retired_threshold_attrs.isdisjoint(threshold_attrs)
+
+
+def test_prometheus_source_queries_project_state_histogram(monkeypatch):
+    """OP-2559 -- project-state p95 comes from the real S1 histogram."""
+    queries: list[str] = []
+
+    class _FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def read(self) -> bytes:
+            return b'{"data": {"result": [{"value": [0, "1.0"]}]}}'
+
+    def _fake_urlopen(url: str, timeout: int):
+        assert timeout == 10
+        query = parse_qs(urlparse(url).query)["query"][0]
+        queries.append(query)
+        return _FakeResponse()
+
+    monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
+
+    sample = sm._PrometheusMetricSource("http://prometheus").fetch(
+        error_rate_window_seconds=60,
+        p95_window_seconds=300,
+    )
+
+    assert sample.project_state_api_p95_ms == 1.0
+    assert queries[-1] == (
+        "histogram_quantile(0.95, "
+        "sum(rate(omnisight_project_state_axis_latency_seconds_bucket"
+        "[5m])) by (le)) * 1000"
+    )
+    assert "cognee_query_p95_ms" not in queries
+    assert "graphiti_query_p95_ms" not in queries
+    assert "failure_recall_p95_ms" not in queries
 
 
 # ── T6: cooldown prevents flap ──────────────────────────────────────
@@ -556,9 +608,6 @@ def test_load_thresholds_reads_op912_cross_task_slos(tmp_path):
         "\n".join(
             [
                 "project_state_api_p95_ms_max: 2000",
-                "cognee_query_p95_ms_max: 800",
-                "graphiti_query_p95_ms_max: 600",
-                "failure_recall_p95_ms_max: 500",
             ]
         ),
         encoding="utf-8",
@@ -567,9 +616,6 @@ def test_load_thresholds_reads_op912_cross_task_slos(tmp_path):
     thresholds = sm.load_thresholds(cfg)
 
     assert thresholds.project_state_api_p95_ms_max == 2000
-    assert thresholds.cognee_query_p95_ms_max == 800
-    assert thresholds.graphiti_query_p95_ms_max == 600
-    assert thresholds.failure_recall_p95_ms_max == 500
 
 
 def test_maybe_rollback_raises_in_cooldown():

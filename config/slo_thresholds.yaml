@@ -13,9 +13,12 @@ p95_latency_ms_max: 500
 
 # OP-912 F14 — cross-task awareness latency SLOs.
 project_state_api_p95_ms_max: 2000
-cognee_query_p95_ms_max: 800
-graphiti_query_p95_ms_max: 600
-failure_recall_p95_ms_max: 500
+
+# Phase-U retired stubs — these had no exporters, so slo_monitor's
+# absent-metric 0.0 fallback made them permanently green.
+# cognee_query_p95_ms_max: 800
+# graphiti_query_p95_ms_max: 600
+# failure_recall_p95_ms_max: 500
 
 error_rate_window_seconds: 60
 p95_window_seconds: 300

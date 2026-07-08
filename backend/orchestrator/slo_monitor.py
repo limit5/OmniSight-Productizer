@@ -128,9 +128,6 @@ class SloThresholds:
     error_rate_max: float = 0.01           # AC #2: error rate < 1%
     p95_latency_ms_max: float = 500.0      # AC #2: p95 < 500ms
     project_state_api_p95_ms_max: float = 2000.0
-    cognee_query_p95_ms_max: float = 800.0
-    graphiti_query_p95_ms_max: float = 600.0
-    failure_recall_p95_ms_max: float = 500.0
     error_rate_window_seconds: int = 60    # AC #2: 1-min window
     p95_window_seconds: int = 300          # AC #2: 5-min window
     sample_interval_seconds: int = 30      # AC #1: sample every 30s
@@ -146,9 +143,6 @@ class SloSample:
     p95_latency_ms: float
     observed_at: float
     project_state_api_p95_ms: float = 0.0
-    cognee_query_p95_ms: float = 0.0
-    graphiti_query_p95_ms: float = 0.0
-    failure_recall_p95_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -192,18 +186,10 @@ CROSS_TASK_SLOS: tuple[tuple[str, str, str], ...] = (
         "project_state_api_p95_ms",
         "project_state_api_p95_ms_max",
     ),
-    ("cognee_query_p95", "cognee_query_p95_ms", "cognee_query_p95_ms_max"),
-    (
-        "graphiti_query_p95",
-        "graphiti_query_p95_ms",
-        "graphiti_query_p95_ms_max",
-    ),
-    (
-        "failure_recall_p95",
-        "failure_recall_p95_ms",
-        "failure_recall_p95_ms_max",
-    ),
 )
+
+# Phase-U retired stubs: cognee_query_p95_ms, graphiti_query_p95_ms, and
+# failure_recall_p95_ms had no exporters, so querying them made dead SLOs green.
 
 
 # ─── Protocols (injected at construction) ─────────────────────────────
@@ -263,21 +249,6 @@ def load_thresholds(path: Path | str = DEFAULT_CONFIG_PATH) -> SloThresholds:
             raw.get(
                 "project_state_api_p95_ms_max",
                 defaults.project_state_api_p95_ms_max,
-            )
-        ),
-        cognee_query_p95_ms_max=float(
-            raw.get("cognee_query_p95_ms_max", defaults.cognee_query_p95_ms_max)
-        ),
-        graphiti_query_p95_ms_max=float(
-            raw.get(
-                "graphiti_query_p95_ms_max",
-                defaults.graphiti_query_p95_ms_max,
-            )
-        ),
-        failure_recall_p95_ms_max=float(
-            raw.get(
-                "failure_recall_p95_ms_max",
-                defaults.failure_recall_p95_ms_max,
             )
         ),
         error_rate_window_seconds=int(
@@ -768,10 +739,11 @@ class _PrometheusMetricSource:
             "sum(rate(http_request_duration_seconds_bucket"
             f"[{lat_span}])) by (le)) * 1000"
         )
-        project_state_api_p95 = "project_state_api_p95_ms"
-        cognee_query_p95 = "cognee_query_p95_ms"
-        graphiti_query_p95 = "graphiti_query_p95_ms"
-        failure_recall_p95 = "failure_recall_p95_ms"
+        project_state_api_p95 = (
+            "histogram_quantile(0.95, "
+            "sum(rate(omnisight_project_state_axis_latency_seconds_bucket"
+            "[5m])) by (le)) * 1000"
+        )
         total_value = _query(total)
         error_rate = 0.0 if total_value <= 0 else _query(errors) / total_value
         return SloSample(
@@ -779,9 +751,6 @@ class _PrometheusMetricSource:
             p95_latency_ms=_query(latency),
             observed_at=time.time(),
             project_state_api_p95_ms=_query(project_state_api_p95),
-            cognee_query_p95_ms=_query(cognee_query_p95),
-            graphiti_query_p95_ms=_query(graphiti_query_p95),
-            failure_recall_p95_ms=_query(failure_recall_p95),
         )
 
 
