@@ -209,8 +209,9 @@ This amendment narrows the production reading of ADR-0015 after the Phase R
 repair work. The original three-axis architecture remains the target model,
 but the shipped contract must be read honestly:
 
-- **Structural axis:** available when JIRA fields, gathered links, and Cognee
-  neighbours can be fetched inside budget.
+- **Structural axis:** available when JIRA fields, gathered links, and lesson
+  neighbours (BM25, in-process — see the OP-2556 amendment below) can be
+  fetched inside budget.
 - **Temporal axis:** explicitly unavailable until U5. The payload shape IS
   `{"status": "unavailable"}` (OP-2539 replaced the legacy fake-empty shape
   entirely); the runner renderer omits the axis from prompts. No caller should
@@ -272,7 +273,9 @@ Each structural half carries a source-health marker (the SHIPPED contract,
 OP-2535/OP-2540/OP-2541):
 
 - **`structural.jira_source`** — the JIRA-pull half (issuelinks/parent/status);
-- **`structural.kg_source`** — the Cognee knowledge-graph half;
+- **`structural.kg_source`** — the lesson-neighbour half (LEGACY wire name —
+  see the OP-2556 amendment below: backed by BM25 lesson retrieval, was the
+  Cognee knowledge graph);
 - both ∈ `live | degraded | disabled | unavailable`, where `live` means the
   source answered (even with empty content), `degraded` = attempted but
   failed/timed out, `disabled` = switched off (kill-switch / unconfigured),
@@ -283,3 +286,34 @@ These markers are the anti-hollow contract: a populated-looking structural
 axis is not sufficient unless consumers can tell each half's health. An empty
 list with `live` is honest emptiness; an empty list WITHOUT a marker is
 degraded provenance and must be treated as such.
+
+## 2026-07-08 amendment — OP-2556 (B1): BM25 lessons back the structural KG half
+
+`kg_source` / `kg_neighbours` are retained as **LEGACY wire names** but are now
+backed by the in-process BM25 lesson retrieval (`backend/agents/
+lesson_retrieval.py`, OP-848) over `docs/sop/lessons/*.md` — NOT by Cognee.
+Rationale (spec-ref: OP-2556 / the codex-audited B1 design
+`2026-07-08-op2555-b1-bm25-lessons-design`, operator decision B1): the
+Cognee search was latency-broken on the hot path
+(LanceDB search > 0.6 s half budget, single-writer lock contention,
+uncancellable `to_thread` orphans) and the serving replicas lack the
+`LLM_API_KEY` it needs (least-privilege), while the BM25 search is local,
+synchronous, measured ~3 ms warm (~15-20 ms cold build, pre-warmed at FastAPI
+startup) and returned on-topic lessons in quality spot-checks.
+
+Contract after the swap:
+
+- `kg_neighbours` entries are
+  `{"identifier": <lesson file stem>, "score": <BM25 score>, "kind":
+  "lesson", "summary": <sanitized ≤200-char excerpt>}` — the full lesson body
+  is never injected.
+- The BM25 query is the ticket's own JIRA summary (internal-only — never
+  shipped on the wire), falling back to the bare ticket key when the JIRA half
+  degraded.
+- `kg_source` semantics are unchanged: `live` = the search ran (even with 0
+  hits), `degraded` = index build/search raised, `disabled` = lessons dir
+  missing/unreadable (`OMNISIGHT_LESSONS_DIR` overrides the repo-root default).
+- Cognee infra (`backend/agents/cognee_integration.py`, its volumes, the
+  rebuild timer) is **PARKED, not deleted** — independent runner/pipeline
+  callers remain, and Phase U option A may revive Cognee as a separate
+  precomputed graph axis.

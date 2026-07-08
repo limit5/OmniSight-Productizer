@@ -2,8 +2,8 @@
 
 Builds the three-axis ``project-state`` payload that the runner's
 prompt-builder injects so a fresh pickup sees: structural blockers
-(JIRA + Cognee KG), temporal priors (Graphiti MCP), and causal failure
-neighbours (failure_class + failure_graph).
+(JIRA + BM25 lesson neighbours), temporal priors (Graphiti MCP), and
+causal failure neighbours (failure_class + failure_graph).
 
 Budget contract (AC #2 / #3)
 ----------------------------
@@ -21,7 +21,7 @@ Budget contract (AC #2 / #3)
   null axis as "no context", not as a failure).
 
 The aggregator is intentionally pure-async with injected fetchers.
-Production wires the real JIRA / Cognee / Graphiti / failure-graph
+Production wires the real JIRA / BM25-lessons / Graphiti / failure-graph
 adapters; tests inject in-memory stubs so the budget machinery is
 exercised without booting a single backing store.
 
@@ -40,16 +40,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
-import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
-from backend.agents import agent_feature_flags
+from backend.agents import agent_feature_flags, lesson_retrieval
 
 log = logging.getLogger(__name__)
 
@@ -62,17 +63,16 @@ TEMPORAL_BUDGET_SEC: float = 0.6
 CAUSAL_BUDGET_SEC: float = 0.6
 STRUCTURAL_HALF_BUDGET_SEC: float = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
 
-# OP-2555 — the cognee search on a POPULATED LanceDB store reliably
-# exceeds the 0.6 s hot-path half budget (observed >0.6 s on 94 lessons,
-# prod v0.7.39), so fencing the search itself at the half budget left
-# kg_source permanently degraded. The search is moved OFF the request
-# hot path: a per-ticket single-flight background refresh runs it under
-# its own generous budget and lands the result in a process-local TTL
-# cache the hot path reads in O(1). The first (cold) call degrades once;
-# every following call within the TTL serves ``kg_source: live``.
-KG_REFRESH_BUDGET_SEC: float = 15.0
-KG_CACHE_TTL_SEC: float = 1800.0
-KG_CACHE_MAX_ENTRIES: int = 256
+# OP-2556 (B1) — the ``kg_source`` / ``kg_neighbours`` half is backed by
+# the in-process BM25 lesson retrieval (OP-848), NOT Cognee. Cognee is
+# retired from this hot path (measured LanceDB search > 0.6 s half
+# budget, single-writer lock contention, LLM_API_KEY least-privilege
+# gap) and PARKED for Phase U option A; its adapter module keeps
+# independent runner/pipeline-fallback callers. The BM25 search is
+# pure-Python, in-memory, ~3 ms warm — it runs synchronously after the
+# JIRA fetch, no thread, no network, no store.
+LESSON_NEIGHBOUR_TOP_K: int = 5
+LESSON_SUMMARY_MAX_CHARS: int = 200
 
 # OP-1454 — Cap the per-incident BFS loop in ``_causal_failure_neighbours``
 # to the N most-recent own-incidents. OP-1450/1452 fixed the SQL + driver
@@ -259,60 +259,54 @@ async def clear_traces() -> None:
 
 
 async def fetch_structural_axis(ticket_key: str) -> dict[str, Any]:
-    """Compose JIRA issuelinks + Cognee KG neighbours.
+    """Compose JIRA issuelinks + BM25 lesson neighbours (OP-2556 / B1).
 
     The JIRA half answers "what META, what blockers, what siblings."
-    The Cognee half answers "which other code/lesson entities share the
-    semantic neighbourhood." Both halves run concurrently under
-    never-raising wrappers (OP-2541) and degrade to empty lists on
-    backing-store outage.
+    The lessons half answers "which prior lessons share the semantic
+    neighbourhood" via the in-process BM25 index (OP-848) — it runs
+    SYNCHRONOUSLY right after the JIRA fetch (~3 ms warm; no gather, no
+    ``to_thread`` — the thread coupling is exactly what B1 removes).
+    Both halves degrade to empty lists under never-raising wrappers
+    (OP-2541); the JIRA inner fence stays at 0.6 s.
     """
+    try:
+        jira_view = await _structural_jira(ticket_key)
+    except Exception as exc:  # noqa: BLE001 — a half must never raise
+        log.info(
+            "project_state.structural.half_degrade half=jira_source "
+            "ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
+        jira_view = {"jira_source": "degraded"}
 
-    async def _half(
-        fetch: Callable[[str], Awaitable[dict[str, Any]]],
-        source_key: str,
-        timeout_sec: float | None = None,
-    ) -> dict[str, Any]:
-        try:
-            coro = fetch(ticket_key)
-            if timeout_sec is None:
-                return await coro
-            return await asyncio.wait_for(coro, timeout=timeout_sec)
-        except asyncio.TimeoutError:
-            log.warning(
-                "project_state.structural.half_timeout half=%s ticket=%s "
-                "inner_budget_sec=%.3f outer_budget_sec=%.3f",
-                source_key,
-                ticket_key,
-                timeout_sec,
-                STRUCTURAL_BUDGET_SEC,
-            )
-            return {source_key: "degraded"}
-        except Exception as exc:  # noqa: BLE001 — a half must never raise
-            log.info(
-                "project_state.structural.half_degrade half=%s ticket=%s "
-                "err=%s: %s",
-                source_key,
-                ticket_key,
-                type(exc).__name__,
-                exc,
-            )
-            return {source_key: "degraded"}
+    # INTERNAL-only field: the ticket's own sanitized summary seeds the
+    # BM25 query and is explicitly popped so it never reaches the public
+    # structural payload (never injected into prompts).
+    query_text = str(jira_view.pop("summary_internal", "") or "").strip()
 
-    jira_view, cognee_view = await asyncio.gather(
-        _half(_structural_jira, "jira_source"),
-        _half(_structural_cognee, "kg_source", STRUCTURAL_HALF_BUDGET_SEC),
-    )
+    try:
+        lessons_view = _structural_lessons(ticket_key, query_text)
+    except Exception as exc:  # noqa: BLE001 — marker-consistency wrapper
+        log.info(
+            "project_state.structural.lessons_degrade ticket=%s err=%s: %s",
+            ticket_key,
+            type(exc).__name__,
+            exc,
+        )
+        lessons_view = {"kg_source": "degraded"}
+
     return {
         "ticket": ticket_key,
         "jira_source": jira_view.get("jira_source") or "unavailable",
-        "kg_source": cognee_view.get("kg_source") or "degraded",
+        "kg_source": lessons_view.get("kg_source") or "degraded",
         "parent_meta": jira_view.get("parent_meta"),
         "phase": jira_view.get("phase"),
         "blockers": jira_view.get("blockers") or [],
         "blocking": jira_view.get("blocking") or [],
         "siblings": jira_view.get("siblings") or [],
-        "kg_neighbours": cognee_view.get("kg_neighbours") or [],
+        "kg_neighbours": lessons_view.get("kg_neighbours") or [],
     }
 
 
@@ -334,9 +328,9 @@ async def fetch_causal_axis(ticket_key: str) -> dict[str, Any]:
 #   ``labels`` is deliberately NOT requested — nothing consumes it, so
 #   ``phase`` stays null. ``description`` is never requested and never
 #   read (prompt-injection surface).
-# * inner fence 0.6 s = axis budget 0.8 − 0.2 margin (mirrors the
-#   cognee half); ``timeout_s=1.5`` on the transport is the backstop
-#   that also kills the curl subprocess.
+# * inner fence 0.6 s = axis budget 0.8 − 0.2 margin;
+#   ``timeout_s=1.5`` on the transport is the backstop that also kills
+#   the curl subprocess.
 JIRA_PULL_FIELDS = "issuelinks,parent,status,summary"
 JIRA_TRANSPORT_TIMEOUT_SEC: float = 1.5
 JIRA_INNER_BUDGET_SEC: float = STRUCTURAL_HALF_BUDGET_SEC
@@ -431,6 +425,11 @@ def _map_jira_story(story: Any) -> dict[str, Any]:
     what blocks us (→ ``blockers``), ``outwardIssue`` is what we block
     (→ ``blocking``). ``parent`` → ``parent_meta``. Every entry carries
     only the allowlisted key / status-name / summary triple.
+
+    ``summary_internal`` (OP-2556) is the ticket's OWN sanitized summary
+    — INTERNAL-only, consumed by :func:`fetch_structural_axis` to build
+    the BM25 lessons query and popped before the public payload is
+    assembled. It must never ship on the wire.
     """
     raw = getattr(story, "raw", None)
     fields = raw.get("fields") if isinstance(raw, dict) else None
@@ -459,6 +458,7 @@ def _map_jira_story(story: Any) -> dict[str, Any]:
         "parent_meta": _jira_link_entry(fields.get("parent")),
         "blockers": blockers,
         "blocking": blocking,
+        "summary_internal": _sanitize_jira_text(fields.get("summary")),
     }
 
 
@@ -525,233 +525,113 @@ async def _structural_jira(ticket_key: str) -> dict[str, Any]:
     return _map_jira_story(story)
 
 
-# OP-2555 — process-local KG neighbour cache + single-flight refresh
-# registry. Both are only touched from the event loop (the cache write
-# happens inside the refresh task); the search gate is a *threading*
-# lock because the actual store access runs in worker threads and
-# LanceDB is single-writer — concurrent per-call clients raced for the
-# file lock ("Could not set lock on file .../*.lbug").
-_kg_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
-_kg_refresh_tasks: dict[str, "asyncio.Task[dict[str, Any]]"] = {}
-_cognee_search_gate = threading.Lock()
+# OP-2556 (B1) — BM25 lessons half. Keeps the LEGACY wire names
+# ``kg_source`` / ``kg_neighbours`` (consumers pinned them; the docs
+# define them as lesson-backed now).
 
 
-def reset_kg_cache() -> None:
-    """Test helper — clear the KG cache and the refresh-task registry."""
-    _kg_cache.clear()
-    _kg_refresh_tasks.clear()
+def _lessons_dir() -> Path:
+    """Repo-root-anchored lessons dir (NOT CWD-relative).
 
-
-def _kg_cache_get(ticket_key: str) -> dict[str, Any] | None:
-    entry = _kg_cache.get(ticket_key)
-    if entry is None:
-        return None
-    expires_at, payload = entry
-    if time.monotonic() >= expires_at:
-        _kg_cache.pop(ticket_key, None)
-        return None
-    _kg_cache.move_to_end(ticket_key)
-    return _kg_snapshot(payload)
-
-
-def _kg_cache_put(ticket_key: str, payload: dict[str, Any]) -> None:
-    _kg_cache[ticket_key] = (
-        time.monotonic() + KG_CACHE_TTL_SEC,
-        _kg_snapshot(payload),
-    )
-    _kg_cache.move_to_end(ticket_key)
-    while len(_kg_cache) > KG_CACHE_MAX_ENTRIES:
-        _kg_cache.popitem(last=False)
-
-
-def _kg_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
-    """Copy in/out of the cache so consumers can never mutate an entry."""
-    return {
-        "kg_source": payload.get("kg_source"),
-        "kg_neighbours": [
-            dict(n) for n in (payload.get("kg_neighbours") or ())
-        ],
-    }
-
-
-def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
-    """Synchronous Cognee KG fetch executed in a worker thread.
-
-    OP-1456: ``CogneeAdapter.search`` is declared ``async`` but the
-    underlying ``self._cognee.search(...)`` call is synchronous and runs
-    on SQLAlchemy + SQLite. The ``unable to open database file`` retry
-    path inside Cognee can stall for several seconds on tickets with
-    large input sets (observed 7.2 s for OP-214), and because the call
-    is sync it blocks the calling thread — which, when invoked from the
-    event loop, freezes every concurrent axis. The fix is to run the
-    whole adapter interaction in its own thread via
-    :func:`asyncio.to_thread`. The worker thread drives the async
-    ``adapter.search`` through a private ``asyncio.run``.
-
-    OP-2555: the lookup now runs on the *refresh* path (never the hot
-    path), so its inner budget is the generous
-    :data:`KG_REFRESH_BUDGET_SEC`, not the 0.6 s half fence that killed
-    every search on a populated store. The adapter is the process-wide
-    singleton and the actual search is serialised through
-    :data:`_cognee_search_gate` (LanceDB single-writer).
+    Env ``OMNISIGHT_LESSONS_DIR`` overrides; the serving image mounts
+    ``/app/docs/sop/lessons``.
     """
-    from backend.agents import cognee_integration
+    override = os.environ.get("OMNISIGHT_LESSONS_DIR")
+    if override:
+        return Path(override)
+    return Path(__file__).resolve().parents[2] / "docs" / "sop" / "lessons"
 
-    inner_budget_sec = KG_REFRESH_BUDGET_SEC
 
+def warm_lessons_index() -> None:
+    """Build the BM25 lessons index once per worker (never raises).
+
+    Called from the FastAPI startup hook so the ~15-20 ms cold build
+    never lands on a user request; warm searches are ~3 ms.
+    """
+    lessons_dir = _lessons_dir()
     try:
-        adapter = cognee_integration.get_shared_adapter()
-    except (
-        cognee_integration.CogneeNotInstalled,
-        cognee_integration.Neo4jPasswordDefault,
-    ) as exc:
+        index = lesson_retrieval.build_index(lessons_dir)
+    except Exception as exc:  # noqa: BLE001 — warm-up is best-effort
+        log.warning(
+            "project_state.structural.lessons_warm_failed dir=%s err=%s: %s",
+            lessons_dir,
+            type(exc).__name__,
+            exc,
+        )
+        return
+    log.info(
+        "project_state.structural.lessons_warmed dir=%s documents=%d",
+        lessons_dir,
+        len(index.documents) if index is not None else 0,
+    )
+
+
+def _lesson_excerpt(text: str) -> str:
+    """Whitespace-collapsed, control-char-stripped ≤200-char excerpt.
+
+    The full lesson body is never injected into the payload — only this
+    sanitized excerpt ships (same sanitizer as the JIRA half).
+    """
+    collapsed = " ".join(str(text or "").split())
+    return _sanitize_jira_text(collapsed, LESSON_SUMMARY_MAX_CHARS)
+
+
+def _structural_lessons(ticket_key: str, query_text: str) -> dict[str, Any]:
+    """BM25 lesson neighbours for the structural half. Never raises.
+
+    Query = the ticket's own JIRA summary; falls back to the bare
+    ``ticket_key`` when the JIRA half degraded (BM25 still returns).
+    Markers: ``live`` = the search ran (even with 0 hits), ``degraded`` =
+    index build/search raised, ``disabled`` = lessons dir missing or
+    unreadable. Purely local + synchronous — no network, no DB, no
+    ``to_thread`` (that coupling is what B1 removes).
+    """
+    lessons_dir = _lessons_dir()
+    try:
+        if not lessons_dir.is_dir():
+            log.info(
+                "project_state.structural.lessons_disabled ticket=%s dir=%s",
+                ticket_key,
+                lessons_dir,
+            )
+            return {"kg_source": "disabled"}
+    except OSError as exc:
         log.info(
-            "project_state.structural.cognee_adapter_disabled ticket=%s "
+            "project_state.structural.lessons_disabled ticket=%s dir=%s "
             "err=%s: %s",
             ticket_key,
+            lessons_dir,
             type(exc).__name__,
             exc,
         )
         return {"kg_source": "disabled"}
-    except Exception as exc:  # noqa: BLE001 — degrade per AC #3
-        log.info(
-            "project_state.structural.cognee_adapter_degrade ticket=%s err=%s: %s",
-            ticket_key,
-            type(exc).__name__,
-            exc,
-        )
-        return {"kg_source": "degraded"}
 
-    async def _search() -> Any:
-        return await asyncio.wait_for(
-            adapter.search(
-                f"ticket neighbours for {ticket_key}",
-                kinds=(
-                    cognee_integration.SOURCE_KIND_CODE,
-                    cognee_integration.SOURCE_KIND_LESSON,
-                ),
-                top_k=5,
-            ),
-            timeout=inner_budget_sec,
-        )
-
+    query = query_text.strip() or ticket_key
     try:
-        with _cognee_search_gate:
-            hits = asyncio.run(_search())
-    except asyncio.TimeoutError:
-        log.warning(
-            "project_state.structural.cognee_inner_timeout ticket=%s "
-            "inner_budget_sec=%.3f outer_budget_sec=%.3f",
-            ticket_key,
-            inner_budget_sec,
-            STRUCTURAL_BUDGET_SEC,
+        results = lesson_retrieval.retrieve_lessons(
+            lessons_dir,
+            ticket_title=query,
+            acceptance_criteria="",
+            top_k=LESSON_NEIGHBOUR_TOP_K,
         )
-        return {"kg_source": "degraded"}
-    except Exception as exc:  # noqa: BLE001 — degrade per AC #3
-        log.info(
-            "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
-            ticket_key,
-            type(exc).__name__,
-            exc,
-        )
-        return {"kg_source": "degraded"}
-    return {
-        "kg_source": "live",
-        "kg_neighbours": [
+        neighbours = [
             {
-                "identifier": h.identifier,
-                "score": round(float(h.score), 4),
-                "kind": h.kind,
+                "identifier": r.path.stem,
+                "score": round(float(r.score), 4),
+                "kind": "lesson",
+                "summary": _lesson_excerpt(r.text),
             }
-            for h in (hits or ())
+            for r in results
         ]
-    }
-
-
-async def _kg_refresh(ticket_key: str) -> dict[str, Any]:
-    """Single-flight background KG refresh for ``ticket_key`` (OP-2555).
-
-    Runs :func:`_blocking_cognee_lookup` in a worker thread under the
-    generous :data:`KG_REFRESH_BUDGET_SEC` and lands a ``live`` result in
-    the process-local cache. Never raises. The task deliberately outlives
-    the hot-path half budget — the caller stops *waiting*, not the work.
-    """
-    start = time.monotonic()
-    try:
-        try:
-            payload = await asyncio.wait_for(
-                asyncio.to_thread(_blocking_cognee_lookup, ticket_key),
-                # Backstop above the lookup's own inner budget — only a
-                # wedged worker thread (e.g. a stuck store lock) hits it.
-                timeout=KG_REFRESH_BUDGET_SEC + 2.0,
-            )
-        except asyncio.TimeoutError:
-            log.warning(
-                "project_state.structural.kg_refresh_timeout ticket=%s "
-                "budget_sec=%.3f",
-                ticket_key,
-                KG_REFRESH_BUDGET_SEC + 2.0,
-            )
-            return {"kg_source": "degraded"}
-        except Exception as exc:  # noqa: BLE001 — degrade per AC #3
-            log.info(
-                "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
-                ticket_key,
-                type(exc).__name__,
-                exc,
-            )
-            return {"kg_source": "degraded"}
-        if payload.get("kg_source") == "live":
-            _kg_cache_put(ticket_key, payload)
-        log.info(
-            "project_state.structural.kg_refresh_done ticket=%s kg_source=%s "
-            "latency_sec=%.3f",
-            ticket_key,
-            payload.get("kg_source"),
-            time.monotonic() - start,
-        )
-        return payload
-    finally:
-        _kg_refresh_tasks.pop(ticket_key, None)
-
-
-async def _structural_cognee(ticket_key: str) -> dict[str, Any]:
-    """Best-effort Cognee KG neighbour fetch. Degrades, never raises.
-
-    OP-2555: the hot path reads the process-local KG cache; on a miss it
-    joins (or starts) the per-ticket single-flight refresh task and waits
-    only as long as the caller's half budget allows — the outer
-    ``wait_for`` in :func:`fetch_structural_axis` cancels this coroutine,
-    while :func:`asyncio.shield` keeps the refresh itself running so the
-    NEXT call is served ``live`` from the cache. This also ends the
-    orphaned-``to_thread`` pile-up that starved the pool and blew the
-    following call's 0.8 s axis budget (audit F5 realised): concurrent
-    calls join ONE task instead of each spawning a search thread.
-    """
-    try:
-        from backend.agents import cognee_integration  # noqa: F401 — import probe
-    except ImportError:
-        return {"kg_source": "unavailable"}
-    cached = _kg_cache_get(ticket_key)
-    if cached is not None:
-        log.info(
-            "project_state.structural.kg_cache_hit ticket=%s", ticket_key
-        )
-        return cached
-    try:
-        task = _kg_refresh_tasks.get(ticket_key)
-        if task is None or task.done():
-            task = asyncio.create_task(_kg_refresh(ticket_key))
-            _kg_refresh_tasks[ticket_key] = task
-        return dict(await asyncio.shield(task))
     except Exception as exc:  # noqa: BLE001 — degrade per AC #3
         log.info(
-            "project_state.structural.cognee_degrade ticket=%s err=%s: %s",
+            "project_state.structural.lessons_degrade ticket=%s err=%s: %s",
             ticket_key,
             type(exc).__name__,
             exc,
         )
         return {"kg_source": "degraded"}
+    return {"kg_source": "live", "kg_neighbours": neighbours}
 
 
 async def _temporal_graphiti(ticket_key: str) -> dict[str, Any]:
@@ -1122,9 +1002,8 @@ __all__ = [
     "JIRA_PULL_FIELDS",
     "JIRA_SUMMARY_MAX_CHARS",
     "JIRA_TRANSPORT_TIMEOUT_SEC",
-    "KG_CACHE_MAX_ENTRIES",
-    "KG_CACHE_TTL_SEC",
-    "KG_REFRESH_BUDGET_SEC",
+    "LESSON_NEIGHBOUR_TOP_K",
+    "LESSON_SUMMARY_MAX_CHARS",
     "ProjectStateAllAxesFailed",
     "ProjectStateAxisFetchers",
     "ProjectStateAxisTimeout",
@@ -1144,6 +1023,6 @@ __all__ = [
     "fetch_temporal_axis",
     "record_trace",
     "reset_jira_negative_cache",
-    "reset_kg_cache",
     "tail_traces",
+    "warm_lessons_index",
 ]
