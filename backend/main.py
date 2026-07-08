@@ -133,6 +133,12 @@ async def lifespan(app: FastAPI):
         )
     except Exception as exc:
         _log.warning("[startup] set_default_executor failed: %s", exc)
+    # OP-2556 (B1): warm the BM25 lessons index once per worker so the
+    # ~15-20 ms cold build never lands on a user request — the
+    # /api/v1/project-state structural half searches it synchronously
+    # (~3 ms warm). Never raises.
+    from backend.agents import project_state_aggregator as _psa
+    _psa.warm_lessons_index()
     # L1-03: sanity-check critical env/config BEFORE opening the DB.
     # Catches deploy-day typos (wrong bearer, missing provider key)
     # at boot instead of the first 401 / first silent provider fail.

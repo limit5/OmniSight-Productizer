@@ -17,10 +17,10 @@ Covers the 10 cases listed in the AC test plan:
 from __future__ import annotations
 
 import asyncio
-import builtins
-import threading
+import inspect
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -29,6 +29,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend import auth
+from backend.agents import lesson_retrieval
 from backend.agents import project_state_aggregator as agg
 from backend.agents import project_state_cache as cache_mod
 from backend.api import project_state as router_mod
@@ -125,15 +126,27 @@ async def _raising(_ticket: str) -> dict[str, Any]:
 
 @pytest.fixture(autouse=True)
 def _reset_module_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    from backend.agents import cognee_integration as ci
-
     cache_mod.default_cache.clear()
     agg.reset_jira_negative_cache()
-    agg.reset_kg_cache()
-    ci.reset_shared_adapter()
+    monkeypatch.setattr(lesson_retrieval, "_INDEX", None)
     monkeypatch.delenv("OMNISIGHT_BUILD_GIT_SHA", raising=False)
     monkeypatch.delenv("OMNISIGHT_PROJECT_STATE_JIRA_PULL", raising=False)
+    monkeypatch.delenv("OMNISIGHT_LESSONS_DIR", raising=False)
     asyncio.run(agg.clear_traces())
+
+
+def _make_lessons_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    texts: dict[str, str],
+) -> Path:
+    """Materialise a lessons dir with L-*.md files and point env at it."""
+    lessons = tmp_path / "lessons"
+    lessons.mkdir()
+    for name, text in texts.items():
+        (lessons / name).write_text(text, encoding="utf-8")
+    monkeypatch.setenv("OMNISIGHT_LESSONS_DIR", str(lessons))
+    return lessons
 
 
 # ── develop_sha source order ───────────────────────────────────────
@@ -261,11 +274,8 @@ async def test_structural_axis_adds_source_markers_for_degraded_halves(
     async def _jira_stub(_ticket: str) -> dict[str, Any]:
         return {}
 
-    async def _kg_stub(_ticket: str) -> dict[str, Any]:
-        return {}
-
     monkeypatch.setattr(agg, "_structural_jira", _jira_stub)
-    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+    monkeypatch.setattr(agg, "_structural_lessons", lambda _t, _q: {})
 
     payload = await agg.fetch_structural_axis("OP-2535")
 
@@ -282,121 +292,194 @@ async def test_temporal_axis_returns_pinned_unavailable_shape() -> None:
     assert payload == {"status": "unavailable"}
 
 
-def test_blocking_cognee_lookup_searches_code_then_lesson_kinds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from backend.agents import cognee_integration as ci
-
-    calls: list[dict[str, Any]] = []
-
-    class _Hit:
-        identifier = "backend/agents/project_state_aggregator.py"
-        score = 0.87501
-        kind = ci.SOURCE_KIND_CODE
-
-    class _Adapter:
-        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
-            calls.append({"query": query, "kinds": kinds, "top_k": top_k})
-            return (_Hit(),)
-
-    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
-
-    payload = agg._blocking_cognee_lookup("OP-2540")
-
-    assert calls == [
-        {
-            "query": "ticket neighbours for OP-2540",
-            "kinds": (ci.SOURCE_KIND_CODE, ci.SOURCE_KIND_LESSON),
-            "top_k": 5,
-        }
-    ]
-    assert payload == {
-        "kg_source": "live",
-        "kg_neighbours": [
-            {
-                "identifier": "backend/agents/project_state_aggregator.py",
-                "score": 0.875,
-                "kind": ci.SOURCE_KIND_CODE,
-            }
-        ],
-    }
+# ── OP-2556 (B1) — BM25 lessons half backs kg_source / kg_neighbours ─
 
 
-def test_blocking_cognee_lookup_marks_empty_success_live(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from backend.agents import cognee_integration as ci
-
-    class _Adapter:
-        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
-            return ()
-
-    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
-
-    payload = agg._blocking_cognee_lookup("OP-2540")
-
-    assert payload == {"kg_source": "live", "kg_neighbours": []}
-
-
-@pytest.mark.parametrize("exc_name", ["CogneeNotInstalled", "Neo4jPasswordDefault"])
-def test_blocking_cognee_lookup_maps_unconfigured_cognee_to_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-    exc_name: str,
-) -> None:
-    from backend.agents import cognee_integration as ci
-
-    exc_type = getattr(ci, exc_name)
-
-    def _raise():
-        raise exc_type("unconfigured")
-
-    monkeypatch.setattr(ci.CogneeAdapter, "from_env", _raise)
-
-    payload = agg._blocking_cognee_lookup("OP-2540")
-
-    assert payload == {"kg_source": "disabled"}
-
-
-@pytest.mark.parametrize(
-    "exc",
-    [
-        asyncio.TimeoutError(),
-        RuntimeError("store failed"),
-    ],
+_LESSON_BODY = (
+    "# L-OP-914 3d memory integration tradeoffs\n\n"
+    "cognee structural latency exceeded the half budget\x07 on the hot "
+    "path.\n\n" + "lesson body filler line for length purposes.\n" * 20
 )
-def test_blocking_cognee_lookup_maps_query_failures_to_degraded(
+
+
+def test_lessons_contract_pins_match_spec() -> None:
+    # OP-2556 pinned contracts — top-5 lesson neighbours, ≤200-char
+    # sanitized excerpt, JIRA inner fence unchanged at 0.6 s.
+    assert agg.LESSON_NEIGHBOUR_TOP_K == 5
+    assert agg.LESSON_SUMMARY_MAX_CHARS == 200
+    assert agg.STRUCTURAL_HALF_BUDGET_SEC == pytest.approx(0.6)
+    assert agg.JIRA_INNER_BUDGET_SEC == pytest.approx(0.6)
+
+
+def test_structural_lessons_maps_results_to_kg_neighbours_shape(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    exc: BaseException,
 ) -> None:
-    from backend.agents import cognee_integration as ci
+    _make_lessons_dir(
+        tmp_path,
+        monkeypatch,
+        {"L-OP-914-3d-memory-integration-tradeoffs.md": _LESSON_BODY},
+    )
 
-    class _Adapter:
-        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
-            raise exc
+    view = agg._structural_lessons("OP-2556", "cognee structural latency")
 
-    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
+    assert view["kg_source"] == "live"
+    (entry,) = view["kg_neighbours"]
+    assert set(entry) == {"identifier", "score", "kind", "summary"}
+    assert entry["identifier"] == "L-OP-914-3d-memory-integration-tradeoffs"
+    assert entry["kind"] == "lesson"
+    assert entry["score"] > 0
+    # ≤200-char excerpt, control chars stripped, full body never injected.
+    assert len(entry["summary"]) <= agg.LESSON_SUMMARY_MAX_CHARS
+    assert "\x07" not in entry["summary"]
+    assert "\n" not in entry["summary"]
+    assert len(entry["summary"]) < len(_LESSON_BODY)
 
-    payload = agg._blocking_cognee_lookup("OP-2540")
 
-    assert payload == {"kg_source": "degraded"}
+def test_structural_lessons_zero_hits_is_still_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_lessons_dir(
+        tmp_path, monkeypatch, {"L-OP-1-unrelated.md": "totally unrelated"}
+    )
+
+    view = agg._structural_lessons("OP-2556", "zzzz qqqq")
+
+    assert view == {"kg_source": "live", "kg_neighbours": []}
+
+
+def test_structural_lessons_missing_dir_maps_to_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OMNISIGHT_LESSONS_DIR", str(tmp_path / "no-such-dir"))
+
+    view = agg._structural_lessons("OP-2556", "anything")
+
+    assert view == {"kg_source": "disabled"}
+
+
+def test_structural_lessons_index_error_maps_to_degraded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_lessons_dir(tmp_path, monkeypatch, {"L-OP-1-x.md": "content"})
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("index blew up")
+
+    monkeypatch.setattr(lesson_retrieval, "retrieve_lessons", _boom)
+
+    view = agg._structural_lessons("OP-2556", "content")
+
+    assert view == {"kg_source": "degraded"}
 
 
 @pytest.mark.asyncio
-async def test_structural_cognee_maps_module_import_failure_to_unavailable(
+async def test_jira_degraded_falls_back_to_ticket_key_query(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    original_import = builtins.__import__
+    _make_lessons_dir(
+        tmp_path,
+        monkeypatch,
+        {"L-OP-2556-swap-lesson.md": "This lesson mentions OP-2556 explicitly."},
+    )
 
-    def _import(name: str, globals=None, locals=None, fromlist=(), level: int = 0):
-        if name == "backend.agents" and "cognee_integration" in fromlist:
-            raise ImportError("missing cognee integration module")
-        return original_import(name, globals, locals, fromlist, level)
+    async def _degraded_jira(_ticket: str) -> dict[str, Any]:
+        return {"jira_source": "degraded"}
 
-    monkeypatch.setattr(builtins, "__import__", _import)
+    monkeypatch.setattr(agg, "_structural_jira", _degraded_jira)
 
-    payload = await agg._structural_cognee("OP-2540")
+    payload = await agg.fetch_structural_axis("OP-2556")
 
-    assert payload == {"kg_source": "unavailable"}
+    assert payload["jira_source"] == "degraded"
+    assert payload["kg_source"] == "live"
+    assert payload["kg_neighbours"]  # bare ticket-key query still returns
+
+
+def test_no_cognee_on_structural_path() -> None:
+    # OP-2556 — cognee is retired from the aggregator hot path. The
+    # parked adapter module must not be imported here, and every #2028
+    # background-refresh symbol must be gone.
+    source = inspect.getsource(agg)
+    assert "cognee_integration" not in source
+    for name in (
+        "_structural_cognee",
+        "_blocking_cognee_lookup",
+        "_kg_refresh",
+        "_kg_refresh_tasks",
+        "_kg_cache",
+        "_kg_cache_get",
+        "_kg_cache_put",
+        "_kg_snapshot",
+        "_cognee_search_gate",
+        "reset_kg_cache",
+        "KG_REFRESH_BUDGET_SEC",
+        "KG_CACHE_TTL_SEC",
+        "KG_CACHE_MAX_ENTRIES",
+    ):
+        assert not hasattr(agg, name), name
+
+
+def test_warm_lessons_index_prebuilds_once_per_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_lessons_dir(
+        tmp_path, monkeypatch, {"L-OP-1-warm.md": "warm content about OP-1"}
+    )
+    builds = {"n": 0}
+    real_build = lesson_retrieval.LessonBM25Index.build.__func__
+
+    def _counting(cls: type, lessons_dir: Path):
+        builds["n"] += 1
+        return real_build(cls, lessons_dir)
+
+    monkeypatch.setattr(
+        lesson_retrieval.LessonBM25Index, "build", classmethod(_counting)
+    )
+
+    agg.warm_lessons_index()
+    assert builds["n"] == 1
+
+    view = agg._structural_lessons("OP-1", "warm content about OP-1")
+    assert view["kg_source"] == "live"
+    assert builds["n"] == 1  # warm — the request path never rebuilds
+
+
+def test_concurrent_cold_retrievals_build_index_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # OP-2556 — the _INDEX lock: concurrent cold callers within a worker
+    # trigger ONE build instead of racing a rebuild.
+    lessons = _make_lessons_dir(
+        tmp_path, monkeypatch, {"L-OP-1-lock.md": "lock content about OP-1"}
+    )
+    builds = {"n": 0}
+    real_build = lesson_retrieval.LessonBM25Index.build.__func__
+
+    def _slow_build(cls: type, lessons_dir: Path):
+        builds["n"] += 1
+        time.sleep(0.05)
+        return real_build(cls, lessons_dir)
+
+    monkeypatch.setattr(
+        lesson_retrieval.LessonBM25Index, "build", classmethod(_slow_build)
+    )
+
+    def _search(_i: int):
+        return lesson_retrieval.retrieve_lessons(
+            lessons, ticket_title="lock content", acceptance_criteria="", top_k=5
+        )
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(_search, range(4)))
+
+    assert builds["n"] == 1
+    assert all(results)  # every caller still got the hit
 
 
 # ── OP-2541 — structural-JIRA real pull ─────────────────────────────
@@ -510,6 +593,9 @@ async def test_structural_jira_maps_blocks_links_directionally(
         "status": "To Do",
         "summary": "parent meta",
     }
+    # OP-2556 — the ticket's own summary rides along INTERNAL-only (it
+    # seeds the BM25 query and is popped before the public payload).
+    assert view["summary_internal"] == "self summary"
 
 
 @pytest.mark.asyncio
@@ -536,11 +622,11 @@ async def test_structural_axis_makes_one_jira_call_per_miss(
 ) -> None:
     adapter = _FakeJiraAdapter()
     monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
-
-    async def _kg_stub(_ticket: str) -> dict[str, Any]:
-        return {"kg_source": "live", "kg_neighbours": []}
-
-    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+    monkeypatch.setattr(
+        agg,
+        "_structural_lessons",
+        lambda _t, _q: {"kg_source": "live", "kg_neighbours": []},
+    )
 
     payload = await agg.fetch_structural_axis("OP-2541")
 
@@ -549,28 +635,31 @@ async def test_structural_axis_makes_one_jira_call_per_miss(
 
 
 @pytest.mark.asyncio
-async def test_structural_halves_run_concurrently(
+async def test_jira_fence_holds_and_lessons_fit_axis_budget(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _slow_jira(_ticket: str) -> dict[str, Any]:
-        await asyncio.sleep(0.15)
-        return {"jira_source": "live"}
-
-    async def _slow_kg(_ticket: str) -> dict[str, Any]:
-        await asyncio.sleep(0.15)
-        return {"kg_source": "live", "kg_neighbours": []}
-
-    monkeypatch.setattr(agg, "_structural_jira", _slow_jira)
-    monkeypatch.setattr(agg, "_structural_cognee", _slow_kg)
+    # OP-2556 replaces the old halves-gather concurrency test: the JIRA
+    # inner fence still bounds a slow JIRA, and the synchronous BM25
+    # lessons half (a few ms even cold) fits the 0.8 s axis budget
+    # alongside it.
+    _make_lessons_dir(
+        tmp_path,
+        monkeypatch,
+        {"L-OP-2556-budget.md": "budget lesson mentioning OP-2556"},
+    )
+    adapter = _FakeJiraAdapter(delay_sec=0.3)
+    monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
+    monkeypatch.setattr(agg, "JIRA_INNER_BUDGET_SEC", 0.05)
 
     start = time.monotonic()
-    payload = await agg.fetch_structural_axis("OP-2541")
+    payload = await agg.fetch_structural_axis("OP-2556")
     elapsed = time.monotonic() - start
 
-    # Sequential halves would need >= 0.30 s; gather keeps it ~0.15 s.
-    assert elapsed < 0.27
-    assert payload["jira_source"] == "live"
-    assert payload["kg_source"] == "live"
+    assert payload["jira_source"] == "degraded"  # fence tripped at 0.05 s
+    assert payload["kg_source"] == "live"  # sync BM25 still ran
+    assert payload["kg_neighbours"]
+    assert elapsed < agg.STRUCTURAL_BUDGET_SEC
 
 
 @pytest.mark.asyncio
@@ -580,11 +669,12 @@ async def test_structural_half_exception_degrades_instead_of_raising(
     async def _boom(_ticket: str) -> dict[str, Any]:
         raise RuntimeError("jira half blew up")
 
-    async def _kg_stub(_ticket: str) -> dict[str, Any]:
-        return {"kg_source": "live", "kg_neighbours": []}
-
     monkeypatch.setattr(agg, "_structural_jira", _boom)
-    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+    monkeypatch.setattr(
+        agg,
+        "_structural_lessons",
+        lambda _t, _q: {"kg_source": "live", "kg_neighbours": []},
+    )
 
     payload = await agg.fetch_structural_axis("OP-2541")
 
@@ -599,11 +689,11 @@ async def test_structural_jira_inner_fence_degrades_axis_stays_non_null(
     adapter = _FakeJiraAdapter(delay_sec=0.3)
     monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
     monkeypatch.setattr(agg, "JIRA_INNER_BUDGET_SEC", 0.05)
-
-    async def _kg_stub(_ticket: str) -> dict[str, Any]:
-        return {"kg_source": "live", "kg_neighbours": []}
-
-    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+    monkeypatch.setattr(
+        agg,
+        "_structural_lessons",
+        lambda _t, _q: {"kg_source": "live", "kg_neighbours": []},
+    )
 
     payload = await agg.fetch_structural_axis("OP-2541")
 
@@ -615,7 +705,7 @@ async def test_structural_jira_inner_fence_degrades_axis_stays_non_null(
     assert payload["blocking"] == []
 
 
-def test_cold_cognee_timeout_preserves_structural_jira_half(
+def test_lessons_failure_preserves_structural_jira_half(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _run() -> None:
@@ -626,16 +716,14 @@ def test_cold_cognee_timeout_preserves_structural_jira_half(
                 "blockers": [{"key": "OP-2549"}],
             }
 
-        async def _cold_cognee(_ticket: str) -> dict[str, Any]:
-            await asyncio.to_thread(time.sleep, 0.2)
-            return {"kg_source": "live", "kg_neighbours": [{"identifier": "late"}]}
+        def _boom(_ticket: str, _query: str) -> dict[str, Any]:
+            raise RuntimeError("lessons half blew up")
 
         monkeypatch.setattr(agg, "_structural_jira", _jira_stub)
-        monkeypatch.setattr(agg, "_structural_cognee", _cold_cognee)
-        monkeypatch.setattr(agg, "STRUCTURAL_HALF_BUDGET_SEC", 0.03)
+        monkeypatch.setattr(agg, "_structural_lessons", _boom)
 
         budgets = agg.ProjectStateBudgets(
-            structural_sec=0.12, temporal_sec=0.5, causal_sec=0.5, total_sec=1.0
+            structural_sec=0.5, temporal_sec=0.5, causal_sec=0.5, total_sec=1.0
         )
         fetchers = agg.ProjectStateAxisFetchers(
             structural=agg.fetch_structural_axis,
@@ -644,7 +732,7 @@ def test_cold_cognee_timeout_preserves_structural_jira_half(
         )
 
         payload = await agg.aggregate_project_state(
-            "OP-2553", develop_sha="x", fetchers=fetchers, budgets=budgets
+            "OP-2556", develop_sha="x", fetchers=fetchers, budgets=budgets
         )
 
         assert payload["structural"] is not None
@@ -663,214 +751,74 @@ def test_cold_cognee_timeout_preserves_structural_jira_half(
     asyncio.run(_run())
 
 
-# ── OP-2555 — cognee off the hot path (cache + single-flight refresh) ─
-
-
-def test_kg_offpath_contract_pins_match_spec() -> None:
-    # OP-2555 pinned contracts — the KG search runs on the refresh path
-    # under its own generous budget; the hot-path half fence is
-    # unchanged. If these values change, the runbook must follow.
-    assert agg.KG_REFRESH_BUDGET_SEC == 15.0
-    assert agg.KG_CACHE_TTL_SEC == 1800.0
-    assert agg.KG_CACHE_MAX_ENTRIES == 256
-    assert agg.STRUCTURAL_HALF_BUDGET_SEC == pytest.approx(0.6)
-
-
-def test_blocking_cognee_lookup_survives_search_slower_than_half_fence(
+def test_linked_ticket_yields_live_live_non_empty_structural(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The OP-2555 regression: on a populated store the search takes
-    # longer than the 0.6 s half fence. The lookup's inner budget is now
-    # KG_REFRESH_BUDGET_SEC, so a search slower than the (scaled) fence
-    # must still come back live instead of degrading.
-    from backend.agents import cognee_integration as ci
+    # End-to-end B1 happy path: real JIRA mapping (blocks link + own
+    # summary) + real BM25 search → jira_source=live, kg_source=live,
+    # structural classified non_empty — and the internal summary never
+    # reaches the public payload.
+    async def _run() -> None:
+        _make_lessons_dir(
+            tmp_path,
+            monkeypatch,
+            {
+                "L-OP-914-3d-memory-integration-tradeoffs.md": _LESSON_BODY,
+                "L-OP-1-unrelated.md": "nothing in common here",
+            },
+        )
+        body = {
+            "key": "OP-2556",
+            "fields": {
+                "summary": "cognee structural latency XYZZY-INTERNAL-ONLY",
+                "status": {"name": "In Progress"},
+                "issuelinks": [
+                    {
+                        "type": _BLOCKS_TYPE,
+                        "inwardIssue": _linked_issue(
+                            "OP-2555", "Done", "blocks us"
+                        ),
+                    }
+                ],
+            },
+        }
+        adapter = _FakeJiraAdapter(body=body)
+        monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
 
-    class _Adapter:
-        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
-            await asyncio.sleep(0.1)  # slower than the scaled fence below
-            return ()
+        fetchers = agg.ProjectStateAxisFetchers(
+            structural=agg.fetch_structural_axis,
+            temporal=_ok_temporal,
+            causal=_ok_causal,
+        )
+        payload = await agg.aggregate_project_state(
+            "OP-2556", develop_sha="x", fetchers=fetchers
+        )
 
-    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
-    monkeypatch.setattr(agg, "STRUCTURAL_HALF_BUDGET_SEC", 0.03)
+        structural = payload["structural"]
+        assert structural["jira_source"] == "live"
+        assert structural["kg_source"] == "live"
+        assert structural["blockers"] == [
+            {"key": "OP-2555", "status": "Done", "summary": "blocks us"}
+        ]
+        assert structural["kg_neighbours"]
+        assert structural["kg_neighbours"][0]["identifier"] == (
+            "L-OP-914-3d-memory-integration-tradeoffs"
+        )
+        assert "summary_internal" not in structural
+        assert "XYZZY-INTERNAL-ONLY" not in repr(structural)
 
-    payload = agg._blocking_cognee_lookup("OP-2555")
+        traces = await agg.tail_traces()
+        assert traces[-1].axis_content["structural"] == "non_empty"
+        assert traces[-1].source_markers == {
+            "jira_source": "live",
+            "kg_source": "live",
+        }
 
-    assert payload == {"kg_source": "live", "kg_neighbours": []}
-
-
-def test_blocking_cognee_lookup_reuses_one_adapter_per_process(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from backend.agents import cognee_integration as ci
-
-    built = {"n": 0}
-
-    class _Adapter:
-        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
-            return ()
-
-    def _from_env() -> _Adapter:
-        built["n"] += 1
-        return _Adapter()
-
-    monkeypatch.setattr(ci.CogneeAdapter, "from_env", _from_env)
-
-    agg._blocking_cognee_lookup("OP-2555")
-    agg._blocking_cognee_lookup("OP-2556")
-
-    assert built["n"] == 1  # one warm client per process, not per call
-
-
-def test_blocking_cognee_lookup_serializes_store_access(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # LanceDB is single-writer: concurrent per-call searches raced for
-    # the store file lock ("Could not set lock on file .../*.lbug").
-    from backend.agents import cognee_integration as ci
-
-    state = {"active": 0, "max_active": 0}
-    guard = threading.Lock()
-
-    class _Adapter:
-        async def search(self, query: str, *, kinds: tuple[str, ...], top_k: int):
-            with guard:
-                state["active"] += 1
-                state["max_active"] = max(state["max_active"], state["active"])
-            time.sleep(0.05)  # sync store access, like the real SDK
-            with guard:
-                state["active"] -= 1
-            return ()
-
-    monkeypatch.setattr(ci.CogneeAdapter, "from_env", lambda: _Adapter())
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(agg._blocking_cognee_lookup, ["OP-1", "OP-2"]))
-
-    assert state["max_active"] == 1
-    assert results == [{"kg_source": "live", "kg_neighbours": []}] * 2
+    asyncio.run(_run())
 
 
-@pytest.mark.asyncio
-async def test_populated_store_slow_search_degrades_once_then_serves_live(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # End-to-end OP-2555 behaviour: cold call degrades (hot path never
-    # blocks on the slow search), the shielded background refresh lands
-    # the result in the cache, the next call serves kg_source=live with
-    # ONE store search total — and the JIRA half is never regressed.
-    calls = {"n": 0}
-    neighbours = [{"identifier": "L-OP-2549.md", "score": 0.91, "kind": "lesson"}]
-
-    def _slow_lookup(_ticket: str) -> dict[str, Any]:
-        calls["n"] += 1
-        time.sleep(0.1)  # populated-store search, slower than the fence
-        return {"kg_source": "live", "kg_neighbours": list(neighbours)}
-
-    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _slow_lookup)
-    monkeypatch.setattr(agg, "STRUCTURAL_HALF_BUDGET_SEC", 0.03)
-
-    async def _jira_stub(_ticket: str) -> dict[str, Any]:
-        return {"jira_source": "live", "blockers": [{"key": "OP-2549"}]}
-
-    monkeypatch.setattr(agg, "_structural_jira", _jira_stub)
-
-    first = await agg.fetch_structural_axis("OP-2555")
-    assert first["jira_source"] == "live"
-    assert first["blockers"] == [{"key": "OP-2549"}]
-    assert first["kg_source"] == "degraded"  # cold call degrades once
-
-    task = agg._kg_refresh_tasks.get("OP-2555")
-    assert task is not None  # refresh survived the hot-path timeout
-    await task
-
-    second = await agg.fetch_structural_axis("OP-2555")
-    assert second["kg_source"] == "live"
-    assert second["kg_neighbours"] == neighbours
-    assert calls["n"] == 1  # cache hit — no second store search
-
-
-@pytest.mark.asyncio
-async def test_structural_cognee_single_flight_joins_inflight_refresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Concurrent aggregator calls must join ONE refresh task instead of
-    # each spawning a search thread (the orphaned-to_thread pile-up that
-    # starved the pool and blew the next call's 0.8 s axis budget).
-    calls = {"n": 0}
-
-    def _slow_lookup(_ticket: str) -> dict[str, Any]:
-        calls["n"] += 1
-        time.sleep(0.05)
-        return {"kg_source": "live", "kg_neighbours": []}
-
-    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _slow_lookup)
-
-    a, b = await asyncio.gather(
-        agg._structural_cognee("OP-2555"),
-        agg._structural_cognee("OP-2555"),
-    )
-
-    assert calls["n"] == 1
-    assert a["kg_source"] == b["kg_source"] == "live"
-
-
-@pytest.mark.asyncio
-async def test_kg_cache_never_stores_degraded_results(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = {"n": 0}
-
-    def _degraded_lookup(_ticket: str) -> dict[str, Any]:
-        calls["n"] += 1
-        return {"kg_source": "degraded"}
-
-    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _degraded_lookup)
-
-    first = await agg._structural_cognee("OP-2555")
-    second = await agg._structural_cognee("OP-2555")
-
-    assert first == second == {"kg_source": "degraded"}
-    assert calls["n"] == 2  # degraded is retried, never latched
-    assert not agg._kg_cache
-
-
-@pytest.mark.asyncio
-async def test_kg_cache_ttl_expiry_triggers_fresh_refresh(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(agg, "KG_CACHE_TTL_SEC", 0.01)
-    calls = {"n": 0}
-
-    def _lookup(_ticket: str) -> dict[str, Any]:
-        calls["n"] += 1
-        return {"kg_source": "live", "kg_neighbours": []}
-
-    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _lookup)
-
-    await agg._structural_cognee("OP-2555")
-    await asyncio.sleep(0.03)
-    await agg._structural_cognee("OP-2555")
-
-    assert calls["n"] == 2  # expired entry re-searches the store
-
-
-@pytest.mark.asyncio
-async def test_kg_cache_hit_returns_defensive_copy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    neighbours = [{"identifier": "a.py", "score": 1.0, "kind": "code"}]
-
-    def _lookup(_ticket: str) -> dict[str, Any]:
-        return {"kg_source": "live", "kg_neighbours": list(neighbours)}
-
-    monkeypatch.setattr(agg, "_blocking_cognee_lookup", _lookup)
-
-    await agg._structural_cognee("OP-2555")  # fills the cache
-    hit = await agg._structural_cognee("OP-2555")
-    hit["kg_neighbours"].clear()  # consumer mutation must not corrupt
-
-    again = await agg._structural_cognee("OP-2555")
-    assert again["kg_neighbours"] == neighbours
+# ── Router structural-cacheability (OP-2555 audit F4 — kept for B1) ─
 
 
 def test_router_skips_caching_degraded_kg_until_live(
@@ -1140,11 +1088,11 @@ async def test_trace_snapshots_cumulative_negative_cache_counter(
 ) -> None:
     adapter = _FakeJiraAdapter(exc=_jira_http_error(404))
     monkeypatch.setattr(agg, "_build_jira_adapter", lambda: adapter)
-
-    async def _kg_stub(_ticket: str) -> dict[str, Any]:
-        return {"kg_source": "live", "kg_neighbours": []}
-
-    monkeypatch.setattr(agg, "_structural_cognee", _kg_stub)
+    monkeypatch.setattr(
+        agg,
+        "_structural_lessons",
+        lambda _t, _q: {"kg_source": "live", "kg_neighbours": []},
+    )
 
     fetchers = agg.ProjectStateAxisFetchers(
         structural=agg.fetch_structural_axis,

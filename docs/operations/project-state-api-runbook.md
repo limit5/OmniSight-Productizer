@@ -36,11 +36,33 @@ Any axis may render as `null` when its per-axis budget expired or the
 backing store was down at fetch time. The runner prompt-builder treats
 `null` as "no known context for this axis" rather than as an error.
 
+### `kg_source` / `kg_neighbours` (LEGACY wire names — BM25 lessons since OP-2556)
+
+Since OP-2556 (B1) the structural KG half is backed by the **in-process BM25
+lesson retrieval** (`backend/agents/lesson_retrieval.py`, OP-848) over
+`docs/sop/lessons/*.md` — it WAS the Cognee knowledge graph. The wire names
+are kept for consumer compatibility; do not rename them.
+
+* `kg_neighbours` entry shape: `{"identifier": <lesson file stem>,
+  "score": <BM25 score>, "kind": "lesson", "summary": <sanitized ≤200-char
+  excerpt>}`. The full lesson body is never injected.
+* Query = the ticket's own JIRA summary (internal-only, never on the wire);
+  falls back to the bare ticket key when the JIRA half degraded.
+* `kg_source`: `live` = BM25 search ran (even 0 hits) · `degraded` = index
+  build/search raised · `disabled` = lessons dir missing/unreadable.
+* Lessons dir: env `OMNISIGHT_LESSONS_DIR`, else repo-root
+  `docs/sop/lessons` (`/app/docs/sop/lessons` in the serving image).
+* The index is warmed once per worker at FastAPI startup (~15-20 ms cold
+  build); warm searches are ~3 ms and run synchronously after the JIRA fetch
+  — no network, no DB, no worker thread.
+* Cognee infra is PARKED (not deleted) for Phase U option A; nothing on this
+  endpoint's hot path imports it anymore.
+
 ## Budgets (pinned in `backend/agents/project_state_aggregator.py`)
 
 | Axis         | Budget  | Backing store                        |
 |--------------|--------:|--------------------------------------|
-| structural   | 800 ms  | JIRA REST + Cognee KG                |
+| structural   | 800 ms  | JIRA REST + in-process BM25 lessons  |
 | temporal     | 600 ms  | Graphiti MCP                         |
 | causal       | 600 ms  | failure_class + failure_graph BFS    |
 | **total**    | **2 s** | wall-clock; cancels in-flight on overrun |
@@ -71,7 +93,7 @@ the first request after restart computes fresh.
 | Error                          | HTTP | Operator action |
 |--------------------------------|-----:|-----------------|
 | `ProjectStateAxisTimeout`      | 200  | none — axis renders as `null`. Watch the `axis_error` count on the metrics surface. |
-| `ProjectStateAllAxesFailed`    | 200  | check Cognee / Graphiti / failure-graph health; the runner is now operating without cross-task context. |
+| `ProjectStateAllAxesFailed`    | 200  | check JIRA / lessons-dir mount / failure-graph health; the runner is now operating without cross-task context. |
 | `ProjectStateCacheCorrupted`   | 200  | auto-evicted + recomputed; investigate the `corruptions` stat if it grows. |
 | `ProjectStateBudgetExceeded`   | 200  | partial response shipped; pages on sustained tail. |
 | 400 — `ticket must look like…` | 400  | client bug; ticket keys must match `OP-<alphanum>`. |

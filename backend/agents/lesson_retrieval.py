@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import math
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -139,12 +140,16 @@ class LessonBM25Index:
 
 
 _INDEX: LessonBM25Index | None = None
+# OP-2556 — guards the ``_INDEX`` module-global mutation so concurrent
+# cold callers within a worker trigger ONE build, not a rebuild race.
+_INDEX_LOCK = threading.Lock()
 
 
 def build_index(lessons_dir: Path) -> LessonBM25Index | None:
     global _INDEX
-    _INDEX = LessonBM25Index.build(lessons_dir)
-    return _INDEX
+    with _INDEX_LOCK:
+        _INDEX = LessonBM25Index.build(lessons_dir)
+        return _INDEX
 
 
 def retrieve_lessons(
@@ -156,14 +161,18 @@ def retrieve_lessons(
 ) -> tuple[LessonSearchResult, ...]:
     global _INDEX
     try:
-        if _INDEX is None or _INDEX.lessons_dir != lessons_dir:
-            _INDEX = LessonBM25Index.build(lessons_dir)
-        elif _INDEX.is_stale():
-            log.info("%s: rebuilding lesson BM25 index", BM25_INDEX_STALE)
-            _INDEX = LessonBM25Index.build(lessons_dir)
-        if _INDEX is None:
+        with _INDEX_LOCK:
+            if _INDEX is None or _INDEX.lessons_dir != lessons_dir:
+                _INDEX = LessonBM25Index.build(lessons_dir)
+            elif _INDEX.is_stale():
+                log.info("%s: rebuilding lesson BM25 index", BM25_INDEX_STALE)
+                _INDEX = LessonBM25Index.build(lessons_dir)
+            index = _INDEX
+        if index is None:
             return ()
-        return _INDEX.search(
+        # Search runs outside the lock — the index is immutable (frozen
+        # dataclass), only the module-global rebind needs serialising.
+        return index.search(
             f"{ticket_title}\n\n{acceptance_criteria}",
             top_k=top_k,
         )
