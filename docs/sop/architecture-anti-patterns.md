@@ -47,6 +47,7 @@ with `python3 scripts/cognee-ingest-lessons.py`.
 | 12 | [Spike + final-version add/add scaffold race](#12-spike--final-version-addadd-scaffold-race) | "Validate framework" spike ships full scaffold; sibling "initial scaffold" PR add/add conflicts on every shared file |
 | 13 | [Shipped-but-not-deployed](#13-shipped-but-not-deployed) | Code merged + ticket closed, but the systemd unit / container / env-wire / migration never reached prod — found only when a downstream consumer fails |
 | 14 | [Bulk import without refinement creates dead inventory](#14-bulk-import-without-refinement-creates-dead-inventory) | Hundreds of summary-only tickets imported "to refine later" — invisible to automation, but they dominate every human backlog query |
+| 15 | [Deployed-but-hollow / silent-degrade compound](#15-deployed-but-hollow--silent-degrade-compound) | Endpoint, SLO, and dashboard exist, but the promised content silently degrades to empty or absent signals |
 
 ---
 
@@ -488,9 +489,82 @@ owns, not an implicit "someone will run it".
 
 ---
 
+## 15. Deployed-but-hollow / silent-degrade compound
+
+**Domains**: docs, backend, devops
+
+**Symptom**: A production surface is live and returns a valid shape, but the
+business-critical content inside it is empty, disabled, or absent without
+operator-visible failure. The endpoint, dashboard, SLO, and ticket state all
+say "shipped"; the actual value path is hollow. Downstream agents only notice
+when their prompts lack expected context or an audit finds that the alert was
+querying a metric that was never emitted.
+
+**Root cause**: Two anti-patterns stack:
+
+1. **Deployed-but-hollow** — the runtime artifact exists, but its content
+   producer is absent, empty, or backed by a placeholder path.
+2. **Silent-degrade** — the degraded path preserves a successful envelope
+   (`200`, empty list, green dashboard, quiet SLO) instead of emitting source
+   health, non-empty-rate, and metric-absence signals.
+
+The 3D-memory project-state line carried this shape for too long: structural,
+temporal, and causal awareness were described as a first-class pickup contract,
+but live pickup could still receive an empty or partial structural axis without
+per-half provenance, while the SLO path itself could be hollow if it queried a
+non-emitted metric. The result was worse than a hard failure: operators saw a
+plausible system, not a broken one.
+
+**Cure**: Phase S closes the hollow path by making both the envelope and the
+content observable:
+
+1. **Per-half markers as metrics.** Emit axis and sub-source health as
+   Prometheus metrics, not only in-memory trace fields. For project-state this
+   means `structural.jira_source` and `structural.kg_source` must be visible as
+   metric labels or equivalent series with `live | degraded | disabled |
+   unavailable` states.
+2. **Non-empty-rate content alert.** Alert when a source is `live` but the
+   content rate is unexpectedly empty over a meaningful window. A green source
+   marker proves the call ran; it does not prove useful context reached the
+   runner.
+3. **Staging non-empty probe.** Keep at least one staging probe whose expected
+   project-state answer is known non-empty. This catches "everything returns
+   empty" regressions before production agents normalize the absence.
+4. **Absence and ratio alerts.** Alert when the required metric family is
+   absent at scrape time, and when degraded/disabled/unavailable ratios exceed
+   the budget. An SLO querying no series is not green; it is invalid.
+
+**Examples**:
+- 3D-memory hollow-a-year case: the Sprint F / ADR-0015 architecture promised
+  runner pickup awareness across structural, temporal, and causal axes, but the
+  production reading had to be narrowed later by OP-2545 and OP-2556 because
+  parts of the path were unavailable, placeholder-backed, or backed by local
+  BM25 lessons rather than the originally described Cognee KG. OP-2557 and
+  OP-2560 then added the missing metrics and alert surface so the axis could be
+  audited by Prometheus/Grafana instead of by prose.
+- SLO monitor project-state case: an SLO that queried a non-emitted
+  project-state metric provided hollow coverage. It could not fail loudly when
+  the metric disappeared because the absence of the series was not itself part
+  of the SLO contract.
+
+**Reference tickets**: OP-2545 (Phase R reality lock), OP-2556 (BM25-backed
+structural KG half), OP-2557 (axis-health Prometheus metrics), OP-2560
+(anti-hollow alert rules and Grafana panel), OP-2561 (this audit-loop
+documentation record). See also lesson
+`docs/sop/lessons/L-OP-2561-dead-slo-is-hollow-coverage.md`.
+
+**Generalisation**: A shipped observability surface must prove three things:
+the producer exists, the producer is healthy, and the content is non-empty when
+non-empty is expected. HTTP success, dashboard presence, and SLO syntax are not
+coverage by themselves. Any graceful-degradation contract that returns an empty
+payload must also emit machine-checkable provenance and absence signals, or it
+will become silent-degrade coverage.
+
+---
+
 ## Cross-cutting principles
 
-After 14 patterns, common threads:
+After 15 patterns, common threads:
 
 1. **Idempotency is non-negotiable** for any retry-eligible operation.
 2. **Convergence over correctness-of-predecessor** for terminal events.
@@ -503,8 +577,11 @@ After 14 patterns, common threads:
 9. **Two tickets writing to the same final file path cannot run in parallel without a chosen winner** — merge the tickets or scope one to a non-canonical output path with an explicit promotion step. (Pattern #12; "spike" is not orthogonal to "implementation" at the filesystem level.)
 10. **"Merged" is not "deployed"** — every existing gate stops at "in `develop`"; the operator-side activation step in the unit header is verified by nobody unless a `deployed:` AC item plus a recurring deployment audit make it so. (Pattern #13.)
 11. **A tracker item below actionable quality is pure cost** — invisible to automation, visible to every human planning pass. Pay the refinement cost at creation time or don't create the item; there is no "capture now, refine later" tier. (Pattern #14.)
+12. **A green wrapper around empty content is hollow coverage** — source-health
+    metrics, non-empty-rate alerts, staging probes, and metric-absence alerts
+    must travel with any graceful-degradation surface. (Pattern #15.)
 
-If you see a new symptom not in this cookbook, file it as the 15th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
+If you see a new symptom not in this cookbook, file it as the 16th pattern after the same incident class hits 2+ tickets. Don't add patterns for one-off hypothetical concerns.
 
 ---
 
@@ -522,3 +599,4 @@ If you see a new symptom not in this cookbook, file it as the 15th pattern after
   - `OP-761` (Sprint D — deployment automation)
   - `OP-784` (Sprint E — docs-site build-time generation; Pattern 12 incident)
   - `OP-976` (AUDIT-23 — deployment-audit baseline; Pattern 13 incident, `docs/audit/2026-05-12-shipped-not-deployed-sprint-dEF.md`)
+  - `OP-2561` (Phase S — deployed-but-hollow / silent-degrade compound; Pattern 15 incident)

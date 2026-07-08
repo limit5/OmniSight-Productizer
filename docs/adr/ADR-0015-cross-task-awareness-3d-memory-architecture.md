@@ -317,3 +317,27 @@ Contract after the swap:
   rebuild timer) is **PARKED, not deleted** — independent runner/pipeline
   callers remain, and Phase U option A may revive Cognee as a separate
   precomputed graph axis.
+
+## 2026-07-08 amendment — OP-2561 Phase S observability note
+
+Axis health is a first-class Prometheus contract, not just an in-memory trace
+detail. The OP-2545 per-half source markers (`structural.jira_source` and
+`structural.kg_source`) are useful in request traces, but traces alone do not
+close the audit loop: an operator must be able to alert on degraded,
+disabled, unavailable, empty, and absent project-state signals from the normal
+monitoring plane.
+
+Therefore ADR-0015's production reading now includes these observability
+requirements:
+
+- per-axis and per-half health states are emitted as Prometheus metrics;
+- alerting distinguishes unhealthy source ratios from useful-empty content
+  rates;
+- at least one staging probe has a known non-empty project-state expectation;
+- required metric-family absence is itself an alert condition.
+
+This is the difference between graceful degradation and silent degradation. A
+runner payload may still omit unavailable context, but the omission must be
+machine-visible outside the process. An SLO or dashboard that queries a
+non-emitted project-state metric is hollow coverage and does not satisfy this
+ADR.
