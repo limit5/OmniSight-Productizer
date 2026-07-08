@@ -609,6 +609,54 @@ async def test_structural_jira_inner_fence_degrades_axis_stays_non_null(
     assert payload["blocking"] == []
 
 
+def test_cold_cognee_timeout_preserves_structural_jira_half(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _run() -> None:
+        async def _jira_stub(_ticket: str) -> dict[str, Any]:
+            return {
+                "jira_source": "live",
+                "parent_meta": {"key": "OP-2500"},
+                "blockers": [{"key": "OP-2549"}],
+            }
+
+        async def _cold_cognee(_ticket: str) -> dict[str, Any]:
+            await asyncio.to_thread(time.sleep, 0.2)
+            return {"kg_source": "live", "kg_neighbours": [{"identifier": "late"}]}
+
+        monkeypatch.setattr(agg, "_structural_jira", _jira_stub)
+        monkeypatch.setattr(agg, "_structural_cognee", _cold_cognee)
+        monkeypatch.setattr(agg, "STRUCTURAL_HALF_BUDGET_SEC", 0.03)
+
+        budgets = agg.ProjectStateBudgets(
+            structural_sec=0.12, temporal_sec=0.5, causal_sec=0.5, total_sec=1.0
+        )
+        fetchers = agg.ProjectStateAxisFetchers(
+            structural=agg.fetch_structural_axis,
+            temporal=_ok_temporal,
+            causal=_ok_causal,
+        )
+
+        payload = await agg.aggregate_project_state(
+            "OP-2553", develop_sha="x", fetchers=fetchers, budgets=budgets
+        )
+
+        assert payload["structural"] is not None
+        assert payload["structural"]["jira_source"] == "live"
+        assert payload["structural"]["kg_source"] == "degraded"
+        assert payload["structural"]["parent_meta"] == {"key": "OP-2500"}
+        assert payload["structural"]["blockers"] == [{"key": "OP-2549"}]
+        assert payload["structural"]["kg_neighbours"] == []
+        traces = await agg.tail_traces()
+        assert "structural" not in traces[-1].axis_error
+        assert traces[-1].source_markers == {
+            "jira_source": "live",
+            "kg_source": "degraded",
+        }
+
+    asyncio.run(_run())
+
+
 @pytest.mark.asyncio
 async def test_structural_jira_kill_switch_off_makes_zero_adapter_calls(
     monkeypatch: pytest.MonkeyPatch,
@@ -991,6 +1039,7 @@ def test_axis_budgets_match_spec() -> None:
     assert agg.TEMPORAL_BUDGET_SEC == 0.6
     assert agg.CAUSAL_BUDGET_SEC == 0.6
     assert agg.TOTAL_BUDGET_SEC == 2.0
+    assert agg.STRUCTURAL_HALF_BUDGET_SEC == pytest.approx(0.6)
 
 
 @pytest.mark.asyncio

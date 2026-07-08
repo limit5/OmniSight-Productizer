@@ -59,6 +59,7 @@ TOTAL_BUDGET_SEC: float = 2.0
 STRUCTURAL_BUDGET_SEC: float = 0.8
 TEMPORAL_BUDGET_SEC: float = 0.6
 CAUSAL_BUDGET_SEC: float = 0.6
+STRUCTURAL_HALF_BUDGET_SEC: float = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
 
 # OP-1454 — Cap the per-incident BFS loop in ``_causal_failure_neighbours``
 # to the N most-recent own-incidents. OP-1450/1452 fixed the SQL + driver
@@ -257,9 +258,23 @@ async def fetch_structural_axis(ticket_key: str) -> dict[str, Any]:
     async def _half(
         fetch: Callable[[str], Awaitable[dict[str, Any]]],
         source_key: str,
+        timeout_sec: float | None = None,
     ) -> dict[str, Any]:
         try:
-            return await fetch(ticket_key)
+            coro = fetch(ticket_key)
+            if timeout_sec is None:
+                return await coro
+            return await asyncio.wait_for(coro, timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            log.warning(
+                "project_state.structural.half_timeout half=%s ticket=%s "
+                "inner_budget_sec=%.3f outer_budget_sec=%.3f",
+                source_key,
+                ticket_key,
+                timeout_sec,
+                STRUCTURAL_BUDGET_SEC,
+            )
+            return {source_key: "degraded"}
         except Exception as exc:  # noqa: BLE001 — a half must never raise
             log.info(
                 "project_state.structural.half_degrade half=%s ticket=%s "
@@ -273,7 +288,7 @@ async def fetch_structural_axis(ticket_key: str) -> dict[str, Any]:
 
     jira_view, cognee_view = await asyncio.gather(
         _half(_structural_jira, "jira_source"),
-        _half(_structural_cognee, "kg_source"),
+        _half(_structural_cognee, "kg_source", STRUCTURAL_HALF_BUDGET_SEC),
     )
     return {
         "ticket": ticket_key,
@@ -311,7 +326,7 @@ async def fetch_causal_axis(ticket_key: str) -> dict[str, Any]:
 #   that also kills the curl subprocess.
 JIRA_PULL_FIELDS = "issuelinks,parent,status,summary"
 JIRA_TRANSPORT_TIMEOUT_SEC: float = 1.5
-JIRA_INNER_BUDGET_SEC: float = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
+JIRA_INNER_BUDGET_SEC: float = STRUCTURAL_HALF_BUDGET_SEC
 JIRA_SUMMARY_MAX_CHARS = 200
 
 JIRA_NEGATIVE_CACHE_MAX_ENTRIES = 512
@@ -514,7 +529,7 @@ def _blocking_cognee_lookup(ticket_key: str) -> dict[str, Any]:
     """
     from backend.agents import cognee_integration
 
-    inner_budget_sec = max(0.1, STRUCTURAL_BUDGET_SEC - 0.2)
+    inner_budget_sec = STRUCTURAL_HALF_BUDGET_SEC
 
     try:
         adapter = cognee_integration.CogneeAdapter.from_env()
@@ -986,6 +1001,7 @@ __all__ = [
     "ProjectStateBudgets",
     "ProjectStateTrace",
     "STRUCTURAL_BUDGET_SEC",
+    "STRUCTURAL_HALF_BUDGET_SEC",
     "TEMPORAL_BUDGET_SEC",
     "TOTAL_BUDGET_SEC",
     "aggregate_project_state",
