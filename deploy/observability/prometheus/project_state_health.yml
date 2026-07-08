@@ -1,0 +1,58 @@
+# OP-2560 — project-state anti-hollow Prometheus alert rules.
+#
+# This is the loadable plain-Prometheus surface. Do not copy the
+# deploy/prometheus/rules/* bridge metadata shape here; Prometheus loads
+# this file directly through configs/prometheus.yml.
+
+groups:
+  - name: omnisight_project_state_health
+    interval: 30s
+    rules:
+      - alert: ProjectStateStructuralHollow
+        expr: sum(rate(omnisight_project_state_axis_total{axis="structural",content="non_empty"}[15m])) / sum(rate(omnisight_project_state_axis_total{axis="structural"}[15m])) < 0.8
+        for: 15m
+        labels:
+          severity: warning
+          subsystem: project_state
+        annotations:
+          summary: "Project-state structural axis is hollow"
+          description: |
+            Fewer than 80% of structural project-state responses carried
+            non-empty content over the last 15 minutes. Check JIRA and KG
+            sources before trusting pickup prompt context.
+
+      - alert: ProjectStateHalfHollow
+        expr: sum by (half)(rate(omnisight_project_state_structural_half_total{useful="false"}[30m])) / sum by (half)(rate(omnisight_project_state_structural_half_total[30m])) > 0.8
+        for: 30m
+        labels:
+          severity: info
+          subsystem: project_state
+        annotations:
+          summary: "Project-state structural half is hollow"
+          description: |
+            More than 80% of one structural half's project-state samples
+            were not useful over the last 30 minutes. Inspect the half label
+            to distinguish JIRA-side gaps from KG-side gaps.
+
+      - alert: ProjectStateNoTraffic
+        expr: absent(rate(omnisight_project_state_calls_total[30m]))
+        labels:
+          severity: info
+          subsystem: project_state
+        annotations:
+          summary: "Project-state endpoint has no traffic"
+          description: |
+            Prometheus sees no project-state call rate over the last 30
+            minutes. Confirm the backend is exporting metrics and the runner
+            is still requesting pickup context.
+
+      - alert: ProjectStateLatencyHigh
+        expr: histogram_quantile(0.95, sum(rate(omnisight_project_state_axis_latency_seconds_bucket[5m])) by (le)) > 2
+        labels:
+          severity: warning
+          subsystem: project_state
+        annotations:
+          summary: "Project-state axis p95 latency is high"
+          description: |
+            The p95 project-state axis latency is above 2 seconds. Check
+            backing JIRA/KG stores before widening runner pickup timeouts.
