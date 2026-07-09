@@ -585,6 +585,21 @@ async def lifespan(app: FastAPI):
     except Exception as exc:  # pragma: no cover — defence in depth
         _log.debug("[lifecycle] error aggregation close failed: %s", exc)
     await db.close()
+    # OP-2562: multiprocess-metrics worker cleanup. Raw `uvicorn --workers`
+    # has no gunicorn child_exit hook, so this lifespan-shutdown block (which
+    # uvicorn runs on the SIGTERM it sends workers during reload/scale-down)
+    # is where a dying worker retires its per-PID mmap db files. Deliberately
+    # NOT a second SIGTERM handler — the coordinator already installs one
+    # (install_signal_handlers) and a second could race it. No-op unless
+    # PROMETHEUS_MULTIPROC_DIR is set. Runs LAST so nothing later in shutdown
+    # can write fresh gauge values and resurrect the files. Residual gap: a
+    # SIGKILLed (OOM) worker never gets here — one stale db file remains
+    # until the container-start wipe (bounded transient overcount, accepted).
+    try:
+        from backend import metrics as _metrics
+        _metrics.multiprocess_worker_shutdown()
+    except Exception as exc:  # pragma: no cover — defence in depth
+        _log.warning("[lifecycle] multiprocess_worker_shutdown raised: %s", exc)
 
 
 app = FastAPI(

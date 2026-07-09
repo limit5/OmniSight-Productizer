@@ -12,9 +12,25 @@ they sort cleanly in Grafana.
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 logger = logging.getLogger(__name__)
+
+# OP-2562 — multiprocess exposition gate. The whole multiprocess path is
+# keyed on this env var being set (and non-empty): unset means the classic
+# single-process registry, byte-identical to the pre-OP-2562 behaviour.
+# IMPORT-TIMING INVARIANT: prometheus_client picks its value-storage
+# backend (values.ValueClass) ONCE at first import, based on whether
+# PROMETHEUS_MULTIPROC_DIR is in the environment AT THAT MOMENT. The env
+# is therefore a LAUNCH-TIME variable, not a runtime toggle — setting it
+# after the app imported prometheus_client changes the exposition path
+# but the metric values never reach the per-PID mmap files.
+_MULTIPROC_ENV = "PROMETHEUS_MULTIPROC_DIR"
+
+
+def _multiproc_enabled() -> bool:
+    return bool(os.environ.get(_MULTIPROC_ENV))
 
 try:
     from prometheus_client import (
@@ -45,6 +61,15 @@ def is_available() -> bool:
 
 if _AVAILABLE:
     REGISTRY = CollectorRegistry()
+
+    # OP-2562 multiprocess notes: Counters and Histograms sum across
+    # worker processes natively and need no constructor change (Histogram
+    # `_created` timestamps and exemplars are not multiprocess-exported —
+    # acceptable). Every Gauge MUST carry an explicit `multiprocess_mode`
+    # (enforced by test_metrics_multiproc.py): a bare Gauge defaults to
+    # mode 'all', which exports one series PER PID → cardinality explosion
+    # + broken existing queries. The same annotations are mirrored in the
+    # reset_for_tests() rebind block below — keep the two in lockstep.
 
     # Decisions ─────────────────────────────────────────────────
     decision_total = Counter(
@@ -113,6 +138,7 @@ if _AVAILABLE:
         "omnisight_sse_subscribers",
         "Number of currently connected SSE subscribers",
         registry=REGISTRY,
+        multiprocess_mode="livesum",  # per-worker in-flight connection count; sums across live workers
     )
     sse_dropped_total = Counter(
         "omnisight_sse_dropped_total",
@@ -205,24 +231,28 @@ if _AVAILABLE:
         "Per-tenant CPU usage summed across all running sandbox containers",
         labelnames=("tenant_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_mem_used_gb = Gauge(
         "omnisight_tenant_mem_used_gb",
         "Per-tenant memory usage (GiB) — sum of cgroup memory.current",
         labelnames=("tenant_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_disk_used_gb = Gauge(
         "omnisight_tenant_disk_used_gb",
         "Per-tenant on-disk usage (GiB) from tenant_quota.measure_tenant_usage",
         labelnames=("tenant_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_sandbox_count = Gauge(
         "omnisight_tenant_sandbox_count",
         "Number of currently running sandbox containers per tenant",
         labelnames=("tenant_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_cpu_seconds_total = Counter(
         "omnisight_tenant_cpu_seconds_total",
@@ -252,27 +282,32 @@ if _AVAILABLE:
         "omnisight_host_cpu_percent",
         "Whole-host CPU utilisation (0-100) from psutil.cpu_percent",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_mem_percent = Gauge(
         "omnisight_host_mem_percent",
         "Whole-host memory utilisation (0-100); derived from (total-available)/total",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_disk_percent = Gauge(
         "omnisight_host_disk_percent",
         "Root filesystem utilisation (0-100) from psutil.disk_usage('/')",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_loadavg_1m = Gauge(
         "omnisight_host_loadavg_1m",
         "1-minute load average (raw, not normalised by core count)",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_container_count = Gauge(
         "omnisight_host_container_count",
         "Running Docker container count (SDK primary, CLI fallback) labelled by source",
         labelnames=("source",),  # sdk | cli | unavailable
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
 
     # Phase 62: skills extraction (Knowledge Generation L1) ─────
@@ -332,6 +367,7 @@ if _AVAILABLE:
         "Current per-agent score in {code_pass, compliance, consistency, entropy}",
         labelnames=("agent_id", "dim"),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # point-in-time score snapshot
     )
     intelligence_alert_total = Counter(
         "omnisight_intelligence_alert_total",
@@ -409,6 +445,7 @@ if _AVAILABLE:
         "Latest hold-out weighted score (0..1) per model evaluated",
         labelnames=("model",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # latest eval snapshot
     )
 
     # Phase 67-A: prompt cache hit/miss in input tokens ─────────
@@ -431,6 +468,7 @@ if _AVAILABLE:
         "omnisight_rtk_compression_ratio",
         "Latest RTK output compression savings ratio (0..1)",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # latest-ratio snapshot
     )
     rtk_fallback_total = Counter(
         "omnisight_rtk_fallback_total",
@@ -441,11 +479,13 @@ if _AVAILABLE:
         "omnisight_rtk_install_status",
         "1 when the RTK binary is installed and runnable, 0 otherwise",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
     )
     frontend_build_lag_commits = Gauge(
         "omnisight_frontend_build_lag_commits",
         "Commits between the production frontend build and master HEAD",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # single global snapshot
     )
 
     # OP-1483 — FE/BE runtime compatibility detector. Bumped when the
@@ -469,6 +509,7 @@ if _AVAILABLE:
         "Latest nightly IQ benchmark weighted score (0..1) per model",
         labelnames=("model",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # latest benchmark snapshot
     )
     intelligence_iq_regression_total = Counter(
         "omnisight_intelligence_iq_regression_total",
@@ -524,6 +565,7 @@ if _AVAILABLE:
         "Number of messages in the queue, partitioned by priority + state",
         labelnames=("priority", "state"),  # P0..P3 × Queued/Ready/Claimed/...
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global queue state sampled by each worker; not per-worker additive
     )
     queue_claim_duration_seconds = Histogram(
         "omnisight_queue_claim_duration_seconds",
@@ -538,11 +580,13 @@ if _AVAILABLE:
         "omnisight_worker_active",
         "Number of workers currently registered in workers:active",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global registry count sampled; not per-worker additive
     )
     worker_inflight = Gauge(
         "omnisight_worker_inflight",
         "Number of in-flight tasks across this worker process",
         registry=REGISTRY,
+        multiprocess_mode="livesum",  # per-worker in-flight task count; sums across live workers
     )
     worker_heartbeat_total = Counter(
         "omnisight_worker_heartbeat_total",
@@ -610,16 +654,19 @@ if _AVAILABLE:
         "omnisight_awaiting_human_plus_two_pending",
         "Number of changes for which the Merger has +2'd but no human +2 yet",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global pending count snapshot
     )
     awaiting_human_age_seconds = Gauge(
         "omnisight_awaiting_human_plus_two_age_seconds",
         "Wall-clock age of the oldest still-pending dual-sign change",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global oldest-age snapshot
     )
     worker_pool_capacity = Gauge(
         "omnisight_worker_pool_capacity",
         "Configured maximum concurrent in-flight tasks for this worker pool",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # config snapshot; identical across workers
     )
 
     # Process up-time
@@ -627,6 +674,7 @@ if _AVAILABLE:
         "omnisight_process_start_time_seconds",
         "Unix timestamp when this process started",
         registry=REGISTRY,
+        multiprocess_mode="min",  # earliest worker start = process family start
     )
     process_start_time.set(time.time())
 
@@ -636,6 +684,7 @@ if _AVAILABLE:
         "Rolling-window pairwise cosine-similarity mean for an agent's outputs",
         labelnames=("agent_id", "guild_id"),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # rolling-window score snapshot
     )
     cognitive_deadlock_total = Counter(
         "omnisight_cognitive_deadlock_total",
@@ -656,6 +705,7 @@ if _AVAILABLE:
         "Size (bytes, on-disk ciphertext) of the most recent scratchpad write",
         labelnames=("agent_id", "guild_id"),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # size of the most recent write
     )
     token_continuation_total = Counter(
         "omnisight_token_continuation_total",
@@ -713,6 +763,7 @@ if _AVAILABLE:
         "1 when this backend replica is serving traffic, 0 when draining/down",
         labelnames=("instance_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 liveness; a dead worker's value must drop, never sum
     )
     # `rolling_deploy_responses_total` is the source-of-truth counter
     # for the 5xx rate. Labels are the HTTP status class (2xx/3xx/
@@ -732,6 +783,7 @@ if _AVAILABLE:
         "omnisight_rolling_deploy_5xx_rate",
         "Rolling-window 5xx response rate (0..1) computed in-process",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # ratio snapshot; summing ratios is meaningless
     )
     # `replica_lag_seconds` — Postgres streaming replication lag, in
     # seconds. Populated by the pg_ha sampler calling
@@ -742,6 +794,7 @@ if _AVAILABLE:
         "Streaming replication lag from primary to standby, in seconds",
         labelnames=("replica",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global PG replication snapshot
     )
     # `readyz_latency_seconds` — end-to-end wall-clock latency of the
     # /readyz probe. Buckets tuned for fast probe paths: most replies
@@ -764,12 +817,14 @@ if _AVAILABLE:
         "omnisight_readyz_migrations_pending",
         "1 if alembic head on disk > applied revision, 0 if aligned",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
     )
     alembic_drift = Gauge(
         "omnisight_alembic_drift",
         "Alembic image-vs-DB drift state by direction",
         labelnames=("direction",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global drift state snapshot
     )
     alembic_drift_probe_errors_total = Counter(
         "omnisight_alembic_drift_probe_errors_total",
@@ -784,6 +839,7 @@ if _AVAILABLE:
         "omnisight_alembic_drift_unknown",
         "1 when image-vs-DB alembic drift cannot be computed, 0 otherwise",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
     )
     # Family ⑥ §4.4 — freshness: unix timestamp of the last *successful*
     # collection. The AlertBridge freshness rule fires on
@@ -793,6 +849,7 @@ if _AVAILABLE:
         "omnisight_alembic_drift_last_collection_ts",
         "Unix timestamp of the last successful alembic drift collection",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # heartbeat timestamp; last live write wins
     )
 
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics.
@@ -850,6 +907,7 @@ if _AVAILABLE:
         "Fraction (0..1) of the per-worker label cap consumed by tracked values",
         labelnames=("dimension",),  # tenant | project | product_line
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # per-worker fraction; never sums stale values
     )
     capability_matrix_unexpected_fallback_total = Counter(
         "omnisight_capability_matrix_unexpected_fallback_total",
@@ -874,6 +932,7 @@ if _AVAILABLE:
         "1 if an auxiliary service is available, 0 if unavailable, NaN before first probe",
         labelnames=("service",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1/NaN status; summing would corrupt it
     )
     aux_service_available.labels(service="ai_core").set(float("nan"))
 
@@ -891,6 +950,7 @@ if _AVAILABLE:
         "1 while a DAG executor instance is armed and heart-beating, 0 once stopped",
         labelnames=("instance_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 liveness; a dead worker's value must drop
     )
     dag_executor_heartbeat_total = Counter(
         "omnisight_dag_executor_heartbeat_total",
@@ -903,6 +963,7 @@ if _AVAILABLE:
         "Unix timestamp of the most recent DAG executor heartbeat, by instance",
         labelnames=("instance_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # heartbeat timestamp; last live write wins
     )
 
     # OP-2557 — /api/v1/project-state axis-health surface. Counters are
@@ -1060,10 +1121,43 @@ else:
 
 
 def render_exposition() -> tuple[bytes, str]:
-    """Return (body, content_type) for the /metrics endpoint."""
+    """Return (body, content_type) for the /metrics endpoint.
+
+    OP-2562: when PROMETHEUS_MULTIPROC_DIR is set, aggregate the per-PID
+    mmap db files across all uvicorn workers via MultiProcessCollector on
+    a FRESH registry per scrape (never the global REGISTRY — feeding it
+    to the collector would double-collect this worker's metrics). When
+    unset (the default), the output is byte-identical to the classic
+    single-registry render.
+    """
     if not _AVAILABLE:
         return (b"# prometheus_client not installed\n", "text/plain; charset=utf-8")
+    if _multiproc_enabled():
+        from prometheus_client import multiprocess
+
+        reg = CollectorRegistry()
+        multiprocess.MultiProcessCollector(reg)
+        return (generate_latest(reg), CONTENT_TYPE_LATEST)
     return (generate_latest(REGISTRY), CONTENT_TYPE_LATEST)
+
+
+def multiprocess_worker_shutdown() -> None:
+    """Remove this worker's per-PID mmap db files on worker exit (OP-2562).
+
+    Raw ``uvicorn --workers`` has no gunicorn ``child_exit`` hook, so the
+    FastAPI lifespan-shutdown block in backend/main.py calls this instead
+    (uvicorn triggers lifespan-shutdown on the SIGTERM it sends workers).
+    No-op unless PROMETHEUS_MULTIPROC_DIR is set. Residual gap (accepted,
+    documented in the runbook): a worker that is SIGKILLed (e.g. OOM) and
+    respawned inside a living container never runs this, leaving one stale
+    db file — a bounded transient overcount — until the next container
+    restart wipes the dir.
+    """
+    if not _AVAILABLE or not _multiproc_enabled():
+        return
+    from prometheus_client import multiprocess
+
+    multiprocess.mark_process_dead(os.getpid())
 
 
 def reset_for_tests() -> None:
@@ -1158,6 +1252,7 @@ def reset_for_tests() -> None:
     )
     sse_subscribers = Gauge(
         "omnisight_sse_subscribers", "SSE subscribers", registry=REGISTRY,
+        multiprocess_mode="livesum",  # per-worker in-flight connection count; sums across live workers
     )
     sse_dropped_total = Counter(
         "omnisight_sse_dropped_total", "SSE drops", registry=REGISTRY,
@@ -1207,21 +1302,25 @@ def reset_for_tests() -> None:
         "omnisight_tenant_cpu_percent",
         "Per-tenant CPU usage summed across all running sandbox containers",
         labelnames=("tenant_id",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_mem_used_gb = Gauge(
         "omnisight_tenant_mem_used_gb",
         "Per-tenant memory usage (GiB)",
         labelnames=("tenant_id",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_disk_used_gb = Gauge(
         "omnisight_tenant_disk_used_gb",
         "Per-tenant on-disk usage (GiB)",
         labelnames=("tenant_id",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_sandbox_count = Gauge(
         "omnisight_tenant_sandbox_count",
         "Running sandbox containers per tenant",
         labelnames=("tenant_id",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # snapshot from the single sampling loop; last live write wins
     )
     tenant_cpu_seconds_total = Counter(
         "omnisight_tenant_cpu_seconds_total",
@@ -1242,26 +1341,31 @@ def reset_for_tests() -> None:
         "omnisight_host_cpu_percent",
         "Whole-host CPU utilisation (0-100)",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_mem_percent = Gauge(
         "omnisight_host_mem_percent",
         "Whole-host memory utilisation (0-100)",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_disk_percent = Gauge(
         "omnisight_host_disk_percent",
         "Root filesystem utilisation (0-100)",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_loadavg_1m = Gauge(
         "omnisight_host_loadavg_1m",
         "1-minute load average",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     host_container_count = Gauge(
         "omnisight_host_container_count",
         "Running Docker container count labelled by source",
         labelnames=("source",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # whole-host snapshot; never sum across workers
     )
     skill_extracted_total = Counter(
         "omnisight_skill_extracted_total", "Skill extraction events",
@@ -1293,6 +1397,7 @@ def reset_for_tests() -> None:
         "omnisight_intelligence_score",
         "Per-agent IIS score across 4 dims",
         labelnames=("agent_id", "dim"), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # point-in-time score snapshot
     )
     intelligence_alert_total = Counter(
         "omnisight_intelligence_alert_total",
@@ -1339,6 +1444,7 @@ def reset_for_tests() -> None:
     finetune_eval_score = Gauge(
         "omnisight_finetune_eval_score", "Hold-out weighted score per model",
         labelnames=("model",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # latest eval snapshot
     )
     prompt_cache_hit_total = Counter(
         "omnisight_prompt_cache_hit_total", "Cached input tokens",
@@ -1352,6 +1458,7 @@ def reset_for_tests() -> None:
         "omnisight_rtk_compression_ratio",
         "Latest RTK output compression savings ratio (0..1)",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # latest-ratio snapshot
     )
     rtk_fallback_total = Counter(
         "omnisight_rtk_fallback_total",
@@ -1362,11 +1469,13 @@ def reset_for_tests() -> None:
         "omnisight_rtk_install_status",
         "1 when the RTK binary is installed and runnable, 0 otherwise",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
     )
     frontend_build_lag_commits = Gauge(
         "omnisight_frontend_build_lag_commits",
         "Commits between the production frontend build and master HEAD",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # single global snapshot
     )
     fe_be_bundle_mismatch_total = Counter(
         "omnisight_fe_be_bundle_mismatch_total",
@@ -1377,6 +1486,7 @@ def reset_for_tests() -> None:
     intelligence_iq_score = Gauge(
         "omnisight_intelligence_iq_score", "Latest IQ weighted score",
         labelnames=("model",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # latest benchmark snapshot
     )
     intelligence_iq_regression_total = Counter(
         "omnisight_intelligence_iq_regression_total",
@@ -1415,6 +1525,7 @@ def reset_for_tests() -> None:
     queue_depth = Gauge(
         "omnisight_queue_depth", "Queue depth by priority/state",
         labelnames=("priority", "state"), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global queue state sampled by each worker; not per-worker additive
     )
     queue_claim_duration_seconds = Histogram(
         "omnisight_queue_claim_duration_seconds", "Pull duration",
@@ -1425,10 +1536,12 @@ def reset_for_tests() -> None:
     worker_active = Gauge(
         "omnisight_worker_active", "Active worker count",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global registry count sampled; not per-worker additive
     )
     worker_inflight = Gauge(
         "omnisight_worker_inflight", "Per-process in-flight tasks",
         registry=REGISTRY,
+        multiprocess_mode="livesum",  # per-worker in-flight task count; sums across live workers
     )
     worker_heartbeat_total = Counter(
         "omnisight_worker_heartbeat_total", "Heartbeat ticks",
@@ -1475,20 +1588,24 @@ def reset_for_tests() -> None:
         "omnisight_awaiting_human_plus_two_pending",
         "Number of changes waiting for the human +2 hard gate",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global pending count snapshot
     )
     awaiting_human_age_seconds = Gauge(
         "omnisight_awaiting_human_plus_two_age_seconds",
         "Wall-clock age of the oldest still-pending dual-sign change",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global oldest-age snapshot
     )
     worker_pool_capacity = Gauge(
         "omnisight_worker_pool_capacity",
         "Configured maximum concurrent in-flight tasks",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # config snapshot; identical across workers
     )
     process_start_time = Gauge(
         "omnisight_process_start_time_seconds", "Process start time",
         registry=REGISTRY,
+        multiprocess_mode="min",  # earliest worker start = process family start
     )
     process_start_time.set(time.time())
     global pep_decisions_total, pep_deny_total, pep_hold_duration_seconds
@@ -1511,6 +1628,7 @@ def reset_for_tests() -> None:
         "omnisight_semantic_entropy_score",
         "Rolling-window pairwise cosine-similarity mean for an agent's outputs",
         labelnames=("agent_id", "guild_id"), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # rolling-window score snapshot
     )
     cognitive_deadlock_total = Counter(
         "omnisight_cognitive_deadlock_total",
@@ -1527,6 +1645,7 @@ def reset_for_tests() -> None:
         "omnisight_scratchpad_size_bytes",
         "Size (bytes, on-disk ciphertext) of the most recent scratchpad write",
         labelnames=("agent_id", "guild_id"), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # size of the most recent write
     )
     token_continuation_total = Counter(
         "omnisight_token_continuation_total",
@@ -1556,6 +1675,7 @@ def reset_for_tests() -> None:
         "omnisight_backend_instance_up",
         "1 when this backend replica is serving traffic, 0 when draining/down",
         labelnames=("instance_id",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 liveness; a dead worker's value must drop, never sum
     )
     rolling_deploy_responses_total = Counter(
         "omnisight_rolling_deploy_responses_total",
@@ -1566,11 +1686,13 @@ def reset_for_tests() -> None:
         "omnisight_rolling_deploy_5xx_rate",
         "Rolling-window 5xx response rate (0..1) computed in-process",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # ratio snapshot; summing ratios is meaningless
     )
     replica_lag_seconds = Gauge(
         "omnisight_replica_lag_seconds",
         "Streaming replication lag from primary to standby, in seconds",
         labelnames=("replica",), registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global PG replication snapshot
     )
     readyz_latency_seconds = Histogram(
         "omnisight_readyz_latency_seconds",
@@ -1583,12 +1705,14 @@ def reset_for_tests() -> None:
         "omnisight_readyz_migrations_pending",
         "1 if alembic head on disk > applied revision, 0 if aligned",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
     )
     alembic_drift = Gauge(
         "omnisight_alembic_drift",
         "Alembic image-vs-DB drift state by direction",
         labelnames=("direction",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # global drift state snapshot
     )
     alembic_drift_probe_errors_total = Counter(
         "omnisight_alembic_drift_probe_errors_total",
@@ -1599,11 +1723,13 @@ def reset_for_tests() -> None:
         "omnisight_alembic_drift_unknown",
         "1 when image-vs-DB alembic drift cannot be computed, 0 otherwise",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
     )
     alembic_drift_last_collection_ts = Gauge(
         "omnisight_alembic_drift_last_collection_ts",
         "Unix timestamp of the last successful alembic drift collection",
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # heartbeat timestamp; last live write wins
     )
     # Y9 #285 row 4 — per-(tenant, project, product_line) billing metrics
     global billing_llm_calls_total, billing_llm_input_tokens_total
@@ -1662,6 +1788,7 @@ def reset_for_tests() -> None:
         "Fraction (0..1) of the per-worker label cap consumed by tracked values",
         labelnames=("dimension",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # per-worker fraction; never sums stale values
     )
     capability_matrix_unexpected_fallback_total = Counter(
         "omnisight_capability_matrix_unexpected_fallback_total",
@@ -1686,6 +1813,7 @@ def reset_for_tests() -> None:
         "1 if an auxiliary service is available, 0 if unavailable, NaN before first probe",
         labelnames=("service",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1/NaN status; summing would corrupt it
     )
     aux_service_available.labels(service="ai_core").set(float("nan"))
     dag_executor_up = Gauge(
@@ -1693,6 +1821,7 @@ def reset_for_tests() -> None:
         "1 while a DAG executor instance is armed and heart-beating, 0 once stopped",
         labelnames=("instance_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 liveness; a dead worker's value must drop
     )
     dag_executor_heartbeat_total = Counter(
         "omnisight_dag_executor_heartbeat_total",
@@ -1705,6 +1834,7 @@ def reset_for_tests() -> None:
         "Unix timestamp of the most recent DAG executor heartbeat, by instance",
         labelnames=("instance_id",),
         registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # heartbeat timestamp; last live write wins
     )
     project_state_axis_total = Counter(
         "omnisight_project_state_axis_total",
