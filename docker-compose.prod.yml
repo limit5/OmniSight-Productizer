@@ -867,6 +867,10 @@ services:
         condition: service_healthy
       backend-b:
         condition: service_healthy
+      # OP-2563: alerting fan-out — prometheus.yml's `alerting:` block
+      # targets alertmanager:9093, so bring the receiver up first.
+      alertmanager:
+        condition: service_healthy
     restart: unless-stopped
     stop_grace_period: 10s
     # FX.7.7 — cgroup memory caps. Prometheus TSDB compaction + 15d
@@ -877,6 +881,40 @@ services:
     mem_reservation: 256m
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:9090/-/healthy"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  # OP-2563 — Alertmanager: the paging half of the Phase S anti-hollow
+  # chain. S4 (v0.7.42) shipped the 4 project-state alert rules; without
+  # this service a firing alert surfaces only in Prometheus' own
+  # /api/v1/alerts and pages no one. Receivers ship as blackholes —
+  # the operator activates a real channel per
+  # docs/operations/observability-alerting-runbook.md.
+  alertmanager:
+    # v0.27.0 is the Alertmanager release that pairs with
+    # prom/prometheus:v2.54.1 above.
+    image: prom/alertmanager:v0.27.0
+    profiles: ["observability"]
+    ports:
+      - "9093:9093"
+    volumes:
+      - ./configs/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      # Named volume for silences + notification log (nflog) so they
+      # survive container recreation.
+      - omnisight-alertmanager:/alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    restart: unless-stopped
+    stop_grace_period: 10s
+    # FX.7.7 — cgroup memory caps. Alertmanager holds only the active
+    # alert set + silences/nflog; modest class, well under prometheus' 1g.
+    mem_limit: 256m
+    mem_reservation: 64m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "-T", "3", "http://127.0.0.1:9093/-/healthy"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1003,6 +1041,9 @@ volumes:
   omnisight-caddy-config:
     driver: local
   omnisight-prom:
+    driver: local
+  # OP-2563: Alertmanager silences + notification log.
+  omnisight-alertmanager:
     driver: local
   omnisight-grafana:
     driver: local

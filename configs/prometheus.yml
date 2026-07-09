@@ -6,6 +6,14 @@ global:
 rule_files:
   - /etc/prometheus/obs-rules/project_state_health.yml
 
+# OP-2563 — fan firing alerts out to Alertmanager (compose service
+# `alertmanager`, observability profile) so they page instead of only
+# surfacing in /api/v1/alerts.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+
 scrape_configs:
   - job_name: omnisight-backend
     metrics_path: /api/v1/metrics

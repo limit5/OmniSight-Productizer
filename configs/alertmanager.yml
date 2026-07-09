@@ -1,0 +1,53 @@
+# OP-2563 — Alertmanager routing config for the Phase S anti-hollow alerts.
+#
+# Receivers are blackholes until an operator supplies a channel; routing is
+# proven by /api/v2/alerts. See runbook for activation:
+# docs/operations/observability-alerting-runbook.md
+#
+# SECRET-FREE by design (CLAUDE.md L1): no webhook URL, Slack token, or
+# email password is committed here. Each receiver carries a commented-out
+# integration template — the operator uncomments ONE block and supplies the
+# secret via the operator secret mechanism (.env / secret file), never by
+# committing it to this file.
+
+route:
+  # The S4 rules (deploy/observability/prometheus/project_state_health.yml)
+  # were authored to route on the `severity` label.
+  group_by: ["alertname", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: "default"
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: "critical"
+
+receivers:
+  # Name-only receiver = valid blackhole (delivers nowhere).
+  - name: "default"
+    # ── Operator activation template (uncomment ONE, supply the secret) ──
+    # webhook_configs:
+    #   - url: "<YOUR-WEBHOOK-URL>"          # e.g. an on-call bridge endpoint
+    # slack_configs:
+    #   - api_url: "<YOUR-SLACK-WEBHOOK-URL>"
+    #     channel: "#omnisight-alerts"
+    # email_configs:
+    #   - to: "<oncall@example.invalid>"
+    #     from: "<alertmanager@example.invalid>"
+    #     smarthost: "<smtp-host:587>"
+    #     auth_username: "<smtp-user>"
+    #     auth_password: "<SUPPLIED-BY-OPERATOR>"
+
+  - name: "critical"
+    # ── Operator activation template (uncomment ONE, supply the secret) ──
+    # webhook_configs:
+    #   - url: "<YOUR-PAGING-WEBHOOK-URL>"   # e.g. PagerDuty Events v2 bridge
+    # slack_configs:
+    #   - api_url: "<YOUR-SLACK-WEBHOOK-URL>"
+    #     channel: "#omnisight-oncall"
+    # email_configs:
+    #   - to: "<oncall@example.invalid>"
+    #     from: "<alertmanager@example.invalid>"
+    #     smarthost: "<smtp-host:587>"
+    #     auth_username: "<smtp-user>"
+    #     auth_password: "<SUPPLIED-BY-OPERATOR>"

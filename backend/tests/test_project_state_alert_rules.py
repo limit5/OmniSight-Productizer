@@ -175,14 +175,22 @@ def test_prod_prometheus_mounts_observability_rule_directory() -> None:
     )
 
 
-def test_prometheus_config_loads_specific_file_without_glob_or_alerting() -> None:
+def test_prometheus_config_loads_specific_file_and_targets_alertmanager() -> None:
     config = yaml.safe_load(PROMETHEUS_CONFIG.read_text(encoding="utf-8"))
 
     assert config["rule_files"] == [
         "/etc/prometheus/obs-rules/project_state_health.yml"
     ]
     assert not any("*" in entry for entry in config["rule_files"])
-    assert "alerting" not in config
+    # OP-2563 supersedes the S4 alerting-absence pin: Prometheus now fans
+    # firing alerts out to the compose `alertmanager` service.
+    targets = [
+        target
+        for alertmanager in config["alerting"]["alertmanagers"]
+        for static in alertmanager["static_configs"]
+        for target in static["targets"]
+    ]
+    assert targets == ["alertmanager:9093"]
 
 
 def test_dashboard_exists_and_contains_required_project_state_queries() -> None:
