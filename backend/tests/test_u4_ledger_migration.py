@@ -106,7 +106,7 @@ class TestMigrationFileStructure:
         # OP-2567 U4-B: the sanctioned writer boundary is the ONE
         # allowlisted module — any OTHER file referencing the tables
         # still fails.
-        allowed = {"learned_item_publisher.py", "learned_item_approval.py"}
+        allowed = {"learned_item_publisher.py", "learned_item_approval.py", "learned_item_loader.py"}
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):
             rel = py.relative_to(BACKEND_ROOT)

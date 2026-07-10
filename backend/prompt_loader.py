@@ -960,6 +960,7 @@ def build_system_prompt(
     clone_spec_context: str = "",
     last_vite_error_banner: str = "",
     repo_map_preamble: str = "",
+    tenant_id: str | None = None,
 ) -> str:
     """Assemble the full system prompt from model rules + role skill + task skill + handoff.
 
@@ -1199,6 +1200,23 @@ def build_system_prompt(
             handoff_context = handoff_context[:_MAX_HANDOFF] + "\n... [handoff truncated]"
         sections.append(f"# Previous Task Handoff\n\n{handoff_context}")
 
+    # 5. U4-C2 learned items (OP-2572): pure-sync CACHE read — never the
+    # DB. Lazy import keeps this module's import side-effect-free and
+    # avoids a hard import edge for the dormant path (kill-switch OFF ⇒
+    # the read short-circuits to an empty block, loud+measured).
+    from backend.learned_item_loader import get_learned_items_block
+
+    learned_block, _learned_result = get_learned_items_block(
+        tenant_id=tenant_id,
+        context="\n".join(
+            x
+            for x in (domain_context, task_skill_context, handoff_context)
+            if x
+        ),
+    )
+    if learned_block:
+        sections.append(learned_block)
+
     assembled = "\n\n---\n\n".join(sections)
 
     # ZZ.C1 #305-1 checkbox 2: auto-accumulate a versioned row for this
@@ -1208,6 +1226,12 @@ def build_system_prompt(
     # inside ``capture_prompt_snapshot``. Never raises — capture is
     # best-effort and sync contexts (tests, scripts with no event
     # loop) are skipped silently.
-    _schedule_prompt_snapshot(assembled, agent_type, sub_type)
+    #
+    # V3.5 leak close (OP-2572): tenant learned content must never
+    # reach the shared any-reader prompt registry — SKIP the capture
+    # when the learned block was non-empty; empty block = unchanged
+    # capture behaviour.
+    if not learned_block:
+        _schedule_prompt_snapshot(assembled, agent_type, sub_type)
 
     return assembled
