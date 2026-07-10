@@ -428,7 +428,7 @@ class TestRealRepoManifest:
 
 class TestDormantShip:
     def test_no_non_test_module_references_the_loader(self) -> None:
-        own = {"eval_suite_manifest.py"}
+        own = {"eval_suite_manifest.py", "memory_promotion_eval.py"}
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):
             rel = py.relative_to(BACKEND_ROOT)

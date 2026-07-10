@@ -308,7 +308,7 @@ class TestDeterminism:
 
 class TestDormantShip:
     def test_no_nontest_module_references_the_new_module(self) -> None:
-        own = {"memory_eval_stats.py"}
+        own = {"memory_eval_stats.py", "memory_promotion_eval.py"}
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):
             rel = py.relative_to(BACKEND_ROOT)
