@@ -1479,6 +1479,8 @@ from backend.routers import tenant_egress as _tenant_egress_router  # M6
 _include_versioned_router(_tenant_egress_router.router)
 from backend.routers import decisions as _decisions_router  # Phase 47A
 _include_versioned_router(_decisions_router.router)
+from backend.routers import memory_promotion as _memory_promotion_router  # OP-2568 U4-D
+_include_versioned_router(_memory_promotion_router.router)
 from backend.routers import memory as _memory_router  # Phase 63-E
 _include_versioned_router(_memory_router.router)
 from backend.routers import intent as _intent_router  # Phase 68-C
