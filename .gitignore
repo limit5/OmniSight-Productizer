@@ -165,3 +165,6 @@ progress.txt.tmp
 /third_party/**/build
 .pnpm-store/
 **/.pnpm-store/
+
+# OP-2571: claude CLI session cache — untracked .cache/ wedged the runner dirty-check pre-push
+.cache/
