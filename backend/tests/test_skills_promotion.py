@@ -229,6 +229,9 @@ async def test_scaffoldable_skills_endpoint_uses_skill_registry(client, monkeypa
 async def test_promote_moves_into_live_tree(
     client, isolated_pending_dir, monkeypatch,
 ):
+    # U4 step-0 interlock: promotion is deny-by-default; the test client is the
+    # non-bot "anonymous" admin, so enabling the flag is all that's needed.
+    monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED", "true")
     isolated_pending_dir.mkdir(parents=True, exist_ok=True)
     src = isolated_pending_dir / "skill-promo-test.md"
     src.write_text("---\nname: promo\n---\n# body")

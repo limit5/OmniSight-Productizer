@@ -101,6 +101,7 @@ def _admin_user():
 async def test_direct_review_promote_uses_db_row_and_writes_pack(
     monkeypatch, tmp_path,
 ):
+    monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED", "true")  # U4 step-0 interlock
     conn = _FakeConn()
     from backend import audit as _audit
     import backend.db_pool as _db_pool
@@ -233,7 +234,11 @@ async def test_create_list_get_patch_delete_auto_skill(_auto_skills_client):
     assert deleted.json()["previous_status"] == "draft"
 
 
-async def test_review_then_promote_writes_skill_pack(_auto_skills_client):
+async def test_review_then_promote_writes_skill_pack(_auto_skills_client, monkeypatch):
+    # U4 step-0 interlock: promotion is deny-by-default; the anonymous test
+    # client is a non-bot admin, so enabling the flag lets the existing
+    # review/status logic (incl. the 409 "too early") run unchanged.
+    monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED", "true")
     client, live_root = _auto_skills_client
     created = await client.post(
         "/api/v1/auto-skills",
