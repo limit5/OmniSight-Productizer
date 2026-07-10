@@ -177,6 +177,15 @@ async def approve_decision(decision_id: str, req: ResolveRequest,
     existing = de.get(decision_id)
     if existing is None:
         return JSONResponse(status_code=404, content={"detail": "decision not found"})
+    # OP-2568 U4-D: memory/* digest cards are visibility-only — this
+    # generic endpoint is bot-approvable (optional bearer), so approving
+    # one here must be impossible. Reject/undo stay untouched.
+    if existing.kind.startswith("memory/"):
+        raise HTTPException(
+            status_code=403,
+            detail="memory/* approvals only via the dedicated "
+                   "human-only memory-promotions endpoint",
+        )
     if existing.status != de.DecisionStatus.pending:
         return JSONResponse(status_code=409, content={"detail": f"not pending (status={existing.status.value})"})
     # Phase 54: destructive approvals require admin role.
