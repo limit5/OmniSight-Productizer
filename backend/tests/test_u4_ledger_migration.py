@@ -103,6 +103,10 @@ class TestMigrationFileStructure:
     def test_dormant_ship_no_producers_or_consumers(self) -> None:
         # MUST-NOT: nothing outside the migration + tests may reference
         # the new tables (producers land in U4-I, publisher/loader U4-C).
+        # OP-2567 U4-B: the sanctioned writer boundary is the ONE
+        # allowlisted module — any OTHER file referencing the tables
+        # still fails.
+        allowed = {"learned_item_publisher.py"}
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):
             rel = py.relative_to(BACKEND_ROOT)
@@ -110,6 +114,8 @@ class TestMigrationFileStructure:
             if parts[0] in ("tests", "node_modules") or (
                 parts[:2] == ("alembic", "versions")
             ):
+                continue
+            if str(rel) in allowed:
                 continue
             text = py.read_text(errors="ignore")
             if any(table in text for table in ALL_TABLES):
