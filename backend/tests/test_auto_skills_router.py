@@ -101,7 +101,6 @@ def _admin_user():
 async def test_direct_review_promote_uses_db_row_and_writes_pack(
     monkeypatch, tmp_path,
 ):
-    monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED", "true")  # U4 step-0 interlock
     conn = _FakeConn()
     from backend import audit as _audit
     import backend.db_pool as _db_pool
@@ -136,31 +135,15 @@ async def test_direct_review_promote_uses_db_row_and_writes_pack(
     )
     assert reviewed["status"] == "reviewed"
 
-    set_tenant_id("t-prior")
-    try:
-        promoted = await _router.promote_auto_skill(
-            created["id"], user=_admin_user(),
-        )
-    finally:
-        assert current_tenant_id() == "t-prior"
-        set_tenant_id(None)
-    assert promoted["skill"]["status"] == "promoted"
-    skill_file = tmp_path / "skills" / "auto-direct" / "SKILL.md"
-    assert Path(promoted["path"]) == skill_file
-    assert skill_file.read_text(encoding="utf-8").endswith("# Reviewed\n")
-
-    assert len(captured) == 1
-    row = captured[0]
-    assert row["tenant_context"] == "t-default"
-    assert row["action"] == "skill_promoted"
-    assert row["entity_kind"] == "skill"
-    assert row["entity_id"] == "auto-direct"
-    assert row["actor"] == "admin@example.test"
-    assert row["before"]["auto_distilled_skill_id"] == created["id"]
-    assert row["after"]["auto_distilled_skill_id"] == created["id"]
-    assert row["after"]["source_task_id"] is None
-    assert row["after"]["path"] == str(skill_file)
-    assert len(row["after"]["markdown_sha256"]) == 64
+    # U4-0b: the legacy promote path is retired — promote_auto_skill raises
+    # HTTP 410 unconditionally; nothing is written and no promotion is audited.
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as exc:
+        await _router.promote_auto_skill(created["id"], user=_admin_user())
+    assert exc.value.status_code == 410
+    assert exc.value.detail["error"] == "legacy_promotion_retired"
+    assert not (tmp_path / "skills" / "auto-direct" / "SKILL.md").exists()
+    assert not any(c.get("action") == "skill_promoted" for c in captured)
 
 
 @pytest.fixture
@@ -234,11 +217,10 @@ async def test_create_list_get_patch_delete_auto_skill(_auto_skills_client):
     assert deleted.json()["previous_status"] == "draft"
 
 
-async def test_review_then_promote_writes_skill_pack(_auto_skills_client, monkeypatch):
-    # U4 step-0 interlock: promotion is deny-by-default; the anonymous test
-    # client is a non-bot admin, so enabling the flag lets the existing
-    # review/status logic (incl. the 409 "too early") run unchanged.
-    monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED", "true")
+async def test_promote_endpoint_is_retired(_auto_skills_client):
+    # U4-0b: the legacy promote endpoint is RETIRED — HTTP 410 unconditionally
+    # (before AND after review), writes no pack, no flag re-opens it. Create +
+    # review still work.
     client, live_root = _auto_skills_client
     created = await client.post(
         "/api/v1/auto-skills",
@@ -249,10 +231,9 @@ async def test_review_then_promote_writes_skill_pack(_auto_skills_client, monkey
     )
     skill_id = created.json()["id"]
 
-    promote_too_early = await client.post(
-        f"/api/v1/auto-skills/{skill_id}/promote"
-    )
-    assert promote_too_early.status_code == 409
+    retired = await client.post(f"/api/v1/auto-skills/{skill_id}/promote")
+    assert retired.status_code == 410
+    assert retired.json()["detail"]["error"] == "legacy_promotion_retired"
 
     reviewed = await client.post(
         f"/api/v1/auto-skills/{skill_id}/review",
@@ -263,18 +244,10 @@ async def test_review_then_promote_writes_skill_pack(_auto_skills_client, monkey
     )
     assert reviewed.status_code == 200, reviewed.text
     assert reviewed.json()["status"] == "reviewed"
-    assert reviewed.json()["version"] == 2
 
-    promoted = await client.post(f"/api/v1/auto-skills/{skill_id}/promote")
-    assert promoted.status_code == 200, promoted.text
-    body = promoted.json()
-    assert body["skill"]["status"] == "promoted"
-    skill_file = Path(body["path"])
-    assert skill_file == live_root / "auto-promoted" / "SKILL.md"
-    assert skill_file.read_text(encoding="utf-8").endswith("# Reviewed\n")
-
-    delete_promoted = await client.delete(f"/api/v1/auto-skills/{skill_id}")
-    assert delete_promoted.status_code == 409
+    still_retired = await client.post(f"/api/v1/auto-skills/{skill_id}/promote")
+    assert still_retired.status_code == 410
+    assert not (live_root / "auto-promoted" / "SKILL.md").exists()
 
 
 async def test_tenant_scoping_filters_rows(pg_test_pool, _auto_skills_client):

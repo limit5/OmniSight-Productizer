@@ -1,26 +1,20 @@
-"""Emergency promotion interlock (Phase U4 step 0).
+"""Legacy learned-item promotion is RETIRED (Phase U4 step-0b).
 
-Deny-by-default + human-only gate on EVERY runtime path that promotes a
-"learned item" (an auto-distilled skill or a pending skill candidate) into
-the injected ``configs/skills/`` prompt set (and its vector-memory sink).
+HISTORY: the step-0 interlock (OP-2564) made the two legacy FS-writing promote
+endpoints — ``routers/auto_skills.py::promote_auto_skill`` and
+``routers/skills.py`` ``/pending/{name}/promote`` — human-only + deny-by-default,
+closing the live hole where any api-key principal (``role="admin"`` per auth.py)
+could promote arbitrary Markdown into the injected ``configs/skills/`` prompt set
+with no eval. But that gate was human-OVERRIDEABLE: setting
+``OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED=true`` reactivated the legacy UNGATED
+writers (audit finding, 2026-07-10).
 
-WHY THIS EXISTS (verified live hole, 2026-07-10):
-  * ``auth.py`` assigns ``role="admin"`` to any valid API-key bearer, so the
-    ``require_admin`` dependency on the promote endpoints does NOT stop a
-    bot / service principal — an api-key (incl. a prompt-injected runner)
-    could promote arbitrary Markdown into the GLOBAL prompt set with no eval.
-  * There are two such write endpoints (``routers/auto_skills.py`` DB-row
-    promote and ``routers/skills.py`` ``/pending/{name}/promote``), and the
-    Decision-Engine ``skill/promote`` proposal is ``severity=routine`` (auto-
-    resolves in supervised+).
-  * Promotion of self-distilled guidance into future agent prompts is exactly
-    the memory-poisoning surface Phase U's eval gate is meant to govern. Until
-    that gate exists, promotion must NOT happen automatically and must NEVER be
-    reachable by a non-human principal.
-
-This module is the single chokepoint both endpoints call. The eventual U4
-``publish_learned_item_version()`` supersedes it; until then this closes the
-hole deny-by-default. See docs/design/2026-07-10-phase-u4-eval-gated-promotion-design.md §F.
+U4-0b hard-closes that: the legacy promote path is now **UNCONDITIONALLY denied
+(HTTP 410 Gone), independent of any flag or principal**. Promotion of a learned
+item into the injected set happens ONLY via the U4 canonical gated publisher
+(eval-passed + human-approved, materialized DB-view live set) — a NEW path that
+does not reuse these endpoints. Only that publisher may ever replace this denial.
+See docs/design/2026-07-10-phase-u4-a0-contract-freeze.md (§G1, §G7).
 """
 from __future__ import annotations
 
@@ -29,41 +23,38 @@ import os
 from fastapi import HTTPException
 
 from backend import auth
-from backend.api.release_approval import _assert_human_operator
 
-# Operators flip this ON deliberately (a human, after weighing the item) once
-# they accept the pre-U4 risk; default-OFF means the injected set cannot grow
-# by default. Once U4's eval gate lands, promotion is gated on eval-PASS +
-# an approved human-only proposal instead of this coarse flag.
+# The kill-switch flag for the FUTURE U4 canonical publisher / snapshot delivery
+# (freeze §G7). It NO LONGER gates the retired legacy endpoints — those are
+# unconditionally denied by ``assert_promotion_allowed`` regardless of this flag.
 _ENABLE_ENV = "OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
 
 
 def promotion_enabled() -> bool:
-    """True only when an operator has explicitly enabled promotion."""
+    """Kill-switch for the FUTURE U4 canonical publisher / snapshot delivery
+    (freeze §G7). It does NOT gate the retired legacy promote endpoints."""
     return (os.environ.get(_ENABLE_ENV) or "").strip().lower() in _TRUTHY
 
 
 def assert_promotion_allowed(user: auth.User) -> None:
-    """Gate a learned-item promotion. Raises HTTPException(403) if refused.
+    """RETIRED (U4-0b): the legacy FS-writing promote path is unconditionally
+    unavailable — always raises HTTP 410, independent of flag or principal.
 
-    Two independent checks (defense in depth):
-      1. HUMAN-ONLY — rejects api-key / bot / ai-* principals even though they
-         hold ``role="admin"`` (``require_admin`` is not enough on its own).
-      2. DENY-BY-DEFAULT — refuses unless an operator has explicitly enabled
-         promotion, so the injected prompt set cannot grow without a
-         deliberate human act while the U4 eval gate is being built.
+    Promotion is only via the U4 canonical eval-gated, human-approved publisher.
+    The ``user`` argument is retained for call-site compatibility (both legacy
+    endpoints already call this chokepoint) but is not consulted: retirement is
+    unconditional, so no flag or role can re-open the ungated legacy writers.
     """
-    _assert_human_operator(user)
-    if not promotion_enabled():
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "promotion_disabled",
-                "reason": (
-                    "learned-item promotion is deny-by-default until the U4 "
-                    "eval-gated promotion substrate exists; set "
-                    f"{_ENABLE_ENV}=true to override (human-only, deliberate)."
-                ),
-            },
-        )
+    del user  # unconditional retirement — principal is irrelevant
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "error": "legacy_promotion_retired",
+            "reason": (
+                "the legacy learned-item promote endpoints are retired (U4-0b); "
+                "promotion is only via the U4 canonical eval-gated, human-approved "
+                "publisher. This denial is unconditional — no flag re-opens it."
+            ),
+        },
+    )

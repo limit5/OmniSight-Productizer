@@ -226,12 +226,11 @@ async def test_scaffoldable_skills_endpoint_uses_skill_registry(client, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_promote_moves_into_live_tree(
+async def test_promote_is_retired(
     client, isolated_pending_dir, monkeypatch,
 ):
-    # U4 step-0 interlock: promotion is deny-by-default; the test client is the
-    # non-bot "anonymous" admin, so enabling the flag is all that's needed.
-    monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED", "true")
+    # U4-0b: the legacy /pending/{name}/promote endpoint is RETIRED — HTTP 410
+    # unconditionally; the pending file is NOT moved into the live tree.
     isolated_pending_dir.mkdir(parents=True, exist_ok=True)
     src = isolated_pending_dir / "skill-promo-test.md"
     src.write_text("---\nname: promo\n---\n# body")
@@ -242,14 +241,11 @@ async def test_promote_moves_into_live_tree(
         monkeypatch.setattr(_sk_router, "_SKILLS_LIVE", live_root, raising=False)
 
         r = await client.post("/api/v1/skills/pending/skill-promo-test.md/promote")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["slug"] == "promo-test"
-        moved = live_root / "promo-test" / "SKILL.md"
-        assert moved.exists()
-        assert "# body" in moved.read_text()
-        # Source removed.
-        assert not src.exists()
+        assert r.status_code == 410
+        assert r.json()["detail"]["error"] == "legacy_promotion_retired"
+        # Nothing moved; source untouched.
+        assert not (live_root / "promo-test" / "SKILL.md").exists()
+        assert src.exists()
 
 
 @pytest.mark.asyncio
