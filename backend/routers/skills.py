@@ -97,12 +97,14 @@ async def read_pending(name: str,
 
 @router.post("/pending/{name}/promote")
 async def promote(name: str,
-                  _user=Depends(_au.require_admin)) -> dict:
+                  user=Depends(_au.require_admin)) -> dict:
     """Move a pending candidate into the live skills tree.
 
     Layout: `configs/skills/<slug>/SKILL.md` (matches the existing
     skill format used by mcp-builder, npu-detection, etc.).
     """
+    from backend import learned_item_interlock as _interlock
+    _interlock.assert_promotion_allowed(user)  # U4 step-0: human-only + deny-by-default
     src = _safe_pending_path(name)
     # Slug is the filename minus prefix and .md extension.
     slug = src.stem.removeprefix("skill-")

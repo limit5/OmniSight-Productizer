@@ -353,6 +353,8 @@ async def promote_auto_skill(
     skill_id: str,
     user: _au.User = Depends(_au.require_admin),
 ) -> dict:
+    from backend import learned_item_interlock as _interlock
+    _interlock.assert_promotion_allowed(user)  # U4 step-0: human-only + deny-by-default
     tenant_id = _actor_tenant(user)
     from backend.db_pool import get_pool
 
