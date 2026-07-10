@@ -991,6 +991,76 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # OP-2570 — U4 memory-promotion observability surface (freeze G7).
+    # ALL frozen G7 names registered in ONE block so the remaining U4
+    # tickets never conflict on this file; only the promotion and
+    # reconcile-divergence counters are incremented in this increment —
+    # the rest are registered-only until later U4 slices wire them.
+    memory_quarantine_depth = Gauge(
+        "omnisight_memory_quarantine_depth",
+        "Learned-item candidates sitting in quarantine awaiting eval",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # depth snapshot; last live write wins
+    )
+    memory_promotion_total = Counter(
+        "omnisight_memory_promotion_total",
+        "Memory-promotion lifecycle outcomes, by decision",
+        labelnames=("decision",),
+        registry=REGISTRY,
+    )
+    memory_eval_delta = Gauge(
+        "omnisight_memory_eval_delta",
+        "Latest candidate-vs-baseline eval delta",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # point-in-time delta; last live write wins
+    )
+    memory_neg_control_catch_total = Counter(
+        "omnisight_memory_neg_control_catch_total",
+        "Negative-control candidates caught by the eval gate",
+        registry=REGISTRY,
+    )
+    memory_failclosed_total = Counter(
+        "omnisight_memory_failclosed_total",
+        "Memory-promotion fail-closed rejections, by reason",
+        labelnames=("reason",),
+        registry=REGISTRY,
+    )
+    memory_proposal_outcome_total = Counter(
+        "omnisight_memory_proposal_outcome_total",
+        "Memory-promotion proposal outcomes, by decision",
+        labelnames=("decision",),
+        registry=REGISTRY,
+    )
+    memory_delivery_total = Counter(
+        "omnisight_memory_delivery_total",
+        "Learned-item deliveries into agent context, by result",
+        labelnames=("result",),
+        registry=REGISTRY,
+    )
+    memory_reconcile_divergence_total = Counter(
+        "omnisight_memory_reconcile_divergence_total",
+        "Publication-invariant divergences, by scope and reason family",
+        labelnames=("scope", "reason"),
+        registry=REGISTRY,
+    )
+    memory_snapshot_stale_total = Counter(
+        "omnisight_memory_snapshot_stale_total",
+        "Snapshot reads that exceeded the staleness budget",
+        registry=REGISTRY,
+    )
+    memory_enabled = Gauge(
+        "omnisight_memory_enabled",
+        "1 while the memory-promotion kill-switch is ON, 0 otherwise",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
+    )
+    memory_liveness_heartbeat = Gauge(
+        "omnisight_memory_liveness_heartbeat",
+        "Unix timestamp of the most recent memory-pipeline heartbeat",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # heartbeat timestamp set by emitters; last live write wins
+    )
+
 else:
     # No-op stubs so callers don't have to guard every increment.
     class _NoOp:
@@ -1117,6 +1187,18 @@ else:
     project_state_axis_total = _NoOp()  # type: ignore
     project_state_structural_half_total = _NoOp()  # type: ignore
     project_state_axis_latency_seconds = _NoOp()  # type: ignore
+    # OP-2570 — U4 memory-promotion observability surface (freeze G7)
+    memory_quarantine_depth = _NoOp()  # type: ignore
+    memory_promotion_total = _NoOp()  # type: ignore
+    memory_eval_delta = _NoOp()  # type: ignore
+    memory_neg_control_catch_total = _NoOp()  # type: ignore
+    memory_failclosed_total = _NoOp()  # type: ignore
+    memory_proposal_outcome_total = _NoOp()  # type: ignore
+    memory_delivery_total = _NoOp()  # type: ignore
+    memory_reconcile_divergence_total = _NoOp()  # type: ignore
+    memory_snapshot_stale_total = _NoOp()  # type: ignore
+    memory_enabled = _NoOp()  # type: ignore
+    memory_liveness_heartbeat = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1854,4 +1936,75 @@ def reset_for_tests() -> None:
         labelnames=("axis",),
         buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 2.0),
         registry=REGISTRY,
+    )
+    # OP-2570 — U4 memory-promotion observability surface (freeze G7)
+    global memory_quarantine_depth, memory_promotion_total
+    global memory_eval_delta, memory_neg_control_catch_total
+    global memory_failclosed_total, memory_proposal_outcome_total
+    global memory_delivery_total, memory_reconcile_divergence_total
+    global memory_snapshot_stale_total, memory_enabled
+    global memory_liveness_heartbeat
+    memory_quarantine_depth = Gauge(
+        "omnisight_memory_quarantine_depth",
+        "Learned-item candidates sitting in quarantine awaiting eval",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # depth snapshot; last live write wins
+    )
+    memory_promotion_total = Counter(
+        "omnisight_memory_promotion_total",
+        "Memory-promotion lifecycle outcomes, by decision",
+        labelnames=("decision",),
+        registry=REGISTRY,
+    )
+    memory_eval_delta = Gauge(
+        "omnisight_memory_eval_delta",
+        "Latest candidate-vs-baseline eval delta",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # point-in-time delta; last live write wins
+    )
+    memory_neg_control_catch_total = Counter(
+        "omnisight_memory_neg_control_catch_total",
+        "Negative-control candidates caught by the eval gate",
+        registry=REGISTRY,
+    )
+    memory_failclosed_total = Counter(
+        "omnisight_memory_failclosed_total",
+        "Memory-promotion fail-closed rejections, by reason",
+        labelnames=("reason",),
+        registry=REGISTRY,
+    )
+    memory_proposal_outcome_total = Counter(
+        "omnisight_memory_proposal_outcome_total",
+        "Memory-promotion proposal outcomes, by decision",
+        labelnames=("decision",),
+        registry=REGISTRY,
+    )
+    memory_delivery_total = Counter(
+        "omnisight_memory_delivery_total",
+        "Learned-item deliveries into agent context, by result",
+        labelnames=("result",),
+        registry=REGISTRY,
+    )
+    memory_reconcile_divergence_total = Counter(
+        "omnisight_memory_reconcile_divergence_total",
+        "Publication-invariant divergences, by scope and reason family",
+        labelnames=("scope", "reason"),
+        registry=REGISTRY,
+    )
+    memory_snapshot_stale_total = Counter(
+        "omnisight_memory_snapshot_stale_total",
+        "Snapshot reads that exceeded the staleness budget",
+        registry=REGISTRY,
+    )
+    memory_enabled = Gauge(
+        "omnisight_memory_enabled",
+        "1 while the memory-promotion kill-switch is ON, 0 otherwise",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # 0/1 status; summing would corrupt it
+    )
+    memory_liveness_heartbeat = Gauge(
+        "omnisight_memory_liveness_heartbeat",
+        "Unix timestamp of the most recent memory-pipeline heartbeat",
+        registry=REGISTRY,
+        multiprocess_mode="livemostrecent",  # heartbeat timestamp set by emitters; last live write wins
     )

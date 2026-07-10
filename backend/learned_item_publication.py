@@ -137,6 +137,57 @@ def compute_live_set_hash(membership: Iterable[dict[str, Any]]) -> str:
     return hashlib.sha256(payload.encode("ascii")).hexdigest()
 
 
+def derive_membership_entry(
+    *,
+    version_id: str,
+    rendered_payload_sha256: str,
+    delivery_mode: str,
+    publication_event_seq: int | None,
+) -> dict:
+    """OP-2570 U4-C1 — the ONE constructor of live-set membership
+    entries (exactly the four G4 keys; ``compute_live_set_hash``
+    validates key-exactness downstream)."""
+    return {
+        "version_id": version_id,
+        "rendered_payload_sha256": rendered_payload_sha256,
+        "delivery_mode": delivery_mode,
+        "publication_event_seq": publication_event_seq,
+    }
+
+
+def check_publication_invariant(
+    ledger_membership: Iterable[dict[str, Any]],
+    snapshot_membership: Iterable[dict[str, Any]],
+) -> tuple[str, ...]:
+    """OP-2570 U4-C1 — pure comparator for the freeze-V3.4 publication
+    invariant (ledger membership == snapshot membership).
+
+    Both arguments are iterables of membership dicts (the G4 shape).
+    Returns a tuple of divergence reason strings — empty means the
+    invariant holds:
+
+    * ``missing_from_snapshot:<version_id>`` — live per the ledger but
+      absent from the snapshot side;
+    * ``extra_in_snapshot:<version_id>`` — in the snapshot but not live
+      per the ledger;
+    * ``hash_mismatch:<version_id>`` — same version on both sides with
+      a differing component (rendered sha / delivery mode / seq).
+
+    Deterministic ordering: reasons sort by version_id ascending.
+    """
+    ledger = {m["version_id"]: m for m in ledger_membership}
+    snapshot = {m["version_id"]: m for m in snapshot_membership}
+    reasons: list[str] = []
+    for version_id in sorted(set(ledger) | set(snapshot)):
+        if version_id not in snapshot:
+            reasons.append(f"missing_from_snapshot:{version_id}")
+        elif version_id not in ledger:
+            reasons.append(f"extra_in_snapshot:{version_id}")
+        elif ledger[version_id] != snapshot[version_id]:
+            reasons.append(f"hash_mismatch:{version_id}")
+    return tuple(reasons)
+
+
 def advisory_lock_key(scope_key: str) -> str:
     """Returns the scope_key unchanged — locking uses the repo idiom
     ``pg_advisory_xact_lock(hashtext($1))``, so the key derivation is
