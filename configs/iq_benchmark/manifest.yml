@@ -1,0 +1,27 @@
+# OP-2573 U4-H — strict eval-suite manifest.
+#
+# Consumed ONLY by backend/eval_suite_manifest.py (dormant until U4-F).
+# `.yml` extension ON PURPOSE: iq_benchmark.load_all() globs `*.yaml`,
+# so this file is invisible to the legacy loader — zero log noise, zero
+# behavioral delta for nightly/finetune consumers.
+#
+# sha256 values are COMPUTED FROM THE SHARD BYTES at build time
+# (hashlib.sha256(path.read_bytes()).hexdigest()) — never hand-typed.
+# If a shard changes without a manifest bump, the strict loader (and
+# the tripwire test in backend/tests/test_u4_eval_suite_manifest.py)
+# fails LOUDLY with hash_mismatch. Recompute after any shard edit.
+#
+# min_neg_controls is 0 for both existing shards: they predate the
+# neg-control concept. Authoring real neg-control cases is U4-F/J
+# content work.
+
+schema_version: 1
+suites:
+  - path: firmware-debug.yaml
+    sha256: a8f3faff2d12879d095c6d2833039e81b97a64ec435fff9d39d93eb2561c40f8
+    min_cases: 10
+    min_neg_controls: 0
+  - path: holdout-finetune.yaml
+    sha256: a9d9f6b087da154af08b3e011a89037689230506266f45655e6e69efd27de2f4
+    min_cases: 10
+    min_neg_controls: 0
