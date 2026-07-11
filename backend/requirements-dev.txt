@@ -301,9 +301,9 @@ httpx==0.28.1 \
     # via
     #   -c backend/requirements.txt
     #   respx
-hypothesis==6.152.7 \
-    --hash=sha256:741dedcede2ae0f32c32929a5992804b61f2b0400403b6a51a881a2b58482782 \
-    --hash=sha256:c0b17dd428fcb6e962f60315f6f4a77816c72fbb281ce9ba73699dabead5ec82
+hypothesis==6.155.1 \
+    --hash=sha256:07c102031612b98d7c1be15ca3608c43e1234d9d07e3a190a53fa01536700196 \
+    --hash=sha256:2753f469df3ba3c483b08e0c37dbcbc41d8316ebb921abcc07493ee9c8a7d187
     # via -r backend/requirements-dev.in
 idna==3.11 \
     --hash=sha256:771a87f49d9defaf64091e6e6fe9c18d4833f140bd19464795bc32d966ca37ea \
