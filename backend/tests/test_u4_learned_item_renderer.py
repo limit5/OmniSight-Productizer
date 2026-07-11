@@ -363,7 +363,7 @@ class TestDormantShip:
         # A1's rglob pattern: nothing outside tests (and the two new
         # modules themselves) may reference them until U4-C/I wire the
         # producers/publisher.
-        own = {"learned_item_record.py", "learned_item_renderer.py"}
+        own = {"learned_item_record.py", "learned_item_renderer.py", "learned_item_producer.py"}
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):
             rel = py.relative_to(BACKEND_ROOT)

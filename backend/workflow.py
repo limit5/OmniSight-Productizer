@@ -414,7 +414,7 @@ async def finish(run_id: str, status: RunStatus = "completed",
                 run = await get_run(run_id)
                 steps = await list_steps(run_id)
                 if run is not None:
-                    result = _ex.extract(run, steps)
+                    result = await _ex.extract(run, steps)
                     if result.written:
                         _ex.propose_promotion(result, run)
         except Exception as exc:

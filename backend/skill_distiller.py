@@ -1,42 +1,35 @@
-"""BP.M.2 -- Architect Guild trajectory -> skill draft distiller.
+"""OP-2576 U4-I — Architect Guild trajectory → quarantined learned item.
 
-This is the runtime companion to BP.M.1's ``auto_distilled_skills``
-review queue.  A successful trajectory is eligible when it crossed the
-Blueprint Phase M difficulty gate:
+Redirect of the legacy BP.M.2 distiller: the ``auto_distilled_skills``
+draft-writer is REPLACED by the substrate producer
+(:mod:`backend.learned_item_producer`). Every eligible trajectory now
+lands as a quarantined substrate version row (inert downstream — no
+eval/approval/publication until U4-J).
 
-    (tool_calls > 5 OR iterations > 3) AND success == true
+Existing readers of ``auto_distilled_skills`` (routers/auto_skills.py,
+agents/skill_teaching.py, agents/skill_memory.py) keep working on the
+FROZEN ARCHIVE rows — this module simply stops adding to it. No dual
+truth: exactly one system writes learned content going forward.
 
-The distiller deliberately writes ``draft`` rows only.  BP.M.3 owns the
-REST review/promote surface and BP.M.5 owns audit_log traceability.
-
-Module-global / cross-worker state audit (SOP Step 1)
-----------------------------------------------------
-Only immutable thresholds and compiled regex live at module scope.  The
-draft row is written to the database, which is the cross-worker source
-of truth; no process-local mutable cache participates in decisions.
-
-Read-after-write timing audit (SOP Step 1)
------------------------------------------
-This module adds a new best-effort insert after a workflow has already
-finished successfully.  It does not parallelise an existing write path
-or change workflow status commit ordering; readers observe drafts after
-the DB insert commits.
+Thresholds (MIN_TOOL_CALLS/MIN_ITERATIONS), the ``is_enabled()`` L1
+gate, and the best-effort wrapper semantics of ``architect_guild_hook``
+are UNCHANGED — the workflow finish hook shape is preserved.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
-import hashlib
 import time
-import uuid
 from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
 from backend.db_context import current_tenant_id, set_tenant_id, tenant_insert_value
+from backend.learned_item_producer import submit_quarantined_version
 from backend.skills_scrubber import is_safe_to_promote, scrub
 
 logger = logging.getLogger(__name__)
@@ -58,7 +51,13 @@ class TrajectoryStats:
 
 @dataclass(frozen=True)
 class DistilledSkillDraft:
-    """Inserted ``auto_distilled_skills`` draft row."""
+    """Legacy result shell preserved for callers/tests.
+
+    The row itself no longer lives in ``auto_distilled_skills`` — the
+    ``id`` field now carries the substrate version id and
+    ``markdown_content`` carries the scrubbed source template. The
+    other fields document what the record was distilled from.
+    """
 
     id: str
     tenant_id: str
@@ -66,12 +65,16 @@ class DistilledSkillDraft:
     source_task_id: str | None
     markdown_content: str
     version: int = 1
-    status: str = "draft"
+    status: str = "quarantined"
 
 
 @dataclass(frozen=True)
 class SkillDistillationResult:
-    """Result from ``distill`` / ``architect_guild_hook``."""
+    """Result from ``distill`` / ``architect_guild_hook``.
+
+    Shape preserved (written / draft / stats / hits / skipped_reason) —
+    callers and existing tests key off these fields.
+    """
 
     written: bool
     draft: DistilledSkillDraft | None
@@ -88,7 +91,9 @@ def is_enabled() -> bool:
     """Mirror the existing L1 self-improvement gate.
 
     ``off | l3`` keeps the hook inert; ``l1 | l1+l3 | all`` enables
-    draft creation.  The review/promote gate remains human-owned.
+    quarantined-version creation. The eval/approval/publish gate is a
+    separate kill-switch (OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED)
+    owned by U4-C/D/J — this L1 gate remains the intake gate.
     """
 
     level = (os.environ.get("OMNISIGHT_SELF_IMPROVE_LEVEL") or "off").strip().lower()
@@ -321,51 +326,93 @@ def build_markdown(
     return skill_name, "\n".join(frontmatter + body)
 
 
-def _row_to_draft(row: Any, *, fallback: DistilledSkillDraft) -> DistilledSkillDraft:
-    if row is None:
-        return fallback
-    return DistilledSkillDraft(
-        id=row["id"],
-        tenant_id=row["tenant_id"],
-        skill_name=row["skill_name"],
-        source_task_id=row["source_task_id"],
-        markdown_content=row["markdown_content"],
-        version=int(row["version"]),
-        status=row["status"],
-    )
+_WHEN_HEADING = "## When To Use"
+_PROCEDURE_HEADING = "## Draft Procedure"
+_TRAJECTORY_HEADING = "## Trajectory Summary"
+_NEXT_HEADING_PREFIX = "## "
 
 
-async def _insert_draft(
-    draft: DistilledSkillDraft,
-    *,
-    conn: Any | None = None,
-) -> DistilledSkillDraft:
-    sql = (
-        "INSERT INTO auto_distilled_skills ("
-        "id, tenant_id, skill_name, source_task_id, markdown_content, "
-        "version, status"
-        ") VALUES ($1, $2, $3, $4, $5, $6, $7) "
-        "RETURNING id, tenant_id, skill_name, source_task_id, "
-        "markdown_content, version, status"
-    )
-    params = (
-        draft.id,
-        draft.tenant_id,
-        draft.skill_name,
-        draft.source_task_id,
-        draft.markdown_content,
-        draft.version,
-        draft.status,
-    )
-    if conn is not None:
-        row = await conn.fetchrow(sql, *params)
-        return _row_to_draft(row, fallback=draft)
+def _extract_section(markdown: str, heading: str) -> list[str]:
+    """Return the non-empty lines inside a ``## Heading`` section
+    (until the next ``## Heading`` or end-of-doc)."""
+    lines = markdown.splitlines()
+    try:
+        start = lines.index(heading)
+    except ValueError:
+        return []
+    out: list[str] = []
+    for line in lines[start + 1:]:
+        if line.startswith(_NEXT_HEADING_PREFIX):
+            break
+        stripped = line.strip()
+        if stripped:
+            out.append(stripped)
+    return out
 
-    from backend.db_pool import get_pool
 
-    async with get_pool().acquire() as owned:
-        row = await owned.fetchrow(sql, *params)
-    return _row_to_draft(row, fallback=draft)
+_BULLET_RE = re.compile(r"^-\s+(.*)$")
+_NUMBERED_RE = re.compile(r"^\d+\.\s+(.*)$")
+
+
+def _strip_bullet(line: str) -> str | None:
+    m = _BULLET_RE.match(line)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _strip_numbered(line: str) -> str | None:
+    m = _NUMBERED_RE.match(line)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _draft_to_record(
+    markdown: str, run: Any, steps: list[Any]
+) -> dict[str, Any] | None:
+    """Parse the distiller's OWN fixed markdown template into an A2
+    typed-record payload. Deterministic (scrub rewrites only secret
+    spans, not headings). Returns ``None`` when the template didn't
+    match — the caller skips + logs, never a malformed submit.
+
+    Grammar bans backticks in ``evidence_references``, so this helper
+    NEVER puts the backticked Trigger Evidence bullets there (they use
+    ``source task: `id``` etc.).
+    """
+    when_lines = _extract_section(markdown, _WHEN_HEADING)
+    procedure_lines = _extract_section(markdown, _PROCEDURE_HEADING)
+    trajectory_lines = _extract_section(markdown, _TRAJECTORY_HEADING)
+
+    scope_bullets = [
+        s for s in (_strip_bullet(line) for line in when_lines) if s
+    ]
+    scope = scope_bullets[0] if scope_bullets else ""
+
+    procedure_steps: list[str] = []
+    for line in procedure_lines:
+        step = _strip_numbered(line) or _strip_bullet(line)
+        if step:
+            procedure_steps.append(step)
+
+    preconditions: list[str] = []
+    for line in trajectory_lines[:16]:
+        item = _strip_bullet(line)
+        if item and item.startswith("_(") is False:
+            preconditions.append(item)
+
+    if not scope.strip() or not procedure_steps:
+        return None
+
+    return {
+        "scope": scope,
+        "preconditions": preconditions[:16],
+        "procedure_steps": procedure_steps[:16],
+        "verification": "",
+        "known_failures": [],
+        "prohibited_actions": [],
+        "evidence_references": [],
+    }
 
 
 async def _emit_distillation_audit(
@@ -373,10 +420,10 @@ async def _emit_distillation_audit(
     *,
     stats: TrajectoryStats,
 ) -> None:
-    """Best-effort Phase D traceability row for a distilled draft.
+    """Best-effort Phase D traceability row for a quarantined version.
 
-    Tenant context is temporarily set from the durable draft row so
-    audit.log writes the same tenant chain in every worker/process.
+    Retargeted from ``auto_distilled_skill`` to ``learned_item_version``
+    per U4-I: the ``draft.id`` is now the substrate version id.
     """
 
     saved = current_tenant_id()
@@ -386,7 +433,7 @@ async def _emit_distillation_audit(
             from backend import audit as _audit
             await _audit.log(
                 action="skill_distilled",
-                entity_kind="auto_distilled_skill",
+                entity_kind="learned_item_version",
                 entity_id=draft.id,
                 before=None,
                 after={
@@ -409,6 +456,47 @@ async def _emit_distillation_audit(
         set_tenant_id(saved)
 
 
+def _evidence_from_run(run: Any) -> tuple:
+    """Best-effort raw lookup data assembly from the run's own context.
+
+    Only fires when the caller's run metadata already carries a
+    ``change_ref`` — live Gerrit/JIRA fetch wiring is U4-J's, so the
+    distiller passes the injected raw shape through unchanged (empty
+    ``gerrit_change`` / ``jira_labels`` if the metadata omits them).
+    """
+    metadata = getattr(run, "metadata", {}) or {}
+    if not isinstance(metadata, dict):
+        return ()
+    change_ref = metadata.get("change_ref") or metadata.get("gerrit_change_ref")
+    if not change_ref:
+        return ()
+    return (
+        {
+            "change_ref": change_ref,
+            "gerrit_change": metadata.get("gerrit_change") or {},
+            "jira_labels": metadata.get("jira_labels") or [],
+        },
+    )
+
+
+async def _resolve_conn(conn: Any | None) -> tuple[Any, Any]:
+    """Return ``(conn, releaser)``: either the caller's conn (releaser
+    is a no-op) or a pool-acquired conn (releaser closes it). Mirrors
+    the historic ``_insert_draft`` fallback shape."""
+    if conn is not None:
+        async def _noop():  # pragma: no cover — trivial
+            return None
+        return conn, _noop
+    from backend.db_pool import get_pool
+    pool = get_pool()
+    acquired = await pool.acquire()
+
+    async def _release():
+        await pool.release(acquired)
+
+    return acquired, _release
+
+
 async def distill(
     run: Any,
     steps: list[Any],
@@ -416,7 +504,8 @@ async def distill(
     tenant_id: str | None = None,
     conn: Any | None = None,
 ) -> SkillDistillationResult:
-    """Summarize an eligible trajectory and insert a draft row."""
+    """Summarize an eligible trajectory and submit it as a quarantined
+    version row (U4-I)."""
 
     stats = trajectory_stats(run, steps)
     if not (
@@ -454,18 +543,70 @@ async def distill(
             skipped_reason=f"too many secret hits ({sum(hits.values())})",
         )
 
+    payload = _draft_to_record(markdown, run, steps)
+    if payload is None:
+        logger.info(
+            "skill_distiller: template did not parse — skipping submit for "
+            "run=%s",
+            getattr(run, "id", "?"),
+        )
+        return SkillDistillationResult(
+            written=False,
+            draft=None,
+            stats=stats,
+            hits=hits,
+            skipped_reason="template_unparseable",
+        )
+
+    tid = _tenant_id_for(run, tenant_id)
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    evidence = _evidence_from_run(run)
+
+    owned_conn, release = await _resolve_conn(conn)
+    try:
+        try:
+            result = await submit_quarantined_version(
+                owned_conn,
+                payload=payload,
+                kind="skill",
+                audience="tenant",
+                tenant_id=tid,
+                created_by="skill_distiller",
+                name=skill_name,
+                description="Auto-distilled from a successful Architect Guild trajectory.",
+                trigger_condition="",
+                keywords=[],
+                delivery_mode="retrieved",
+                evidence=evidence,
+                now=now,
+            )
+        except Exception as exc:
+            logger.warning(
+                "skill_distiller submit failed for run=%s: %s",
+                getattr(run, "id", "?"),
+                exc,
+            )
+            return SkillDistillationResult(
+                written=False,
+                draft=None,
+                stats=stats,
+                hits=hits,
+                skipped_reason=f"submit_failed: {exc}",
+            )
+    finally:
+        await release()
+
     draft = DistilledSkillDraft(
-        id=f"ads-{uuid.uuid4().hex[:12]}",
-        tenant_id=_tenant_id_for(run, tenant_id),
+        id=result.version_id,
+        tenant_id=tid,
         skill_name=skill_name,
         source_task_id=_source_task_id_for(run),
         markdown_content=markdown,
     )
-    inserted = await _insert_draft(draft, conn=conn)
-    await _emit_distillation_audit(inserted, stats=stats)
+    await _emit_distillation_audit(draft, stats=stats)
     return SkillDistillationResult(
         written=True,
-        draft=inserted,
+        draft=draft,
         stats=stats,
         hits=hits,
     )

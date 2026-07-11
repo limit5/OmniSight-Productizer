@@ -1,4 +1,10 @@
-"""BP.M.2 -- Architect Guild skill distiller."""
+"""BP.M.2 -- Architect Guild skill distiller (post-U4-I redirect).
+
+Original BP.M.2 assertions pinning the ``auto_distilled_skills``
+sink shape have been retargeted to pin the U4-I substrate producer
+submit call (frozen archive — the distiller no longer writes it).
+Thresholds, scrub semantics, and the L1 gate assertions are unchanged.
+"""
 
 from __future__ import annotations
 
@@ -30,23 +36,56 @@ class _FakeStep:
 
 
 class _FakeConn:
-    def __init__(self, *, row: dict[str, Any] | None = None) -> None:
-        self.calls: list[tuple[str, tuple[Any, ...]]] = []
-        self.row = row
+    """Minimal asyncpg-shaped stub — the redirected distiller now
+    passes the conn straight through to the producer (which we
+    monkeypatch), so ``execute``/``fetchrow`` are recording no-ops."""
 
-    async def fetchrow(self, sql: str, *args: Any) -> dict[str, Any] | None:
-        self.calls.append((sql, args))
-        if self.row is not None:
-            return self.row
-        return {
-            "id": args[0],
-            "tenant_id": args[1],
-            "skill_name": args[2],
-            "source_task_id": args[3],
-            "markdown_content": args[4],
-            "version": args[5],
-            "status": args[6],
-        }
+    def __init__(self) -> None:
+        self.execute_calls: list[tuple[str, tuple[Any, ...]]] = []
+        self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def execute(self, sql: str, *args: Any) -> None:
+        self.execute_calls.append((sql, args))
+
+    async def fetchrow(self, sql: str, *args: Any):
+        self.fetchrow_calls.append((sql, args))
+        return None
+
+
+class _SubmitRecorder:
+    """Replaces ``learned_item_producer.submit_quarantined_version``
+    so the redirect can be asserted without exercising the DB."""
+
+    def __init__(
+        self, *, version_id: str = "v-fake-1", created: bool = True
+    ) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._version_id = version_id
+        self._created = created
+
+    async def __call__(self, conn: Any, **kwargs: Any):
+        self.calls.append({"conn": conn, **kwargs})
+        return sd.__dict__.get("SubmitResult") or _SubmitResultShim(
+            version_id=self._version_id, created=self._created
+        )
+
+
+class _SubmitResultShim:
+    def __init__(self, *, version_id: str, created: bool) -> None:
+        self.version_id = version_id
+        self.created = created
+
+
+@pytest.fixture()
+def recorder(monkeypatch) -> _SubmitRecorder:
+    rec = _SubmitRecorder()
+
+    async def _stub(conn, **kwargs):
+        rec.calls.append({"conn": conn, **kwargs})
+        return _SubmitResultShim(version_id="v-fake-1", created=True)
+
+    monkeypatch.setattr(sd, "submit_quarantined_version", _stub, raising=True)
+    return rec
 
 
 def _steps(n: int) -> list[_FakeStep]:
@@ -254,8 +293,11 @@ def test_build_markdown_kind_fallback_slug() -> None:
     assert skill_name == "auto-trajectory-skill"
 
 
+# ━━ U4-I redirect assertions (replace legacy sink assertions) ━━━━━━━
+
+
 @pytest.mark.asyncio
-async def test_distill_inserts_draft_row() -> None:
+async def test_distill_submits_quarantined_version(recorder) -> None:
     conn = _FakeConn()
     run = _FakeRun(
         metadata={
@@ -266,51 +308,62 @@ async def test_distill_inserts_draft_row() -> None:
         }
     )
     result = await sd.distill(run, _steps(2), conn=conn)
+
     assert result.written is True
     assert result.draft is not None
-    assert result.draft.id.startswith("ads-")
+    assert result.draft.id == "v-fake-1"
     assert result.draft.tenant_id == "t-acme"
     assert result.draft.source_task_id == "task-acme"
-    assert result.draft.status == "draft"
+    # Legacy assertion retargeted: the substrate row is quarantined,
+    # not the auto_distilled_skills "draft" status.
+    assert result.draft.status == "quarantined"
 
-    sql, args = conn.calls[0]
-    assert "INSERT INTO auto_distilled_skills" in sql
-    assert args[1] == "t-acme"
-    assert args[6] == "draft"
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["kind"] == "skill"
+    assert call["audience"] == "tenant"
+    assert call["tenant_id"] == "t-acme"
+    assert call["created_by"] == "skill_distiller"
+    payload = call["payload"]
+    # A2 record shape: scope + procedure_steps come from the fixed
+    # template; the parser rejects an empty/unparseable draft.
+    assert payload["scope"].startswith("Use this draft")
+    assert len(payload["procedure_steps"]) >= 1
 
 
 @pytest.mark.asyncio
-async def test_distill_tenant_argument_wins_over_run_metadata() -> None:
+async def test_distill_tenant_argument_wins_over_run_metadata(
+    recorder,
+) -> None:
     conn = _FakeConn()
     run = _FakeRun(metadata={"tenant_id": "t-run", "tool_calls": 6})
     result = await sd.distill(run, _steps(1), tenant_id="t-arg", conn=conn)
     assert result.draft is not None
     assert result.draft.tenant_id == "t-arg"
+    # The submit call carries the same tenant_id.
+    assert recorder.calls[0]["tenant_id"] == "t-arg"
+    # Markdown template still reflects the override.
     assert "tenant_id: 't-arg'" in result.draft.markdown_content
 
 
 @pytest.mark.asyncio
-async def test_distill_preserves_insert_returned_row() -> None:
-    row = {
-        "id": "ads-returned",
-        "tenant_id": "t-returned",
-        "skill_name": "auto-returned",
-        "source_task_id": "task-returned",
-        "markdown_content": "# Returned\n",
-        "version": 3,
-        "status": "reviewed",
-    }
-    conn = _FakeConn(row=row)
+async def test_distill_returns_producer_version_id(monkeypatch) -> None:
+    """Idempotent re-observation: producer returned created=False +
+    an existing id → the distiller surfaces both without extra writes."""
+    async def _stub(conn, **kwargs):
+        return _SubmitResultShim(version_id="v-existing", created=False)
+
+    monkeypatch.setattr(sd, "submit_quarantined_version", _stub, raising=True)
+    conn = _FakeConn()
     run = _FakeRun(metadata={"tenant_id": "t-run", "tool_calls": 6})
     result = await sd.distill(run, _steps(1), conn=conn)
+    assert result.written is True
     assert result.draft is not None
-    assert result.draft.id == "ads-returned"
-    assert result.draft.version == 3
-    assert result.draft.status == "reviewed"
+    assert result.draft.id == "v-existing"
 
 
 @pytest.mark.asyncio
-async def test_distill_emits_audit_log(monkeypatch) -> None:
+async def test_distill_emits_audit_log(recorder, monkeypatch) -> None:
     from backend import audit as _audit
     from backend.db_context import current_tenant_id, set_tenant_id
 
@@ -342,7 +395,9 @@ async def test_distill_emits_audit_log(monkeypatch) -> None:
     row = captured[0]
     assert row["tenant_context"] == "t-acme"
     assert row["action"] == "skill_distilled"
-    assert row["entity_kind"] == "auto_distilled_skill"
+    # U4-I: entity_kind retargeted from "auto_distilled_skill" →
+    # "learned_item_version"; entity_id is the substrate version id.
+    assert row["entity_kind"] == "learned_item_version"
     assert row["entity_id"] == result.draft.id
     assert row["actor"] == "system:skill-distiller"
     assert row["after"]["skill_name"] == "auto-architect-blueprint"
@@ -352,7 +407,7 @@ async def test_distill_emits_audit_log(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_distill_swallows_audit_log_error(monkeypatch) -> None:
+async def test_distill_swallows_audit_log_error(recorder, monkeypatch) -> None:
     from backend import audit as _audit
     from backend.db_context import current_tenant_id, set_tenant_id
 
@@ -374,17 +429,20 @@ async def test_distill_swallows_audit_log_error(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_distill_skips_below_threshold() -> None:
+async def test_distill_skips_below_threshold(recorder) -> None:
     conn = _FakeConn()
     run = _FakeRun(metadata={"tool_calls": 5, "iterations": 3})
     result = await sd.distill(run, _steps(1), conn=conn)
     assert result.written is False
     assert "below threshold" in result.skipped_reason
-    assert conn.calls == []
+    # Threshold gate happens BEFORE the substrate submit.
+    assert recorder.calls == []
 
 
 @pytest.mark.asyncio
-async def test_distill_skips_when_scrub_hits_exceed_safety_threshold() -> None:
+async def test_distill_skips_when_scrub_hits_exceed_safety_threshold(
+    recorder,
+) -> None:
     conn = _FakeConn()
     run = _FakeRun(metadata={"tenant_id": "t-acme", "tool_calls": 6})
     steps = [
@@ -408,27 +466,28 @@ async def test_distill_skips_when_scrub_hits_exceed_safety_threshold() -> None:
     assert result.draft is None
     assert result.hits["email"] == 27
     assert result.skipped_reason == "too many secret hits (27)"
-    assert conn.calls == []
+    # Scrub gate happens BEFORE the substrate submit.
+    assert recorder.calls == []
 
 
 @pytest.mark.asyncio
-async def test_architect_hook_honours_l1_gate(monkeypatch) -> None:
+async def test_architect_hook_honours_l1_gate(recorder, monkeypatch) -> None:
     monkeypatch.delenv("OMNISIGHT_SELF_IMPROVE_LEVEL", raising=False)
     conn = _FakeConn()
     run = _FakeRun(metadata={"tool_calls": 9, "iterations": 9})
     result = await sd.architect_guild_hook(run, _steps(2), conn=conn)
     assert result.written is False
     assert result.skipped_reason == "disabled"
-    assert conn.calls == []
+    assert recorder.calls == []
 
     monkeypatch.setenv("OMNISIGHT_SELF_IMPROVE_LEVEL", "l1")
     result = await sd.architect_guild_hook(run, _steps(2), conn=conn)
     assert result.written is True
-    assert len(conn.calls) == 1
+    assert len(recorder.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_distill_scrubs_secret_before_insert() -> None:
+async def test_distill_scrubs_secret_before_insert(recorder) -> None:
     conn = _FakeConn()
     run = _FakeRun(metadata={"tenant_id": "t-acme", "tool_calls": 6})
     steps = [
