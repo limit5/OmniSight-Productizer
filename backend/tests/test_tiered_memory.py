@@ -341,16 +341,24 @@ class TestToolRegistry:
         assert "summarize_state" in TOOL_MAP
 
     def test_episodic_tools_in_registry(self):
+        # U6-0 H0.5a (OP-2592, 2026-07-11): save_solution is intentionally
+        # NOT bound as a model-callable tool anymore (guild-side containment
+        # of the forgeable-provenance memory-poisoning loop). The READ is
+        # kept; the WRITE is only produced server-side on real Gerrit merge
+        # by webhooks._save_merged_solution_to_l3.
         from backend.agents.tools import TOOL_MAP
         assert "search_past_solutions" in TOOL_MAP
-        assert "save_solution" in TOOL_MAP
+        assert "save_solution" not in TOOL_MAP
 
     def test_firmware_has_all_memory_tools(self):
+        # U6-0 H0.5a (OP-2592, 2026-07-11): every guild loadout now excludes
+        # the model-callable save_solution write. search_past_solutions (the
+        # READ) and summarize_state (L2) remain.
         from backend.agents.tools import AGENT_TOOLS
         fw_tools = {t.name for t in AGENT_TOOLS["firmware"]}
         assert "summarize_state" in fw_tools
         assert "search_past_solutions" in fw_tools
-        assert "save_solution" in fw_tools
+        assert "save_solution" not in fw_tools
 
     def test_reporter_has_l2_but_not_l3(self):
         """Reporter doesn't need L3 episodic tools."""

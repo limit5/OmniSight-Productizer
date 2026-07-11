@@ -1991,7 +1991,26 @@ async def save_solution(
     )
 
 
-EPISODIC_TOOLS = [search_past_solutions, save_solution]
+# ⚠ save_solution (the model-callable L3 WRITE) is intentionally NOT bound
+# here. Removed 2026-07-11 as U6-0 H0.5a — finishing the episodic containment
+# H0 started on the Sora side (OP-2591 / Gerrit #2062). Every guild loadout
+# (_ARCHITECT_TOOLS / _DESIGN_TOOLS / _GENERAL_TOOLS / _DEVOPS_TOOLS /
+# _INTEL_TOOLS + siblings) concatenates EPISODIC_TOOLS, so a specialist could
+# otherwise self-author a high-ranking cross-user episodic row: save_solution
+# mints quality_score = 1.0 from a RAW model-supplied gerrit_change_id with NO
+# server-side +2 verification, into a GLOBAL, tenant-less episodic_memory
+# table read back into prompts (rag_prefetch / search_past_solutions) — the
+# same forgeable-provenance memory-poisoning loop H0 closed on Sora.
+#
+# save_solution the FUNCTION stays defined and importable from
+# backend.agents.tools (the direct-ainvoke tiered-memory tests still exercise
+# it). The legitimate "remember a verified rescue" write is UNAFFECTED: it
+# runs server-side on real Gerrit merge in
+# webhooks._save_merged_solution_to_l3 via db.insert_episodic_memory. The
+# READ (search_past_solutions) stays in every loadout that had it. Re-binding
+# save_solution as a model-callable tool requires the U6-0 provenance gate +
+# fail-closed action-capability guard first.
+EPISODIC_TOOLS = [search_past_solutions]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

@@ -31,7 +31,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "read_file",
             "read_yaml",
             "run_bash",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -66,7 +65,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "read_yaml",
             "register_build_artifact",
             "run_bash",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -100,7 +98,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "read_yaml",
             "register_build_artifact",
             "run_bash",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -135,7 +132,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "register_build_artifact",
             "run_bash",
             "run_simulation",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -170,7 +166,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "read_yaml",
             "register_build_artifact",
             "run_bash",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -200,7 +195,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "read_file",
             "read_yaml",
             "run_bash",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -315,7 +309,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "register_build_artifact",
             "run_bash",
             "run_simulation",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -350,7 +343,6 @@ EXPECTED_LOADOUT_NAMES: dict[str, frozenset[str]] = {
             "register_build_artifact",
             "run_bash",
             "run_simulation",
-            "save_solution",
             "search_in_files",
             "search_past_solutions",
             "summarize_state",
@@ -467,6 +459,53 @@ def test_tool_map_tool_is_reachable_from_a_guild_loadout(tool_name: str) -> None
     )
 
     assert tool_name in all_loadout_names
+
+
+def test_save_solution_not_bound_in_episodic_tools_or_any_guild_loadout() -> None:
+    # U6-0 H0.5a (OP-2592, 2026-07-11) — finishes the episodic-memory
+    # containment H0 started on the Sora action set (OP-2591 / Gerrit #2062).
+    # The model-callable save_solution L3 WRITE is intentionally NOT bound as
+    # a tool: it minted quality_score = 1.0 from a RAW model-supplied
+    # gerrit_change_id with no server-side +2 verification, into a GLOBAL,
+    # tenant-less episodic_memory table read back into prompts
+    # (rag_prefetch / search_past_solutions) — a forgeable, cross-user
+    # memory-poisoning write-loop. Every specialist guild loadout
+    # concatenates EPISODIC_TOOLS, so removing save_solution from the list
+    # is what unbinds it from every guild + from TOOL_MAP in one edit.
+    #
+    # The READ (search_past_solutions) must stay in EPISODIC_TOOLS and in
+    # every loadout that had it. save_solution the FUNCTION must remain
+    # importable — the direct-ainvoke tiered-memory tests still exercise it,
+    # and the legitimate server-side write in
+    # webhooks._save_merged_solution_to_l3 calls db.insert_episodic_memory
+    # directly (not via this tool). Do NOT re-bind save_solution as a tool
+    # without the U6-0 provenance gate + fail-closed action-capability guard.
+    episodic_names = {t.name for t in agent_tools.EPISODIC_TOOLS}
+    assert "save_solution" not in episodic_names
+    assert "search_past_solutions" in episodic_names
+
+    # Import path preserved (function still callable server-side).
+    from backend.agents.tools import save_solution  # noqa: F401
+
+    # Not registered as a model-callable tool anywhere.
+    assert "save_solution" not in agent_tools.TOOL_MAP
+
+    # Every guild loadout that previously carried EPISODIC_TOOLS must have
+    # kept the READ and dropped the WRITE.
+    guilds_that_had_episodic = (
+        "architect", "custom", "devops", "firmware",
+        "general", "intel", "software", "validator",
+    )
+    for guild in guilds_that_had_episodic:
+        loadout_names = {t.name for t in agent_tools.AGENT_TOOLS[guild]}
+        assert "save_solution" not in loadout_names, (
+            f"guild {guild!r} must not bind the model-callable save_solution "
+            "write (see OP-2592)"
+        )
+        assert "search_past_solutions" in loadout_names, (
+            f"guild {guild!r} lost the search_past_solutions READ; only the "
+            "WRITE was supposed to be removed (see OP-2592)"
+        )
 
 
 def test_guild_loadout_fixture_count_matches_bp_b10_target() -> None:
