@@ -172,6 +172,7 @@ def test_every_metadata_family_is_in_declared_set() -> None:
         "dangerous_propose",
         "delegation",
         "external_comms",
+        "skill_exec",
     }
     for key, desc in TOOL_METADATA.items():
         assert desc.family in valid, (

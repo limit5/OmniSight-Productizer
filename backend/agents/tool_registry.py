@@ -51,9 +51,16 @@ class OperationDescriptor:
 # ── Family strings (frozen design §2.B) ────────────────────────────────
 # The kernel keys authorization decisions on ``family`` — new tools MUST
 # reuse one of these labels (or add one deliberately, extending the
-# kernel's policy table in the same change). ``external_comms`` is
-# reserved for future outbound-message tools (Slack, email, PR
-# comment-body posts to non-Gerrit surfaces); no current tool maps to it.
+# kernel's policy table in the same change). ``external_comms`` covers
+# outbound-message tools (Slack today; email / non-Gerrit PR comment-body
+# posts as they land). ``skill_exec`` is a HIGH-RISK family reserved for
+# ``*.skill`` executable-scoped file runs — the ``skills_loader`` invokes
+# them as arbitrary subprocesses with the full parent environment, so
+# they must NOT share the bare ``delegation`` family with sub-agent
+# spawns (an enforce flip on ``code_write`` / ``deploy`` would otherwise
+# be silently bypassable through a skill). The structural containment
+# (unbinding ``*.skill`` exec from model use) is a separate ticket
+# (P-SKILL); the classification here is what the kernel will consult.
 _READ_ONLY = "read_only"
 _CODE_WRITE = "code_write"
 _GERRIT_WRITE = "gerrit_write"
@@ -64,7 +71,8 @@ _ARTIFACT_WRITE = "artifact_write"
 _MEMORY_WRITE = "memory_write"
 _DANGEROUS_PROPOSE = "dangerous_propose"
 _DELEGATION = "delegation"
-_EXTERNAL_COMMS = "external_comms"  # reserved; no current mapping
+_EXTERNAL_COMMS = "external_comms"  # SlackPostMessage; future email / PR comment posts
+_SKILL_EXEC = "skill_exec"  # arbitrary subprocess exec via *.skill files (see docstring)
 
 _UNKNOWN_DENY = "__unknown_deny__"
 
@@ -186,8 +194,47 @@ TOOL_METADATA: dict[str, OperationDescriptor] = {
     "Bash": _op("Bash", "mutating", _CODE_WRITE),
     "bash": _op("bash", "mutating", _CODE_WRITE),
     "Agent": _op("Agent", "mutating", _DELEGATION),
-    "Skill": _op("Skill", "mutating", _DELEGATION),
+    # Skill runs a ``*.skill`` executable as an arbitrary subprocess with
+    # the full parent environment (backend/agents/skills_loader.py::
+    # _run_executable_skill → subprocess.run(..., env=os.environ.copy())).
+    # Classifying it as bare ``delegation`` would let an enforce flip on
+    # code_write / deploy be silently bypassed through a skill call — so
+    # it gets its own high-risk family (_SKILL_EXEC). Agent stays
+    # ``delegation`` (sub-agent spawn, not arbitrary code exec).
+    "Skill": _op("Skill", "mutating", _SKILL_EXEC),
+
+    # ── Runner dispatcher extras (runner_handlers.py::_HANDLERS) ────
+    # KnowledgeRetrieval is bound via bind_to_dispatcher on the runner
+    # dispatcher — a read-only knowledge lookup, no side effect.
+    "KnowledgeRetrieval": _op("KnowledgeRetrieval", "read_only", _READ_ONLY),
+
+    # ── Default dispatcher extras (tool_dispatcher.py::_default_dispatcher) ─
+    # SlackPostMessage posts to a Slack channel — an outbound message
+    # to an external comms surface. FAMILY: external_comms.
+    "SlackPostMessage": _op("SlackPostMessage", "mutating", _EXTERNAL_COMMS),
+
+    # ── OP-828 built-in tool aliases (bind_built_in_tools*) ────────
+    # ``code_execution`` names the DISPATCHER-REGISTERED emulation entry
+    # (backend/agents/tool_dispatcher.py::ptc_sandbox_handler) that
+    # tests exercise locally — the LIVE ``code_execution_20260120``
+    # runs PROVIDER-SIDE inside Anthropic's PTC sandbox and never
+    # reaches this dispatcher. Provider-side containment is P-PROV
+    # (NOT this ticket); this classification only governs the local
+    # emulation name so an enforce flip treats it as ``code_write``.
+    "code_execution": _op("code_execution", "mutating", _CODE_WRITE),
+
+    # ── OP-851 Memory Tool (bind_memory_tool → MEMORY_TOOL_NAME="memory") ──
+    # Fail-closed name-level: memory tool exposes read (``view``) AND
+    # write (``create``/``str_replace``/``insert``/``delete``/``rename``)
+    # sub-commands, but ``resolve()`` is name-only today (the ``command``
+    # arg is not inspected). Classified ``mutating`` / ``memory_write``
+    # conservatively; per-command refinement is deferred to T8/T11 when
+    # memory enforcement matters.
+    "memory": _op("memory", "mutating", _MEMORY_WRITE),
 }
+
+
+_EXTERNAL_AGENT_PREFIX = "external_agent:"
 
 
 def resolve(tool_name: str) -> OperationDescriptor:
@@ -200,10 +247,29 @@ def resolve(tool_name: str) -> OperationDescriptor:
     a registry entry cannot silently fall through to a permissive path.
     Every classification MUST land in :data:`TOOL_METADATA`; the parity
     test enforces this for the LangChain surface.
+
+    Fallthrough #1 — dynamic A2A prefix. The outbound A2A node
+    (``backend/agents/nodes.py::external_agent_node``) synthesises the
+    per-call tool name as ``external_agent:<clean_agent_id>``. That id is
+    a free-form registry key that MAY itself contain ``:`` (e.g.
+    ``external_agent:team:bot``), so this branch matches on the prefix
+    and requires a non-empty remainder — we do NOT ``split(":")``, which
+    would truncate colon-in-id agent names to the first segment. Every
+    such call is a delegation to another authority boundary → classified
+    ``mutating`` / ``delegation``.
     """
     hit = TOOL_METADATA.get(tool_name)
     if hit is not None:
         return hit
+    if (
+        tool_name.startswith(_EXTERNAL_AGENT_PREFIX)
+        and len(tool_name) > len(_EXTERNAL_AGENT_PREFIX)
+    ):
+        return OperationDescriptor(
+            tool_name=tool_name,
+            effect="mutating",
+            family=_DELEGATION,
+        )
     return OperationDescriptor(
         tool_name=tool_name,
         effect="mutating",
