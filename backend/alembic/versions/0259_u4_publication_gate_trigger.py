@@ -45,7 +45,15 @@ depends_on = None
 # success path and 0258's own downgrade drops it). A BEFORE INSERT
 # function MUST end with RETURN NEW — falling off the end is a runtime
 # error on every insert, and returning NULL silently drops rows.
-
+#
+# The RAISE format spec below uses a DOUBLED percent ('%%'). This DDL is
+# executed through exec_driver_sql -> psycopg2, whose pyformat paramstyle
+# scans the WHOLE string (comments included) for a bare percent and treats
+# it as a parameter marker, failing "immutabledict is not a sequence" on
+# PostgreSQL. Doubling emits a literal percent for plpgsql's own
+# substitution. Keep NO bare percent anywhere inside this string (not even
+# in a -- SQL comment). SQLite uses a separate DDL string, so its offline
+# tests never exercised this.
 _PG_TRIGGER_FN = """
 CREATE OR REPLACE FUNCTION learned_item_publication_gate()
 RETURNS trigger AS $$
@@ -59,10 +67,6 @@ BEGIN
               AND a.version_id = NEW.version_id
               AND e.decision = 'promote'
         ) THEN
-            -- %% is deliberate: this body is run via exec_driver_sql →
-            -- psycopg2, whose pyformat paramstyle treats a bare % as a
-            -- parameter marker (fails "immutabledict is not a sequence" on
-            -- PG). %% emits a literal % for plpgsql's own substitution.
             RAISE EXCEPTION
                 'PublicationGate: %% requires a promote-decision approval',
                 NEW.state;
