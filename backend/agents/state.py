@@ -6,6 +6,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
+from backend.agents.execution_context import ExecutionContext
 from backend.llm_adapter import BaseMessage, add_messages
 
 
@@ -166,3 +167,13 @@ class GraphState(BaseModel):
     # specialist.
     soc_vendor: str = ""
     sdk_version: str = ""
+
+    # OP-2595 (U6-0 T4b) — server-constructed principal for this graph
+    # run. Populated at every ``run_graph`` entry point (chat / A2A /
+    # invoke / orchestration); dormant here (no consumer reads it for
+    # authorization until T6). Optional so any legacy code path that
+    # builds ``GraphState`` directly without going through ``run_graph``
+    # keeps working during the rollout window.
+    execution_context: ExecutionContext | None = None
+
+    model_config = {"arbitrary_types_allowed": True}

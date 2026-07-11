@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from backend import auth as _au
+from backend.agents import execution_context as _ec
 from backend.agents.graph import run_graph
 from backend.db_pool import get_conn
 from backend.events import emit_chat_message, emit_pipeline_phase, emit_session_titled
@@ -124,14 +125,20 @@ async def _load_session_memory(
         return []
 
 
-def _bind_chat_context(user_id: str, session_id: str) -> None:
+def _bind_chat_context(
+    user_id: str, session_id: str, tenant_id: str = "",
+) -> None:
     """Bind the chat caller so create_task can record the user↔ticket link
     (Gap C). Contextvars copy into the graph's task, so the tool sees it.
     Best-effort — never break the chat path over an optional binding.
+
+    OP-2595: forwards ``tenant_id`` — the pre-existing 2-positional call
+    was dropping the third ``set_chat_context`` arg, leaving the tenant
+    contextvar empty on the chat path.
     """
     try:
         from backend.agents.tools import set_chat_context
-        set_chat_context(user_id, session_id)
+        set_chat_context(user_id, session_id, tenant_id)
     except Exception as exc:  # noqa: BLE001
         logger.debug("set_chat_context failed (non-fatal): %s", exc)
 
@@ -139,17 +146,23 @@ def _bind_chat_context(user_id: str, session_id: str) -> None:
 async def _run_pipeline(
     user_msg: str, prior_messages: list[tuple[str, str]] | None = None,
     model_name: str = "",
+    execution_context=None,
 ) -> OrchestratorMessage:
     """Run the LangGraph pipeline. Emits real-time events via the event bus.
 
     ``model_name`` (P2) is the operator's UI-pinned model for this turn;
     empty = auto-route (decided inside the conversation node).
+
+    ``execution_context`` (OP-2595) is the server-constructed principal
+    for this chat turn — dormant here (nothing reads it yet), populated
+    onto ``GraphState`` for the T6 kernel to consume.
     """
     try:
         emit_pipeline_phase("start", f"Processing: {user_msg[:80]}")
         add_system_log(f"Command received: {user_msg[:60]}", "info")
         result = await run_graph(
             user_msg, prior_messages=prior_messages, model_name=model_name,
+            execution_context=execution_context,
         )
         add_system_log(f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s)", "info")
         emit_pipeline_phase("complete", f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s) used")
@@ -510,7 +523,7 @@ async def chat(
     # Load conversation memory BEFORE persisting the current turn so the
     # injected history excludes the message we're about to answer.
     prior = await _load_session_memory(conn, user.id, session_id)
-    _bind_chat_context(user.id, session_id)
+    _bind_chat_context(user.id, session_id, user.tenant_id)
     user_message = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",
         role=MessageRole.user,
@@ -523,7 +536,18 @@ async def chat(
     if slash_reply:
         await _persist_and_emit(conn, slash_reply, user_id=user.id, session_id=session_id)
         return ChatResponse(message=slash_reply)
-    reply = await _run_pipeline(body.message, prior_messages=prior, model_name=body.model)
+    exec_ctx = _ec.for_human(
+        user=user,
+        tenant_id=user.tenant_id,
+        session_id=session_id or None,
+        request_id=uuid.uuid4().hex,
+        message_id=user_message.id,
+        authorization_source="chat",
+    )
+    reply = await _run_pipeline(
+        body.message, prior_messages=prior, model_name=body.model,
+        execution_context=exec_ctx,
+    )
     await _persist_and_emit(conn, reply, user_id=user.id, session_id=session_id)
     return ChatResponse(message=reply)
 
@@ -550,17 +574,36 @@ async def chat_stream(
     # Conversation memory — loaded before the current turn is persisted
     # (persist happens after the pipeline below) so it isn't echoed back.
     prior = await _load_session_memory(conn, user.id, session_id)
-    _bind_chat_context(user.id, session_id)
-    # Slash command interception
-    slash_reply = await _try_slash_command(conn, body.message)
-    reply = slash_reply if slash_reply else await _run_pipeline(body.message, prior_messages=prior, model_name=body.model)
-
+    _bind_chat_context(user.id, session_id, user.tenant_id)
+    # OP-2595: build the inbound user-message id BEFORE the pipeline so
+    # ``for_human(message_id=…)`` sees the same id the row is persisted
+    # under. The persist-and-emit for user_msg still runs after the
+    # pipeline (unchanged ordering) so the SSE fan-out semantics don't
+    # shift under the LLM path.
     user_msg = OrchestratorMessage(
         id=f"msg-{uuid.uuid4().hex[:6]}",
         role=MessageRole.user,
         content=body.message,
         timestamp=_now_iso(),
     )
+    # Slash command interception
+    slash_reply = await _try_slash_command(conn, body.message)
+    if slash_reply:
+        reply = slash_reply
+    else:
+        exec_ctx = _ec.for_human(
+            user=user,
+            tenant_id=user.tenant_id,
+            session_id=session_id or None,
+            request_id=uuid.uuid4().hex,
+            message_id=user_msg.id,
+            authorization_source="chat",
+        )
+        reply = await _run_pipeline(
+            body.message, prior_messages=prior, model_name=body.model,
+            execution_context=exec_ctx,
+        )
+
     await _persist_and_emit(conn, user_msg, user_id=user.id, session_id=session_id)
     await _persist_and_emit(conn, reply, user_id=user.id, session_id=session_id)
 

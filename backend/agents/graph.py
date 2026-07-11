@@ -55,6 +55,7 @@ import os
 from types import MappingProxyType
 
 from backend.llm_adapter import AIMessage, END, HumanMessage, StateGraph
+from backend.agents.execution_context import ExecutionContext
 from backend.agents.state import GraphState
 from backend.agents.nodes import (
     _should_retry,
@@ -265,6 +266,7 @@ async def run_graph(
     firewall_result: FirewallResult | None = None,
     firewall_trust: str = "external",
     prior_messages: list[tuple[str, str]] | None = None,
+    execution_context: ExecutionContext | None = None,
 ) -> GraphState:
     """Execute the full agent pipeline for a user command.
 
@@ -311,6 +313,7 @@ async def run_graph(
                 size=size,
                 answer=firewall.refusal_message or BLOCKED_REFUSAL_MESSAGE,
                 last_error="llm_firewall_blocked",
+                execution_context=execution_context,
             )
         if firewall and firewall.system_prompt_warning:
             handoff_context = firewall.apply_system_prompt_warning(
@@ -346,6 +349,7 @@ async def run_graph(
         soc_vendor=soc_vendor,
         sdk_version=sdk_version,
         size=size,
+        execution_context=execution_context,
     )
     try:
         result = await asyncio.wait_for(
@@ -367,6 +371,7 @@ async def run_graph(
             size=size,
             answer=f"[TIMEOUT] Graph execution exceeded {GRAPH_TIMEOUT}s",
             last_error="Graph execution timeout",
+            execution_context=execution_context,
         )
     if isinstance(result, dict):
         return GraphState(**result)

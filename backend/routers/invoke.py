@@ -18,6 +18,7 @@ from backend import auth as _auth
 from backend.models import InvokeHaltResponse
 
 from backend.agents.graph import run_graph
+from backend.agents import execution_context as _ec
 from backend.routers.agents import _agents, _persist as _persist_agent
 from backend.routers.tasks import _tasks, _persist as _persist_task
 from backend.models import AgentStatus, AgentWorkspace, Task, TaskStatus
@@ -580,6 +581,10 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 task_id=task.id,
                 soc_vendor=soc_vendor,
                 sdk_version=sdk_version,
+                execution_context=_ec.for_machine(
+                    service_name="agent-invoke-run-task",
+                    request_id=uuid.uuid4().hex,
+                ),
             )
             agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
             agent.status = AgentStatus.success
@@ -1461,6 +1466,10 @@ async def _execute_actions(actions: list[dict], state: dict):
                     agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
                     handoff_context=_handoff,
                     task_skill_context=_task_skill,
+                    execution_context=_ec.for_machine(
+                        service_name="agent-invoke-execute-actions",
+                        request_id=uuid.uuid4().hex,
+                    ),
                 )
                 yield {
                     "event": "action",
@@ -2862,6 +2871,10 @@ async def invoke_sync(
                         agent_sub_type=(_agent_ctx.sub_type or "") if _agent_ctx else "",
                         handoff_context=_handoff,
                         task_skill_context=_task_skill,
+                        execution_context=_ec.for_machine(
+                            service_name="agent-invoke-sync",
+                            request_id=uuid.uuid4().hex,
+                        ),
                     )
                     results.append({
                         "type": "command",

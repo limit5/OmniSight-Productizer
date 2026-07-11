@@ -232,14 +232,23 @@ async def test_provider_invoke_routes_to_graph_with_provider_model_spec(monkeypa
     assert body["provider_id"] == "openrouter"
     assert body["agent_name"] == "reviewer"
     assert body["model_spec"].startswith("openrouter:")
-    assert graph_calls == [
-        {
-            "command": "review the patch",
-            "agent_sub_type": "reviewer",
-            "model_name": body["model_spec"],
-            "task_id": body["invocation_id"],
-        }
-    ]
+    assert len(graph_calls) == 1
+    call = graph_calls[0]
+    # OP-2595 (T4b) added ``execution_context`` to the run_graph call;
+    # assert on the non-context kwargs by subset so future dormant-
+    # population fields don't force this test to re-baseline.
+    for key, value in {
+        "command": "review the patch",
+        "agent_sub_type": "reviewer",
+        "model_name": body["model_spec"],
+        "task_id": body["invocation_id"],
+    }.items():
+        assert call[key] == value
+    # OP-2595: authenticated A2A caller RETAINS the human principal.
+    ec = call["execution_context"]
+    assert ec is not None
+    assert ec.principal_type == "human"
+    assert ec.authorization_source == "a2a"
 
 
 @pytest.mark.asyncio

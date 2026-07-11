@@ -24,6 +24,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from backend import auth as _auth
 from backend import pep_gateway as _pep
+from backend.agents import execution_context as _ec
 from backend.a2a.agent_card import (
     A2A_PROVIDER_IDS,
     DEFAULT_DISCOVERY_PATH,
@@ -260,13 +261,29 @@ async def _run_a2a_graph(
     agent_name: str,
     invocation_id: str,
     model_name: str = "",
+    user: _auth.User | None = None,
 ) -> GraphState:
+    # OP-2595: A2A callers ARE authenticated humans (the FastAPI dep is
+    # ``require_operator``), so we mint a ``for_human`` context and retain
+    # the human principal. NEVER downgrade to ``for_machine`` here — that
+    # would erase the caller's identity from the kernel's view.
+    execution_context = None
+    if user is not None:
+        execution_context = _ec.for_human(
+            user=user,
+            tenant_id=user.tenant_id,
+            session_id=None,
+            request_id=uuid.uuid4().hex,
+            message_id=invocation_id,
+            authorization_source="a2a",
+        )
     try:
         return await run_graph(
             command,
             agent_sub_type=agent_name,
             model_name=model_name,
             task_id=invocation_id,
+            execution_context=execution_context,
         )
     except Exception as exc:  # noqa: BLE001 — A2A returns task_failed
         return GraphState(
@@ -276,6 +293,7 @@ async def _run_a2a_graph(
             last_error=f"{exc.__class__.__name__}: {exc}",
             task_id=invocation_id,
             model_name=model_name,
+            execution_context=execution_context,
         )
 
 
@@ -419,6 +437,7 @@ async def invoke_agent(
                 command=command,
                 agent_name=agent_name,
                 invocation_id=invocation_id,
+                user=user,
             )
             payload = _graph_to_a2a_payload(
                 invocation_id=invocation_id,
@@ -468,6 +487,7 @@ async def invoke_agent(
         command=command,
         agent_name=agent_name,
         invocation_id=invocation_id,
+        user=user,
     )
     payload = _graph_to_a2a_payload(
         invocation_id=invocation_id,
@@ -558,6 +578,7 @@ async def invoke_provider_agent(
                 agent_name=agent_name,
                 invocation_id=invocation_id,
                 model_name=model_spec,
+                user=user,
             )
             payload = _graph_to_a2a_payload(
                 invocation_id=invocation_id,
@@ -613,6 +634,7 @@ async def invoke_provider_agent(
         agent_name=agent_name,
         invocation_id=invocation_id,
         model_name=model_spec,
+        user=user,
     )
     payload = _graph_to_a2a_payload(
         invocation_id=invocation_id,

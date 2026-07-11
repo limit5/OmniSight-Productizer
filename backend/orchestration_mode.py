@@ -374,6 +374,7 @@ QueuePushFn = Callable[[Any, Any], str]
 async def _monolith_dispatch(request: DispatchRequest) -> DispatchOutcome:
     """Legacy path — run the full LangGraph graph in-process."""
     from backend.agents.graph import run_graph
+    from backend.agents import execution_context as _ec
 
     try:
         state = await run_graph(
@@ -386,6 +387,10 @@ async def _monolith_dispatch(request: DispatchRequest) -> DispatchOutcome:
             task_id=request.task_id,
             soc_vendor=request.soc_vendor,
             sdk_version=request.sdk_version,
+            execution_context=_ec.for_machine(
+                service_name="orchestration",
+                request_id=uuid.uuid4().hex,
+            ),
         )
     except Exception as exc:
         return DispatchOutcome(
