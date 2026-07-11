@@ -900,10 +900,15 @@ class TestModuleSourceBans:
         assert "memory_eval_stats" in src  # positive: F-math IS imported
 
     def test_no_clock_reads(self) -> None:
+        # ``now`` is caller-supplied for determinism — the module must not
+        # READ a clock. It MAY import datetime to COERCE that caller string
+        # into a tz-aware value for the ``ran_at`` timestamptz param
+        # (asyncpg rejects a bare string; parsing is not a clock read).
         src = MODULE_PATH.read_text()
         assert "datetime.now" not in src
+        assert "datetime.utcnow" not in src
         assert "time.time" not in src
-        assert "import datetime" not in src
+        assert "time.monotonic" not in src
         # ``import time`` is banned; ``asyncio.wait_for`` supplies the
         # per-Q timeout without a raw clock read.
         for line in src.splitlines():

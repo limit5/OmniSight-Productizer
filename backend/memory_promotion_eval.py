@@ -45,6 +45,7 @@ import hashlib
 import json
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -62,6 +63,18 @@ from backend.memory_eval_stats import (
     decide,
     summarize,
 )
+
+
+def _coerce_ts(value):
+    """Coerce an ISO-8601 ``now`` string to a tz-aware datetime for a
+    ``timestamptz`` column. asyncpg (real PG) rejects a bare string for a
+    timestamp param — it wants a datetime — while SQLite (the offline test
+    path) accepts either; a datetime works on BOTH. Tolerant of a trailing
+    ``Z``; passes a datetime/None through unchanged."""
+    if value is None or isinstance(value, datetime):
+        return value
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # Frozen ask_fn contract (matches ``backend.iq_runner.AskFn``):
@@ -280,7 +293,7 @@ async def _write_infra_invalid_run(
         model_fp,
         "infra_invalid",
         json.dumps(stat_summary, separators=(",", ":")),
-        now,
+        _coerce_ts(now),
     )
     metrics.memory_failclosed_total.labels(reason="eval_infra").inc()
 
@@ -548,7 +561,7 @@ async def run_plan_triage_eval(
         model_fp,
         decision,
         json.dumps(stat_summary, separators=(",", ":")),
-        now,
+        _coerce_ts(now),
     )
     for case in collapsed:
         await conn.execute(

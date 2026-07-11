@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from backend import metrics
@@ -42,6 +43,18 @@ from backend.learned_item_provenance import (
 from backend.learned_item_renderer import validate_and_render
 
 logger = logging.getLogger(__name__)
+
+
+def _coerce_ts(value):
+    """Coerce an ISO-8601 string to a tz-aware datetime for a
+    ``timestamptz`` column. asyncpg (real PG) rejects a bare string for a
+    timestamp param — it wants a datetime — while SQLite (the offline test
+    path) accepts either; a datetime works on BOTH. Passes datetime/None
+    through unchanged."""
+    if value is None or isinstance(value, datetime):
+        return value
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 @dataclass(frozen=True)
@@ -106,7 +119,10 @@ async def _select_existing_version_id(
     )
     if row is None:
         return None
-    return row[0]
+    # str(): asyncpg returns uuid.UUID for the UUID id column on real PG;
+    # the fresh-insert path returns the str version_id, so normalize the
+    # idempotent path to match (SQLite returns str already).
+    return str(row[0])
 
 
 async def submit_quarantined_version(
@@ -231,7 +247,7 @@ async def submit_quarantined_version(
                 version_id,
                 truth.kind,
                 truth.source_change_id,
-                truth.verified_at,
+                _coerce_ts(truth.verified_at),
                 truth.revert_state,
                 evidence_span_json,
             )
