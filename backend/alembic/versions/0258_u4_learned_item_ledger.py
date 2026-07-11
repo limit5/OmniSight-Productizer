@@ -195,11 +195,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_learned_item_versions_tenant_hash
 )
 
 
+# NOTE: the ``%%`` is deliberate. This DDL is run via
+# ``exec_driver_sql`` → psycopg2, whose pyformat paramstyle treats a bare
+# ``%`` as a parameter marker (an empty params dict is still passed), so
+# ``RAISE EXCEPTION '… % …'`` raises "immutabledict is not a sequence" on
+# PostgreSQL. Escaping to ``%%`` makes psycopg2 emit a literal ``%`` for
+# plpgsql's own format substitution. SQLite (the unit-test path) does no
+# %-substitution, which is why the offline tests passed while the real PG
+# apply failed. Keep ``%%`` for every ``%`` inside an exec_driver_sql'd
+# plpgsql body.
 _PG_TRIGGER_FN = """
 CREATE OR REPLACE FUNCTION learned_item_ledger_block_mutation()
 RETURNS trigger AS $$
 BEGIN
-    RAISE EXCEPTION 'LedgerTriggerBypassed: % is append-only', TG_TABLE_NAME;
+    RAISE EXCEPTION 'LedgerTriggerBypassed: %% is append-only', TG_TABLE_NAME;
 END;
 $$ LANGUAGE plpgsql
 """

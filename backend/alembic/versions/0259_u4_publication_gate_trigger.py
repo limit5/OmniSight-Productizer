@@ -59,8 +59,12 @@ BEGIN
               AND a.version_id = NEW.version_id
               AND e.decision = 'promote'
         ) THEN
+            -- %% is deliberate: this body is run via exec_driver_sql →
+            -- psycopg2, whose pyformat paramstyle treats a bare % as a
+            -- parameter marker (fails "immutabledict is not a sequence" on
+            -- PG). %% emits a literal % for plpgsql's own substitution.
             RAISE EXCEPTION
-                'PublicationGate: % requires a promote-decision approval',
+                'PublicationGate: %% requires a promote-decision approval',
                 NEW.state;
         END IF;
     END IF;
