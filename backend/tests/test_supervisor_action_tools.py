@@ -74,6 +74,20 @@ def test_all_action_tools_registered():
         assert t.name in TOOL_MAP
 
 
+def test_save_solution_not_model_callable_in_sora_action_set():
+    # U6-0 step-0 containment (2026-07-11). The model-callable save_solution L3
+    # write was REMOVED from Sora's live action set: it mints quality_score=1.0
+    # from an UNVERIFIED, model-supplied gerrit_change_id into a GLOBAL,
+    # tenant-less episodic_memory that is read back into prompts
+    # (rag_prefetch / search_past_solutions) — a forgeable cross-user
+    # memory-poisoning write-loop. The legitimate "remember a verified rescue"
+    # write is unaffected: it is produced server-side on real Gerrit merge
+    # (webhooks._save_merged_solution_to_l3). Re-binding a MODEL write here
+    # requires the U6-0 provenance gate + fail-closed action-capability guard;
+    # do NOT re-add save_solution to this set without them.
+    assert "save_solution" not in {t.name for t in SORA_ACTION_TOOLS}
+
+
 @pytest.mark.parametrize("bad", ["", "nope", "op- 5", "PROJ-1", "OP-", "drop table"])
 def test_key_guard_refuses_non_op(bad):
     out = asyncio.run(supervisor_requeue_ticket.ainvoke({"ticket_key": bad}))

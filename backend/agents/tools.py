@@ -3688,8 +3688,17 @@ async def supervisor_set_labels(
 
 
 # Bound to Sora's chat behind OMNISIGHT_ORCHESTRATOR_ACTION_TOOLS (default on).
-# save_solution (L3 write) rides here so Sora can remember a verified rescue —
-# the P1-deferred write, safe now that actions self-verify.
+# ⚠ save_solution (model-callable L3 write) was REMOVED from this live Sora set
+# 2026-07-11 (U6-0 step-0 containment). Rationale: its write trusts a raw
+# model-supplied gerrit_change_id and mints quality_score=1.0 with NO server
+# +2 verification (see save_solution above), and episodic_memory is a GLOBAL
+# table (db.py, no user_id/tenant_id) read back into prompts (rag_prefetch /
+# search_past_solutions) → a model-forgeable, cross-user memory-poisoning
+# write-loop. The legitimate "remember a verified rescue" write is UNAFFECTED:
+# it is produced SERVER-SIDE on real Gerrit merge
+# (webhooks._save_merged_solution_to_l3). Sora keeps the READ
+# (search_past_solutions). Re-binding a model write requires the U6-0
+# provenance gate + fail-closed action-capability guard (design doc, same date).
 SORA_ACTION_TOOLS = [
     supervisor_rescue_ticket,       # compound one-shot (prefer for stuck-ticket rescue)
     supervisor_requeue_ticket,
@@ -3697,7 +3706,6 @@ SORA_ACTION_TOOLS = [
     supervisor_comment_ticket,
     supervisor_transition_ticket,
     supervisor_set_labels,
-    save_solution,
 ]
 
 
