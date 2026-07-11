@@ -254,6 +254,37 @@ MCP_JIRA_READ_ONLY_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# OP-2593 (U6-0 T2a): read-only allowlist for the Figma MCP server. Figma is
+# a MIXED-capability remote MCP whose write methods (create_new_file,
+# upload_assets, use_figma, ...) execute PROVIDER-SIDE — before any local
+# guard can run. Enforcement therefore lives in the beta ``tool_configuration.
+# allowed_tools`` per-server field on the forwarded ``mcp_servers=[]`` entry
+# (see :meth:`RemoteMCPRegistry.to_anthropic_mcp_servers`).
+#
+# The 11 methods below are the FULL live read-only surface of
+# ``claude_ai_Figma`` at the time of this containment; the 7 known writes
+# (create_new_file, add_code_connect_map, send_code_connect_mappings,
+# upload_assets, generate_diagram, use_figma, download_assets) are EXCLUDED.
+# FAIL-CLOSED: any Figma method not positively listed here is refused. If
+# the live catalog adds a new method it defaults to excluded until
+# classified. ``download_assets`` is technically a read (exports image
+# bytes) but is deliberately excluded under fail-closed until the T2b
+# kernel-governed local proxy lands.
+FIGMA_MCP_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "get_design_context",
+    "get_screenshot",
+    "get_metadata",
+    "get_variable_defs",
+    "get_code_connect_map",
+    "get_context_for_code_connect",
+    "get_code_connect_suggestions",
+    "search_design_system",
+    "get_figjam",
+    "get_libraries",
+    "whoami",
+})
+
+
 # OP-853: Graphiti query tools are read-only by method prefix. This mirrors
 # the ticket's contract: allow ``get*``, ``find*``, ``query*``, ``list*``;
 # refuse write-shaped names such as ``create*``, ``update*``, ``delete*``.
@@ -348,7 +379,16 @@ class RemoteMCPRegistry:
                 continue
             if only_names is not None and cfg.name not in only_names:
                 continue
-            out.append(cfg.to_anthropic_payload())
+            payload = cfg.to_anthropic_payload()
+            # OP-2593 (U6-0 T2a): Figma is a mixed-capability MCP whose write
+            # methods run provider-side. Inject the beta per-server read-only
+            # allowlist on the forwarded entry — sorted for the deterministic-
+            # ordering contract. Other servers get no ``tool_configuration``.
+            if cfg.name == "claude_ai_Figma":
+                payload["tool_configuration"] = {
+                    "allowed_tools": sorted(FIGMA_MCP_READ_ONLY_TOOLS),
+                }
+            out.append(payload)
         # Stable order: deterministic for tests + log diff
         out.sort(key=lambda d: d.get("name", ""))
         return out

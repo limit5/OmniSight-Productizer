@@ -32,6 +32,7 @@ import pytest
 from backend.agents.mcp_integration import (
     DEFAULT_REMOTE_MCP_CATALOG,
     ENV_TOKEN_VAR_BY_NAME,
+    FIGMA_MCP_READ_ONLY_TOOLS,
     MCPServerConfig,
     RemoteMCPRegistry,
     build_default_server_config,
@@ -263,6 +264,114 @@ def test_anthropic_payload_empty_when_only_names_no_match():
     reg = RemoteMCPRegistry(configs=[_figma_cfg()])
     payload = reg.to_anthropic_mcp_servers(only_names=["nonexistent"])
     assert payload == []
+
+
+# ─── OP-2593 (U6-0 T2a): Figma read-only allowlist on forward ────
+
+
+# Authoritative mutating-method list from the ticket: these 7 Figma methods
+# execute provider-side and MUST NOT appear in the forwarded allowed_tools.
+_FIGMA_MUTATING_METHODS = (
+    "create_new_file",
+    "add_code_connect_map",
+    "send_code_connect_mappings",
+    "upload_assets",
+    "generate_diagram",
+    "use_figma",
+    "download_assets",
+)
+
+
+def test_figma_read_only_constant_exposes_the_expected_11_reads():
+    """The frozenset pins the read-only surface at 11 methods (T2a scope)."""
+    assert FIGMA_MCP_READ_ONLY_TOOLS == frozenset({
+        "get_design_context",
+        "get_screenshot",
+        "get_metadata",
+        "get_variable_defs",
+        "get_code_connect_map",
+        "get_context_for_code_connect",
+        "get_code_connect_suggestions",
+        "search_design_system",
+        "get_figjam",
+        "get_libraries",
+        "whoami",
+    })
+    assert len(FIGMA_MCP_READ_ONLY_TOOLS) == 11
+
+
+def test_anthropic_payload_injects_figma_tool_configuration_allowed_tools():
+    """AC: the claude_ai_Figma entry carries tool_configuration.allowed_tools
+    sorted; the 3 core reads are present; all 7 mutating names are absent."""
+    reg = RemoteMCPRegistry(configs=[_figma_cfg()])
+    payload = reg.to_anthropic_mcp_servers()
+    assert len(payload) == 1
+    figma_entry = payload[0]
+    assert figma_entry["name"] == "claude_ai_Figma"
+    assert "tool_configuration" in figma_entry
+    tc = figma_entry["tool_configuration"]
+    assert set(tc.keys()) == {"allowed_tools"}
+
+    allowed = tc["allowed_tools"]
+    # Deterministic-ordering contract: sorted.
+    assert allowed == sorted(allowed)
+    # Full 11-read surface forwarded.
+    assert allowed == sorted(FIGMA_MCP_READ_ONLY_TOOLS)
+
+    # (b) Core reads PRESENT.
+    for core_read in ("get_design_context", "get_screenshot", "get_metadata"):
+        assert core_read in allowed
+
+    # (a) All 7 mutating names ABSENT.
+    for mutating in _FIGMA_MUTATING_METHODS:
+        assert mutating not in allowed
+
+
+def test_anthropic_payload_non_figma_entry_has_no_tool_configuration():
+    """AC: a non-Figma entry (e.g. Gmail) carries NO tool_configuration key.
+    Other servers keep the untouched shape from to_anthropic_payload."""
+    reg = RemoteMCPRegistry(configs=[_figma_cfg(), _gmail_cfg()])
+    payload = reg.to_anthropic_mcp_servers()
+    by_name = {e["name"]: e for e in payload}
+
+    gmail_entry = by_name["claude_ai_Gmail"]
+    assert "tool_configuration" not in gmail_entry
+    # Regression: the generic payload builder shape survives untouched.
+    assert set(gmail_entry.keys()) == {"type", "url", "name", "authorization_token"}
+
+    # Figma still gets the guard.
+    assert "tool_configuration" in by_name["claude_ai_Figma"]
+
+
+def test_anthropic_payload_figma_allowlist_offline_no_token_needed():
+    """AC 'Exercised': run the check with no Figma token / live turn — inspect
+    the produced dict directly and state the exact allowed_tools list."""
+    reg = RemoteMCPRegistry(configs=[
+        build_default_server_config("claude_ai_Figma", authorization_token=None),
+    ])
+    payload = reg.to_anthropic_mcp_servers()
+
+    figma_entry = payload[0]
+    # No token flowed through: authorization_token key omitted per
+    # MCPServerConfig.to_anthropic_payload contract.
+    assert "authorization_token" not in figma_entry
+    # Exact forwarded allowed_tools list (as would go to the Anthropic beta):
+    assert figma_entry["tool_configuration"]["allowed_tools"] == [
+        "get_code_connect_map",
+        "get_code_connect_suggestions",
+        "get_context_for_code_connect",
+        "get_design_context",
+        "get_figjam",
+        "get_libraries",
+        "get_metadata",
+        "get_screenshot",
+        "get_variable_defs",
+        "search_design_system",
+        "whoami",
+    ]
+    # Fail-closed confirmation: NO mutating method present.
+    for mutating in _FIGMA_MUTATING_METHODS:
+        assert mutating not in figma_entry["tool_configuration"]["allowed_tools"]
 
 
 # ─── parse_mcp_tool_name ─────────────────────────────────────────
