@@ -228,7 +228,7 @@ async def _derive_ledger_membership(
     )
     return [
         derive_membership_entry(
-            version_id=row[0],
+            version_id=str(row[0]),
             rendered_payload_sha256=row[1],
             delivery_mode=row[2],
             publication_event_seq=None if row[3] is None else int(row[3]),
@@ -329,7 +329,7 @@ async def publish_learned_item_version(
     )
     if approval is None:
         raise PublishValidationError("approval_not_found")
-    if approval[0] != version_id:
+    if str(approval[0]) != version_id:
         raise PublishValidationError("approval_version_mismatch")
     approval_live_set_hash = approval[1]
     current_head, current_membership = await _read_latest_snapshot(

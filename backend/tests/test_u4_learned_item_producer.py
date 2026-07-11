@@ -339,7 +339,10 @@ class TestEvidence:
         assert "merged" in kinds
         for row in rows:
             assert row[1] == "gerrit:2046"
-            assert row[2] == NOW
+            # verified_at is coerced to a datetime for the timestamptz
+            # column (asyncpg rejects a bare string); the stored form is a
+            # datetime/ISO rendering of NOW, not the verbatim input string.
+            assert "2026-07-11" in str(row[2])
             assert row[3] == "none"
 
     async def test_unconfirmable_evidence_skipped_with_metric(
