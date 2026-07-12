@@ -197,6 +197,7 @@ class ToolDispatcher:
         tool_input: dict[str, Any],
         *,
         execution_context: "ExecutionContext | None" = None,
+        provenance_snapshot_ids: tuple[str, ...] = (),
     ) -> ToolResult:
         """Execute a tool by name, returning a ToolResult.
 
@@ -209,6 +210,10 @@ class ToolDispatcher:
         namespace before the proficiency gate and handler run. A missing
         ctx falls back to ``for_unbound()`` INSIDE the guard and shows up
         as ``authorization_source="unbound"`` in the guard metric.
+
+        ``provenance_snapshot_ids`` (U6-0 T5b-1a) is a pure passthrough
+        to the guard for INV-3 audit; an empty tuple is the dormant
+        default and nothing consumes the ids until T9/T10.
         """
         started_at = time.perf_counter()
         input_size = args_size_bytes(tool_input)
@@ -241,6 +246,7 @@ class ToolDispatcher:
             tool_name=tool_name,
             raw_args=tool_input,
             execution_context=execution_context,
+            provenance_snapshot_ids=provenance_snapshot_ids,
         )
         if not outcome.proceed:
             emit_tool_invocation(

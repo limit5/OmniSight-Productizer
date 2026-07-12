@@ -37,6 +37,15 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from backend.agents.anthropic_sdk_audit import assert_no_deprecated_beta_messages_call
 from backend.agents.mcp_integration import enforce_mcp_policy
+from backend.agents.provenance import (
+    STALE_REFRESH,
+    TOOL_RESULT,
+    SnapshotCache,
+    audit_ids,
+    for_model_response,
+    provenance_scope,
+    record_content,
+)
 from backend.agents.stale_refresh_strategy import (
     build_refresh_marker,
     build_skip_marker,
@@ -71,6 +80,13 @@ def get_active_execution_context() -> "ExecutionContext | None":
     """Return the ExecutionContext of the innermost active `run_with_tools`
     loop in this task, or ``None`` when no context is active (dormant)."""
     return _active_execution_context.get()
+
+
+# U6-0 T5b-1a: process-local, NON-authoritative snapshot cache (T5a
+# docstring) — a grant will NOT bind via this cache; the durable store is
+# T9/T10. Sealed per-turn snapshots land here so audit ids are resolvable
+# in-process.
+_SNAPSHOT_CACHE = SnapshotCache()
 
 
 DEFAULT_MODEL_OPUS = "claude-opus-4-7"
@@ -427,37 +443,42 @@ class AnthropicClient:
         every_n: int,
         strategy: str,
         max_tokens: int,
-    ) -> None:
+    ) -> tuple[str, str] | None:
         """C5 refresh: every ``every_n`` iterations append a synthetic view block.
 
         The block is appended as an extra ``text`` content block on the most
         recent ``user`` message — keeps the user/assistant alternation that
         Anthropic enforces while making the fresh file content visible on the
         next API call. Cost-gated by ``max_tokens`` to bound the injection.
+
+        Returns ``(target, injected_text)`` — the SAME string appended as
+        the ``injected_block`` text — when a refresh was injected, else
+        ``None`` (U6-0 T5b-1a: purely additive; callers may ignore it).
         """
         if every_n <= 0 or iteration % every_n != 0:
-            return
+            return None
         if not touched_files or not messages or messages[-1].get("role") != "user":
-            return
+            return None
 
         target = pick_refresh_target(
             touched_files, strategy, iteration=iteration
         )
         if not target:
-            return
+            return None
 
         content = read_file_for_refresh(target)
         if content is None:
-            return
+            return None
 
         tokens = estimate_tokens(content)
         if tokens > max_tokens:
             logger.info(build_skip_marker(target, iteration, tokens, max_tokens))
-            return
+            return None
 
         marker = build_refresh_marker(target, iteration, strategy)
         logger.info(marker)
-        injected_block = {"type": "text", "text": f"{marker}\n\n{content}"}
+        injected_text = f"{marker}\n\n{content}"
+        injected_block = {"type": "text", "text": injected_text}
 
         last_msg = messages[-1]
         existing = last_msg.get("content")
@@ -473,6 +494,7 @@ class AnthropicClient:
         transcript.append(
             {"role": "user", "content": [injected_block], "stale_refresh": True}
         )
+        return (target, injected_text)
 
     def simple(
         self,
@@ -696,91 +718,126 @@ class AnthropicClient:
         # and task-safe.
         token = _active_execution_context.set(effective)
         try:
-            while iterations < max_iterations:
-                iterations += 1
-                self._maybe_inject_stale_refresh(
-                    iteration=iterations,
-                    messages=messages,
-                    transcript=transcript,
-                    touched_files=touched_files,
-                    every_n=refresh_every_n,
-                    strategy=refresh_strategy,
-                    max_tokens=refresh_max_tokens,
-                )
-                kwargs: dict[str, Any] = {
-                    "model": model or self.default_model,
-                    "max_tokens": max_tokens or self.max_tokens_default,
-                    "temperature": temperature,
-                    "messages": _apply_message_cache_control(messages, enable_cache),
-                }
-                if sys_blocks is not None:
-                    kwargs["system"] = sys_blocks
-                if tool_payload:
-                    kwargs["tools"] = tool_payload
-                if mcp_servers:
-                    kwargs["mcp_servers"] = mcp_servers
-                    kwargs["betas"] = list(request_betas or [])
-
-                response = _create_message_with_cache_fallback(self._client, kwargs)
-                content = _content_to_dict(response.content)
-                stop_reason = getattr(response, "stop_reason", "unknown") or "unknown"
-                total_usage = total_usage + _extract_usage(getattr(response, "usage", None))
-
-                transcript.append({"role": "assistant", "content": content})
-                messages.append({"role": "assistant", "content": content})
-
-                if stop_reason != "tool_use":
-                    final_text = _content_to_text(content)
-                    break
-
-                # Resolve every tool_use in this turn before continuing.
-                tool_uses = _extract_tool_uses(content)
-                tool_results_blocks: list[dict[str, Any]] = []
-                for tu in tool_uses:
-                    if on_tool_call == "log":
-                        logger.info(
-                            "tool_call iter=%d name=%s id=%s",
-                            iterations,
-                            tu["name"],
-                            tu["id"],
+            # U6-0 T5b-1a: one FRESH provenance collector per run_with_tools
+            # invocation (a nested sub-agent run gets its OWN scope, mirroring
+            # the per-invocation execution-context token). The collector
+            # accumulates across iterations WITHIN this invocation — the
+            # message list is itself cumulative — and seal() never resets it.
+            with provenance_scope() as _pcol:
+                while iterations < max_iterations:
+                    iterations += 1
+                    refreshed = self._maybe_inject_stale_refresh(
+                        iteration=iterations,
+                        messages=messages,
+                        transcript=transcript,
+                        touched_files=touched_files,
+                        every_n=refresh_every_n,
+                        strategy=refresh_strategy,
+                        max_tokens=refresh_max_tokens,
+                    )
+                    if refreshed is not None:
+                        record_content(
+                            _pcol, STALE_REFRESH, refreshed[0], refreshed[1]
                         )
-                    result = await self.dispatcher.execute(
-                        tool_use_id=tu["id"],
-                        tool_name=tu["name"],
-                        tool_input=tu["input"],
-                        execution_context=effective,
+                    kwargs: dict[str, Any] = {
+                        "model": model or self.default_model,
+                        "max_tokens": max_tokens or self.max_tokens_default,
+                        "temperature": temperature,
+                        "messages": _apply_message_cache_control(
+                            messages, enable_cache
+                        ),
+                    }
+                    if sys_blocks is not None:
+                        kwargs["system"] = sys_blocks
+                    if tool_payload:
+                        kwargs["tools"] = tool_payload
+                    if mcp_servers:
+                        kwargs["mcp_servers"] = mcp_servers
+                        kwargs["betas"] = list(request_betas or [])
+
+                    # Seal ONCE per iteration, immediately before the model
+                    # call — best-effort: provenance never breaks the turn.
+                    # An empty id set is not grant-eligible (fail-closed for
+                    # a future grant).
+                    try:
+                        _turn_prov = for_model_response(_pcol.seal(_SNAPSHOT_CACHE))
+                        _prov_ids = audit_ids(_turn_prov)
+                    except Exception:  # noqa: BLE001 — hot loop, degrade only
+                        _prov_ids = ()
+
+                    response = _create_message_with_cache_fallback(
+                        self._client, kwargs
                     )
-                    tool_results_blocks.append(result.to_anthropic_block())
-                    tool_calls_log.append(
-                        {
-                            "turn": iterations,
-                            "name": tu["name"],
-                            "input": tu["input"],
-                            "tool_use_id": tu["id"],
-                            "result": result.content[:500],
-                            "is_error": result.is_error,
-                        }
+                    content = _content_to_dict(response.content)
+                    stop_reason = (
+                        getattr(response, "stop_reason", "unknown") or "unknown"
                     )
-                    if not result.is_error:
-                        mutated_path = extract_mutated_path(tu)
-                        if mutated_path:
-                            touched_files[mutated_path] = (
-                                touched_files.get(mutated_path, 0) + 1
+                    total_usage = total_usage + _extract_usage(
+                        getattr(response, "usage", None)
+                    )
+
+                    transcript.append({"role": "assistant", "content": content})
+                    messages.append({"role": "assistant", "content": content})
+
+                    if stop_reason != "tool_use":
+                        final_text = _content_to_text(content)
+                        break
+
+                    # Resolve every tool_use in this turn before continuing.
+                    tool_uses = _extract_tool_uses(content)
+                    tool_results_blocks: list[dict[str, Any]] = []
+                    for tu in tool_uses:
+                        if on_tool_call == "log":
+                            logger.info(
+                                "tool_call iter=%d name=%s id=%s",
+                                iterations,
+                                tu["name"],
+                                tu["id"],
                             )
+                        result = await self.dispatcher.execute(
+                            tool_use_id=tu["id"],
+                            tool_name=tu["name"],
+                            tool_input=tu["input"],
+                            execution_context=effective,
+                            provenance_snapshot_ids=_prov_ids,
+                        )
+                        # §2.E temporal rule: turn N's result enters turn
+                        # N+1's snapshot (turn N's actions reference the
+                        # pre-N frame that was actually sent).
+                        record_content(_pcol, TOOL_RESULT, tu["id"], result.content)
+                        tool_results_blocks.append(result.to_anthropic_block())
+                        tool_calls_log.append(
+                            {
+                                "turn": iterations,
+                                "name": tu["name"],
+                                "input": tu["input"],
+                                "tool_use_id": tu["id"],
+                                "result": result.content[:500],
+                                "is_error": result.is_error,
+                            }
+                        )
+                        if not result.is_error:
+                            mutated_path = extract_mutated_path(tu)
+                            if mutated_path:
+                                touched_files[mutated_path] = (
+                                    touched_files.get(mutated_path, 0) + 1
+                                )
 
-                # Feed all tool_results back in one user message — Anthropic's
-                # convention for multi-tool responses in a single turn.
-                tr_msg = {"role": "user", "content": tool_results_blocks}
-                messages.append(tr_msg)
-                transcript.append(tr_msg)
+                    # Feed all tool_results back in one user message —
+                    # Anthropic's convention for multi-tool responses in a
+                    # single turn.
+                    tr_msg = {"role": "user", "content": tool_results_blocks}
+                    messages.append(tr_msg)
+                    transcript.append(tr_msg)
 
-            else:
-                # Loop exhausted without `break` — i.e. iterations == max_iterations
-                # and the last response was still tool_use.
-                stop_reason = "max_iterations_exceeded"
-                logger.warning(
-                    "run_with_tools hit max_iterations=%d; bailing", max_iterations
-                )
+                else:
+                    # Loop exhausted without `break` — i.e. iterations ==
+                    # max_iterations and the last response was still tool_use.
+                    stop_reason = "max_iterations_exceeded"
+                    logger.warning(
+                        "run_with_tools hit max_iterations=%d; bailing",
+                        max_iterations,
+                    )
         finally:
             _active_execution_context.reset(token)
 
