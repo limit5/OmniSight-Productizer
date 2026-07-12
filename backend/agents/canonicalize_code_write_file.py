@@ -1,0 +1,176 @@
+"""U6-0 T9/T10 code-write file canonicalizers (dormant)."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from pathlib import Path
+
+from backend.agents.action_canonicalize import (
+    CanonicalizationContext,
+    CanonicalizationError,
+    PreparedAction,
+    register_canonicalizer,
+)
+from backend.agents.tool_registry import resolve
+
+
+def _require_str(raw_args: Mapping[str, object], key: str) -> str:
+    """Return one required string argument, or fail closed."""
+    value = raw_args.get(key)
+    if not isinstance(value, str):
+        raise CanonicalizationError(f"missing_or_invalid_arg:{key}")
+    return value
+
+
+def _resolve_in_workspace(
+    root: str,
+    raw_path: str,
+    *,
+    expanduser: bool,
+) -> tuple[str, str]:
+    """Return workspace-relative and absolute paths, failing closed on escape."""
+    if not raw_path:
+        raise CanonicalizationError("empty_path")
+
+    root_p = Path(root).resolve()
+    path = Path(raw_path)
+    if expanduser:
+        path = path.expanduser()
+    if not path.is_absolute():
+        path = root_p / path
+    resolved = path.resolve()
+    try:
+        relative = resolved.relative_to(root_p)
+    except ValueError as exc:
+        raise CanonicalizationError("path_escapes_workspace") from exc
+    return relative.as_posix(), str(resolved)
+
+
+def _canon_write_file(
+    context: CanonicalizationContext,
+    raw_args: Mapping[str, object],
+) -> PreparedAction:
+    path = _require_str(raw_args, "path")
+    content = _require_str(raw_args, "content")
+    relative_path, resolved = _resolve_in_workspace(
+        context.require_workspace(),
+        path,
+        expanduser=False,
+    )
+    return PreparedAction(
+        operation_descriptor=resolve("write_file"),
+        canonical_target=relative_path,
+        executable_args={
+            "workspace_id": context.workspace_id,
+            "relative_path": relative_path,
+            "resolved_at_prepare": resolved,
+            "content": content,
+        },
+        human_rendering={
+            "tool": "write_file",
+            "action": "write",
+            "target": relative_path,
+            "summary": f"{len(content.encode('utf-8'))} bytes",
+        },
+    )
+
+
+def _canon_write_yaml(
+    context: CanonicalizationContext,
+    raw_args: Mapping[str, object],
+) -> PreparedAction:
+    path = _require_str(raw_args, "path")
+    content = _require_str(raw_args, "content")
+    relative_path, resolved = _resolve_in_workspace(
+        context.require_workspace(),
+        path,
+        expanduser=False,
+    )
+    return PreparedAction(
+        operation_descriptor=resolve("write_yaml"),
+        canonical_target=relative_path,
+        executable_args={
+            "workspace_id": context.workspace_id,
+            "relative_path": relative_path,
+            "resolved_at_prepare": resolved,
+            "content": content,
+        },
+        human_rendering={
+            "tool": "write_yaml",
+            "action": "write",
+            "target": relative_path,
+            "summary": f"{len(content.encode('utf-8'))} bytes",
+        },
+    )
+
+
+def _canon_sdk_write(
+    context: CanonicalizationContext,
+    raw_args: Mapping[str, object],
+) -> PreparedAction:
+    file_path = _require_str(raw_args, "file_path")
+    content = _require_str(raw_args, "content")
+    relative_path, resolved = _resolve_in_workspace(
+        context.require_workspace(),
+        file_path,
+        expanduser=True,
+    )
+    return PreparedAction(
+        operation_descriptor=resolve("Write"),
+        canonical_target=relative_path,
+        executable_args={
+            "workspace_id": context.workspace_id,
+            "relative_path": relative_path,
+            "resolved_at_prepare": resolved,
+            "content": content,
+        },
+        human_rendering={
+            "tool": "Write",
+            "action": "write",
+            "target": relative_path,
+            "summary": f"{len(content.encode('utf-8'))} bytes",
+        },
+    )
+
+
+def _canon_sdk_edit(
+    context: CanonicalizationContext,
+    raw_args: Mapping[str, object],
+) -> PreparedAction:
+    file_path = _require_str(raw_args, "file_path")
+    old_string = _require_str(raw_args, "old_string")
+    new_string = _require_str(raw_args, "new_string")
+    relative_path, resolved = _resolve_in_workspace(
+        context.require_workspace(),
+        file_path,
+        expanduser=True,
+    )
+    if old_string == new_string:
+        raise CanonicalizationError("edit_noop")
+    replace_all = bool(raw_args.get("replace_all", False))
+    return PreparedAction(
+        operation_descriptor=resolve("Edit"),
+        canonical_target=relative_path,
+        executable_args={
+            "workspace_id": context.workspace_id,
+            "relative_path": relative_path,
+            "resolved_at_prepare": resolved,
+            "old_string": old_string,
+            "new_string": new_string,
+            "replace_all": replace_all,
+        },
+        human_rendering={
+            "tool": "Edit",
+            "action": "edit",
+            "target": relative_path,
+            "summary": f"replace {'all' if replace_all else 'first'}",
+        },
+    )
+
+
+def register_code_write_file_canonicalizers() -> None:
+    """Register the four single-operation code-write file adapters."""
+    register_canonicalizer("specialist", "write_file", "v1", _canon_write_file)
+    register_canonicalizer("specialist", "write_yaml", "v1", _canon_write_yaml)
+    register_canonicalizer("runner_sdk", "Write", "v1", _canon_sdk_write)
+    register_canonicalizer("runner_sdk", "Edit", "v1", _canon_sdk_edit)
