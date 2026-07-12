@@ -296,6 +296,14 @@ def test_kernel_reachable_only_via_action_guard() -> None:
         # (monkeypatch target names the token); still no ADAPTER imports
         # the kernel directly.
         backend_root / "tests" / "test_nodes_action_guard.py",
+        # U6-0 T5a: NOT adapter→kernel imports. provenance.py's DOCSTRING
+        # explains the anti-forge invariant (names authorize_action; the
+        # module is a stdlib-only leaf — the import-direction test proves
+        # it imports nothing from backend). test_provenance.py's anti-forge
+        # test CALLS the kernel to PROVE the verdict is invariant to
+        # provenance content. Both legitimate references, not offenders.
+        backend_root / "agents" / "provenance.py",
+        backend_root / "tests" / "test_provenance.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(
