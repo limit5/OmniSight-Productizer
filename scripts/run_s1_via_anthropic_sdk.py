@@ -105,6 +105,8 @@ from backend.agents.anthropic_native_client import (
     RunResult,
     TokenUsage,
 )
+from backend.agents import runner_tenant
+from backend.agents.execution_context import ExecutionContext, for_service
 from backend.agents.context_reset import (
     DetectorAwareDispatcher,
     run_with_resets,
@@ -311,6 +313,33 @@ async def estimate_for(
     )
 
 
+# ── Runner identity (U6-0 P-ID-C, populate-only / dormant) ─────────────
+
+# FIXED server constant — the runner's service identity is never a
+# model-configurable value.
+_RUNNER_SERVICE_NAME = "s1-jira-runner"
+
+
+def _build_runner_execution_context(
+    ticket_key: str,
+    *,
+    request_id_factory: Callable[[], str] = lambda: uuid.uuid4().hex,
+) -> ExecutionContext:
+    """Server-derived runner principal for one top-level ticket invocation.
+
+    Every field is server-constructed (never model/ticket-body text). The
+    request_id is fresh per invocation — unrelated attempts must not share
+    a grant-binding dimension — prefixed with the ticket key for trace.
+    """
+    return for_service(
+        service_name=_RUNNER_SERVICE_NAME,
+        tenant_id=runner_tenant.OMNISIGHT_SELF_TENANT,
+        request_id=f"{ticket_key}:{request_id_factory()}",
+        roles=(),
+        authorization_source="jira_runner",
+    )
+
+
 # ── Dry-run mock client ────────────────────────────────────────────────
 
 
@@ -321,6 +350,10 @@ class _DryRunClient:
     runs; useful for the G1 gate to prove the launcher's control flow
     without spending tokens.
     """
+
+    # Accepts the P-ID-C context set-site cleanly; run_with_tools ignores
+    # kwargs, so dry-run behaviour is unchanged.
+    execution_context: "ExecutionContext | None" = None
 
     async def run_with_tools(self, **kwargs: Any) -> RunResult:
         # 1 turn, modest token usage so cost is tiny but non-zero
@@ -393,6 +426,11 @@ async def process_ticket(
     log_outcome: Callable[[TicketOutcome], None],
 ) -> str:
     """Run one S1 ticket end-to-end. Returns the outcome status string."""
+    # U6-0 P-ID-C (dormant): server-derived runner principal for this
+    # top-level invocation; all inner run_with_tools + sub-agents inherit
+    # it via the client attr (P-ID-B). Nothing consumes it until T7b.
+    client.execution_context = _build_runner_execution_context(ticket_key)
+
     started = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
 
     if has_existing_gerrit_ps(ticket_key):
@@ -889,6 +927,11 @@ async def process_ticket_full(
     Opus and doubled max_iterations. A second structural failure walks the
     ticket back to To Do.
     """
+    # U6-0 P-ID-C (dormant): server-derived runner principal for this
+    # top-level invocation; all inner run_with_tools + sub-agents inherit
+    # it via the client attr (P-ID-B). Nothing consumes it until T7b.
+    client.execution_context = _build_runner_execution_context(ticket_key)
+
     started = _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds")
     escalation_counts = escalation_counts if escalation_counts is not None else {}
 
