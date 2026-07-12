@@ -97,7 +97,14 @@ async def parse(req: ParseRequest,
     # when L3 has a matching record. The UI pre-selects the option
     # but still requires an explicit click (we deliberately don't
     # silently steer the operator's current intent).
-    await _imem.annotate_conflicts_with_priors(req.text, body["conflicts"])
+    # U6-0 T8-C3: a prior-choice hint is private to its author within
+    # their tenant — thread the operator identity (require_operator
+    # doesn't set the db_context tenant). Unresolved ⇒ no hint.
+    await _imem.annotate_conflicts_with_priors(
+        req.text, body["conflicts"],
+        owner_user_id=getattr(_user, "id", None) or "",
+        tenant_id=getattr(_user, "tenant_id", None) or "",
+    )
     return body
 
 
@@ -153,8 +160,13 @@ async def clarify(req: ClarifyRequest,
 
     body = updated.to_dict()
     # Re-annotate — a subsequent conflict (second round) should
-    # carry its own prior hint if one exists.
-    await _imem.annotate_conflicts_with_priors(ps.raw_text, body["conflicts"])
+    # carry its own prior hint if one exists. U6-0 T8-C3: same
+    # operator-scoped identity as the /parse path above.
+    await _imem.annotate_conflicts_with_priors(
+        ps.raw_text, body["conflicts"],
+        owner_user_id=getattr(_user, "id", None) or "",
+        tenant_id=getattr(_user, "tenant_id", None) or "",
+    )
     return body
 
 

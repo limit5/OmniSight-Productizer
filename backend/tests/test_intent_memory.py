@@ -77,15 +77,26 @@ async def test_record_creates_episodic_row(client):
     assert payload["operator"] == "op@example.com"
 
 
+# U6-0 T8-C3: a clarification hint is private to its author within a
+# tenant. Record + lookup must carry a matching (owner, tenant) or the
+# fail-closed guard returns no hit. Both tenants are seeded (db.init).
+_OP_A = "u-op-alpha"
+_OP_B = "u-op-bravo"
+_T_A = "t-default"
+_T_B = "omnisight-self"
+
+
 @pytest.mark.asyncio
 async def test_lookup_finds_prior_choice(client):
     raw = "Next.js static site with local SQLite runtime query"
     await _imem.record_clarification_choice(
         raw_text=raw, conflict_id="static_with_runtime_db",
         option_id="ssr_runtime",
+        operator_user_id=_OP_A, tenant_id=_T_A,
     )
     prior = await _imem.lookup_prior_choice(
         raw_text=raw, conflict_id="static_with_runtime_db",
+        owner_user_id=_OP_A, tenant_id=_T_A,
     )
     assert prior is not None
     assert prior.option_id == "ssr_runtime"
@@ -100,9 +111,11 @@ async def test_lookup_scoped_per_conflict(client):
     await _imem.record_clarification_choice(
         raw_text=raw, conflict_id="static_with_runtime_db",
         option_id="ssr_runtime",
+        operator_user_id=_OP_A, tenant_id=_T_A,
     )
     prior = await _imem.lookup_prior_choice(
         raw_text=raw, conflict_id="embedded_to_cloud_mismatch",
+        owner_user_id=_OP_A, tenant_id=_T_A,
     )
     assert prior is None
 
@@ -112,6 +125,47 @@ async def test_lookup_returns_none_when_no_history(client):
     prior = await _imem.lookup_prior_choice(
         raw_text="fresh prompt no history ever",
         conflict_id="static_with_runtime_db",
+        owner_user_id=_OP_A, tenant_id=_T_A,
+    )
+    assert prior is None
+
+
+@pytest.mark.asyncio
+async def test_lookup_isolated_by_owner(client):
+    """U6-0 T8-C3: operator A's private clarification must NOT surface
+    to operator B in the SAME tenant."""
+    raw = "Next.js static site with local SQLite runtime query"
+    await _imem.record_clarification_choice(
+        raw_text=raw, conflict_id="static_with_runtime_db",
+        option_id="ssr_runtime",
+        operator_user_id=_OP_A, tenant_id=_T_A,
+    )
+    prior = await _imem.lookup_prior_choice(
+        raw_text=raw, conflict_id="static_with_runtime_db",
+        owner_user_id=_OP_B, tenant_id=_T_A,
+    )
+    assert prior is None
+    # …and the author still sees it (sanity — the row exists).
+    own = await _imem.lookup_prior_choice(
+        raw_text=raw, conflict_id="static_with_runtime_db",
+        owner_user_id=_OP_A, tenant_id=_T_A,
+    )
+    assert own is not None and own.option_id == "ssr_runtime"
+
+
+@pytest.mark.asyncio
+async def test_lookup_isolated_by_tenant(client):
+    """U6-0 T8-C3: the same operator id in a DIFFERENT tenant must not
+    see the hint (owner id is not globally unique across tenants)."""
+    raw = "Next.js static site with local SQLite runtime query"
+    await _imem.record_clarification_choice(
+        raw_text=raw, conflict_id="static_with_runtime_db",
+        option_id="ssr_runtime",
+        operator_user_id=_OP_A, tenant_id=_T_A,
+    )
+    prior = await _imem.lookup_prior_choice(
+        raw_text=raw, conflict_id="static_with_runtime_db",
+        owner_user_id=_OP_A, tenant_id=_T_B,
     )
     assert prior is None
 
@@ -122,6 +176,7 @@ async def test_annotate_conflicts_attaches_prior_choice(client):
     await _imem.record_clarification_choice(
         raw_text=raw, conflict_id="static_with_runtime_db",
         option_id="isr_hybrid",
+        operator_user_id=_OP_A, tenant_id=_T_A,
     )
     conflicts = [{
         "id": "static_with_runtime_db",
@@ -134,7 +189,9 @@ async def test_annotate_conflicts_attaches_prior_choice(client):
         ],
         "severity": "routine",
     }]
-    out = await _imem.annotate_conflicts_with_priors(raw, conflicts)
+    out = await _imem.annotate_conflicts_with_priors(
+        raw, conflicts, owner_user_id=_OP_A, tenant_id=_T_A,
+    )
     assert out[0].get("prior_choice")
     assert out[0]["prior_choice"]["option_id"] == "isr_hybrid"
 

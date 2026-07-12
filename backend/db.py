@@ -3794,6 +3794,58 @@ async def search_verified_tenant_solutions(
     return results
 
 
+async def search_owner_clarifications(
+    conn,
+    query: str,
+    *,
+    owner_user_id: str,
+    tenant_id: str,
+    limit: int = 5,
+    min_quality: float | None = None,
+) -> list[dict]:
+    """U6-0 T8-C3: fetch an operator's OWN prior spec-conflict
+    clarifications for the intent-parser hint path.
+
+    Same ``tsv @@ plainto_tsquery`` + ``ts_rank`` match semantics as
+    :func:`search_episodic_memory` (so "similar prompt" matching is
+    unchanged), but ALWAYS filtered to
+    ``source = 'user_clarification' AND owner_user_id = $op AND
+    tenant_id = $t``. A private clarification hint only ever surfaces
+    to its own author within their tenant; a legacy NULL-owner row is
+    correctly excluded by the equality filter (blind-test B3). The
+    filters are not opt-out parameters.
+
+    Fails closed BEFORE touching the connection: an empty owner or
+    tenant raises ``ValueError`` (never a global read). Read-only — no
+    access_count bump (a hint surfacing must not mutate decay state)."""
+    if not owner_user_id:
+        raise ValueError("owner_user_id is required")
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+
+    conditions: list[str] = [
+        "tsv @@ plainto_tsquery('english', $1)",
+        "source = 'user_clarification'",
+    ]
+    params: list = [query]
+    conditions.append(f"owner_user_id = ${len(params) + 1}")
+    params.append(owner_user_id)
+    conditions.append(f"tenant_id = ${len(params) + 1}")
+    params.append(tenant_id)
+    if min_quality is not None:
+        conditions.append(f"quality_score >= ${len(params) + 1}")
+        params.append(min_quality)
+    # LIMIT bind is the final positional param.
+    params.append(limit)
+    sql = (
+        "SELECT *, ts_rank(tsv, plainto_tsquery('english', $1)) AS rank "
+        "FROM episodic_memory WHERE " + " AND ".join(conditions)
+        + f" ORDER BY rank DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
+    return [_episodic_row_to_dict(r) for r in rows]
+
+
 async def get_episodic_memory(conn, memory_id: str) -> dict | None:
     row = await conn.fetchrow(
         "SELECT * FROM episodic_memory WHERE id = $1", memory_id,

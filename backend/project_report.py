@@ -198,15 +198,48 @@ async def _audit_timeline(limit: int = 100) -> list[AuditEntry]:
     return out
 
 
-async def _lessons_learned(limit: int = 20) -> list[str]:
-    """v0: pull top quality_score episodic_memory entries."""
+async def _resolve_report_tenant(project_id: str) -> str:
+    """Resolve the tenant whose episodic rows this report may surface.
+
+    U6-0 T8-C3: prefer the request-scoped tenant; the report routes
+    in ``routers/projects.py`` call ``build_report(project_id)`` with
+    no ``_user``/tenant (blind-test B2), so fall back to the project's
+    own ``tenant_id`` row. Returns ``""`` when neither resolves — the
+    caller fails closed (an unresolved tenant yields an EMPTY lessons
+    list, never a cross-tenant global read)."""
+    from backend import db_context
+    tid = db_context.current_tenant_id()
+    if tid:
+        return tid
+    try:
+        from backend.db_pool import get_pool
+        async with get_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT tenant_id FROM projects WHERE id = $1", project_id,
+            )
+        return (row["tenant_id"] if row else "") or ""
+    except Exception as exc:
+        logger.debug("report tenant resolve failed for %s: %s", project_id, exc)
+        return ""
+
+
+async def _lessons_learned(limit: int = 20, tenant_id: str = "") -> list[str]:
+    """v0: pull top quality_score episodic_memory entries FOR ONE TENANT.
+
+    U6-0 T8-C3: the report is a human-facing artifact (not a model
+    prompt like the T8-C1 fence), so this is a defense-in-depth
+    tenant scope. An unresolved tenant fails closed — no global read
+    that would leak another tenant's lessons into this report."""
+    if not tenant_id:
+        return []
     try:
         from backend.db_pool import get_pool
         async with get_pool().acquire() as conn:
             rows = await conn.fetch(
                 "SELECT error_signature, solution FROM episodic_memory "
-                "ORDER BY quality_score DESC, access_count DESC LIMIT $1",
-                limit,
+                "WHERE tenant_id = $1 "
+                "ORDER BY quality_score DESC, access_count DESC LIMIT $2",
+                tenant_id, limit,
             )
         return [f"**{r['error_signature']}** — {r['solution']}" for r in rows]
     except Exception as exc:
@@ -261,6 +294,10 @@ async def build_report(project_id: str = "current") -> FinalReport:
     total_tasks = next((m.actual for m in metrics if m.label == "tasks"), 0)
     total_hours = next((m.forecast for m in metrics if m.label == "hours"), 0.0)
 
+    # U6-0 T8-C3: scope the lessons-learned episodic read to this
+    # report's tenant (fail-closed to an empty list when unresolved).
+    report_tenant = await _resolve_report_tenant(project_id)
+
     return FinalReport(
         project_id=project_id,
         project_name=project_name,
@@ -274,7 +311,7 @@ async def build_report(project_id: str = "current") -> FinalReport:
         compliance=await _compliance_matrix(manifest),
         metrics=metrics,
         audit_timeline=await _audit_timeline(),
-        lessons_learned=await _lessons_learned(),
+        lessons_learned=await _lessons_learned(tenant_id=report_tenant),
         artifacts=await _artifact_catalog(),
         forecast_method=fc_meta["forecast_method"],
         forecast_confidence=float(fc_meta["confidence"]),
