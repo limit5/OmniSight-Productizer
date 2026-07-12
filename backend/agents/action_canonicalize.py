@@ -8,13 +8,14 @@ future family modules register the same canonicalizers in every worker.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 
-from backend.agents.tool_registry import OperationDescriptor
+from backend.agents.tool_registry import OperationDescriptor, resolve
 
 
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class PreparedAction:
     """Immutable operation-level output from a trusted canonicalizer.
 
@@ -39,7 +40,24 @@ class CanonicalizationError(Exception):
         self.reason = reason
 
 
-Canonicalizer = Callable[[Mapping[str, object]], PreparedAction]
+@dataclasses.dataclass(frozen=True)
+class CanonicalizationContext:
+    """Trusted adapter and workspace binding supplied by the guard."""
+
+    workspace_id: str
+    workspace_root: str
+    adapter_namespace: str
+
+    def require_workspace(self) -> str:
+        """Return the authoritative root, or fail closed when unbound."""
+        if not self.workspace_id or not self.workspace_root:
+            raise CanonicalizationError("no_workspace_context")
+        return self.workspace_root
+
+
+Canonicalizer = Callable[
+    [CanonicalizationContext, Mapping[str, object]], PreparedAction
+]
 
 _CanonicalizerKey = tuple[str, str, str]
 _CANONICALIZERS: dict[_CanonicalizerKey, Canonicalizer] = {}
@@ -62,6 +80,7 @@ def register_canonicalizer(
 
 
 def canonicalize(
+    context: CanonicalizationContext,
     adapter_namespace: str,
     tool_name: str,
     schema_version: str,
@@ -75,13 +94,42 @@ def canonicalize(
         raise CanonicalizationError(f"no_canonicalizer:{target}")
 
     try:
-        prepared = canonicalizer(raw_args)
+        prepared = canonicalizer(context, raw_args)
+    except CanonicalizationError:
+        raise
     except Exception as exc:
         raise CanonicalizationError(f"canonicalizer_failed:{target}") from exc
 
+    return _finalize_prepared(tool_name, prepared, target)
+
+
+def _finalize_prepared(
+    tool_name: str,
+    prepared: PreparedAction,
+    target: str,
+) -> PreparedAction:
+    """Return a detached JSON form after enforcing descriptor invariants."""
     if not isinstance(prepared, PreparedAction):
         raise CanonicalizationError(f"canonicalizer_failed:{target}")
+
+    prepared = dataclasses.replace(
+        prepared,
+        executable_args=_freeze_json(prepared.executable_args),
+        human_rendering=_freeze_json(prepared.human_rendering),
+    )
+    if prepared.operation_descriptor.tool_name != tool_name:
+        raise CanonicalizationError("descriptor_tool_mismatch")
+    if prepared.operation_descriptor != resolve(tool_name):
+        raise CanonicalizationError("descriptor_refinement_unregistered")
     return prepared
+
+
+def _freeze_json(value: Mapping[str, object]) -> Mapping[str, object]:
+    """Deep-copy ``value`` through its authoritative JSON representation."""
+    try:
+        return json.loads(json.dumps(value))
+    except (TypeError, ValueError) as exc:
+        raise CanonicalizationError("non_serializable_args") from exc
 
 
 def _registry_snapshot() -> dict[_CanonicalizerKey, Canonicalizer]:
