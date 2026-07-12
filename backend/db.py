@@ -979,6 +979,26 @@ CREATE TABLE IF NOT EXISTS episodic_memory (
 -- _migrate() (AFTER the columns land), NOT here — on an existing pre-0260
 -- DB the CREATE TABLE above is a no-op and `verified` would not yet exist.
 
+-- U6-0 T9/T10 G0a (OP-2622): durable, write-once provenance snapshots.
+-- PostgreSQL's alembic 0262 schema is authoritative; SQLite deliberately
+-- stores JSON as TEXT and leaves the complete-only CHECK to the repository
+-- boundary.  The explicit composite UNIQUE supports later grant FKs.
+CREATE TABLE IF NOT EXISTS provenance_snapshots (
+    snapshot_id     TEXT PRIMARY KEY,
+    tenant_id       TEXT NOT NULL REFERENCES tenants(id),
+    model_call_id   TEXT NOT NULL,
+    request_id      TEXT NOT NULL DEFAULT '',
+    records         TEXT NOT NULL,
+    omissions       TEXT NOT NULL DEFAULT '[]',
+    completeness    TEXT NOT NULL,
+    manifest_digest TEXT NOT NULL,
+    schema_version  TEXT NOT NULL DEFAULT 'v1',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS idx_provenance_snapshots_tenant_model_call
+    ON provenance_snapshots(tenant_id, model_call_id);
+
 CREATE TABLE IF NOT EXISTS debug_findings (
     id              TEXT PRIMARY KEY,
     task_id         TEXT NOT NULL,
@@ -3899,6 +3919,81 @@ def _episodic_row_to_dict(row) -> dict:
     d.pop("tsv", None)
     d.pop("rank", None)
     return d
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Durable provenance snapshots (U6-0 T9/T10 G0a)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def insert_provenance_snapshot(
+    conn,
+    *,
+    snapshot_id: str,
+    tenant_id: str,
+    model_call_id: str,
+    request_id: str,
+    records_json: str,
+    omissions_json: str,
+    manifest_digest: str,
+    schema_version: str = "v1",
+) -> bool:
+    """Insert one immutable provenance snapshot, or idempotently no-op.
+
+    ``snapshot_id`` is globally unique.  A same-id/same-manifest replay is
+    harmless; a same-id/different-manifest replay is an integrity failure and
+    never mutates the original row.
+    """
+    if not tenant_id or not model_call_id:
+        raise ValueError("tenant_id and model_call_id must be non-empty")
+
+    row = await conn.fetchrow(
+        """INSERT INTO provenance_snapshots
+           (snapshot_id, tenant_id, model_call_id, request_id, records,
+            omissions, completeness, manifest_digest, schema_version)
+           VALUES ($1, $2, $3, $4, $5::jsonb,
+                   $6::jsonb, 'complete', $7, $8)
+           ON CONFLICT (snapshot_id) DO NOTHING
+           RETURNING snapshot_id""",
+        snapshot_id,
+        tenant_id,
+        model_call_id,
+        request_id,
+        records_json,
+        omissions_json,
+        manifest_digest,
+        schema_version,
+    )
+    if row is not None:
+        return True
+
+    existing = await conn.fetchrow(
+        "SELECT manifest_digest FROM provenance_snapshots "
+        "WHERE snapshot_id = $1",
+        snapshot_id,
+    )
+    if existing is not None and existing["manifest_digest"] != manifest_digest:
+        raise ValueError("snapshot manifest mismatch")
+    return False
+
+
+async def get_provenance_snapshot(
+    conn,
+    snapshot_id: str,
+    *,
+    tenant_id: str,
+) -> dict | None:
+    """Return a snapshot only within ``tenant_id``; fail closed if empty."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    row = await conn.fetchrow(
+        "SELECT snapshot_id, tenant_id, model_call_id, request_id, records, "
+        "omissions, completeness, manifest_digest, schema_version, created_at "
+        "FROM provenance_snapshots "
+        "WHERE snapshot_id = $1 AND tenant_id = $2",
+        snapshot_id,
+        tenant_id,
+    )
+    return dict(row) if row is not None else None
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

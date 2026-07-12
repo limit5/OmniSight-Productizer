@@ -22,9 +22,9 @@ Cache invariants (``SnapshotCache``):
   * The cache is process-local and NON-authoritative. A cache miss is
     neither denial nor approval; cache resolution NEVER determines
     authorization.
-  * The durable, transaction-aware store that a grant binds is a
-    SEPARATE T9/T10 concern (``DurableSnapshotRepository`` below is a
-    typing-only stub; T5a implements ONLY ``SnapshotCache``).
+  * The durable, transaction-aware store that a grant binds is SEPARATE
+    from this cache (``PgSnapshotRepository``); later T9/T10 leaves wire it
+    into the grant path.
   * A grant binds the snapshot VALUE paired with the response, never a
     ``cache.get(id)`` re-lookup.
 
@@ -37,6 +37,9 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import importlib
+import json
+import logging
 import threading
 import uuid
 from collections import OrderedDict
@@ -45,6 +48,9 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 from typing import Iterator, Protocol, Union
+
+
+logger = logging.getLogger(__name__)
 
 # ── A. Records + attestation ───────────────────────────────────────────
 
@@ -272,9 +278,121 @@ _CACHE_CAP = 2048
 
 
 class DurableSnapshotRepository(Protocol):
-    """Typing-only stub for the T9/T10 durable store. NOT implemented here."""
+    """Interface for the T9/T10 durable, tenant-scoped snapshot store."""
 
-    async def persist(self, snapshot: ProvenanceSnapshot) -> None: ...
+    async def persist(
+        self,
+        snapshot: ProvenanceSnapshot,
+        *,
+        tenant_id: str,
+        model_call_id: str,
+        request_id: str = "",
+    ) -> None: ...
+
+    async def get(
+        self,
+        snapshot_id: str,
+        *,
+        tenant_id: str,
+    ) -> ProvenanceSnapshot | None: ...
+
+
+def _records_to_json(records: tuple[ProvenanceRecord, ...]) -> str:
+    """Serialize records with all eight fields and stable key ordering."""
+    payload = [
+        {field.name: getattr(record, field.name) for field in dataclasses.fields(record)}
+        for record in records
+    ]
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _records_from_json(s: str) -> tuple[ProvenanceRecord, ...]:
+    """Reconstruct the immutable record tuple from its JSON representation."""
+    payload = json.loads(s)
+    return tuple(
+        ProvenanceRecord(
+            source_kind=item["source_kind"],
+            source_id=item["source_id"],
+            content_digest=item["content_digest"],
+            attestation=Attestation(item["attestation"]),
+            verification_status=item["verification_status"],
+            verification_authority=item["verification_authority"],
+            tenant_id=item["tenant_id"],
+            visibility=item["visibility"],
+        )
+        for item in payload
+    )
+
+
+class PgSnapshotRepository:
+    """PostgreSQL-backed implementation of :class:`DurableSnapshotRepository`."""
+
+    def __init__(self, pool):
+        self._pool = pool
+
+    async def persist(
+        self,
+        snap: ProvenanceSnapshot,
+        *,
+        tenant_id: str,
+        model_call_id: str,
+        request_id: str = "",
+    ) -> None:
+        if snap.completeness != "complete":
+            raise ValueError("only complete provenance snapshots may be persisted")
+
+        # Resolve lazily through stdlib importlib: importing this leaf must not
+        # import any backend module (enforced by test_provenance.py).
+        db = importlib.import_module("backend.db")
+        async with self._pool.acquire() as conn:
+            await db.insert_provenance_snapshot(
+                conn,
+                snapshot_id=snap.snapshot_id,
+                tenant_id=tenant_id,
+                model_call_id=model_call_id,
+                request_id=request_id,
+                records_json=_records_to_json(snap.records),
+                omissions_json=json.dumps(
+                    snap.omissions, sort_keys=True, separators=(",", ":")
+                ),
+                manifest_digest=snap.manifest_digest,
+            )
+
+    async def get(
+        self,
+        snapshot_id: str,
+        *,
+        tenant_id: str,
+    ) -> ProvenanceSnapshot | None:
+        db = importlib.import_module("backend.db")
+        async with self._pool.acquire() as conn:
+            row = await db.get_provenance_snapshot(
+                conn, snapshot_id, tenant_id=tenant_id
+            )
+        if row is None:
+            return None
+
+        records = _records_from_json(row["records"])
+        omissions = tuple(json.loads(row["omissions"]))
+        reconstructed = ProvenanceSnapshot(
+            snapshot_id=row["snapshot_id"],
+            records=records,
+            completeness=row["completeness"],
+            omissions=omissions,
+            manifest_digest=row["manifest_digest"],
+        )
+        expected = _manifest_digest(
+            reconstructed.snapshot_id,
+            reconstructed.records,
+            reconstructed.completeness,
+            reconstructed.omissions,
+        )
+        if expected != reconstructed.manifest_digest:
+            logger.warning(
+                "provenance snapshot manifest mismatch on read: %s", snapshot_id
+            )
+            return None
+        return reconstructed
 
 
 class SnapshotCache:
