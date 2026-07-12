@@ -160,6 +160,8 @@ async def lookup_prior_choice(
     *,
     raw_text: str,
     conflict_id: str,
+    owner_user_id: str = "",
+    tenant_id: str = "",
     top_k: int = 3,
     min_quality: float = 0.5,
 ) -> Optional[PriorChoice]:
@@ -171,7 +173,16 @@ async def lookup_prior_choice(
     so any row that survives decay will still pass this gate; we
     keep it lower for robustness during the warm-up period before
     a workspace has accumulated many examples.
+
+    U6-0 T8-C3: a clarification hint is `visibility='private'` and
+    only ever surfaces to its own author within their tenant. An
+    unresolved `owner_user_id`/`tenant_id` fails closed (no hit) —
+    a NULL-owner legacy row is likewise never surfaced.
     """
+    # Fail-closed: a private hint needs a bound author + tenant.
+    if not owner_user_id or not tenant_id:
+        return None
+
     try:
         from backend import db
     except Exception as exc:
@@ -190,8 +201,12 @@ async def lookup_prior_choice(
     try:
         from backend.db_pool import get_pool
         async with get_pool().acquire() as _conn:
-            rows = await db.search_episodic_memory(
-                _conn, query, limit=top_k, min_quality=min_quality,
+            # U6-0 T8-C3: dedicated owner+tenant+source-scoped query —
+            # search_episodic_memory can't express owner/tenant.
+            rows = await db.search_owner_clarifications(
+                _conn, query,
+                owner_user_id=owner_user_id, tenant_id=tenant_id,
+                limit=top_k, min_quality=min_quality,
             )
     except Exception as exc:
         logger.debug("intent_memory: search failed: %s", exc)
@@ -224,6 +239,9 @@ async def lookup_prior_choice(
 async def annotate_conflicts_with_priors(
     raw_text: str,
     conflicts: list[dict],
+    *,
+    owner_user_id: str = "",
+    tenant_id: str = "",
 ) -> list[dict]:
     """For each conflict in a ParsedSpec.to_dict()-shaped list, add
     a `prior_choice` field if a historical pick is available. The
@@ -234,6 +252,11 @@ async def annotate_conflicts_with_priors(
     with id / message / fields / options / severity). Output is the
     same list mutated in place — kept simple for the router hot
     path, which isn't thread-sharing the structure.
+
+    U6-0 T8-C3: `owner_user_id`/`tenant_id` are the requesting
+    operator's identity (threaded from routers/intent.py). An
+    unresolved identity fails closed inside `lookup_prior_choice`
+    (no hint), so a hint never crosses operator or tenant.
     """
     for c in conflicts:
         cid = c.get("id") or ""
@@ -242,6 +265,7 @@ async def annotate_conflicts_with_priors(
         try:
             prior = await lookup_prior_choice(
                 raw_text=raw_text, conflict_id=cid,
+                owner_user_id=owner_user_id, tenant_id=tenant_id,
             )
         except Exception as exc:
             logger.debug("annotate: lookup failed for %s: %s", cid, exc)

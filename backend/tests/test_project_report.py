@@ -9,14 +9,19 @@ import pytest
 
 
 @pytest.fixture()
-async def _report_db(pg_test_pool):
+async def _report_db(pg_test_pool, monkeypatch):
     """Phase-3 Step C.1 (2026-04-21): ported off the SQLite-file
     ``OMNISIGHT_DATABASE_PATH`` + ``db._conn()`` setup onto the
     shared ``pg_test_pool`` + direct ``$N`` placeholders. The tables
     aren't part of the conftest TRUNCATE set, so we wipe the three
     seed tables explicitly before inserting.
     """
-    from backend import audit, db
+    from backend import audit, db, db_context
+    # U6-0 T8-C3: in prod a report is built inside a tenant-scoped
+    # request; pin the report tenant so the now tenant-scoped
+    # lessons-learned read surfaces this fixture's seed rows (all
+    # seeded under the default tenant).
+    monkeypatch.setattr(db_context, "current_tenant_id", lambda: "t-default")
     async with pg_test_pool.acquire() as conn:
         await conn.execute(
             "TRUNCATE token_usage, artifacts, episodic_memory, audit_log "
@@ -113,3 +118,25 @@ async def test_etag_changes_with_content(_report_db):
     # we still expect both etags to be 16 hex chars
     assert len(pr.report_etag(rep1)) == 16
     assert len(pr.report_etag(rep2)) == 16
+
+
+@pytest.mark.asyncio
+async def test_lessons_learned_tenant_scoped(_report_db, pg_test_pool):
+    """U6-0 T8-C3: a report built under one tenant surfaces ONLY that
+    tenant's episodic lessons — another tenant's row never leaks in."""
+    from backend import project_report as pr
+    # _report_db pins the report tenant to t-default and seeds the
+    # 'cmake not found' lesson there. Add a HIGHER-quality row under a
+    # DIFFERENT tenant — if scoping were broken it would sort first.
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO episodic_memory (id, error_signature, solution, "
+            "quality_score, access_count, tenant_id) "
+            "VALUES ($1, $2, $3, $4, $5, $6)",
+            "ep-other", "OTHER TENANT SECRET", "leak me", 0.99, 99,
+            "omnisight-self",
+        )
+    rep = await pr.build_report("smoke")
+    joined = " ".join(rep.lessons_learned)
+    assert "cmake" in joined                    # own-tenant lesson present
+    assert "OTHER TENANT SECRET" not in joined  # cross-tenant row excluded

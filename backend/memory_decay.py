@@ -121,7 +121,15 @@ async def decay_unused(
     """Walk `episodic_memory`. Any row whose `last_used_at` is older
     than `ttl_s` (or NULL — never touched after migration) gets its
     `decayed_score` multiplied by `factor`. Caller usually invokes
-    this from the nightly loop; tests pass `now` for determinism."""
+    this from the nightly loop; tests pass `now` for determinism.
+
+    U6-0 T8-C3: this is a GLOBAL maintenance sweep run by the nightly
+    background loop with no tenant in context. It mutates decay
+    bookkeeping (`decayed_score`/`last_used_at`), NOT model-visible or
+    human-visible content, so it is DELIBERATELY left cross-tenant:
+    scoping the sweep to one tenant would silently stop decay for
+    every other tenant. The tenant/owner read fences live on the
+    reader side (T8-C1 model reads, T8-C3 report + intent hint)."""
     ttl = ttl_s if ttl_s is not None else _env_float(
         "OMNISIGHT_MEMORY_DECAY_TTL_S", DEFAULT_TTL_S)
     f = factor if factor is not None else _env_float(
