@@ -33,7 +33,9 @@ from backend.agents.authorization_kernel import (
     AuthorizationDecision,
     OperationRequest,
     authorize_action,
+    classify_operation,
 )
+from backend.agents.tool_registry import OperationDescriptor, resolve
 from backend.auth import User
 
 
@@ -275,14 +277,90 @@ def test_bound_principals_mutating_still_requires_grant_regression() -> None:
         assert d.reason == "mutating_needs_grant:code_write"
 
 
+# ── OP-2626 (U6-0 G2c): canonical descriptor classification ─────────
+def test_classify_operation_read_only_descriptor_allows() -> None:
+    descriptor = OperationDescriptor(
+        tool_name="canonical_read",
+        effect="read_only",
+        family="read_only",
+    )
+    d = classify_operation(_ctx_human(), descriptor)
+    assert d.verdict == "allow"
+    assert d.reason == "read_only"
+    assert d.operation_descriptor is descriptor
+
+
+def test_classify_operation_mutating_bound_requires_grant() -> None:
+    descriptor = OperationDescriptor(
+        tool_name="canonical_write",
+        effect="mutating",
+        family="code_write",
+    )
+    d = classify_operation(_ctx_human(), descriptor)
+    assert d.verdict == "requires_grant"
+    assert d.reason == "mutating_needs_grant:code_write"
+    assert d.operation_descriptor is descriptor
+
+
+def test_classify_operation_mutating_unbound_denies() -> None:
+    descriptor = OperationDescriptor(
+        tool_name="canonical_write",
+        effect="mutating",
+        family="code_write",
+    )
+    d = classify_operation(_ctx_unbound(), descriptor)
+    assert d.verdict == "deny"
+    assert d.reason == "unbound_principal_denied"
+    assert d.operation_descriptor is descriptor
+
+
+def test_classify_operation_unknown_family_denies_before_effect() -> None:
+    descriptor = OperationDescriptor(
+        tool_name="canonical_unknown",
+        effect="mutating",
+        family="__unknown_deny__",
+    )
+    d = classify_operation(_ctx_human(), descriptor)
+    assert d.verdict == "deny"
+    assert d.reason == "unknown_tool_default_deny"
+    assert d.operation_descriptor is descriptor
+
+
+@pytest.mark.parametrize("tool_name", ["read_file", "git_push", "unknown_for_g2c"])
+def test_authorize_action_name_shim_matches_classify_operation(
+    tool_name: str,
+) -> None:
+    ctx = _ctx_human()
+    actual = authorize_action(ctx, _req(tool_name))
+    expected = classify_operation(ctx, resolve(tool_name))
+    assert actual.verdict == expected.verdict
+    assert actual.reason == expected.reason
+    assert actual.operation_descriptor == expected.operation_descriptor
+
+
+def test_classify_operation_records_provenance_snapshot_ids() -> None:
+    descriptor = OperationDescriptor(
+        tool_name="canonical_read",
+        effect="read_only",
+        family="read_only",
+    )
+    d = classify_operation(
+        _ctx_human(),
+        descriptor,
+        provenance_snapshot_ids=("snap-1", "snap-2"),
+    )
+    assert d.provenance_snapshot_ids == ("snap-1", "snap-2")
+    assert isinstance(d.provenance_snapshot_ids, tuple)
+
+
 # ── Kernel reachability guard ────────────────────────────────────────────
 def test_kernel_reachable_only_via_action_guard() -> None:
     """Adapters must NEVER import ``authorize_action`` / ``OperationRequest``
-    directly — the only legitimate kernel caller is the dispatch guard in
-    ``backend/agents/action_guard.py`` (T7-0). Beyond the kernel module,
-    the guard module, and their two test files, no backend file may
-    reference the kernel tokens. T7a/T7b wire the adapters to the GUARD;
-    T11 flips enforce.
+    / ``classify_operation`` directly — the only legitimate kernel caller is
+    the dispatch guard in ``backend/agents/action_guard.py`` (T7-0). Beyond
+    the kernel module, the guard module, and their two test files, no backend
+    file may reference the kernel tokens. T7a/T7b wire the adapters to the
+    GUARD; G6 switches the guard to the canonical path; T11 flips enforce.
 
     This guard fails loudly if a direct kernel caller sneaks in — the
     frozen design forbids it.
@@ -307,7 +385,7 @@ def test_kernel_reachable_only_via_action_guard() -> None:
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(
-        r"\b(authorize_action|OperationRequest|authorization_kernel)\b"
+        r"\b(authorize_action|OperationRequest|classify_operation|authorization_kernel)\b"
     )
     offenders: list[str] = []
     for py in backend_root.rglob("*.py"):

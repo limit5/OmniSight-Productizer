@@ -11,21 +11,25 @@ Frozen design §1, §2.C. The core invariant: since the model / memory can
 never MINT a grant, a mutating side effect can never be authorized from
 the model path — it only ever reaches ``requires_grant``, never ``allow``.
 
-⚠ DORMANT. No production adapter reaches this kernel yet. The ONLY
-additional legitimate referent is the T7-0 dispatch guard in
-``backend/agents/action_guard.py`` — adapters call the guard, never the
-kernel directly; T11 flips enforcement. Add NO other caller —
-``grep -rn "authorize_action\\|OperationRequest\\|authorization_kernel"
-backend/ --include=*.py`` returns only this module, the guard module,
-and their tests.
+⚠ DORMANT. No production adapter reaches the canonical classification
+entry point yet. The T7-0 dispatch guard in
+``backend/agents/action_guard.py`` still calls the name-only
+:func:`authorize_action` shim; adapters call the guard, never the kernel
+directly. G6 will switch the guard to canonicalize then call
+:func:`classify_operation`; T11 flips enforcement. Add NO other caller —
+the caller-scan test covers both kernel entry points.
 
 ⚠ Naming: this module exposes ``AuthorizationDecision`` — NOT ``Decision``.
 ``backend.decision_engine`` already defines an unrelated ``Decision``
 dataclass; do not clash/shadow it.
 
-The kernel resolves the tool via :func:`backend.agents.tool_registry.resolve`
-itself; it does NOT accept a caller-supplied ``OperationDescriptor`` (an
-adapter could otherwise lie about what a tool does).
+The pure :func:`classify_operation` entry point trusts its descriptor. Its
+ONLY legitimate producers are (a) :func:`backend.agents.tool_registry.resolve`
+via the name-only :func:`authorize_action` shim and (b) the trusted server-side
+canonicalizer, which derives from ``resolve`` plus argument inspection. No
+adapter, model, or memory value may construct a descriptor or call
+``classify_operation`` directly; adapters call the guard, preserving the
+anti-forge boundary.
 """
 
 from __future__ import annotations
@@ -74,13 +78,16 @@ class AuthorizationDecision:
     provenance_snapshot_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
-def authorize_action(
+def classify_operation(
     execution_context: ExecutionContext,
-    request: OperationRequest,
+    descriptor: OperationDescriptor,
     provenance_snapshot_ids: tuple[str, ...] = (),
 ) -> AuthorizationDecision:
-    """Classify a model-side tool call into ``allow`` / ``requires_grant``
-    / ``deny`` per frozen design §2.C.
+    """Classify a trusted canonical descriptor per frozen design §2.C.
+
+    This pure function trusts ``descriptor``. The caller boundary must admit
+    descriptors only from the name shim or trusted server-side canonicalizer,
+    never from an adapter, model, or memory value.
 
     Check order is load-bearing:
 
@@ -99,8 +106,6 @@ def authorize_action(
     logic lands with the grant flow (T9/T10). Here we are fail-closed for
     mutating operations regardless of principal type.
     """
-    descriptor = resolve(request.tool_name)
-
     if descriptor.family == "__unknown_deny__":
         return AuthorizationDecision(
             verdict="deny",
@@ -134,4 +139,18 @@ def authorize_action(
         reason=f"mutating_needs_grant:{descriptor.family}",
         execution_context=execution_context,
         provenance_snapshot_ids=tuple(provenance_snapshot_ids),
+    )
+
+
+def authorize_action(
+    execution_context: ExecutionContext,
+    request: OperationRequest,
+    provenance_snapshot_ids: tuple[str, ...] = (),
+) -> AuthorizationDecision:
+    """Name-only compatibility shim that resolves before classification."""
+    descriptor = resolve(request.tool_name)
+    return classify_operation(
+        execution_context,
+        descriptor,
+        provenance_snapshot_ids,
     )
