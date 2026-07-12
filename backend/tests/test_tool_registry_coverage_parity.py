@@ -32,10 +32,11 @@ this test does not need). It then asserts:
      free-form registry key that MAY itself contain ``:`` — a
      ``split(":")`` fallthrough would truncate that.
   4. ``Skill`` classifies as ``skill_exec`` (NOT bare ``delegation``) —
-     ``skills_loader._run_executable_skill`` runs a ``*.skill`` file as
-     an arbitrary subprocess with the full parent environment; sharing
-     the ``delegation`` family with ``Agent`` would let an enforce flip
-     on ``code_write`` / ``deploy`` be silently bypassed via a skill.
+     ``skills_loader._run_executable_skill`` runs a manifest-pinned,
+     hash-verified ``*.skill`` file as a subprocess with the full parent
+     environment (P-SKILL containment); sharing the ``delegation`` family
+     with ``Agent`` would let an enforce flip on ``code_write`` /
+     ``deploy`` be silently bypassed via a skill.
   5. The pre-existing LangChain ``TOOL_MAP`` parity assertion also
      stays green (belt + suspenders — the older test enforces it too).
 
