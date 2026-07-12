@@ -1144,6 +1144,40 @@ CREATE TABLE IF NOT EXISTS action_grants (
 CREATE INDEX IF NOT EXISTS idx_grants_tenant_state
     ON action_grants(tenant_id, state);
 
+-- U6-0 T9/T10 G4a-2 (OP-2635): dormant resume queue and result substrate.
+-- PostgreSQL's alembic 0265 schema is authoritative; the SQLite subset keeps
+-- the write-once UNIQUE keys, state CHECK, and grant composite foreign keys.
+CREATE TABLE IF NOT EXISTS resume_jobs (
+    resume_id          TEXT PRIMARY KEY,
+    tenant_id          TEXT NOT NULL REFERENCES tenants(id),
+    grant_id           TEXT NOT NULL,
+    action_instance_id TEXT NOT NULL,
+    state              TEXT NOT NULL DEFAULT 'queued'
+                       CHECK (state IN (
+                           'queued', 'claimed', 'done', 'manual', 'failed'
+                       )),
+    lease_owner        TEXT,
+    lease_expires_at   TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, grant_id),
+    UNIQUE (tenant_id, resume_id),
+    FOREIGN KEY (tenant_id, grant_id)
+        REFERENCES action_grants (tenant_id, grant_id)
+);
+CREATE INDEX IF NOT EXISTS idx_resume_jobs_tenant_state
+    ON resume_jobs(tenant_id, state);
+
+CREATE TABLE IF NOT EXISTS execution_results (
+    grant_id     TEXT PRIMARY KEY,
+    tenant_id    TEXT NOT NULL REFERENCES tenants(id),
+    result       TEXT NOT NULL,
+    ambiguous    INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, grant_id),
+    FOREIGN KEY (tenant_id, grant_id)
+        REFERENCES action_grants (tenant_id, grant_id)
+);
+
 CREATE TABLE IF NOT EXISTS debug_findings (
     id              TEXT PRIMARY KEY,
     task_id         TEXT NOT NULL,
@@ -4441,6 +4475,115 @@ async def get_action_grant(
         tenant_id,
     )
     return dict(row) if row is not None else None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Durable resume jobs and execution results (U6-0 T9/T10 G4a-2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def put_resume_job(
+    conn,
+    *,
+    resume_id: str,
+    tenant_id: str,
+    grant_id: str,
+    action_instance_id: str,
+) -> bool:
+    """Insert one dormant resume job, or idempotently no-op."""
+    if not tenant_id or not resume_id:
+        raise ValueError("tenant_id and resume_id must be non-empty")
+
+    row = await conn.fetchrow(
+        """INSERT INTO resume_jobs
+           (resume_id, tenant_id, grant_id, action_instance_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (resume_id) DO NOTHING
+           RETURNING resume_id""",
+        resume_id,
+        tenant_id,
+        grant_id,
+        action_instance_id,
+    )
+    return row is not None
+
+
+async def get_resume_job(
+    conn,
+    resume_id: str,
+    *,
+    tenant_id: str,
+) -> dict | None:
+    """Return a resume job only within ``tenant_id``; fail closed."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    row = await conn.fetchrow(
+        "SELECT resume_id, tenant_id, grant_id, action_instance_id, state, "
+        "lease_owner, lease_expires_at, created_at FROM resume_jobs "
+        "WHERE resume_id = $1 AND tenant_id = $2",
+        resume_id,
+        tenant_id,
+    )
+    return dict(row) if row is not None else None
+
+
+async def put_execution_result(
+    conn,
+    *,
+    grant_id: str,
+    tenant_id: str,
+    result_json: str,
+    ambiguous: bool,
+) -> bool:
+    """Insert once, accepting only same-grant/same-result replays."""
+    if not tenant_id or not grant_id:
+        raise ValueError("tenant_id and grant_id must be non-empty")
+
+    row = await conn.fetchrow(
+        """INSERT INTO execution_results
+           (grant_id, tenant_id, result, ambiguous)
+           VALUES ($1, $2, $3::jsonb, $4)
+           ON CONFLICT (grant_id) DO NOTHING
+           RETURNING grant_id""",
+        grant_id,
+        tenant_id,
+        result_json,
+        ambiguous,
+    )
+    if row is not None:
+        return True
+
+    existing = await conn.fetchrow(
+        "SELECT result FROM execution_results WHERE grant_id = $1",
+        grant_id,
+    )
+    if (
+        existing is not None
+        and json.loads(existing["result"]) != json.loads(result_json)
+    ):
+        raise ValueError("execution_result mismatch")
+    return False
+
+
+async def get_execution_result(
+    conn,
+    grant_id: str,
+    *,
+    tenant_id: str,
+) -> dict | None:
+    """Return an execution result only within ``tenant_id``; fail closed."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    row = await conn.fetchrow(
+        "SELECT grant_id, tenant_id, result, ambiguous, completed_at "
+        "FROM execution_results WHERE grant_id = $1 AND tenant_id = $2",
+        grant_id,
+        tenant_id,
+    )
+    if row is None:
+        return None
+    result = dict(row)
+    result["ambiguous"] = bool(result["ambiguous"])
+    return result
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
