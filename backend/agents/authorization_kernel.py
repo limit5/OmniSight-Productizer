@@ -31,7 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from backend.agents.execution_context import ExecutionContext
+from backend.agents.execution_context import ExecutionContext, is_unbound
 from backend.agents.tool_registry import OperationDescriptor, resolve
 
 Verdict = Literal["allow", "deny", "requires_grant"]
@@ -87,13 +87,15 @@ def authorize_action(
          so if the effect branch fired first they'd wrongly become
          ``requires_grant``. Family/unknown check MUST precede effect.
       2. ``effect == "read_only"`` ⇒ ``allow``.
-      3. ``effect == "mutating"`` ⇒ ``requires_grant``. NEVER ``allow`` on
-         this model-side path — that's the core §1 invariant.
+      3. ``effect == "mutating"``: an ``unbound`` principal ⇒ ``deny``;
+         otherwise ``requires_grant``. NEVER ``allow`` on this model-side
+         path — that's the core §1 invariant.
 
-    Principal-independent: does NOT branch on
-    ``execution_context.principal_type``. Machine-principal /
-    grant-matching logic lands with the grant flow (T9/T10). Here we are
-    fail-closed for mutating operations regardless of principal type.
+    Principal-independent EXCEPT an ``unbound`` principal (a
+    missing/whole-invalid identity), which hard-DENYs protected (mutating)
+    ops instead of ``requires_grant``. Machine-principal / grant-matching
+    logic lands with the grant flow (T9/T10). Here we are fail-closed for
+    mutating operations regardless of principal type.
     """
     descriptor = resolve(request.tool_name)
 
@@ -111,6 +113,15 @@ def authorize_action(
             verdict="allow",
             operation_descriptor=descriptor,
             reason="read_only",
+            execution_context=execution_context,
+            provenance_snapshot_ids=tuple(provenance_snapshot_ids),
+        )
+
+    if is_unbound(execution_context):
+        return AuthorizationDecision(
+            verdict="deny",
+            operation_descriptor=descriptor,
+            reason="unbound_principal_denied",
             execution_context=execution_context,
             provenance_snapshot_ids=tuple(provenance_snapshot_ids),
         )

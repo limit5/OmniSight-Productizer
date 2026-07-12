@@ -8,7 +8,9 @@ decision function that resolves each request against the authoritative
 Frozen design §1 core invariant exercised here: a mutating side effect
 can never be authorized from the model-side kernel path — it only ever
 reaches ``requires_grant`` (grant/challenge machinery is a LATER ticket).
-The kernel is principal-independent — case (f) below asserts that even a
+The kernel is principal-independent EXCEPT an ``unbound`` principal (a
+missing/whole-invalid identity), which hard-DENYs protected (mutating) ops
+instead of ``requires_grant`` — case (f) below asserts that even a
 machine-principal context still gets ``requires_grant`` for a mutating
 tool, never ``allow``.
 
@@ -48,6 +50,10 @@ def _ctx_human() -> execution_context.ExecutionContext:
 
 def _ctx_machine() -> execution_context.ExecutionContext:
     return execution_context.for_machine(service_name="runner", request_id="r2")
+
+
+def _ctx_unbound() -> execution_context.ExecutionContext:
+    return execution_context.for_unbound()
 
 
 def _req(tool_name: str) -> OperationRequest:
@@ -119,10 +125,12 @@ def test_unknown_tool_denies_with_unknown_tool_default_deny_reason() -> None:
 
 # ── AC (f): machine principal + mutating ⇒ STILL requires_grant ──────────
 def test_machine_principal_mutating_still_requires_grant_never_allow() -> None:
-    """Principal-independent fail-closed: a machine-principal ExecutionContext
-    on a mutating operation MUST still classify to ``requires_grant`` — never
-    ``allow``. Machine-principal / grant-matching branching lands with T9/T10;
-    the model-side kernel here classifies solely on tool effect/family.
+    """Fail-closed and principal-independent EXCEPT an ``unbound`` principal
+    (a missing/whole-invalid identity), which hard-DENYs protected (mutating)
+    ops instead of ``requires_grant``. A machine principal is BOUND, so a
+    machine-principal ExecutionContext on a mutating operation MUST still
+    classify to ``requires_grant`` — never ``allow``. Machine-principal /
+    grant-matching branching lands with T9/T10.
     """
     ctx_m = _ctx_machine()
     d = authorize_action(ctx_m, _req("git_push"))
@@ -214,6 +222,56 @@ def test_read_only_never_requires_grant_and_mutating_never_allows() -> None:
             f"{t} should be requires_grant but got {d.verdict}"
         )
         assert d.verdict != "allow"
+
+
+# ── OP-2600 (U6-0 P-ID-A): unbound-hard-deny kernel branch ───────────────
+def test_unbound_principal_mutating_is_hard_denied() -> None:
+    """unbound + KNOWN mutating tool ⇒ deny — never requires_grant (so it
+    can never structurally enter the T9/T10 grant-matching path), never
+    allow."""
+    d = authorize_action(_ctx_unbound(), _req("git_push"))
+    assert d.verdict == "deny"
+    assert d.reason == "unbound_principal_denied"
+    assert d.verdict != "requires_grant"
+    assert d.verdict != "allow"
+    assert d.execution_context.principal_type == "unbound"
+
+
+def test_unbound_principal_unknown_tool_keeps_unknown_deny_reason() -> None:
+    """The family/unknown check precedence holds under unbound: unknown is
+    denied for every principal with the unknown-tool reason; the
+    unbound-specific reason applies only to KNOWN mutating tools."""
+    d = authorize_action(_ctx_unbound(), _req("totally_unknown_tool"))
+    assert d.verdict == "deny"
+    assert d.reason == "unknown_tool_default_deny"
+
+
+def test_unbound_principal_read_only_is_allowed() -> None:
+    """Frozen §1 invariant: read_only always allows — a read has no side
+    effect by the registry's classification. A missing context is surfaced
+    by the guard's authorization_source="unbound" metric, not by denying
+    reads."""
+    d = authorize_action(_ctx_unbound(), _req("read_file"))
+    assert d.verdict == "allow"
+    assert d.reason == "read_only"
+
+
+def test_bound_principals_mutating_still_requires_grant_regression() -> None:
+    """Regression: the unbound branch changes NOTHING for bound principals —
+    human/service/machine + git_push all still classify to requires_grant."""
+    ctx_service = execution_context.for_service(
+        service_name="runner",
+        tenant_id="t-default",
+        request_id="r3",
+        roles=["operator"],
+        authorization_source="a2a",
+    )
+    for ctx in (_ctx_human(), ctx_service, _ctx_machine()):
+        d = authorize_action(ctx, _req("git_push"))
+        assert d.verdict == "requires_grant", (
+            f"{ctx.principal_type} should still be requires_grant, got {d.verdict}"
+        )
+        assert d.reason == "mutating_needs_grant:code_write"
 
 
 # ── Dormant guard ────────────────────────────────────────────────────────
