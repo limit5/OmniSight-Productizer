@@ -1,4 +1,4 @@
-"""OP-2632 code-write file canonicalizer tests (offline)."""
+"""OP-2632/OP-2633 code-write file canonicalizer tests (offline)."""
 
 from __future__ import annotations
 
@@ -243,6 +243,182 @@ def test_edit_replace_all_defaults_false(tmp_path: pathlib.Path) -> None:
     assert prepared.human_rendering["summary"] == "replace first"
 
 
+@pytest.mark.parametrize(
+    ("raw_args", "expected_specific", "summary"),
+    [
+        (
+            {"command": "view", "path": "src/main.py", "view_range": (1, 5)},
+            {"view_range": [1, 5]},
+            "view",
+        ),
+        (
+            {"command": "create", "path": "src/main.py", "file_text": "new\n"},
+            {"file_text": "new\n"},
+            "4 bytes",
+        ),
+        (
+            {
+                "command": "str_replace",
+                "path": "src/main.py",
+                "old_str": "before",
+            },
+            {"old_str": "before", "new_str": ""},
+            "replace unique",
+        ),
+        (
+            {"command": "insert", "path": "src/main.py", "insert_line": 3},
+            {"insert_line": 3, "insert_text": ""},
+            "at line 3",
+        ),
+    ],
+    ids=["view", "create", "str-replace", "insert"],
+)
+def test_text_editor_commands_return_structured_executable_args(
+    tmp_path: pathlib.Path,
+    raw_args: dict[str, object],
+    expected_specific: dict[str, object],
+    summary: str,
+) -> None:
+    register_code_write_file_canonicalizers()
+
+    prepared = canonicalize(
+        _context(tmp_path, "runner_sdk"),
+        "runner_sdk",
+        "str_replace_based_edit_tool",
+        "v1",
+        raw_args,
+    )
+
+    command = raw_args["command"]
+    assert isinstance(command, str)
+    assert prepared.operation_descriptor == resolve("str_replace_based_edit_tool")
+    assert prepared.operation_descriptor.effect == "mutating"
+    assert prepared.canonical_target == "src/main.py"
+    assert prepared.executable_args == {
+        "workspace_id": "ws-1",
+        "relative_path": "src/main.py",
+        "resolved_at_prepare": str((tmp_path / "src/main.py").resolve()),
+        "command": command,
+        **expected_specific,
+    }
+    assert prepared.human_rendering == {
+        "tool": "str_replace_based_edit_tool",
+        "action": command,
+        "target": "src/main.py",
+        "summary": summary,
+    }
+
+
+def test_text_editor_undo_edit_fails_closed(tmp_path: pathlib.Path) -> None:
+    register_code_write_file_canonicalizers()
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(
+            _context(tmp_path, "runner_sdk"),
+            "runner_sdk",
+            "str_replace_based_edit_tool",
+            "v1",
+            {"command": "undo_edit", "path": "src/main.py"},
+        )
+
+    assert caught.value.reason == "uncanonicalizable_undo_edit"
+
+
+def test_text_editor_unknown_command_fails_closed(tmp_path: pathlib.Path) -> None:
+    register_code_write_file_canonicalizers()
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(
+            _context(tmp_path, "runner_sdk"),
+            "runner_sdk",
+            "str_replace_based_edit_tool",
+            "v1",
+            {"command": "delete", "path": "src/main.py"},
+        )
+
+    assert caught.value.reason == "unknown_text_editor_command:delete"
+
+
+@pytest.mark.parametrize(
+    ("raw_args", "reason"),
+    [
+        (
+            {"command": "view", "path": "src/main.py", "view_range": [1, 2, 3]},
+            "invalid_view_range",
+        ),
+        (
+            {"command": "view", "path": "src/main.py", "view_range": [0, 5]},
+            "invalid_view_range",
+        ),
+        (
+            {"command": "view", "path": "src/main.py", "view_range": [True, 2]},
+            "invalid_view_range",
+        ),
+        (
+            {"command": "view", "path": "src/main.py", "view_range": None},
+            "invalid_view_range",
+        ),
+        (
+            {"command": "create", "path": "src/main.py"},
+            "missing_or_invalid_arg:file_text",
+        ),
+        (
+            {
+                "command": "str_replace",
+                "path": "src/main.py",
+                "old_str": "",
+            },
+            "empty_old_str",
+        ),
+        (
+            {"command": "insert", "path": "src/main.py", "insert_line": True},
+            "missing_or_invalid_arg:insert_line",
+        ),
+    ],
+    ids=[
+        "view-range-length",
+        "view-range-start",
+        "view-range-bool",
+        "view-range-none",
+        "create-file-text",
+        "str-replace-empty-old-str",
+        "insert-line-bool",
+    ],
+)
+def test_text_editor_bad_command_args_fail_closed(
+    tmp_path: pathlib.Path,
+    raw_args: dict[str, object],
+    reason: str,
+) -> None:
+    register_code_write_file_canonicalizers()
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(
+            _context(tmp_path, "runner_sdk"),
+            "runner_sdk",
+            "str_replace_based_edit_tool",
+            "v1",
+            raw_args,
+        )
+
+    assert caught.value.reason == reason
+
+
+def test_text_editor_create_path_escape_fails_closed(tmp_path: pathlib.Path) -> None:
+    register_code_write_file_canonicalizers()
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(
+            _context(tmp_path, "runner_sdk"),
+            "runner_sdk",
+            "str_replace_based_edit_tool",
+            "v1",
+            {"command": "create", "path": "../../x", "file_text": "blocked"},
+        )
+
+    assert caught.value.reason == "path_escapes_workspace"
+
+
 def test_require_workspace_fails_closed_through_canonicalize() -> None:
     register_code_write_file_canonicalizers()
     context = CanonicalizationContext(
@@ -310,6 +486,7 @@ def test_registration_adds_exact_keys_and_rejects_duplicate() -> None:
         ("specialist", "write_yaml", "v1"),
         ("runner_sdk", "Write", "v1"),
         ("runner_sdk", "Edit", "v1"),
+        ("runner_sdk", "str_replace_based_edit_tool", "v1"),
     }
 
     register_code_write_file_canonicalizers()

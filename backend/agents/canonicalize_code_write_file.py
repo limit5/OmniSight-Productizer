@@ -168,9 +168,90 @@ def _canon_sdk_edit(
     )
 
 
+def _canon_str_replace(
+    context: CanonicalizationContext,
+    raw_args: Mapping[str, object],
+) -> PreparedAction:
+    command = _require_str(raw_args, "command")
+    if command == "undo_edit":
+        raise CanonicalizationError("uncanonicalizable_undo_edit")
+    if command not in {"view", "create", "str_replace", "insert"}:
+        raise CanonicalizationError(f"unknown_text_editor_command:{command}")
+
+    path = _require_str(raw_args, "path")
+    relative_path, resolved = _resolve_in_workspace(
+        context.require_workspace(),
+        path,
+        expanduser=True,
+    )
+
+    cmd_args: dict[str, object]
+    if command == "view":
+        cmd_args = {}
+        if "view_range" in raw_args:
+            view_range = raw_args["view_range"]
+            if not isinstance(view_range, (list, tuple)) or len(view_range) != 2:
+                raise CanonicalizationError("invalid_view_range")
+            if any(isinstance(entry, bool) for entry in view_range):
+                raise CanonicalizationError("invalid_view_range")
+            if any(not isinstance(entry, int) for entry in view_range):
+                raise CanonicalizationError("invalid_view_range")
+            start, end = view_range
+            if start < 1:
+                raise CanonicalizationError("invalid_view_range")
+            cmd_args["view_range"] = [start, end]
+        summary = "view"
+    elif command == "create":
+        file_text = _require_str(raw_args, "file_text")
+        cmd_args = {"file_text": file_text}
+        summary = f"{len(file_text.encode('utf-8'))} bytes"
+    elif command == "str_replace":
+        old_str = _require_str(raw_args, "old_str")
+        if old_str == "":
+            raise CanonicalizationError("empty_old_str")
+        new_str = raw_args.get("new_str", "")
+        if not isinstance(new_str, str):
+            raise CanonicalizationError("missing_or_invalid_arg:new_str")
+        cmd_args = {"old_str": old_str, "new_str": new_str}
+        summary = "replace unique"
+    else:
+        insert_line = raw_args.get("insert_line")
+        if isinstance(insert_line, bool) or not isinstance(insert_line, int):
+            raise CanonicalizationError("missing_or_invalid_arg:insert_line")
+        insert_text = raw_args.get("insert_text", "")
+        if not isinstance(insert_text, str):
+            raise CanonicalizationError("missing_or_invalid_arg:insert_text")
+        cmd_args = {"insert_line": insert_line, "insert_text": insert_text}
+        summary = f"at line {insert_line}"
+
+    return PreparedAction(
+        operation_descriptor=resolve("str_replace_based_edit_tool"),
+        canonical_target=relative_path,
+        executable_args={
+            "workspace_id": context.workspace_id,
+            "relative_path": relative_path,
+            "resolved_at_prepare": resolved,
+            "command": command,
+            **cmd_args,
+        },
+        human_rendering={
+            "tool": "str_replace_based_edit_tool",
+            "action": command,
+            "target": relative_path,
+            "summary": summary,
+        },
+    )
+
+
 def register_code_write_file_canonicalizers() -> None:
-    """Register the four single-operation code-write file adapters."""
+    """Register the five code-write file adapters."""
     register_canonicalizer("specialist", "write_file", "v1", _canon_write_file)
     register_canonicalizer("specialist", "write_yaml", "v1", _canon_write_yaml)
     register_canonicalizer("runner_sdk", "Write", "v1", _canon_sdk_write)
     register_canonicalizer("runner_sdk", "Edit", "v1", _canon_sdk_edit)
+    register_canonicalizer(
+        "runner_sdk",
+        "str_replace_based_edit_tool",
+        "v1",
+        _canon_str_replace,
+    )
