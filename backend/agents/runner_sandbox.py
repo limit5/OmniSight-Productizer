@@ -49,6 +49,7 @@ import os
 import platform
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -745,6 +746,32 @@ def _host_home(env: Mapping[str, str]) -> Path:
     return Path(env.get("HOME") or os.path.expanduser("~")).expanduser()
 
 
+def _python_test_deps_dir(env: Mapping[str, str]) -> Path | None:
+    """Resolve the host Python user-site-packages so the jail's python can
+    run the project's ``pytest`` suite (OP-2619).
+
+    The jail's ``/usr/bin/python3`` (from the ``/usr`` RO-bind) has none of
+    the backend deps, so an agent that runs ``python -m pytest`` to VERIFY
+    its AC fails to import ``pytest``/``fastapi``/``asyncpg`` — a
+    codex-class ticket then refuses to push its unverified patch and
+    reverts (claude ships unverified; the reviewer catches issues). We
+    RO-bind the user-site of the SAME interpreter version the jail runs
+    (the runner + jail both run the system ``python3`` here) and
+    ``--setenv PYTHONPATH`` it below. Read-only; absent on a minimal host
+    (no user-site) → ``None`` → no bind, no effect on any CLI. Gated by
+    ``OMNISIGHT_RUNNER_BIND_PYTEST_DEPS`` (default ON; set ``0`` to opt
+    out — e.g. a host that provisions a real per-ticket venv instead)."""
+    if os.environ.get("OMNISIGHT_RUNNER_BIND_PYTEST_DEPS", "1").strip() == "0":
+        return None
+    home = _host_home(env)
+    site = (
+        home / ".local" / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    return site if site.is_dir() else None
+
+
 def _host_gradle_binary_tree(env: Mapping[str, str]) -> Path:
     return _host_home(env) / _GRADLE_BINARY_DIRNAME
 
@@ -871,6 +898,14 @@ def _build_bubblewrap_argv(
     for _agy in _agentic_cli_binaries(env):
         argv += ["--ro-bind", _agy, _agy]
 
+    # OP-2619: RO-bind the host Python user-site so the jail's system
+    # python3 can ``import pytest`` + the backend deps for AC verification
+    # (see :func:`_python_test_deps_dir`). PYTHONPATH is --setenv'd below.
+    py_deps = _python_test_deps_dir(env)
+    if py_deps is not None:
+        py_deps_abs = str(py_deps)
+        argv += ["--ro-bind", py_deps_abs, py_deps_abs]
+
     allowed_env = build_allowlisted_env(env)
     android_home = allowed_env.get("ANDROID_HOME", "").strip()
     android_gradle_env: dict[str, str] = {}
@@ -941,6 +976,10 @@ def _build_bubblewrap_argv(
     # per-ticket cli-home (OP-1834) so session/cache/state writes succeed. cwd
     # stays the worktree — the CLI works on the code there, HOME lives apart.
     argv += ["--setenv", "TMPDIR", tmp_dir]
+    # OP-2619: point the jail python at the RO-bound host user-site (above)
+    # so `python -m pytest` imports the backend deps for AC verification.
+    if py_deps is not None:
+        argv += ["--setenv", "PYTHONPATH", py_deps_abs]
     for name, value in cli_env.items():
         argv += ["--setenv", name, value]
     for name, value in android_gradle_env.items():

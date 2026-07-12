@@ -105,6 +105,57 @@ def test_argv_shape_linux_includes_readonly_system_mounts(tmp_path, monkeypatch)
         assert found, f"missing --ro-bind for {required}"
 
 
+def test_argv_binds_python_user_site_and_sets_pythonpath(tmp_path, monkeypatch):
+    """OP-2619: the host Python user-site is RO-bound + ``PYTHONPATH`` set so
+    the jail's python can ``import pytest`` + backend deps for AC
+    verification (a codex ticket refuses to push its unverified patch
+    otherwise)."""
+    _force_platform(monkeypatch, rs.PLATFORM_LINUX)
+    _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
+    fake_site = tmp_path / "site-packages"
+    fake_site.mkdir()
+    # Pin the resolver at a real dir we control (host-independent).
+    monkeypatch.setattr(rs, "_python_test_deps_dir", lambda env: fake_site)
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    argv = rs.wrap_in_bubblewrap(
+        ["codex", "exec"], worktree_path=worktree, ticket_key="OP-TEST",
+    )
+    sp = str(fake_site)
+    assert any(
+        argv[i] == "--ro-bind" and argv[i + 1] == sp and argv[i + 2] == sp
+        for i in range(len(argv) - 2)
+    ), "site-packages not RO-bound"
+    assert any(
+        argv[i] == "--setenv" and argv[i + 1] == "PYTHONPATH" and argv[i + 2] == sp
+        for i in range(len(argv) - 2)
+    ), "PYTHONPATH not --setenv'd"
+
+
+def test_python_deps_bind_opt_out_and_absent(tmp_path, monkeypatch):
+    """No PYTHONPATH when opted out (``OMNISIGHT_RUNNER_BIND_PYTEST_DEPS=0``)
+    or when the user-site is absent — so a host that provisions its own
+    venv, or a minimal host, is unaffected (and claude never needs it)."""
+    _force_platform(monkeypatch, rs.PLATFORM_LINUX)
+    _force_which(monkeypatch, {"bwrap": "/usr/bin/bwrap"})
+    worktree = tmp_path / "wt"
+    worktree.mkdir()
+
+    monkeypatch.setenv("OMNISIGHT_RUNNER_BIND_PYTEST_DEPS", "0")
+    argv = rs.wrap_in_bubblewrap(
+        ["codex"], worktree_path=worktree, ticket_key="OP-TEST",
+    )
+    assert "PYTHONPATH" not in argv
+
+    monkeypatch.delenv("OMNISIGHT_RUNNER_BIND_PYTEST_DEPS", raising=False)
+    monkeypatch.setattr(rs, "_python_test_deps_dir", lambda env: None)
+    argv2 = rs.wrap_in_bubblewrap(
+        ["codex"], worktree_path=worktree, ticket_key="OP-TEST",
+    )
+    assert "PYTHONPATH" not in argv2
+
+
 def test_argv_shape_linux_binds_linked_git_metadata(tmp_path, monkeypatch):
     """Linked worktrees need their out-of-worktree git metadata mounted."""
     _force_platform(monkeypatch, rs.PLATFORM_LINUX)
