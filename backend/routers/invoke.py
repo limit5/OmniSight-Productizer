@@ -19,6 +19,7 @@ from backend.models import InvokeHaltResponse
 
 from backend.agents.graph import run_graph
 from backend.agents import execution_context as _ec
+from backend.agents import runner_tenant as _rt
 from backend.routers.agents import _agents, _persist as _persist_agent
 from backend.routers.tasks import _tasks, _persist as _persist_task
 from backend.models import AgentStatus, AgentWorkspace, Task, TaskStatus
@@ -584,6 +585,9 @@ async def _run_agent_task(agent, task, workspace_path: str | None) -> None:
                 execution_context=_ec.for_machine(
                     service_name="agent-invoke-run-task",
                     request_id=uuid.uuid4().hex,
+                    # U6-0 T8-C2: internal agent-run → self tenant, so the
+                    # verified-read fence (T8-C1) resolves on this path.
+                    tenant_id=_rt.OMNISIGHT_SELF_TENANT,
                 ),
             )
             agent.thought_chain = graph_result.answer[:300] if graph_result.answer else "Task complete."
@@ -1469,6 +1473,7 @@ async def _execute_actions(actions: list[dict], state: dict):
                     execution_context=_ec.for_machine(
                         service_name="agent-invoke-execute-actions",
                         request_id=uuid.uuid4().hex,
+                        tenant_id=_rt.OMNISIGHT_SELF_TENANT,  # U6-0 T8-C2
                     ),
                 )
                 yield {
@@ -2874,6 +2879,7 @@ async def invoke_sync(
                         execution_context=_ec.for_machine(
                             service_name="agent-invoke-sync",
                             request_id=uuid.uuid4().hex,
+                            tenant_id=_rt.OMNISIGHT_SELF_TENANT,  # U6-0 T8-C2
                         ),
                     )
                     results.append({
