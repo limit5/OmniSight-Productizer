@@ -38,7 +38,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -285,15 +285,213 @@ FIGMA_MCP_READ_ONLY_TOOLS: frozenset[str] = frozenset({
 })
 
 
-# OP-853: Graphiti query tools are read-only by method prefix. This mirrors
-# the ticket's contract: allow ``get*``, ``find*``, ``query*``, ``list*``;
-# refuse write-shaped names such as ``create*``, ``update*``, ``delete*``.
-MCP_GRAPHITI_READ_ONLY_PREFIXES: tuple[str, ...] = (
-    "get",
-    "find",
-    "query",
-    "list",
-)
+# OP-2607 (U6-0 P-PROV-A): exact read-only allowlist for the Graphiti MCP
+# server, replacing the OP-853 prefix predicate (``get*``/``find*``/``query*``
+# /``list*``), which was too loose — a future write-shaped method named e.g.
+# ``getAndUpdateNode`` would have slipped through. This is the FULL legitimate
+# set, pinned at design time from the catalog + every real call site
+# (``queryTimeline``/``listPatterns`` existed only in prefix-predicate tests,
+# never in the catalog or a caller — they are now refused).
+MCP_GRAPHITI_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "getTicketTimeline",
+    "findSimilarPriorTicketsByTimeline",
+    "getBotSuccessRateByPattern",
+})
+
+
+# ─── OP-2607 (U6-0 P-PROV-A): per-server MCP forwarding policy ────
+#
+# Remote MCP servers execute PROVIDER-SIDE (Anthropic runs them) — the
+# in-process dispatcher guard cannot reach them. The only lever is what
+# we FORWARD in ``mcp_servers=[]``. The policy map below is the single
+# source of truth for that decision: default-DENY unknown servers,
+# origin-pinned URLs, exact per-server method allowlists.
+#
+# RESIDUAL ASSUMPTION: a method allowlist cannot prove SERVER behavior —
+# a malicious server could hide a side effect behind ``getTicket``.
+# Endpoint/operator trust of the pinned origins below is an explicit
+# assumption until the T2b kernel-governed local proxy lands. Widening
+# (new origins, new methods, new servers) happens ONLY via a reviewed
+# policy change here (H0 pattern), never via env/config at runtime — an
+# attacker-controlled env must not be able to re-open the hole.
+
+
+@dataclass(frozen=True)
+class McpServerPolicy:
+    """Forwarding policy for one known remote MCP server.
+
+    Invariants (validated at import time over :data:`MCP_SERVER_POLICY`):
+      * ``action == "forward"`` ⇒ non-empty ``allowed_tools`` AND
+        non-empty ``allowed_url_prefixes``.
+      * ``action == "deny"`` ⇒ both are ``None``.
+    """
+
+    action: Literal["forward", "deny"]
+
+    allowed_tools: frozenset[str] | None
+    """Exact method allowlist injected as ``tool_configuration.
+    allowed_tools`` on the forwarded entry. Fail-closed: methods not
+    positively listed are refused provider-side."""
+
+    allowed_url_prefixes: tuple[str, ...] | None
+    """Pinned origins. A ``forward`` policy applies ONLY when the config
+    URL matches one of these prefixes (delimiter-safe, see
+    :func:`_url_matches_pinned_prefix`); name-match + URL-mismatch is
+    treated as an impersonation attempt and DENIED."""
+
+
+MCP_SERVER_POLICY: dict[str, McpServerPolicy] = {
+    "claude_ai_Figma": McpServerPolicy(
+        action="forward",
+        allowed_tools=FIGMA_MCP_READ_ONLY_TOOLS,
+        # The Anthropic-managed Figma gateway (DEFAULT_REMOTE_MCP_CATALOG).
+        allowed_url_prefixes=(
+            "https://mcp.anthropic.com/v1/integrations/figma",
+        ),
+    ),
+    "mcp_jira": McpServerPolicy(
+        action="forward",
+        allowed_tools=MCP_JIRA_READ_ONLY_TOOLS,
+        # Catalog default only: no production JIRA MCP origin is documented
+        # (checked docs/operations/ runbooks + deploy/caddy/ — only Graphiti
+        # has a public ingress). Add the production origin here in a
+        # reviewed change when one is deployed.
+        allowed_url_prefixes=(
+            "https://mcp-atlassian.local/jira",
+        ),
+    ),
+    "mcp_graphiti": McpServerPolicy(
+        action="forward",
+        allowed_tools=MCP_GRAPHITI_READ_ONLY_TOOLS,
+        # Catalog default + the documented production origin
+        # (docs/operations/graphiti-mcp-runbook.md, deploy/caddy/
+        # mcp-graphiti.caddy). Pinning only the catalog default would
+        # silently drop the prod deployment as "impersonation".
+        allowed_url_prefixes=(
+            "https://mcp-graphiti.local",
+            "https://mcp-graphiti.sora.services",
+        ),
+    ),
+    # Inactive-unless-token today; the policy delta is that a token can no
+    # longer re-enable them — forwarding requires a reviewed policy change.
+    "claude_ai_Gmail": McpServerPolicy(
+        action="deny", allowed_tools=None, allowed_url_prefixes=None,
+    ),
+    "claude_ai_Google_Calendar": McpServerPolicy(
+        action="deny", allowed_tools=None, allowed_url_prefixes=None,
+    ),
+    "claude_ai_Google_Drive": McpServerPolicy(
+        action="deny", allowed_tools=None, allowed_url_prefixes=None,
+    ),
+}
+
+
+def _validate_mcp_server_policy_map() -> None:
+    """Import-time invariant check over :data:`MCP_SERVER_POLICY`."""
+    for name, policy in MCP_SERVER_POLICY.items():
+        if policy.action == "forward":
+            if not policy.allowed_tools or not policy.allowed_url_prefixes:
+                raise ValueError(
+                    f"backend.agents.mcp_integration.MCP_SERVER_POLICY: "
+                    f"forward policy for {name!r} must carry a non-empty "
+                    f"allowed_tools AND non-empty allowed_url_prefixes "
+                    f"(got allowed_tools={policy.allowed_tools!r}, "
+                    f"allowed_url_prefixes={policy.allowed_url_prefixes!r})"
+                )
+        elif policy.action == "deny":
+            if (
+                policy.allowed_tools is not None
+                or policy.allowed_url_prefixes is not None
+            ):
+                raise ValueError(
+                    f"backend.agents.mcp_integration.MCP_SERVER_POLICY: "
+                    f"deny policy for {name!r} must carry allowed_tools=None "
+                    f"and allowed_url_prefixes=None "
+                    f"(got allowed_tools={policy.allowed_tools!r}, "
+                    f"allowed_url_prefixes={policy.allowed_url_prefixes!r})"
+                )
+        else:  # pragma: no cover - Literal-typed, defensive
+            raise ValueError(
+                f"backend.agents.mcp_integration.MCP_SERVER_POLICY: "
+                f"unknown action {policy.action!r} for {name!r}"
+            )
+
+
+_validate_mcp_server_policy_map()
+
+
+def _url_matches_pinned_prefix(url: str, prefix: str) -> bool:
+    """Delimiter-safe prefix match between a config URL and a pinned origin.
+
+    Naive ``str.startswith`` is defeated by host-suffix impostors:
+    ``"https://mcp-graphiti.localhost.evil.example/mcp"`` startswith
+    ``"https://mcp-graphiti.local"`` is True. Normalizing BOTH sides to end
+    with ``/`` forces the character after the pinned prefix to be a path
+    delimiter, so a host-suffix impostor cannot match.
+    """
+    normalized_prefix = prefix if prefix.endswith("/") else prefix + "/"
+    candidate = url if url.endswith("/") else url + "/"
+    return candidate.startswith(normalized_prefix)
+
+
+def enforce_mcp_policy(servers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter raw ``mcp_servers=[]`` payload entries through the policy map.
+
+    Registry-independent by design: it validates raw name/url dicts, so the
+    same mechanism serves two call sites — the registry payload producer
+    (:meth:`RemoteMCPRegistry.to_anthropic_mcp_servers`) and, per P-PROV-B,
+    the final client boundary where callers may hand in arbitrary dicts.
+
+    Per entry:
+      * unknown server name        → DROP + warning (default-DENY)
+      * ``deny`` policy            → DROP
+      * pinned-origin mismatch     → DROP + warning (impersonation attempt)
+      * ``forward`` + origin match → KEEP, (re)injecting
+        ``tool_configuration = {"allowed_tools": sorted(...)}`` — exactly
+        that one-key shape.
+
+    Input order is preserved for the deterministic-payload contract; input
+    dicts are not mutated.
+    """
+    out: list[dict[str, Any]] = []
+    for entry in servers:
+        name = entry.get("name", "")
+        policy = MCP_SERVER_POLICY.get(name)
+        if policy is None:
+            logger.warning(
+                "backend.agents.mcp_integration.enforce_mcp_policy: "
+                "dropping UNKNOWN MCP server %r (url=%r) — default-DENY; "
+                "known policy names: %s",
+                name, entry.get("url"), sorted(MCP_SERVER_POLICY),
+            )
+            continue
+        if policy.action == "deny":
+            logger.info(
+                "backend.agents.mcp_integration.enforce_mcp_policy: "
+                "dropping MCP server %r — explicit deny policy",
+                name,
+            )
+            continue
+        url = entry.get("url", "")
+        assert policy.allowed_url_prefixes is not None  # forward invariant
+        assert policy.allowed_tools is not None  # forward invariant
+        if not any(
+            _url_matches_pinned_prefix(url, prefix)
+            for prefix in policy.allowed_url_prefixes
+        ):
+            logger.warning(
+                "backend.agents.mcp_integration.enforce_mcp_policy: "
+                "dropping MCP server %r — URL %r does not match any pinned "
+                "origin %r (possible impersonation attempt)",
+                name, url, policy.allowed_url_prefixes,
+            )
+            continue
+        kept = dict(entry)
+        kept["tool_configuration"] = {
+            "allowed_tools": sorted(policy.allowed_tools),
+        }
+        out.append(kept)
+    return out
 
 
 def default_catalog_by_name() -> dict[str, _CatalogEntry]:
@@ -372,6 +570,13 @@ class RemoteMCPRegistry:
         Defaults to all enabled servers; pass ``only_names`` to scope a
         request to a subset (e.g., only Figma for a design-review task).
         Disabled servers are silently filtered.
+
+        OP-2607 (U6-0 P-PROV-A): every candidate entry is routed through
+        :func:`enforce_mcp_policy` — unknown servers and explicit-deny
+        servers are dropped, origins are pinned, and each forwarded entry
+        carries its exact ``tool_configuration.allowed_tools`` allowlist
+        (this replaced the OP-2593 Figma-only special case; one mechanism,
+        two call sites — the P-PROV-B client boundary is the other).
         """
         out: list[dict[str, Any]] = []
         for cfg in self._servers.values():
@@ -379,19 +584,10 @@ class RemoteMCPRegistry:
                 continue
             if only_names is not None and cfg.name not in only_names:
                 continue
-            payload = cfg.to_anthropic_payload()
-            # OP-2593 (U6-0 T2a): Figma is a mixed-capability MCP whose write
-            # methods run provider-side. Inject the beta per-server read-only
-            # allowlist on the forwarded entry — sorted for the deterministic-
-            # ordering contract. Other servers get no ``tool_configuration``.
-            if cfg.name == "claude_ai_Figma":
-                payload["tool_configuration"] = {
-                    "allowed_tools": sorted(FIGMA_MCP_READ_ONLY_TOOLS),
-                }
-            out.append(payload)
+            out.append(cfg.to_anthropic_payload())
         # Stable order: deterministic for tests + log diff
         out.sort(key=lambda d: d.get("name", ""))
-        return out
+        return enforce_mcp_policy(out)
 
     def configured_names(self) -> list[str]:
         return sorted(self._servers)
@@ -591,21 +787,21 @@ def is_jira_mcp_read_only_tool(tool_name: str) -> bool:
 
 
 def is_graphiti_mcp_read_only_tool(tool_name: str) -> bool:
-    """OP-853 (C4): structural read-only check for the Graphiti MCP server.
+    """OP-853 (C4) / OP-2607 (P-PROV-A): structural read-only check for the
+    Graphiti MCP server.
 
     Returns True iff ``tool_name`` is of the form
-    ``mcp__mcp_graphiti__<method>`` AND ``<method>`` starts with one of
-    :data:`MCP_GRAPHITI_READ_ONLY_PREFIXES` (``get``, ``find``, ``query``,
-    ``list``). Mutation-shaped names are refused before dispatch so Graphiti
+    ``mcp__mcp_graphiti__<method>`` AND ``<method>`` is in the exact
+    :data:`MCP_GRAPHITI_READ_ONLY_TOOLS` allowlist. The OP-853 prefix
+    predicate (``get*``/``find*``/``query*``/``list*``) is gone — any
+    method not positively pinned is refused before dispatch, so Graphiti
     remains a temporal-query surface for the runner, not a write path.
     """
     parsed = parse_mcp_tool_name(tool_name)
     if parsed is None:
         return False
     server, method = parsed
-    return server == "mcp_graphiti" and method.startswith(
-        MCP_GRAPHITI_READ_ONLY_PREFIXES
-    )
+    return server == "mcp_graphiti" and method in MCP_GRAPHITI_READ_ONLY_TOOLS
 
 
 # ─── Local (in-process) MCP server registration — META OP-814 ─────
