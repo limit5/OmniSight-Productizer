@@ -47,7 +47,9 @@ from backend.agents.anthropic_native_client import (
     DEFAULT_MODEL_OPUS,
     DEFAULT_MODEL_SONNET,
     AnthropicClient,
+    get_active_execution_context,
 )
+from backend.agents.execution_context import for_child
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +251,14 @@ def make_agent_tool_handler(
             except Exception:  # noqa: BLE001 - observer boundary
                 logger.exception("Agent: on_dispatch raised, swallowing")
 
+        # U6-0 P-ID-B: derive the sub-agent's identity from the ACTIVE
+        # context (the ContextVar, NOT `client.execution_context`) — a
+        # per-call override on the parent run must be what the child
+        # inherits, or a restricted-tenant sub-run would escalate back to
+        # the client's ambient identity. Dormant: no active context ⇒ None.
+        parent_ctx = get_active_execution_context()
+        child_ctx = for_child(parent_ctx) if parent_ctx is not None else None
+
         result = await client.run_with_tools(
             prompt=sub_prompt,
             tools=list(spec.tools),
@@ -258,6 +268,7 @@ def make_agent_tool_handler(
             max_iterations=spec.max_iterations,
             enable_cache=spec.enable_cache,
             on_tool_call="silent",  # don't pollute parent log with sub tools
+            execution_context=child_ctx,
         )
 
         text = result.final_text.strip() or "(sub-agent returned no text)"

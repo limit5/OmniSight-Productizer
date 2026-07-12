@@ -47,13 +47,16 @@ from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from queue import Empty, Queue
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backend.agents.telemetry.tool_invocation import (
     args_size_bytes,
     emit_tool_invocation,
 )
 from backend.agents.tool_schemas import get_schema
+
+if TYPE_CHECKING:
+    from backend.agents.execution_context import ExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -187,13 +190,24 @@ class ToolDispatcher:
         return sorted(self._handlers)
 
     async def execute(
-        self, tool_use_id: str, tool_name: str, tool_input: dict[str, Any]
+        self,
+        tool_use_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        *,
+        execution_context: "ExecutionContext | None" = None,
     ) -> ToolResult:
         """Execute a tool by name, returning a ToolResult.
 
         Never raises — exceptions are captured and returned as error
         tool_results so the calling LLM can self-correct.
+
+        ``execution_context`` (U6-0 P-ID-B) is accepted but NOT consumed —
+        dormant plumbing. The T7b guard ticket inserts
+        ``guard_tool_dispatch(execution_context, ...)`` here; until then
+        every caller may legitimately pass ``None``.
         """
+        del execution_context  # accept-only until T7b reads it here
         started_at = time.perf_counter()
         input_size = args_size_bytes(tool_input)
         handler = self._handlers.get(tool_name)

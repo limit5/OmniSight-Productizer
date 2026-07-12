@@ -51,7 +51,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from backend.agents.anthropic_native_client import RunResult, TokenUsage
 from backend.agents.loop_detector import (
@@ -64,6 +64,9 @@ from backend.agents.loop_detector import (
 )
 from backend.agents.tom_scratchpad import ToMScratchpad
 from backend.agents.tool_dispatcher import ToolDispatcher, ToolResult
+
+if TYPE_CHECKING:
+    from backend.agents.execution_context import ExecutionContext
 
 logger = logging.getLogger(__name__)
 
@@ -131,11 +134,14 @@ class DetectorAwareDispatcher:
         tool_use_id: str,
         tool_name: str,
         tool_input: dict[str, Any],
+        *,
+        execution_context: "ExecutionContext | None" = None,
     ) -> ToolResult:
         result = await self._inner.execute(
             tool_use_id=tool_use_id,
             tool_name=tool_name,
             tool_input=tool_input,
+            execution_context=execution_context,
         )
         # In-flight call has now returned (awaited cleanly). Now safe to
         # consult the detector and possibly raise.

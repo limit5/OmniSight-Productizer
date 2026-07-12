@@ -49,6 +49,7 @@ class _StubInnerDispatcher:
     ) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.completed_calls: list[str] = []
+        self.execution_contexts: list[Any] = []
         self._results = result_sequence or []
         self._idx = 0
 
@@ -62,9 +63,15 @@ class _StubInnerDispatcher:
         return []
 
     async def execute(
-        self, *, tool_use_id: str, tool_name: str, tool_input: dict[str, Any]
+        self,
+        *,
+        tool_use_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        execution_context: Any = None,
     ) -> ToolResult:
         self.calls.append((tool_name, dict(tool_input)))
+        self.execution_contexts.append(execution_context)
         await asyncio.sleep(0)  # simulate real I/O — yield to event loop
         if self._idx < len(self._results):
             r = self._results[self._idx]
@@ -159,6 +166,45 @@ async def test_dispatcher_classifies_error_class_from_tool_result():
             tool_use_id="t3", tool_name="Bash", tool_input=args,
         )
     assert exc.value.signature.error_class == "bash_metachar_blocked"
+
+
+# ─── U6-0 P-ID-B: execution_context pass-through (dormant plumbing) ──
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_passes_execution_context_through_to_inner():
+    """DetectorAwareDispatcher.execute forwards execution_context verbatim
+    to the inner dispatcher (frozen design: wrapper propagation lands here,
+    not in T7b)."""
+    from backend.agents import execution_context as ec
+
+    inner = _StubInnerDispatcher()
+    detector = LoopDetector(ticket_key="OP-2601")
+    wrapped = DetectorAwareDispatcher(inner=inner, detector=detector)
+
+    ctx = ec.for_machine(service_name="runner", request_id="r-op-2601")
+    await wrapped.execute(
+        tool_use_id="t1",
+        tool_name="Glob",
+        tool_input={"pattern": "x"},
+        execution_context=ctx,
+    )
+    assert inner.execution_contexts == [ctx]
+    assert inner.execution_contexts[0] is ctx
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_default_execution_context_is_none():
+    """Dormant default: callers that pass no context still work and the
+    inner dispatcher observes None."""
+    inner = _StubInnerDispatcher()
+    detector = LoopDetector(ticket_key="OP-2601")
+    wrapped = DetectorAwareDispatcher(inner=inner, detector=detector)
+
+    await wrapped.execute(
+        tool_use_id="t1", tool_name="Glob", tool_input={"pattern": "x"},
+    )
+    assert inner.execution_contexts == [None]
 
 
 # ─── run_with_resets — happy path / single reset ─────────────────────

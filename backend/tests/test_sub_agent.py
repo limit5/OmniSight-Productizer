@@ -337,6 +337,54 @@ def test_custom_subagent_type_can_be_added() -> None:
     assert client.captured.kwargs["system"].startswith("You are a code reviewer.")
 
 
+# ─── U6-0 P-ID-B: child ExecutionContext derivation ─────────────
+
+
+def test_handler_derives_child_context_from_active_parent_context() -> None:
+    """With an active parent context published (the ContextVar channel),
+    the nested run_with_tools receives a for_child-derived context: same
+    tenant / actor / principal_type as the parent, message_id reset."""
+    from backend.agents import anthropic_native_client as anc
+    from backend.agents import execution_context as ec
+
+    parent = ec.for_service(
+        service_name="runner",
+        tenant_id="t-op-2601",
+        request_id="r-parent",
+        roles=["operator"],
+        authorization_source="a2a",
+    )
+    client = _StubClient()
+    h = make_agent_tool_handler(client=client)
+
+    token = anc._active_execution_context.set(parent)
+    try:
+        asyncio.run(h({"description": "d", "prompt": "p"}))
+    finally:
+        anc._active_execution_context.reset(token)
+
+    child = client.captured.kwargs["execution_context"]
+    assert child is not None
+    assert child is not parent  # derived, not the parent object itself
+    assert child.principal_type == parent.principal_type
+    assert child.tenant_id == parent.tenant_id
+    assert child.actor_id == parent.actor_id
+    assert child.authorization_source == parent.authorization_source
+    assert child.message_id is None  # fresh model turn per for_child
+    assert child == ec.for_child(parent)
+
+
+def test_handler_without_active_context_passes_none() -> None:
+    """Dormant / non-runner path: no active context ⇒ the nested
+    run_with_tools is called with execution_context=None (unchanged
+    behaviour)."""
+    client = _StubClient()
+    h = make_agent_tool_handler(client=client)
+    asyncio.run(h({"description": "d", "prompt": "p"}))
+    assert "execution_context" in client.captured.kwargs
+    assert client.captured.kwargs["execution_context"] is None
+
+
 # ─── parent_system_suffix ───────────────────────────────────────
 
 

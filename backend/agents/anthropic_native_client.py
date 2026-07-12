@@ -31,8 +31,9 @@ from __future__ import annotations
 
 import logging
 import os
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from backend.agents.anthropic_sdk_audit import assert_no_deprecated_beta_messages_call
 from backend.agents.stale_refresh_strategy import (
@@ -50,7 +51,25 @@ from backend.agents.system_prompt_builder import inject_tool_catalog
 from backend.agents.tool_dispatcher import ToolDispatcher, get_default_dispatcher
 from backend.agents.tool_schemas import to_anthropic_tools
 
+if TYPE_CHECKING:
+    from backend.agents.execution_context import ExecutionContext
+
 logger = logging.getLogger(__name__)
+
+# U6-0 P-ID-B: task-local channel that carries the ExecutionContext to
+# registered handlers that cannot receive the dispatcher keyword param
+# (e.g. the nested sub-agent handler). Published for the duration of each
+# `run_with_tools` loop; a ContextVar (not a client attribute) so a
+# per-call override in one asyncio task never leaks into another.
+_active_execution_context: ContextVar["ExecutionContext | None"] = ContextVar(
+    "omnisight_active_execution_context", default=None
+)
+
+
+def get_active_execution_context() -> "ExecutionContext | None":
+    """Return the ExecutionContext of the innermost active `run_with_tools`
+    loop in this task, or ``None`` when no context is active (dormant)."""
+    return _active_execution_context.get()
 
 
 DEFAULT_MODEL_OPUS = "claude-opus-4-7"
@@ -344,6 +363,7 @@ class AnthropicClient:
         max_tokens_default: int = 8192,
         dispatcher: ToolDispatcher | None = None,
         beta_headers: list[str] | None = None,
+        execution_context: "ExecutionContext | None" = None,
     ) -> None:
         # Lazy import so test code can monkeypatch easily and so unrelated
         # callers don't pull anthropic SDK into their import graph.
@@ -372,6 +392,10 @@ class AnthropicClient:
         self.max_tokens_default = max_tokens_default
         self.dispatcher = dispatcher or get_default_dispatcher()
         self.beta_headers = tuple(beta_headers) if beta_headers else ()
+        # U6-0 P-ID-B: per-run default identity injection point (P-ID-C
+        # populates it at the launchers). The `run_with_tools` per-call
+        # param overrides this attribute; dormant while None.
+        self.execution_context = execution_context
 
     @property
     def messages(self) -> Any:
@@ -521,6 +545,7 @@ class AnthropicClient:
             | None
         ) = "log",
         mcp_servers: list[dict[str, Any]] | None = None,
+        execution_context: "ExecutionContext | None" = None,
     ) -> RunResult:
         """Execute multi-turn tool-use loop until `stop_reason="end_turn"`.
 
@@ -549,6 +574,14 @@ class AnthropicClient:
             raise ValueError(
                 "run_with_tools: pass either `tools` or `raw_tools`, not both"
             )
+        # U6-0 P-ID-B: the per-call param is authoritative for this call —
+        # a sub-agent override must never clobber the parent's attribute,
+        # so `self.execution_context` is read but never mutated here.
+        effective = (
+            execution_context
+            if execution_context is not None
+            else self.execution_context
+        )
         if raw_tools is not None:
             tool_payload = list(raw_tools)
             catalog_system = system
@@ -579,89 +612,99 @@ class AnthropicClient:
         refresh_strategy = get_refresh_strategy()
         refresh_max_tokens = get_refresh_max_tokens()
 
-        while iterations < max_iterations:
-            iterations += 1
-            self._maybe_inject_stale_refresh(
-                iteration=iterations,
-                messages=messages,
-                transcript=transcript,
-                touched_files=touched_files,
-                every_n=refresh_every_n,
-                strategy=refresh_strategy,
-                max_tokens=refresh_max_tokens,
-            )
-            kwargs: dict[str, Any] = {
-                "model": model or self.default_model,
-                "max_tokens": max_tokens or self.max_tokens_default,
-                "temperature": temperature,
-                "messages": _apply_message_cache_control(messages, enable_cache),
-            }
-            if sys_blocks is not None:
-                kwargs["system"] = sys_blocks
-            if tool_payload:
-                kwargs["tools"] = tool_payload
-            if mcp_servers:
-                kwargs["mcp_servers"] = mcp_servers
-
-            response = _create_message_with_cache_fallback(self._client, kwargs)
-            content = _content_to_dict(response.content)
-            stop_reason = getattr(response, "stop_reason", "unknown") or "unknown"
-            total_usage = total_usage + _extract_usage(getattr(response, "usage", None))
-
-            transcript.append({"role": "assistant", "content": content})
-            messages.append({"role": "assistant", "content": content})
-
-            if stop_reason != "tool_use":
-                final_text = _content_to_text(content)
-                break
-
-            # Resolve every tool_use in this turn before continuing.
-            tool_uses = _extract_tool_uses(content)
-            tool_results_blocks: list[dict[str, Any]] = []
-            for tu in tool_uses:
-                if on_tool_call == "log":
-                    logger.info(
-                        "tool_call iter=%d name=%s id=%s",
-                        iterations,
-                        tu["name"],
-                        tu["id"],
-                    )
-                result = await self.dispatcher.execute(
-                    tool_use_id=tu["id"],
-                    tool_name=tu["name"],
-                    tool_input=tu["input"],
+        # U6-0 P-ID-B: publish the effective context for the duration of the
+        # tool-use loop so registered handlers (which cannot receive the
+        # dispatcher keyword param) can read it via
+        # `get_active_execution_context()`. Token-reset keeps this nesting-
+        # and task-safe.
+        token = _active_execution_context.set(effective)
+        try:
+            while iterations < max_iterations:
+                iterations += 1
+                self._maybe_inject_stale_refresh(
+                    iteration=iterations,
+                    messages=messages,
+                    transcript=transcript,
+                    touched_files=touched_files,
+                    every_n=refresh_every_n,
+                    strategy=refresh_strategy,
+                    max_tokens=refresh_max_tokens,
                 )
-                tool_results_blocks.append(result.to_anthropic_block())
-                tool_calls_log.append(
-                    {
-                        "turn": iterations,
-                        "name": tu["name"],
-                        "input": tu["input"],
-                        "tool_use_id": tu["id"],
-                        "result": result.content[:500],
-                        "is_error": result.is_error,
-                    }
-                )
-                if not result.is_error:
-                    mutated_path = extract_mutated_path(tu)
-                    if mutated_path:
-                        touched_files[mutated_path] = (
-                            touched_files.get(mutated_path, 0) + 1
+                kwargs: dict[str, Any] = {
+                    "model": model or self.default_model,
+                    "max_tokens": max_tokens or self.max_tokens_default,
+                    "temperature": temperature,
+                    "messages": _apply_message_cache_control(messages, enable_cache),
+                }
+                if sys_blocks is not None:
+                    kwargs["system"] = sys_blocks
+                if tool_payload:
+                    kwargs["tools"] = tool_payload
+                if mcp_servers:
+                    kwargs["mcp_servers"] = mcp_servers
+
+                response = _create_message_with_cache_fallback(self._client, kwargs)
+                content = _content_to_dict(response.content)
+                stop_reason = getattr(response, "stop_reason", "unknown") or "unknown"
+                total_usage = total_usage + _extract_usage(getattr(response, "usage", None))
+
+                transcript.append({"role": "assistant", "content": content})
+                messages.append({"role": "assistant", "content": content})
+
+                if stop_reason != "tool_use":
+                    final_text = _content_to_text(content)
+                    break
+
+                # Resolve every tool_use in this turn before continuing.
+                tool_uses = _extract_tool_uses(content)
+                tool_results_blocks: list[dict[str, Any]] = []
+                for tu in tool_uses:
+                    if on_tool_call == "log":
+                        logger.info(
+                            "tool_call iter=%d name=%s id=%s",
+                            iterations,
+                            tu["name"],
+                            tu["id"],
                         )
+                    result = await self.dispatcher.execute(
+                        tool_use_id=tu["id"],
+                        tool_name=tu["name"],
+                        tool_input=tu["input"],
+                        execution_context=effective,
+                    )
+                    tool_results_blocks.append(result.to_anthropic_block())
+                    tool_calls_log.append(
+                        {
+                            "turn": iterations,
+                            "name": tu["name"],
+                            "input": tu["input"],
+                            "tool_use_id": tu["id"],
+                            "result": result.content[:500],
+                            "is_error": result.is_error,
+                        }
+                    )
+                    if not result.is_error:
+                        mutated_path = extract_mutated_path(tu)
+                        if mutated_path:
+                            touched_files[mutated_path] = (
+                                touched_files.get(mutated_path, 0) + 1
+                            )
 
-            # Feed all tool_results back in one user message — Anthropic's
-            # convention for multi-tool responses in a single turn.
-            tr_msg = {"role": "user", "content": tool_results_blocks}
-            messages.append(tr_msg)
-            transcript.append(tr_msg)
+                # Feed all tool_results back in one user message — Anthropic's
+                # convention for multi-tool responses in a single turn.
+                tr_msg = {"role": "user", "content": tool_results_blocks}
+                messages.append(tr_msg)
+                transcript.append(tr_msg)
 
-        else:
-            # Loop exhausted without `break` — i.e. iterations == max_iterations
-            # and the last response was still tool_use.
-            stop_reason = "max_iterations_exceeded"
-            logger.warning(
-                "run_with_tools hit max_iterations=%d; bailing", max_iterations
-            )
+            else:
+                # Loop exhausted without `break` — i.e. iterations == max_iterations
+                # and the last response was still tool_use.
+                stop_reason = "max_iterations_exceeded"
+                logger.warning(
+                    "run_with_tools hit max_iterations=%d; bailing", max_iterations
+                )
+        finally:
+            _active_execution_context.reset(token)
 
         return RunResult(
             final_text=final_text,
