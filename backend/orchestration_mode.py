@@ -375,6 +375,7 @@ async def _monolith_dispatch(request: DispatchRequest) -> DispatchOutcome:
     """Legacy path — run the full LangGraph graph in-process."""
     from backend.agents.graph import run_graph
     from backend.agents import execution_context as _ec
+    from backend.agents import runner_tenant as _rt
 
     try:
         state = await run_graph(
@@ -390,6 +391,7 @@ async def _monolith_dispatch(request: DispatchRequest) -> DispatchOutcome:
             execution_context=_ec.for_machine(
                 service_name="orchestration",
                 request_id=uuid.uuid4().hex,
+                tenant_id=_rt.OMNISIGHT_SELF_TENANT,  # U6-0 T8-C2
             ),
         )
     except Exception as exc:

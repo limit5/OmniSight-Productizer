@@ -143,6 +143,25 @@ class TestMonolithDispatch:
         }
 
     @pytest.mark.asyncio
+    async def test_monolith_execution_context_carries_self_tenant(self, monkeypatch):
+        """U6-0 T8-C2: the orchestration for_machine ctx must carry the
+        internal self tenant so T8-C1's verified-read fence resolves
+        (an empty tenant would fail-close every episodic read)."""
+        from backend.agents import runner_tenant
+
+        captured = {}
+
+        async def _capture(**kwargs):
+            captured["ec"] = kwargs.get("execution_context")
+            raise RuntimeError("stop after capture")
+
+        monkeypatch.setattr("backend.agents.graph.run_graph", _capture)
+        set_mode_override(OrchestrationMode.monolith)
+        await dispatch(DispatchRequest(user_command="hello"))
+        assert captured["ec"] is not None
+        assert captured["ec"].tenant_id == runner_tenant.OMNISIGHT_SELF_TENANT
+
+    @pytest.mark.asyncio
     async def test_monolith_event_sequence_is_parity(self):
         set_mode_override(OrchestrationMode.monolith)
         out = await dispatch(DispatchRequest(user_command="status"))
