@@ -760,3 +760,89 @@ class TestSearchVerifiedTenantSolutionsPg:
             tenant_id="t-default", soc_vendor="rockchip", min_quality=0.5,
         )
         assert [r["id"] for r in rows] == ["m-rk-v"]
+
+
+# ─── T8-B1 (OP-2611): atomic idempotency ─────────────────────────
+
+
+class TestVerifiedMergeUniqueIndexSqlite:
+    """OFFLINE: the partial unique index lands via db.py::_migrate."""
+
+    @pytest.mark.asyncio
+    async def test_uq_index_exists_after_migrate(self, tmp_path: Path) -> None:
+        db_path = tmp_path / "pre0260.db"
+        _make_pre_0260_db(db_path)
+        _point_db_at(db_path)
+        await db.init()
+        try:
+            conn = db._conn()
+            async with conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name='uq_episodic_verified_merge'"
+            ) as cur:
+                assert await cur.fetchone() is not None, (
+                    "T8-B1 partial unique index must exist after _migrate"
+                )
+        finally:
+            await db.close()
+
+
+def _verified_merge(**over) -> dict:
+    base = dict(
+        id="vm-1",
+        error_signature="[OP-9] fix the thing",
+        solution="[OP-9] fix the thing",
+        gerrit_change_id="I-merge-1",
+        quality_score=1.0,
+        tenant_id="omnisight-self",
+    )
+    base.update(over)
+    return base
+
+
+class TestInsertVerifiedMergeSolutionPg:
+    """PG-MATRIX: the ON CONFLICT DO NOTHING RETURNING idempotency + the
+    hard-set verified/gerrit provenance. Skips without OMNI_TEST_PG_URL."""
+
+    @pytest.mark.asyncio
+    async def test_first_insert_true_hard_sets_gerrit_provenance(
+        self, pg_test_conn,
+    ) -> None:
+        inserted = await db.insert_verified_merge_solution(
+            pg_test_conn, _verified_merge(),
+        )
+        assert inserted is True
+        row = await db.get_episodic_memory(pg_test_conn, "vm-1")
+        assert row["verified"] is True
+        assert row["source"] == "service_gerrit_merge"
+        assert row["verification_authority"] == "gerrit"
+        assert row["tenant_id"] == "omnisight-self"
+
+    @pytest.mark.asyncio
+    async def test_replay_same_change_is_no_op(self, pg_test_conn) -> None:
+        first = await db.insert_verified_merge_solution(pg_test_conn, _verified_merge())
+        # A duplicate change-merged webhook: different row id, SAME change.
+        second = await db.insert_verified_merge_solution(
+            pg_test_conn, _verified_merge(id="vm-2"),
+        )
+        assert first is True
+        assert second is False, "a replayed merge must not double-write"
+        n = await pg_test_conn.fetchval(
+            "SELECT COUNT(*) FROM episodic_memory "
+            "WHERE gerrit_change_id = 'I-merge-1' AND verified",
+        )
+        assert n == 1
+
+    @pytest.mark.asyncio
+    async def test_partial_index_allows_quarantined_row_same_change(
+        self, pg_test_conn,
+    ) -> None:
+        # The partial index only constrains verified+service rows — a
+        # quarantined row citing the same change is allowed.
+        await db.insert_verified_merge_solution(pg_test_conn, _verified_merge())
+        await db.insert_episodic_memory(pg_test_conn, _mem(
+            id="q-1", gerrit_change_id="I-merge-1",
+            source="model_save_solution", verified=False,
+        ))
+        n = await db.episodic_memory_count(pg_test_conn)
+        assert n == 2

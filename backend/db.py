@@ -469,6 +469,18 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
     except Exception as exc:
         logger.warning("idx_episodic_tenant create failed: %s", exc)
 
+    # U6-0 T8-B1: partial unique index = one verified merge-solution row per
+    # change (mirrors alembic 0261; the verified-write path relies on
+    # ON CONFLICT DO NOTHING). verified is INTEGER on SQLite → `verified = 1`.
+    try:
+        await conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_episodic_verified_merge "
+            "ON episodic_memory (gerrit_change_id) "
+            "WHERE verified = 1 AND source = 'service_gerrit_merge'"
+        )
+    except Exception as exc:
+        logger.warning("uq_episodic_verified_merge create failed: %s", exc)
+
     # Y1 row 6 (#277, alembic 0037): seed default project for the
     # default tenant. Mirrors the alembic backfill's deterministic id
     # projection (``p-<tenant-suffix>-default``) for the single
@@ -963,6 +975,9 @@ CREATE TABLE IF NOT EXISTS episodic_memory (
     owner_user_id   TEXT,
     visibility      TEXT NOT NULL DEFAULT 'tenant_shared'
 );
+-- NB: the T8-B1 uq_episodic_verified_merge partial index is created in
+-- _migrate() (AFTER the columns land), NOT here — on an existing pre-0260
+-- DB the CREATE TABLE above is a no-op and `verified` would not yet exist.
 
 CREATE TABLE IF NOT EXISTS debug_findings (
     id              TEXT PRIMARY KEY,
@@ -3560,6 +3575,70 @@ async def insert_episodic_memory(conn, data: dict) -> None:
         await on_lesson_written(data)
     except Exception as exc:
         logger.debug("lessons_distiller hook failed: %s", exc)
+
+
+async def insert_verified_merge_solution(conn, data: dict) -> bool:
+    """Atomically insert ONE Gerrit-verified merge solution (T8-B1, OP-2611).
+
+    The verified-write path (T8-B2) calls this ONLY after
+    ``mcp_gerrit.verify_merged_change`` independently confirmed the merge.
+    The row's provenance is HARD-SET here — ``source='service_gerrit_merge'``,
+    ``verification_authority='gerrit'``, ``verified=TRUE`` — so a caller can
+    never route non-Gerrit content through this path (the alembic 0260
+    verified⇒gerrit CHECK backs it at the DB level).
+
+    Idempotent via the ``uq_episodic_verified_merge`` partial unique index
+    (alembic 0261): ``ON CONFLICT DO NOTHING RETURNING id`` returns a row on
+    a real insert and NOTHING on a replay. Returns True iff a row was
+    inserted, so the caller only does post-insert work (distillation) once —
+    a duplicate/replayed ``change-merged`` webhook cannot double-write.
+    ``conn.execute`` returns only a status string, so the ``RETURNING`` read
+    MUST go through ``fetchrow`` (mirrors the ``npi_state`` idiom).
+    """
+    q = float(data.get("quality_score", 1.0))
+    row = await conn.fetchrow(
+        """INSERT INTO episodic_memory
+           (id, error_signature, solution, soc_vendor, sdk_version,
+            hardware_rev, source_task_id, source_agent_id,
+            gerrit_change_id, tags, quality_score, decayed_score,
+            tenant_id, source, verification_authority, verified,
+            owner_user_id, visibility,
+            created_at, updated_at)
+           VALUES ($1, $2, $3, $4, $5,
+                   $6, $7, $8,
+                   $9, $10, $11, $12,
+                   $13, 'service_gerrit_merge', 'gerrit', TRUE,
+                   $14, 'tenant_shared',
+                   to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'),
+                   to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'))
+           ON CONFLICT (gerrit_change_id)
+               WHERE verified AND source = 'service_gerrit_merge'
+           DO NOTHING
+           RETURNING id""",
+        data["id"],
+        data["error_signature"],
+        data["solution"],
+        data.get("soc_vendor", ""),
+        data.get("sdk_version", ""),
+        data.get("hardware_rev", ""),
+        data.get("source_task_id"),
+        data.get("source_agent_id"),
+        data["gerrit_change_id"],
+        json.dumps(data.get("tags", [])),
+        q,
+        q,  # decayed_score seeded from quality_score
+        data.get("tenant_id") or tenant_insert_value(),
+        data.get("owner_user_id"),
+    )
+    inserted = row is not None
+    if inserted:
+        # Distil ONLY on a real insert — a replay must not re-run it.
+        try:
+            from backend.agents.lessons_distiller import on_lesson_written
+            await on_lesson_written(data)
+        except Exception as exc:
+            logger.debug("lessons_distiller hook failed: %s", exc)
+    return inserted
 
 
 async def rebuild_episodic_fts(conn) -> int:

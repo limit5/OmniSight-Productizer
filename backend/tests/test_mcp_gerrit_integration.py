@@ -517,3 +517,121 @@ def test_ssh_argv_uses_jira_dispatch_resolution(monkeypatch: pytest.MonkeyPatch)
     assert cmd[port_index] == str(mcp_gerrit.GERRIT_SSH_PORT)
     target = next(arg for arg in cmd if "@" in arg and arg.endswith(mcp_gerrit.GERRIT_SSH_HOST))
     assert "claude-bot" in target
+
+
+# ─── verify_merged_change (U6-0 T8-B1, OP-2611) ──────────────────
+_PROJECT = mcp_gerrit.GERRIT_PROJECT_PATH
+
+
+def _human_plus2() -> list[dict[str, Any]]:
+    # A NON-bot Code-Review +2 (learned_item_provenance._is_bot_shaped
+    # rejects "-bot"/AI-CI usernames, so use a plain human handle).
+    return [{"type": "Code-Review", "value": "2", "by": {"username": "sora"}}]
+
+
+def _merged_blob(**over: Any) -> dict[str, Any]:
+    base: dict[str, Any] = dict(
+        number=2046,
+        change_id="Iabc",
+        subject="[OP-9] fix the thing",
+        status="MERGED",
+        project=_PROJECT,
+        branch="develop",
+        current_revision="deadbeef",
+        approvals=_human_plus2(),
+    )
+    base.update(over)
+    return _gerrit_change_blob(**base)
+
+
+def test_verify_merged_change_accepts_bound_merged_reviewed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob()))
+    vm = mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT)
+    assert vm is not None
+    assert vm.change_number == 2046
+    assert vm.change_id == "Iabc"
+    assert vm.canonical_subject == "[OP-9] fix the thing"
+    assert vm.revision == "deadbeef"
+    assert vm.project == _PROJECT
+    assert vm.branch == "develop"
+
+
+def test_verify_rejects_wrong_project_without_querying(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob()))
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project="evil/repo") is None
+    assert "cmd" not in captured  # never issued an SSH query
+
+
+def test_verify_rejects_out_of_bounds_number_without_querying(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob()))
+    assert mcp_gerrit.verify_merged_change(change_number=0, project=_PROJECT) is None
+    assert mcp_gerrit.verify_merged_change(change_number=-5, project=_PROJECT) is None
+    assert mcp_gerrit.verify_merged_change(change_number=99_999_999, project=_PROJECT) is None
+    assert "cmd" not in captured
+
+
+def test_verify_rejects_zero_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout())
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None
+
+
+def test_verify_rejects_multiple_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob(), _merged_blob(change_id="Ixyz")))
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None
+
+
+def test_verify_rejects_row_from_other_project(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Defense in depth: even if Gerrit returned a foreign-project row.
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob(project="other/repo")))
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None
+
+
+def test_verify_rejects_non_merged_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob(status="NEW")))
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None
+
+
+def test_verify_rejects_merged_without_human_plus2(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob(approvals=[])))
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None
+
+
+def test_verify_rejects_bot_only_plus2(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = [{"type": "Code-Review", "value": "2", "by": {"username": "merger-agent-bot"}}]
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob(approvals=bot)))
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None
+
+
+def test_verify_rejects_number_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob(number=9999)))
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None
+
+
+def test_verify_rejects_expected_change_id_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob()))
+    assert mcp_gerrit.verify_merged_change(
+        change_number=2046, project=_PROJECT, expected_change_id="Iother"
+    ) is None
+
+
+def test_verify_rejects_expected_revision_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob()))
+    assert mcp_gerrit.verify_merged_change(
+        change_number=2046, project=_PROJECT, expected_revision="feedface"
+    ) is None
+
+
+def test_verify_accepts_matching_expected_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_subprocess(monkeypatch, stdout=_gerrit_stdout(_merged_blob()))
+    vm = mcp_gerrit.verify_merged_change(
+        change_number=2046, project=_PROJECT,
+        expected_change_id="Iabc", expected_revision="deadbeef",
+    )
+    assert vm is not None and vm.change_id == "Iabc"
+
+
+def test_verify_returns_none_on_query_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: Any, **k: Any):
+        raise RuntimeError("ssh down")
+    monkeypatch.setattr(mcp_gerrit.subprocess, "run", boom)
+    assert mcp_gerrit.verify_merged_change(change_number=2046, project=_PROJECT) is None

@@ -315,6 +315,124 @@ def get_review(
     return None
 
 
+# U6-0 T8-B1 (OP-2611): identity-bound merge verification for the episodic
+# verified-write path. An UNAUTHENTICATED webhook must not be trusted about
+# whether a change merged — this re-derives the truth from Gerrit, bound to
+# the trusted project + the exact instance-global change number, and requires
+# both MERGED status and a NON-BOT Code-Review>=2 (via learned_item_provenance).
+_MAX_CHANGE_NUMBER = 10_000_000
+
+
+@dataclass(frozen=True)
+class VerifiedMerge:
+    change_number: int
+    change_id: str
+    canonical_subject: str
+    revision: str
+    project: str
+    branch: str
+
+
+def verify_merged_change(
+    *,
+    change_number: int,
+    project: str,
+    expected_change_id: str = "",
+    expected_revision: str = "",
+    agent_class: str = "subscription-claude",
+    instance_id: str | None = None,
+) -> "VerifiedMerge | None":
+    """Independently confirm that ``change_number`` really merged in the
+    trusted project, returning Gerrit-CANONICAL identity + content, or None.
+
+    Fails CLOSED (returns None, never raises) on: an out-of-bounds number, a
+    project other than the configured :data:`GERRIT_PROJECT_PATH`, zero or
+    more-than-one matching rows (kills Change-Id ambiguity), a status other
+    than MERGED, a missing NON-BOT Code-Review>=2, an identity mismatch
+    against ``expected_change_id``/``expected_revision`` when supplied, or any
+    query/parse error. Callers run it in an executor (sync SSH).
+    """
+    import datetime as _dt
+
+    from backend import learned_item_provenance as _prov
+
+    # Bounded numeric — keep a giant/negative id off argv before any query.
+    if not isinstance(change_number, int) or change_number <= 0 or change_number > _MAX_CHANGE_NUMBER:
+        return None
+    # Trust the project allowlist from CONFIG, never the webhook.
+    if project != GERRIT_PROJECT_PATH:
+        return None
+
+    argv = _ssh_argv(
+        [
+            "gerrit", "query", "--format=JSON",
+            "--current-patch-set", "--all-approvals",
+            f"change:{change_number}", f"project:{GERRIT_PROJECT_PATH}",
+        ],
+        agent_class=agent_class,
+        instance_id=instance_id,
+    )
+    try:
+        stdout = _run_gerrit_query(argv)
+        rows = [r for r in _iter_gerrit_json_lines(stdout)]
+    except Exception:  # noqa: BLE001 — verify must never raise
+        return None
+
+    # Exactly one row — 0 or >1 is ambiguous, fail closed.
+    if len(rows) != 1:
+        return None
+    row = rows[0]
+
+    # Bind identity to the AUTHENTICATED row, never the webhook body.
+    row_number = row.get("number") or row.get("_number")
+    try:
+        if int(row_number) != change_number:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if str(row.get("project") or "") != GERRIT_PROJECT_PATH:
+        return None
+    row_change_id = str(row.get("id") or "")
+    current_ps = row.get("currentPatchSet") or {}
+    revision = str(current_ps.get("revision") or "")
+    if expected_change_id and row_change_id != expected_change_id:
+        return None
+    if expected_revision and revision != expected_revision:
+        return None
+
+    # Merge + human-review gate. Build the shape derive_ground_truths wants
+    # from the RAW row (get_review flattens approvals; the deriver reads
+    # currentPatchSet.approvals). change_ref MUST be the bare number — a
+    # "gerrit:" prefix is rejected by normalize_change_ref (silent no-op).
+    gerrit_change = {
+        "status": row.get("status"),
+        "currentPatchSet": {"approvals": current_ps.get("approvals") or []},
+    }
+    try:
+        kinds = {
+            t.kind
+            for t in _prov.derive_ground_truths(
+                change_ref=str(change_number),
+                gerrit_change=gerrit_change,
+                jira_labels=None,
+                now=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+            )
+        }
+    except _prov.ProvenanceUnconfirmable:
+        return None
+    if not {"merged", "review_plus2"} <= kinds:
+        return None
+
+    return VerifiedMerge(
+        change_number=change_number,
+        change_id=row_change_id,
+        canonical_subject=str(row.get("subject") or ""),
+        revision=revision,
+        project=GERRIT_PROJECT_PATH,
+        branch=str(row.get("branch") or ""),
+    )
+
+
 def has_open_ps_for_ticket(
     ticket_key: str,
     *,
