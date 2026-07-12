@@ -51,7 +51,9 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from backend.agents.action_guard import guard_tool_dispatch
 from backend.agents.cognee_integration import build_repo_map_via_cognee
+from backend.agents.execution_context import ExecutionContext
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_P5_PROPOSE_TOOLS, SORA_PLANNING_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
@@ -76,7 +78,9 @@ def _is_tool_failure(out_str: str) -> bool:
     the literal "refused" — so the prefix check below is collision-free.
     """
     head = (out_str or "").split("\n", 1)[0]
-    if head.startswith(("[ERROR]", "[FAILED]")):
+    # U6-0 T7a: "[BLOCKED]" (action-guard / PEP denial) is a failure for the
+    # breaker + telemetry, same as the specialist path's _TOOL_ERROR_PREFIXES.
+    if head.startswith(("[ERROR]", "[FAILED]", "[BLOCKED]")):
         return True
     if head.startswith("[SUPERVISOR] refused"):
         return True
@@ -1160,10 +1164,47 @@ async def tool_executor_node(state: GraphState) -> dict:
                     tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
                     continue
             except Exception as pep_exc:
-                # PEP evaluate raised unexpectedly — stay conservative:
-                # let the tool run (circuit breaker inside evaluate() will
-                # have tripped already so the next call fails closed).
-                logger.warning("PEP evaluate raised: %s — proceeding", pep_exc)
+                # U6-0 T7a (codex M8, 3/3 auditors): the old fail-open
+                # ("let the tool run") is fixed OUTRIGHT. On a PEP gateway
+                # error only an AUTHORITATIVELY-classified read-only tool
+                # may run; mutating/unknown fails CLOSED — independent of
+                # the action-guard mode flag (this is an error path, not a
+                # policy path).
+                from backend.agents.tool_registry import resolve as _resolve_tool
+                if _resolve_tool(tc.tool_name).effect == "read_only":
+                    logger.warning(
+                        "PEP evaluate raised: %s — read-only %s proceeds",
+                        pep_exc, tc.tool_name,
+                    )
+                else:
+                    output = (
+                        f"[BLOCKED] PEP gateway error on {tc.tool_name} — "
+                        f"fail-closed for non-read-only tools: {pep_exc}"
+                    )
+                    emit_tool_progress(tc.tool_name, "error", output, index=i, success=False)
+                    results.append(ToolResult(tool_name=tc.tool_name, output=output, success=False))
+                    tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+                    continue
+
+            # U6-0 T7a — action guard (kernel verdict + (adapter,family)
+            # mode) before execution. Shadow observes-and-proceeds;
+            # enforce blocks; unknown tools are denied mode-independently
+            # (locked decision #3). ctx=None ⇒ for_unbound inside the guard.
+            guard = guard_tool_dispatch(
+                adapter_namespace="specialist",
+                tool_name=tc.tool_name,
+                raw_args=args,
+                execution_context=state.execution_context,
+            )
+            if not guard.proceed:
+                output = (
+                    f"[BLOCKED] action guard denied {tc.tool_name}: "
+                    f"{guard.blocked_reason}"
+                )
+                emit_tool_progress(tc.tool_name, "error", output, index=i, success=False)
+                results.append(ToolResult(tool_name=tc.tool_name, output=output, success=False))
+                tool_messages.append(ToolMessage(content=output, tool_call_id=tc.tool_name))
+                continue
 
             try:
                 output = await tool_fn.ainvoke(args)
@@ -1279,6 +1320,43 @@ def external_agent_node_factory(
             "start",
             f"Invoking external A2A agent {clean_agent_id}",
         )
+
+        def _blocked(output: str) -> dict:
+            emit_tool_progress(tool_name, "error", output, success=False)
+            return {
+                "tool_results": [
+                    ToolResult(tool_name=tool_name, output=output, success=False)
+                ],
+                "messages": [ToolMessage(content=output, tool_call_id=tool_name)],
+            }
+
+        # U6-0 T7a — A2A outbound is DORMANT in prod (no caller builds this
+        # node today); the guard is wired DEFENSIVELY so productionizing it
+        # later cannot skip the kernel. The registry resolves the dynamic
+        # ``external_agent:<id>`` prefix → delegation family.
+        guard = guard_tool_dispatch(
+            adapter_namespace="a2a",
+            tool_name=tool_name,
+            raw_args={"agent_id": clean_agent_id},
+            execution_context=state.execution_context,
+        )
+        if not guard.proceed:
+            return _blocked(
+                f"[BLOCKED] action guard denied {tool_name}: "
+                f"{guard.blocked_reason}"
+            )
+
+        # Tenant scope: the node closes over its workflow tenant; a caller
+        # principal from ANOTHER tenant is an EXPLICIT denial BEFORE any
+        # endpoint/client work — never a Python ``assert`` (stripped
+        # under -O; codex M13 + re-audit R#6).
+        ctx = state.execution_context
+        if ctx is not None and ctx.tenant_id != tenant_id:
+            return _blocked(
+                f"[BLOCKED] tenant mismatch on {tool_name}: node tenant "
+                f"{tenant_id!r} != caller tenant {ctx.tenant_id!r}"
+            )
+
         try:
             endpoint = await registry.get_endpoint(
                 clean_agent_id,
@@ -1761,7 +1839,10 @@ def _trim_to_last_user_turn(messages: list) -> list:
     return out if out else list(messages)
 
 
-async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 5):
+async def _run_tool_rounds(
+    resp, convo: list, llm_tools, llm, max_rounds: int = 5,
+    *, execution_context: ExecutionContext | None = None,
+):
     """BP.LA.1 — BOUNDED MULTI-ROUND tool loop for Sora's conversational turn.
 
     Lets Sora chain observe → decide → act → verify in a SINGLE turn (a
@@ -1882,16 +1963,35 @@ async def _run_tool_rounds(resp, convo: list, llm_tools, llm, max_rounds: int = 
                 if fn is None:
                     out = f"[ERROR] Unknown tool: {name}"
                 else:
-                    if is_write:
-                        write_call_budget -= 1
-                    try:
-                        out = await asyncio.wait_for(
-                            fn.ainvoke(args), timeout=tool_timeout_s,
+                    # U6-0 T7a — action guard before each ainvoke (chat
+                    # adapter). Shadow observes-and-proceeds; enforce
+                    # blocks; unknown tools deny mode-independently.
+                    # ctx=None ⇒ for_unbound inside the guard. A blocked
+                    # WRITE burns no budget and (via write_cache below)
+                    # won't re-guard an identical re-request this turn.
+                    guard = guard_tool_dispatch(
+                        adapter_namespace="chat",
+                        tool_name=name,
+                        raw_args=args,
+                        execution_context=execution_context,
+                    )
+                    if not guard.proceed:
+                        out = (
+                            f"[BLOCKED] {name} denied by the action guard "
+                            f"({guard.blocked_reason}); this call was NOT "
+                            f"executed."
                         )
-                    except asyncio.TimeoutError:
-                        out = f"[ERROR] {name} timed out after {tool_timeout_s:.0f}s."
-                    except Exception as tool_exc:  # noqa: BLE001
-                        out = f"[ERROR] {name} failed: {tool_exc}"
+                    else:
+                        if is_write:
+                            write_call_budget -= 1
+                        try:
+                            out = await asyncio.wait_for(
+                                fn.ainvoke(args), timeout=tool_timeout_s,
+                            )
+                        except asyncio.TimeoutError:
+                            out = f"[ERROR] {name} timed out after {tool_timeout_s:.0f}s."
+                        except Exception as tool_exc:  # noqa: BLE001
+                            out = f"[ERROR] {name} failed: {tool_exc}"
                 if is_write:
                     write_cache[dedup_key] = str(out)
             out_str = str(out)
@@ -2225,7 +2325,12 @@ async def conversation_node(state: GraphState) -> dict:
     emit_pipeline_phase("conversation", "Generating conversational response")
     try:
         resp = (llm_tools or llm).invoke([sys_prompt, *send_messages])
-        resp = await _run_tool_rounds(resp, [sys_prompt, *send_messages], llm_tools, llm)
+        # U6-0 T7a: thread the server-constructed principal (populated at
+        # the graph entries by OP-2595) into the tool loop, kw-only.
+        resp = await _run_tool_rounds(
+            resp, [sys_prompt, *send_messages], llm_tools, llm,
+            execution_context=state.execution_context,
+        )
         answer = resp.content  # type: ignore[union-attr]
         # R20 Phase 0: redact accidentally-leaked secrets from the
         # LLM's output BEFORE it reaches the chat / SSE / audit log.

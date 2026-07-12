@@ -92,6 +92,11 @@ TOOL_METADATA: dict[str, OperationDescriptor] = {
     # ── FILE_TOOLS (mixed: read + write) ────────────────────────────
     "read_file": _op("read_file", "read_only", _READ_ONLY),
     "write_file": _op("write_file", "mutating", _CODE_WRITE),
+    # patch_file is defined in tools.py but not currently in TOOL_MAP;
+    # tests inject it (and it may be registered later). Classified by its
+    # true effect so the T7a guard never treats a real file-mutating tool
+    # as unknown.
+    "patch_file": _op("patch_file", "mutating", _CODE_WRITE),
     "list_directory": _op("list_directory", "read_only", _READ_ONLY),
     "read_yaml": _op("read_yaml", "read_only", _READ_ONLY),
     "write_yaml": _op("write_yaml", "mutating", _CODE_WRITE),
