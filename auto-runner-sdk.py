@@ -912,7 +912,8 @@ async def main() -> None:
     else:
         print(
             "🔌 MCP servers: none configured "
-            "(set OMNISIGHT_MCP_*_TOKEN to enable Figma/Gmail/Calendar/Drive)"
+            "(set OMNISIGHT_MCP_FIGMA_TOKEN to enable Figma; "
+            "Gmail/Calendar/Drive are policy-denied (U6-0 P-PROV))"
         )
 
     pipeline_start = time.time()

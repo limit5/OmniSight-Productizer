@@ -186,17 +186,22 @@ RUNNER_TOOLS: list[str] = [
 ]
 
 # OP-828 (B1) — Anthropic built-in tools spec. The model issues tool_use
-# blocks against these names; ``str_replace_based_edit_tool`` and ``bash``
-# round-trip through the dispatcher's local handlers, while
-# ``code_execution`` runs server-side in Anthropic's PTC sandbox. The
-# ``allowed_callers`` whitelist is the AC #3 boundary that prevents the
-# sandbox from issuing unrelated tool calls (HTTP / DB).
+# blocks against these names; every entry round-trips through
+# ``ToolDispatcher.execute``'s local handlers (CLIENT-side), which is what
+# makes them guardable by the in-process action guard (T7b).
 #
 # OP-851 (C1) appends the Anthropic Memory Tool (``memory_20260120``).
 # The C1 spike confirms the tool is standalone — see
 # ``backend/agents/memory_tool_handler.py`` module docstring. Beta
 # header ``managed-agents-2026-04-01`` is pinned by ``AnthropicClient``
 # via ``MemoryToolHandler.beta_header()``.
+#
+# U6-0 P-PROV-C (OP-2606) — provider-side tools are FORBIDDEN in this
+# spec. Anything that executes inside Anthropic's infrastructure (e.g.
+# ``code_execution_20260120`` in the PTC sandbox) is unreachable by the
+# in-process dispatcher guard. Re-adding a provider-side tool requires a
+# containment review (H0 pattern) and will be REJECTED at the client
+# boundary once P-PROV-B lands.
 BUILT_IN_TOOLS_SPEC: list[dict[str, Any]] = [
     {
         "type": "text_editor_20250728",
@@ -205,14 +210,6 @@ BUILT_IN_TOOLS_SPEC: list[dict[str, Any]] = [
     {
         "type": "bash_20250124",
         "name": "bash",
-    },
-    {
-        "type": "code_execution_20260120",
-        "name": "code_execution",
-        "allowed_callers": [
-            "text_editor_20250728",
-            "bash_20250124",
-        ],
     },
     # C1 (OP-851) — Anthropic Memory Tool. Client-side: the runner
     # implements storage at /var/omnisight/memory/<fleet-id>/.

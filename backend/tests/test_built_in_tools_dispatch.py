@@ -8,8 +8,10 @@ Locks the runner-side contract for Anthropic's built-in tool surface:
 * ``bash`` (bash_20250124) — persistent shell state across calls; the
   ``restart`` action recycles the underlying session (AC #5).
 * ``BUILT_IN_TOOLS_SPEC`` shape — exactly the payload Anthropic expects
-  for the Phase 1 launcher (AC #1), including ``allowed_callers`` on the
-  PTC code-execution tool (AC #3 boundary surface).
+  for the Phase 1 launcher (AC #1). U6-0 P-PROV-C (OP-2606): the spec is
+  CLIENT-side only (text_editor / bash / memory); provider-side entries
+  such as ``code_execution*`` are forbidden — the in-process dispatcher
+  guard cannot reach tools that execute in Anthropic's infrastructure.
 
 Companion test file ``test_ptc_sandbox_isolation.py`` covers the sandbox
 boundary invariants (AC #2 / #3 / #7).
@@ -48,14 +50,19 @@ def test_built_in_tools_spec_matches_anthropic_phase_1_contract() -> None:
             "name": "bash",
         },
         {
-            "type": "code_execution_20260120",
-            "name": "code_execution",
-            "allowed_callers": [
-                "text_editor_20250728",
-                "bash_20250124",
-            ],
+            "type": "memory_20260120",
+            "name": "memory",
         },
     ]
+
+
+def test_built_in_tools_spec_has_no_provider_side_code_execution() -> None:
+    """U6-0 P-PROV-C (OP-2606) — regression guard against re-adding a
+    provider-side execution surface the in-process guard cannot reach."""
+    spec = _import_built_in_spec()
+    assert not any(
+        e.get("type", "").startswith("code_execution") for e in spec
+    )
 
 
 # ─── TextEditorHandler (AC #4) ──────────────────────────────────────
@@ -327,6 +334,12 @@ async def test_dispatcher_text_editor_no_match_is_structured(
 async def test_dispatcher_registers_three_built_in_names(
     tmp_path: Path,
 ) -> None:
+    # NOTE: these are two intentionally-different "threes" (OP-2606).
+    # BUILT_IN_TOOLS_SPEC (contract test above) is what we SEND to
+    # Anthropic: text_editor / bash / memory — client-side only. The
+    # DISPATCHER additionally registers ``code_execution`` as a local
+    # emulation (the registry classifies it code_write); that handler is
+    # never reachable from the live spec but stays for isolation tests.
     from backend.agents.tool_dispatcher import (
         ToolDispatcher,
         bind_built_in_tools,
