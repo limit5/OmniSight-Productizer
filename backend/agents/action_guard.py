@@ -5,10 +5,10 @@ model-chosen tool: computes the kernel verdict, resolves an enforcement
 mode from a CLOSED ``(adapter_namespace, family)`` matrix, and returns a
 :class:`GuardOutcome` telling the adapter whether to proceed.
 
-⚠ DORMANT: no adapter calls :func:`guard_tool_dispatch` in this ticket
-(T7a wires chat/specialist/a2a; T7b wires the runner SDK dispatcher).
-Not fully inert — importing this module adds two Prometheus counters to
-the exposition, which is expected.
+Live call sites: the T7a ``nodes.py`` adapters (chat ``_run_tool_rounds``,
+specialist ``tool_executor_node``, A2A ``external_agent_node``) and the
+T7b runner-SDK chokepoint ``ToolDispatcher.execute``. Importing this
+module adds two Prometheus counters to the exposition, which is expected.
 
 Adapters must NEVER import ``authorize_action`` / ``OperationRequest``
 directly — the kernel-reachability test in

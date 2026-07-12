@@ -1,0 +1,323 @@
+"""U6-0 T7b — fault-injection tests for the ToolDispatcher action-guard wiring.
+
+``ToolDispatcher.execute`` is the single runner-SDK dispatch chokepoint
+(adapter_namespace="runner_sdk"): all three wrappers (``ToolWrapper``,
+``invoke_tool``, ``DetectorAwareDispatcher``) funnel through it, so one
+guard call covers the whole runner surface. Tool names below are REAL
+schema-registered AND registry-classified names (``Write``/``Read``…);
+handlers are fakes. Also covers the outright proficiency fail-open fix
+(codex M8): a gate ERROR now fails CLOSED for non-read-only tools.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import pathlib
+
+import pytest
+
+from backend.agents import action_guard, tool_dispatcher
+from backend.agents import execution_context as ec
+from backend.agents.circuit_breaker import CircuitBreaker
+from backend.agents.context_reset import DetectorAwareDispatcher
+from backend.agents.loop_detector import LoopDetector
+from backend.agents.memory_tool_handler import MEMORY_TOOL_NAME
+from backend.agents.tool_call_wrapper import invoke_tool, reset_circuits_for_tests
+from backend.agents.tool_dispatcher import ToolDispatcher
+from backend.agents.tool_registry import resolve as resolve_tool
+from backend.agents.tool_wrapper import ToolWrapper
+
+
+# ── shared fixtures ──────────────────────────────────────────────────────
+@pytest.fixture(autouse=True)
+def _clean_guard_matrix(monkeypatch: pytest.MonkeyPatch):
+    """Each test starts AND ends on the default all-shadow matrix.
+
+    pytest's monkeypatch restores the ENV at teardown but NOT the
+    already-reloaded module-global matrix — reload on both edges.
+    """
+    monkeypatch.delenv("OMNISIGHT_ACTION_GUARD_MODE", raising=False)
+    action_guard.reload_mode_matrix_for_tests()
+    yield
+    monkeypatch.delenv("OMNISIGHT_ACTION_GUARD_MODE", raising=False)
+    action_guard.reload_mode_matrix_for_tests()
+
+
+# Real SDK schema names that are ALSO registry-classified (register()
+# validates against tool_schemas; the guard resolves via tool_registry).
+_MUTATING = "Write"     # mutating / code_write
+_READ_ONLY = "Read"     # read_only / read_only
+
+
+def _enforce(monkeypatch: pytest.MonkeyPatch, adapter: str, tool_name: str) -> str:
+    """Flip ``(adapter, family-of(tool_name))`` to enforce; return the family."""
+    family = resolve_tool(tool_name).family
+    monkeypatch.setenv("OMNISIGHT_ACTION_GUARD_MODE", f"{adapter}:{family}=enforce")
+    action_guard.reload_mode_matrix_for_tests()
+    return family
+
+
+def _ctx_service() -> ec.ExecutionContext:
+    return ec.for_service(
+        service_name="runner-launcher",
+        tenant_id="t-default",
+        request_id="r1",
+        roles=("runner",),
+        authorization_source="server_launcher",
+    )
+
+
+def _make_handler(result: str = "ok"):
+    calls: list[dict] = []
+
+    async def _handler(args: dict) -> str:
+        calls.append(args)
+        return result
+
+    return _handler, calls
+
+
+def _dispatcher(tool_name: str = _MUTATING, result: str = "ok"):
+    d = ToolDispatcher()
+    handler, calls = _make_handler(result)
+    d.register(tool_name, handler)
+    return d, calls
+
+
+def _payload(res) -> dict:
+    return json.loads(res.content)
+
+
+# ── 1. shadow default: mutating handler runs ─────────────────────────────
+def test_shadow_default_runs_mutating_handler() -> None:
+    d, calls = _dispatcher(_MUTATING, "wrote")
+    res = asyncio.run(d.execute("tu1", _MUTATING, {"file_path": "x"}))
+    assert calls, "default all-shadow matrix must observe-and-proceed"
+    assert not res.is_error
+    assert res.content == "wrote"
+
+
+# ── 2. enforce blocks: handler NOT called ────────────────────────────────
+def test_enforce_blocks_mutating_handler_not_called(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    d, calls = _dispatcher()
+    _enforce(monkeypatch, "runner_sdk", _MUTATING)
+    res = asyncio.run(
+        d.execute("tu1", _MUTATING, {}, execution_context=_ctx_service())
+    )
+    assert not calls, "enforce must block BEFORE the handler runs"
+    assert res.is_error
+    payload = _payload(res)
+    assert payload["error"] == "action_guard_denied"
+    assert payload["blocked_reason"] == "requires_grant"
+    assert payload["mode"] == "enforce"
+    assert payload["retryable"] is False
+
+
+# ── 3. (adapter, family) keying: chat enforce does not leak ──────────────
+def test_chat_enforce_does_not_leak_to_runner_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enforce(monkeypatch, "chat", _MUTATING)
+    d, calls = _dispatcher()
+    res = asyncio.run(
+        d.execute("tu1", _MUTATING, {}, execution_context=_ctx_service())
+    )
+    assert calls, "chat-scoped enforce must not block the runner_sdk adapter"
+    assert not res.is_error
+
+
+# ── 4. ctx threading: unbound / bound / read-only ────────────────────────
+def test_missing_ctx_enforce_blocks_unbound_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    d, calls = _dispatcher()
+    _enforce(monkeypatch, "runner_sdk", _MUTATING)
+    res = asyncio.run(d.execute("tu1", _MUTATING, {}))
+    assert not calls
+    assert res.is_error
+    assert _payload(res)["blocked_reason"] == "unbound_principal"
+
+
+def test_missing_ctx_shadow_proceeds() -> None:
+    d, calls = _dispatcher()
+    res = asyncio.run(d.execute("tu1", _MUTATING, {}))
+    assert calls, "shadow observes-and-proceeds even for an unbound principal"
+    assert not res.is_error
+
+
+def test_bound_service_ctx_enforce_blocks_requires_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    d, calls = _dispatcher()
+    _enforce(monkeypatch, "runner_sdk", _MUTATING)
+    res = asyncio.run(
+        d.execute("tu1", _MUTATING, {}, execution_context=_ctx_service())
+    )
+    assert not calls
+    assert _payload(res)["blocked_reason"] == "requires_grant"
+
+
+def test_read_only_allowed_under_shadow_and_enforce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Default shadow.
+    d, calls = _dispatcher(_READ_ONLY, "contents")
+    res = asyncio.run(d.execute("tu1", _READ_ONLY, {}))
+    assert calls and not res.is_error
+
+    # Enforce on the read_only family: allow is allow regardless of mode.
+    _enforce(monkeypatch, "runner_sdk", _READ_ONLY)
+    d2, calls2 = _dispatcher(_READ_ONLY, "contents")
+    res2 = asyncio.run(
+        d2.execute("tu2", _READ_ONLY, {}, execution_context=_ctx_service())
+    )
+    assert calls2 and not res2.is_error
+
+
+# ── 5. guard-internals raise: error outcome, no escape ───────────────────
+def test_guard_raise_shadow_proceeds_enforce_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Patch the guard's stage-1-only for_unbound (NOT resolve_mode — the
+    # stage-1 except handler itself calls resolve_mode(adapter,
+    # "__error__"), so an unconditional raiser there would double-raise
+    # and escape) and call execute WITHOUT a ctx to hit the fallback.
+    def _boom():
+        raise RuntimeError("guard internals exploded")
+
+    monkeypatch.setattr(action_guard, "for_unbound", _boom)
+
+    # All-shadow: error outcome observes-and-proceeds; nothing escapes.
+    d, calls = _dispatcher()
+    res = asyncio.run(d.execute("tu1", _MUTATING, {}))
+    assert calls, "stage-1 raise in all-shadow must proceed (error outcome)"
+    assert not res.is_error
+
+    # Any runner_sdk enforce entry ⇒ the error fails closed; no escape.
+    _enforce(monkeypatch, "runner_sdk", _MUTATING)
+    d2, calls2 = _dispatcher()
+    res2 = asyncio.run(d2.execute("tu2", _MUTATING, {}))
+    assert not calls2
+    assert res2.is_error
+    payload = _payload(res2)
+    assert payload["error"] == "action_guard_denied"
+    assert payload["blocked_reason"] == "guard_error"
+
+
+# ── 6. proficiency-gate error path: fail-closed fix (codex M8) ───────────
+async def _raising_gate(_tool_name: str, _agent_id: str) -> bool:
+    raise RuntimeError("gate down")
+
+
+async def _refusing_gate(_tool_name: str, _agent_id: str) -> bool:
+    return False
+
+
+def test_proficiency_gate_error_fails_closed_for_mutating() -> None:
+    d, calls = _dispatcher()
+    d.set_proficiency_gate(_raising_gate, agent_id="a1")
+    res = asyncio.run(d.execute("tu1", _MUTATING, {}))
+    assert not calls, "gate error + mutating tool must fail CLOSED (no fail-open)"
+    assert res.is_error
+    payload = _payload(res)
+    assert payload["error"] == "tool_proficiency_gate_error"
+    assert payload["retryable"] is False
+
+
+def test_proficiency_gate_error_lets_read_only_proceed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    d, calls = _dispatcher(_READ_ONLY, "contents")
+    d.set_proficiency_gate(_raising_gate, agent_id="a1")
+    with caplog.at_level("WARNING", logger="backend.agents.tool_dispatcher"):
+        res = asyncio.run(d.execute("tu1", _READ_ONLY, {}))
+    assert calls, "gate error + authoritatively read-only tool proceeds"
+    assert not res.is_error
+    assert any("read-only proceeds" in r.message for r in caplog.records)
+
+
+def test_proficiency_gate_refusal_still_yields_insufficient() -> None:
+    d, calls = _dispatcher()
+    d.set_proficiency_gate(_refusing_gate, agent_id="a1")
+    res = asyncio.run(d.execute("tu1", _MUTATING, {}))
+    assert not calls
+    assert _payload(res)["error"] == "tool_proficiency_insufficient"
+
+
+# ── 7. wrapper inventory (codex M12): all paths hit the ONE guard ────────
+def _install_guard_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    calls: list[dict] = []
+
+    def _recorder(**kwargs):
+        calls.append(kwargs)
+        return action_guard.GuardOutcome(
+            proceed=True, decision=None, family="code_write", mode="shadow"
+        )
+
+    monkeypatch.setattr(tool_dispatcher, "guard_tool_dispatch", _recorder)
+    return calls
+
+
+def test_all_three_wrappers_funnel_through_the_guarded_execute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorded = _install_guard_recorder(monkeypatch)
+    d, handler_calls = _dispatcher()
+
+    # Path 1 — ToolWrapper.invoke (tool_wrapper.py).
+    wrapper = ToolWrapper(dispatcher=d, breaker=CircuitBreaker(name="t7b-test"))
+    res1 = asyncio.run(wrapper.invoke("tu-a", _MUTATING, {"file_path": "a"}))
+    assert not res1.is_error
+    assert len(recorded) == 1
+
+    # Path 2 — invoke_tool (tool_call_wrapper.py).
+    reset_circuits_for_tests()
+    res2 = asyncio.run(
+        invoke_tool(_MUTATING, {"file_path": "b"}, dispatcher=d, tool_use_id="tu-b")
+    )
+    assert not res2.is_error
+    assert len(recorded) == 2
+
+    # Path 3 — DetectorAwareDispatcher.execute (context_reset.py), with a
+    # real ctx: assert the recorder received THAT ctx (threaded, not lost).
+    ctx = _ctx_service()
+    detector_dispatcher = DetectorAwareDispatcher(
+        inner=d, detector=LoopDetector(ticket_key="OP-2609-test")
+    )
+    res3 = asyncio.run(
+        detector_dispatcher.execute(
+            "tu-c", _MUTATING, {"file_path": "c"}, execution_context=ctx
+        )
+    )
+    assert not res3.is_error
+    assert len(recorded) == 3
+    assert recorded[2]["execution_context"] is ctx
+
+    # No wrapper reached the handler except via the guarded execute.
+    assert len(handler_calls) == 3
+    assert all(call["adapter_namespace"] == "runner_sdk" for call in recorded)
+
+
+def test_wrapper_modules_have_no_direct_handler_access() -> None:
+    agents_dir = (
+        pathlib.Path(__file__).resolve().parents[1] / "agents"
+    )
+    for module in ("tool_wrapper.py", "tool_call_wrapper.py", "context_reset.py"):
+        text = (agents_dir / module).read_text(encoding="utf-8")
+        assert "_handlers" not in text, (
+            f"{module} must reach handlers only via ToolDispatcher.execute"
+        )
+
+
+# ── 8. Memory Tool coverage note ─────────────────────────────────────────
+def test_memory_tool_is_classified_memory_write() -> None:
+    # bind_memory_tool registers MEMORY_TOOL_NAME on this same dispatcher
+    # class, so the chokepoint guard covers it. The raw handle() write-sink
+    # hardening remains T8 (out of scope here).
+    assert MEMORY_TOOL_NAME == "memory"
+    descriptor = resolve_tool(MEMORY_TOOL_NAME)
+    assert descriptor.family == "memory_write"
+    assert descriptor.effect == "mutating"

@@ -614,7 +614,7 @@ async def test_telemetry_consumer_unknown_status_counts_as_failure():
     )
     assert recorded is not None
     assert recorded.invocation_count == 1
-    assert recorded.success_count == 1
+    assert recorded.success_count == 0
 
     recorded = await consume_event(
         store,
@@ -629,7 +629,7 @@ async def test_telemetry_consumer_unknown_status_counts_as_failure():
     )
     assert recorded is not None
     assert recorded.invocation_count == 2
-    assert recorded.success_count == 1
+    assert recorded.success_count == 0
 
 
 @pytest.mark.asyncio
@@ -651,7 +651,6 @@ async def test_telemetry_consumer_detects_invocation_log_line():
     assert recorded.agent_id == AGENT
     assert recorded.tool_id == TOOL
     assert recorded.success_count == 1
-    assert recorded.success_count == 0
 
 
 @pytest.mark.asyncio

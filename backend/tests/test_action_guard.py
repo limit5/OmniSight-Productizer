@@ -271,11 +271,11 @@ def test_action_guard_callers_are_declared() -> None:
     allowed = {
         backend_root / "agents" / "action_guard.py",
         backend_root / "agents" / "nodes.py",
-        # P-ID-B left a docstring pointer on ToolDispatcher.execute
-        # ("the T7b guard ticket inserts guard_tool_dispatch here");
-        # T7b wires it for real.
+        # T7b wired ToolDispatcher.execute (the runner-SDK chokepoint).
         backend_root / "agents" / "tool_dispatcher.py",
         backend_root / "tests" / "test_nodes_action_guard.py",
+        # T7b test file names guard_tool_dispatch as a monkeypatch target.
+        backend_root / "tests" / "test_tool_dispatcher_action_guard.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(r"\bguard_tool_dispatch\b")

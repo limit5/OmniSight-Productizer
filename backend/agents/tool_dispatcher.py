@@ -49,6 +49,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
+from backend.agents.action_guard import guard_tool_dispatch
 from backend.agents.telemetry.tool_invocation import (
     args_size_bytes,
     emit_tool_invocation,
@@ -202,12 +203,13 @@ class ToolDispatcher:
         Never raises — exceptions are captured and returned as error
         tool_results so the calling LLM can self-correct.
 
-        ``execution_context`` (U6-0 P-ID-B) is accepted but NOT consumed —
-        dormant plumbing. The T7b guard ticket inserts
-        ``guard_tool_dispatch(execution_context, ...)`` here; until then
-        every caller may legitimately pass ``None``.
+        ``execution_context`` (U6-0 P-ID-B → T7b) is consumed by the
+        action guard: every dispatch is authorized via
+        ``guard_tool_dispatch`` under the ``runner_sdk`` adapter
+        namespace before the proficiency gate and handler run. A missing
+        ctx falls back to ``for_unbound()`` INSIDE the guard and shows up
+        as ``authorization_source="unbound"`` in the guard metric.
         """
-        del execution_context  # accept-only until T7b reads it here
         started_at = time.perf_counter()
         input_size = args_size_bytes(tool_input)
         handler = self._handlers.get(tool_name)
@@ -231,6 +233,41 @@ class ToolDispatcher:
                 is_error=True,
             )
 
+        # U6-0 T7b: authorization precedes capability — the guard runs
+        # after the no-handler check (an unregistered call never executes
+        # anyway) and before the proficiency gate.
+        outcome = guard_tool_dispatch(
+            adapter_namespace="runner_sdk",
+            tool_name=tool_name,
+            raw_args=tool_input,
+            execution_context=execution_context,
+        )
+        if not outcome.proceed:
+            emit_tool_invocation(
+                tool_name,
+                (time.perf_counter() - started_at) * 1000,
+                False,
+                input_size,
+                agent_id=self._current_agent_id,
+            )
+            return _error_result(
+                tool_use_id=tool_use_id,
+                error=ToolError(
+                    error="action_guard_denied",
+                    error_type="ActionGuardDenied",
+                    retryable=False,
+                    hint=(
+                        f"action guard denied {tool_name}: "
+                        f"{outcome.blocked_reason}"
+                    ),
+                ),
+                extra={
+                    "tool_name": tool_name,
+                    "blocked_reason": outcome.blocked_reason,
+                    "mode": outcome.mode,
+                },
+            )
+
         if (
             self._proficiency_gate is not None
             and self._current_agent_id is not None
@@ -239,10 +276,43 @@ class ToolDispatcher:
                 allowed = await self._proficiency_gate(
                     tool_name, self._current_agent_id
                 )
-            except Exception as gate_exc:  # noqa: BLE001 — gate must not crash dispatch
+            except Exception:  # noqa: BLE001 — gate must not crash dispatch
                 logger.exception("Proficiency gate raised on %s", tool_name)
-                allowed = True  # fail-open per W13 §"Error catalog"
-                _ = gate_exc
+                # The W13 §"Error catalog" fail-open is fixed OUTRIGHT
+                # (T7b, codex M8): only an authoritatively read-only tool
+                # may proceed on a gate error; anything else fails CLOSED.
+                from backend.agents.tool_registry import resolve
+
+                if resolve(tool_name).effect == "read_only":
+                    logger.warning(
+                        "Proficiency gate raised on %s — read-only proceeds",
+                        tool_name,
+                    )
+                    allowed = True
+                else:
+                    emit_tool_invocation(
+                        tool_name,
+                        (time.perf_counter() - started_at) * 1000,
+                        False,
+                        input_size,
+                        agent_id=self._current_agent_id,
+                    )
+                    return _error_result(
+                        tool_use_id=tool_use_id,
+                        error=ToolError(
+                            error="tool_proficiency_gate_error",
+                            error_type="ToolProficiencyGateError",
+                            retryable=False,
+                            hint=(
+                                f"proficiency gate errored on {tool_name}; "
+                                "fail-closed for non-read-only tools"
+                            ),
+                        ),
+                        extra={
+                            "tool_name": tool_name,
+                            "agent_id": self._current_agent_id,
+                        },
+                    )
             if not allowed:
                 emit_tool_invocation(
                     tool_name,
