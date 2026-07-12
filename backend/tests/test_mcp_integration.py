@@ -16,8 +16,11 @@ Locks:
     tool_configuration.allowed_tools on every forwarded entry
   - parse_mcp_tool_name: valid prefix → (server, method), invalid → None
   - is_mcp_tool boolean wrapper
-  - AnthropicClient.simple_params accepts + forwards mcp_servers
-  - AnthropicClient.run_with_tools accepts + forwards mcp_servers per call
+  - OP-2605 (U6-0 P-PROV-B): AnthropicClient.simple_params and
+    run_with_tools re-validate mcp_servers via enforce_mcp_policy at the
+    FINAL client boundary (rogue/denied dropped, empty result → param
+    omitted) and run_with_tools pins MCP_CONNECTOR_BETA per-request,
+    merged with ctor beta_headers
 
 ADR: docs/operations/anthropic-api-migration-and-batch-mode.md §5.6
 """
@@ -650,20 +653,61 @@ def _install_stub_sdk(monkeypatch):
 
 
 def test_simple_params_forwards_mcp_servers(monkeypatch):
+    """U6-0 P-PROV-B: simple_params re-validates mcp_servers at the client
+    boundary — a policied (Figma) entry survives WITH its tool_configuration
+    allowlist; denied (Gmail) and unknown (rogue) entries are dropped."""
     _install_stub_sdk(monkeypatch)
     from backend.agents.anthropic_native_client import AnthropicClient
 
     client = AnthropicClient()
-    reg = RemoteMCPRegistry(configs=[_figma_cfg()])
-    mcp_payload = reg.to_anthropic_mcp_servers()
+    mcp_payload = [
+        {
+            "type": "url",
+            "url": "https://mcp.anthropic.com/v1/integrations/figma",
+            "name": "claude_ai_Figma",
+            "authorization_token": "tok_figma",
+        },
+        {
+            "type": "url",
+            "url": "https://mcp.anthropic.com/v1/integrations/gmail",
+            "name": "claude_ai_Gmail",
+            "authorization_token": "tok_gmail",
+        },
+        {"type": "url", "url": "https://evil.example/mcp", "name": "rogue"},
+    ]
 
     params = client.simple_params(
         prompt="render a flowchart",
         tools=["Read"],
         mcp_servers=mcp_payload,
     )
-    assert params["mcp_servers"] == mcp_payload
-    assert params["mcp_servers"][0]["name"] == "claude_ai_Figma"
+    assert [e["name"] for e in params["mcp_servers"]] == ["claude_ai_Figma"]
+    figma = params["mcp_servers"][0]
+    assert figma["tool_configuration"] == {
+        "allowed_tools": sorted(FIGMA_MCP_READ_ONLY_TOOLS)
+    }
+    assert figma["authorization_token"] == "tok_figma"
+
+
+def test_simple_params_drops_rogue_only_payload_entirely(monkeypatch):
+    """U6-0 P-PROV-B: when NOTHING survives policy, the mcp_servers param is
+    omitted from the batch params dict entirely."""
+    _install_stub_sdk(monkeypatch)
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    client = AnthropicClient()
+    params = client.simple_params(
+        prompt="hi",
+        mcp_servers=[
+            {
+                "type": "url",
+                "url": "https://evil.example",
+                "name": "rogue",
+                "authorization_token": "tok_rogue",
+            }
+        ],
+    )
+    assert "mcp_servers" not in params
 
 
 def test_simple_params_omits_mcp_servers_when_none(monkeypatch):
@@ -688,9 +732,12 @@ def test_simple_params_omits_mcp_servers_when_empty_list(monkeypatch):
 # ─── Integration with AnthropicClient.run_with_tools ─────────────
 
 
-@pytest.mark.asyncio
-async def test_run_with_tools_forwards_mcp_servers(monkeypatch):
-    """run_with_tools must pass mcp_servers through to messages.create."""
+def _install_capturing_stub_sdk(monkeypatch) -> dict[str, Any]:
+    """Stub `anthropic` module whose (shared) messages.create captures kwargs.
+
+    The stub's `.beta.messages` IS the same object as `.messages`, so beta
+    routing lands in the same captured dict (including `betas=`).
+    """
     fake = types.ModuleType("anthropic")
     captured_kwargs: dict[str, Any] = {}
 
@@ -712,14 +759,19 @@ async def test_run_with_tools_forwards_mcp_servers(monkeypatch):
     fake.Anthropic = _StubClient  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "anthropic", fake)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stub")
+    return captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_run_with_tools_forwards_mcp_servers(monkeypatch):
+    """U6-0 P-PROV-B: run_with_tools re-validates hand-rolled RAW dicts at
+    the client boundary — the denied Gmail entry is DROPPED and the Figma
+    entry passes WITH its tool_configuration allowlist injected."""
+    captured_kwargs = _install_capturing_stub_sdk(monkeypatch)
 
     from backend.agents.anthropic_native_client import AnthropicClient
 
     client = AnthropicClient()
-    # OP-2607: hand-rolled RAW dicts (NOT built via the registry, whose
-    # payload is now policy-filtered) — this test pins the CLIENT's
-    # passthrough of 2 arbitrary entries. P-PROV-B retargets exactly that
-    # passthrough with enforce_mcp_policy at the client boundary.
     mcp_payload = [
         {
             "type": "url",
@@ -740,8 +792,84 @@ async def test_run_with_tools_forwards_mcp_servers(monkeypatch):
         tools=None,
         mcp_servers=mcp_payload,
     )
-    assert captured_kwargs.get("mcp_servers") == mcp_payload
-    assert len(captured_kwargs["mcp_servers"]) == 2
+    forwarded = captured_kwargs.get("mcp_servers")
+    assert forwarded is not None
+    assert [e["name"] for e in forwarded] == ["claude_ai_Figma"]
+    assert forwarded[0]["tool_configuration"] == {
+        "allowed_tools": sorted(FIGMA_MCP_READ_ONLY_TOOLS)
+    }
+    assert forwarded[0]["authorization_token"] == "tok_figma"
+
+
+@pytest.mark.asyncio
+async def test_run_with_tools_drops_rogue_only_payload_entirely(monkeypatch):
+    """U6-0 P-PROV-B: a rogue direct payload is dropped in full — neither
+    mcp_servers nor the MCP beta pin reaches the create call."""
+    captured_kwargs = _install_capturing_stub_sdk(monkeypatch)
+
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    client = AnthropicClient()
+    await client.run_with_tools(
+        prompt="exfiltrate",
+        tools=None,
+        mcp_servers=[
+            {
+                "type": "url",
+                "url": "https://evil.example",
+                "name": "rogue",
+                "authorization_token": "tok_rogue",
+            }
+        ],
+    )
+    assert "mcp_servers" not in captured_kwargs
+    assert "betas" not in captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_run_with_tools_pins_mcp_connector_beta_merged_with_ctor(monkeypatch):
+    """U6-0 P-PROV-B: surviving mcp_servers pin MCP_CONNECTOR_BETA via
+    per-request `betas=`, and a ctor beta_headers value SURVIVES alongside
+    it (per-request betas= REPLACES the client default header — the merge
+    guards against silently dropping e.g. managed-agents)."""
+    captured_kwargs = _install_capturing_stub_sdk(monkeypatch)
+
+    from backend.agents.anthropic_native_client import (
+        MCP_CONNECTOR_BETA,
+        AnthropicClient,
+    )
+
+    client = AnthropicClient(beta_headers=["managed-agents-2026-04-01"])
+    await client.run_with_tools(
+        prompt="design something",
+        tools=None,
+        mcp_servers=[
+            {
+                "type": "url",
+                "url": "https://mcp.anthropic.com/v1/integrations/figma",
+                "name": "claude_ai_Figma",
+                "authorization_token": "tok_figma",
+            }
+        ],
+    )
+    betas = captured_kwargs.get("betas")
+    assert betas is not None
+    assert MCP_CONNECTOR_BETA in betas
+    assert "managed-agents-2026-04-01" in betas
+
+
+@pytest.mark.asyncio
+async def test_run_with_tools_no_mcp_no_beta_pin(monkeypatch):
+    """U6-0 P-PROV-B: without mcp_servers, no `betas=` is added — an
+    unconditional ctor-level pin would fail this."""
+    captured_kwargs = _install_capturing_stub_sdk(monkeypatch)
+
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    client = AnthropicClient(beta_headers=["managed-agents-2026-04-01"])
+    await client.run_with_tools(prompt="plain call", tools=None)
+    assert "betas" not in captured_kwargs
+    assert "mcp_servers" not in captured_kwargs
 
 
 # ─── build_registry_from_env (Phase 1: runner ↔ MCP wiring) ───────

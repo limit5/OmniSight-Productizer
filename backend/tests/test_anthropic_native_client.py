@@ -362,13 +362,37 @@ async def test_run_with_beta_builtin_tools_uses_beta_messages(monkeypatch):
 
     client = AnthropicClient()
     result = await client.run_with_tools(
-        prompt="run in sandbox",
-        raw_tools=[{"type": "code_execution_20260120", "name": "code_execution"}],
+        prompt="edit a file",
+        raw_tools=[
+            {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"}
+        ],
         enable_cache=False,
     )
     assert result.stop_reason == "end_turn"
     assert client._client.messages.calls == []  # type: ignore[attr-defined]
     assert len(client._client.beta.messages.calls) == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_run_with_forbidden_code_execution_raw_tool_raises(monkeypatch):
+    """U6-0 P-PROV-B: `code_execution*` provider-side tools are rejected at
+    the client boundary — ValueError before any API call is made."""
+    _install_stub_sdk(monkeypatch, [])
+
+    from backend.agents.anthropic_native_client import AnthropicClient
+
+    client = AnthropicClient()
+    with pytest.raises(ValueError, match="code_execution"):
+        await client.run_with_tools(
+            prompt="run in sandbox",
+            raw_tools=[
+                {"type": "text_editor_20250728", "name": "str_replace_based_edit_tool"},
+                {"type": "code_execution_20260120", "name": "code_execution"},
+            ],
+            enable_cache=False,
+        )
+    assert client._client.messages.calls == []  # type: ignore[attr-defined]
+    assert client._client.beta.messages.calls == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
