@@ -33,6 +33,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+from backend.agents.provenance import record_episodic, active_collector
+
 logger = logging.getLogger(__name__)
 
 
@@ -215,6 +217,7 @@ async def prefetch_for_error(
             soc_vendor=r.get("soc_vendor") or "",
             sdk_version=r.get("sdk_version") or "",
         ))
+        record_episodic(active_collector(), r, r.get("solution") or "")
         if len(hits) >= _top_k():
             break
 
@@ -349,6 +352,7 @@ async def prefetch_for_sandbox_error(
             soc_vendor=r.get("soc_vendor") or "",
             sdk_version=hit_sdk,
         ))
+        record_episodic(active_collector(), r, r.get("solution") or "")
         if len(hits) >= _top_k():
             break
 
