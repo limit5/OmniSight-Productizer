@@ -999,6 +999,48 @@ CREATE TABLE IF NOT EXISTS provenance_snapshots (
 CREATE INDEX IF NOT EXISTS idx_provenance_snapshots_tenant_model_call
     ON provenance_snapshots(tenant_id, model_call_id);
 
+-- U6-0 T9/T10 G2b (OP-2629): durable, write-once prepared actions.
+-- PostgreSQL's alembic 0263 schema is authoritative; SQLite deliberately
+-- stores JSON as TEXT. CHECKs mirror OperationIdentity.validate, and the
+-- explicit composite UNIQUE supports later challenge and grant FKs.
+CREATE TABLE IF NOT EXISTS prepared_actions (
+    action_instance_id     TEXT PRIMARY KEY,
+    tenant_id              TEXT NOT NULL REFERENCES tenants(id),
+    principal_type         TEXT NOT NULL,
+    actor_id               TEXT NOT NULL,
+    request_id             TEXT NOT NULL DEFAULT '',
+    model_call_id          TEXT NOT NULL DEFAULT '',
+    adapter_namespace      TEXT NOT NULL,
+    tool_name              TEXT NOT NULL,
+    schema_version         TEXT NOT NULL,
+    family                 TEXT NOT NULL,
+    effect                 TEXT NOT NULL
+                           CHECK (effect IN ('read_only', 'mutating')),
+    canonical_target       TEXT NOT NULL DEFAULT '',
+    args_hash              TEXT NOT NULL,
+    provenance_kind        TEXT NOT NULL
+                           CHECK (provenance_kind IN ('model', 'no_model_input')),
+    model_snapshot_id      TEXT,
+    no_model_input_source  TEXT,
+    executable_args        TEXT NOT NULL,
+    human_rendering        TEXT NOT NULL DEFAULT '{}',
+    prepared_action_digest TEXT NOT NULL,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, action_instance_id),
+    CHECK (
+        (provenance_kind = 'model'
+         AND model_snapshot_id IS NOT NULL
+         AND model_call_id <> ''
+         AND no_model_input_source IS NULL)
+     OR (provenance_kind = 'no_model_input'
+         AND no_model_input_source IS NOT NULL
+         AND model_call_id = ''
+         AND model_snapshot_id IS NULL)
+    )
+);
+CREATE INDEX IF NOT EXISTS idx_prepared_actions_tenant_digest
+    ON prepared_actions(tenant_id, prepared_action_digest);
+
 CREATE TABLE IF NOT EXISTS debug_findings (
     id              TEXT PRIMARY KEY,
     task_id         TEXT NOT NULL,
@@ -3991,6 +4033,107 @@ async def get_provenance_snapshot(
         "FROM provenance_snapshots "
         "WHERE snapshot_id = $1 AND tenant_id = $2",
         snapshot_id,
+        tenant_id,
+    )
+    return dict(row) if row is not None else None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Durable prepared actions (U6-0 T9/T10 G2b)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def put_prepared_action(
+    conn,
+    *,
+    action_instance_id: str,
+    tenant_id: str,
+    principal_type: str,
+    actor_id: str,
+    request_id: str,
+    model_call_id: str,
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+    family: str,
+    effect: str,
+    canonical_target: str,
+    args_hash: str,
+    provenance_kind: str,
+    model_snapshot_id: str | None,
+    no_model_input_source: str | None,
+    executable_args_json: str,
+    human_rendering_json: str,
+    prepared_action_digest: str,
+) -> bool:
+    """Insert once, accepting only same-id/same-digest replays."""
+    if not tenant_id or not action_instance_id:
+        raise ValueError("tenant_id and action_instance_id must be non-empty")
+
+    row = await conn.fetchrow(
+        """INSERT INTO prepared_actions
+           (action_instance_id, tenant_id, principal_type, actor_id,
+            request_id, model_call_id, adapter_namespace, tool_name,
+            schema_version, family, effect, canonical_target, args_hash,
+            provenance_kind, model_snapshot_id, no_model_input_source,
+            executable_args, human_rendering, prepared_action_digest)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                   $13, $14, $15, $16, $17::jsonb, $18::jsonb, $19)
+           ON CONFLICT (action_instance_id) DO NOTHING
+           RETURNING action_instance_id""",
+        action_instance_id,
+        tenant_id,
+        principal_type,
+        actor_id,
+        request_id,
+        model_call_id,
+        adapter_namespace,
+        tool_name,
+        schema_version,
+        family,
+        effect,
+        canonical_target,
+        args_hash,
+        provenance_kind,
+        model_snapshot_id,
+        no_model_input_source,
+        executable_args_json,
+        human_rendering_json,
+        prepared_action_digest,
+    )
+    if row is not None:
+        return True
+
+    existing = await conn.fetchrow(
+        "SELECT prepared_action_digest FROM prepared_actions "
+        "WHERE action_instance_id = $1",
+        action_instance_id,
+    )
+    if (
+        existing is not None
+        and existing["prepared_action_digest"] != prepared_action_digest
+    ):
+        raise ValueError("prepared_action digest mismatch")
+    return False
+
+
+async def get_prepared_action(
+    conn,
+    action_instance_id: str,
+    *,
+    tenant_id: str,
+) -> dict | None:
+    """Return a prepared action only within ``tenant_id``; fail closed."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    row = await conn.fetchrow(
+        "SELECT action_instance_id, tenant_id, principal_type, actor_id, "
+        "request_id, model_call_id, adapter_namespace, tool_name, "
+        "schema_version, family, effect, canonical_target, args_hash, "
+        "provenance_kind, model_snapshot_id, no_model_input_source, "
+        "executable_args, human_rendering, prepared_action_digest, created_at "
+        "FROM prepared_actions "
+        "WHERE action_instance_id = $1 AND tenant_id = $2",
+        action_instance_id,
         tenant_id,
     )
     return dict(row) if row is not None else None

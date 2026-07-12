@@ -385,6 +385,10 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # neither table FKs the other.  Empty until the WebSandboxManager
     # swap to PG-backed reads lands (separate row).
     "web_sandbox_instances",
+    # U6-0 G0a (0262): tenant FK; app-generated TEXT PK (not identity).
+    "provenance_snapshots",
+    # U6-0 G2b (0263): tenant FK; app-generated TEXT PK (not identity).
+    "prepared_actions",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY
