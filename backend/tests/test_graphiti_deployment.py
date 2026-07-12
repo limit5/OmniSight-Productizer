@@ -76,7 +76,9 @@ def test_graphiti_mcp_env_registration_and_read_only_contract() -> None:
     assert servers[0].name == "mcp_graphiti"
     assert servers[0].url == "https://mcp-graphiti.local"
     assert mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__getTicketTimeline")
-    assert mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__queryTimeline")
+    # OP-2607: exact-set contract — queryTimeline is not a catalog method
+    # and is refused (the old prefix predicate accepted it).
+    assert not mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__queryTimeline")
     assert not mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__createEpisode")
     assert not mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__updateNode")
     assert not mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__deleteEpisode")

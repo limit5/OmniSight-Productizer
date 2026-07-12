@@ -98,14 +98,21 @@ def test_graphiti_unavailable_and_no_match_degrade_to_no_context() -> None:
 
 
 def test_graphiti_read_only_guard_refuses_write_tools() -> None:
+    # OP-2607 (P-PROV-A): exact-set contract — only the 3 pinned catalog
+    # methods pass. The old prefix predicate accepted read-SHAPED names
+    # like queryTimeline/listPatterns that exist in no catalog or caller;
+    # those are now refused.
     assert mcp.is_graphiti_mcp_read_only_tool(
         "mcp__mcp_graphiti__getTicketTimeline"
     )
     assert mcp.is_graphiti_mcp_read_only_tool(
         "mcp__mcp_graphiti__findSimilarPriorTicketsByTimeline"
     )
-    assert mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__queryTimeline")
-    assert mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__listPatterns")
+    assert mcp.is_graphiti_mcp_read_only_tool(
+        "mcp__mcp_graphiti__getBotSuccessRateByPattern"
+    )
+    assert not mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__queryTimeline")
+    assert not mcp.is_graphiti_mcp_read_only_tool("mcp__mcp_graphiti__listPatterns")
 
     assert not mcp.is_graphiti_mcp_read_only_tool(
         "mcp__mcp_graphiti__createEpisode"

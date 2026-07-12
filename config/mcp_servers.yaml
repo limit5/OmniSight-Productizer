@@ -5,11 +5,9 @@ servers:
     token_env: OMNISIGHT_MCP_GRAPHITI_TOKEN
     default_url: https://mcp-graphiti.local
     mode: read_only
-    read_only_tool_prefixes:
-      - get
-      - find
-      - query
-      - list
+    # OP-2607: read-only enforcement is an EXACT tool set (MCP_GRAPHITI_READ_ONLY_TOOLS
+    # in backend/agents/mcp_integration.py = the temporal_tools below); the old
+    # get/find/query/list prefix matching is gone.
     temporal_tools:
       - getTicketTimeline
       - findSimilarPriorTicketsByTimeline

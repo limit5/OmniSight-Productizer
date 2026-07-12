@@ -11,6 +11,9 @@ Locks:
     remove returns bool, get + list_all + enabled_only filter
   - to_anthropic_mcp_servers: enabled servers only, optional name subset,
     stable ordering, empty registry → empty list
+  - OP-2607 (U6-0 P-PROV-A): per-server policy map — default-DENY unknown
+    servers, origin pinning (delimiter-safe), exact allowlists injected as
+    tool_configuration.allowed_tools on every forwarded entry
   - parse_mcp_tool_name: valid prefix → (server, method), invalid → None
   - is_mcp_tool boolean wrapper
   - AnthropicClient.simple_params accepts + forwards mcp_servers
@@ -33,10 +36,14 @@ from backend.agents.mcp_integration import (
     DEFAULT_REMOTE_MCP_CATALOG,
     ENV_TOKEN_VAR_BY_NAME,
     FIGMA_MCP_READ_ONLY_TOOLS,
+    MCP_GRAPHITI_READ_ONLY_TOOLS,
+    MCP_JIRA_READ_ONLY_TOOLS,
+    MCP_SERVER_POLICY,
     MCPServerConfig,
     RemoteMCPRegistry,
     build_default_server_config,
     default_catalog_by_name,
+    enforce_mcp_policy,
     is_mcp_tool,
     parse_mcp_tool_name,
     query_mcp_tool_list,
@@ -247,7 +254,11 @@ def test_anthropic_payload_only_names_subset():
 
 
 def test_anthropic_payload_stable_ordering():
-    """Same registry → same payload byte-equal across runs (deterministic)."""
+    """Same registry → same payload byte-equal across runs (deterministic).
+
+    OP-2607: strengthened — Gmail and Calendar carry explicit-DENY policies,
+    so of the three registered servers only Figma survives the policy filter.
+    """
     reg = RemoteMCPRegistry(configs=[
         _gmail_cfg(),
         _figma_cfg(),
@@ -258,6 +269,8 @@ def test_anthropic_payload_stable_ordering():
     assert a == b
     names_in_order = [s["name"] for s in a]
     assert names_in_order == sorted(names_in_order)
+    # Policy filter: only the forward-policy server remains.
+    assert names_in_order == ["claude_ai_Figma"]
 
 
 def test_anthropic_payload_empty_when_only_names_no_match():
@@ -327,20 +340,27 @@ def test_anthropic_payload_injects_figma_tool_configuration_allowed_tools():
         assert mutating not in allowed
 
 
-def test_anthropic_payload_non_figma_entry_has_no_tool_configuration():
-    """AC: a non-Figma entry (e.g. Gmail) carries NO tool_configuration key.
-    Other servers keep the untouched shape from to_anthropic_payload."""
-    reg = RemoteMCPRegistry(configs=[_figma_cfg(), _gmail_cfg()])
+def test_anthropic_payload_every_forwarded_entry_carries_tool_configuration():
+    """OP-2607 contract (rewrite of the pre-policy 'non-Figma entry has no
+    tool_configuration' pin): every FORWARDED entry carries a
+    ``tool_configuration`` with exactly the one-key ``{"allowed_tools"}``
+    shape; denied servers (Gmail) are absent from the payload entirely —
+    a token no longer re-enables them."""
+    reg = RemoteMCPRegistry(configs=[
+        _figma_cfg(),
+        _gmail_cfg(),
+        build_default_server_config("mcp_jira", authorization_token="tok-jira"),
+    ])
     payload = reg.to_anthropic_mcp_servers()
     by_name = {e["name"]: e for e in payload}
 
-    gmail_entry = by_name["claude_ai_Gmail"]
-    assert "tool_configuration" not in gmail_entry
-    # Regression: the generic payload builder shape survives untouched.
-    assert set(gmail_entry.keys()) == {"type", "url", "name", "authorization_token"}
+    assert set(by_name) == {"claude_ai_Figma", "mcp_jira"}
+    assert "claude_ai_Gmail" not in by_name  # explicit deny → dropped
 
-    # Figma still gets the guard.
-    assert "tool_configuration" in by_name["claude_ai_Figma"]
+    for entry in payload:
+        assert set(entry["tool_configuration"].keys()) == {"allowed_tools"}
+        allowed = entry["tool_configuration"]["allowed_tools"]
+        assert allowed == sorted(allowed)
 
 
 def test_anthropic_payload_figma_allowlist_offline_no_token_needed():
@@ -372,6 +392,199 @@ def test_anthropic_payload_figma_allowlist_offline_no_token_needed():
     # Fail-closed confirmation: NO mutating method present.
     for mutating in _FIGMA_MUTATING_METHODS:
         assert mutating not in figma_entry["tool_configuration"]["allowed_tools"]
+
+
+# ─── OP-2607 (U6-0 P-PROV-A): per-server policy map ──────────────
+
+
+def test_anthropic_payload_drops_unknown_server_with_warning(caplog):
+    """Default-DENY: a server not in MCP_SERVER_POLICY never reaches the
+    payload, and the drop is logged as a warning."""
+    reg = RemoteMCPRegistry(configs=[
+        _figma_cfg(),
+        MCPServerConfig(
+            name="rogue_server",
+            url="https://rogue.example/mcp",
+            authorization_token="tok-rogue",
+        ),
+    ])
+    with caplog.at_level("WARNING", logger="backend.agents.mcp_integration"):
+        payload = reg.to_anthropic_mcp_servers()
+
+    assert [e["name"] for e in payload] == ["claude_ai_Figma"]
+    assert any(
+        "UNKNOWN MCP server 'rogue_server'" in rec.getMessage()
+        for rec in caplog.records
+    )
+
+
+def test_anthropic_payload_drops_origin_impersonation_with_warning(caplog):
+    """Name-impersonation: a config NAMED mcp_jira with a non-pinned URL
+    must NOT inherit the trusted allowlist — it is dropped + warned."""
+    reg = RemoteMCPRegistry(configs=[
+        MCPServerConfig(
+            name="mcp_jira",
+            url="https://evil.example/mcp",
+            authorization_token="tok",
+        ),
+    ])
+    with caplog.at_level("WARNING", logger="backend.agents.mcp_integration"):
+        payload = reg.to_anthropic_mcp_servers()
+
+    assert payload == []
+    assert any(
+        "impersonation" in rec.getMessage() for rec in caplog.records
+    )
+
+
+def test_anthropic_payload_jira_and_graphiti_carry_exact_allowlists():
+    """Forwarded self-hosted servers carry their exact sorted allowlists."""
+    reg = RemoteMCPRegistry(configs=[
+        build_default_server_config("mcp_jira", authorization_token="t1"),
+        build_default_server_config("mcp_graphiti", authorization_token="t2"),
+    ])
+    payload = reg.to_anthropic_mcp_servers()
+    by_name = {e["name"]: e for e in payload}
+
+    assert set(by_name) == {"mcp_jira", "mcp_graphiti"}
+    assert by_name["mcp_jira"]["tool_configuration"] == {
+        "allowed_tools": ["getComments", "getTicket", "searchTickets"],
+    }
+    assert by_name["mcp_graphiti"]["tool_configuration"] == {
+        "allowed_tools": [
+            "findSimilarPriorTicketsByTimeline",
+            "getBotSuccessRateByPattern",
+            "getTicketTimeline",
+        ],
+    }
+    assert by_name["mcp_jira"]["tool_configuration"]["allowed_tools"] == sorted(
+        MCP_JIRA_READ_ONLY_TOOLS
+    )
+    assert by_name["mcp_graphiti"]["tool_configuration"][
+        "allowed_tools"
+    ] == sorted(MCP_GRAPHITI_READ_ONLY_TOOLS)
+
+
+def test_anthropic_payload_forwards_documented_graphiti_production_origin():
+    """The pinned origins include the documented production Graphiti origin
+    (graphiti-mcp-runbook.md / deploy/caddy/mcp-graphiti.caddy) — a prod
+    deployment using the OMNISIGHT_MCP_GRAPHITI_URL override must NOT be
+    dropped as impersonation."""
+    reg = RemoteMCPRegistry(configs=[
+        build_default_server_config(
+            "mcp_graphiti",
+            url_override="https://mcp-graphiti.sora.services",
+            authorization_token="tok",
+        ),
+    ])
+    payload = reg.to_anthropic_mcp_servers()
+    assert [e["name"] for e in payload] == ["mcp_graphiti"]
+    assert payload[0]["url"] == "https://mcp-graphiti.sora.services"
+
+
+def test_policy_map_import_invariants():
+    """AC-4 evidence: re-assert the import-time invariants over the live
+    map (a genuinely violated invariant makes the module unimportable, so
+    this is a pin of the contract, not a can-fail-gracefully check)."""
+    assert set(MCP_SERVER_POLICY) == {
+        "claude_ai_Figma",
+        "claude_ai_Gmail",
+        "claude_ai_Google_Calendar",
+        "claude_ai_Google_Drive",
+        "mcp_jira",
+        "mcp_graphiti",
+    }
+    for name, policy in MCP_SERVER_POLICY.items():
+        if policy.action == "forward":
+            assert policy.allowed_tools, name
+            assert policy.allowed_url_prefixes, name
+        else:
+            assert policy.action == "deny", name
+            assert policy.allowed_tools is None, name
+            assert policy.allowed_url_prefixes is None, name
+
+    # The three Google-suite MCPs are explicit-deny; the rest forward.
+    denied = {n for n, p in MCP_SERVER_POLICY.items() if p.action == "deny"}
+    assert denied == {
+        "claude_ai_Gmail",
+        "claude_ai_Google_Calendar",
+        "claude_ai_Google_Drive",
+    }
+
+
+# ─── enforce_mcp_policy (direct unit tests over raw dicts) ───────
+
+
+def _raw_entry(name: str, url: str, token: str = "tok") -> dict:
+    return {"type": "url", "url": url, "name": name, "authorization_token": token}
+
+
+def test_enforce_mcp_policy_drops_unknown_and_denied_keeps_forward():
+    servers = [
+        _raw_entry("claude_ai_Figma", "https://mcp.anthropic.com/v1/integrations/figma"),
+        _raw_entry("claude_ai_Gmail", "https://mcp.anthropic.com/v1/integrations/gmail"),
+        _raw_entry("totally_unknown", "https://whatever.example/mcp"),
+    ]
+    out = enforce_mcp_policy(servers)
+    assert [e["name"] for e in out] == ["claude_ai_Figma"]
+    assert out[0]["tool_configuration"] == {
+        "allowed_tools": sorted(FIGMA_MCP_READ_ONLY_TOOLS),
+    }
+
+
+def test_enforce_mcp_policy_reinjects_allowlist_over_caller_supplied():
+    """A caller-supplied tool_configuration is overwritten by the policy's
+    exact allowlist — the payload cannot smuggle a wider surface."""
+    entry = _raw_entry("mcp_jira", "https://mcp-atlassian.local/jira")
+    entry["tool_configuration"] = {
+        "allowed_tools": ["transitionTicket", "deleteTicket"],
+    }
+    out = enforce_mcp_policy([entry])
+    assert len(out) == 1
+    assert out[0]["tool_configuration"] == {
+        "allowed_tools": ["getComments", "getTicket", "searchTickets"],
+    }
+    # Input dict not mutated.
+    assert entry["tool_configuration"]["allowed_tools"] == [
+        "transitionTicket", "deleteTicket",
+    ]
+
+
+def test_enforce_mcp_policy_origin_mismatch_dropped():
+    out = enforce_mcp_policy([
+        _raw_entry("mcp_graphiti", "https://evil.example/mcp"),
+    ])
+    assert out == []
+
+
+def test_enforce_mcp_policy_host_suffix_impostor_dropped():
+    """Delimiter-safe pinning: naive startswith would accept a host whose
+    name merely EXTENDS the pinned host. It must be refused."""
+    impostor = "https://mcp-graphiti.localhost.evil.example/mcp"
+    assert impostor.startswith("https://mcp-graphiti.local")  # the trap
+    out = enforce_mcp_policy([_raw_entry("mcp_graphiti", impostor)])
+    assert out == []
+
+    # The genuine pinned origins still pass, with and without a path slash.
+    for genuine in (
+        "https://mcp-graphiti.local",
+        "https://mcp-graphiti.local/",
+        "https://mcp-graphiti.sora.services",
+    ):
+        out = enforce_mcp_policy([_raw_entry("mcp_graphiti", genuine)])
+        assert [e["name"] for e in out] == ["mcp_graphiti"]
+
+
+def test_enforce_mcp_policy_preserves_input_order():
+    servers = [
+        _raw_entry("mcp_jira", "https://mcp-atlassian.local/jira"),
+        _raw_entry("claude_ai_Figma", "https://mcp.anthropic.com/v1/integrations/figma"),
+        _raw_entry("mcp_graphiti", "https://mcp-graphiti.local"),
+    ]
+    out = enforce_mcp_policy(servers)
+    assert [e["name"] for e in out] == [
+        "mcp_jira", "claude_ai_Figma", "mcp_graphiti",
+    ]
 
 
 # ─── parse_mcp_tool_name ─────────────────────────────────────────
@@ -503,8 +716,24 @@ async def test_run_with_tools_forwards_mcp_servers(monkeypatch):
     from backend.agents.anthropic_native_client import AnthropicClient
 
     client = AnthropicClient()
-    reg = RemoteMCPRegistry(configs=[_figma_cfg(), _gmail_cfg()])
-    mcp_payload = reg.to_anthropic_mcp_servers()
+    # OP-2607: hand-rolled RAW dicts (NOT built via the registry, whose
+    # payload is now policy-filtered) — this test pins the CLIENT's
+    # passthrough of 2 arbitrary entries. P-PROV-B retargets exactly that
+    # passthrough with enforce_mcp_policy at the client boundary.
+    mcp_payload = [
+        {
+            "type": "url",
+            "url": "https://mcp.anthropic.com/v1/integrations/figma",
+            "name": "claude_ai_Figma",
+            "authorization_token": "tok_figma",
+        },
+        {
+            "type": "url",
+            "url": "https://mcp.anthropic.com/v1/integrations/gmail",
+            "name": "claude_ai_Gmail",
+            "authorization_token": "tok_gmail",
+        },
+    ]
 
     await client.run_with_tools(
         prompt="design something",
