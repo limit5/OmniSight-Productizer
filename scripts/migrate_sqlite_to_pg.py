@@ -389,6 +389,10 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "provenance_snapshots",
     # U6-0 G2b (0263): tenant FK; app-generated TEXT PK (not identity).
     "prepared_actions",
+    # U6-0 G4a-1 (0264): tenant FK; app-generated TEXT PK (not identity).
+    "challenges",
+    # U6-0 G4a-1 (0264): tenant FK; app-generated TEXT PK (not identity).
+    "action_grants",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY

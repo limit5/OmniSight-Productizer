@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -1040,6 +1041,108 @@ CREATE TABLE IF NOT EXISTS prepared_actions (
 );
 CREATE INDEX IF NOT EXISTS idx_prepared_actions_tenant_digest
     ON prepared_actions(tenant_id, prepared_action_digest);
+
+-- U6-0 T9/T10 G4a-1 (OP-2634): dormant challenge and grant substrate.
+-- PostgreSQL's alembic 0264 schema is authoritative; the SQLite subset keeps
+-- the write-once UNIQUE keys, provenance/expiry CHECKs, and composite FKs.
+CREATE TABLE IF NOT EXISTS challenges (
+    challenge_id             TEXT PRIMARY KEY,
+    tenant_id                TEXT NOT NULL REFERENCES tenants(id),
+    action_instance_id       TEXT NOT NULL,
+    principal_type           TEXT NOT NULL,
+    actor_id                 TEXT NOT NULL,
+    request_id               TEXT NOT NULL DEFAULT '',
+    model_call_id            TEXT NOT NULL DEFAULT '',
+    adapter_namespace        TEXT NOT NULL,
+    tool_name                TEXT NOT NULL,
+    schema_version           TEXT NOT NULL,
+    family                   TEXT NOT NULL,
+    canonical_target         TEXT NOT NULL DEFAULT '',
+    args_hash                TEXT NOT NULL,
+    provenance_kind          TEXT NOT NULL
+                             CHECK (provenance_kind IN ('model', 'no_model_input')),
+    model_snapshot_id        TEXT,
+    no_model_input_source    TEXT,
+    prepared_action_digest   TEXT NOT NULL,
+    confirmer_actor          TEXT,
+    confirmer_principal_type TEXT,
+    confirmed_at             TEXT,
+    confirm_reason           TEXT,
+    state                    TEXT NOT NULL DEFAULT 'pending'
+                             CHECK (state IN ('pending', 'confirmed', 'rejected', 'expired')),
+    created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at               TEXT NOT NULL,
+    UNIQUE (tenant_id, action_instance_id),
+    UNIQUE (tenant_id, challenge_id),
+    FOREIGN KEY (tenant_id, action_instance_id)
+        REFERENCES prepared_actions (tenant_id, action_instance_id),
+    CHECK (
+        (provenance_kind = 'model'
+         AND model_snapshot_id IS NOT NULL
+         AND model_call_id <> ''
+         AND no_model_input_source IS NULL)
+     OR (provenance_kind = 'no_model_input'
+         AND no_model_input_source IS NOT NULL
+         AND model_call_id = ''
+         AND model_snapshot_id IS NULL)
+    ),
+    CHECK (expires_at > created_at)
+);
+CREATE INDEX IF NOT EXISTS idx_challenges_tenant_state
+    ON challenges(tenant_id, state);
+
+CREATE TABLE IF NOT EXISTS action_grants (
+    grant_id                TEXT PRIMARY KEY,
+    tenant_id               TEXT NOT NULL REFERENCES tenants(id),
+    challenge_id            TEXT NOT NULL,
+    action_instance_id      TEXT NOT NULL,
+    principal_type          TEXT NOT NULL,
+    actor_id                TEXT NOT NULL,
+    request_id              TEXT NOT NULL DEFAULT '',
+    model_call_id           TEXT NOT NULL DEFAULT '',
+    adapter_namespace       TEXT NOT NULL,
+    tool_name               TEXT NOT NULL,
+    schema_version          TEXT NOT NULL,
+    family                  TEXT NOT NULL,
+    canonical_target        TEXT NOT NULL DEFAULT '',
+    args_hash               TEXT NOT NULL,
+    provenance_kind         TEXT NOT NULL
+                            CHECK (provenance_kind IN ('model', 'no_model_input')),
+    model_snapshot_id       TEXT,
+    no_model_input_source   TEXT,
+    prepared_action_digest  TEXT NOT NULL,
+    grant_issuer_source     TEXT NOT NULL
+                            CHECK (grant_issuer_source IN ('ui_confirm', 'slash_command')),
+    idempotency_key         TEXT,
+    recovery_mode           TEXT NOT NULL DEFAULT 'non_replayable'
+                            CHECK (recovery_mode IN ('non_replayable', 'sink_idempotency_key', 'read_after_write')),
+    state                   TEXT NOT NULL DEFAULT 'pending'
+                            CHECK (state IN ('pending', 'executing', 'consumed', 'expired')),
+    created_at              TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at              TEXT NOT NULL,
+    UNIQUE (tenant_id, challenge_id),
+    UNIQUE (tenant_id, action_instance_id),
+    UNIQUE (tenant_id, grant_id),
+    FOREIGN KEY (tenant_id, action_instance_id)
+        REFERENCES prepared_actions (tenant_id, action_instance_id),
+    FOREIGN KEY (tenant_id, challenge_id)
+        REFERENCES challenges (tenant_id, challenge_id),
+    FOREIGN KEY (tenant_id, model_snapshot_id)
+        REFERENCES provenance_snapshots (tenant_id, snapshot_id),
+    CHECK (
+        (provenance_kind = 'model'
+         AND model_snapshot_id IS NOT NULL
+         AND model_call_id <> ''
+         AND no_model_input_source IS NULL)
+     OR (provenance_kind = 'no_model_input'
+         AND no_model_input_source IS NOT NULL
+         AND model_call_id = ''
+         AND model_snapshot_id IS NULL)
+    ),
+    CHECK (expires_at > created_at)
+);
+CREATE INDEX IF NOT EXISTS idx_grants_tenant_state
+    ON action_grants(tenant_id, state);
 
 CREATE TABLE IF NOT EXISTS debug_findings (
     id              TEXT PRIMARY KEY,
@@ -4134,6 +4237,207 @@ async def get_prepared_action(
         "FROM prepared_actions "
         "WHERE action_instance_id = $1 AND tenant_id = $2",
         action_instance_id,
+        tenant_id,
+    )
+    return dict(row) if row is not None else None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Durable challenges and action grants (U6-0 T9/T10 G4a-1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+async def put_challenge(
+    conn,
+    *,
+    challenge_id: str,
+    tenant_id: str,
+    action_instance_id: str,
+    principal_type: str,
+    actor_id: str,
+    request_id: str,
+    model_call_id: str,
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+    family: str,
+    canonical_target: str,
+    args_hash: str,
+    provenance_kind: str,
+    model_snapshot_id: str | None,
+    no_model_input_source: str | None,
+    prepared_action_digest: str,
+    expires_at: str | datetime,
+) -> bool:
+    """Insert once, accepting only same-id/same-digest replays."""
+    if not tenant_id or not challenge_id:
+        raise ValueError("tenant_id and challenge_id must be non-empty")
+
+    row = await conn.fetchrow(
+        """INSERT INTO challenges
+           (challenge_id, tenant_id, action_instance_id, principal_type,
+            actor_id, request_id, model_call_id, adapter_namespace, tool_name,
+            schema_version, family, canonical_target, args_hash,
+            provenance_kind, model_snapshot_id, no_model_input_source,
+            prepared_action_digest, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                   $13, $14, $15, $16, $17, $18)
+           ON CONFLICT (challenge_id) DO NOTHING
+           RETURNING challenge_id""",
+        challenge_id,
+        tenant_id,
+        action_instance_id,
+        principal_type,
+        actor_id,
+        request_id,
+        model_call_id,
+        adapter_namespace,
+        tool_name,
+        schema_version,
+        family,
+        canonical_target,
+        args_hash,
+        provenance_kind,
+        model_snapshot_id,
+        no_model_input_source,
+        prepared_action_digest,
+        expires_at,
+    )
+    if row is not None:
+        return True
+
+    existing = await conn.fetchrow(
+        "SELECT prepared_action_digest FROM challenges WHERE challenge_id = $1",
+        challenge_id,
+    )
+    if (
+        existing is not None
+        and existing["prepared_action_digest"] != prepared_action_digest
+    ):
+        raise ValueError("challenge digest mismatch")
+    return False
+
+
+async def get_challenge(
+    conn,
+    challenge_id: str,
+    *,
+    tenant_id: str,
+) -> dict | None:
+    """Return a challenge only within ``tenant_id``; fail closed."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    row = await conn.fetchrow(
+        "SELECT challenge_id, tenant_id, action_instance_id, principal_type, "
+        "actor_id, request_id, model_call_id, adapter_namespace, tool_name, "
+        "schema_version, family, canonical_target, args_hash, provenance_kind, "
+        "model_snapshot_id, no_model_input_source, prepared_action_digest, "
+        "confirmer_actor, confirmer_principal_type, confirmed_at, "
+        "confirm_reason, state, created_at, expires_at FROM challenges "
+        "WHERE challenge_id = $1 AND tenant_id = $2",
+        challenge_id,
+        tenant_id,
+    )
+    return dict(row) if row is not None else None
+
+
+async def put_action_grant(
+    conn,
+    *,
+    grant_id: str,
+    tenant_id: str,
+    challenge_id: str,
+    action_instance_id: str,
+    principal_type: str,
+    actor_id: str,
+    request_id: str,
+    model_call_id: str,
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+    family: str,
+    canonical_target: str,
+    args_hash: str,
+    provenance_kind: str,
+    model_snapshot_id: str | None,
+    no_model_input_source: str | None,
+    prepared_action_digest: str,
+    grant_issuer_source: str,
+    idempotency_key: str | None,
+    recovery_mode: str,
+    expires_at: str | datetime,
+) -> bool:
+    """Insert once, accepting only same-id/same-digest replays."""
+    if not tenant_id or not grant_id:
+        raise ValueError("tenant_id and grant_id must be non-empty")
+
+    row = await conn.fetchrow(
+        """INSERT INTO action_grants
+           (grant_id, tenant_id, challenge_id, action_instance_id,
+            principal_type, actor_id, request_id, model_call_id,
+            adapter_namespace, tool_name, schema_version, family,
+            canonical_target, args_hash, provenance_kind, model_snapshot_id,
+            no_model_input_source, prepared_action_digest, grant_issuer_source,
+            idempotency_key, recovery_mode, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+           ON CONFLICT (grant_id) DO NOTHING
+           RETURNING grant_id""",
+        grant_id,
+        tenant_id,
+        challenge_id,
+        action_instance_id,
+        principal_type,
+        actor_id,
+        request_id,
+        model_call_id,
+        adapter_namespace,
+        tool_name,
+        schema_version,
+        family,
+        canonical_target,
+        args_hash,
+        provenance_kind,
+        model_snapshot_id,
+        no_model_input_source,
+        prepared_action_digest,
+        grant_issuer_source,
+        idempotency_key,
+        recovery_mode,
+        expires_at,
+    )
+    if row is not None:
+        return True
+
+    existing = await conn.fetchrow(
+        "SELECT prepared_action_digest FROM action_grants WHERE grant_id = $1",
+        grant_id,
+    )
+    if (
+        existing is not None
+        and existing["prepared_action_digest"] != prepared_action_digest
+    ):
+        raise ValueError("action_grant digest mismatch")
+    return False
+
+
+async def get_action_grant(
+    conn,
+    grant_id: str,
+    *,
+    tenant_id: str,
+) -> dict | None:
+    """Return an action grant only within ``tenant_id``; fail closed."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    row = await conn.fetchrow(
+        "SELECT grant_id, tenant_id, challenge_id, action_instance_id, "
+        "principal_type, actor_id, request_id, model_call_id, "
+        "adapter_namespace, tool_name, schema_version, family, "
+        "canonical_target, args_hash, provenance_kind, model_snapshot_id, "
+        "no_model_input_source, prepared_action_digest, grant_issuer_source, "
+        "idempotency_key, recovery_mode, state, created_at, expires_at "
+        "FROM action_grants WHERE grant_id = $1 AND tenant_id = $2",
+        grant_id,
         tenant_id,
     )
     return dict(row) if row is not None else None
