@@ -257,12 +257,25 @@ def test_metrics_reset_rebinds_both_guard_counters() -> None:
     ).inc()
 
 
-# ── 11. guard dormancy ───────────────────────────────────────────────────
-def test_action_guard_is_dormant_no_callers_in_backend() -> None:
-    """No production adapter calls the guard yet (T7a/T7b retarget this)."""
+# ── 11. guard callers are a declared, closed set ─────────────────────────
+def test_action_guard_callers_are_declared() -> None:
+    """U6-0 T7a retarget: the guard's callers are a CLOSED, declared set.
+
+    T7a wired the nodes.py adapters (chat ``_run_tool_rounds`` + specialist
+    ``tool_executor_node`` + the dormant A2A ``external_agent_node``); T7b
+    will add ``tool_dispatcher.py``. Any OTHER caller must extend this
+    allowlist in a reviewed change — the guard is the single kernel
+    chokepoint T11 flips, so an undeclared caller is a wiring smell.
+    """
     backend_root = pathlib.Path(__file__).resolve().parents[1]
     allowed = {
         backend_root / "agents" / "action_guard.py",
+        backend_root / "agents" / "nodes.py",
+        # P-ID-B left a docstring pointer on ToolDispatcher.execute
+        # ("the T7b guard ticket inserts guard_tool_dispatch here");
+        # T7b wires it for real.
+        backend_root / "agents" / "tool_dispatcher.py",
+        backend_root / "tests" / "test_nodes_action_guard.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(r"\bguard_tool_dispatch\b")
@@ -277,5 +290,6 @@ def test_action_guard_is_dormant_no_callers_in_backend() -> None:
         if pattern.search(text):
             offenders.append(str(py.relative_to(backend_root)))
     assert not offenders, (
-        f"guard core must be dormant. Unexpected references: {sorted(offenders)}"
+        f"guard callers must be the declared set. Unexpected references: "
+        f"{sorted(offenders)}"
     )
