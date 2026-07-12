@@ -35,6 +35,7 @@ from sse_starlette.sse import EventSourceResponse
 from backend import auth as _au
 from backend.agents import execution_context as _ec
 from backend.agents.graph import run_graph
+from backend.agents.provenance import provenance_scope
 from backend.db_pool import get_conn
 from backend.events import emit_chat_message, emit_pipeline_phase, emit_session_titled
 from backend.models import (
@@ -160,10 +161,11 @@ async def _run_pipeline(
     try:
         emit_pipeline_phase("start", f"Processing: {user_msg[:80]}")
         add_system_log(f"Command received: {user_msg[:60]}", "info")
-        result = await run_graph(
-            user_msg, prior_messages=prior_messages, model_name=model_name,
-            execution_context=execution_context,
-        )
+        with provenance_scope():
+            result = await run_graph(
+                user_msg, prior_messages=prior_messages, model_name=model_name,
+                execution_context=execution_context,
+            )
         add_system_log(f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s)", "info")
         emit_pipeline_phase("complete", f"Routed to {result.routed_to}, {len(result.tool_results)} tool(s) used")
         suggestion = _build_suggestion(result)

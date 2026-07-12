@@ -54,6 +54,14 @@ from typing import Any, Awaitable, Callable
 from backend.agents.action_guard import guard_tool_dispatch
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.agents.execution_context import ExecutionContext
+from backend.agents.provenance import (
+    TOOL_RESULT,
+    SnapshotCache,
+    active_collector,
+    audit_ids,
+    for_model_response,
+    record_content,
+)
 from backend.llm_adapter import AIMessage, RemoveMessage, SystemMessage, ToolMessage
 from backend.agents.state import AgentAction, GraphState, ToolCall, ToolResult
 from backend.agents.tools import AGENT_TOOLS, GUILD_TOOLS, ORCHESTRATION_TOOLS, SORA_ACTION_TOOLS, SORA_P5_PROPOSE_TOOLS, SORA_PLANNING_TOOLS, SORA_SUPERVISOR_TOOLS, TOOL_MAP, set_active_workspace
@@ -96,6 +104,22 @@ MAX_TOOL_OUTPUT_CHARS = 6000   # cap context fed back per tool result
 # realistic GATED decomposition (≤ ~10 Stories + their Blocks links) while still
 # bounding a runaway; a bigger epic spans multiple turns (audit r2 codex#6).
 MAX_WRITE_CALLS_PER_TURN = 24
+
+# U6-0 T5b-2a: process-local, NON-authoritative audit-resolution cache. Each
+# worker intentionally owns a separate instance; future durable grant binding
+# is a T9/T10 concern and never resolves through this cache.
+_SNAPSHOT_CACHE = SnapshotCache()
+
+
+def _seal_prov_ids(collector) -> tuple[str, ...]:
+    try:
+        if collector is None:
+            return ()
+        return audit_ids(for_model_response(collector.seal(_SNAPSHOT_CACHE)))
+    except Exception:  # noqa: BLE001 — provenance never breaks the turn
+        return ()
+
+
 from backend.agents.llm import get_llm
 from backend.events import emit_tool_progress, emit_pipeline_phase, emit_turn_tool_stats
 from backend.prompt_loader import (
@@ -1881,6 +1905,8 @@ async def _run_tool_rounds(
     max_output_chars = MAX_TOOL_OUTPUT_CHARS
 
     convo = list(convo)
+    _pcol = active_collector()
+    _prov_ids = _seal_prov_ids(_pcol)
     write_cache: dict[str, str] = {}  # (name,args) -> result for WRITE tools this turn
     write_call_budget = MAX_WRITE_CALLS_PER_TURN  # total WRITE invocations / turn
     failed_sigs: set[str] = set()  # (name,args) that FAILED this turn (audit r2 codex#4)
@@ -1981,6 +2007,7 @@ async def _run_tool_rounds(
                         tool_name=name,
                         raw_args=args,
                         execution_context=execution_context,
+                        provenance_snapshot_ids=_prov_ids,
                     )
                     if not guard.proceed:
                         out = (
@@ -2018,6 +2045,7 @@ async def _run_tool_rounds(
                 made_progress = True
             emit_tool_progress(name, "error" if is_failure else "done", out_str)
             convo.append(ToolMessage(content=out_str, tool_call_id=cid))
+            record_content(_pcol, TOOL_RESULT, cid, out_str)
         for call in dropped:
             cid = (call.get("id") if isinstance(call, dict) else getattr(call, "id", "")) or "?"
             convo.append(ToolMessage(
@@ -2032,6 +2060,7 @@ async def _run_tool_rounds(
             break
         try:
             resp = (llm_tools or llm).invoke(convo)
+            _prov_ids = _seal_prov_ids(_pcol)
         except Exception as llm_exc:  # noqa: BLE001
             logger.warning("tool-round LLM invoke failed: %s", llm_exc)
             return AIMessage(content=(
