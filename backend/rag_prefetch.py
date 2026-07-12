@@ -158,12 +158,15 @@ async def prefetch_for_error(
     rc: int = 1,
     soc_vendor: str = "",
     sdk_version: str = "",
+    tenant_id: str = "",
 ) -> Optional[str]:
     """End-to-end pre-fetch: rc != 0 → extract signature → search L3 →
     filter by confidence → format as a <related_past_solutions> block.
 
     Returns None when:
       * rc == 0 (no error → nothing to pre-fetch)
+      * tenant_id is unresolved ('') — FAIL-CLOSED (U6-0 T8-C1): a
+        missing tenant must never fall through to a global read
       * signature extraction returned ''
       * no search hit clears the confidence floor
 
@@ -172,6 +175,8 @@ async def prefetch_for_error(
     itself).
     """
     if rc == 0:
+        return None
+    if not tenant_id:
         return None
     sig = extract_signature(error_log)
     if not sig:
@@ -183,8 +188,9 @@ async def prefetch_for_error(
         from backend import db
         from backend.db_pool import get_pool
         async with get_pool().acquire() as _conn:
-            hits_raw = await db.search_episodic_memory(
-                _conn, sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
+            hits_raw = await db.search_verified_tenant_solutions(
+                _conn, sig, tenant_id=tenant_id,
+                soc_vendor=soc_vendor, sdk_version=sdk_version,
                 limit=_top_k() * 2,  # over-fetch, then apply confidence filter
             )
     except Exception as exc:
@@ -288,13 +294,19 @@ async def prefetch_for_sandbox_error(
     rc: int = 1,
     soc_vendor: str = "",
     sdk_version: str = "",
+    tenant_id: str = "",
 ) -> Optional[str]:
     """Tier-1 sandbox-specific pre-fetch with the strict guardrails
     from docs/design/dag-pre-fetching.md. Returns a `<system_auto_prefetch>`
     XML block ready for injection, or None if no hit clears the bars.
 
+    FAIL-CLOSED (U6-0 T8-C1): an unresolved tenant_id ('') returns None
+    without touching the DB — never a global/cross-tenant read.
+
     Never raises; DB / metric failures degrade to None."""
     if rc == 0:
+        return None
+    if not tenant_id:
         return None
     sig = extract_signature(error_log)
     if not sig:
@@ -305,8 +317,9 @@ async def prefetch_for_sandbox_error(
         from backend import db
         from backend.db_pool import get_pool
         async with get_pool().acquire() as _conn:
-            hits_raw = await db.search_episodic_memory(
-                _conn, sig, soc_vendor=soc_vendor, sdk_version=sdk_version,
+            hits_raw = await db.search_verified_tenant_solutions(
+                _conn, sig, tenant_id=tenant_id,
+                soc_vendor=soc_vendor, sdk_version=sdk_version,
                 limit=_top_k() * 2, min_quality=min_cos,
             )
     except Exception as exc:

@@ -1904,14 +1904,24 @@ async def search_past_solutions(
     """
     from backend import db
 
+    # U6-0 T8-C1: tenant resolved from the TRUSTED server-side
+    # ContextVar (P-ID-B) — NEVER a model-supplied arg. Unresolved
+    # scope fail-closes: no rows, never a global/cross-tenant read.
+    from backend.agents.anthropic_native_client import get_active_execution_context
+    ctx = get_active_execution_context()
+    tenant_id = ctx.tenant_id if ctx else ""
+    if not tenant_id:
+        return "[L3] No verified past solutions in scope."
+
     # SP-3.12: agent-tool search is a worker context — acquire pool
     # conn for the search call. The inner access-count UPDATEs ride
     # the same conn, so a single acquire covers both read + write.
     try:
         async with get_pool().acquire() as _conn:
-            results = await db.search_episodic_memory(
+            results = await db.search_verified_tenant_solutions(
                 _conn,
                 query=error_signature,
+                tenant_id=tenant_id,
                 soc_vendor=soc_vendor,
                 sdk_version=sdk_version,
                 limit=limit,

@@ -275,31 +275,117 @@ class TestL3Tools:
         })
         assert "[ERROR]" in result
 
+    @staticmethod
+    def _service_ctx(tenant_id: str = "t-x"):
+        from backend.agents import execution_context as ec
+        return ec.for_service(
+            service_name="runner",
+            tenant_id=tenant_id,
+            request_id="r-t8c1",
+            roles=["operator"],
+            authorization_source="a2a",
+        )
+
     @pytest.mark.asyncio
-    async def test_search_past_solutions_found(self, client, db_pool_init):
-        from backend.agents.tools import save_solution, search_past_solutions
-        # First save one
-        await save_solution.ainvoke({
-            "error_signature": "cmake toolchain file not found xyz123",
-            "solution": "Set CMAKE_TOOLCHAIN_FILE to /opt/sdk/toolchain.cmake",
-            "soc_vendor": "rockchip",
-        })
-        # Then search
-        result = await search_past_solutions.ainvoke({
-            "error_signature": "toolchain file not found xyz123",
-        })
+    async def test_search_past_solutions_found(
+        self, client, db_pool_init, monkeypatch,
+    ):
+        """U6-0 T8-C1: the model-callable READ resolves the tenant from
+        the trusted ContextVar and routes through the VERIFIED helper —
+        a verified/gerrit/tenant-matched row renders; the helper is
+        called with the ctx tenant."""
+        from backend import db
+        from backend.db_pool import get_pool
+        from backend.agents.tools import search_past_solutions
+        from backend.agents.anthropic_native_client import (
+            _active_execution_context,
+        )
+
+        # Seed a row in the VERIFIED provenance state (all four columns
+        # together — the alembic-0260 CHECK raises on verified=True
+        # without verification_authority='gerrit').
+        async with get_pool().acquire() as conn:
+            await db.insert_episodic_memory(conn, {
+                "id": "l3-found-t8c1",
+                "error_signature": "cmake toolchain file not found xyz123",
+                "solution": "Set CMAKE_TOOLCHAIN_FILE to /opt/sdk/toolchain.cmake",
+                "soc_vendor": "rockchip", "sdk_version": "",
+                "hardware_rev": "", "source_task_id": "",
+                "source_agent_id": "", "gerrit_change_id": "",
+                "tags": [], "quality_score": 0.9,
+                "tenant_id": "t-x", "verified": True,
+                "source": "service_gerrit_merge",
+                "verification_authority": "gerrit",
+                "visibility": "tenant_shared",
+            })
+
+        calls: list[dict] = []
+        real = db.search_verified_tenant_solutions
+
+        async def spy(conn, query, **kwargs):
+            calls.append(dict(kwargs))
+            return await real(conn, query, **kwargs)
+
+        monkeypatch.setattr(db, "search_verified_tenant_solutions", spy)
+
+        token = _active_execution_context.set(self._service_ctx("t-x"))
+        try:
+            result = await search_past_solutions.ainvoke({
+                "error_signature": "toolchain file not found xyz123",
+            })
+        finally:
+            _active_execution_context.reset(token)
+            async with get_pool().acquire() as conn:
+                await db.delete_episodic_memory(conn, "l3-found-t8c1")
+
+        assert calls and calls[0]["tenant_id"] == "t-x"
         assert "[L3]" in result
         assert "Found" in result
         assert "toolchain" in result.lower()
 
     @pytest.mark.asyncio
-    async def test_search_past_solutions_not_found(self, client, db_pool_init):
+    async def test_search_past_solutions_not_found(
+        self, client, db_pool_init,
+    ):
+        """Tenant resolved but no verified row matches ⇒ the search-empty
+        message (NOT the fail-closed literal)."""
         from backend.agents.tools import search_past_solutions
-        result = await search_past_solutions.ainvoke({
-            "error_signature": "completely_unique_nonexistent_error_zzz999",
-        })
+        from backend.agents.anthropic_native_client import (
+            _active_execution_context,
+        )
+        token = _active_execution_context.set(self._service_ctx("t-x"))
+        try:
+            result = await search_past_solutions.ainvoke({
+                "error_signature": "completely_unique_nonexistent_error_zzz999",
+            })
+        finally:
+            _active_execution_context.reset(token)
         assert "[L3]" in result
         assert "No past solutions" in result
+
+    @pytest.mark.asyncio
+    async def test_search_past_solutions_no_context_fail_closed(
+        self, monkeypatch,
+    ):
+        """U6-0 T8-C1: no ContextVar ⇒ unresolved tenant ⇒ EXACTLY the
+        pinned fail-closed literal + NO DB call (never a global read).
+        Runs offline — the fail-closed branch returns before any pool
+        acquire."""
+        from backend import db
+        from backend.agents.tools import search_past_solutions
+
+        async def _no_db_call(*args, **kwargs):
+            raise AssertionError("DB search must not be called")
+
+        monkeypatch.setattr(
+            db, "search_verified_tenant_solutions", _no_db_call,
+        )
+        monkeypatch.setattr(db, "search_episodic_memory", _no_db_call)
+
+        result = await search_past_solutions.ainvoke({
+            "error_signature": "any error at all",
+        })
+        assert result == "[L3] No verified past solutions in scope."
 
     @pytest.mark.asyncio
     async def test_save_with_gerrit_id_quality_boost(self, client, db_pool_init):

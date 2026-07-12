@@ -105,11 +105,12 @@ async def test_error_check_node_forwards_platform_tags(monkeypatch):
 
     captured: dict = {}
 
-    async def spy(error_log, *, rc, soc_vendor, sdk_version):
+    async def spy(error_log, *, rc, soc_vendor, sdk_version, tenant_id=""):
         captured["error_log"] = error_log
         captured["rc"] = rc
         captured["soc_vendor"] = soc_vendor
         captured["sdk_version"] = sdk_version
+        captured["tenant_id"] = tenant_id
         return None  # no injection — just verifying the call
 
     monkeypatch.setattr(rp, "prefetch_for_sandbox_error", spy)
@@ -129,3 +130,6 @@ async def test_error_check_node_forwards_platform_tags(monkeypatch):
     assert captured["sdk_version"] == "SDK-v2"
     assert captured["rc"] == 1
     assert "v4l2_open" in captured["error_log"]
+    # U6-0 T8-C1: no execution_context on this state ⇒ the node
+    # threads '' so the prefetch fail-closes downstream.
+    assert captured["tenant_id"] == ""

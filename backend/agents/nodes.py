@@ -1706,6 +1706,13 @@ async def error_check_node(state: GraphState) -> dict:
                 # callers degrade gracefully.
                 soc_vendor=state.soc_vendor,
                 sdk_version=state.sdk_version,
+                # U6-0 T8-C1: tenant from the trusted server-side context
+                # (OP-2595). Absent ⇒ '' ⇒ the prefetch fail-closes (no
+                # hint) instead of a global/cross-tenant read.
+                tenant_id=(
+                    state.execution_context.tenant_id
+                    if state.execution_context else ""
+                ),
             )
             if block:
                 l3_hint_messages = [AIMessage(content=block)]

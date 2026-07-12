@@ -173,7 +173,12 @@ async def fresh_db(pg_test_pool):
 
 
 async def _seed(pool, *, mid: str, err: str, sol: str, q: float,
-                vendor: str = "", sdk: str = ""):
+                vendor: str = "", sdk: str = "", tenant: str = "t-x"):
+    """U6-0 T8-C1: seed rows in the VERIFIED provenance state — the
+    read fence only surfaces verified/gerrit/tenant_shared rows, so
+    the four provenance columns are written TOGETHER (the alembic-0260
+    PG CHECK raises on verified=True without verification_authority=
+    'gerrit')."""
     from backend import db
     async with pool.acquire() as conn:
         await db.insert_episodic_memory(conn, {
@@ -181,6 +186,10 @@ async def _seed(pool, *, mid: str, err: str, sol: str, q: float,
             "soc_vendor": vendor, "sdk_version": sdk, "hardware_rev": "",
             "source_task_id": "", "source_agent_id": "",
             "gerrit_change_id": "", "tags": [], "quality_score": q,
+            "tenant_id": tenant, "verified": True,
+            "source": "service_gerrit_merge",
+            "verification_authority": "gerrit",
+            "visibility": "tenant_shared",
         })
 
 
@@ -190,13 +199,17 @@ async def test_rc_zero_never_prefetches(fresh_db):
     happens to contain a match for something in the log."""
     await _seed(fresh_db, mid="m1", err="Segmentation fault",
                 sol="init the pointer", q=0.9)
-    out = await rp.prefetch_for_error("Segmentation fault somewhere", rc=0)
+    out = await rp.prefetch_for_error(
+        "Segmentation fault somewhere", rc=0, tenant_id="t-x",
+    )
     assert out is None
 
 
 @pytest.mark.asyncio
 async def test_no_signature_match_returns_none(fresh_db):
-    out = await rp.prefetch_for_error("build succeeded in 2.3s", rc=1)
+    out = await rp.prefetch_for_error(
+        "build succeeded in 2.3s", rc=1, tenant_id="t-x",
+    )
     assert out is None
 
 
@@ -206,7 +219,7 @@ async def test_below_confidence_returns_none(fresh_db, monkeypatch):
                 sol="try A", q=0.3)
     monkeypatch.setenv("OMNISIGHT_RAG_MIN_CONFIDENCE", "0.5")
     out = await rp.prefetch_for_error(
-        "Segmentation fault (core dumped)", rc=139,
+        "Segmentation fault (core dumped)", rc=139, tenant_id="t-x",
     )
     assert out is None
 
@@ -217,10 +230,43 @@ async def test_high_confidence_injects_block(fresh_db):
                 sol="initialise the pointer before deref", q=0.9)
     out = await rp.prefetch_for_error(
         "something something Segmentation fault here", rc=139,
+        tenant_id="t-x",
     )
     assert out is not None
     assert "<related_past_solutions>" in out
     assert "initialise the pointer" in out
+
+
+@pytest.mark.asyncio
+async def test_other_tenant_rows_never_surface(fresh_db):
+    """U6-0 T8-C1: a verified row from ANOTHER tenant must not reach
+    the caller's prefetch block."""
+    await _seed(fresh_db, mid="theirs", err="Segmentation fault",
+                sol="their tenant's fix", q=0.9, tenant="t-other")
+    out = await rp.prefetch_for_error(
+        "Segmentation fault here", rc=139, tenant_id="t-x",
+    )
+    assert out is None
+
+
+@pytest.mark.asyncio
+async def test_quarantined_rows_never_surface(fresh_db):
+    """U6-0 T8-C1: an UNVERIFIED (quarantined/legacy-state) row must
+    not reach the prefetch block even for the right tenant."""
+    from backend import db
+    async with fresh_db.acquire() as conn:
+        await db.insert_episodic_memory(conn, {
+            "id": "quarantined", "error_signature": "Segmentation fault",
+            "solution": "poisoned fix", "soc_vendor": "", "sdk_version": "",
+            "hardware_rev": "", "source_task_id": "", "source_agent_id": "",
+            "gerrit_change_id": "", "tags": [], "quality_score": 0.9,
+            "tenant_id": "t-x",
+            # insert_episodic_memory defaults: verified=False, source='legacy'
+        })
+    out = await rp.prefetch_for_error(
+        "Segmentation fault here", rc=139, tenant_id="t-x",
+    )
+    assert out is None
 
 
 @pytest.mark.asyncio
@@ -230,7 +276,7 @@ async def test_top_k_caps_results(fresh_db, monkeypatch):
                     sol=f"sol {i}", q=0.8)
     monkeypatch.setenv("OMNISIGHT_RAG_TOP_K", "2")
     out = await rp.prefetch_for_error(
-        "Segmentation fault boom", rc=139,
+        "Segmentation fault boom", rc=139, tenant_id="t-x",
     )
     assert out is not None
     assert out.count("<solution") == 2
@@ -244,9 +290,11 @@ async def test_search_error_returns_none_not_raise(fresh_db, monkeypatch):
 
     async def boom(*args, **kwargs):
         raise RuntimeError("fts5 melted")
-    monkeypatch.setattr(db, "search_episodic_memory", boom)
+    monkeypatch.setattr(db, "search_verified_tenant_solutions", boom)
 
-    out = await rp.prefetch_for_error("Segmentation fault here", rc=1)
+    out = await rp.prefetch_for_error(
+        "Segmentation fault here", rc=1, tenant_id="t-x",
+    )
     assert out is None
 
 
@@ -348,7 +396,9 @@ def test_format_sandbox_block_no_truncation_when_budget_fits():
 async def test_sandbox_rc_zero_returns_none(fresh_db):
     await _seed(fresh_db, mid="m", err="Segmentation fault",
                 sol="fix it", q=0.9)
-    out = await rp.prefetch_for_sandbox_error("Segmentation fault", rc=0)
+    out = await rp.prefetch_for_sandbox_error(
+        "Segmentation fault", rc=0, tenant_id="t-x",
+    )
     assert out is None
 
 
@@ -360,7 +410,7 @@ async def test_sandbox_below_cosine_returns_none(fresh_db, monkeypatch):
                 sol="try A", q=0.7)
     monkeypatch.delenv("OMNISIGHT_RAG_MIN_COSINE", raising=False)
     out = await rp.prefetch_for_sandbox_error(
-        "Segmentation fault here", rc=139,
+        "Segmentation fault here", rc=139, tenant_id="t-x",
     )
     assert out is None
 
@@ -377,7 +427,7 @@ async def test_sandbox_rejects_sdk_mismatch_even_at_high_quality(
     monkeypatch.delenv("OMNISIGHT_RAG_MIN_COSINE", raising=False)
     out = await rp.prefetch_for_sandbox_error(
         "Segmentation fault", rc=139,
-        soc_vendor="Rockchip", sdk_version="SDK-v2",
+        soc_vendor="Rockchip", sdk_version="SDK-v2", tenant_id="t-x",
     )
     # DB's sdk_version filter also drops the row, so we reach the
     # "no_hit" branch. Either way the block must not be emitted.
@@ -391,7 +441,7 @@ async def test_sandbox_high_quality_matching_sdk_injects_doc_format(fresh_db):
                 vendor="Fullhan", sdk="SDK-v1")
     out = await rp.prefetch_for_sandbox_error(
         "libmedia.so: undefined reference to `v4l2_open'", rc=1,
-        soc_vendor="Fullhan", sdk_version="SDK-v1",
+        soc_vendor="Fullhan", sdk_version="SDK-v1", tenant_id="t-x",
     )
     assert out is not None
     assert "<system_auto_prefetch>" in out
@@ -425,7 +475,7 @@ async def test_sandbox_hit_touches_memory_decay(fresh_db):
     assert row["last_used_at"] is None
 
     out = await rp.prefetch_for_sandbox_error(
-        "Segmentation fault (core dumped)", rc=139,
+        "Segmentation fault (core dumped)", rc=139, tenant_id="t-x",
     )
     assert out is not None
 
@@ -435,3 +485,115 @@ async def test_sandbox_hit_touches_memory_decay(fresh_db):
             "touched",
         )
     assert row["last_used_at"] is not None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  U6-0 T8-C1 — the READ FENCE (offline, no PG needed)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# Model-feeding reads go through db.search_verified_tenant_solutions
+# ONLY, always with the caller's tenant; an unresolved tenant
+# fail-closes (None, no DB touch) — never a global/unfiltered read.
+
+
+class _FenceSpy:
+    """Records calls; returns a canned row list."""
+
+    def __init__(self, rows=None):
+        self.calls: list[dict] = []
+        self._rows = rows or []
+
+    async def __call__(self, conn, query, **kwargs):
+        self.calls.append({"query": query, **kwargs})
+        return self._rows
+
+
+class _FakePoolAcquire:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePool:
+    def acquire(self):
+        return _FakePoolAcquire()
+
+
+def _patch_fence(monkeypatch, verified_rows=None):
+    """Spy on BOTH search fns + a fake pool so no real DB is needed."""
+    import backend.db_pool as _db_pool
+    from backend import db
+    verified_spy = _FenceSpy(verified_rows)
+    legacy_spy = _FenceSpy()
+    monkeypatch.setattr(db, "search_verified_tenant_solutions", verified_spy)
+    monkeypatch.setattr(db, "search_episodic_memory", legacy_spy)
+    monkeypatch.setattr(_db_pool, "get_pool", lambda: _FakePool())
+    return verified_spy, legacy_spy
+
+
+_VERIFIED_ROW = {
+    "id": "vr1", "error_signature": "Segmentation fault",
+    "solution": "the verified fix", "quality_score": 0.95,
+    "soc_vendor": "", "sdk_version": "",
+}
+
+
+@pytest.mark.asyncio
+async def test_prefetch_for_error_empty_tenant_fail_closed_no_db_call(
+    monkeypatch,
+):
+    verified_spy, legacy_spy = _patch_fence(monkeypatch)
+    out = await rp.prefetch_for_error(
+        "Segmentation fault here", rc=1, tenant_id="",
+    )
+    assert out is None
+    assert verified_spy.calls == []
+    assert legacy_spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_sandbox_prefetch_empty_tenant_fail_closed_no_db_call(
+    monkeypatch,
+):
+    verified_spy, legacy_spy = _patch_fence(monkeypatch)
+    out = await rp.prefetch_for_sandbox_error(
+        "Segmentation fault here", rc=1, tenant_id="",
+    )
+    assert out is None
+    assert verified_spy.calls == []
+    assert legacy_spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_prefetch_for_error_fence_uses_verified_helper_with_tenant(
+    monkeypatch,
+):
+    verified_spy, legacy_spy = _patch_fence(
+        monkeypatch, verified_rows=[_VERIFIED_ROW],
+    )
+    out = await rp.prefetch_for_error(
+        "Segmentation fault here", rc=1, tenant_id="t-x",
+    )
+    assert out is not None and "the verified fix" in out
+    assert len(verified_spy.calls) == 1
+    assert verified_spy.calls[0]["tenant_id"] == "t-x"
+    # THE FENCE: the unfiltered legacy search is never touched.
+    assert legacy_spy.calls == []
+
+
+@pytest.mark.asyncio
+async def test_sandbox_prefetch_fence_uses_verified_helper_with_tenant(
+    monkeypatch,
+):
+    verified_spy, legacy_spy = _patch_fence(
+        monkeypatch, verified_rows=[_VERIFIED_ROW],
+    )
+    out = await rp.prefetch_for_sandbox_error(
+        "Segmentation fault here", rc=1, tenant_id="t-x",
+    )
+    assert out is not None and "the verified fix" in out
+    assert len(verified_spy.calls) == 1
+    assert verified_spy.calls[0]["tenant_id"] == "t-x"
+    assert legacy_spy.calls == []
