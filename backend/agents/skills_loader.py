@@ -54,8 +54,11 @@ import json
 import logging
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 from hashlib import sha256
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,6 +75,40 @@ logger = logging.getLogger(__name__)
 SCOPE_ORDER: tuple[str, ...] = ("project", "home", "bundled")
 _DEFAULT_PROVIDER_RANK = 0
 SKILLS_LOADER_ENABLED_ENV = "OMNISIGHT_WP_SKILLS_LOADER_ENABLED"
+
+# ─── Executable-skill containment (U6-0 P-SKILL) ─────────────────
+#
+# Trust boundary for `*.skill` subprocess execution. The boundary is the
+# CURRENT process's imported constants below — the model editing this file
+# (or the manifest) on disk does NOT affect the already-imported module.
+# Corollary: a dirty, model-modified checkout must never be RESTARTED into
+# a runner without review/reset; the manifest-lockstep test is maintenance
+# protection, NOT the security boundary.
+#
+# Update procedure: edit the trusted skill AND its pinned sha256 here in
+# ONE reviewed change.
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+"""The singular module-owned repo root — both launchers resolve to it."""
+
+TRUSTED_EXECUTABLE_SKILLS: dict[str, str] = {
+    "scripts/skills/run_tests.skill": (
+        "ef0116ced93971eb07a31b1fc6b90ceab94b7b4c3f82956464e743f9af43a936"
+    ),
+    "scripts/skills/fmt.skill": (
+        "5c3e3359797bbdd754013277b238ba29045133863c2907d9d665b6e9fea6e9c3"
+    ),
+    "scripts/skills/lint_changed.skill": (
+        "8e31ae6d8f2d80195eeb428e5f650771339a3d616663b4ed23396fc608585099"
+    ),
+}
+"""Pinned manifest: repo-relative path → sha256 of the committed bytes."""
+
+# Kill-switch: truthy ⇒ refuse ALL executable-skill exec (markdown skills
+# unaffected). Deliberately a plain env check — a security kill-switch
+# must not depend on backend state (feature_flags / DB registries).
+EXECUTABLE_SKILLS_DISABLED_ENV = "OMNISIGHT_EXECUTABLE_SKILLS_DISABLED"
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 # WP.2.7 rollback registry: mirrors the pre-WP.2.5 hard-coded
 # SKILL_HD_* table from backend.agents.tool_schemas.
@@ -671,11 +708,98 @@ def make_skill_handler(registry: SkillRegistry):
     return _handler
 
 
+class UntrustedExecutableSkillError(ValueError):
+    """Refusal to execute a ``*.skill`` file outside the pinned manifest.
+
+    Raised OUT of the Skill tool handler on purpose: ``ToolDispatcher.execute``
+    is the layer that catches handler exceptions and converts them into
+    ``is_error=True`` tool results. Returning a structured error instead would
+    be serialized as a SUCCESSFUL tool result — wrong.
+
+    ``reason`` is one of the bounded values: ``executable_skills_disabled`` /
+    ``untrusted_path`` / ``symlink_at_trusted_path`` / ``content_hash_mismatch``.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            f"executable skill refused: {reason} — only pinned repo-committed "
+            "skills may run (TRUSTED_EXECUTABLE_SKILLS)"
+        )
+
+
+def _verify_trusted_executable_skill(script_path: Path) -> bytes:
+    """Verify ``script_path`` against the pinned manifest; return its bytes.
+
+    ``script_path`` must be the UNRESOLVED ``skill.source_path``: path
+    identity is compared with directories canonicalized but the LEAF never
+    resolved (``candidate.parent.resolve() / candidate.name``). A naive
+    ``resolve()`` would follow a symlink first and make the symlink check
+    dead code — a symlink whose target hashes correctly is still refused,
+    because hash equality does not preserve execution context.
+
+    Expected paths are built from the module constants at CALL time.
+    Checks, in order:
+
+      1. kill-switch env ⇒ ``executable_skills_disabled``
+      2. leaf-unresolved identity against one manifest key ⇒ else
+         ``untrusted_path`` (note: a project/home-scope ``run_tests.skill``
+         SHADOWS the bundled one at scan time and is then REFUSED here —
+         intended fail-closed, not a regression)
+      3. ``lstat`` on the matched pinned path: regular file, not a symlink
+         ⇒ else ``symlink_at_trusted_path``
+      4. single read + sha256 == pinned digest ⇒ else
+         ``content_hash_mismatch``
+
+    On success returns the VERIFIED BYTES read in step 4 — callers must
+    execute THOSE bytes (never re-open the workspace pathname; see
+    :func:`_run_executable_skill`).
+    """
+    disabled = os.environ.get(EXECUTABLE_SKILLS_DISABLED_ENV, "")
+    if disabled.strip().lower() in _TRUTHY_ENV_VALUES:
+        raise UntrustedExecutableSkillError("executable_skills_disabled")
+
+    candidate_identity = script_path.parent.resolve() / script_path.name
+    matched_path: Path | None = None
+    expected_digest: str | None = None
+    for key, digest in TRUSTED_EXECUTABLE_SKILLS.items():
+        pinned = REPO_ROOT / key
+        if candidate_identity == pinned.parent.resolve() / Path(key).name:
+            matched_path = pinned.parent.resolve() / Path(key).name
+            expected_digest = digest
+            break
+    if matched_path is None or expected_digest is None:
+        raise UntrustedExecutableSkillError("untrusted_path")
+
+    if matched_path.is_symlink() or not stat.S_ISREG(
+        matched_path.lstat().st_mode
+    ):
+        raise UntrustedExecutableSkillError("symlink_at_trusted_path")
+
+    data = matched_path.read_bytes()
+    if sha256(data).hexdigest() != expected_digest:
+        raise UntrustedExecutableSkillError("content_hash_mismatch")
+    return data
+
+
 def _run_executable_skill(skill: Skill, payload: dict[str, Any]) -> Any:
-    """Execute a flat ``*.skill`` file using JSON stdin/stdout."""
+    """Execute a verified ``*.skill`` file using JSON stdin/stdout.
+
+    TOCTOU containment: verify-then-execute-the-pathname is racy (a
+    previously-launched background process can swap the file between the
+    hash check and Python re-opening it; hardlinks defeat naive symlink
+    prohibition). So the workspace pathname is NEVER re-opened for
+    execution — the verified bytes are written to a fresh private snapshot
+    (``mkstemp`` inside a 0700 ``mkdtemp``, unpredictable name, created by
+    this process) and THAT snapshot is executed, then deleted.
+
+    Residual risk: same-uid processes can theoretically still race the
+    private snapshot; the unpredictable name plus the open-write-close-exec
+    window makes this impractical — noted rather than claiming perfection.
+    """
     if skill.source_path is None:
         raise ValueError(f"Executable skill {skill.name!r} has no source path")
-    script_path = skill.source_path.resolve()
+    verified_bytes = _verify_trusted_executable_skill(skill.source_path)
     args = payload.get("args")
     if isinstance(args, dict):
         skill_input = dict(args)
@@ -691,16 +815,27 @@ def _run_executable_skill(skill: Skill, payload: dict[str, Any]) -> Any:
         if key not in {"skill", "args"}:
             skill_input[key] = value
 
-    result = subprocess.run(
-        [sys.executable, str(script_path)],
-        input=json.dumps(skill_input),
-        text=True,
-        capture_output=True,
-        cwd=script_path.parents[2],
-        env=os.environ.copy(),
-        timeout=600,
-        check=False,
-    )
+    snapshot_dir = tempfile.mkdtemp(prefix="omnisight-skill-")
+    try:
+        fd, snapshot_path = tempfile.mkstemp(
+            dir=snapshot_dir, suffix=".skill"
+        )
+        try:
+            os.write(fd, verified_bytes)
+        finally:
+            os.close(fd)
+        result = subprocess.run(
+            [sys.executable, snapshot_path],
+            input=json.dumps(skill_input),
+            text=True,
+            capture_output=True,
+            cwd=str(REPO_ROOT),
+            env=os.environ.copy(),
+            timeout=600,
+            check=False,
+        )
+    finally:
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RuntimeError(

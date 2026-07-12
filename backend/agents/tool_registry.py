@@ -54,13 +54,13 @@ class OperationDescriptor:
 # kernel's policy table in the same change). ``external_comms`` covers
 # outbound-message tools (Slack today; email / non-Gerrit PR comment-body
 # posts as they land). ``skill_exec`` is a HIGH-RISK family reserved for
-# ``*.skill`` executable-scoped file runs — the ``skills_loader`` invokes
-# them as arbitrary subprocesses with the full parent environment, so
-# they must NOT share the bare ``delegation`` family with sub-agent
-# spawns (an enforce flip on ``code_write`` / ``deploy`` would otherwise
-# be silently bypassable through a skill). The structural containment
-# (unbinding ``*.skill`` exec from model use) is a separate ticket
-# (P-SKILL); the classification here is what the kernel will consult.
+# ``*.skill`` executable-scoped file runs — the ``skills_loader`` runs
+# only manifest-pinned, hash-verified skills as subprocesses (P-SKILL
+# containment; still with the full parent environment), so they must NOT
+# share the bare ``delegation`` family with sub-agent spawns (an enforce
+# flip on ``code_write`` / ``deploy`` would otherwise be silently
+# bypassable through a skill). The classification here is what the
+# kernel will consult.
 _READ_ONLY = "read_only"
 _CODE_WRITE = "code_write"
 _GERRIT_WRITE = "gerrit_write"
@@ -72,7 +72,7 @@ _MEMORY_WRITE = "memory_write"
 _DANGEROUS_PROPOSE = "dangerous_propose"
 _DELEGATION = "delegation"
 _EXTERNAL_COMMS = "external_comms"  # SlackPostMessage; future email / PR comment posts
-_SKILL_EXEC = "skill_exec"  # arbitrary subprocess exec via *.skill files (see docstring)
+_SKILL_EXEC = "skill_exec"  # manifest-pinned subprocess exec via *.skill files (see docstring)
 
 _UNKNOWN_DENY = "__unknown_deny__"
 
@@ -194,9 +194,9 @@ TOOL_METADATA: dict[str, OperationDescriptor] = {
     "Bash": _op("Bash", "mutating", _CODE_WRITE),
     "bash": _op("bash", "mutating", _CODE_WRITE),
     "Agent": _op("Agent", "mutating", _DELEGATION),
-    # Skill runs a ``*.skill`` executable as an arbitrary subprocess with
-    # the full parent environment (backend/agents/skills_loader.py::
-    # _run_executable_skill → subprocess.run(..., env=os.environ.copy())).
+    # Skill runs a manifest-pinned, hash-verified ``*.skill`` executable
+    # as a subprocess with the full parent environment
+    # (backend/agents/skills_loader.py::_run_executable_skill, P-SKILL).
     # Classifying it as bare ``delegation`` would let an enforce flip on
     # code_write / deploy be silently bypassed through a skill call — so
     # it gets its own high-risk family (_SKILL_EXEC). Agent stays

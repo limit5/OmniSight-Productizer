@@ -11,21 +11,33 @@ Locks:
   * render_catalog_for_prompt: empty registry → empty string; truncation
   * Real-world smoke: load this repo's bundled skills and verify at least
     one frontmatter skill + one legacy skill round-trip
+  * Executable-skill containment (U6-0 P-SKILL): trusted-manifest
+    verification, snapshot execution, kill-switch, symlink/shadow/hash
+    refusals, manifest lockstep
 """
 
 from __future__ import annotations
 
 import logging
+import tempfile
+from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from backend.agents import skills_loader
 from backend.agents.skills_loader import (
+    EXECUTABLE_SKILLS_DISABLED_ENV,
+    REPO_ROOT,
     SKILLS_LOADER_ENABLED_ENV,
+    TRUSTED_EXECUTABLE_SKILLS,
     Skill,
     SkillRegistry,
+    UntrustedExecutableSkillError,
+    _run_executable_skill,
     load_default_scopes,
     make_skill_handler,
     parse_skill_file,
@@ -1007,6 +1019,215 @@ def test_render_catalog_property_is_deterministic_and_respects_max_entries(
         assert f"還有 {len(names) - max_entries} 個未列出" in out
     else:
         assert "個未列出" not in out
+
+
+# ─── Executable-skill containment (U6-0 P-SKILL) ────────────────
+
+
+class _SubprocessRecorder:
+    """Stands in for subprocess.run — records calls, executes nothing.
+
+    Captures the snapshot state AT CALL TIME (existence + bytes) so tests
+    can assert the snapshot mechanics even though the snapshot dir is
+    deleted before `_run_executable_skill` returns.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, argv, **kwargs):  # noqa: ANN001, ANN003
+        snapshot = Path(argv[1])
+        self.calls.append(
+            {
+                "argv": list(argv),
+                "cwd": kwargs.get("cwd"),
+                "snapshot_existed": snapshot.exists(),
+                "snapshot_bytes": (
+                    snapshot.read_bytes() if snapshot.exists() else None
+                ),
+            }
+        )
+        return SimpleNamespace(returncode=0, stdout='{"ok": true}', stderr="")
+
+
+def _recorder(monkeypatch: pytest.MonkeyPatch) -> _SubprocessRecorder:
+    recorder = _SubprocessRecorder()
+    monkeypatch.setattr(skills_loader.subprocess, "run", recorder)
+    return recorder
+
+
+def _trusted_run_tests_skill() -> Skill:
+    return Skill(
+        name="run_tests",
+        description="d",
+        body="",
+        source_path=REPO_ROOT / "scripts" / "skills" / "run_tests.skill",
+        scope="bundled",
+    )
+
+
+def test_executable_trusted_skill_runs_via_private_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _recorder(monkeypatch)
+
+    out = _run_executable_skill(_trusted_run_tests_skill(), {"skill": "run_tests"})
+
+    assert out == {"ok": True}
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    workspace_path = REPO_ROOT / "scripts" / "skills" / "run_tests.skill"
+    snapshot_arg = Path(str(call["argv"][1]))
+    # The exec target is a fresh private snapshot, never the workspace pathname.
+    assert snapshot_arg != workspace_path
+    assert str(snapshot_arg).startswith(tempfile.gettempdir())
+    assert call["cwd"] == str(REPO_ROOT)
+    # Snapshot carried exactly the verified bytes at exec time …
+    assert call["snapshot_existed"] is True
+    assert call["snapshot_bytes"] == workspace_path.read_bytes()
+    # … and is deleted afterwards.
+    assert not snapshot_arg.exists()
+    assert not snapshot_arg.parent.exists()
+
+
+def test_executable_untrusted_path_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _recorder(monkeypatch)
+    evil = tmp_path / "evil.skill"
+    evil.write_text("print('pwned')\n", encoding="utf-8")
+    sk = Skill(
+        name="evil", description="d", body="", source_path=evil, scope="project"
+    )
+
+    with pytest.raises(UntrustedExecutableSkillError, match="untrusted_path") as ei:
+        _run_executable_skill(sk, {"skill": "evil"})
+
+    assert ei.value.reason == "untrusted_path"
+    assert recorder.calls == []
+
+
+def test_executable_hash_mismatch_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = _recorder(monkeypatch)
+    monkeypatch.setattr(
+        skills_loader,
+        "TRUSTED_EXECUTABLE_SKILLS",
+        {"scripts/skills/run_tests.skill": "0" * 64},
+    )
+
+    with pytest.raises(UntrustedExecutableSkillError) as ei:
+        _run_executable_skill(_trusted_run_tests_skill(), {"skill": "run_tests"})
+
+    assert ei.value.reason == "content_hash_mismatch"
+    assert recorder.calls == []
+
+
+def test_executable_symlink_at_trusted_path_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A symlink whose target hashes correctly is STILL refused.
+
+    Expects the DISTINCT reason ``symlink_at_trusted_path`` — if this comes
+    back ``untrusted_path``, the implementation resolved the leaf (dead
+    symlink check); fix the implementation, do not downgrade this test.
+    """
+    recorder = _recorder(monkeypatch)
+    fake_root = tmp_path.resolve() / "repo"
+    skills_dir = fake_root / "scripts" / "skills"
+    skills_dir.mkdir(parents=True)
+    payload = b"print('byte-identical copy')\n"
+    target = tmp_path.resolve() / "target.skill"
+    target.write_bytes(payload)
+    link = skills_dir / "run_tests.skill"
+    link.symlink_to(target)
+    monkeypatch.setattr(skills_loader, "REPO_ROOT", fake_root)
+    monkeypatch.setattr(
+        skills_loader,
+        "TRUSTED_EXECUTABLE_SKILLS",
+        {"scripts/skills/run_tests.skill": sha256(payload).hexdigest()},
+    )
+    sk = Skill(
+        name="run_tests",
+        description="d",
+        body="",
+        source_path=link,
+        scope="bundled",
+    )
+
+    with pytest.raises(UntrustedExecutableSkillError) as ei:
+        _run_executable_skill(sk, {"skill": "run_tests"})
+
+    assert ei.value.reason == "symlink_at_trusted_path"
+    assert recorder.calls == []
+
+
+@pytest.mark.parametrize("truthy", ["1", "true", "YES", "on"])
+def test_executable_kill_switch_refuses_even_trusted_skill(
+    monkeypatch: pytest.MonkeyPatch,
+    truthy: str,
+) -> None:
+    recorder = _recorder(monkeypatch)
+    monkeypatch.setenv(EXECUTABLE_SKILLS_DISABLED_ENV, truthy)
+
+    with pytest.raises(UntrustedExecutableSkillError) as ei:
+        _run_executable_skill(_trusted_run_tests_skill(), {"skill": "run_tests"})
+
+    assert ei.value.reason == "executable_skills_disabled"
+    assert recorder.calls == []
+
+
+def test_executable_project_scope_shadow_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A project-scope run_tests.skill shadows the bundled one — and is refused.
+
+    The NAME means nothing; only the resolved pinned path may run.
+    """
+    recorder = _recorder(monkeypatch)
+    project = tmp_path.resolve() / "proj"
+    skill_file = project / ".claude" / "skills" / "run_tests.skill"
+    skill_file.parent.mkdir(parents=True)
+    skill_file.write_text(
+        "# description: shadowing skill\nprint('shadow')\n", encoding="utf-8"
+    )
+
+    reg = load_default_scopes(project, home=tmp_path / "nohome")
+    sk = reg.get("run_tests")
+    assert sk is not None
+    assert sk.scope == "project"
+    assert sk.source_path == skill_file
+    handler = make_skill_handler(reg)
+
+    with pytest.raises(UntrustedExecutableSkillError) as ei:
+        handler({"skill": "run_tests"})
+
+    assert ei.value.reason == "untrusted_path"
+    assert recorder.calls == []
+
+
+def test_trusted_manifest_in_lockstep_with_committed_skills() -> None:
+    """Maintenance guard, NOT the security boundary.
+
+    Catches an accidental skill edit without the manifest hash update in
+    the same change. The boundary itself is the running process's imported
+    constants — see the skills_loader docstrings.
+    """
+    assert set(TRUSTED_EXECUTABLE_SKILLS) == {
+        "scripts/skills/run_tests.skill",
+        "scripts/skills/fmt.skill",
+        "scripts/skills/lint_changed.skill",
+    }
+    for key, pinned_digest in TRUSTED_EXECUTABLE_SKILLS.items():
+        actual = sha256((REPO_ROOT / key).read_bytes()).hexdigest()
+        assert actual == pinned_digest, (
+            f"manifest out of lockstep for {key} — update "
+            "TRUSTED_EXECUTABLE_SKILLS in the same change as the skill edit"
+        )
 
 
 # ─── Real-world smoke against this repo ────────────────────────
