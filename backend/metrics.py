@@ -1060,6 +1060,19 @@ if _AVAILABLE:
         registry=REGISTRY,
         multiprocess_mode="livemostrecent",  # heartbeat timestamp set by emitters; last live write wins
     )
+    # OP-2603 — U6-0 T7-0 action-guard decision surface
+    action_guard_decision_total = Counter(
+        "omnisight_action_guard_decision_total",
+        "U6-0 action-guard verdicts by adapter / family / verdict / authorization_source / mode",
+        labelnames=("adapter", "family", "verdict", "authorization_source", "mode"),
+        registry=REGISTRY,
+    )
+    action_guard_fail_closed_total = Counter(
+        "omnisight_action_guard_fail_closed_total",
+        "U6-0 action-guard blocked dispatches by adapter / bounded reason",
+        labelnames=("adapter", "reason"),
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -1199,6 +1212,9 @@ else:
     memory_snapshot_stale_total = _NoOp()  # type: ignore
     memory_enabled = _NoOp()  # type: ignore
     memory_liveness_heartbeat = _NoOp()  # type: ignore
+    # OP-2603 — U6-0 T7-0 action-guard decision surface
+    action_guard_decision_total = _NoOp()  # type: ignore
+    action_guard_fail_closed_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1944,6 +1960,8 @@ def reset_for_tests() -> None:
     global memory_delivery_total, memory_reconcile_divergence_total
     global memory_snapshot_stale_total, memory_enabled
     global memory_liveness_heartbeat
+    # OP-2603 — U6-0 T7-0 action-guard decision surface
+    global action_guard_decision_total, action_guard_fail_closed_total
     memory_quarantine_depth = Gauge(
         "omnisight_memory_quarantine_depth",
         "Learned-item candidates sitting in quarantine awaiting eval",
@@ -2007,4 +2025,17 @@ def reset_for_tests() -> None:
         "Unix timestamp of the most recent memory-pipeline heartbeat",
         registry=REGISTRY,
         multiprocess_mode="livemostrecent",  # heartbeat timestamp set by emitters; last live write wins
+    )
+    # OP-2603 — U6-0 T7-0 action-guard decision surface
+    action_guard_decision_total = Counter(
+        "omnisight_action_guard_decision_total",
+        "Action-guard verdicts",
+        labelnames=("adapter", "family", "verdict", "authorization_source", "mode"),
+        registry=REGISTRY,
+    )
+    action_guard_fail_closed_total = Counter(
+        "omnisight_action_guard_fail_closed_total",
+        "Action-guard blocked dispatches",
+        labelnames=("adapter", "reason"),
+        registry=REGISTRY,
     )
