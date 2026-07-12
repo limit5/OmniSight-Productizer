@@ -11,11 +11,13 @@ Frozen design §1, §2.C. The core invariant: since the model / memory can
 never MINT a grant, a mutating side effect can never be authorized from
 the model path — it only ever reaches ``requires_grant``, never ``allow``.
 
-⚠ DORMANT. Nothing calls :func:`authorize_action` in this ticket. T7
-wires the six adapters to invoke it before their handlers; T11 flips
-enforcement. Add NO caller here — after this ticket
+⚠ DORMANT. No production adapter reaches this kernel yet. The ONLY
+additional legitimate referent is the T7-0 dispatch guard in
+``backend/agents/action_guard.py`` — adapters call the guard, never the
+kernel directly; T11 flips enforcement. Add NO other caller —
 ``grep -rn "authorize_action\\|OperationRequest\\|authorization_kernel"
-backend/ --include=*.py`` returns only this module + its test.
+backend/ --include=*.py`` returns only this module, the guard module,
+and their tests.
 
 ⚠ Naming: this module exposes ``AuthorizationDecision`` — NOT ``Decision``.
 ``backend.decision_engine`` already defines an unrelated ``Decision``

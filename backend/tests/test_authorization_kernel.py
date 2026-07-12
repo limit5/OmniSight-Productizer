@@ -14,9 +14,10 @@ instead of ``requires_grant`` — case (f) below asserts that even a
 machine-principal context still gets ``requires_grant`` for a mutating
 tool, never ``allow``.
 
-Dormant confirmation (asserted programmatically in this file):
+Kernel reachability (asserted programmatically in this file):
 ``grep -rn "authorize_action\\|OperationRequest\\|authorization_kernel"
-backend/ --include=*.py`` returns ONLY the module + this test.
+backend/ --include=*.py`` returns ONLY the kernel module, the T7-0
+dispatch guard (``backend/agents/action_guard.py``), and their tests.
 """
 
 from __future__ import annotations
@@ -274,18 +275,23 @@ def test_bound_principals_mutating_still_requires_grant_regression() -> None:
         assert d.reason == "mutating_needs_grant:code_write"
 
 
-# ── Dormant guard ────────────────────────────────────────────────────────
-def test_kernel_is_dormant_no_callers_in_backend() -> None:
-    """After this ticket, only the kernel module + this test may reference
-    ``authorize_action`` / ``OperationRequest`` / ``authorization_kernel``.
-    T7 will wire the six adapters to call the kernel; T11 will flip enforce.
+# ── Kernel reachability guard ────────────────────────────────────────────
+def test_kernel_reachable_only_via_action_guard() -> None:
+    """Adapters must NEVER import ``authorize_action`` / ``OperationRequest``
+    directly — the only legitimate kernel caller is the dispatch guard in
+    ``backend/agents/action_guard.py`` (T7-0). Beyond the kernel module,
+    the guard module, and their two test files, no backend file may
+    reference the kernel tokens. T7a/T7b wire the adapters to the GUARD;
+    T11 flips enforce.
 
-    This guard fails loudly if a caller sneaks in early — the frozen design
-    forbids it.
+    This guard fails loudly if a direct kernel caller sneaks in — the
+    frozen design forbids it.
     """
     backend_root = pathlib.Path(__file__).resolve().parents[1]
     allowed = {
         backend_root / "agents" / "authorization_kernel.py",
+        backend_root / "agents" / "action_guard.py",
+        backend_root / "tests" / "test_action_guard.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(
