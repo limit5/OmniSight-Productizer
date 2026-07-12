@@ -28,6 +28,7 @@ from urllib.parse import urlparse
 import yaml
 
 from backend.llm_adapter import tool
+from backend.agents.provenance import record_episodic, active_collector
 from backend.db_pool import get_pool
 from backend.sandbox_tier import Guild
 
@@ -1938,11 +1939,13 @@ async def search_past_solutions(
         sdk_info = f" | sdk={r['sdk_version']}" if r.get("sdk_version") else ""
         hw_info = f" | hw={r['hardware_rev']}" if r.get("hardware_rev") else ""
         score = f" | quality={r.get('quality_score', 0):.1f}"
-        lines.append(
+        block = (
             f"  {i}. Error: {r['error_signature'][:120]}\n"
             f"     Solution: {r['solution'][:300]}\n"
             f"     Meta:{vendor_info}{sdk_info}{hw_info}{score}\n"
         )
+        lines.append(block)
+        record_episodic(active_collector(), r, block)
     return "\n".join(lines)
 
 

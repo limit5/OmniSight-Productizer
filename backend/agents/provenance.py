@@ -398,6 +398,26 @@ def record_content(
             pass
 
 
+def record_episodic(
+    collector: ProvenanceCollector | None,
+    row: dict,
+    exposed_text: str,
+) -> None:
+    """Best-effort: record an ATTESTED episodic row (the only DB_* path).
+
+    ``collector is None`` ⇒ no-op. NEVER raises; no await.
+    """
+    if collector is None:
+        return
+    try:
+        collector.record(attested_episodic_record(row, exposed_text))
+    except Exception:
+        try:
+            collector.latch_failure("record_error")
+        except Exception:
+            pass
+
+
 # ── F. Scope (ContextVar; spans native + LangChain paths) ──────────────
 
 # Mirrors the set/reset-token pattern of the active-execution-context
