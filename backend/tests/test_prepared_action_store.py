@@ -72,6 +72,7 @@ def _action(action_instance_id: str = "act-prepared", **overrides) -> dict:
         "executable_args_json": '{"content":"done","path":"output.txt"}',
         "human_rendering_json": '{"summary":"Write output.txt"}',
         "prepared_action_digest": "d" * 64,
+        "recovery_mode": "read_after_write",
     }
     values.update(overrides)
     return values
@@ -108,6 +109,7 @@ async def test_sqlite_put_get_roundtrips_all_columns_within_tenant(
         "executable_args",
         "human_rendering",
         "prepared_action_digest",
+        "recovery_mode",
         "created_at",
     }
     for key, value in action.items():
@@ -130,6 +132,20 @@ async def test_sqlite_cross_tenant_get_returns_none(sqlite_conn) -> None:
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_put_defaults_recovery_mode_to_non_replayable(
+    sqlite_conn,
+) -> None:
+    action = _action("act-default-recovery")
+    action.pop("recovery_mode")
+    await db.put_prepared_action(sqlite_conn, **action)
+
+    stored = await db.get_prepared_action(
+        sqlite_conn, action["action_instance_id"], tenant_id=action["tenant_id"]
+    )
+    assert stored["recovery_mode"] == "non_replayable"
 
 
 @pytest.mark.asyncio
@@ -196,11 +212,51 @@ def test_sqlite_bootstrap_contains_prepared_actions_table_and_index() -> None:
         "executable_args",
         "human_rendering",
         "prepared_action_digest",
+        "recovery_mode",
         "created_at",
     }
     indexes = {row[1] for row in conn.execute("PRAGMA index_list(prepared_actions)")}
     assert "idx_prepared_actions_tenant_digest" in indexes
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_sqlite_recovery_mode_check_rejects_unknown_value(
+    sqlite_conn,
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        await db.put_prepared_action(
+            sqlite_conn,
+            **_action("act-invalid-recovery", recovery_mode="bogus"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("sql", "params"),
+    [
+        (
+            "UPDATE prepared_actions SET executable_args = ? "
+            "WHERE action_instance_id = ?",
+            ('{"changed":true}', "act-immutable"),
+        ),
+        (
+            "DELETE FROM prepared_actions WHERE action_instance_id = ?",
+            ("act-immutable",),
+        ),
+    ],
+    ids=("update", "delete"),
+)
+@pytest.mark.asyncio
+async def test_sqlite_prepared_action_direct_mutation_is_blocked(
+    sqlite_conn,
+    sql: str,
+    params: tuple[str, ...],
+) -> None:
+    action = _action("act-immutable")
+    await db.put_prepared_action(sqlite_conn, **action)
+
+    with pytest.raises(sqlite3.IntegrityError, match="PreparedActionImmutable"):
+        sqlite_conn.raw.execute(sql, params)
 
 
 def _insert_sqlite_action(conn: sqlite3.Connection, **overrides) -> None:
@@ -290,6 +346,7 @@ async def test_pg_put_get_roundtrip_and_tenant_scope(pg_test_conn) -> None:
     assert json.loads(stored["executable_args"]) == json.loads(
         action["executable_args_json"]
     )
+    assert stored["recovery_mode"] == "read_after_write"
     assert (
         await db.get_prepared_action(
             pg_test_conn, action["action_instance_id"], tenant_id=tenant_b
@@ -311,3 +368,53 @@ async def test_pg_provenance_xor_rejects_invalid_model_shape(pg_test_conn) -> No
     )
     with pytest.raises(asyncpg.CheckViolationError):
         await db.put_prepared_action(pg_test_conn, **action)
+
+
+@pytest.mark.asyncio
+async def test_pg_recovery_mode_check_rejects_unknown_value(pg_test_conn) -> None:
+    suffix = uuid.uuid4().hex
+    tenant_id = f"t-prepared-{suffix}"
+    await _seed_tenants(pg_test_conn, tenant_id)
+    action = _action(
+        f"act-{suffix}",
+        tenant_id=tenant_id,
+        model_call_id=f"model-{suffix}",
+        model_snapshot_id=f"psnap-{suffix}",
+        recovery_mode="bogus",
+    )
+    with pytest.raises(asyncpg.CheckViolationError):
+        async with pg_test_conn.transaction():
+            await db.put_prepared_action(pg_test_conn, **action)
+
+
+@pytest.mark.parametrize("operation", ("update", "delete"))
+@pytest.mark.asyncio
+async def test_pg_prepared_action_direct_mutation_is_blocked(
+    pg_test_conn,
+    operation: str,
+) -> None:
+    suffix = uuid.uuid4().hex
+    tenant_id = f"t-prepared-{suffix}"
+    await _seed_tenants(pg_test_conn, tenant_id)
+    action = _action(
+        f"act-{suffix}",
+        tenant_id=tenant_id,
+        model_call_id=f"model-{suffix}",
+        model_snapshot_id=f"psnap-{suffix}",
+    )
+    await db.put_prepared_action(pg_test_conn, **action)
+
+    with pytest.raises(asyncpg.RaiseError, match="PreparedActionImmutable"):
+        async with pg_test_conn.transaction():
+            if operation == "update":
+                await pg_test_conn.execute(
+                    "UPDATE prepared_actions SET executable_args = $1::jsonb "
+                    "WHERE action_instance_id = $2",
+                    '{"changed":true}',
+                    action["action_instance_id"],
+                )
+            else:
+                await pg_test_conn.execute(
+                    "DELETE FROM prepared_actions WHERE action_instance_id = $1",
+                    action["action_instance_id"],
+                )

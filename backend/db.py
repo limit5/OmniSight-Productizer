@@ -1026,6 +1026,12 @@ CREATE TABLE IF NOT EXISTS prepared_actions (
     executable_args        TEXT NOT NULL,
     human_rendering        TEXT NOT NULL DEFAULT '{}',
     prepared_action_digest TEXT NOT NULL,
+    recovery_mode          TEXT NOT NULL DEFAULT 'non_replayable'
+                           CHECK (recovery_mode IN (
+                               'non_replayable',
+                               'sink_idempotency_key',
+                               'read_after_write'
+                           )),
     created_at             TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (tenant_id, action_instance_id),
     CHECK (
@@ -1039,6 +1045,22 @@ CREATE TABLE IF NOT EXISTS prepared_actions (
          AND model_snapshot_id IS NULL)
     )
 );
+CREATE TRIGGER IF NOT EXISTS trg_prepared_actions_no_update
+BEFORE UPDATE ON prepared_actions
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'PreparedActionImmutable: prepared_actions is write-once'
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS trg_prepared_actions_no_delete
+BEFORE DELETE ON prepared_actions
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'PreparedActionImmutable: prepared_actions is write-once'
+    );
+END;
 CREATE INDEX IF NOT EXISTS idx_prepared_actions_tenant_digest
     ON prepared_actions(tenant_id, prepared_action_digest);
 
@@ -4201,6 +4223,7 @@ async def put_prepared_action(
     executable_args_json: str,
     human_rendering_json: str,
     prepared_action_digest: str,
+    recovery_mode: str = "non_replayable",
 ) -> bool:
     """Insert once, accepting only same-id/same-digest replays."""
     if not tenant_id or not action_instance_id:
@@ -4212,9 +4235,10 @@ async def put_prepared_action(
             request_id, model_call_id, adapter_namespace, tool_name,
             schema_version, family, effect, canonical_target, args_hash,
             provenance_kind, model_snapshot_id, no_model_input_source,
-            executable_args, human_rendering, prepared_action_digest)
+            executable_args, human_rendering, prepared_action_digest,
+            recovery_mode)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                   $13, $14, $15, $16, $17::jsonb, $18::jsonb, $19)
+                   $13, $14, $15, $16, $17::jsonb, $18::jsonb, $19, $20)
            ON CONFLICT (action_instance_id) DO NOTHING
            RETURNING action_instance_id""",
         action_instance_id,
@@ -4236,6 +4260,7 @@ async def put_prepared_action(
         executable_args_json,
         human_rendering_json,
         prepared_action_digest,
+        recovery_mode,
     )
     if row is not None:
         return True
@@ -4267,7 +4292,8 @@ async def get_prepared_action(
         "request_id, model_call_id, adapter_namespace, tool_name, "
         "schema_version, family, effect, canonical_target, args_hash, "
         "provenance_kind, model_snapshot_id, no_model_input_source, "
-        "executable_args, human_rendering, prepared_action_digest, created_at "
+        "executable_args, human_rendering, prepared_action_digest, "
+        "recovery_mode, created_at "
         "FROM prepared_actions "
         "WHERE action_instance_id = $1 AND tenant_id = $2",
         action_instance_id,
