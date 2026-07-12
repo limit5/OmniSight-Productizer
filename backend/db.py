@@ -356,11 +356,41 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
             "allowed_tenants", _t(), nullable=False, server_default="[]",
         )),
         ("feature_flags", sa.Column("updated_at", _t())),
+        # U6-0 T8-A (OP-2610, alembic 0260): source-aware episodic
+        # memory, quarantined-by-default. tenant_id MUST stay a PLAIN
+        # Column with NO sa.ForeignKey — _render_add_column would emit
+        # an inline REFERENCES, and SQLite rejects ADD COLUMN with both
+        # a non-NULL default and an FK while foreign_keys=ON; the loop
+        # below would swallow that as a WARNING and the column would
+        # silently never exist (the REQUIRED entries below are the
+        # backstop). Fresh DBs get the FK from the CREATE TABLE in
+        # _SCHEMA. verified is Integer, not Boolean — keeps both SQLite
+        # schema sources reading identically.
+        ("episodic_memory", sa.Column("tenant_id", _t(), nullable=False, server_default="t-default")),
+        ("episodic_memory", sa.Column("source", _t(), nullable=False, server_default="legacy")),
+        ("episodic_memory", sa.Column("verification_authority", _t())),
+        ("episodic_memory", sa.Column("verified", _i(), nullable=False, server_default=_txt("0"))),
+        ("episodic_memory", sa.Column("owner_user_id", _t())),
+        ("episodic_memory", sa.Column("visibility", _t(), nullable=False, server_default="tenant_shared")),
     ]
     # N6: critical columns the runtime hard-depends on. If post-migration
     # any of these are still missing, fail-fast at startup rather than
     # silently letting the ORM raise IntegrityError on every insert.
-    REQUIRED = {("tasks", "npi_phase_id"), ("agents", "sub_type")}
+    REQUIRED = {
+        ("tasks", "npi_phase_id"),
+        ("agents", "sub_type"),
+        # U6-0 T8-A: the migration loop above fails OPEN (a non-
+        # "duplicate" ALTER error is logged and skipped), so these
+        # fail-fast entries are load-bearing: without them a silently
+        # missing provenance column would let unquarantined reads
+        # through once T8-C flips the readers.
+        ("episodic_memory", "tenant_id"),
+        ("episodic_memory", "source"),
+        ("episodic_memory", "verification_authority"),
+        ("episodic_memory", "verified"),
+        ("episodic_memory", "owner_user_id"),
+        ("episodic_memory", "visibility"),
+    }
     for table, column in migrations:
         try:
             await conn.execute(_render_add_column(table, column))
@@ -397,6 +427,47 @@ async def _migrate(conn: aiosqlite.Connection) -> None:
         )
     except Exception as exc:
         logger.warning("Default tenant seed failed: %s", exc)
+
+    # U6-0 T8-A (OP-2610, alembic 0260): seed the runner's own tenant
+    # so its episodic writes can't violate the tenants FK once P-ID-C
+    # identity threading reaches the writers.
+    try:
+        await conn.execute(
+            "INSERT OR IGNORE INTO tenants (id, name, plan) "
+            "VALUES ('omnisight-self', 'OmniSight Internal', 'free')"
+        )
+    except Exception as exc:
+        logger.warning("omnisight-self tenant seed failed: %s", exc)
+
+    # U6-0 T8-A: quarantine legacy episodic rows explicitly. Redundant
+    # with the ADD COLUMN defaults above on the happy path, but belt-
+    # and-braces for a partially-migrated DB. Bounded to NULL/empty
+    # values so a future T8-B verified service write is never clobbered
+    # by this every-boot migrator.
+    try:
+        await conn.execute(
+            "UPDATE episodic_memory SET "
+            "tenant_id = COALESCE(NULLIF(tenant_id, ''), 't-default'), "
+            "source = COALESCE(NULLIF(source, ''), 'legacy'), "
+            "visibility = COALESCE(NULLIF(visibility, ''), 'tenant_shared'), "
+            "verified = COALESCE(verified, 0) "
+            "WHERE tenant_id IS NULL OR tenant_id = '' "
+            "OR source IS NULL OR source = '' "
+            "OR visibility IS NULL OR visibility = '' "
+            "OR verified IS NULL"
+        )
+    except Exception as exc:
+        logger.warning("episodic legacy quarantine backfill failed: %s", exc)
+
+    # U6-0 T8-A: tenant filter index (PG gets the richer
+    # (tenant_id, verified) composite in alembic 0260).
+    try:
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_episodic_tenant "
+            "ON episodic_memory(tenant_id)"
+        )
+    except Exception as exc:
+        logger.warning("idx_episodic_tenant create failed: %s", exc)
 
     # Y1 row 6 (#277, alembic 0037): seed default project for the
     # default tenant. Mirrors the alembic backfill's deterministic id
@@ -876,7 +947,21 @@ CREATE TABLE IF NOT EXISTS episodic_memory (
     quality_score   REAL NOT NULL DEFAULT 0.0,
     access_count    INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    -- U6-0 T8-A (OP-2610, alembic 0260): source-aware provenance,
+    -- quarantined-by-default. The inline FK is safe at CREATE time
+    -- (matches every sibling table); the _migrate() ALTER path adds
+    -- tenant_id WITHOUT it (SQLite forbids ADD COLUMN ... REFERENCES
+    -- with a non-NULL default while foreign_keys=ON). No CHECKs here:
+    -- SQLite stays a deliberate subset of the PG schema; the
+    -- verified=>gerrit CHECK binds on PG (prod). verified is INTEGER
+    -- (SQLite has no BOOLEAN) — keep _migrate() identical.
+    tenant_id       TEXT NOT NULL DEFAULT 't-default' REFERENCES tenants(id),
+    source          TEXT NOT NULL DEFAULT 'legacy',
+    verification_authority TEXT,
+    verified        INTEGER NOT NULL DEFAULT 0,
+    owner_user_id   TEXT,
+    visibility      TEXT NOT NULL DEFAULT 'tenant_shared'
 );
 
 CREATE TABLE IF NOT EXISTS debug_findings (
@@ -3422,6 +3507,14 @@ async def insert_episodic_memory(conn, data: dict) -> None:
     clock_timestamp() — matches the SP-3.3 handoffs / SP-3.9
     debug_findings pattern (advances within a single tx, consistent
     YYYY-MM-DD HH:MM:SS text format).
+
+    U6-0 T8-A (OP-2610): the six source-aware fields default to the
+    QUARANTINED state — ``verified=False``/``source='legacy'`` — so an
+    un-updated caller can never mint a verified row; the alembic 0260
+    verified⇒gerrit CHECK backs this at the DB level on PG. T8-B's
+    Gerrit-verified service path is the only writer that may pass
+    ``verified=True`` (with source='service_gerrit_merge' +
+    verification_authority='gerrit').
     """
     q = float(data.get("quality_score", 0.0))
     await conn.execute(
@@ -3429,10 +3522,14 @@ async def insert_episodic_memory(conn, data: dict) -> None:
            (id, error_signature, solution, soc_vendor, sdk_version,
             hardware_rev, source_task_id, source_agent_id,
             gerrit_change_id, tags, quality_score, decayed_score,
+            tenant_id, source, verification_authority, verified,
+            owner_user_id, visibility,
             created_at, updated_at)
            VALUES ($1, $2, $3, $4, $5,
                    $6, $7, $8,
                    $9, $10, $11, $12,
+                   $13, $14, $15, $16,
+                   $17, $18,
                    to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'),
                    to_char(clock_timestamp(), 'YYYY-MM-DD HH24:MI:SS'))""",
         data["id"],
@@ -3447,6 +3544,12 @@ async def insert_episodic_memory(conn, data: dict) -> None:
         json.dumps(data.get("tags", [])),
         q,
         q,  # decayed_score seeded from quality_score
+        data.get("tenant_id") or tenant_insert_value(),
+        data.get("source", "legacy"),
+        data.get("verification_authority"),
+        bool(data.get("verified", False)),
+        data.get("owner_user_id"),
+        data.get("visibility", "tenant_shared"),
     )
 
     # RPG.W5.2 [OP-1354]: auto-distil a <=200 token summary for the L2
@@ -3518,6 +3621,76 @@ async def search_episodic_memory(
     if min_quality is not None:
         conditions.append(f"quality_score >= ${len(params) + 1}")
         params.append(min_quality)
+    # LIMIT bind is the final positional param.
+    params.append(limit)
+    sql = (
+        "SELECT *, ts_rank(tsv, plainto_tsquery('english', $1)) AS rank "
+        "FROM episodic_memory WHERE " + " AND ".join(conditions)
+        + f" ORDER BY rank DESC LIMIT ${len(params)}"
+    )
+    rows = await conn.fetch(sql, *params)
+    results = [_episodic_row_to_dict(r) for r in rows]
+
+    # Increment access count for returned rows (best-effort — a write
+    # failure here must not hide search hits from the caller).
+    for r in results:
+        try:
+            await conn.execute(
+                "UPDATE episodic_memory SET access_count = access_count + 1 "
+                "WHERE id = $1",
+                r["id"],
+            )
+        except Exception:
+            pass
+    return results
+
+
+async def search_verified_tenant_solutions(
+    conn,
+    query: str,
+    *,
+    tenant_id: str,
+    soc_vendor: str = "",
+    sdk_version: str = "",
+    limit: int = 5,
+    min_quality: float | None = None,
+) -> list[dict]:
+    """DEFAULT-SECURE episodic search for model-facing readers.
+
+    U6-0 T8-A (OP-2610): same ``tsv @@ plainto_tsquery`` + ``ts_rank``
+    ranking, access_count bump, and row shape as
+    :func:`search_episodic_memory`, but ALWAYS filtered to
+    ``verified AND tenant_id = $t AND source = 'service_gerrit_merge'
+    AND visibility = 'tenant_shared'`` — a quarantined legacy row, a
+    model-authored "solution", a private row, or another tenant's row
+    can never reach an agent prompt through this function. The filters
+    are not parameters: callers cannot opt out.
+
+    DORMANT until T8-C wires the three model readers to it.
+    ``search_episodic_memory`` stays unchanged as the admin/unverified
+    path.
+    """
+    # Fail-closed BEFORE touching the connection: an unresolved tenant
+    # must never fall through to a global (cross-tenant) read.
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+
+    conditions: list[str] = ["tsv @@ plainto_tsquery('english', $1)"]
+    params: list = [query]
+    if soc_vendor:
+        conditions.append(f"soc_vendor = ${len(params) + 1}")
+        params.append(soc_vendor)
+    if sdk_version:
+        conditions.append(f"sdk_version = ${len(params) + 1}")
+        params.append(sdk_version)
+    if min_quality is not None:
+        conditions.append(f"quality_score >= ${len(params) + 1}")
+        params.append(min_quality)
+    conditions.append("verified")
+    conditions.append(f"tenant_id = ${len(params) + 1}")
+    params.append(tenant_id)
+    conditions.append("source = 'service_gerrit_merge'")
+    conditions.append("visibility = 'tenant_shared'")
     # LIMIT bind is the final positional param.
     params.append(limit)
     sql = (
