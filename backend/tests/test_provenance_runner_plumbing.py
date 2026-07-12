@@ -1,20 +1,20 @@
 """OP-2617 — U6-0 T5b-1a: runner-path provenance capture plumbing (dormant).
 
 ``run_with_tools`` seals one per-turn ProvenanceSnapshot immediately
-before each model call and threads its id to the dispatcher (→ the T7
-action guard's ``provenance_snapshot_ids`` passthrough). Locks:
+before each model call and threads the whole typed value to the dispatcher
+(→ the T7 action guard's ``turn_provenance`` passthrough). Locks:
 
-  * per-turn seal + thread-to-dispatcher (a ``psnap-`` id per dispatch,
-    distinct per turn, resolvable in the process-local cache);
+  * per-turn seal + thread-to-dispatcher (a ModelSnapshot per dispatch,
+    with distinct ``psnap-`` ids resolvable in the process-local cache);
   * the §2.E temporal rule — turn N's tool result enters turn N+1's
     snapshot, never turn N's own;
   * stale-refresh capture — an injected refresh frame is recorded so the
     next seal carries it;
   * per-invocation scope isolation across concurrent asyncio tasks;
   * the HARD RULE — provenance is best-effort: a seal failure degrades to
-    ``provenance_snapshot_ids=()`` and never aborts the run.
+    ``CaptureUnavailable`` and never aborts the run.
 
-Still dormant end-to-end: nothing CONSUMES the ids until T9/T10.
+Still dormant end-to-end: nothing consumes the whole value yet.
 Offline — mirrors ``test_execution_context_plumbing.py``'s stub-SDK
 harness.
 """
@@ -30,10 +30,13 @@ import pytest
 
 from backend.agents import action_guard, tool_dispatcher
 from backend.agents.provenance import (
+    CaptureUnavailable,
+    ModelSnapshot,
     STALE_REFRESH,
     TOOL_RESULT,
     ProvenanceCollector,
     ProvenanceSnapshot,
+    SnapshotCache,
     active_collector,
 )
 from backend.agents.tool_dispatcher import ToolDispatcher, ToolResult
@@ -80,12 +83,11 @@ class _FakeSDKClient:
 
 
 class _RecordingDispatcher:
-    """Duck-typed dispatcher: records the provenance_snapshot_ids kwarg
-    (paired with the tool_use_id) for each dispatch."""
+    """Duck-typed dispatcher recording whole provenance per dispatch."""
 
     def __init__(self, result_content: str = "ok") -> None:
         self._result_content = result_content
-        self.prov_ids: list[tuple[str, ...]] = []
+        self.turn_provenances: list[Any] = []
         self.tool_use_ids: list[str] = []
 
     async def execute(
@@ -95,10 +97,10 @@ class _RecordingDispatcher:
         tool_name: str,
         tool_input: dict[str, Any],
         execution_context: Any = None,
-        provenance_snapshot_ids: tuple[str, ...] = (),
+        turn_provenance: Any = None,
     ) -> ToolResult:
         del tool_name, tool_input, execution_context
-        self.prov_ids.append(provenance_snapshot_ids)
+        self.turn_provenances.append(turn_provenance)
         self.tool_use_ids.append(tool_use_id)
         await asyncio.sleep(0)  # yield so concurrent tasks interleave
         return ToolResult(tool_use_id=tool_use_id, content=self._result_content)
@@ -139,22 +141,22 @@ def _cache():
 
 
 @pytest.mark.asyncio
-async def test_snapshot_id_is_threaded_to_dispatcher(monkeypatch):
+async def test_whole_model_snapshot_is_threaded_to_dispatcher(monkeypatch):
     dispatcher = _RecordingDispatcher()
     client = _make_client(monkeypatch, [_tool_use_resp(), _end_resp()], dispatcher)
     result = await client.run_with_tools(prompt="go")
     assert result.stop_reason == "end_turn"
-    assert len(dispatcher.prov_ids) == 1
-    ids = dispatcher.prov_ids[0]
-    assert isinstance(ids, tuple) and len(ids) == 1
-    assert ids[0].startswith("psnap-")
+    assert len(dispatcher.turn_provenances) == 1
+    turn_provenance = dispatcher.turn_provenances[0]
+    assert isinstance(turn_provenance, ModelSnapshot)
+    assert turn_provenance.snapshot.snapshot_id.startswith("psnap-")
 
 
 # ─── 2. per-turn distinct + resolvable in the process-local cache ─────
 
 
 @pytest.mark.asyncio
-async def test_per_turn_ids_are_distinct_and_resolvable(monkeypatch):
+async def test_per_turn_model_snapshots_are_distinct_and_resolvable(monkeypatch):
     dispatcher = _RecordingDispatcher()
     client = _make_client(
         monkeypatch,
@@ -162,8 +164,12 @@ async def test_per_turn_ids_are_distinct_and_resolvable(monkeypatch):
         dispatcher,
     )
     await client.run_with_tools(prompt="go")
-    assert len(dispatcher.prov_ids) == 2
-    (id_turn1,), (id_turn2,) = dispatcher.prov_ids
+    assert len(dispatcher.turn_provenances) == 2
+    turn1, turn2 = dispatcher.turn_provenances
+    assert isinstance(turn1, ModelSnapshot)
+    assert isinstance(turn2, ModelSnapshot)
+    id_turn1 = turn1.snapshot.snapshot_id
+    id_turn2 = turn2.snapshot.snapshot_id
     assert id_turn1 != id_turn2
     for sid in (id_turn1, id_turn2):
         snap = _cache().get(sid)
@@ -183,7 +189,11 @@ async def test_tool_result_is_carried_into_next_turn_snapshot(monkeypatch):
         dispatcher,
     )
     await client.run_with_tools(prompt="go")
-    (id_turn1,), (id_turn2,) = dispatcher.prov_ids
+    turn1, turn2 = dispatcher.turn_provenances
+    assert isinstance(turn1, ModelSnapshot)
+    assert isinstance(turn2, ModelSnapshot)
+    id_turn1 = turn1.snapshot.snapshot_id
+    id_turn2 = turn2.snapshot.snapshot_id
     snap1 = _cache().get(id_turn1)
     snap2 = _cache().get(id_turn2)
     tr_records_2 = [
@@ -224,7 +234,11 @@ async def test_stale_refresh_is_captured_in_next_seal(monkeypatch):
     monkeypatch.setattr(client, "_maybe_inject_stale_refresh", _fake_refresh)
 
     await client.run_with_tools(prompt="go")
-    (id_turn1,), (id_turn2,) = dispatcher.prov_ids
+    turn1, turn2 = dispatcher.turn_provenances
+    assert isinstance(turn1, ModelSnapshot)
+    assert isinstance(turn2, ModelSnapshot)
+    id_turn1 = turn1.snapshot.snapshot_id
+    id_turn2 = turn2.snapshot.snapshot_id
     snap1 = _cache().get(id_turn1)
     snap2 = _cache().get(id_turn2)
     refresh_records = [
@@ -240,7 +254,7 @@ async def test_stale_refresh_is_captured_in_next_seal(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_runs_do_not_leak_snapshot_ids(monkeypatch):
+async def test_concurrent_runs_do_not_leak_model_snapshots(monkeypatch):
     dispatcher_a = _RecordingDispatcher()
     dispatcher_b = _RecordingDispatcher()
     # Several tool rounds each so the two loops genuinely interleave.
@@ -258,10 +272,12 @@ async def test_concurrent_runs_do_not_leak_snapshot_ids(monkeypatch):
         asyncio.create_task(client_a.run_with_tools(prompt="go")),
         asyncio.create_task(client_b.run_with_tools(prompt="go")),
     )
-    ids_a = {sid for ids in dispatcher_a.prov_ids for sid in ids}
-    ids_b = {sid for ids in dispatcher_b.prov_ids for sid in ids}
-    assert len(dispatcher_a.prov_ids) == 3 and len(ids_a) == 3
-    assert len(dispatcher_b.prov_ids) == 3 and len(ids_b) == 3
+    assert all(isinstance(tp, ModelSnapshot) for tp in dispatcher_a.turn_provenances)
+    assert all(isinstance(tp, ModelSnapshot) for tp in dispatcher_b.turn_provenances)
+    ids_a = {tp.snapshot.snapshot_id for tp in dispatcher_a.turn_provenances}
+    ids_b = {tp.snapshot.snapshot_id for tp in dispatcher_b.turn_provenances}
+    assert len(dispatcher_a.turn_provenances) == 3 and len(ids_a) == 3
+    assert len(dispatcher_b.turn_provenances) == 3 and len(ids_b) == 3
     assert ids_a.isdisjoint(ids_b), "no cross-task snapshot-id leak"
     # No collector leaked into the test task after both loops finished.
     assert active_collector() is None
@@ -271,7 +287,7 @@ async def test_concurrent_runs_do_not_leak_snapshot_ids(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_seal_failure_degrades_to_empty_ids_and_run_completes(monkeypatch):
+async def test_seal_failure_passes_capture_unavailable_and_run_completes(monkeypatch):
     dispatcher = _RecordingDispatcher()
     client = _make_client(monkeypatch, [_tool_use_resp(), _end_resp()], dispatcher)
 
@@ -282,7 +298,7 @@ async def test_seal_failure_degrades_to_empty_ids_and_run_completes(monkeypatch)
 
     result = await client.run_with_tools(prompt="go")
     assert result.stop_reason == "end_turn", "provenance must never break the turn"
-    assert dispatcher.prov_ids == [()]
+    assert dispatcher.turn_provenances == [CaptureUnavailable("seal_failed")]
 
 
 # ─── 7. dispatcher forwards the kwarg to the guard ────────────────────
@@ -301,7 +317,7 @@ def _install_guard_recorder(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     return calls
 
 
-def test_dispatcher_forwards_provenance_ids_to_guard(
+def test_dispatcher_forwards_whole_turn_provenance_to_guard(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorded = _install_guard_recorder(monkeypatch)
@@ -314,20 +330,22 @@ def test_dispatcher_forwards_provenance_ids_to_guard(
     # Register a handler for the tool used — the no-handler branch returns
     # BEFORE the guard runs.
     d.register("Read", _handler)
+    turn_provenance = ProvenanceCollector().seal(SnapshotCache())
+    assert isinstance(turn_provenance, ModelSnapshot)
     res = asyncio.run(
         d.execute(
             tool_use_id="tu1",
             tool_name="Read",
             tool_input={},
-            provenance_snapshot_ids=("psnap-x",),
+            turn_provenance=turn_provenance,
         )
     )
     assert not res.is_error
     assert len(recorded) == 1
-    assert recorded[0]["provenance_snapshot_ids"] == ("psnap-x",)
+    assert recorded[0]["turn_provenance"] is turn_provenance
 
 
-def test_dispatcher_default_is_dormant_empty_tuple(
+def test_dispatcher_default_is_dormant_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorded = _install_guard_recorder(monkeypatch)
@@ -339,4 +357,4 @@ def test_dispatcher_default_is_dormant_empty_tuple(
 
     d.register("Read", _handler)
     asyncio.run(d.execute(tool_use_id="tu1", tool_name="Read", tool_input={}))
-    assert recorded[0]["provenance_snapshot_ids"] == ()
+    assert recorded[0]["turn_provenance"] is None

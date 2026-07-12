@@ -55,10 +55,11 @@ from backend.agents.action_guard import guard_tool_dispatch
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.agents.execution_context import ExecutionContext
 from backend.agents.provenance import (
+    CaptureUnavailable,
     TOOL_RESULT,
     SnapshotCache,
+    TurnProvenance,
     active_collector,
-    audit_ids,
     for_model_response,
     record_content,
 )
@@ -111,13 +112,13 @@ MAX_WRITE_CALLS_PER_TURN = 24
 _SNAPSHOT_CACHE = SnapshotCache()
 
 
-def _seal_prov_ids(collector) -> tuple[str, ...]:
+def _seal_turn_prov(collector) -> TurnProvenance:
     try:
         if collector is None:
-            return ()
-        return audit_ids(for_model_response(collector.seal(_SNAPSHOT_CACHE)))
+            return CaptureUnavailable("no_scope")
+        return for_model_response(collector.seal(_SNAPSHOT_CACHE))
     except Exception:  # noqa: BLE001 — provenance never breaks the turn
-        return ()
+        return CaptureUnavailable("seal_failed")
 
 
 from backend.agents.llm import get_llm
@@ -1219,6 +1220,7 @@ async def tool_executor_node(state: GraphState) -> dict:
                 tool_name=tc.tool_name,
                 raw_args=args,
                 execution_context=state.execution_context,
+                turn_provenance=None,
             )
             if not guard.proceed:
                 output = (
@@ -1363,6 +1365,7 @@ def external_agent_node_factory(
             tool_name=tool_name,
             raw_args={"agent_id": clean_agent_id},
             execution_context=state.execution_context,
+            turn_provenance=None,
         )
         if not guard.proceed:
             return _blocked(
@@ -1906,7 +1909,7 @@ async def _run_tool_rounds(
 
     convo = list(convo)
     _pcol = active_collector()
-    _prov_ids = _seal_prov_ids(_pcol)
+    _turn_prov = _seal_turn_prov(_pcol)
     write_cache: dict[str, str] = {}  # (name,args) -> result for WRITE tools this turn
     write_call_budget = MAX_WRITE_CALLS_PER_TURN  # total WRITE invocations / turn
     failed_sigs: set[str] = set()  # (name,args) that FAILED this turn (audit r2 codex#4)
@@ -2007,7 +2010,7 @@ async def _run_tool_rounds(
                         tool_name=name,
                         raw_args=args,
                         execution_context=execution_context,
-                        provenance_snapshot_ids=_prov_ids,
+                        turn_provenance=_turn_prov,
                     )
                     if not guard.proceed:
                         out = (
@@ -2060,7 +2063,7 @@ async def _run_tool_rounds(
             break
         try:
             resp = (llm_tools or llm).invoke(convo)
-            _prov_ids = _seal_prov_ids(_pcol)
+            _turn_prov = _seal_turn_prov(_pcol)
         except Exception as llm_exc:  # noqa: BLE001
             logger.warning("tool-round LLM invoke failed: %s", llm_exc)
             return AIMessage(content=(

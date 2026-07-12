@@ -26,6 +26,14 @@ from backend.agents.action_guard import (
     reload_mode_matrix_for_tests,
     resolve_mode,
 )
+from backend.agents.provenance import (
+    CaptureUnavailable,
+    ModelSnapshot,
+    ProvenanceCollector,
+    SnapshotCache,
+    audit_ids,
+    for_model_response,
+)
 from backend.auth import User
 
 
@@ -152,6 +160,27 @@ def test_missing_ctx_falls_back_to_unbound(monkeypatch: pytest.MonkeyPatch) -> N
     assert out2.blocked_reason == "unbound_principal"
 
 
+def test_guard_derives_kernel_audit_ids_from_whole_turn_provenance() -> None:
+    complete = for_model_response(ProvenanceCollector().seal(SnapshotCache()))
+    assert isinstance(complete, ModelSnapshot)
+
+    for turn_provenance in (
+        complete,
+        CaptureUnavailable("capture_failed"),
+        None,
+    ):
+        out = guard_tool_dispatch(
+            adapter_namespace="chat",
+            tool_name="read_file",
+            raw_args={},
+            execution_context=_ctx_bound(),
+            turn_provenance=turn_provenance,
+        )
+        assert out.decision is not None
+        expected = audit_ids(turn_provenance) if turn_provenance is not None else ()
+        assert out.decision.provenance_snapshot_ids == expected
+
+
 # ── 6. stage-1 raise ⇒ well-formed error outcome, no escape ──────────────
 def test_stage1_raise_yields_error_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(*_a, **_kw):
@@ -276,6 +305,9 @@ def test_action_guard_callers_are_declared() -> None:
         backend_root / "tests" / "test_nodes_action_guard.py",
         # T7b test file names guard_tool_dispatch as a monkeypatch target.
         backend_root / "tests" / "test_tool_dispatcher_action_guard.py",
+        # G0b plumbing tests record the guard/dispatcher whole-value kwargs.
+        backend_root / "tests" / "test_provenance_chat_plumbing.py",
+        backend_root / "tests" / "test_provenance_runner_plumbing.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(r"\bguard_tool_dispatch\b")

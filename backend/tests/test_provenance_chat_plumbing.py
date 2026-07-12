@@ -1,10 +1,10 @@
 """OP-2620 — chat-path provenance capture plumbing (dormant).
 
 The LangGraph conversation tool loop seals the model-input frame once per
-response, threads its snapshot id to every chat action guard call in that
-round, and records tool results for the next round's frame. Provenance remains
-best-effort: an absent scope or seal failure degrades to empty ids without
-breaking the chat turn.
+response, threads the whole ModelSnapshot to every chat action guard call in
+that round, and records tool results for the next round's frame. Provenance
+remains best-effort: an absent scope or seal failure degrades to
+CaptureUnavailable without breaking the chat turn.
 
 Offline — the LLM/tool fakes mirror ``test_nodes_action_guard.py`` and cache
 resolution mirrors ``test_provenance_runner_plumbing.py``.
@@ -19,6 +19,8 @@ import pytest
 from backend.agents import nodes
 from backend.agents.action_guard import GuardOutcome
 from backend.agents.provenance import (
+    CaptureUnavailable,
+    ModelSnapshot,
     TOOL_RESULT,
     ProvenanceCollector,
     ProvenanceSnapshot,
@@ -90,7 +92,7 @@ def _tool_reply(call_id: str) -> _Reply:
 
 
 @pytest.mark.asyncio
-async def test_chat_snapshot_id_is_threaded_to_guard(monkeypatch) -> None:
+async def test_chat_whole_model_snapshot_is_threaded_to_guard(monkeypatch) -> None:
     recorded = _patch_chat_harness(monkeypatch)
 
     with provenance_scope():
@@ -103,10 +105,11 @@ async def test_chat_snapshot_id_is_threaded_to_guard(monkeypatch) -> None:
 
     assert result.content == "done"
     assert len(recorded) == 1
-    ids = recorded[0]["provenance_snapshot_ids"]
-    assert isinstance(ids, tuple) and len(ids) == 1
-    assert ids[0].startswith("psnap-")
-    assert isinstance(_cache().get(ids[0]), ProvenanceSnapshot)
+    turn_provenance = recorded[0]["turn_provenance"]
+    assert isinstance(turn_provenance, ModelSnapshot)
+    snapshot_id = turn_provenance.snapshot.snapshot_id
+    assert snapshot_id.startswith("psnap-")
+    assert isinstance(_cache().get(snapshot_id), ProvenanceSnapshot)
 
 
 @pytest.mark.asyncio
@@ -123,9 +126,11 @@ async def test_chat_per_round_snapshots_are_distinct_and_temporal(
 
     assert result.content == "done"
     assert len(recorded) == 2
-    (round1_id,), (round2_id,) = [
-        call["provenance_snapshot_ids"] for call in recorded
-    ]
+    round1, round2 = [call["turn_provenance"] for call in recorded]
+    assert isinstance(round1, ModelSnapshot)
+    assert isinstance(round2, ModelSnapshot)
+    round1_id = round1.snapshot.snapshot_id
+    round2_id = round2.snapshot.snapshot_id
     assert round1_id != round2_id
     snap1 = _cache().get(round1_id)
     snap2 = _cache().get(round2_id)
@@ -139,7 +144,9 @@ async def test_chat_per_round_snapshots_are_distinct_and_temporal(
 
 
 @pytest.mark.asyncio
-async def test_chat_without_provenance_scope_uses_empty_ids(monkeypatch) -> None:
+async def test_chat_without_provenance_scope_passes_capture_unavailable(
+    monkeypatch,
+) -> None:
     recorded = _patch_chat_harness(monkeypatch)
 
     result = await nodes._run_tool_rounds(
@@ -150,11 +157,11 @@ async def test_chat_without_provenance_scope_uses_empty_ids(monkeypatch) -> None
     )
 
     assert result.content == "done"
-    assert recorded[0]["provenance_snapshot_ids"] == ()
+    assert recorded[0]["turn_provenance"] == CaptureUnavailable("no_scope")
 
 
 @pytest.mark.asyncio
-async def test_chat_seal_failure_degrades_to_empty_ids_and_turn_completes(
+async def test_chat_seal_failure_passes_capture_unavailable_and_turn_completes(
     monkeypatch,
 ) -> None:
     recorded = _patch_chat_harness(monkeypatch)
@@ -173,7 +180,7 @@ async def test_chat_seal_failure_degrades_to_empty_ids_and_turn_completes(
         )
 
     assert result.content == "done"
-    assert recorded[0]["provenance_snapshot_ids"] == ()
+    assert recorded[0]["turn_provenance"] == CaptureUnavailable("seal_failed")
 
 
 @pytest.mark.asyncio

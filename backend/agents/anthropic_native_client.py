@@ -38,10 +38,10 @@ from typing import TYPE_CHECKING, Any, Literal
 from backend.agents.anthropic_sdk_audit import assert_no_deprecated_beta_messages_call
 from backend.agents.mcp_integration import enforce_mcp_policy
 from backend.agents.provenance import (
+    CaptureUnavailable,
     STALE_REFRESH,
     TOOL_RESULT,
     SnapshotCache,
-    audit_ids,
     for_model_response,
     provenance_scope,
     record_content,
@@ -757,13 +757,12 @@ class AnthropicClient:
 
                     # Seal ONCE per iteration, immediately before the model
                     # call — best-effort: provenance never breaks the turn.
-                    # An empty id set is not grant-eligible (fail-closed for
-                    # a future grant).
+                    # CaptureUnavailable is not grant-eligible (fail-closed
+                    # for a future grant).
                     try:
                         _turn_prov = for_model_response(_pcol.seal(_SNAPSHOT_CACHE))
-                        _prov_ids = audit_ids(_turn_prov)
                     except Exception:  # noqa: BLE001 — hot loop, degrade only
-                        _prov_ids = ()
+                        _turn_prov = CaptureUnavailable("seal_failed")
 
                     response = _create_message_with_cache_fallback(
                         self._client, kwargs
@@ -799,7 +798,7 @@ class AnthropicClient:
                             tool_name=tu["name"],
                             tool_input=tu["input"],
                             execution_context=effective,
-                            provenance_snapshot_ids=_prov_ids,
+                            turn_provenance=_turn_prov,
                         )
                         # §2.E temporal rule: turn N's result enters turn
                         # N+1's snapshot (turn N's actions reference the
