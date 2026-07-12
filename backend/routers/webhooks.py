@@ -1426,6 +1426,15 @@ async def _on_comment_added(event: dict) -> None:
             break
 
 
+# U6-0 T8-B2 (OP-2612): bounded admission for the verified L3 write.
+# The gerrit webhook route is effectively unauthenticated, so each
+# admitted change costs an independent Gerrit SSH verification (~30 s
+# worst case) in an executor thread — bound BOTH in-flight and pending
+# (no waiter queue) and coalesce duplicate/replayed stream-events.
+_L3_MAX_INFLIGHT = 2
+_l3_inflight: set[int] = set()
+
+
 async def _on_change_merged(event: dict) -> None:
     """A change was merged — trigger replication to external repos."""
     change = event.get("change", {})
@@ -1451,6 +1460,51 @@ async def _on_change_merged(event: dict) -> None:
     except Exception as exc:
         logger.warning("intent_bridge.on_gerrit_change_merged failed: %s", exc)
 
+    # U6-0 T8-B2: L3 verified write — MUST run regardless of the
+    # replication config (it used to sit after the `if not targets:
+    # return` below, so the common no-replication deploy never wrote
+    # the corpus). The event fields are used ONLY to TARGET the
+    # independent Gerrit verification — never trusted as content.
+    # `change.number` is absent from some real events; a missing/bad
+    # number skips ONLY this admission block (replication + CI +
+    # pipeline-advance below must still run).
+    raw_num = change.get("number")
+    change_number = (
+        int(raw_num) if (raw_num is not None and str(raw_num).isdigit()) else 0
+    )
+    project = str(change.get("project") or "")
+    event_change_id = str(change.get("id") or "")
+    event_revision = str(
+        (change.get("currentPatchSet") or {}).get("revision") or ""
+    )
+    if (
+        change_number
+        and change_number not in _l3_inflight
+        and len(_l3_inflight) < _L3_MAX_INFLIGHT
+    ):
+        _l3_inflight.add(change_number)
+        asyncio.create_task(_save_merged_solution_to_l3(
+            change_number, project, event_change_id, event_revision,
+        ))
+    else:
+        if not change_number:
+            drop_reason = "missing_change_number"
+        elif change_number in _l3_inflight:
+            drop_reason = "duplicate_inflight"
+        else:
+            drop_reason = "over_capacity"
+        from backend import audit
+        await audit.log(
+            action="l3_verify_dropped",
+            entity_kind="gerrit_change",
+            entity_id=str(raw_num or ""),
+            after={
+                "project": project,
+                "inflight": len(_l3_inflight),
+                "reason": drop_reason,
+            },
+        )
+
     # Trigger replication
     targets = [t.strip() for t in settings.gerrit_replication_targets.split(",") if t.strip()]
     if not targets:
@@ -1463,8 +1517,10 @@ async def _on_change_merged(event: dict) -> None:
     # force-align loop is exactly what ADR-0040 kills: `develop` only ever
     # fast-forwards via Gerrit submit, so a non-force push that fails to
     # ff signals a real divergence worth surfacing rather than silently
-    # overwriting. Branch comes from the (HMAC-verified) event but is
-    # still validated against a safe ref charset before shelling out.
+    # overwriting. Branch comes from the webhook event (route-level
+    # webhook auth is a broader concern outside T8 scope — do NOT treat
+    # the event as verified) and is validated against a safe ref
+    # charset before shelling out.
     import re as _re
     raw_branch = (change.get("branch") or "").strip()
     branch = raw_branch if _re.fullmatch(r"[A-Za-z0-9._/-]+", raw_branch) else "develop"
@@ -1492,9 +1548,6 @@ async def _on_change_merged(event: dict) -> None:
 
     # Package build artifacts from merged change
     asyncio.create_task(_package_merged_artifacts(change_id, subject))
-
-    # L3 Episodic Memory: auto-save solution from merged change
-    asyncio.create_task(_save_merged_solution_to_l3(change_id, subject))
 
     # Trigger CI/CD pipelines after merge
     asyncio.create_task(_trigger_ci_pipelines())
@@ -1594,56 +1647,80 @@ async def _package_merged_artifacts(change_id: str, subject: str) -> None:
         logger.warning("Merge artifact packaging failed (non-critical): %s", exc)
 
 
-async def _save_merged_solution_to_l3(change_id: str, subject: str) -> None:
-    """Save a merged change's solution to L3 episodic memory if it fixed a bug.
+async def _save_merged_solution_to_l3(
+    change_number: int,
+    project: str,
+    event_change_id: str,
+    event_revision: str,
+) -> None:
+    """Mint a verified L3 episodic row ONLY from an independent,
+    identity-bound Gerrit verification of the merge (U6-0 T8-B2).
 
-    Only saves if the change has associated debug findings (indicating it was a bug fix).
-    This ensures L3 only contains verified, human-approved solutions (Gerrit +2).
+    The webhook event supplies only the QUERY TARGET (number / project /
+    identity pins) — never content. ``mcp_gerrit.verify_merged_change``
+    re-derives the canonical subject + Change-Id from Gerrit itself
+    (exactly-one row, MERGED, non-bot +2), so a forged ``change-merged``
+    POST cannot inject a trusted "solution". Fail-closed: verify None or
+    any error ⇒ no episodic row, and no exception may escape this
+    background task.
     """
-    # SP-3.9: _save_merged_solution_to_l3 is a background task (spawned
-    # via asyncio.create_task from _on_change_merged) — no request
-    # conn. Acquire ONCE for the list + update loop since the read
-    # result drives the subsequent writes on the same logical unit of
-    # work. insert_episodic_memory is still pre-port (SP-3.12) so it
-    # still works via the compat wrapper.
     try:
-        from backend import db
-        from backend.db_pool import get_pool
-        async with get_pool().acquire() as _conn:
-            findings = await db.list_debug_findings(
-                _conn, status="open", limit=20,
+        from backend import audit, db
+        from backend.agents import mcp_gerrit, runner_tenant
+
+        # Independent verify — sync SSH, keep it off the event loop.
+        vm = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: mcp_gerrit.verify_merged_change(
+                change_number=change_number,
+                project=project,
+                expected_change_id=event_change_id,
+                expected_revision=event_revision,
+            ),
+        )
+        if vm is None:
+            await audit.log(
+                action="security.merge_unconfirmed",
+                entity_kind="gerrit_change",
+                entity_id=str(change_number),
+                after={
+                    "project": project,
+                    "reason": "verify_merged_change_returned_none",
+                },
             )
-            # Match findings by looking for the change subject in task context
-            related = [f for f in findings if subject and (
-                subject.lower() in f.get("content", "").lower()
-                or change_id in f.get("context", "")
-            )]
+            return
 
-            if not related:
-                return
-
-            for finding in related[:3]:  # Max 3 memories per merge
-                memory_id = f"mem-{uuid.uuid4().hex[:12]}"
-                # SP-3.12: conn already acquired at the top of this
-                # try/except block (see SP-3.9 change) — reuse it.
-                await db.insert_episodic_memory(_conn, {
-                    "id": memory_id,
-                    "error_signature": finding.get("content", "")[:500],
-                    "solution": f"Fix: {subject}",
-                    "soc_vendor": "",  # Can be enriched from platform config
-                    "sdk_version": "",
-                    "gerrit_change_id": change_id,
-                    "source_task_id": finding.get("task_id", ""),
-                    "source_agent_id": finding.get("agent_id", ""),
-                    "tags": [finding.get("finding_type", "fix")],
-                    "quality_score": 1.0,  # Merged = verified
-                })
-                # Mark the finding as resolved
-                await db.update_debug_finding(_conn, finding["id"], "resolved")
-                logger.info("L3: Saved merged solution %s for finding %s", memory_id, finding["id"])
-
+        # Canonical content ONLY — never the webhook subject. Atomic +
+        # idempotent (T8-B1): source/authority/verified are hard-set
+        # inside the helper; the alembic-0260 CHECK backs it.
+        async with get_pool().acquire() as _conn:
+            inserted = await db.insert_verified_merge_solution(_conn, {
+                "id": f"mem-{uuid.uuid4().hex[:12]}",
+                "error_signature": vm.canonical_subject,
+                "solution": vm.canonical_subject,
+                "gerrit_change_id": vm.change_id,
+                "tenant_id": runner_tenant.OMNISIGHT_SELF_TENANT,
+                "quality_score": 1.0,
+                "tags": ["fix"],
+            })
+        if inserted:
+            logger.info(
+                "L3: verified merge solution saved (change %s, %s)",
+                change_number, vm.change_id,
+            )
+        else:
+            # ON CONFLICT DO NOTHING — a replayed/duplicate event dedup'd.
+            logger.info(
+                "L3: verified merge %s already recorded (replay dedup)",
+                change_number,
+            )
     except Exception as exc:
-        logger.warning("L3 auto-save on merge failed (non-critical): %s", exc)
+        logger.warning(
+            "L3 verified-write failed for change %s (nothing written): %s",
+            change_number, exc,
+        )
+    finally:
+        _l3_inflight.discard(change_number)
 
 
 async def _trigger_ci_pipelines() -> None:

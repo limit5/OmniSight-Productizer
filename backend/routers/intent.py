@@ -138,6 +138,10 @@ async def clarify(req: ClarifyRequest,
             conflict_id=req.conflict_id,
             option_id=req.option_id,
             operator_email=getattr(_user, "email", None),
+            # require_operator doesn't set the db_context tenant —
+            # thread owner + tenant explicitly (codex-B MINOR-6).
+            operator_user_id=getattr(_user, "id", None),
+            tenant_id=getattr(_user, "tenant_id", None),
         )
     except Exception as exc:
         logger.debug(

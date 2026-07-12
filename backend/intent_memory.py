@@ -82,6 +82,8 @@ async def record_clarification_choice(
     conflict_id: str,
     option_id: str,
     operator_email: str | None = None,
+    operator_user_id: str | None = None,
+    tenant_id: str | None = None,
     quality: float = 0.85,
 ) -> Optional[str]:
     """Persist the operator's pick. Returns the new memory row id on
@@ -125,6 +127,15 @@ async def record_clarification_choice(
                 "gerrit_change_id": None,
                 "tags": [_TAG_PREFIX, f"conflict:{conflict_id}"],
                 "quality_score": max(0.0, min(1.0, quality)),
+                # U6-0 T8-B2: quarantined provenance — an operator hint
+                # is private to its author, never a verified solution.
+                # A None tenant_id falls through to insert_episodic_
+                # memory's own tenant_insert_value() default.
+                "source": "user_clarification",
+                "verified": False,
+                "visibility": "private",
+                "owner_user_id": operator_user_id,
+                "tenant_id": tenant_id,
             })
     except Exception as exc:
         logger.warning(

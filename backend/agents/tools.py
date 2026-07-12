@@ -1980,6 +1980,11 @@ async def save_solution(
                 "gerrit_change_id": gerrit_change_id,
                 "tags": tags or [],
                 "quality_score": 1.0 if gerrit_change_id else 0.5,
+                # U6-0 T8-B2: explicit provenance — a model-authored row
+                # is quarantined (never verified); T8-C's read fence
+                # excludes it from the trusted corpus.
+                "source": "model_save_solution",
+                "verified": False,
             })
     except Exception as exc:
         return f"[ERROR] Failed to save to L3: {exc}"

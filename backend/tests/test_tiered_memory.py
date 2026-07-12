@@ -369,6 +369,88 @@ class TestToolRegistry:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  U6-0 T8-B2 (OP-2612): non-Gerrit L3 writers are source-tagged
+#  (quarantined) — verified rows can only come from the webhook's
+#  independently-verified merge path.
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+class _FakePoolAcquire:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePool:
+    def acquire(self):
+        return _FakePoolAcquire()
+
+
+class TestWriterSourceTags:
+
+    @pytest.mark.asyncio
+    async def test_save_solution_source_tagged_unverified(self, monkeypatch):
+        """The (unbound) model writer must self-declare
+        source='model_save_solution' + verified=False."""
+        from backend import db
+        from backend.agents import tools as _tools
+
+        captured: dict = {}
+
+        async def _capture_insert(conn, data):
+            captured.update(data)
+
+        monkeypatch.setattr(db, "insert_episodic_memory", _capture_insert)
+        monkeypatch.setattr(_tools, "get_pool", lambda: _FakePool())
+
+        result = await _tools.save_solution.ainvoke({
+            "error_signature": "linker error: undefined t8b2_sym",
+            "solution": "Add -lt8b2 to LDFLAGS",
+            "gerrit_change_id": "I-model-claimed",
+        })
+
+        assert "[L3]" in result
+        assert captured["source"] == "model_save_solution"
+        assert captured["verified"] is False
+
+    @pytest.mark.asyncio
+    async def test_record_clarification_choice_source_tagged_private(
+        self, monkeypatch,
+    ):
+        """The operator-hint writer must quarantine its rows:
+        source='user_clarification', verified=False, PRIVATE to its
+        author, with the caller-threaded owner + tenant."""
+        import backend.db_pool as _db_pool
+        from backend import db, intent_memory
+
+        captured: dict = {}
+
+        async def _capture_insert(conn, data):
+            captured.update(data)
+
+        monkeypatch.setattr(db, "insert_episodic_memory", _capture_insert)
+        monkeypatch.setattr(_db_pool, "get_pool", lambda: _FakePool())
+
+        mem_id = await intent_memory.record_clarification_choice(
+            raw_text="build the ipc pipeline for fullhan",
+            conflict_id="c-fps",
+            option_id="opt-30fps",
+            operator_email="op@test.local",
+            operator_user_id="u1",
+            tenant_id="t-x",
+        )
+
+        assert mem_id is not None
+        assert captured["source"] == "user_clarification"
+        assert captured["verified"] is False
+        assert captured["visibility"] == "private"
+        assert captured["owner_user_id"] == "u1"
+        assert captured["tenant_id"] == "t-x"
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Graph Integration
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

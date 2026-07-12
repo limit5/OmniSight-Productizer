@@ -1778,3 +1778,359 @@ class TestMergeReplicationBranchContract:
             assert cmd == 'git push "origin-mirror" develop'
             assert " main" not in cmd
             assert "--force" not in cmd
+
+
+# ──────────────────────────────────────────────────────────────────────
+# U6-0 T8-B2 (OP-2612) — verified L3 write path
+# ──────────────────────────────────────────────────────────────────────
+#
+# The merge webhook may only mint a verified episodic row via T8-B1's
+# INDEPENDENT, identity-bound Gerrit verification — never from the
+# (unauthenticated) webhook body. These tests run offline: they
+# monkeypatch ``mcp_gerrit.verify_merged_change`` +
+# ``db.insert_verified_merge_solution`` and assert the calls, not DB
+# rows.
+
+
+class _FakePoolAcquire:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class _FakePool:
+    def acquire(self):
+        return _FakePoolAcquire()
+
+
+class TestVerifiedL3WritePath:
+
+    @pytest.fixture(autouse=True)
+    def _clean_inflight(self):
+        from backend.routers import webhooks
+        webhooks._l3_inflight.clear()
+        yield
+        webhooks._l3_inflight.clear()
+
+    @staticmethod
+    def _patch_common(monkeypatch):
+        """Return (audit_log, insert) mocks; also neuter the pool."""
+        from backend import audit, db
+        from backend.routers import webhooks
+        audit_log = AsyncMock()
+        monkeypatch.setattr(audit, "log", audit_log)
+        insert = AsyncMock(return_value=True)
+        monkeypatch.setattr(db, "insert_verified_merge_solution", insert)
+        monkeypatch.setattr(webhooks, "get_pool", lambda: _FakePool())
+        return audit_log, insert
+
+    @staticmethod
+    def _patch_merge_leaves(monkeypatch):
+        """Stub every non-L3 side-effect of ``_on_change_merged``."""
+        from backend import intent_bridge as _bridge
+        from backend import notifications as _notifs
+        from backend import workspace as _ws
+        from backend.routers import webhooks as _webhooks
+        monkeypatch.setattr(_ws, "_run", AsyncMock(return_value=(0, "", "")))
+        monkeypatch.setattr(_notifs, "notify", AsyncMock())
+        monkeypatch.setattr(
+            _bridge, "on_gerrit_change_merged", AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(_webhooks, "_package_merged_artifacts", AsyncMock())
+        monkeypatch.setattr(_webhooks, "_trigger_ci_pipelines", AsyncMock())
+
+    @staticmethod
+    def _merged_body(number: int | None) -> dict:
+        change: dict = {
+            "id": f"It8b2-{number}",
+            "project": "omnisight",
+            "branch": "develop",
+            "subject": "webhook-claimed subject (must never be stored)",
+            "commitMessage": "x\n",
+            "currentPatchSet": {"revision": f"rev-{number}"},
+        }
+        if number is not None:
+            change["number"] = number
+        return {"type": "change-merged", "change": change}
+
+    @staticmethod
+    def _drop_reasons(audit_log) -> list[str]:
+        return [
+            c.kwargs["after"]["reason"]
+            for c in audit_log.call_args_list
+            if c.kwargs.get("action") == "l3_verify_dropped"
+        ]
+
+    # ── the saver itself ─────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_forged_unconfirmed_writes_nothing_and_audits(
+        self, monkeypatch,
+    ):
+        """verify → None (forged/unconfirmed) ⇒ NO insert, one
+        ``security.merge_unconfirmed`` audit record, no exception,
+        slot released."""
+        from unittest.mock import Mock
+
+        from backend.agents import mcp_gerrit
+        from backend.routers import webhooks
+
+        audit_log, insert = self._patch_common(monkeypatch)
+        verify = Mock(return_value=None)
+        monkeypatch.setattr(mcp_gerrit, "verify_merged_change", verify)
+
+        webhooks._l3_inflight.add(42)
+        await webhooks._save_merged_solution_to_l3(
+            42, "omnisight", "Iforged", "deadbeef",
+        )
+
+        insert.assert_not_called()
+        verify.assert_called_once_with(
+            change_number=42, project="omnisight",
+            expected_change_id="Iforged", expected_revision="deadbeef",
+        )
+        unconfirmed = [
+            c for c in audit_log.call_args_list
+            if c.kwargs.get("action") == "security.merge_unconfirmed"
+        ]
+        assert len(unconfirmed) == 1
+        assert unconfirmed[0].kwargs["entity_id"] == "42"
+        assert 42 not in webhooks._l3_inflight
+
+    @pytest.mark.asyncio
+    async def test_genuine_merge_inserts_canonical_content_only(
+        self, monkeypatch,
+    ):
+        """verify → VerifiedMerge ⇒ ONE atomic insert carrying
+        Gerrit-CANONICAL content (never the webhook subject), the
+        service tenant, and NO debug_findings traffic at all."""
+        from unittest.mock import Mock
+
+        from backend import db
+        from backend.agents import mcp_gerrit
+        from backend.routers import webhooks
+
+        audit_log, insert = self._patch_common(monkeypatch)
+        vm = mcp_gerrit.VerifiedMerge(
+            change_number=9, change_id="Iabc",
+            canonical_subject="[OP-9] fix", revision="rev-9",
+            project="omnisight", branch="develop",
+        )
+        verify = Mock(return_value=vm)
+        monkeypatch.setattr(mcp_gerrit, "verify_merged_change", verify)
+        list_findings = AsyncMock()
+        update_finding = AsyncMock()
+        monkeypatch.setattr(db, "list_debug_findings", list_findings)
+        monkeypatch.setattr(db, "update_debug_finding", update_finding)
+
+        webhooks._l3_inflight.add(9)
+        await webhooks._save_merged_solution_to_l3(
+            9, "omnisight", "Iabc", "rev-9",
+        )
+
+        insert.assert_called_once()
+        data = insert.call_args.args[1]
+        assert data["error_signature"] == "[OP-9] fix"
+        assert data["solution"] == "[OP-9] fix"
+        assert data["gerrit_change_id"] == "Iabc"
+        assert data["tenant_id"] == "omnisight-self"
+        assert data["quality_score"] == 1.0
+        # BLOCKER-2: the substring-match finding block is DELETED.
+        list_findings.assert_not_called()
+        update_finding.assert_not_called()
+        assert 9 not in webhooks._l3_inflight
+
+    @pytest.mark.asyncio
+    async def test_verify_exception_swallowed_and_slot_released(
+        self, monkeypatch,
+    ):
+        """A raising verify must not escape the background task, must
+        write nothing, and must release the in-flight slot."""
+        from backend.agents import mcp_gerrit
+        from backend.routers import webhooks
+
+        audit_log, insert = self._patch_common(monkeypatch)
+
+        def _boom(**_kw):
+            raise RuntimeError("ssh exploded")
+
+        monkeypatch.setattr(mcp_gerrit, "verify_merged_change", _boom)
+
+        webhooks._l3_inflight.add(7)
+        await webhooks._save_merged_solution_to_l3(7, "omnisight", "", "")
+
+        insert.assert_not_called()
+        assert webhooks._l3_inflight == set()
+
+    # ── admission via _on_change_merged ──────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_branch_move_l3_spawns_without_replication_targets(
+        self, monkeypatch,
+    ):
+        """BLOCKER-6 regression: with ``gerrit_replication_targets``
+        EMPTY, a change-merged event must STILL reach the independent
+        verify (the old code returned before spawning the L3 saver)."""
+        import asyncio as _asyncio
+        from unittest.mock import Mock
+
+        from backend.agents import mcp_gerrit
+        from backend.config import settings
+        from backend.routers import webhooks
+
+        audit_log, insert = self._patch_common(monkeypatch)
+        self._patch_merge_leaves(monkeypatch)
+        verify = Mock(return_value=None)
+        monkeypatch.setattr(mcp_gerrit, "verify_merged_change", verify)
+
+        original = settings.gerrit_replication_targets
+        try:
+            settings.gerrit_replication_targets = ""
+            await webhooks._on_change_merged(self._merged_body(77))
+            for _ in range(200):
+                if verify.called and not webhooks._l3_inflight:
+                    break
+                await _asyncio.sleep(0.01)
+        finally:
+            settings.gerrit_replication_targets = original
+
+        verify.assert_called_once_with(
+            change_number=77, project="omnisight",
+            expected_change_id="It8b2-77", expected_revision="rev-77",
+        )
+        assert webhooks._l3_inflight == set()
+
+    @pytest.mark.asyncio
+    async def test_bounded_admission_drops_over_cap(self, monkeypatch):
+        """More than ``_L3_MAX_INFLIGHT`` distinct in-flight changes ⇒
+        the excess is dropped with an ``l3_verify_dropped`` audit record
+        and NEVER reaches verify."""
+        import asyncio as _asyncio
+        import threading
+
+        from backend.agents import mcp_gerrit
+        from backend.config import settings
+        from backend.routers import webhooks
+
+        audit_log, insert = self._patch_common(monkeypatch)
+        self._patch_merge_leaves(monkeypatch)
+
+        gate = threading.Event()
+        verified_numbers: list[int] = []
+
+        def _gated_verify(**kw):
+            verified_numbers.append(kw["change_number"])
+            gate.wait(timeout=10)
+            return None
+
+        monkeypatch.setattr(mcp_gerrit, "verify_merged_change", _gated_verify)
+
+        original = settings.gerrit_replication_targets
+        try:
+            settings.gerrit_replication_targets = ""
+            await webhooks._on_change_merged(self._merged_body(101))
+            await webhooks._on_change_merged(self._merged_body(102))
+            await webhooks._on_change_merged(self._merged_body(103))
+
+            # Admission is decided synchronously: two slots held, the
+            # third dropped without a waiter queue.
+            assert webhooks._l3_inflight == {101, 102}
+            assert self._drop_reasons(audit_log) == ["over_capacity"]
+
+            gate.set()
+            for _ in range(300):
+                if not webhooks._l3_inflight and len(verified_numbers) == 2:
+                    break
+                await _asyncio.sleep(0.01)
+        finally:
+            gate.set()
+            settings.gerrit_replication_targets = original
+
+        assert sorted(verified_numbers) == [101, 102]
+        assert 103 not in verified_numbers
+        assert webhooks._l3_inflight == set()
+
+    @pytest.mark.asyncio
+    async def test_duplicate_inflight_coalesced(self, monkeypatch):
+        """A replayed/duplicate change number while in-flight is
+        coalesced — verify runs exactly once."""
+        import asyncio as _asyncio
+        import threading
+
+        from backend.agents import mcp_gerrit
+        from backend.config import settings
+        from backend.routers import webhooks
+
+        audit_log, insert = self._patch_common(monkeypatch)
+        self._patch_merge_leaves(monkeypatch)
+
+        gate = threading.Event()
+        verified_numbers: list[int] = []
+
+        def _gated_verify(**kw):
+            verified_numbers.append(kw["change_number"])
+            gate.wait(timeout=10)
+            return None
+
+        monkeypatch.setattr(mcp_gerrit, "verify_merged_change", _gated_verify)
+
+        original = settings.gerrit_replication_targets
+        try:
+            settings.gerrit_replication_targets = ""
+            await webhooks._on_change_merged(self._merged_body(55))
+            await webhooks._on_change_merged(self._merged_body(55))
+
+            assert webhooks._l3_inflight == {55}
+            assert self._drop_reasons(audit_log) == ["duplicate_inflight"]
+
+            gate.set()
+            for _ in range(300):
+                if not webhooks._l3_inflight and verified_numbers:
+                    break
+                await _asyncio.sleep(0.01)
+        finally:
+            gate.set()
+            settings.gerrit_replication_targets = original
+
+        assert verified_numbers == [55]
+        assert webhooks._l3_inflight == set()
+
+    @pytest.mark.asyncio
+    async def test_missing_change_number_skips_l3_but_still_replicates(
+        self, monkeypatch,
+    ):
+        """M2 guard: an event WITHOUT ``change.number`` (real Gerrit
+        emits these) must skip ONLY the L3-admission block — the
+        replication fan-out below still runs, no TypeError."""
+        from unittest.mock import Mock
+
+        from backend import workspace as _ws
+        from backend.agents import mcp_gerrit
+        from backend.config import settings
+        from backend.routers import webhooks
+
+        audit_log, insert = self._patch_common(monkeypatch)
+        self._patch_merge_leaves(monkeypatch)
+        # _patch_merge_leaves stubbed _run; re-grab it for assertions.
+        mock_run = AsyncMock(return_value=(0, "mirror-url\n", ""))
+        monkeypatch.setattr(_ws, "_run", mock_run)
+        verify = Mock(return_value=None)
+        monkeypatch.setattr(mcp_gerrit, "verify_merged_change", verify)
+
+        original = settings.gerrit_replication_targets
+        try:
+            settings.gerrit_replication_targets = "origin-mirror"
+            await webhooks._on_change_merged(self._merged_body(None))
+        finally:
+            settings.gerrit_replication_targets = original
+
+        verify.assert_not_called()
+        assert self._drop_reasons(audit_log) == ["missing_change_number"]
+        # The always-runs section below the admission block executed.
+        assert any(
+            c.args and c.args[0].startswith("git push")
+            for c in mock_run.call_args_list
+        )
+        assert webhooks._l3_inflight == set()
