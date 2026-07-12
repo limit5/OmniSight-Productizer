@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from backend.agents.anthropic_sdk_audit import assert_no_deprecated_beta_messages_call
+from backend.agents.mcp_integration import enforce_mcp_policy
 from backend.agents.stale_refresh_strategy import (
     build_refresh_marker,
     build_skip_marker,
@@ -79,6 +80,20 @@ DEFAULT_MODEL_HAIKU = "claude-haiku-4-5-20251001"
 # Hard stop on runaway loops. Real workflows almost never need > 25 turns;
 # beyond this we bail with a structured error so the operator can inspect.
 DEFAULT_MAX_ITERATIONS = 25
+
+# U6-0 P-PROV-B: provider-side tool types the client refuses to offer via
+# `raw_tools` — code runs on Anthropic infrastructure outside every OmniSight
+# containment layer. Single place to add future provider-side types; widening
+# (removing an entry) requires a containment review (H0 pattern).
+FORBIDDEN_PROVIDER_TOOL_TYPE_PREFIXES = ("code_execution",)
+
+# U6-0 P-PROV-B: explicit MCP connector beta pin. The SDK does NOT
+# auto-inject an `mcp-client-*` version, so without this pin our
+# payload-shape assumptions (`tool_configuration.allowed_tools`) ride an
+# implicit server-side default. Applied PER-REQUEST (only when mcp_servers
+# survive policy), merged with — never clobbering — the ctor beta_headers.
+# Migrating to the current `mcp_toolset` format is a tracked follow-up.
+MCP_CONNECTOR_BETA = "mcp-client-2025-04-04"
 
 
 @dataclass(frozen=True)
@@ -510,6 +525,16 @@ class AnthropicClient:
         ``mcp_servers=[]`` parameter so SDK auto-injects remote MCP tool
         definitions (Figma / Gmail / Calendar / Drive). Caller typically
         builds via ``RemoteMCPRegistry.to_anthropic_mcp_servers()``.
+
+        U6-0 P-PROV-B: this method is a FINAL client boundary for
+        provider-side surfaces — ``mcp_servers`` input is re-validated via
+        :func:`backend.agents.mcp_integration.enforce_mcp_policy` regardless
+        of who built it (defense in depth over the registry's own filter).
+        Denied/unknown/origin-mismatched entries are dropped; when nothing
+        survives, the param is omitted. Widening MCP forwarding here
+        requires a containment review (H0 pattern). Residual: the batch
+        lane carries NO ``mcp-client-*`` beta pin — headers live in the
+        batch client, not in this params dict.
         """
         tool_payload = to_anthropic_tools(tools) if tools else None
         sys_blocks, tool_payload = _apply_cache_control(system, tool_payload, enable_cache)
@@ -525,7 +550,9 @@ class AnthropicClient:
         if tool_payload:
             params["tools"] = tool_payload
         if mcp_servers:
-            params["mcp_servers"] = mcp_servers
+            allowed_mcp_servers = enforce_mcp_policy(mcp_servers)
+            if allowed_mcp_servers:
+                params["mcp_servers"] = allowed_mcp_servers
         return params
 
     async def run_with_tools(
@@ -565,15 +592,51 @@ class AnthropicClient:
 
         OP-828 (B1): when ``raw_tools`` is supplied, the caller has already
         constructed the Anthropic ``tools=[]`` payload (e.g. for built-in
-        ``text_editor_20250728`` / ``bash_20250124`` / ``code_execution``),
-        so we skip ``to_anthropic_tools`` translation and the OmniSight
-        tool-catalog system block injection (built-in tools are documented
-        by Anthropic, not by us).
+        ``text_editor_20250728`` / ``bash_20250124``), so we skip
+        ``to_anthropic_tools`` translation and the OmniSight tool-catalog
+        system block injection (built-in tools are documented by Anthropic,
+        not by us).
+
+        U6-0 P-PROV-B: this method is a FINAL client boundary for
+        provider-side surfaces:
+
+          * ``raw_tools`` entries whose type starts with a
+            :data:`FORBIDDEN_PROVIDER_TOOL_TYPE_PREFIXES` prefix raise
+            ``ValueError`` — a programming-error guard (the model never
+            chooses ``raw_tools``), because those tools execute on
+            Anthropic infrastructure outside OmniSight containment.
+          * ``mcp_servers`` is re-validated via
+            :func:`backend.agents.mcp_integration.enforce_mcp_policy`
+            regardless of who built it; denied/unknown/origin-mismatched
+            entries are dropped, and when nothing survives the param is
+            omitted.
+          * requests that carry surviving ``mcp_servers`` pin
+            :data:`MCP_CONNECTOR_BETA` via per-request ``betas=``, merged
+            with the ctor ``beta_headers`` (a per-request ``betas=``
+            REPLACES the client-level default header — clobbering would
+            silently drop e.g. managed-agents). Migrating to the current
+            ``mcp_toolset`` format is a tracked follow-up.
+
+        Adding a provider-side tool type or widening MCP forwarding here
+        requires a containment review (H0 pattern).
         """
         if raw_tools is not None and tools:
             raise ValueError(
                 "run_with_tools: pass either `tools` or `raw_tools`, not both"
             )
+        if raw_tools is not None:
+            for entry in raw_tools:
+                if not isinstance(entry, dict):
+                    continue
+                entry_type = str(entry.get("type", ""))
+                if entry_type.startswith(FORBIDDEN_PROVIDER_TOOL_TYPE_PREFIXES):
+                    raise ValueError(
+                        "run_with_tools: provider-side tool type "
+                        f"{entry_type!r} is forbidden at the client boundary "
+                        "(matches FORBIDDEN_PROVIDER_TOOL_TYPE_PREFIXES="
+                        f"{FORBIDDEN_PROVIDER_TOOL_TYPE_PREFIXES!r}); "
+                        "offering it requires a containment review"
+                    )
         # U6-0 P-ID-B: the per-call param is authoritative for this call —
         # a sub-agent override must never clobber the parent's attribute,
         # so `self.execution_context` is read but never mutated here.
@@ -605,6 +668,20 @@ class AnthropicClient:
         iterations = 0
         stop_reason = "unknown"
         final_text = ""
+
+        # U6-0 P-PROV-B: MCP policy at the final client boundary — mcp_servers
+        # is loop-invariant, so enforce once here (not per iteration, which
+        # would re-emit the drop warnings every turn). Non-empty survivors
+        # always force beta routing (_requires_beta_messages), so the
+        # per-request `betas=` pin is safe; it MERGES the ctor beta_headers
+        # because a per-request betas= REPLACES the client default header.
+        request_betas: list[str] | None = None
+        if mcp_servers:
+            mcp_servers = enforce_mcp_policy(mcp_servers)
+            if mcp_servers:
+                request_betas = list(
+                    dict.fromkeys([*self.beta_headers, MCP_CONNECTOR_BETA])
+                )
 
         # C5 semantic-drift refresh policy (SP-B-X-006 / OP-1064).
         touched_files: dict[str, int] = {}
@@ -642,6 +719,7 @@ class AnthropicClient:
                     kwargs["tools"] = tool_payload
                 if mcp_servers:
                     kwargs["mcp_servers"] = mcp_servers
+                    kwargs["betas"] = list(request_betas or [])
 
                 response = _create_message_with_cache_fallback(self._client, kwargs)
                 content = _content_to_dict(response.content)
