@@ -133,13 +133,16 @@ def args_hash(executable_args: dict) -> str:
 def prepared_action_digest(
     identity: OperationIdentity,
     executable_args: dict,
-    human_rendering: dict,
 ) -> str:
-    """Hash stable prepared-action content, excluding volatile metadata."""
+    """Hash stable prepared-action content = op-identity + executable args.
+
+    human_rendering is DESCRIPTIVE-only (P5 display) and is NOT hashed — a
+    rendering/wording change must not invalidate an otherwise-identical grant.
+    It is persisted + integrity-protected separately (prepared_actions).
+    """
     payload = bytearray(_PREPARED_ACTION_DOMAIN)
     payload.extend(_frame(op_hash(identity)))
     payload.extend(_frame(args_hash(executable_args)))
-    payload.extend(_frame(_canonical_json(human_rendering)))
     return hashlib.sha256(payload).hexdigest()
 
 

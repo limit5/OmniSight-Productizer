@@ -84,20 +84,17 @@ def test_op_hash_and_canonical_bytes_are_deterministic_and_sensitive() -> None:
 def test_prepared_action_digest_is_volatile_free_and_content_sensitive() -> None:
     identity = _identity()
     executable_args = {"path": "result.txt", "options": {"mode": "safe"}}
-    human_rendering = {"summary": "Write result.txt", "risk": "low"}
 
-    first = prepared_action_digest(identity, executable_args, human_rendering)
-    second = prepared_action_digest(identity, executable_args, human_rendering)
+    first = prepared_action_digest(identity, executable_args)
+    second = prepared_action_digest(identity, executable_args)
     assert first == second  # prepare time is deliberately not an input
     assert first != prepared_action_digest(
         identity,
         {"path": "other.txt", "options": {"mode": "safe"}},
-        human_rendering,
     )
     assert first != prepared_action_digest(
-        identity,
+        _identity(tool_name="read_file"),
         executable_args,
-        {"summary": "Write result.txt", "risk": "high"},
     )
 
 
