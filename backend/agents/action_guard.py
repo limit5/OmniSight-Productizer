@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from backend import metrics
 from backend.agents import tool_registry
@@ -30,6 +31,10 @@ from backend.agents.authorization_kernel import (
     authorize_action,
 )
 from backend.agents.execution_context import ExecutionContext, for_unbound
+from backend.agents.provenance import audit_ids
+
+if TYPE_CHECKING:
+    from backend.agents.provenance import TurnProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +181,7 @@ def guard_tool_dispatch(
     raw_args: dict,
     execution_context: ExecutionContext | None,
     schema_version: str = "v1",
-    provenance_snapshot_ids: tuple[str, ...] = (),
+    turn_provenance: "TurnProvenance | None" = None,
 ) -> GuardOutcome:
     """Two-stage, telemetry-isolated dispatch guard.
 
@@ -197,6 +202,7 @@ def guard_tool_dispatch(
             if execution_context is not None
             else for_unbound()
         )
+        _ids = audit_ids(turn_provenance) if turn_provenance is not None else ()
         decision = authorize_action(
             ctx,
             OperationRequest(
@@ -205,7 +211,7 @@ def guard_tool_dispatch(
                 schema_version=schema_version,
                 raw_args=raw_args,
             ),
-            provenance_snapshot_ids,
+            provenance_snapshot_ids=_ids,
         )
         family = decision.operation_descriptor.family
         mode = resolve_mode(adapter_namespace, family)

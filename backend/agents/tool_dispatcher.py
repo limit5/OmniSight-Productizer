@@ -58,6 +58,7 @@ from backend.agents.tool_schemas import get_schema
 
 if TYPE_CHECKING:
     from backend.agents.execution_context import ExecutionContext
+    from backend.agents.provenance import TurnProvenance
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,7 @@ class ToolDispatcher:
         tool_input: dict[str, Any],
         *,
         execution_context: "ExecutionContext | None" = None,
-        provenance_snapshot_ids: tuple[str, ...] = (),
+        turn_provenance: "TurnProvenance | None" = None,
     ) -> ToolResult:
         """Execute a tool by name, returning a ToolResult.
 
@@ -211,9 +212,9 @@ class ToolDispatcher:
         ctx falls back to ``for_unbound()`` INSIDE the guard and shows up
         as ``authorization_source="unbound"`` in the guard metric.
 
-        ``provenance_snapshot_ids`` (U6-0 T5b-1a) is a pure passthrough
-        to the guard for INV-3 audit; an empty tuple is the dormant
-        default and nothing consumes the ids until T9/T10.
+        ``turn_provenance`` (U6-0 G0b) is a pure passthrough to the guard,
+        which derives the existing INV-3 audit ids. The whole value remains
+        dormant until the later grant-binding leaf consumes it.
         """
         started_at = time.perf_counter()
         input_size = args_size_bytes(tool_input)
@@ -246,7 +247,7 @@ class ToolDispatcher:
             tool_name=tool_name,
             raw_args=tool_input,
             execution_context=execution_context,
-            provenance_snapshot_ids=provenance_snapshot_ids,
+            turn_provenance=turn_provenance,
         )
         if not outcome.proceed:
             emit_tool_invocation(

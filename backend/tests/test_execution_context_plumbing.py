@@ -94,9 +94,9 @@ class _RecordingDispatcher:
         tool_name: str,
         tool_input: dict[str, Any],
         execution_context: Any = None,
-        provenance_snapshot_ids: tuple[str, ...] = (),
+        turn_provenance: Any = None,
     ) -> ToolResult:
-        del tool_name, tool_input, provenance_snapshot_ids
+        del tool_name, tool_input, turn_provenance
         self.param_contexts.append(execution_context)
         self.active_contexts.append(get_active_execution_context())
         await asyncio.sleep(0)  # yield so concurrent tasks interleave
@@ -300,9 +300,9 @@ async def test_end_to_end_parent_ctx_reaches_dispatcher_and_child_sub_agent(
             tool_name: str,
             tool_input: dict[str, Any],
             execution_context: Any = None,
-            provenance_snapshot_ids: tuple[str, ...] = (),
+            turn_provenance: Any = None,
         ) -> ToolResult:
-            del tool_name, provenance_snapshot_ids
+            del tool_name, turn_provenance
             self.param_contexts.append(execution_context)
             content = await agent_handler(tool_input)
             return ToolResult(tool_use_id=tool_use_id, content=content)
