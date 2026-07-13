@@ -1151,7 +1151,10 @@ CREATE TABLE IF NOT EXISTS action_grants (
     recovery_mode           TEXT NOT NULL DEFAULT 'non_replayable'
                             CHECK (recovery_mode IN ('non_replayable', 'sink_idempotency_key', 'read_after_write')),
     state                   TEXT NOT NULL DEFAULT 'pending'
-                            CHECK (state IN ('pending', 'executing', 'consumed', 'expired')),
+                            CHECK (state IN (
+                                'pending', 'executing', 'consumed', 'expired',
+                                'failed', 'manual'
+                            )),
     created_at              TEXT NOT NULL DEFAULT (datetime('now')),
     expires_at              TEXT NOT NULL,
     UNIQUE (tenant_id, challenge_id),
@@ -1201,6 +1204,7 @@ CREATE TABLE IF NOT EXISTS resume_jobs (
                        )),
     lease_owner        TEXT,
     lease_expires_at   TEXT,
+    lease_epoch        INTEGER NOT NULL DEFAULT 0,
     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (tenant_id, grant_id),
     UNIQUE (tenant_id, resume_id),
@@ -1220,6 +1224,26 @@ CREATE TABLE IF NOT EXISTS execution_results (
     FOREIGN KEY (tenant_id, grant_id)
         REFERENCES action_grants (tenant_id, grant_id)
 );
+
+-- U6-0 T9/T10 G5a-2 (OP-2641): append-only execution attempt observations.
+CREATE TABLE IF NOT EXISTS execution_attempts (
+    attempt_id  TEXT PRIMARY KEY,
+    grant_id    TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+    outcome     TEXT NOT NULL CHECK (outcome IN (
+                    'applied', 'definitely_not_applied', 'unknown'
+                )),
+    evidence    TEXT NOT NULL DEFAULT '',
+    error       TEXT NOT NULL DEFAULT '',
+    lease_owner TEXT NOT NULL DEFAULT '',
+    lease_epoch INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, attempt_id),
+    FOREIGN KEY (tenant_id, grant_id)
+        REFERENCES action_grants (tenant_id, grant_id)
+);
+CREATE INDEX IF NOT EXISTS idx_execution_attempts_tenant_grant
+    ON execution_attempts(tenant_id, grant_id);
 
 CREATE TABLE IF NOT EXISTS debug_findings (
     id              TEXT PRIMARY KEY,
@@ -4569,7 +4593,7 @@ async def expire_stale(conn) -> dict[str, int]:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Durable resume jobs and execution results (U6-0 T9/T10 G4a-2)
+#  Durable resume jobs, execution attempts, and results (U6-0 T9/T10 G4a/G5a)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 async def put_resume_job(
@@ -4677,6 +4701,60 @@ async def get_execution_result(
     result = dict(row)
     result["ambiguous"] = bool(result["ambiguous"])
     return result
+
+
+async def put_execution_attempt(
+    conn,
+    *,
+    attempt_id: str,
+    tenant_id: str,
+    grant_id: str,
+    outcome: str,
+    evidence: str = "",
+    error: str = "",
+    lease_owner: str = "",
+    lease_epoch: int = 0,
+) -> bool:
+    """Append one execution attempt, idempotently keyed by attempt ID."""
+    if not tenant_id or not attempt_id or not grant_id:
+        raise ValueError("tenant_id, attempt_id, and grant_id must be non-empty")
+
+    row = await conn.fetchrow(
+        """INSERT INTO execution_attempts
+           (attempt_id, tenant_id, grant_id, outcome, evidence, error,
+            lease_owner, lease_epoch)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (attempt_id) DO NOTHING
+           RETURNING attempt_id""",
+        attempt_id,
+        tenant_id,
+        grant_id,
+        outcome,
+        evidence,
+        error,
+        lease_owner,
+        lease_epoch,
+    )
+    return row is not None
+
+
+async def get_execution_attempts(
+    conn,
+    grant_id: str,
+    *,
+    tenant_id: str,
+) -> list[dict]:
+    """Return a grant's execution attempts only within ``tenant_id``."""
+    if not tenant_id:
+        raise ValueError("tenant_id must be non-empty")
+    rows = await conn.fetch(
+        "SELECT attempt_id, grant_id, tenant_id, outcome, evidence, error, "
+        "lease_owner, lease_epoch, created_at FROM execution_attempts "
+        "WHERE grant_id = $1 AND tenant_id = $2 ORDER BY created_at",
+        grant_id,
+        tenant_id,
+    )
+    return [dict(row) for row in rows]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

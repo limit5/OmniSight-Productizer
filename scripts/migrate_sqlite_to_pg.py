@@ -393,6 +393,8 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "challenges",
     # U6-0 G4a-1 (0264): tenant FK; app-generated TEXT PK (not identity).
     "action_grants",
+    # U6-0 G5a-2 (0269): grant/tenant FK; app-generated TEXT PK (not identity).
+    "execution_attempts",
     # U6-0 G4a-2 (0265): tenant FK; app-generated TEXT PK (not identity).
     "resume_jobs",
     # U6-0 G4a-2 (0265): tenant FK; app-generated TEXT PK (not identity).
