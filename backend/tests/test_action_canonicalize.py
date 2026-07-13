@@ -6,6 +6,7 @@ import ast
 import dataclasses
 import pathlib
 import sys
+import threading
 from collections.abc import Iterator, Mapping
 
 import pytest
@@ -14,11 +15,13 @@ from backend.agents import action_canonicalize
 from backend.agents.action_canonicalize import (
     CanonicalizationContext,
     CanonicalizationError,
+    CanonicalizerSpec,
     PreparedAction,
     _registry_restore,
     _registry_snapshot,
     canonicalize,
     register_canonicalizer,
+    register_canonicalizers_atomic,
 )
 from backend.agents.tool_registry import OperationDescriptor, resolve
 
@@ -145,7 +148,7 @@ def test_canonicalize_requires_exact_registry_key() -> None:
     assert caught.value.reason == "no_canonicalizer:builtin/write_file@v2"
 
 
-def test_register_canonicalizer_rejects_duplicate_key() -> None:
+def test_register_canonicalizer_rejects_conflicting_duplicate_key() -> None:
     register_canonicalizer(
         "builtin",
         _TOOL_NAME,
@@ -153,13 +156,212 @@ def test_register_canonicalizer_rejects_duplicate_key() -> None:
         lambda _context, _args: _prepared_action(),
     )
 
-    with pytest.raises(ValueError, match="duplicate canonicalizer"):
+    with pytest.raises(
+        ValueError,
+        match="conflicting_canonicalizer_registration",
+    ):
         register_canonicalizer(
             "builtin",
             _TOOL_NAME,
             "v1",
             lambda _context, _args: _prepared_action(),
         )
+
+
+def test_register_canonicalizer_identical_republish_is_noop() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    key = ("builtin", _TOOL_NAME, "v1")
+    register_canonicalizer(*key, canonicalizer)
+
+    register_canonicalizer(*key, canonicalizer)
+
+    snapshot = _registry_snapshot()
+    assert sum(registered == key for registered in snapshot) == 1
+    assert snapshot[key].fn is canonicalizer
+
+
+def test_register_canonicalizers_atomic_conflict_is_all_or_nothing() -> None:
+    def existing_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    def new_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    def conflicting_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    existing_key = ("builtin", "existing_writer", "v1")
+    new_key = ("builtin", "new_writer", "v1")
+    register_canonicalizers_atomic(
+        [CanonicalizerSpec(*existing_key, existing_canonicalizer)]
+    )
+    before = _registry_snapshot()
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting_canonicalizer_registration",
+    ):
+        register_canonicalizers_atomic(
+            [
+                CanonicalizerSpec(*new_key, new_canonicalizer),
+                CanonicalizerSpec(*existing_key, conflicting_canonicalizer),
+            ]
+        )
+
+    assert _registry_snapshot() == before
+    assert new_key not in _registry_snapshot()
+
+
+def test_register_canonicalizers_atomic_rejects_same_batch_duplicate() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    key = ("builtin", "duplicate_writer", "v1")
+    before = _registry_snapshot()
+
+    with pytest.raises(ValueError, match="duplicate_key_in_batch"):
+        register_canonicalizers_atomic(
+            [
+                CanonicalizerSpec(*key, canonicalizer),
+                CanonicalizerSpec(*key, canonicalizer),
+            ]
+        )
+
+    assert _registry_snapshot() == before
+
+
+def test_register_canonicalizers_atomic_rejects_reload_conflict() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    def reloaded_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    key = ("builtin", "reload_writer", "v1")
+    register_canonicalizers_atomic([CanonicalizerSpec(*key, canonicalizer)])
+    before = _registry_snapshot()
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting_canonicalizer_registration",
+    ):
+        register_canonicalizers_atomic(
+            [CanonicalizerSpec(*key, reloaded_canonicalizer)]
+        )
+
+    assert _registry_snapshot() == before
+    assert _registry_snapshot()[key].fn is canonicalizer
+
+
+def test_register_canonicalizers_atomic_identical_republish_is_noop() -> None:
+    def first_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    def second_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    specs = [
+        CanonicalizerSpec("builtin", "first_writer", "v1", first_canonicalizer),
+        CanonicalizerSpec("builtin", "second_writer", "v1", second_canonicalizer),
+    ]
+    register_canonicalizers_atomic(specs)
+    before = _registry_snapshot()
+
+    register_canonicalizers_atomic(specs)
+
+    assert _registry_snapshot() == before
+    assert _registry_snapshot()[
+        ("builtin", "first_writer", "v1")
+    ].fn is first_canonicalizer
+    assert _registry_snapshot()[
+        ("builtin", "second_writer", "v1")
+    ].fn is second_canonicalizer
+
+
+def test_registry_snapshot_restore_preserves_whole_entries() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    specs = [
+        CanonicalizerSpec("builtin", f"writer_{index}", "v1", canonicalizer)
+        for index in range(5)
+    ]
+    register_canonicalizers_atomic(specs)
+    snapshot = _registry_snapshot()
+    sixth_key = ("builtin", "writer_5", "v1")
+    register_canonicalizers_atomic(
+        [CanonicalizerSpec(*sixth_key, canonicalizer)]
+    )
+
+    _registry_restore(snapshot)
+
+    restored = _registry_snapshot()
+    assert restored == snapshot
+    assert sixth_key not in restored
+    for spec in specs:
+        entry = restored[
+            (spec.adapter_namespace, spec.tool_name, spec.schema_version)
+        ]
+        assert entry.fn is canonicalizer
+        assert entry.refinements == frozenset()
+
+
+def test_register_canonicalizer_shim_honors_registry_lock() -> None:
+    started = threading.Event()
+    done = threading.Event()
+
+    def worker() -> None:
+        started.set()
+        register_canonicalizer(
+            "builtin",
+            "locked_probe",
+            "v1",
+            lambda _context, _args: _prepared_action(),
+        )
+        done.set()
+
+    with action_canonicalize._REGISTRY_LOCK:
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert started.wait(timeout=2.0)
+        assert not done.wait(timeout=0.2)
+        assert ("builtin", "locked_probe", "v1") not in _registry_snapshot()
+
+    thread.join(timeout=2.0)
+    assert done.is_set()
+    assert _registry_snapshot()[("builtin", "locked_probe", "v1")].fn is not None
 
 
 def test_prepared_action_is_frozen() -> None:

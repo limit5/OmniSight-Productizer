@@ -16,8 +16,10 @@ from backend.agents.action_canonicalize import (
     _registry_restore,
     _registry_snapshot,
     canonicalize,
+    register_canonicalizer,
 )
 from backend.agents.canonicalize_code_write_file import (
+    _canon_sdk_write,
     register_code_write_file_canonicalizers,
 )
 from backend.agents.tool_registry import resolve
@@ -479,7 +481,7 @@ def test_import_direction_is_stdlib_plus_canonicalization_leafs() -> None:
         assert root_module in sys.stdlib_module_names, f"non-leaf import: {module}"
 
 
-def test_registration_adds_exact_keys_and_rejects_duplicate() -> None:
+def test_registration_adds_exact_keys_and_is_idempotent() -> None:
     before = _registry_snapshot()
     expected = {
         ("specialist", "write_file", "v1"),
@@ -493,5 +495,26 @@ def test_registration_adds_exact_keys_and_rejects_duplicate() -> None:
 
     after = _registry_snapshot()
     assert set(after) - set(before) == expected
-    with pytest.raises(ValueError, match="duplicate canonicalizer"):
+    assert after[("runner_sdk", "Write", "v1")].fn is _canon_sdk_write
+
+    register_code_write_file_canonicalizers()
+
+    assert _registry_snapshot() == after
+
+
+def test_family_registration_mid_batch_conflict_does_not_mutate() -> None:
+    register_canonicalizer(
+        "runner_sdk",
+        "Write",
+        "v1",
+        lambda _context, _args: _canon_sdk_write(_context, _args),
+    )
+    before = _registry_snapshot()
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting_canonicalizer_registration",
+    ):
         register_code_write_file_canonicalizers()
+
+    assert _registry_snapshot() == before

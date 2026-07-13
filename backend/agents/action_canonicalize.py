@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from collections.abc import Callable, Mapping
+import threading
+from collections.abc import Callable, Mapping, Sequence
 
 from backend.agents.tool_registry import OperationDescriptor, resolve
 
@@ -59,8 +60,56 @@ Canonicalizer = Callable[
     [CanonicalizationContext, Mapping[str, object]], PreparedAction
 ]
 
+
+@dataclasses.dataclass(frozen=True)
+class CanonicalizerEntry:
+    fn: "Canonicalizer"
+    refinements: frozenset[OperationDescriptor] = frozenset()
+
+
 _CanonicalizerKey = tuple[str, str, str]
-_CANONICALIZERS: dict[_CanonicalizerKey, Canonicalizer] = {}
+_CANONICALIZERS: dict[_CanonicalizerKey, CanonicalizerEntry] = {}
+_REGISTRY_LOCK = threading.RLock()
+
+
+@dataclasses.dataclass(frozen=True)
+class CanonicalizerSpec:
+    adapter_namespace: str
+    tool_name: str
+    schema_version: str
+    fn: "Canonicalizer"
+    refinements: frozenset[OperationDescriptor] = frozenset()
+
+
+def _entry_identical(a: CanonicalizerEntry, b: CanonicalizerEntry) -> bool:
+    return a.fn is b.fn and a.refinements == b.refinements
+
+
+def register_canonicalizers_atomic(
+    specs: "Sequence[CanonicalizerSpec]",
+) -> None:
+    """Publish atomically; identical is a no-op and any conflict aborts."""
+    with _REGISTRY_LOCK:
+        staged: dict[_CanonicalizerKey, CanonicalizerEntry] = {}
+        for spec in specs:
+            key = (
+                spec.adapter_namespace,
+                spec.tool_name,
+                spec.schema_version,
+            )
+            entry = CanonicalizerEntry(
+                fn=spec.fn,
+                refinements=frozenset(spec.refinements),
+            )
+            if key in staged:
+                raise ValueError(f"duplicate_key_in_batch:{key}")
+            existing = _CANONICALIZERS.get(key)
+            if existing is not None and not _entry_identical(existing, entry):
+                raise ValueError(
+                    f"conflicting_canonicalizer_registration:{key}"
+                )
+            staged[key] = entry
+        _CANONICALIZERS.update(staged)
 
 
 def register_canonicalizer(
@@ -69,14 +118,10 @@ def register_canonicalizer(
     schema_version: str,
     fn: Canonicalizer,
 ) -> None:
-    """Register one exact-key canonicalizer without allowing overwrite."""
-    key = (adapter_namespace, tool_name, schema_version)
-    if key in _CANONICALIZERS:
-        raise ValueError(
-            "duplicate canonicalizer: "
-            f"{adapter_namespace}/{tool_name}@{schema_version}"
-        )
-    _CANONICALIZERS[key] = fn
+    """Register one exact-key canonicalizer through the atomic API."""
+    register_canonicalizers_atomic(
+        [CanonicalizerSpec(adapter_namespace, tool_name, schema_version, fn)]
+    )
 
 
 def canonicalize(
@@ -88,13 +133,13 @@ def canonicalize(
 ) -> PreparedAction:
     """Dispatch an exact-key canonicalizer or fail closed."""
     key = (adapter_namespace, tool_name, schema_version)
-    canonicalizer = _CANONICALIZERS.get(key)
+    entry = _CANONICALIZERS.get(key)
     target = f"{adapter_namespace}/{tool_name}@{schema_version}"
-    if canonicalizer is None:
+    if entry is None:
         raise CanonicalizationError(f"no_canonicalizer:{target}")
 
     try:
-        prepared = canonicalizer(context, raw_args)
+        prepared = entry.fn(context, raw_args)
     except CanonicalizationError:
         raise
     except Exception as exc:
@@ -132,12 +177,16 @@ def _freeze_json(value: Mapping[str, object]) -> Mapping[str, object]:
         raise CanonicalizationError("non_serializable_args") from exc
 
 
-def _registry_snapshot() -> dict[_CanonicalizerKey, Canonicalizer]:
-    """Return a shallow registry copy for test isolation."""
-    return _CANONICALIZERS.copy()
+def _registry_snapshot() -> dict[_CanonicalizerKey, CanonicalizerEntry]:
+    """Return a whole-entry registry copy for test isolation."""
+    with _REGISTRY_LOCK:
+        return dict(_CANONICALIZERS)
 
 
-def _registry_restore(snap: dict[_CanonicalizerKey, Canonicalizer]) -> None:
+def _registry_restore(
+    snap: dict[_CanonicalizerKey, CanonicalizerEntry],
+) -> None:
     """Restore a test snapshot while preserving the registry object."""
-    _CANONICALIZERS.clear()
-    _CANONICALIZERS.update(snap)
+    with _REGISTRY_LOCK:
+        _CANONICALIZERS.clear()
+        _CANONICALIZERS.update(snap)

@@ -8,8 +8,9 @@ from pathlib import Path
 from backend.agents.action_canonicalize import (
     CanonicalizationContext,
     CanonicalizationError,
+    CanonicalizerSpec,
     PreparedAction,
-    register_canonicalizer,
+    register_canonicalizers_atomic,
 )
 from backend.agents.tool_registry import resolve
 
@@ -245,13 +246,25 @@ def _canon_str_replace(
 
 def register_code_write_file_canonicalizers() -> None:
     """Register the five code-write file adapters."""
-    register_canonicalizer("specialist", "write_file", "v1", _canon_write_file)
-    register_canonicalizer("specialist", "write_yaml", "v1", _canon_write_yaml)
-    register_canonicalizer("runner_sdk", "Write", "v1", _canon_sdk_write)
-    register_canonicalizer("runner_sdk", "Edit", "v1", _canon_sdk_edit)
-    register_canonicalizer(
-        "runner_sdk",
-        "str_replace_based_edit_tool",
-        "v1",
-        _canon_str_replace,
+    register_canonicalizers_atomic(
+        [
+            CanonicalizerSpec(
+                "specialist", "write_file", "v1", _canon_write_file
+            ),
+            CanonicalizerSpec(
+                "specialist", "write_yaml", "v1", _canon_write_yaml
+            ),
+            CanonicalizerSpec(
+                "runner_sdk", "Write", "v1", _canon_sdk_write
+            ),
+            CanonicalizerSpec(
+                "runner_sdk", "Edit", "v1", _canon_sdk_edit
+            ),
+            CanonicalizerSpec(
+                "runner_sdk",
+                "str_replace_based_edit_tool",
+                "v1",
+                _canon_str_replace,
+            ),
+        ]
     )
