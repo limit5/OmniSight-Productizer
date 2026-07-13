@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
@@ -276,6 +277,50 @@ class DispatchClient:
     bot_email: str
 
 
+_RETRY_MAX_ATTEMPTS = 3  # 1 initial + 2 retries
+_RETRY_BASE_BACKOFF = 0.4  # seconds
+_RETRY_MAX_BACKOFF = 2.0  # cap any single sleep (incl. Retry-After)
+_RETRY_SLEEP_BUDGET = 2.0  # cumulative cap per _request_raw call
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})  # reads only
+_READ_ONLY_POST_SUFFIXES = ("/search/jql",)
+
+
+def _request_is_retryable(method: str, url: str) -> bool:
+    m = method.upper()
+    if m == "GET":
+        return True
+    if m == "POST":
+        return any(
+            url.split("?", 1)[0].endswith(sfx)
+            for sfx in _READ_ONLY_POST_SUFFIXES
+        )
+    return False
+
+
+def _is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    return isinstance(getattr(exc, "reason", None), TimeoutError)
+
+
+def _retry_delay(
+    attempt: int,
+    http_error,
+    remaining_budget: float,
+) -> float:
+    """Return the next sleep, clamped to the remaining cumulative budget."""
+    delay = min(
+        _RETRY_BASE_BACKOFF * (2 ** (attempt - 1)),
+        _RETRY_MAX_BACKOFF,
+    )
+    if http_error is not None and getattr(http_error, "headers", None):
+        retry_after = http_error.headers.get("Retry-After")
+        if retry_after and retry_after.strip().isdigit():
+            delay = min(float(retry_after.strip()), _RETRY_MAX_BACKOFF)
+    delay += random.uniform(0, _RETRY_BASE_BACKOFF)
+    return max(0.0, min(delay, remaining_budget))
+
+
 def make_client(agent_class: str, instance_id: str | None = None) -> DispatchClient:
     if instance_id is None:
         instance_id = _instance_id_from_env()
@@ -328,8 +373,48 @@ def _request_raw(
         url, data=data, method=method,
         headers=headers,
     )
+    retryable = _request_is_retryable(method, url)
+
+    def _open():
+        attempt = 0
+        slept = 0.0
+        while True:
+            attempt += 1
+            try:
+                return urllib.request.urlopen(req, timeout=30)
+            except urllib.error.HTTPError as e:
+                if (
+                    retryable
+                    and e.code in _RETRYABLE_STATUS
+                    and attempt < _RETRY_MAX_ATTEMPTS
+                ):
+                    delay = _retry_delay(
+                        attempt,
+                        e,
+                        _RETRY_SLEEP_BUDGET - slept,
+                    )
+                    slept += delay
+                    time.sleep(delay)
+                    continue
+                raise
+            except (ConnectionError, TimeoutError, urllib.error.URLError) as e:
+                if (
+                    retryable
+                    and attempt < _RETRY_MAX_ATTEMPTS
+                    and not _is_timeout(e)
+                ):
+                    delay = _retry_delay(
+                        attempt,
+                        None,
+                        _RETRY_SLEEP_BUDGET - slept,
+                    )
+                    slept += delay
+                    time.sleep(delay)
+                    continue
+                raise
+
     try:
-        with BREAKERS["jira_rest"].call(urllib.request.urlopen, req, timeout=30) as resp:
+        with BREAKERS["jira_rest"].call(_open) as resp:
             payload = resp.read().decode()
             return json.loads(payload) if payload else {}
     except urllib.error.HTTPError as e:

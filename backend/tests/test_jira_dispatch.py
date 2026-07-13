@@ -10,9 +10,11 @@ JIRA credentials absent, so this suite runs offline cleanly.
 """
 from __future__ import annotations
 
+import email.message
 import json
 import subprocess
 import sys
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -23,6 +25,7 @@ from hypothesis import strategies as st
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
+from backend.agents import circuit_breaker
 from backend.agents import jira_dispatch as jd
 from backend.agents.provider_quota_tracker import QuotaState
 
@@ -1290,7 +1293,7 @@ def test_pickup_staleness_abstains_at_fifteen_days(monkeypatch) -> None:
     assert "rebase the Gerrit patchset manually" in comments[0]
 
 
-# ── OP-687: mutex enforcement at pre-pickup ───────────────────────
+# ── Shared JIRA request fixture ──────────────────────────────────
 
 
 def _fake_dispatch_client() -> jd.DispatchClient:
@@ -1302,6 +1305,288 @@ def _fake_dispatch_client() -> jd.DispatchClient:
         bot_account_id="acc-test",
         bot_email="bot@example.invalid",
     )
+
+
+# ── OP-2646: transient JIRA read retries ─────────────────────────
+
+
+class _FakeJiraResponse:
+    def __init__(self, payload: bytes = b'{"ok": true}') -> None:
+        self.payload = payload
+
+    def read(self) -> bytes:
+        return self.payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+
+def _fake_http_error(
+    url: str,
+    code: int = 503,
+    retry_after: str | None = None,
+) -> urllib.error.HTTPError:
+    headers = None
+    if retry_after is not None:
+        headers = email.message.Message()
+        headers["Retry-After"] = retry_after
+    return urllib.error.HTTPError(
+        url=url,
+        code=code,
+        msg="",
+        hdrs=headers,
+        fp=None,
+    )
+
+
+def _install_request_raw_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    outcomes: list[object],
+) -> tuple[list[object], list[float]]:
+    remaining = iter(outcomes)
+    calls: list[object] = []
+    sleeps: list[float] = []
+
+    def fake_urlopen(req, timeout):
+        calls.append((req, timeout))
+        outcome = next(remaining)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(jd.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(jd.time, "sleep", sleeps.append)
+    return calls, sleeps
+
+
+def test_request_raw_retries_get_503_then_returns_response(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [_fake_http_error(url), _FakeJiraResponse()],
+    )
+
+    result = jd._request_raw("GET", url, "Basic test", None)
+
+    assert result == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_request_retries_read_only_search_post(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/search/jql"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [_fake_http_error(url), _FakeJiraResponse()],
+    )
+
+    result = jd._request(
+        _fake_dispatch_client(),
+        "POST",
+        "/search/jql",
+        {"jql": "project = OP"},
+    )
+
+    assert result == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_request_raw_does_not_retry_write_post(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/issue/OP-2646/comment"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [_fake_http_error(url)],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        jd._request_raw(
+            "POST",
+            url,
+            "Basic test",
+            {"body": "comment"},
+            idem_key="comment-1",
+        )
+
+    assert "→ 503:" in str(exc_info.value)
+    assert len(calls) == 1
+
+
+def test_request_raw_does_not_retry_put(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/issue/OP-2646"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [_fake_http_error(url)],
+    )
+
+    with pytest.raises(RuntimeError):
+        jd._request_raw("PUT", url, "Basic test", {"fields": {}})
+
+    assert len(calls) == 1
+
+
+def test_request_raw_does_not_retry_get_400(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [_fake_http_error(url, code=400)],
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        jd._request_raw("GET", url, "Basic test", None)
+
+    assert "→ 400:" in str(exc_info.value)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TimeoutError("timed out"),
+        urllib.error.URLError(reason=TimeoutError("timed out")),
+    ],
+    ids=["timeout-error", "url-error-timeout-reason"],
+)
+def test_request_raw_does_not_retry_timeouts(monkeypatch, error) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, _ = _install_request_raw_harness(monkeypatch, [error])
+
+    with pytest.raises(type(error)):
+        jd._request_raw("GET", url, "Basic test", None)
+
+    assert len(calls) == 1
+
+
+def test_request_raw_retries_connection_reset(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [ConnectionResetError("reset"), _FakeJiraResponse()],
+    )
+
+    result = jd._request_raw("GET", url, "Basic test", None)
+
+    assert result == {"ok": True}
+    assert len(calls) == 2
+
+
+def test_request_raw_stops_after_max_attempts(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [_fake_http_error(url) for _ in range(jd._RETRY_MAX_ATTEMPTS)],
+    )
+
+    with pytest.raises(RuntimeError):
+        jd._request_raw("GET", url, "Basic test", None)
+
+    assert len(calls) == jd._RETRY_MAX_ATTEMPTS
+
+
+def test_request_raw_exhaustion_records_one_breaker_failure(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    _install_request_raw_harness(
+        monkeypatch,
+        [_fake_http_error(url) for _ in range(jd._RETRY_MAX_ATTEMPTS)],
+    )
+
+    with pytest.raises(RuntimeError):
+        jd._request_raw("GET", url, "Basic test", None)
+
+    assert circuit_breaker.BREAKERS["jira_rest"].consecutive_failures == 1
+
+
+def test_request_raw_opens_breaker_after_five_exhaustions(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, _ = _install_request_raw_harness(
+        monkeypatch,
+        [
+            _fake_http_error(url)
+            for _ in range(5 * jd._RETRY_MAX_ATTEMPTS)
+        ],
+    )
+    monkeypatch.setattr(circuit_breaker, "_notify_operator", lambda service: None)
+
+    for _ in range(5):
+        with pytest.raises(RuntimeError):
+            jd._request_raw("GET", url, "Basic test", None)
+
+    breaker = circuit_breaker.BREAKERS["jira_rest"]
+    assert breaker.consecutive_failures == 5
+    assert breaker.state == "open"
+    assert len(calls) == 5 * jd._RETRY_MAX_ATTEMPTS
+
+
+def test_request_raw_preopened_breaker_skips_urlopen(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    calls, _ = _install_request_raw_harness(monkeypatch, [])
+    breaker = circuit_breaker.BREAKERS["jira_rest"]
+    breaker.state = "open"
+    breaker.opened_at = jd.time.time()
+
+    with pytest.raises(circuit_breaker.CircuitBreakerOpen):
+        jd._request_raw(
+            "GET",
+            "https://test.invalid/rest/api/3/myself",
+            "Basic test",
+            None,
+        )
+
+    assert calls == []
+
+
+def test_request_raw_honours_retry_after_with_jitter(monkeypatch) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, sleeps = _install_request_raw_harness(
+        monkeypatch,
+        [
+            _fake_http_error(url, code=429, retry_after="1"),
+            _FakeJiraResponse(),
+        ],
+    )
+    monkeypatch.setattr(jd.random, "uniform", lambda low, high: 0.2)
+
+    result = jd._request_raw("GET", url, "Basic test", None)
+
+    assert result == {"ok": True}
+    assert len(calls) == 2
+    assert sleeps == pytest.approx([1.2])
+
+
+def test_request_raw_clamps_cumulative_retry_after_sleep_budget(
+    monkeypatch,
+) -> None:
+    circuit_breaker.reset_for_tests()
+    url = "https://test.invalid/rest/api/3/myself"
+    calls, sleeps = _install_request_raw_harness(
+        monkeypatch,
+        [
+            _fake_http_error(url, retry_after="100")
+            for _ in range(jd._RETRY_MAX_ATTEMPTS)
+        ],
+    )
+
+    with pytest.raises(RuntimeError):
+        jd._request_raw("GET", url, "Basic test", None)
+
+    assert len(calls) == jd._RETRY_MAX_ATTEMPTS
+    assert len(sleeps) == jd._RETRY_MAX_ATTEMPTS - 1
+    assert sum(sleeps) <= jd._RETRY_SLEEP_BUDGET
+
+
+# ── OP-687: mutex enforcement at pre-pickup ───────────────────────
 
 
 class _RevertCleanupFakeJira:
