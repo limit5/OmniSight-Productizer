@@ -388,6 +388,8 @@ def test_view_canonical_verdict_diverges_from_name_verdict() -> None:
             workspace_id="w",
             workspace_root="/w",
             adapter_namespace="runner_sdk",
+            tool_name="str_replace_based_edit_tool",
+            schema_version="v1",
         )
         prepared = action_canonicalize.canonicalize(
             workspace_context,

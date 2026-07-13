@@ -43,11 +43,15 @@ def restore_canonicalizer_registry() -> Iterator[None]:
 def _context(
     tmp_path: pathlib.Path,
     adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
 ) -> CanonicalizationContext:
     return CanonicalizationContext(
         workspace_id="ws-1",
         workspace_root=str(tmp_path),
         adapter_namespace=adapter_namespace,
+        tool_name=tool_name,
+        schema_version=schema_version,
     )
 
 
@@ -113,7 +117,7 @@ def test_each_writer_returns_workspace_relative_structured_executable_args(
     relative_path = pathlib.Path(raw_path).as_posix()
 
     prepared = canonicalize(
-        _context(tmp_path, adapter),
+        _context(tmp_path, adapter, tool, "v1"),
         adapter,
         tool,
         "v1",
@@ -155,7 +159,7 @@ def test_path_escape_fails_closed(
 
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(
-            _context(tmp_path, adapter),
+            _context(tmp_path, adapter, tool, "v1"),
             adapter,
             tool,
             "v1",
@@ -172,6 +176,8 @@ def test_empty_path_fails_closed() -> None:
         workspace_id="ws-1",
         workspace_root="/workspace",
         adapter_namespace="specialist",
+        tool_name="write_yaml",
+        schema_version="v1",
     )
 
     with pytest.raises(CanonicalizationError) as caught:
@@ -203,7 +209,7 @@ def test_missing_or_invalid_arg_fails_closed(
 
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(
-            _context(tmp_path, "specialist"),
+            _context(tmp_path, "specialist", "write_file", "v1"),
             "specialist",
             "write_file",
             "v1",
@@ -219,7 +225,7 @@ def test_edit_noop_fails_closed(tmp_path: pathlib.Path) -> None:
 
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(
-            _context(tmp_path, "runner_sdk"),
+            _context(tmp_path, "runner_sdk", "Edit", "v1"),
             "runner_sdk",
             "Edit",
             "v1",
@@ -238,7 +244,7 @@ def test_edit_replace_all_defaults_false(tmp_path: pathlib.Path) -> None:
     register_code_write_file_canonicalizers()
 
     prepared = canonicalize(
-        _context(tmp_path, "runner_sdk"),
+        _context(tmp_path, "runner_sdk", "Edit", "v1"),
         "runner_sdk",
         "Edit",
         "v1",
@@ -292,7 +298,12 @@ def test_text_editor_commands_return_structured_executable_args(
     register_code_write_file_canonicalizers()
 
     prepared = canonicalize(
-        _context(tmp_path, "runner_sdk"),
+        _context(
+            tmp_path,
+            "runner_sdk",
+            "str_replace_based_edit_tool",
+            "v1",
+        ),
         "runner_sdk",
         "str_replace_based_edit_tool",
         "v1",
@@ -331,7 +342,12 @@ def test_text_editor_view_refines_to_read_only(tmp_path: pathlib.Path) -> None:
     register_code_write_file_canonicalizers()
 
     prepared = canonicalize(
-        _context(tmp_path, "runner_sdk"),
+        _context(
+            tmp_path,
+            "runner_sdk",
+            "str_replace_based_edit_tool",
+            "v1",
+        ),
         "runner_sdk",
         "str_replace_based_edit_tool",
         "v1",
@@ -348,7 +364,12 @@ def test_text_editor_undo_edit_fails_closed(tmp_path: pathlib.Path) -> None:
 
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(
-            _context(tmp_path, "runner_sdk"),
+            _context(
+                tmp_path,
+                "runner_sdk",
+                "str_replace_based_edit_tool",
+                "v1",
+            ),
             "runner_sdk",
             "str_replace_based_edit_tool",
             "v1",
@@ -364,7 +385,12 @@ def test_text_editor_unknown_command_fails_closed(tmp_path: pathlib.Path) -> Non
 
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(
-            _context(tmp_path, "runner_sdk"),
+            _context(
+                tmp_path,
+                "runner_sdk",
+                "str_replace_based_edit_tool",
+                "v1",
+            ),
             "runner_sdk",
             "str_replace_based_edit_tool",
             "v1",
@@ -429,7 +455,12 @@ def test_text_editor_bad_command_args_fail_closed(
 
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(
-            _context(tmp_path, "runner_sdk"),
+            _context(
+                tmp_path,
+                "runner_sdk",
+                "str_replace_based_edit_tool",
+                "v1",
+            ),
             "runner_sdk",
             "str_replace_based_edit_tool",
             "v1",
@@ -445,7 +476,12 @@ def test_text_editor_create_path_escape_fails_closed(tmp_path: pathlib.Path) -> 
 
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(
-            _context(tmp_path, "runner_sdk"),
+            _context(
+                tmp_path,
+                "runner_sdk",
+                "str_replace_based_edit_tool",
+                "v1",
+            ),
             "runner_sdk",
             "str_replace_based_edit_tool",
             "v1",
@@ -461,6 +497,8 @@ def test_require_workspace_fails_closed_through_canonicalize() -> None:
         workspace_id="ws-1",
         workspace_root="",
         adapter_namespace="specialist",
+        tool_name="write_file",
+        schema_version="v1",
     )
 
     with pytest.raises(CanonicalizationError) as caught:
@@ -480,7 +518,7 @@ def test_canonicalize_deep_freezes_writer_input(tmp_path: pathlib.Path) -> None:
     raw_args = {"path": "output.txt", "content": "original"}
 
     prepared = canonicalize(
-        _context(tmp_path, "specialist"),
+        _context(tmp_path, "specialist", "write_file", "v1"),
         "specialist",
         "write_file",
         "v1",

@@ -129,6 +129,8 @@ class CanonicalizationContext:
     workspace_id: str
     workspace_root: str
     adapter_namespace: str
+    tool_name: str
+    schema_version: str
 
     def require_workspace(self) -> str:
         """Return the authoritative root, or fail closed when unbound."""
@@ -380,6 +382,12 @@ def canonicalize(
         )
 
     try:
+        _require_context_bound_to_key(
+            context,
+            adapter_namespace,
+            tool_name,
+            schema_version,
+        )
         prepared = entry.fn(context, raw_args)
         return _finalize_prepared(
             tool_name,
@@ -394,6 +402,36 @@ def canonicalize(
             f"canonicalizer_failed:{target}",
             category=CanonOutcome.INTERNAL_ERROR,
         ) from exc
+
+
+def _require_context_bound_to_key(
+    context: object,
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+) -> None:
+    """Require an exact context whose stored fields match the dispatch key.
+
+    Exact type and stored-field reads make this check non-overridable. Any
+    ordinary failure is self-normalized to a fresh ``INTERNAL_ERROR``.
+    """
+    try:
+        ok = (
+            type(context) is CanonicalizationContext
+            and type(context.adapter_namespace) is str
+            and type(context.tool_name) is str
+            and type(context.schema_version) is str
+            and context.adapter_namespace == adapter_namespace
+            and context.tool_name == tool_name
+            and context.schema_version == schema_version
+        )
+    except Exception:
+        ok = False
+    if not ok:
+        raise CanonicalizationError(
+            "context_dispatch_key_mismatch",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
 
 
 def _finalize_prepared(

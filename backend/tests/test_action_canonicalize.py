@@ -47,6 +47,15 @@ _CONTEXT = CanonicalizationContext(
     workspace_id="workspace-1",
     workspace_root="/workspace",
     adapter_namespace="builtin",
+    tool_name="write_file",
+    schema_version="v1",
+)
+_SR_CONTEXT = CanonicalizationContext(
+    workspace_id="workspace-1",
+    workspace_root="/workspace",
+    adapter_namespace="runner_sdk",
+    tool_name="str_replace_based_edit_tool",
+    schema_version="v1",
 )
 
 
@@ -179,7 +188,7 @@ def test_canonicalize_if_registered_covered_rejection_is_error() -> None:
     register_code_write_file_canonicalizers()
 
     result = canonicalize_if_registered(
-        _CONTEXT,
+        _SR_CONTEXT,
         "runner_sdk",
         "str_replace_based_edit_tool",
         "v1",
@@ -303,6 +312,194 @@ def test_canonicalize_unregistered_key_fails_closed() -> None:
     assert caught.value.reason == "no_canonicalizer:builtin/unknown@v1"
     assert caught.value.category is CanonOutcome.UNREGISTERED
     assert is_uncovered(caught.value)
+
+
+# ── OP-2655 (U6-0 AT-2): exact dispatch-key context binding ──────────
+def _assert_context_dispatch_key_mismatch(
+    error: CanonicalizationError,
+) -> None:
+    assert type(error) is CanonicalizationError
+    assert error.reason == "context_dispatch_key_mismatch"
+    assert error.category is CanonOutcome.INTERNAL_ERROR
+    assert not is_uncovered(error)
+
+
+def _register_leaf_spy(
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+) -> list[CanonicalizationContext]:
+    calls: list[CanonicalizationContext] = []
+
+    def canonicalizer(
+        context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        calls.append(context)
+        return _prepared_action(operation_descriptor=resolve(tool_name))
+
+    register_canonicalizer(
+        adapter_namespace,
+        tool_name,
+        schema_version,
+        canonicalizer,
+    )
+    return calls
+
+
+def _assert_registered_context_mismatch(
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+) -> None:
+    context_key = (
+        _CONTEXT.adapter_namespace,
+        _CONTEXT.tool_name,
+        _CONTEXT.schema_version,
+    )
+    dispatch_key = (adapter_namespace, tool_name, schema_version)
+    context_calls = _register_leaf_spy(*context_key)
+    dispatch_calls = _register_leaf_spy(*dispatch_key)
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, *dispatch_key, {})
+
+    _assert_context_dispatch_key_mismatch(caught.value)
+    assert not context_calls
+    assert not dispatch_calls
+
+
+def test_context_dispatch_key_match_calls_registered_canonicalizer() -> None:
+    calls = _register_leaf_spy("builtin", _TOOL_NAME, "v1")
+
+    prepared = canonicalize(
+        _CONTEXT,
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        {},
+    )
+
+    assert prepared.operation_descriptor == resolve(_TOOL_NAME)
+    assert calls == [_CONTEXT]
+
+
+def test_context_dispatch_key_cross_tool_mismatch_fails_closed() -> None:
+    _assert_registered_context_mismatch("builtin", "read_file", "v1")
+
+
+def test_context_dispatch_key_cross_adapter_mismatch_fails_closed() -> None:
+    _assert_registered_context_mismatch("other_adapter", _TOOL_NAME, "v1")
+
+
+def test_context_dispatch_key_cross_schema_mismatch_fails_closed() -> None:
+    _assert_registered_context_mismatch("builtin", _TOOL_NAME, "v2")
+
+
+def test_context_dispatch_key_duck_typed_liar_never_calls_leaf() -> None:
+    class DuckTypedLiar:
+        adapter_namespace = "builtin"
+        tool_name = _TOOL_NAME
+        schema_version = "v1"
+
+        def bound_key(self) -> tuple[str, str, str]:
+            return (self.adapter_namespace, self.tool_name, self.schema_version)
+
+        def require_workspace(self) -> str:
+            return "/attacker-root"
+
+    calls = _register_leaf_spy("builtin", _TOOL_NAME, "v1")
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(
+            DuckTypedLiar(),  # type: ignore[arg-type]
+            "builtin",
+            _TOOL_NAME,
+            "v1",
+            {},
+        )
+
+    _assert_context_dispatch_key_mismatch(caught.value)
+    assert not calls
+
+
+def test_context_dispatch_key_subclass_liar_never_calls_leaf() -> None:
+    class SubclassLiar(CanonicalizationContext):
+        def bound_key(self) -> tuple[str, str, str]:
+            return (self.adapter_namespace, self.tool_name, self.schema_version)
+
+        def require_workspace(self) -> str:
+            return "/attacker-root"
+
+    context = SubclassLiar(
+        workspace_id="workspace-1",
+        workspace_root="/workspace",
+        adapter_namespace="builtin",
+        tool_name=_TOOL_NAME,
+        schema_version="v1",
+    )
+    calls = _register_leaf_spy("builtin", _TOOL_NAME, "v1")
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(context, "builtin", _TOOL_NAME, "v1", {})
+
+    _assert_context_dispatch_key_mismatch(caught.value)
+    assert not calls
+
+
+def test_context_dispatch_key_unset_exact_context_self_normalizes() -> None:
+    context = object.__new__(CanonicalizationContext)
+    calls = _register_leaf_spy("builtin", _TOOL_NAME, "v1")
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(context, "builtin", _TOOL_NAME, "v1", {})
+
+    _assert_context_dispatch_key_mismatch(caught.value)
+    assert not calls
+
+
+def test_context_dispatch_key_non_str_stored_field_fails_closed() -> None:
+    context = CanonicalizationContext(
+        workspace_id="workspace-1",
+        workspace_root="/workspace",
+        adapter_namespace="builtin",
+        tool_name=123,  # type: ignore[arg-type]
+        schema_version="v1",
+    )
+    calls = _register_leaf_spy("builtin", _TOOL_NAME, "v1")
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(context, "builtin", _TOOL_NAME, "v1", {})
+
+    _assert_context_dispatch_key_mismatch(caught.value)
+    assert not calls
+
+
+def test_context_dispatch_key_miss_precedes_context_validation() -> None:
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_SR_CONTEXT, "builtin", "missing", "v1", {})
+
+    assert caught.value.reason == "no_canonicalizer:builtin/missing@v1"
+    assert caught.value.category is CanonOutcome.UNREGISTERED
+    assert is_uncovered(caught.value)
+
+
+def test_canonicalize_if_registered_context_mismatch_is_error() -> None:
+    calls = _register_leaf_spy("builtin", "read_file", "v1")
+
+    result = canonicalize_if_registered(
+        _CONTEXT,
+        "builtin",
+        "read_file",
+        "v1",
+        {},
+    )
+
+    assert result.status is CoverageStatus.ERROR
+    assert result.prepared is None
+    assert result.error is not None
+    _assert_context_dispatch_key_mismatch(result.error)
+    assert not calls
 
 
 def test_canonicalize_wraps_canonicalizer_exception_with_cause() -> None:
@@ -1309,6 +1506,8 @@ def test_canonicalization_context_require_workspace_fails_closed(
         workspace_id=workspace_id,
         workspace_root=workspace_root,
         adapter_namespace="builtin",
+        tool_name="write_file",
+        schema_version="v1",
     )
 
     with pytest.raises(CanonicalizationError) as caught:
