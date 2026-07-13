@@ -1,4 +1,4 @@
-"""U6-0 T9/T10 G5b dormant PostgreSQL execution service.
+"""U6-0 T9/T10 G5b/G5c dormant PostgreSQL execution service.
 
 The service owns fresh pooled connections so the pending-to-executing claim is
 committed before the executor can perform an external side effect.  Durable
@@ -160,3 +160,78 @@ async def claim_and_execute(
                 )
 
     return ExecResult("finalized", plan.grant_next, plan.resume_next, outcome)
+
+
+async def run_resume_job(
+    pool,
+    *,
+    worker_id: str,
+    lease_ttl_seconds: int,
+    executor: Executor,
+    authorizer: Authorizer,
+    attempt_id_factory: Callable[[], str],
+    result_of: Callable[[Applied], str],
+) -> str:
+    """Lease and drive one resume job through a fenced transition.
+
+    PostgreSQL only and dormant: no loop schedules this driver.  Every resume
+    transition uses the lease owner and epoch returned by the durable lease.
+    """
+    async with pool.acquire() as conn:
+        leased = await db.lease_next_resume_job(
+            conn,
+            worker_id=worker_id,
+            lease_ttl_seconds=lease_ttl_seconds,
+        )
+    if leased is None:
+        return "idle"
+
+    async def read_grant_state() -> str | None:
+        async with pool.acquire() as conn:
+            return await conn.fetchval(
+                "SELECT state FROM action_grants "
+                "WHERE tenant_id = $1 AND grant_id = $2",
+                leased["tenant_id"],
+                leased["grant_id"],
+            )
+
+    grant_state = await read_grant_state()
+    resume_next = None
+    if grant_state == "pending":
+        result = await claim_and_execute(
+            pool,
+            tenant_id=leased["tenant_id"],
+            grant_id=leased["grant_id"],
+            executor=executor,
+            authorizer=authorizer,
+            attempt_id_factory=attempt_id_factory,
+            result_of=result_of,
+        )
+        resume_next = result.resume_next
+        if resume_next is None and result.status == "not_claimable":
+            grant_state = await read_grant_state()
+        elif resume_next is None:
+            raise RuntimeError(
+                f"resume grant could not be driven: {result.status}"
+            )
+
+    if resume_next is None:
+        if grant_state == "consumed":
+            resume_next = "done"
+        elif grant_state in {"failed", "expired"}:
+            resume_next = "failed"
+        elif grant_state in {"executing", "manual"}:
+            resume_next = "manual"
+        else:
+            raise RuntimeError(f"unsupported resume grant state: {grant_state}")
+
+    async with pool.acquire() as conn:
+        finalized = await db.finalize_resume(
+            conn,
+            resume_id=leased["resume_id"],
+            tenant_id=leased["tenant_id"],
+            lease_owner=leased["lease_owner"],
+            lease_epoch=leased["lease_epoch"],
+            new_state=resume_next,
+        )
+    return resume_next if finalized else "lease_lost"

@@ -4700,6 +4700,76 @@ async def get_resume_job(
     return dict(row) if row is not None else None
 
 
+async def lease_next_resume_job(
+    conn,
+    *,
+    worker_id: str,
+    lease_ttl_seconds: int,
+) -> dict | None:
+    """Lease the oldest runnable resume job with a fresh fence (PG-only).
+
+    Call on an autocommit connection so the lease is durable before work uses
+    other pooled connections.
+    """
+    if not worker_id:
+        raise ValueError("worker_id must be non-empty")
+    if lease_ttl_seconds <= 0:
+        raise ValueError("lease_ttl_seconds must be greater than zero")
+
+    row = await conn.fetchrow(
+        """UPDATE resume_jobs
+           SET state = 'claimed', lease_owner = $1,
+               lease_epoch = lease_epoch + 1,
+               lease_expires_at = clock_timestamp()
+                   + ($2 * interval '1 second')
+           WHERE resume_id = (
+               SELECT resume_id FROM resume_jobs
+               WHERE state = 'queued'
+                  OR (state = 'claimed'
+                      AND lease_expires_at < clock_timestamp())
+               ORDER BY created_at
+               FOR UPDATE SKIP LOCKED
+               LIMIT 1
+           )
+           RETURNING resume_id, tenant_id, grant_id, action_instance_id,
+                     lease_owner, lease_epoch""",
+        worker_id,
+        lease_ttl_seconds,
+    )
+    return dict(row) if row is not None else None
+
+
+async def finalize_resume(
+    conn,
+    *,
+    resume_id: str,
+    tenant_id: str,
+    lease_owner: str,
+    lease_epoch: int,
+    new_state: str,
+) -> bool:
+    """Apply a claimed resume transition only while its lease fence is held.
+
+    PostgreSQL only.  A false result means the lease was lost or the job is
+    no longer claimed; callers must not retry the stale transition blindly.
+    """
+    if new_state not in {"done", "manual", "failed", "queued"}:
+        raise ValueError(f"invalid resume final state: {new_state}")
+
+    row = await conn.fetchrow(
+        "UPDATE resume_jobs SET state = $5 "
+        "WHERE resume_id = $1 AND tenant_id = $2 AND lease_owner = $3 "
+        "AND lease_epoch = $4 AND state = 'claimed' "
+        "RETURNING resume_id",
+        resume_id,
+        tenant_id,
+        lease_owner,
+        lease_epoch,
+        new_state,
+    )
+    return row is not None
+
+
 async def put_execution_result(
     conn,
     *,
