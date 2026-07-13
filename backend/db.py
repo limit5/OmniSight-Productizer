@@ -1064,9 +1064,9 @@ END;
 CREATE INDEX IF NOT EXISTS idx_prepared_actions_tenant_digest
     ON prepared_actions(tenant_id, prepared_action_digest);
 
--- U6-0 T9/T10 G4a-1 (OP-2634): dormant challenge and grant substrate.
--- PostgreSQL's alembic 0264 schema is authoritative; the SQLite subset keeps
--- the write-once UNIQUE keys, provenance/expiry CHECKs, and composite FKs.
+-- U6-0 T9/T10 G4a (OP-2634/OP-2637/OP-2638): dormant grant substrate.
+-- PostgreSQL's alembic 0264/0267/0268 schema is authoritative; the SQLite
+-- subset keeps the write-once UNIQUE keys, CHECKs, and composite FKs.
 CREATE TABLE IF NOT EXISTS challenges (
     challenge_id             TEXT PRIMARY KEY,
     tenant_id                TEXT NOT NULL REFERENCES tenants(id),
@@ -1157,10 +1157,15 @@ CREATE TABLE IF NOT EXISTS action_grants (
     UNIQUE (tenant_id, challenge_id),
     UNIQUE (tenant_id, action_instance_id),
     UNIQUE (tenant_id, grant_id),
+    CONSTRAINT uq_grants_tenant_grant_instance
+        UNIQUE (tenant_id, grant_id, action_instance_id),
     FOREIGN KEY (tenant_id, action_instance_id)
         REFERENCES prepared_actions (tenant_id, action_instance_id),
     FOREIGN KEY (tenant_id, challenge_id)
         REFERENCES challenges (tenant_id, challenge_id),
+    CONSTRAINT fk_grants_challenge_instance
+        FOREIGN KEY (tenant_id, challenge_id, action_instance_id)
+        REFERENCES challenges (tenant_id, challenge_id, action_instance_id),
     FOREIGN KEY (tenant_id, model_snapshot_id)
         REFERENCES provenance_snapshots (tenant_id, snapshot_id),
     CHECK (
@@ -1173,14 +1178,18 @@ CREATE TABLE IF NOT EXISTS action_grants (
          AND model_call_id = ''
          AND model_snapshot_id IS NULL)
     ),
+    CONSTRAINT ck_grants_sink_idempotency CHECK (
+        recovery_mode <> 'sink_idempotency_key'
+        OR (idempotency_key IS NOT NULL AND length(idempotency_key) > 0)
+    ),
     CHECK (expires_at > created_at)
 );
 CREATE INDEX IF NOT EXISTS idx_grants_tenant_state
     ON action_grants(tenant_id, state);
 
--- U6-0 T9/T10 G4a-2 (OP-2635): dormant resume queue and result substrate.
--- PostgreSQL's alembic 0265 schema is authoritative; the SQLite subset keeps
--- the write-once UNIQUE keys, state CHECK, and grant composite foreign keys.
+-- U6-0 T9/T10 G4a (OP-2635/OP-2638): dormant resume/result substrate.
+-- PostgreSQL's alembic 0265/0268 schema is authoritative; the SQLite subset
+-- keeps the write-once UNIQUE keys, state CHECK, and grant composite FKs.
 CREATE TABLE IF NOT EXISTS resume_jobs (
     resume_id          TEXT PRIMARY KEY,
     tenant_id          TEXT NOT NULL REFERENCES tenants(id),
@@ -1195,8 +1204,8 @@ CREATE TABLE IF NOT EXISTS resume_jobs (
     created_at         TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (tenant_id, grant_id),
     UNIQUE (tenant_id, resume_id),
-    FOREIGN KEY (tenant_id, grant_id)
-        REFERENCES action_grants (tenant_id, grant_id)
+    FOREIGN KEY (tenant_id, grant_id, action_instance_id)
+        REFERENCES action_grants (tenant_id, grant_id, action_instance_id)
 );
 CREATE INDEX IF NOT EXISTS idx_resume_jobs_tenant_state
     ON resume_jobs(tenant_id, state);
@@ -4391,86 +4400,6 @@ async def get_challenge(
     return dict(row) if row is not None else None
 
 
-async def put_action_grant(
-    conn,
-    *,
-    grant_id: str,
-    tenant_id: str,
-    challenge_id: str,
-    action_instance_id: str,
-    principal_type: str,
-    actor_id: str,
-    request_id: str,
-    model_call_id: str,
-    adapter_namespace: str,
-    tool_name: str,
-    schema_version: str,
-    family: str,
-    canonical_target: str,
-    args_hash: str,
-    provenance_kind: str,
-    model_snapshot_id: str | None,
-    no_model_input_source: str | None,
-    prepared_action_digest: str,
-    grant_issuer_source: str,
-    idempotency_key: str | None,
-    recovery_mode: str,
-    expires_at: str | datetime,
-) -> bool:
-    """Insert once, accepting only same-id/same-digest replays."""
-    if not tenant_id or not grant_id:
-        raise ValueError("tenant_id and grant_id must be non-empty")
-
-    row = await conn.fetchrow(
-        """INSERT INTO action_grants
-           (grant_id, tenant_id, challenge_id, action_instance_id,
-            principal_type, actor_id, request_id, model_call_id,
-            adapter_namespace, tool_name, schema_version, family,
-            canonical_target, args_hash, provenance_kind, model_snapshot_id,
-            no_model_input_source, prepared_action_digest, grant_issuer_source,
-            idempotency_key, recovery_mode, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                   $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
-           ON CONFLICT (grant_id) DO NOTHING
-           RETURNING grant_id""",
-        grant_id,
-        tenant_id,
-        challenge_id,
-        action_instance_id,
-        principal_type,
-        actor_id,
-        request_id,
-        model_call_id,
-        adapter_namespace,
-        tool_name,
-        schema_version,
-        family,
-        canonical_target,
-        args_hash,
-        provenance_kind,
-        model_snapshot_id,
-        no_model_input_source,
-        prepared_action_digest,
-        grant_issuer_source,
-        idempotency_key,
-        recovery_mode,
-        expires_at,
-    )
-    if row is not None:
-        return True
-
-    existing = await conn.fetchrow(
-        "SELECT prepared_action_digest FROM action_grants WHERE grant_id = $1",
-        grant_id,
-    )
-    if (
-        existing is not None
-        and existing["prepared_action_digest"] != prepared_action_digest
-    ):
-        raise ValueError("action_grant digest mismatch")
-    return False
-
-
 async def get_action_grant(
     conn,
     grant_id: str,
@@ -4570,8 +4499,10 @@ async def put_execution_result(
         return True
 
     existing = await conn.fetchrow(
-        "SELECT result FROM execution_results WHERE grant_id = $1",
+        "SELECT result FROM execution_results "
+        "WHERE grant_id = $1 AND tenant_id = $2",
         grant_id,
+        tenant_id,
     )
     if (
         existing is not None

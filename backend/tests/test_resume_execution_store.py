@@ -1,4 +1,4 @@
-"""OP-2635 — dormant resume-job and execution-result store tests.
+"""OP-2635/OP-2638 — dormant resume-job and result store tests.
 
 Offline tests exercise the async store helpers against the SQLite ``_SCHEMA``
 subset. The final tests use the standard PG fixture and skip when
@@ -298,15 +298,28 @@ async def _seed_grant(conn, suffix: str, tenant_id: str) -> tuple[str, str]:
         action_instance_id=action_instance_id,
         expires_at=FUTURE_PG,
     )
-    await db.put_action_grant(
-        conn,
-        grant_id=grant_id,
-        challenge_id=challenge_id,
-        **identity,
-        grant_issuer_source="slash_command",
-        idempotency_key=None,
-        recovery_mode="non_replayable",
-        expires_at=FUTURE_PG,
+    await conn.execute(
+        """INSERT INTO action_grants
+           (grant_id, tenant_id, challenge_id, action_instance_id,
+            principal_type, actor_id, request_id, model_call_id,
+            adapter_namespace, tool_name, schema_version, family,
+            canonical_target, args_hash, provenance_kind, model_snapshot_id,
+            no_model_input_source, prepared_action_digest, grant_issuer_source,
+            idempotency_key, recovery_mode, state, expires_at)
+           SELECT $1, p.tenant_id, $2, p.action_instance_id,
+                  p.principal_type, p.actor_id, p.request_id, p.model_call_id,
+                  p.adapter_namespace, p.tool_name, p.schema_version, p.family,
+                  p.canonical_target, p.args_hash, p.provenance_kind,
+                  p.model_snapshot_id, p.no_model_input_source,
+                  p.prepared_action_digest, 'slash_command', NULL,
+                  'non_replayable', 'pending', $5
+           FROM prepared_actions p
+           WHERE p.tenant_id = $3 AND p.action_instance_id = $4""",
+        grant_id,
+        challenge_id,
+        tenant_id,
+        action_instance_id,
+        FUTURE_PG,
     )
     return grant_id, action_instance_id
 
@@ -327,7 +340,31 @@ async def test_pg_resume_job_composite_fk_rejects_missing_grant(
             grant_id=f"grant-missing-{suffix}",
             action_instance_id=f"act-missing-{suffix}",
         )
-    assert exc_info.value.constraint_name == "fk_resume_jobs_grant"
+    assert exc_info.value.constraint_name == "fk_resume_jobs_grant_instance"
+
+
+@pytest.mark.asyncio
+async def test_pg_resume_job_grant_instance_fk_rejects_mismatched_action(
+    pg_test_conn,
+) -> None:
+    suffix = uuid.uuid4().hex
+    tenant_id = f"t-resume-instance-fk-{suffix}"
+    await _seed_tenants(pg_test_conn, tenant_id)
+    grant_id, action_instance_id = await _seed_grant(
+        pg_test_conn,
+        suffix,
+        tenant_id,
+    )
+
+    with pytest.raises(asyncpg.ForeignKeyViolationError) as exc_info:
+        await db.put_resume_job(
+            pg_test_conn,
+            resume_id=f"resume-wrong-instance-{suffix}",
+            tenant_id=tenant_id,
+            grant_id=grant_id,
+            action_instance_id=f"{action_instance_id}-wrong",
+        )
+    assert exc_info.value.constraint_name == "fk_resume_jobs_grant_instance"
 
 
 @pytest.mark.asyncio

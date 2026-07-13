@@ -1,4 +1,4 @@
-"""OP-2634 — dormant challenge and action-grant store contract tests.
+"""OP-2634/OP-2638 — dormant challenge and grant store contract tests.
 
 Offline tests exercise the async store helpers against the SQLite ``_SCHEMA``
 subset. The final tests use the standard PG fixture and skip when
@@ -116,6 +116,47 @@ def _grant(grant_id: str = "grant-1", **overrides) -> dict:
     }
     values.update(overrides)
     return values
+
+
+async def _seed_grant_raw(
+    conn,
+    *,
+    grant_id: str,
+    tenant_id: str,
+    challenge_id: str,
+    action_instance_id: str,
+    grant_issuer_source: str = "ui_confirm",
+    idempotency_key: str | None = None,
+    recovery_mode: str = "non_replayable",
+    expires_at: str | datetime,
+) -> bool:
+    row = await conn.fetchrow(
+        """INSERT INTO action_grants
+           (grant_id, tenant_id, challenge_id, action_instance_id,
+            principal_type, actor_id, request_id, model_call_id,
+            adapter_namespace, tool_name, schema_version, family,
+            canonical_target, args_hash, provenance_kind, model_snapshot_id,
+            no_model_input_source, prepared_action_digest, grant_issuer_source,
+            idempotency_key, recovery_mode, state, expires_at)
+           SELECT $1, p.tenant_id, $3, p.action_instance_id,
+                  p.principal_type, p.actor_id, p.request_id, p.model_call_id,
+                  p.adapter_namespace, p.tool_name, p.schema_version, p.family,
+                  p.canonical_target, p.args_hash, p.provenance_kind,
+                  p.model_snapshot_id, p.no_model_input_source,
+                  p.prepared_action_digest, $5, $6, $7, 'pending', $8
+           FROM prepared_actions p
+           WHERE p.tenant_id = $2 AND p.action_instance_id = $4
+           RETURNING grant_id""",
+        grant_id,
+        tenant_id,
+        challenge_id,
+        action_instance_id,
+        grant_issuer_source,
+        idempotency_key,
+        recovery_mode,
+        expires_at,
+    )
+    return row is not None
 
 
 @pytest.mark.asyncio
@@ -246,14 +287,34 @@ async def test_sqlite_cross_tenant_prepared_action_fails_closed(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_action_grant_put_get_roundtrip_within_tenant(
+async def test_sqlite_action_grant_raw_seed_get_roundtrip_within_tenant(
     sqlite_conn,
 ) -> None:
-    grant = _grant()
-    assert await db.put_action_grant(sqlite_conn, **grant) is True
+    prepared = _prepared_action("act-grant-raw", "t-grant")
+    challenge_id = "challenge-grant-raw"
+    grant_id = "grant-raw"
+    await db.put_prepared_action(sqlite_conn, **prepared)
+    await db.put_challenge(
+        sqlite_conn,
+        challenge_id=challenge_id,
+        tenant_id=prepared["tenant_id"],
+        action_instance_id=prepared["action_instance_id"],
+        expires_at=FUTURE,
+    )
+    assert await _seed_grant_raw(
+        sqlite_conn,
+        grant_id=grant_id,
+        tenant_id=prepared["tenant_id"],
+        challenge_id=challenge_id,
+        action_instance_id=prepared["action_instance_id"],
+        grant_issuer_source="ui_confirm",
+        idempotency_key="sink-key-raw",
+        recovery_mode="sink_idempotency_key",
+        expires_at=FUTURE,
+    )
 
     stored = await db.get_action_grant(
-        sqlite_conn, grant["grant_id"], tenant_id=grant["tenant_id"]
+        sqlite_conn, grant_id, tenant_id=prepared["tenant_id"]
     )
     assert stored is not None
     assert set(stored) == {
@@ -282,8 +343,14 @@ async def test_sqlite_action_grant_put_get_roundtrip_within_tenant(
         "created_at",
         "expires_at",
     }
-    for key, value in grant.items():
-        assert stored[key] == value
+    for key in _identity():
+        assert stored[key] == prepared[key]
+    assert stored["grant_id"] == grant_id
+    assert stored["challenge_id"] == challenge_id
+    assert stored["grant_issuer_source"] == "ui_confirm"
+    assert stored["idempotency_key"] == "sink-key-raw"
+    assert stored["recovery_mode"] == "sink_idempotency_key"
+    assert stored["expires_at"] == FUTURE
     assert stored["state"] == "pending"
     assert stored["created_at"]
 
@@ -293,7 +360,7 @@ async def test_sqlite_cross_tenant_get_returns_none_for_both_tables(
     sqlite_conn,
 ) -> None:
     challenge = _challenge("challenge-cross")
-    grant = _grant("grant-cross", challenge_id=challenge["challenge_id"])
+    grant_id = "grant-cross"
     await db.put_prepared_action(
         sqlite_conn,
         **_prepared_action(
@@ -307,7 +374,14 @@ async def test_sqlite_cross_tenant_get_returns_none_for_both_tables(
         action_instance_id=challenge["action_instance_id"],
         expires_at=challenge["expires_at"],
     )
-    await db.put_action_grant(sqlite_conn, **grant)
+    await _seed_grant_raw(
+        sqlite_conn,
+        grant_id=grant_id,
+        tenant_id=challenge["tenant_id"],
+        challenge_id=challenge["challenge_id"],
+        action_instance_id=challenge["action_instance_id"],
+        expires_at=FUTURE,
+    )
 
     assert (
         await db.get_challenge(
@@ -317,14 +391,14 @@ async def test_sqlite_cross_tenant_get_returns_none_for_both_tables(
     )
     assert (
         await db.get_action_grant(
-            sqlite_conn, grant["grant_id"], tenant_id="t-other"
+            sqlite_conn, grant_id, tenant_id="t-other"
         )
         is None
     )
 
 
 @pytest.mark.asyncio
-async def test_sqlite_challenge_and_grant_replays_are_idempotent_and_unchanged(
+async def test_sqlite_challenge_replay_is_idempotent_and_unchanged(
     sqlite_conn,
 ) -> None:
     challenge = _challenge("challenge-replay")
@@ -362,55 +436,9 @@ async def test_sqlite_challenge_and_grant_replays_are_idempotent_and_unchanged(
     )
     assert stored_challenge == stored_before_replay
 
-    grant = _grant("grant-replay", challenge_id=challenge["challenge_id"])
-    assert await db.put_action_grant(sqlite_conn, **grant) is True
-    assert (
-        await db.put_action_grant(
-            sqlite_conn, **{**grant, "idempotency_key": "changed"}
-        )
-        is False
-    )
-    stored_grant = await db.get_action_grant(
-        sqlite_conn, grant["grant_id"], tenant_id=grant["tenant_id"]
-    )
-    assert stored_grant["idempotency_key"] == "sink-key-1"
 
-
-@pytest.mark.asyncio
-async def test_sqlite_different_digest_replays_raise_without_mutation(
-    sqlite_conn,
-) -> None:
-    challenge = _challenge("challenge-write-once")
-    await db.put_prepared_action(
-        sqlite_conn,
-        **_prepared_action(
-            challenge["action_instance_id"], challenge["tenant_id"]
-        ),
-    )
-    await db.put_challenge(
-        sqlite_conn,
-        challenge_id=challenge["challenge_id"],
-        tenant_id=challenge["tenant_id"],
-        action_instance_id=challenge["action_instance_id"],
-        expires_at=challenge["expires_at"],
-    )
-
-    grant = _grant("grant-write-once", challenge_id=challenge["challenge_id"])
-    await db.put_action_grant(sqlite_conn, **grant)
-    with pytest.raises(ValueError, match="action_grant digest mismatch"):
-        await db.put_action_grant(
-            sqlite_conn,
-            **{**grant, "prepared_action_digest": "e" * 64},
-        )
-
-    stored_challenge = await db.get_challenge(
-        sqlite_conn, challenge["challenge_id"], tenant_id=challenge["tenant_id"]
-    )
-    stored_grant = await db.get_action_grant(
-        sqlite_conn, grant["grant_id"], tenant_id=grant["tenant_id"]
-    )
-    assert stored_challenge["prepared_action_digest"] == "d" * 64
-    assert stored_grant["prepared_action_digest"] == "d" * 64
+def test_put_action_grant_bypass_is_removed() -> None:
+    assert not hasattr(db, "put_action_grant")
 
 
 def test_sqlite_bootstrap_contains_challenge_and_grant_tables() -> None:
@@ -432,6 +460,50 @@ def test_sqlite_bootstrap_contains_challenge_and_grant_tables() -> None:
     assert "idx_challenges_tenant_state" in challenge_indexes
     assert "idx_grants_tenant_state" in grant_indexes
     conn.close()
+
+
+@pytest.mark.parametrize("idempotency_key", (None, ""))
+@pytest.mark.asyncio
+async def test_sqlite_sink_idempotency_grant_requires_non_empty_key(
+    sqlite_conn,
+    idempotency_key: str | None,
+) -> None:
+    prepared = _prepared_action("act-sink-check", "t-grant")
+    challenge_id = "challenge-sink-check"
+    await db.put_prepared_action(sqlite_conn, **prepared)
+    await db.put_challenge(
+        sqlite_conn,
+        challenge_id=challenge_id,
+        tenant_id=prepared["tenant_id"],
+        action_instance_id=prepared["action_instance_id"],
+        expires_at=FUTURE,
+    )
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="ck_grants_sink_idempotency",
+    ):
+        await _seed_grant_raw(
+            sqlite_conn,
+            grant_id="grant-sink-invalid",
+            tenant_id=prepared["tenant_id"],
+            challenge_id=challenge_id,
+            action_instance_id=prepared["action_instance_id"],
+            idempotency_key=idempotency_key,
+            recovery_mode="sink_idempotency_key",
+            expires_at=FUTURE,
+        )
+
+    assert await _seed_grant_raw(
+        sqlite_conn,
+        grant_id="grant-sink-valid",
+        tenant_id=prepared["tenant_id"],
+        challenge_id=challenge_id,
+        action_instance_id=prepared["action_instance_id"],
+        idempotency_key="sink-key-present",
+        recovery_mode="sink_idempotency_key",
+        expires_at=FUTURE,
+    )
 
 
 def _insert_sqlite_challenge(conn: sqlite3.Connection, **overrides) -> None:
@@ -583,129 +655,38 @@ def _prepared_action(action_instance_id: str, tenant_id: str, **overrides) -> di
 
 
 @pytest.mark.asyncio
-async def test_pg_grant_composite_fk_rejects_missing_prepared_action(
+async def test_pg_grant_challenge_instance_fk_rejects_mismatched_action(
     pg_test_conn,
 ) -> None:
     suffix = uuid.uuid4().hex
-    tenant_id = f"t-grant-fk-{suffix}"
+    tenant_id = f"t-grant-challenge-fk-{suffix}"
     await _seed_tenants(pg_test_conn, tenant_id)
-    prepared = _prepared_action(f"act-present-{suffix}", tenant_id)
-    await db.put_prepared_action(pg_test_conn, **prepared)
-    challenge = _challenge(
-        f"challenge-{suffix}",
-        **{key: prepared[key] for key in _identity()},
-        expires_at=FUTURE_PG,
-    )
-    await db.put_challenge(
-        pg_test_conn,
-        challenge_id=challenge["challenge_id"],
-        tenant_id=challenge["tenant_id"],
-        action_instance_id=challenge["action_instance_id"],
-        expires_at=challenge["expires_at"],
-    )
-
-    grant = _grant(
-        f"grant-{suffix}",
-        **{
-            **{key: challenge[key] for key in _identity()},
-            "action_instance_id": f"act-missing-{suffix}",
-        },
-        challenge_id=challenge["challenge_id"],
-        grant_issuer_source="slash_command",
-        idempotency_key=None,
-        recovery_mode="non_replayable",
-        expires_at=FUTURE_PG,
-    )
-    with pytest.raises(asyncpg.ForeignKeyViolationError) as exc_info:
-        await db.put_action_grant(pg_test_conn, **grant)
-    assert exc_info.value.constraint_name == "fk_grants_prepared_action"
-
-
-@pytest.mark.asyncio
-async def test_pg_model_grant_composite_fk_rejects_missing_snapshot(
-    pg_test_conn,
-) -> None:
-    suffix = uuid.uuid4().hex
-    tenant_id = f"t-grant-snapshot-{suffix}"
-    action_instance_id = f"act-{suffix}"
-    await _seed_tenants(pg_test_conn, tenant_id)
-    prepared = _prepared_action(
-        action_instance_id,
+    challenge_prepared = _prepared_action(
+        f"act-challenge-{suffix}",
         tenant_id,
-        model_call_id=f"model-{suffix}",
-        provenance_kind="model",
-        model_snapshot_id=f"snapshot-missing-{suffix}",
-        no_model_input_source=None,
     )
-    await db.put_prepared_action(pg_test_conn, **prepared)
-    challenge = _challenge(
-        f"challenge-{suffix}",
-        **{key: prepared[key] for key in _identity()},
-        expires_at=FUTURE_PG,
-    )
+    grant_prepared = _prepared_action(f"act-grant-{suffix}", tenant_id)
+    await db.put_prepared_action(pg_test_conn, **challenge_prepared)
+    await db.put_prepared_action(pg_test_conn, **grant_prepared)
+    challenge_id = f"challenge-{suffix}"
     await db.put_challenge(
         pg_test_conn,
-        challenge_id=challenge["challenge_id"],
-        tenant_id=challenge["tenant_id"],
-        action_instance_id=challenge["action_instance_id"],
-        expires_at=challenge["expires_at"],
-    )
-    grant = _grant(
-        f"grant-{suffix}",
-        **{key: challenge[key] for key in _identity()},
-        challenge_id=challenge["challenge_id"],
+        challenge_id=challenge_id,
+        tenant_id=tenant_id,
+        action_instance_id=challenge_prepared["action_instance_id"],
         expires_at=FUTURE_PG,
     )
 
     with pytest.raises(asyncpg.ForeignKeyViolationError) as exc_info:
-        await db.put_action_grant(pg_test_conn, **grant)
-    assert exc_info.value.constraint_name == "fk_grants_snapshot"
-
-
-@pytest.mark.asyncio
-async def test_pg_slash_grant_with_null_snapshot_and_tenant_scope(
-    pg_test_conn,
-) -> None:
-    suffix = uuid.uuid4().hex
-    tenant_id = f"t-grant-slash-{suffix}"
-    other_tenant_id = f"t-grant-other-{suffix}"
-    await _seed_tenants(pg_test_conn, tenant_id, other_tenant_id)
-    prepared = _prepared_action(f"act-{suffix}", tenant_id)
-    await db.put_prepared_action(pg_test_conn, **prepared)
-    challenge = _challenge(
-        f"challenge-{suffix}",
-        **{key: prepared[key] for key in _identity()},
-        expires_at=FUTURE_PG,
-    )
-    await db.put_challenge(
-        pg_test_conn,
-        challenge_id=challenge["challenge_id"],
-        tenant_id=challenge["tenant_id"],
-        action_instance_id=challenge["action_instance_id"],
-        expires_at=challenge["expires_at"],
-    )
-    grant = _grant(
-        f"grant-{suffix}",
-        **{key: challenge[key] for key in _identity()},
-        challenge_id=challenge["challenge_id"],
-        grant_issuer_source="slash_command",
-        idempotency_key=None,
-        recovery_mode="non_replayable",
-        expires_at=FUTURE_PG,
-    )
-    assert await db.put_action_grant(pg_test_conn, **grant) is True
-    assert (
-        await db.get_challenge(
-            pg_test_conn, challenge["challenge_id"], tenant_id=other_tenant_id
+        await _seed_grant_raw(
+            pg_test_conn,
+            grant_id=f"grant-{suffix}",
+            tenant_id=tenant_id,
+            challenge_id=challenge_id,
+            action_instance_id=grant_prepared["action_instance_id"],
+            expires_at=FUTURE_PG,
         )
-        is None
-    )
-    assert (
-        await db.get_action_grant(
-            pg_test_conn, grant["grant_id"], tenant_id=other_tenant_id
-        )
-        is None
-    )
+    assert exc_info.value.constraint_name == "fk_grants_challenge_instance"
 
 
 @pytest.mark.asyncio
