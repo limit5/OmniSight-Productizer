@@ -17,15 +17,27 @@ from backend.agents.action_canonicalize import (
     CanonicalizationContext,
     CanonicalizationError,
     CanonicalizerSpec,
+    CoverageResult,
+    CoverageStatus,
     PreparedAction,
     Refinement,
+    _restore_state_for_tests,
     _registry_restore,
     _registry_snapshot,
+    _snapshot_state_for_tests,
     canonicalize,
+    canonicalize_if_registered,
     classify_refinement,
+    freeze_registry,
+    is_frozen,
+    is_registered,
     is_uncovered,
     register_canonicalizer,
     register_canonicalizers_atomic,
+    reset_for_tests,
+)
+from backend.agents.canonicalize_code_write_file import (
+    register_code_write_file_canonicalizers,
 )
 from backend.agents.tool_registry import OperationDescriptor, resolve
 
@@ -41,11 +53,12 @@ _CONTEXT = CanonicalizationContext(
 @pytest.fixture(autouse=True)
 def restore_canonicalizer_registry() -> Iterator[None]:
     """Prevent registrations in one test from leaking into another."""
-    snapshot = _registry_snapshot()
+    prior = _snapshot_state_for_tests()
+    reset_for_tests()
     try:
         yield
     finally:
-        _registry_restore(snapshot)
+        _restore_state_for_tests(prior)
 
 
 def _prepared_action(
@@ -67,6 +80,157 @@ def _prepared_action(
             if human_rendering is not None
             else {"summary": "Write /workspace/input.txt"}
         ),
+    )
+
+
+def test_coverage_result_closed_invariant_rejects_invalid_states() -> None:
+    with pytest.raises(TypeError, match="invalid coverage status"):
+        CoverageResult("prepared")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="PREPARED requires"):
+        CoverageResult(
+            CoverageStatus.PREPARED,
+            prepared=object(),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="ERROR requires"):
+        CoverageResult(
+            CoverageStatus.ERROR,
+            error=object(),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="PREPARED requires"):
+        CoverageResult(CoverageStatus.PREPARED)
+    with pytest.raises(ValueError, match="ERROR requires"):
+        CoverageResult(CoverageStatus.ERROR)
+    with pytest.raises(ValueError, match="UNREGISTERED carries no payload"):
+        CoverageResult(
+            CoverageStatus.UNREGISTERED,
+            prepared=_prepared_action(),
+        )
+
+
+def test_coverage_result_closed_invariant_accepts_valid_states() -> None:
+    prepared = _prepared_action()
+    error = CanonicalizationError("rejected")
+
+    prepared_result = CoverageResult(
+        CoverageStatus.PREPARED,
+        prepared=prepared,
+    )
+    error_result = CoverageResult(CoverageStatus.ERROR, error=error)
+    unregistered_result = CoverageResult(CoverageStatus.UNREGISTERED)
+
+    assert prepared_result.prepared is prepared
+    assert prepared_result.error is None
+    assert error_result.error is error
+    assert error_result.prepared is None
+    assert unregistered_result.prepared is None
+    assert unregistered_result.error is None
+
+
+def test_canonicalize_if_registered_unregistered_does_not_call_leaf() -> None:
+    called = False
+
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        nonlocal called
+        called = True
+        return _prepared_action()
+
+    register_canonicalizer("builtin", _TOOL_NAME, "v1", canonicalizer)
+
+    result = canonicalize_if_registered(
+        _CONTEXT,
+        "builtin",
+        _TOOL_NAME,
+        "v2",
+        {},
+    )
+
+    assert result.status is CoverageStatus.UNREGISTERED
+    assert result.prepared is None
+    assert result.error is None
+    assert not called
+
+
+def test_canonicalize_if_registered_covered_success_is_prepared() -> None:
+    prepared = _prepared_action()
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: prepared,
+    )
+
+    result = canonicalize_if_registered(
+        _CONTEXT,
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        {},
+    )
+
+    assert result.status is CoverageStatus.PREPARED
+    assert result.prepared == prepared
+    assert result.error is None
+
+
+def test_canonicalize_if_registered_covered_rejection_is_error() -> None:
+    register_code_write_file_canonicalizers()
+
+    result = canonicalize_if_registered(
+        _CONTEXT,
+        "runner_sdk",
+        "str_replace_based_edit_tool",
+        "v1",
+        {"command": "undo_edit", "path": "src/main.py"},
+    )
+
+    assert result.status is CoverageStatus.ERROR
+    assert result.prepared is None
+    assert result.error is not None
+    assert result.error.reason == "uncanonicalizable_undo_edit"
+    assert result.error.category is CanonOutcome.REJECTED
+
+
+def test_canonicalize_if_registered_malformed_key_is_closed_error() -> None:
+    class UnhashableStr(str):
+        __hash__ = None  # type: ignore[assignment]
+
+    for invalid_namespace in (None, UnhashableStr("builtin")):
+        result = canonicalize_if_registered(
+            _CONTEXT,
+            invalid_namespace,  # type: ignore[arg-type]
+            _TOOL_NAME,
+            "v1",
+            {},
+        )
+
+        assert result.status is CoverageStatus.ERROR
+        assert result.prepared is None
+        assert result.error is not None
+        assert result.error.reason == "invalid_dispatch_key"
+        assert result.error.category is CanonOutcome.INTERNAL_ERROR
+
+
+def test_is_registered_handles_exact_missing_and_malformed_keys() -> None:
+    class UnhashableStr(str):
+        __hash__ = None  # type: ignore[assignment]
+
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: _prepared_action(),
+    )
+
+    assert is_registered("builtin", _TOOL_NAME, "v1")
+    assert not is_registered("builtin", _TOOL_NAME, "v2")
+    assert not is_registered(None, _TOOL_NAME, "v1")  # type: ignore[arg-type]
+    assert not is_registered(
+        UnhashableStr("builtin"),
+        _TOOL_NAME,
+        "v1",
     )
 
 
@@ -730,6 +894,120 @@ def test_register_canonicalizers_atomic_identical_republish_is_noop() -> None:
     assert _registry_snapshot()[
         ("builtin", "second_writer", "v1")
     ].fn is second_canonicalizer
+
+
+def test_freeze_registry_blocks_new_batch_without_partial_mutation() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    existing_spec = CanonicalizerSpec(
+        "builtin",
+        "existing_writer",
+        "v1",
+        canonicalizer,
+    )
+    register_canonicalizers_atomic([existing_spec])
+    freeze_registry()
+    before = _registry_snapshot()
+
+    with pytest.raises(
+        RuntimeError,
+        match="^canonicalizer_registry_frozen$",
+    ):
+        register_canonicalizers_atomic(
+            [
+                existing_spec,
+                CanonicalizerSpec(
+                    "builtin",
+                    "new_writer",
+                    "v1",
+                    canonicalizer,
+                ),
+            ]
+        )
+
+    after = _registry_snapshot()
+    assert after == before
+    assert all(after[key] is entry for key, entry in before.items())
+    assert ("builtin", "new_writer", "v1") not in after
+
+
+def test_frozen_identical_republish_is_true_noop_preserving_identity() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    key = ("builtin", "identity_writer", "v1")
+    spec = CanonicalizerSpec(*key, canonicalizer)
+    register_canonicalizers_atomic([spec])
+    captured = action_canonicalize._CANONICALIZERS[key]
+    freeze_registry()
+
+    register_canonicalizers_atomic([spec])
+
+    assert action_canonicalize._CANONICALIZERS[key] is captured
+    assert is_frozen()
+
+
+def test_reset_for_tests_clears_registry_and_thaws() -> None:
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: _prepared_action(),
+    )
+    freeze_registry()
+
+    reset_for_tests()
+
+    assert _registry_snapshot() == {}
+    assert not is_frozen()
+
+
+def test_freeze_registry_blocks_on_registry_lock_until_release() -> None:
+    started = threading.Event()
+    done = threading.Event()
+
+    def worker() -> None:
+        started.set()
+        freeze_registry()
+        done.set()
+
+    with action_canonicalize._REGISTRY_LOCK:
+        thread = threading.Thread(target=worker)
+        thread.start()
+        assert started.wait(timeout=2.0)
+        assert not done.wait(timeout=0.2)
+        assert not is_frozen()
+
+    thread.join(timeout=2.0)
+    assert done.is_set()
+    assert is_frozen()
+
+
+def test_full_state_snapshot_restore_preserves_entries_and_frozen_flag() -> None:
+    key = ("builtin", _TOOL_NAME, "v1")
+    register_canonicalizer(
+        *key,
+        lambda _context, _args: _prepared_action(),
+    )
+    freeze_registry()
+    state = _snapshot_state_for_tests()
+    captured = state[0][key]
+
+    reset_for_tests()
+    assert not is_frozen()
+    assert _registry_snapshot() == {}
+
+    _restore_state_for_tests(state)
+
+    assert is_frozen()
+    assert action_canonicalize._CANONICALIZERS[key] is captured
 
 
 def test_register_canonicalizers_atomic_identical_nonempty_refinement_is_noop(

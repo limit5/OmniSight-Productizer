@@ -358,7 +358,8 @@ def test_classify_operation_records_provenance_snapshot_ids() -> None:
 
 
 def test_view_canonical_verdict_diverges_from_name_verdict() -> None:
-    snap = action_canonicalize._registry_snapshot()
+    prior = action_canonicalize._snapshot_state_for_tests()
+    action_canonicalize.reset_for_tests()
     try:
         register_code_write_file_canonicalizers()
         ctx = _ctx_machine()
@@ -392,7 +393,7 @@ def test_view_canonical_verdict_diverges_from_name_verdict() -> None:
         assert name_decision.verdict == "requires_grant"
         assert canonical_decision.verdict != name_decision.verdict
     finally:
-        action_canonicalize._registry_restore(snap)
+        action_canonicalize._restore_state_for_tests(prior)
 
 
 # ── Kernel reachability guard ────────────────────────────────────────────

@@ -63,6 +63,45 @@ class CanonicalizationError(Exception):
         self.category = category
 
 
+class CoverageStatus(str, enum.Enum):
+    """Closed outcomes from a canonicalizer coverage lookup."""
+
+    UNREGISTERED = "unregistered"
+    PREPARED = "prepared"
+    ERROR = "error"
+
+
+@dataclasses.dataclass(frozen=True)
+class CoverageResult:
+    """Raise-free coverage lookup result with status-bound payloads."""
+
+    status: CoverageStatus
+    prepared: PreparedAction | None = None
+    error: CanonicalizationError | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not CoverageStatus:
+            raise TypeError(f"invalid coverage status: {self.status!r}")
+        if self.status is CoverageStatus.PREPARED:
+            if (
+                not isinstance(self.prepared, PreparedAction)
+                or self.error is not None
+            ):
+                raise ValueError(
+                    "PREPARED requires a PreparedAction and no error"
+                )
+        elif self.status is CoverageStatus.ERROR:
+            if (
+                type(self.error) is not CanonicalizationError
+                or self.prepared is not None
+            ):
+                raise ValueError(
+                    "ERROR requires a CanonicalizationError and no prepared"
+                )
+        elif self.prepared is not None or self.error is not None:
+            raise ValueError("UNREGISTERED carries no payload")
+
+
 def _normalize_leaf_error(exc: BaseException) -> "CanonicalizationError":
     """Return a fresh exact error after one read of a forged leaf error.
 
@@ -144,6 +183,7 @@ class CanonicalizerEntry:
 _CanonicalizerKey = tuple[str, str, str]
 _CANONICALIZERS: dict[_CanonicalizerKey, CanonicalizerEntry] = {}
 _REGISTRY_LOCK = threading.RLock()
+_frozen: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -215,7 +255,14 @@ def register_canonicalizers_atomic(
                     f"conflicting_canonicalizer_registration:{key}"
                 )
             staged[key] = entry
-        _CANONICALIZERS.update(staged)
+        to_insert = {
+            key: entry
+            for key, entry in staged.items()
+            if key not in _CANONICALIZERS
+        }
+        if _frozen and to_insert:
+            raise RuntimeError("canonicalizer_registry_frozen")
+        _CANONICALIZERS.update(to_insert)
 
 
 def register_canonicalizer(
@@ -228,6 +275,82 @@ def register_canonicalizer(
     register_canonicalizers_atomic(
         [CanonicalizerSpec(adapter_namespace, tool_name, schema_version, fn)]
     )
+
+
+def freeze_registry() -> None:
+    """Finish bootstrap and reject subsequent new-key publication."""
+    global _frozen
+    with _REGISTRY_LOCK:
+        _frozen = True
+
+
+def is_frozen() -> bool:
+    """Return whether this process-local registry has finished bootstrap."""
+    return _frozen
+
+
+def reset_for_tests() -> None:
+    """Clear and thaw the process-local registry for test isolation."""
+    global _frozen
+    with _REGISTRY_LOCK:
+        _CANONICALIZERS.clear()
+        _frozen = False
+
+
+def is_registered(
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+) -> bool:
+    """Return whether an exact, well-formed dispatch key is registered."""
+    if not (
+        type(adapter_namespace) is str
+        and type(tool_name) is str
+        and type(schema_version) is str
+    ):
+        return False
+    return (adapter_namespace, tool_name, schema_version) in _CANONICALIZERS
+
+
+def canonicalize_if_registered(
+    context: CanonicalizationContext,
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+    raw_args: Mapping[str, object],
+) -> CoverageResult:
+    """Return tri-state coverage without raising canonicalization failures.
+
+    ``UNREGISTERED`` costs one dictionary membership check. A malformed key
+    is ``ERROR`` (fail closed), never uncovered.
+    """
+    if not (
+        type(adapter_namespace) is str
+        and type(tool_name) is str
+        and type(schema_version) is str
+    ):
+        return CoverageResult(
+            CoverageStatus.ERROR,
+            error=CanonicalizationError(
+                "invalid_dispatch_key",
+                category=CanonOutcome.INTERNAL_ERROR,
+            ),
+        )
+    if (adapter_namespace, tool_name, schema_version) not in _CANONICALIZERS:
+        return CoverageResult(CoverageStatus.UNREGISTERED)
+    try:
+        return CoverageResult(
+            CoverageStatus.PREPARED,
+            prepared=canonicalize(
+                context,
+                adapter_namespace,
+                tool_name,
+                schema_version,
+                raw_args,
+            ),
+        )
+    except CanonicalizationError as exc:
+        return CoverageResult(CoverageStatus.ERROR, error=exc)
 
 
 def canonicalize(
@@ -376,3 +499,24 @@ def _registry_restore(
     with _REGISTRY_LOCK:
         _CANONICALIZERS.clear()
         _CANONICALIZERS.update(snap)
+
+
+def _snapshot_state_for_tests() -> tuple[
+    dict[_CanonicalizerKey, CanonicalizerEntry],
+    bool,
+]:
+    """Return all mutable registry state for exact test isolation."""
+    with _REGISTRY_LOCK:
+        return (dict(_CANONICALIZERS), _frozen)
+
+
+def _restore_state_for_tests(
+    state: tuple[dict[_CanonicalizerKey, CanonicalizerEntry], bool],
+) -> None:
+    """Restore all mutable registry state while preserving the dictionary."""
+    global _frozen
+    entries, frozen = state
+    with _REGISTRY_LOCK:
+        _CANONICALIZERS.clear()
+        _CANONICALIZERS.update(entries)
+        _frozen = frozen

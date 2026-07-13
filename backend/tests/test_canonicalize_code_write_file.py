@@ -14,10 +14,12 @@ from backend.agents.action_canonicalize import (
     CanonOutcome,
     CanonicalizationContext,
     CanonicalizationError,
-    _registry_restore,
+    _restore_state_for_tests,
     _registry_snapshot,
+    _snapshot_state_for_tests,
     canonicalize,
     register_canonicalizer,
+    reset_for_tests,
 )
 from backend.agents.canonicalize_code_write_file import (
     _VIEW_REFINED_DESCRIPTOR,
@@ -30,11 +32,12 @@ from backend.agents.tool_registry import OperationDescriptor, resolve
 @pytest.fixture(autouse=True)
 def restore_canonicalizer_registry() -> Iterator[None]:
     """Prevent registrations in one test from leaking into another."""
-    snapshot = _registry_snapshot()
+    prior = _snapshot_state_for_tests()
+    reset_for_tests()
     try:
         yield
     finally:
-        _registry_restore(snapshot)
+        _restore_state_for_tests(prior)
 
 
 def _context(
