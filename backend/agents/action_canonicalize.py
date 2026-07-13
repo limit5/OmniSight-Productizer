@@ -14,7 +14,11 @@ import json
 import threading
 from collections.abc import Callable, Mapping, Sequence
 
-from backend.agents.tool_registry import OperationDescriptor, resolve
+from backend.agents.tool_registry import (
+    KNOWN_OPERATION_CLASSES,
+    OperationDescriptor,
+    resolve,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -100,6 +104,38 @@ Canonicalizer = Callable[
 
 
 @dataclasses.dataclass(frozen=True)
+class Refinement:
+    descriptor: OperationDescriptor
+    review_note: str
+
+
+def _verdict_rank(descriptor: OperationDescriptor) -> int:
+    if descriptor.family == "__unknown_deny__":
+        return 2
+    if descriptor.effect == "read_only":
+        return 0
+    return 1
+
+
+def classify_refinement(
+    name_desc: OperationDescriptor,
+    canon_desc: OperationDescriptor,
+) -> str:
+    """Telemetry ONLY (G6.3), NOT the gate. A family change is
+    policy-INCOMPARABLE — NEVER ``same``.
+    """
+    if name_desc.family != canon_desc.family:
+        return "family_changed"
+    name_rank = _verdict_rank(name_desc)
+    canon_rank = _verdict_rank(canon_desc)
+    if canon_rank > name_rank:
+        return "canonical_stricter"
+    if canon_rank < name_rank:
+        return "canonical_looser"
+    return "same"
+
+
+@dataclasses.dataclass(frozen=True)
 class CanonicalizerEntry:
     fn: "Canonicalizer"
     refinements: frozenset[OperationDescriptor] = frozenset()
@@ -116,7 +152,7 @@ class CanonicalizerSpec:
     tool_name: str
     schema_version: str
     fn: "Canonicalizer"
-    refinements: frozenset[OperationDescriptor] = frozenset()
+    refinements: tuple["Refinement", ...] = ()
 
 
 def _entry_identical(a: CanonicalizerEntry, b: CanonicalizerEntry) -> bool:
@@ -135,9 +171,41 @@ def register_canonicalizers_atomic(
                 spec.tool_name,
                 spec.schema_version,
             )
+            name_desc = resolve(spec.tool_name)
+            seen: set[OperationDescriptor] = set()
+            for refinement in spec.refinements:
+                if name_desc.family == "__unknown_deny__":
+                    raise ValueError(f"refinement_of_unknown_base:{key}")
+                if refinement.descriptor.tool_name != spec.tool_name:
+                    raise ValueError(f"refinement_tool_mismatch:{key}")
+                if refinement.descriptor == name_desc:
+                    raise ValueError(f"refinement_is_identity:{key}")
+                operation_class = (
+                    refinement.descriptor.effect,
+                    refinement.descriptor.family,
+                )
+                if operation_class not in KNOWN_OPERATION_CLASSES:
+                    raise ValueError(
+                        f"refinement_unknown_operation_class:{key}"
+                    )
+                if (
+                    name_desc.effect == refinement.descriptor.effect
+                    and name_desc.family != refinement.descriptor.family
+                ):
+                    raise ValueError(
+                        "refinement_same_effect_family_change_forbidden:"
+                        f"{key}"
+                    )
+                if not refinement.review_note.strip():
+                    raise ValueError(f"refinement_needs_review_note:{key}")
+                if refinement.descriptor in seen:
+                    raise ValueError(
+                        f"duplicate_refinement_descriptor:{key}"
+                    )
+                seen.add(refinement.descriptor)
             entry = CanonicalizerEntry(
                 fn=spec.fn,
-                refinements=frozenset(spec.refinements),
+                refinements=frozenset(seen),
             )
             if key in staged:
                 raise ValueError(f"duplicate_key_in_batch:{key}")
@@ -190,7 +258,12 @@ def canonicalize(
 
     try:
         prepared = entry.fn(context, raw_args)
-        return _finalize_prepared(tool_name, prepared, target)
+        return _finalize_prepared(
+            tool_name,
+            prepared,
+            target,
+            entry.refinements,
+        )
     except CanonicalizationError as exc:
         raise _normalize_leaf_error(exc) from exc
     except Exception as exc:
@@ -204,6 +277,7 @@ def _finalize_prepared(
     tool_name: str,
     prepared: PreparedAction,
     target: str,
+    refinements: frozenset[OperationDescriptor],
 ) -> PreparedAction:
     """Return a detached JSON form after enforcing descriptor invariants."""
     if not isinstance(prepared, PreparedAction):
@@ -241,12 +315,14 @@ def _finalize_prepared(
             "descriptor_tool_mismatch",
             category=CanonOutcome.INTERNAL_ERROR,
         )
-    if d != resolve(tool_name):
-        raise CanonicalizationError(
-            "descriptor_refinement_unregistered",
-            category=CanonOutcome.INTERNAL_ERROR,
-        )
-    return prepared
+    if d == resolve(tool_name):
+        return prepared
+    if d in refinements:
+        return prepared
+    raise CanonicalizationError(
+        f"refinement_unregistered:{target}",
+        category=CanonOutcome.REFINEMENT_UNREGISTERED,
+    )
 
 
 def _reject_non_str_keys(value: object) -> None:

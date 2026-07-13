@@ -239,6 +239,15 @@ TOOL_METADATA: dict[str, OperationDescriptor] = {
 }
 
 
+KNOWN_EFFECTS: frozenset[str] = frozenset({"read_only", "mutating"})
+KNOWN_FAMILIES: frozenset[str] = frozenset(
+    d.family for d in TOOL_METADATA.values()
+)
+KNOWN_OPERATION_CLASSES: frozenset[tuple[str, str]] = frozenset(
+    (d.effect, d.family) for d in TOOL_METADATA.values()
+)
+
+
 _EXTERNAL_AGENT_PREFIX = "external_agent:"
 
 

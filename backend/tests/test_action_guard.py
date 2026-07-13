@@ -15,7 +15,7 @@ import re
 import pytest
 
 from backend import metrics
-from backend.agents import action_guard, execution_context
+from backend.agents import action_guard, execution_context, tool_registry
 from backend.agents.action_guard import (
     ADAPTER_NAMESPACES,
     FAMILY_VOCAB,
@@ -84,6 +84,7 @@ def test_vocabularies_are_closed_and_derived() -> None:
     assert GUARD_MODES == frozenset({"shadow", "enforce"})
     # KNOWN_FAMILIES is DERIVED from the registry; the sentinel is only
     # in FAMILY_VOCAB, never a metadata row.
+    assert KNOWN_FAMILIES is tool_registry.KNOWN_FAMILIES
     assert "__unknown_deny__" not in KNOWN_FAMILIES
     assert FAMILY_VOCAB == KNOWN_FAMILIES | {"__unknown_deny__"}
     assert "code_write" in KNOWN_FAMILIES

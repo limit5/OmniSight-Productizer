@@ -34,6 +34,9 @@ import dataclasses
 import pytest
 
 from backend.agents.tool_registry import (
+    KNOWN_EFFECTS,
+    KNOWN_FAMILIES,
+    KNOWN_OPERATION_CLASSES,
     OperationDescriptor,
     TOOL_METADATA,
     resolve,
@@ -154,6 +157,18 @@ def test_every_metadata_effect_is_valid_literal() -> None:
         assert desc.effect in ("read_only", "mutating"), (
             f"{key}: effect={desc.effect!r} outside frozen Literal"
         )
+
+
+def test_closed_operation_class_vocabularies_are_derived() -> None:
+    assert KNOWN_EFFECTS == frozenset({"read_only", "mutating"})
+    assert KNOWN_FAMILIES == frozenset(
+        descriptor.family for descriptor in TOOL_METADATA.values()
+    )
+    assert "__unknown_deny__" not in KNOWN_FAMILIES
+    assert ("read_only", "read_only") in KNOWN_OPERATION_CLASSES
+    assert ("mutating", "code_write") in KNOWN_OPERATION_CLASSES
+    assert ("read_only", "deploy") not in KNOWN_OPERATION_CLASSES
+    assert ("mutating", "deploy_typo") not in KNOWN_OPERATION_CLASSES
 
 
 def test_every_metadata_family_is_in_declared_set() -> None:

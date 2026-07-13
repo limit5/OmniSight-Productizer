@@ -46,9 +46,7 @@ ADAPTER_NAMESPACES = frozenset({"chat", "specialist", "a2a", "runner_sdk"})
 # DERIVED from the registry (single source of truth). __unknown_deny__
 # is naturally absent: it is only resolve()'s synthetic fallback, never
 # a metadata row.
-KNOWN_FAMILIES = frozenset(
-    d.family for d in tool_registry.TOOL_METADATA.values()
-)
+KNOWN_FAMILIES = tool_registry.KNOWN_FAMILIES
 # The guard recognizes the sentinel as a VALUE (resolve_mode rule 4 can
 # see it via a kernel deny), but it is NOT configurable in the matrix.
 FAMILY_VOCAB = KNOWN_FAMILIES | {"__unknown_deny__"}

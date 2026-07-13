@@ -1,4 +1,4 @@
-"""OP-2630/OP-2648 canonicalization hardening tests (offline)."""
+"""OP-2630/OP-2648/OP-2649 canonicalization hardening tests (offline)."""
 
 from __future__ import annotations
 
@@ -18,9 +18,11 @@ from backend.agents.action_canonicalize import (
     CanonicalizationError,
     CanonicalizerSpec,
     PreparedAction,
+    Refinement,
     _registry_restore,
     _registry_snapshot,
     canonicalize,
+    classify_refinement,
     is_uncovered,
     register_canonicalizer,
     register_canonicalizers_atomic,
@@ -92,6 +94,41 @@ def test_canonicalize_dispatches_and_returns_prepared_action() -> None:
     }
     assert result.executable_args is not raw_args
     assert raw_args == {"path": "input.txt"}
+
+
+def test_canonicalize_admits_registered_descriptor_refinement() -> None:
+    refined_descriptor = dataclasses.replace(
+        resolve(_TOOL_NAME),
+        effect="read_only",
+        family="read_only",
+    )
+
+    def refined_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action(operation_descriptor=refined_descriptor)
+
+    register_canonicalizers_atomic(
+        [
+            CanonicalizerSpec(
+                "builtin",
+                _TOOL_NAME,
+                "v1",
+                refined_canonicalizer,
+                refinements=(
+                    Refinement(
+                        descriptor=refined_descriptor,
+                        review_note="Read-only operation shape was reviewed.",
+                    ),
+                ),
+            )
+        ]
+    )
+
+    result = canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert result.operation_descriptor == refined_descriptor
 
 
 def test_canonicalize_unregistered_key_fails_closed() -> None:
@@ -374,6 +411,205 @@ def test_register_canonicalizer_identical_republish_is_noop() -> None:
     assert snapshot[key].fn is canonicalizer
 
 
+def _assert_refinement_registration_rejected(
+    spec: CanonicalizerSpec,
+    reason: str,
+) -> None:
+    before = _registry_snapshot()
+
+    with pytest.raises(ValueError, match=reason):
+        register_canonicalizers_atomic([spec])
+
+    assert _registry_snapshot() == before
+
+
+def test_register_refinement_rejects_unknown_base_atomically() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    _assert_refinement_registration_rejected(
+        CanonicalizerSpec(
+            "builtin",
+            "unknown_refinement_base",
+            "v1",
+            canonicalizer,
+            refinements=(
+                Refinement(
+                    OperationDescriptor(
+                        "unknown_refinement_base",
+                        "read_only",
+                        "read_only",
+                    ),
+                    "Reviewed test refinement.",
+                ),
+            ),
+        ),
+        "refinement_of_unknown_base",
+    )
+
+
+def test_register_refinement_rejects_tool_mismatch_atomically() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    _assert_refinement_registration_rejected(
+        CanonicalizerSpec(
+            "builtin",
+            _TOOL_NAME,
+            "v1",
+            canonicalizer,
+            refinements=(
+                Refinement(
+                    resolve("read_file"),
+                    "Reviewed test refinement.",
+                ),
+            ),
+        ),
+        "refinement_tool_mismatch",
+    )
+
+
+def test_register_refinement_rejects_identity_atomically() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    _assert_refinement_registration_rejected(
+        CanonicalizerSpec(
+            "builtin",
+            _TOOL_NAME,
+            "v1",
+            canonicalizer,
+            refinements=(
+                Refinement(
+                    resolve(_TOOL_NAME),
+                    "Reviewed test refinement.",
+                ),
+            ),
+        ),
+        "refinement_is_identity",
+    )
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        OperationDescriptor(_TOOL_NAME, "read_only", "deploy"),
+        OperationDescriptor(_TOOL_NAME, "mutating", "deploy_typo"),
+    ],
+    ids=["incoherent-pair", "typo-family"],
+)
+def test_register_refinement_rejects_unknown_operation_class_atomically(
+    descriptor: OperationDescriptor,
+) -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    _assert_refinement_registration_rejected(
+        CanonicalizerSpec(
+            "builtin",
+            _TOOL_NAME,
+            "v1",
+            canonicalizer,
+            refinements=(
+                Refinement(descriptor, "Reviewed test refinement."),
+            ),
+        ),
+        "refinement_unknown_operation_class",
+    )
+
+
+def test_register_refinement_rejects_same_effect_family_change_atomically(
+) -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    _assert_refinement_registration_rejected(
+        CanonicalizerSpec(
+            "builtin",
+            _TOOL_NAME,
+            "v1",
+            canonicalizer,
+            refinements=(
+                Refinement(
+                    OperationDescriptor(_TOOL_NAME, "mutating", "deploy"),
+                    "Reviewed test refinement.",
+                ),
+            ),
+        ),
+        "refinement_same_effect_family_change_forbidden",
+    )
+
+
+def test_register_refinement_requires_nonempty_review_note_atomically() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    _assert_refinement_registration_rejected(
+        CanonicalizerSpec(
+            "builtin",
+            _TOOL_NAME,
+            "v1",
+            canonicalizer,
+            refinements=(
+                Refinement(
+                    OperationDescriptor(
+                        _TOOL_NAME,
+                        "read_only",
+                        "read_only",
+                    ),
+                    "   ",
+                ),
+            ),
+        ),
+        "refinement_needs_review_note",
+    )
+
+
+def test_register_refinement_rejects_duplicate_descriptor_atomically() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    descriptor = OperationDescriptor(
+        _TOOL_NAME,
+        "read_only",
+        "read_only",
+    )
+    _assert_refinement_registration_rejected(
+        CanonicalizerSpec(
+            "builtin",
+            _TOOL_NAME,
+            "v1",
+            canonicalizer,
+            refinements=(
+                Refinement(descriptor, "First reviewed refinement."),
+                Refinement(descriptor, "Second reviewed refinement."),
+            ),
+        ),
+        "duplicate_refinement_descriptor",
+    )
+
+
 def test_register_canonicalizers_atomic_conflict_is_all_or_nothing() -> None:
     def existing_canonicalizer(
         _context: CanonicalizationContext,
@@ -496,6 +732,188 @@ def test_register_canonicalizers_atomic_identical_republish_is_noop() -> None:
     ].fn is second_canonicalizer
 
 
+def test_register_canonicalizers_atomic_identical_nonempty_refinement_is_noop(
+) -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    descriptor = OperationDescriptor(
+        _TOOL_NAME,
+        "read_only",
+        "read_only",
+    )
+    spec = CanonicalizerSpec(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        canonicalizer,
+        refinements=(
+            Refinement(descriptor, "Reviewed read-only refinement."),
+        ),
+    )
+    register_canonicalizers_atomic([spec])
+    before = _registry_snapshot()
+
+    register_canonicalizers_atomic([spec])
+
+    assert _registry_snapshot() == before
+    assert before[("builtin", _TOOL_NAME, "v1")].refinements == frozenset(
+        {descriptor}
+    )
+
+
+def test_register_canonicalizers_atomic_different_refinement_set_conflicts(
+) -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    key = ("builtin", "read_file", "v1")
+    code_write_descriptor = OperationDescriptor(
+        "read_file",
+        "mutating",
+        "code_write",
+    )
+    deploy_descriptor = OperationDescriptor(
+        "read_file",
+        "mutating",
+        "deploy",
+    )
+    register_canonicalizers_atomic(
+        [
+            CanonicalizerSpec(
+                *key,
+                canonicalizer,
+                refinements=(
+                    Refinement(
+                        code_write_descriptor,
+                        "Reviewed code-write refinement.",
+                    ),
+                ),
+            )
+        ]
+    )
+    before = _registry_snapshot()
+
+    with pytest.raises(
+        ValueError,
+        match="conflicting_canonicalizer_registration",
+    ):
+        register_canonicalizers_atomic(
+            [
+                CanonicalizerSpec(
+                    *key,
+                    canonicalizer,
+                    refinements=(
+                        Refinement(
+                            deploy_descriptor,
+                            "Reviewed deploy refinement.",
+                        ),
+                    ),
+                )
+            ]
+        )
+
+    assert _registry_snapshot() == before
+
+
+def test_registry_snapshot_restore_preserves_nonempty_refinement_set() -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    key = ("builtin", "read_file", "v1")
+    descriptor = OperationDescriptor(
+        "read_file",
+        "mutating",
+        "code_write",
+    )
+    register_canonicalizers_atomic(
+        [
+            CanonicalizerSpec(
+                *key,
+                canonicalizer,
+                refinements=(
+                    Refinement(descriptor, "Reviewed mutating refinement."),
+                ),
+            )
+        ]
+    )
+    snapshot = _registry_snapshot()
+    register_canonicalizer(
+        "builtin",
+        "snapshot_restore_probe",
+        "v1",
+        canonicalizer,
+    )
+
+    _registry_restore(snapshot)
+
+    restored = _registry_snapshot()
+    assert restored == snapshot
+    assert restored[key].refinements == frozenset({descriptor})
+    assert ("builtin", "snapshot_restore_probe", "v1") not in restored
+
+
+def test_register_canonicalizers_atomic_late_invalid_refinement_publishes_none(
+) -> None:
+    def canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        return _prepared_action()
+
+    valid_key = ("late_refinement_batch", _TOOL_NAME, "v1")
+    invalid_tool_name = "unknown_late_refinement_base"
+    before = _registry_snapshot()
+
+    with pytest.raises(ValueError, match="refinement_of_unknown_base"):
+        register_canonicalizers_atomic(
+            [
+                CanonicalizerSpec(
+                    *valid_key,
+                    canonicalizer,
+                    refinements=(
+                        Refinement(
+                            OperationDescriptor(
+                                _TOOL_NAME,
+                                "read_only",
+                                "read_only",
+                            ),
+                            "Reviewed read-only refinement.",
+                        ),
+                    ),
+                ),
+                CanonicalizerSpec(
+                    "late_refinement_batch",
+                    invalid_tool_name,
+                    "v1",
+                    canonicalizer,
+                    refinements=(
+                        Refinement(
+                            OperationDescriptor(
+                                invalid_tool_name,
+                                "read_only",
+                                "read_only",
+                            ),
+                            "Reviewed test refinement.",
+                        ),
+                    ),
+                ),
+            ]
+        )
+
+    assert _registry_snapshot() == before
+    assert valid_key not in _registry_snapshot()
+
+
 def test_registry_snapshot_restore_preserves_whole_entries() -> None:
     def canonicalizer(
         _context: CanonicalizationContext,
@@ -558,6 +976,40 @@ def test_prepared_action_is_frozen() -> None:
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         prepared.canonical_target = "/workspace/other.txt"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("name_desc", "canon_desc", "expected"),
+    [
+        (
+            OperationDescriptor("probe", "mutating", "shared_family"),
+            OperationDescriptor("probe", "read_only", "shared_family"),
+            "canonical_looser",
+        ),
+        (
+            OperationDescriptor("probe", "read_only", "shared_family"),
+            OperationDescriptor("probe", "mutating", "shared_family"),
+            "canonical_stricter",
+        ),
+        (
+            OperationDescriptor("probe", "mutating", "code_write"),
+            OperationDescriptor("probe", "mutating", "deploy"),
+            "family_changed",
+        ),
+        (
+            resolve("read_file"),
+            resolve("read_file"),
+            "same",
+        ),
+    ],
+    ids=["looser", "stricter", "family-changed", "same"],
+)
+def test_classify_refinement_table(
+    name_desc: OperationDescriptor,
+    canon_desc: OperationDescriptor,
+    expected: str,
+) -> None:
+    assert classify_refinement(name_desc, canon_desc) == expected
 
 
 def test_canonicalization_context_is_frozen_and_requires_workspace() -> None:
@@ -809,8 +1261,10 @@ def test_canonicalize_rejects_unregistered_descriptor_refinement() -> None:
     with pytest.raises(CanonicalizationError) as caught:
         canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
 
-    assert caught.value.reason == "descriptor_refinement_unregistered"
-    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+    assert caught.value.reason == (
+        "refinement_unregistered:builtin/write_file@v1"
+    )
+    assert caught.value.category is CanonOutcome.REFINEMENT_UNREGISTERED
 
 
 def test_canonicalize_rejects_non_prepared_action_result() -> None:
