@@ -294,7 +294,8 @@ async def _seed_grant(conn, suffix: str, tenant_id: str) -> tuple[str, str]:
     await db.put_challenge(
         conn,
         challenge_id=challenge_id,
-        **identity,
+        tenant_id=tenant_id,
+        action_instance_id=action_instance_id,
         expires_at=FUTURE_PG,
     )
     await db.put_action_grant(

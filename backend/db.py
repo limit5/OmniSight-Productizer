@@ -1089,6 +1089,7 @@ CREATE TABLE IF NOT EXISTS challenges (
     confirmer_actor          TEXT,
     confirmer_principal_type TEXT,
     confirmed_at             TEXT,
+    confirmer_auth_event_id  TEXT,
     confirm_reason           TEXT,
     state                    TEXT NOT NULL DEFAULT 'pending'
                              CHECK (state IN ('pending', 'confirmed', 'rejected', 'expired')),
@@ -1096,6 +1097,8 @@ CREATE TABLE IF NOT EXISTS challenges (
     expires_at               TEXT NOT NULL,
     UNIQUE (tenant_id, action_instance_id),
     UNIQUE (tenant_id, challenge_id),
+    CONSTRAINT uq_challenges_tenant_challenge_instance
+        UNIQUE (tenant_id, challenge_id, action_instance_id),
     FOREIGN KEY (tenant_id, action_instance_id)
         REFERENCES prepared_actions (tenant_id, action_instance_id),
     CHECK (
@@ -1107,6 +1110,15 @@ CREATE TABLE IF NOT EXISTS challenges (
          AND no_model_input_source IS NOT NULL
          AND model_call_id = ''
          AND model_snapshot_id IS NULL)
+    ),
+    CONSTRAINT ck_challenges_decided_has_confirmer CHECK (
+        state NOT IN ('confirmed', 'rejected')
+        OR (confirmer_actor IS NOT NULL
+            AND confirmer_principal_type IS NOT NULL
+            AND confirmed_at IS NOT NULL
+            AND confirmer_auth_event_id IS NOT NULL
+            AND confirm_reason IS NOT NULL
+            AND length(confirm_reason) > 0)
     ),
     CHECK (expires_at > created_at)
 );
@@ -4312,25 +4324,13 @@ async def put_challenge(
     challenge_id: str,
     tenant_id: str,
     action_instance_id: str,
-    principal_type: str,
-    actor_id: str,
-    request_id: str,
-    model_call_id: str,
-    adapter_namespace: str,
-    tool_name: str,
-    schema_version: str,
-    family: str,
-    canonical_target: str,
-    args_hash: str,
-    provenance_kind: str,
-    model_snapshot_id: str | None,
-    no_model_input_source: str | None,
-    prepared_action_digest: str,
     expires_at: str | datetime,
 ) -> bool:
-    """Insert once, accepting only same-id/same-digest replays."""
-    if not tenant_id or not challenge_id:
-        raise ValueError("tenant_id and challenge_id must be non-empty")
+    """Insert once, copying trusted identity from a prepared action."""
+    if not tenant_id or not challenge_id or not action_instance_id:
+        raise ValueError(
+            "tenant_id, challenge_id, and action_instance_id must be non-empty"
+        )
 
     row = await conn.fetchrow(
         """INSERT INTO challenges
@@ -4338,43 +4338,33 @@ async def put_challenge(
             actor_id, request_id, model_call_id, adapter_namespace, tool_name,
             schema_version, family, canonical_target, args_hash,
             provenance_kind, model_snapshot_id, no_model_input_source,
-            prepared_action_digest, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                   $13, $14, $15, $16, $17, $18)
+            prepared_action_digest, state, expires_at)
+           SELECT $1, p.tenant_id, p.action_instance_id, p.principal_type,
+                  p.actor_id, p.request_id, p.model_call_id,
+                  p.adapter_namespace, p.tool_name, p.schema_version, p.family,
+                  p.canonical_target, p.args_hash, p.provenance_kind,
+                  p.model_snapshot_id, p.no_model_input_source,
+                  p.prepared_action_digest, 'pending', $4
+           FROM prepared_actions p
+           WHERE p.tenant_id = $2 AND p.action_instance_id = $3
            ON CONFLICT (challenge_id) DO NOTHING
            RETURNING challenge_id""",
         challenge_id,
         tenant_id,
         action_instance_id,
-        principal_type,
-        actor_id,
-        request_id,
-        model_call_id,
-        adapter_namespace,
-        tool_name,
-        schema_version,
-        family,
-        canonical_target,
-        args_hash,
-        provenance_kind,
-        model_snapshot_id,
-        no_model_input_source,
-        prepared_action_digest,
         expires_at,
     )
     if row is not None:
         return True
 
     existing = await conn.fetchrow(
-        "SELECT prepared_action_digest FROM challenges WHERE challenge_id = $1",
+        "SELECT 1 FROM challenges WHERE challenge_id = $1 AND tenant_id = $2",
         challenge_id,
+        tenant_id,
     )
-    if (
-        existing is not None
-        and existing["prepared_action_digest"] != prepared_action_digest
-    ):
-        raise ValueError("challenge digest mismatch")
-    return False
+    if existing is not None:
+        return False
+    raise ValueError("no prepared_action for challenge")
 
 
 async def get_challenge(
@@ -4392,7 +4382,8 @@ async def get_challenge(
         "schema_version, family, canonical_target, args_hash, provenance_kind, "
         "model_snapshot_id, no_model_input_source, prepared_action_digest, "
         "confirmer_actor, confirmer_principal_type, confirmed_at, "
-        "confirm_reason, state, created_at, expires_at FROM challenges "
+        "confirmer_auth_event_id, confirm_reason, state, created_at, "
+        "expires_at FROM challenges "
         "WHERE challenge_id = $1 AND tenant_id = $2",
         challenge_id,
         tenant_id,

@@ -32,8 +32,17 @@ class _SQLiteConn:
         self.raw.executescript(db._SCHEMA)
 
     async def fetchrow(self, sql: str, *params):
-        sqlite_sql = re.sub(r"\$\d+", "?", sql)
-        return self.raw.execute(sqlite_sql, params).fetchone()
+        param_indexes: list[int] = []
+
+        def replace_placeholder(match: re.Match) -> str:
+            param_indexes.append(int(match.group(1)) - 1)
+            return "?"
+
+        sqlite_sql = re.sub(
+            r"\$(\d+)(?:::jsonb)?", replace_placeholder, sql
+        )
+        sqlite_params = tuple(params[index] for index in param_indexes)
+        return self.raw.execute(sqlite_sql, sqlite_params).fetchone()
 
     def close(self) -> None:
         self.raw.close()
@@ -83,6 +92,12 @@ def _challenge(challenge_id: str = "challenge-1", **overrides) -> dict:
     values = {
         **_identity(),
         "challenge_id": challenge_id,
+        "confirmer_actor": None,
+        "confirmer_principal_type": None,
+        "confirmed_at": None,
+        "confirmer_auth_event_id": None,
+        "confirm_reason": None,
+        "state": "pending",
         "expires_at": FUTURE,
     }
     values.update(overrides)
@@ -104,14 +119,26 @@ def _grant(grant_id: str = "grant-1", **overrides) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_sqlite_challenge_put_get_roundtrip_within_tenant(
+async def test_sqlite_challenge_copies_identity_from_prepared_action(
     sqlite_conn,
 ) -> None:
-    challenge = _challenge()
-    assert await db.put_challenge(sqlite_conn, **challenge) is True
+    prepared = _prepared_action("act-copy-identity", "t-grant")
+    await db.put_prepared_action(sqlite_conn, **prepared)
+    assert (
+        await db.put_challenge(
+            sqlite_conn,
+            challenge_id="challenge-copy-identity",
+            tenant_id=prepared["tenant_id"],
+            action_instance_id=prepared["action_instance_id"],
+            expires_at=FUTURE,
+        )
+        is True
+    )
 
     stored = await db.get_challenge(
-        sqlite_conn, challenge["challenge_id"], tenant_id=challenge["tenant_id"]
+        sqlite_conn,
+        "challenge-copy-identity",
+        tenant_id=prepared["tenant_id"],
     )
     assert stored is not None
     assert set(stored) == {
@@ -135,16 +162,87 @@ async def test_sqlite_challenge_put_get_roundtrip_within_tenant(
         "confirmer_actor",
         "confirmer_principal_type",
         "confirmed_at",
+        "confirmer_auth_event_id",
         "confirm_reason",
         "state",
         "created_at",
         "expires_at",
     }
-    for key, value in challenge.items():
-        assert stored[key] == value
+    for key in _identity():
+        assert stored[key] == prepared[key]
     assert stored["state"] == "pending"
-    assert stored["confirmer_actor"] is None
+    assert stored["expires_at"] == FUTURE
+    for key in (
+        "confirmer_actor",
+        "confirmer_principal_type",
+        "confirmed_at",
+        "confirmer_auth_event_id",
+        "confirm_reason",
+    ):
+        assert stored[key] is None
     assert stored["created_at"]
+
+
+@pytest.mark.asyncio
+async def test_sqlite_challenge_without_prepared_action_fails_closed(
+    sqlite_conn,
+) -> None:
+    with pytest.raises(ValueError, match="no prepared_action for challenge"):
+        await db.put_challenge(
+            sqlite_conn,
+            challenge_id="challenge-no-prepared",
+            tenant_id="t-grant",
+            action_instance_id="act-no-prepared",
+            expires_at=FUTURE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("challenge_id", "tenant_id", "action_instance_id"),
+    (
+        ("", "t-grant", "act-non-empty"),
+        ("challenge-non-empty", "", "act-non-empty"),
+        ("challenge-non-empty", "t-grant", ""),
+    ),
+)
+@pytest.mark.asyncio
+async def test_sqlite_challenge_rejects_empty_reference_identity(
+    sqlite_conn,
+    challenge_id: str,
+    tenant_id: str,
+    action_instance_id: str,
+) -> None:
+    with pytest.raises(ValueError, match="must be non-empty"):
+        await db.put_challenge(
+            sqlite_conn,
+            challenge_id=challenge_id,
+            tenant_id=tenant_id,
+            action_instance_id=action_instance_id,
+            expires_at=FUTURE,
+        )
+
+
+@pytest.mark.asyncio
+async def test_sqlite_cross_tenant_prepared_action_fails_closed(
+    sqlite_conn,
+) -> None:
+    prepared = _prepared_action("act-cross-tenant", "t-grant")
+    await db.put_prepared_action(sqlite_conn, **prepared)
+
+    with pytest.raises(ValueError, match="no prepared_action for challenge"):
+        await db.put_challenge(
+            sqlite_conn,
+            challenge_id="challenge-cross-tenant",
+            tenant_id="t-other",
+            action_instance_id=prepared["action_instance_id"],
+            expires_at=FUTURE,
+        )
+    assert (
+        await db.get_challenge(
+            sqlite_conn, "challenge-cross-tenant", tenant_id="t-other"
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -196,7 +294,19 @@ async def test_sqlite_cross_tenant_get_returns_none_for_both_tables(
 ) -> None:
     challenge = _challenge("challenge-cross")
     grant = _grant("grant-cross", challenge_id=challenge["challenge_id"])
-    await db.put_challenge(sqlite_conn, **challenge)
+    await db.put_prepared_action(
+        sqlite_conn,
+        **_prepared_action(
+            challenge["action_instance_id"], challenge["tenant_id"]
+        ),
+    )
+    await db.put_challenge(
+        sqlite_conn,
+        challenge_id=challenge["challenge_id"],
+        tenant_id=challenge["tenant_id"],
+        action_instance_id=challenge["action_instance_id"],
+        expires_at=challenge["expires_at"],
+    )
     await db.put_action_grant(sqlite_conn, **grant)
 
     assert (
@@ -214,21 +324,43 @@ async def test_sqlite_cross_tenant_get_returns_none_for_both_tables(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_same_digest_replays_are_idempotent_and_unchanged(
+async def test_sqlite_challenge_and_grant_replays_are_idempotent_and_unchanged(
     sqlite_conn,
 ) -> None:
     challenge = _challenge("challenge-replay")
-    assert await db.put_challenge(sqlite_conn, **challenge) is True
+    await db.put_prepared_action(
+        sqlite_conn,
+        **_prepared_action(
+            challenge["action_instance_id"], challenge["tenant_id"]
+        ),
+    )
     assert (
         await db.put_challenge(
-            sqlite_conn, **{**challenge, "canonical_target": "/changed"}
+            sqlite_conn,
+            challenge_id=challenge["challenge_id"],
+            tenant_id=challenge["tenant_id"],
+            action_instance_id=challenge["action_instance_id"],
+            expires_at=challenge["expires_at"],
+        )
+        is True
+    )
+    stored_before_replay = await db.get_challenge(
+        sqlite_conn, challenge["challenge_id"], tenant_id=challenge["tenant_id"]
+    )
+    assert (
+        await db.put_challenge(
+            sqlite_conn,
+            challenge_id=challenge["challenge_id"],
+            tenant_id=challenge["tenant_id"],
+            action_instance_id=challenge["action_instance_id"],
+            expires_at=challenge["expires_at"],
         )
         is False
     )
     stored_challenge = await db.get_challenge(
         sqlite_conn, challenge["challenge_id"], tenant_id=challenge["tenant_id"]
     )
-    assert stored_challenge["canonical_target"] == "/workspace/output.txt"
+    assert stored_challenge == stored_before_replay
 
     grant = _grant("grant-replay", challenge_id=challenge["challenge_id"])
     assert await db.put_action_grant(sqlite_conn, **grant) is True
@@ -249,12 +381,19 @@ async def test_sqlite_different_digest_replays_raise_without_mutation(
     sqlite_conn,
 ) -> None:
     challenge = _challenge("challenge-write-once")
-    await db.put_challenge(sqlite_conn, **challenge)
-    with pytest.raises(ValueError, match="challenge digest mismatch"):
-        await db.put_challenge(
-            sqlite_conn,
-            **{**challenge, "prepared_action_digest": "e" * 64},
-        )
+    await db.put_prepared_action(
+        sqlite_conn,
+        **_prepared_action(
+            challenge["action_instance_id"], challenge["tenant_id"]
+        ),
+    )
+    await db.put_challenge(
+        sqlite_conn,
+        challenge_id=challenge["challenge_id"],
+        tenant_id=challenge["tenant_id"],
+        action_instance_id=challenge["action_instance_id"],
+        expires_at=challenge["expires_at"],
+    )
 
     grant = _grant("grant-write-once", challenge_id=challenge["challenge_id"])
     await db.put_action_grant(sqlite_conn, **grant)
@@ -303,13 +442,18 @@ def _insert_sqlite_challenge(conn: sqlite3.Connection, **overrides) -> None:
             actor_id, request_id, model_call_id, adapter_namespace, tool_name,
             schema_version, family, canonical_target, args_hash,
             provenance_kind, model_snapshot_id, no_model_input_source,
-            prepared_action_digest, expires_at)
+            prepared_action_digest, confirmer_actor,
+            confirmer_principal_type, confirmed_at, confirmer_auth_event_id,
+            confirm_reason, state, expires_at)
            VALUES (:challenge_id, :tenant_id, :action_instance_id,
                    :principal_type, :actor_id, :request_id, :model_call_id,
                    :adapter_namespace, :tool_name, :schema_version, :family,
                    :canonical_target, :args_hash, :provenance_kind,
                    :model_snapshot_id, :no_model_input_source,
-                   :prepared_action_digest, :expires_at)""",
+                   :prepared_action_digest, :confirmer_actor,
+                   :confirmer_principal_type, :confirmed_at,
+                   :confirmer_auth_event_id, :confirm_reason, :state,
+                   :expires_at)""",
         challenge,
     )
 
@@ -372,6 +516,35 @@ def test_sqlite_expiry_check_rejects_past_challenge_and_grant_rows(
         )
 
 
+def test_sqlite_confirmed_challenge_requires_full_confirmer_evidence(
+    sqlite_conn,
+) -> None:
+    with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint failed"):
+        _insert_sqlite_challenge(
+            sqlite_conn.raw,
+            challenge_id="challenge-confirmed-missing-confirmer",
+            state="confirmed",
+            confirmer_actor=None,
+        )
+
+    _insert_sqlite_challenge(
+        sqlite_conn.raw,
+        challenge_id="challenge-confirmed-with-confirmer",
+        state="confirmed",
+        confirmer_actor="user-1",
+        confirmer_principal_type="user",
+        confirmed_at="2098-01-01 00:00:00",
+        confirmer_auth_event_id="auth-event-1",
+        confirm_reason="approved in authenticated session",
+    )
+    stored = sqlite_conn.raw.execute(
+        "SELECT state, confirmer_auth_event_id FROM challenges "
+        "WHERE challenge_id = ?",
+        ("challenge-confirmed-with-confirmer",),
+    ).fetchone()
+    assert tuple(stored) == ("confirmed", "auth-event-1")
+
+
 def test_migrator_catalog_contains_grant_tables_in_fk_order_as_text_pks() -> None:
     prepared_index = mig.TABLES_IN_ORDER.index("prepared_actions")
     challenge_index = mig.TABLES_IN_ORDER.index("challenges")
@@ -423,7 +596,13 @@ async def test_pg_grant_composite_fk_rejects_missing_prepared_action(
         **{key: prepared[key] for key in _identity()},
         expires_at=FUTURE_PG,
     )
-    await db.put_challenge(pg_test_conn, **challenge)
+    await db.put_challenge(
+        pg_test_conn,
+        challenge_id=challenge["challenge_id"],
+        tenant_id=challenge["tenant_id"],
+        action_instance_id=challenge["action_instance_id"],
+        expires_at=challenge["expires_at"],
+    )
 
     grant = _grant(
         f"grant-{suffix}",
@@ -464,7 +643,13 @@ async def test_pg_model_grant_composite_fk_rejects_missing_snapshot(
         **{key: prepared[key] for key in _identity()},
         expires_at=FUTURE_PG,
     )
-    await db.put_challenge(pg_test_conn, **challenge)
+    await db.put_challenge(
+        pg_test_conn,
+        challenge_id=challenge["challenge_id"],
+        tenant_id=challenge["tenant_id"],
+        action_instance_id=challenge["action_instance_id"],
+        expires_at=challenge["expires_at"],
+    )
     grant = _grant(
         f"grant-{suffix}",
         **{key: challenge[key] for key in _identity()},
@@ -492,7 +677,13 @@ async def test_pg_slash_grant_with_null_snapshot_and_tenant_scope(
         **{key: prepared[key] for key in _identity()},
         expires_at=FUTURE_PG,
     )
-    await db.put_challenge(pg_test_conn, **challenge)
+    await db.put_challenge(
+        pg_test_conn,
+        challenge_id=challenge["challenge_id"],
+        tenant_id=challenge["tenant_id"],
+        action_instance_id=challenge["action_instance_id"],
+        expires_at=challenge["expires_at"],
+    )
     grant = _grant(
         f"grant-{suffix}",
         **{key: challenge[key] for key in _identity()},
@@ -526,18 +717,19 @@ async def test_pg_one_active_challenge_per_tenant_instance_unique(
     prepared = _prepared_action(f"act-{suffix}", tenant_id)
     await _seed_tenants(pg_test_conn, tenant_id)
     await db.put_prepared_action(pg_test_conn, **prepared)
-    identity = {key: prepared[key] for key in _identity()}
     await db.put_challenge(
         pg_test_conn,
-        **_challenge(
-            f"challenge-a-{suffix}", **identity, expires_at=FUTURE_PG
-        ),
+        challenge_id=f"challenge-a-{suffix}",
+        tenant_id=tenant_id,
+        action_instance_id=prepared["action_instance_id"],
+        expires_at=FUTURE_PG,
     )
     with pytest.raises(asyncpg.UniqueViolationError) as exc_info:
         await db.put_challenge(
             pg_test_conn,
-            **_challenge(
-                f"challenge-b-{suffix}", **identity, expires_at=FUTURE_PG
-            ),
+            challenge_id=f"challenge-b-{suffix}",
+            tenant_id=tenant_id,
+            action_instance_id=prepared["action_instance_id"],
+            expires_at=FUTURE_PG,
         )
     assert exc_info.value.constraint_name == "uq_challenges_tenant_instance"
