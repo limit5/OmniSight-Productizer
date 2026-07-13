@@ -1,4 +1,4 @@
-"""OP-2632/OP-2633 code-write file canonicalizer tests (offline)."""
+"""OP-2632/OP-2633/OP-2648 code-write canonicalizer tests (offline)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import pytest
 
 from backend.agents import canonicalize_code_write_file
 from backend.agents.action_canonicalize import (
+    CanonOutcome,
     CanonicalizationContext,
     CanonicalizationError,
     _registry_restore,
@@ -158,6 +159,7 @@ def test_path_escape_fails_closed(
         )
 
     assert caught.value.reason == "path_escapes_workspace"
+    assert caught.value.category is CanonOutcome.REJECTED
 
 
 def test_empty_path_fails_closed() -> None:
@@ -205,6 +207,7 @@ def test_missing_or_invalid_arg_fails_closed(
         )
 
     assert caught.value.reason == reason
+    assert caught.value.category is CanonOutcome.REJECTED
 
 
 def test_edit_noop_fails_closed(tmp_path: pathlib.Path) -> None:
@@ -224,6 +227,7 @@ def test_edit_noop_fails_closed(tmp_path: pathlib.Path) -> None:
         )
 
     assert caught.value.reason == "edit_noop"
+    assert caught.value.category is CanonOutcome.REJECTED
 
 
 def test_edit_replace_all_defaults_false(tmp_path: pathlib.Path) -> None:
@@ -324,6 +328,7 @@ def test_text_editor_undo_edit_fails_closed(tmp_path: pathlib.Path) -> None:
         )
 
     assert caught.value.reason == "uncanonicalizable_undo_edit"
+    assert caught.value.category is CanonOutcome.REJECTED
 
 
 def test_text_editor_unknown_command_fails_closed(tmp_path: pathlib.Path) -> None:
@@ -404,6 +409,7 @@ def test_text_editor_bad_command_args_fail_closed(
         )
 
     assert caught.value.reason == reason
+    assert caught.value.category is CanonOutcome.REJECTED
 
 
 def test_text_editor_create_path_escape_fails_closed(tmp_path: pathlib.Path) -> None:

@@ -1,4 +1,4 @@
-"""OP-2630 prepared-action canonicalization hardening tests (offline)."""
+"""OP-2630/OP-2648 canonicalization hardening tests (offline)."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import pytest
 
 from backend.agents import action_canonicalize
 from backend.agents.action_canonicalize import (
+    CanonOutcome,
     CanonicalizationContext,
     CanonicalizationError,
     CanonicalizerSpec,
@@ -20,6 +21,7 @@ from backend.agents.action_canonicalize import (
     _registry_restore,
     _registry_snapshot,
     canonicalize,
+    is_uncovered,
     register_canonicalizer,
     register_canonicalizers_atomic,
 )
@@ -98,6 +100,8 @@ def test_canonicalize_unregistered_key_fails_closed() -> None:
 
     assert caught.value.reason.startswith("no_canonicalizer:")
     assert caught.value.reason == "no_canonicalizer:builtin/unknown@v1"
+    assert caught.value.category is CanonOutcome.UNREGISTERED
+    assert is_uncovered(caught.value)
 
 
 def test_canonicalize_wraps_canonicalizer_exception_with_cause() -> None:
@@ -116,7 +120,25 @@ def test_canonicalize_wraps_canonicalizer_exception_with_cause() -> None:
         canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
 
     assert caught.value.reason == "canonicalizer_failed:builtin/write_file@v1"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
     assert isinstance(caught.value.__cause__, RawCanonicalizerError)
+
+
+def test_canonicalize_maps_plain_value_error_to_internal_error() -> None:
+    def failing_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        raise ValueError("leaf bug")
+
+    register_canonicalizer("builtin", _TOOL_NAME, "v1", failing_canonicalizer)
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert caught.value.reason == "canonicalizer_failed:builtin/write_file@v1"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+    assert isinstance(caught.value.__cause__, ValueError)
 
 
 def test_canonicalize_propagates_canonicalization_error() -> None:
@@ -132,6 +154,173 @@ def test_canonicalize_propagates_canonicalization_error() -> None:
         canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
 
     assert caught.value.reason == "leaf_rejected"
+    assert caught.value.category is CanonOutcome.REJECTED
+    assert type(caught.value) is CanonicalizationError
+    assert isinstance(caught.value.__cause__, CanonicalizationError)
+    assert caught.value is not caught.value.__cause__
+
+
+def test_leaf_exact_error_cannot_forge_unregistered_outcome() -> None:
+    forged = CanonicalizationError(
+        "leaf_forged_unregistered",
+        category=CanonOutcome.UNREGISTERED,
+    )
+
+    def failing_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        raise forged
+
+    register_canonicalizer("builtin", _TOOL_NAME, "v1", failing_canonicalizer)
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert type(caught.value) is CanonicalizationError
+    assert caught.value.reason == "leaf_forged_unregistered"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+    assert caught.value.__cause__ is forged
+    assert not is_uncovered(caught.value)
+
+
+def test_leaf_subclass_toggling_category_cannot_forge_unregistered() -> None:
+    class TogglingCategoryError(CanonicalizationError):
+        def __init__(self) -> None:
+            self._category_reads = 0
+            super().__init__("toggling_category")
+
+        @property
+        def category(self) -> CanonOutcome:
+            self._category_reads += 1
+            if self._category_reads == 1:
+                return CanonOutcome.REJECTED
+            return CanonOutcome.UNREGISTERED
+
+        @category.setter
+        def category(self, _value: CanonOutcome) -> None:
+            pass
+
+    forged = TogglingCategoryError()
+
+    def failing_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        raise forged
+
+    register_canonicalizer("builtin", _TOOL_NAME, "v1", failing_canonicalizer)
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert type(caught.value) is CanonicalizationError
+    assert caught.value.category is CanonOutcome.REJECTED
+    assert forged.category is CanonOutcome.UNREGISTERED
+    assert not is_uncovered(caught.value)
+
+
+def test_leaf_subclass_raising_category_is_normalized_to_internal_error() -> None:
+    class RaisingCategoryError(CanonicalizationError):
+        @property
+        def category(self) -> CanonOutcome:
+            raise RuntimeError("hostile category accessor")
+
+        @category.setter
+        def category(self, _value: CanonOutcome) -> None:
+            pass
+
+    forged = RaisingCategoryError("raising_category")
+
+    def failing_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        raise forged
+
+    register_canonicalizer("builtin", _TOOL_NAME, "v1", failing_canonicalizer)
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert type(caught.value) is CanonicalizationError
+    assert caught.value.reason == "raising_category"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+    assert caught.value.__cause__ is forged
+    assert not is_uncovered(caught.value)
+
+
+def test_leaf_deleted_or_dict_mutated_error_is_normalized_to_internal_error(
+) -> None:
+    deleted = CanonicalizationError("deleted_category")
+    del deleted.category
+    dict_mutated = CanonicalizationError("dict_mutated_category")
+    dict_mutated.__dict__["category"] = "unregistered"
+    current = [deleted]
+
+    def failing_canonicalizer(
+        _context: CanonicalizationContext,
+        _args: Mapping[str, object],
+    ) -> PreparedAction:
+        raise current[0]
+
+    register_canonicalizer("builtin", _TOOL_NAME, "v1", failing_canonicalizer)
+
+    for forged in (deleted, dict_mutated):
+        current[0] = forged
+        with pytest.raises(CanonicalizationError) as caught:
+            canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+        assert type(caught.value) is CanonicalizationError
+        assert caught.value.reason == forged.reason
+        assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+        assert caught.value.__cause__ is forged
+        assert not is_uncovered(caught.value)
+
+
+def test_is_uncovered_fail_closed_table_requires_exact_framework_miss() -> None:
+    with pytest.raises(CanonicalizationError) as registry_miss:
+        canonicalize(_CONTEXT, "builtin", "missing", "v1", {})
+
+    class ForgedSubclass(CanonicalizationError):
+        pass
+
+    fail_closed = [
+        CanonicalizationError("rejected"),
+        CanonicalizationError(
+            "refinement",
+            category=CanonOutcome.REFINEMENT_UNREGISTERED,
+        ),
+        CanonicalizationError(
+            "internal",
+            category=CanonOutcome.INTERNAL_ERROR,
+        ),
+        ValueError("not a canonicalization error"),
+        ForgedSubclass("forged", category=CanonOutcome.UNREGISTERED),
+    ]
+
+    assert is_uncovered(registry_miss.value)
+    assert all(not is_uncovered(exc) for exc in fail_closed)
+
+
+def test_canonicalize_invalid_dispatch_key_is_total() -> None:
+    class UnhashableStr(str):
+        __hash__ = None  # type: ignore[assignment]
+
+    for invalid_namespace in (None, UnhashableStr("builtin")):
+        with pytest.raises(CanonicalizationError) as caught:
+            canonicalize(
+                _CONTEXT,
+                invalid_namespace,  # type: ignore[arg-type]
+                _TOOL_NAME,
+                "v1",
+                {},
+            )
+
+        assert caught.value.reason == "invalid_dispatch_key"
+        assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+        assert caught.value.__cause__ is None
+        assert not is_uncovered(caught.value)
 
 
 def test_canonicalize_requires_exact_registry_key() -> None:
@@ -398,6 +587,20 @@ def test_canonicalization_context_require_workspace_fails_closed(
     assert caught.value.reason == "no_workspace_context"
 
 
+def test_canonicalization_error_enforces_runtime_closed_outcomes() -> None:
+    error = CanonicalizationError("default_rejection")
+
+    assert error.category is CanonOutcome.REJECTED
+    with pytest.raises(
+        TypeError,
+        match="invalid canonicalization category: 'rejected'",
+    ):
+        CanonicalizationError(
+            "invalid_category",
+            category="rejected",  # type: ignore[arg-type]
+        )
+
+
 def test_canonicalize_deep_freezes_json_fields() -> None:
     lines = ["first"]
     rendering_parts = ["Write", "input.txt"]
@@ -431,6 +634,129 @@ def test_canonicalize_deep_freezes_json_fields() -> None:
     assert result.human_rendering == {"parts": ["Write", "input.txt"]}
 
 
+def test_canonicalize_rejects_non_operation_descriptor() -> None:
+    prepared = dataclasses.replace(
+        _prepared_action(),
+        operation_descriptor=None,  # type: ignore[arg-type]
+    )
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: prepared,
+    )
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert caught.value.reason == "descriptor_not_operation_descriptor"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+
+
+def test_canonicalize_rejects_non_str_canonical_target() -> None:
+    prepared = dataclasses.replace(
+        _prepared_action(),
+        canonical_target=42,  # type: ignore[arg-type]
+    )
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: prepared,
+    )
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert caught.value.reason == "canonical_target_not_str"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_root"),
+    [
+        ("executable_args", []),
+        ("human_rendering", "not-a-mapping"),
+    ],
+    ids=["list-root", "str-root"],
+)
+def test_canonicalize_rejects_non_mapping_payload_roots(
+    field_name: str,
+    invalid_root: object,
+) -> None:
+    prepared = dataclasses.replace(
+        _prepared_action(),
+        **{field_name: invalid_root},  # type: ignore[arg-type]
+    )
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: prepared,
+    )
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert caught.value.reason == "payload_root_not_mapping"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {1: "root"},
+        {"a": {None: 1}},
+        {"a": [{"b": {2: 3}}]},
+    ],
+    ids=["root", "nested-mapping", "nested-list"],
+)
+def test_canonicalize_rejects_non_str_payload_keys(payload: object) -> None:
+    prepared = dataclasses.replace(
+        _prepared_action(),
+        executable_args=payload,  # type: ignore[arg-type]
+    )
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: prepared,
+    )
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert caught.value.reason == "non_str_payload_key"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"value": float("nan")},
+        {"value": float("inf")},
+        {"nested": {"value": float("nan")}},
+        {"nested": [{"value": float("-inf")}]},
+    ],
+    ids=["root-nan", "root-inf", "nested-nan", "nested-inf"],
+)
+def test_canonicalize_rejects_non_finite_payload_values(
+    payload: Mapping[str, object],
+) -> None:
+    register_canonicalizer(
+        "builtin",
+        _TOOL_NAME,
+        "v1",
+        lambda _context, _args: _prepared_action(executable_args=payload),
+    )
+
+    with pytest.raises(CanonicalizationError) as caught:
+        canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
+
+    assert caught.value.reason == "non_serializable_args"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+
+
 @pytest.mark.parametrize("field_name", ["executable_args", "human_rendering"])
 def test_canonicalize_rejects_non_serializable_json_fields(field_name: str) -> None:
     kwargs = {field_name: {"invalid": {"not-json"}}}
@@ -445,6 +771,7 @@ def test_canonicalize_rejects_non_serializable_json_fields(field_name: str) -> N
         canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
 
     assert caught.value.reason == "non_serializable_args"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
 
 
 def test_canonicalize_rejects_descriptor_tool_mismatch() -> None:
@@ -461,6 +788,7 @@ def test_canonicalize_rejects_descriptor_tool_mismatch() -> None:
         canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
 
     assert caught.value.reason == "descriptor_tool_mismatch"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
 
 
 def test_canonicalize_rejects_unregistered_descriptor_refinement() -> None:
@@ -482,6 +810,7 @@ def test_canonicalize_rejects_unregistered_descriptor_refinement() -> None:
         canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
 
     assert caught.value.reason == "descriptor_refinement_unregistered"
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
 
 
 def test_canonicalize_rejects_non_prepared_action_result() -> None:
@@ -497,7 +826,8 @@ def test_canonicalize_rejects_non_prepared_action_result() -> None:
         canonicalize(_CONTEXT, "builtin", _TOOL_NAME, "v1", {})
 
     assert caught.value.reason == "canonicalizer_failed:builtin/write_file@v1"
-    assert caught.value.__cause__ is None
+    assert caught.value.category is CanonOutcome.INTERNAL_ERROR
+    assert isinstance(caught.value.__cause__, CanonicalizationError)
 
 
 def test_action_canonicalize_import_direction_is_stdlib_plus_tool_registry() -> None:

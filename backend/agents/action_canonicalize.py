@@ -9,6 +9,7 @@ future family modules register the same canonicalizers in every worker.
 from __future__ import annotations
 
 import dataclasses
+import enum
 import json
 import threading
 from collections.abc import Callable, Mapping, Sequence
@@ -33,12 +34,49 @@ class PreparedAction:
     human_rendering: Mapping[str, object]
 
 
+class CanonOutcome(str, enum.Enum):
+    """Closed outcomes surfaced by the canonicalization boundary."""
+
+    UNREGISTERED = "unregistered"
+    REJECTED = "rejected"
+    REFINEMENT_UNREGISTERED = "refinement_unregistered"
+    INTERNAL_ERROR = "internal_error"
+
+
 class CanonicalizationError(Exception):
     """Fail-closed canonicalization failure surfaced to the guard."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        category: CanonOutcome = CanonOutcome.REJECTED,
+    ) -> None:
+        if not isinstance(category, CanonOutcome):
+            raise TypeError(f"invalid canonicalization category: {category!r}")
         super().__init__(reason)
         self.reason = reason
+        self.category = category
+
+
+def _normalize_leaf_error(exc: BaseException) -> "CanonicalizationError":
+    """Return a fresh exact error after one read of a forged leaf error.
+
+    A leaf or finalizer may never produce ``UNREGISTERED``.  A forged,
+    non-enum, raising, or deleted category becomes ``INTERNAL_ERROR``.
+    """
+    try:
+        r = exc.reason  # type: ignore[attr-defined]
+        reason = r if isinstance(r, str) else "canonicalization_error"
+    except Exception:
+        reason = "malformed_canonicalization_error"
+    try:
+        cat = exc.category  # type: ignore[attr-defined]
+    except Exception:
+        cat = None
+    if not isinstance(cat, CanonOutcome) or cat is CanonOutcome.UNREGISTERED:
+        cat = CanonOutcome.INTERNAL_ERROR
+    return CanonicalizationError(reason, category=cat)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -132,20 +170,34 @@ def canonicalize(
     raw_args: Mapping[str, object],
 ) -> PreparedAction:
     """Dispatch an exact-key canonicalizer or fail closed."""
+    if not (
+        type(adapter_namespace) is str
+        and type(tool_name) is str
+        and type(schema_version) is str
+    ):
+        raise CanonicalizationError(
+            "invalid_dispatch_key",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
     key = (adapter_namespace, tool_name, schema_version)
-    entry = _CANONICALIZERS.get(key)
     target = f"{adapter_namespace}/{tool_name}@{schema_version}"
+    entry = _CANONICALIZERS.get(key)
     if entry is None:
-        raise CanonicalizationError(f"no_canonicalizer:{target}")
+        raise CanonicalizationError(
+            f"no_canonicalizer:{target}",
+            category=CanonOutcome.UNREGISTERED,
+        )
 
     try:
         prepared = entry.fn(context, raw_args)
-    except CanonicalizationError:
-        raise
+        return _finalize_prepared(tool_name, prepared, target)
+    except CanonicalizationError as exc:
+        raise _normalize_leaf_error(exc) from exc
     except Exception as exc:
-        raise CanonicalizationError(f"canonicalizer_failed:{target}") from exc
-
-    return _finalize_prepared(tool_name, prepared, target)
+        raise CanonicalizationError(
+            f"canonicalizer_failed:{target}",
+            category=CanonOutcome.INTERNAL_ERROR,
+        ) from exc
 
 
 def _finalize_prepared(
@@ -155,26 +207,84 @@ def _finalize_prepared(
 ) -> PreparedAction:
     """Return a detached JSON form after enforcing descriptor invariants."""
     if not isinstance(prepared, PreparedAction):
-        raise CanonicalizationError(f"canonicalizer_failed:{target}")
+        raise CanonicalizationError(
+            f"canonicalizer_failed:{target}",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
+
+    d = prepared.operation_descriptor
+    if not isinstance(d, OperationDescriptor):
+        raise CanonicalizationError(
+            "descriptor_not_operation_descriptor",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
+    if not isinstance(prepared.canonical_target, str):
+        raise CanonicalizationError(
+            "canonical_target_not_str",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
+    if not isinstance(prepared.executable_args, Mapping) or not isinstance(
+        prepared.human_rendering, Mapping
+    ):
+        raise CanonicalizationError(
+            "payload_root_not_mapping",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
 
     prepared = dataclasses.replace(
         prepared,
         executable_args=_freeze_json(prepared.executable_args),
         human_rendering=_freeze_json(prepared.human_rendering),
     )
-    if prepared.operation_descriptor.tool_name != tool_name:
-        raise CanonicalizationError("descriptor_tool_mismatch")
-    if prepared.operation_descriptor != resolve(tool_name):
-        raise CanonicalizationError("descriptor_refinement_unregistered")
+    if d.tool_name != tool_name:
+        raise CanonicalizationError(
+            "descriptor_tool_mismatch",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
+    if d != resolve(tool_name):
+        raise CanonicalizationError(
+            "descriptor_refinement_unregistered",
+            category=CanonOutcome.INTERNAL_ERROR,
+        )
     return prepared
+
+
+def _reject_non_str_keys(value: object) -> None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if not isinstance(key, str):
+                raise CanonicalizationError(
+                    "non_str_payload_key",
+                    category=CanonOutcome.INTERNAL_ERROR,
+                )
+            _reject_non_str_keys(nested)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_non_str_keys(item)
 
 
 def _freeze_json(value: Mapping[str, object]) -> Mapping[str, object]:
     """Deep-copy ``value`` through its authoritative JSON representation."""
+    _reject_non_str_keys(value)
     try:
-        return json.loads(json.dumps(value))
+        return json.loads(json.dumps(value, allow_nan=False))
     except (TypeError, ValueError) as exc:
-        raise CanonicalizationError("non_serializable_args") from exc
+        raise CanonicalizationError(
+            "non_serializable_args",
+            category=CanonOutcome.INTERNAL_ERROR,
+        ) from exc
+
+
+def is_uncovered(exc: object) -> bool:
+    """Return whether ``exc`` is the exact framework registry-miss outcome.
+
+    This is the only outcome later guard stages may treat as an unbuilt tool.
+    All other outcomes fail closed, and subclasses cannot impersonate a miss.
+    """
+    return (
+        type(exc) is CanonicalizationError
+        and exc.category is CanonOutcome.UNREGISTERED
+    )
 
 
 def _registry_snapshot() -> dict[_CanonicalizerKey, CanonicalizerEntry]:
