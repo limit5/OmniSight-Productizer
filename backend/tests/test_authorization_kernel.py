@@ -1,9 +1,8 @@
 """OP-2597 — U6-0 T6 authorize_action kernel (dormant).
 
-Offline unit tests for ``backend.agents.authorization_kernel``: pure
-decision function that resolves each request against the authoritative
-``tool_registry`` and classifies the resolved descriptor into
-``allow`` / ``requires_grant`` / ``deny``.
+Offline unit tests for ``backend.agents.authorization_kernel``: issued
+authorization capabilities resolve requests against the authoritative
+``tool_registry``; bare descriptors produce telemetry-only verdicts.
 
 Frozen design §1 core invariant exercised here: a mutating side effect
 can never be authorized from the model-side kernel path — it only ever
@@ -22,8 +21,11 @@ dispatch guard (``backend/agents/action_guard.py``), and their tests.
 
 from __future__ import annotations
 
+import ast
+import copy
 import dataclasses
 import pathlib
+import pickle
 import re
 
 import pytest
@@ -31,9 +33,13 @@ import pytest
 from backend.agents import action_canonicalize, execution_context
 from backend.agents.action_canonicalize import CanonicalizationContext
 from backend.agents.authorization_kernel import (
+    AuthorizedOperation,
     AuthorizationDecision,
     OperationRequest,
+    TelemetryVerdict,
+    _issue_from_name,
     authorize_action,
+    classify_for_telemetry,
     classify_operation,
 )
 from backend.agents.canonicalize_code_write_file import (
@@ -283,51 +289,72 @@ def test_bound_principals_mutating_still_requires_grant_regression() -> None:
 
 # ── OP-2626 (U6-0 G2c): canonical descriptor classification ─────────
 def test_classify_operation_read_only_descriptor_allows() -> None:
+    ctx = _ctx_human()
     descriptor = OperationDescriptor(
         tool_name="canonical_read",
         effect="read_only",
         family="read_only",
     )
-    d = classify_operation(_ctx_human(), descriptor)
-    assert d.verdict == "allow"
-    assert d.reason == "read_only"
-    assert d.operation_descriptor is descriptor
+    telemetry = classify_for_telemetry(ctx, descriptor)
+    assert telemetry.would_verdict == "allow"
+    assert telemetry.reason == "read_only"
+    assert telemetry.family == descriptor.family
+
+    decision = classify_operation(_issue_from_name(ctx, "read_file"))
+    assert decision.verdict == "allow"
+    assert decision.reason == "read_only"
+    assert decision.operation_descriptor is resolve("read_file")
 
 
 def test_classify_operation_mutating_bound_requires_grant() -> None:
+    ctx = _ctx_human()
     descriptor = OperationDescriptor(
         tool_name="canonical_write",
         effect="mutating",
         family="code_write",
     )
-    d = classify_operation(_ctx_human(), descriptor)
-    assert d.verdict == "requires_grant"
-    assert d.reason == "mutating_needs_grant:code_write"
-    assert d.operation_descriptor is descriptor
+    telemetry = classify_for_telemetry(ctx, descriptor)
+    assert telemetry.would_verdict == "requires_grant"
+    assert telemetry.reason == "mutating_needs_grant:code_write"
+
+    decision = classify_operation(_issue_from_name(ctx, "git_push"))
+    assert decision.verdict == "requires_grant"
+    assert decision.reason == "mutating_needs_grant:code_write"
+    assert decision.operation_descriptor is resolve("git_push")
 
 
 def test_classify_operation_mutating_unbound_denies() -> None:
+    ctx = _ctx_unbound()
     descriptor = OperationDescriptor(
         tool_name="canonical_write",
         effect="mutating",
         family="code_write",
     )
-    d = classify_operation(_ctx_unbound(), descriptor)
-    assert d.verdict == "deny"
-    assert d.reason == "unbound_principal_denied"
-    assert d.operation_descriptor is descriptor
+    telemetry = classify_for_telemetry(ctx, descriptor)
+    assert telemetry.would_verdict == "deny"
+    assert telemetry.reason == "unbound_principal_denied"
+
+    decision = classify_operation(_issue_from_name(ctx, "git_push"))
+    assert decision.verdict == "deny"
+    assert decision.reason == "unbound_principal_denied"
+    assert decision.operation_descriptor is resolve("git_push")
 
 
 def test_classify_operation_unknown_family_denies_before_effect() -> None:
+    ctx = _ctx_human()
     descriptor = OperationDescriptor(
         tool_name="canonical_unknown",
         effect="mutating",
         family="__unknown_deny__",
     )
-    d = classify_operation(_ctx_human(), descriptor)
-    assert d.verdict == "deny"
-    assert d.reason == "unknown_tool_default_deny"
-    assert d.operation_descriptor is descriptor
+    telemetry = classify_for_telemetry(ctx, descriptor)
+    assert telemetry.would_verdict == "deny"
+    assert telemetry.reason == "unknown_tool_default_deny"
+
+    decision = classify_operation(_issue_from_name(ctx, "unknown_for_at1"))
+    assert decision.verdict == "deny"
+    assert decision.reason == "unknown_tool_default_deny"
+    assert decision.operation_descriptor.family == "__unknown_deny__"
 
 
 @pytest.mark.parametrize("tool_name", ["read_file", "git_push", "unknown_for_g2c"])
@@ -336,23 +363,17 @@ def test_authorize_action_name_shim_matches_classify_operation(
 ) -> None:
     ctx = _ctx_human()
     actual = authorize_action(ctx, _req(tool_name))
-    expected = classify_operation(ctx, resolve(tool_name))
-    assert actual.verdict == expected.verdict
-    assert actual.reason == expected.reason
-    assert actual.operation_descriptor == expected.operation_descriptor
+    expected = classify_operation(_issue_from_name(ctx, tool_name))
+    assert actual == expected
 
 
 def test_classify_operation_records_provenance_snapshot_ids() -> None:
-    descriptor = OperationDescriptor(
-        tool_name="canonical_read",
-        effect="read_only",
-        family="read_only",
-    )
-    d = classify_operation(
+    operation = _issue_from_name(
         _ctx_human(),
-        descriptor,
+        "read_file",
         provenance_snapshot_ids=("snap-1", "snap-2"),
     )
+    d = classify_operation(operation)
     assert d.provenance_snapshot_ids == ("snap-1", "snap-2")
     assert isinstance(d.provenance_snapshot_ids, tuple)
 
@@ -376,8 +397,9 @@ def test_view_canonical_verdict_diverges_from_name_verdict() -> None:
             {"command": "view", "path": "src/x.py"},
         )
 
-        canonical_decision = classify_operation(
-            ctx, prepared.operation_descriptor
+        canonical_telemetry = classify_for_telemetry(
+            ctx,
+            prepared.operation_descriptor,
         )
         name_decision = authorize_action(
             ctx,
@@ -389,11 +411,163 @@ def test_view_canonical_verdict_diverges_from_name_verdict() -> None:
             ),
         )
 
-        assert canonical_decision.verdict == "allow"
+        assert canonical_telemetry.would_verdict == "allow"
         assert name_decision.verdict == "requires_grant"
-        assert canonical_decision.verdict != name_decision.verdict
+        assert canonical_telemetry.would_verdict != name_decision.verdict
     finally:
         action_canonicalize._restore_state_for_tests(prior)
+
+
+# ── OP-2654 (U6-0 AT-1): capability forge resistance ─────────────────
+def test_issued_authorized_operation_is_accepted() -> None:
+    operation = _issue_from_name(_ctx_human(), "read_file")
+    assert type(operation) is AuthorizedOperation
+    assert classify_operation(operation).verdict == "allow"
+
+
+def test_unissued_authorized_operation_is_rejected() -> None:
+    forged = object.__new__(AuthorizedOperation)
+    with pytest.raises(ValueError, match="unissued AuthorizedOperation"):
+        classify_operation(forged)
+
+
+def test_authorized_operation_direct_constructor_is_rejected() -> None:
+    with pytest.raises(
+        TypeError,
+        match="AuthorizedOperation is issued internally only",
+    ):
+        AuthorizedOperation()
+
+
+def test_authorized_operation_subclass_is_rejected() -> None:
+    with pytest.raises(
+        TypeError,
+        match="AuthorizedOperation cannot be subclassed",
+    ):
+
+        class ForgedAuthorizedOperation(AuthorizedOperation):
+            pass
+
+
+def test_authorized_operation_copy_preserves_issued_identity() -> None:
+    operation = _issue_from_name(_ctx_human(), "git_push")
+    shallow_copy = copy.copy(operation)
+    deep_copy = copy.deepcopy(operation)
+    assert shallow_copy is operation
+    assert deep_copy is operation
+    assert classify_operation(shallow_copy).verdict == "requires_grant"
+    assert classify_operation(deep_copy).verdict == "requires_grant"
+
+
+def test_authorized_operation_pickle_is_rejected() -> None:
+    operation = _issue_from_name(_ctx_human(), "read_file")
+    with pytest.raises(
+        TypeError,
+        match="AuthorizedOperation cannot be serialized",
+    ):
+        pickle.dumps(operation)
+
+
+def test_classify_operation_rejects_bare_descriptor() -> None:
+    import inspect
+
+    signature = inspect.signature(classify_operation)
+    assert tuple(signature.parameters) == ("op",)
+
+    descriptor = resolve("read_file")
+    with pytest.raises(TypeError, match="exact AuthorizedOperation required"):
+        classify_operation(descriptor)  # type: ignore[arg-type]
+
+
+def test_telemetry_verdict_cannot_authorize() -> None:
+    telemetry = classify_for_telemetry(_ctx_human(), resolve("read_file"))
+    assert isinstance(telemetry, TelemetryVerdict)
+    assert not isinstance(telemetry, AuthorizationDecision)
+
+    field_names = {field.name for field in dataclasses.fields(telemetry)}
+    assert field_names == {"would_verdict", "family", "reason"}
+    for authority_field in (
+        "verdict",
+        "proceed",
+        "execution_context",
+        "provenance_snapshot_ids",
+    ):
+        assert not hasattr(telemetry, authority_field)
+
+    with pytest.raises(AttributeError):
+        _ = telemetry.verdict  # type: ignore[attr-defined]
+
+
+def test_authority_issuer_call_sites_are_allowlisted() -> None:
+    """Only authorize_action and this test module may mint capabilities."""
+    backend_root = pathlib.Path(__file__).resolve().parents[1]
+    test_path = pathlib.Path(__file__).resolve()
+    production_calls: list[tuple[str, str]] = []
+
+    for py in backend_root.rglob("*.py"):
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        functions = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name):
+                callee = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                callee = node.func.attr
+            else:
+                continue
+            if callee not in {"_issue_from_name", "issue_from_name"}:
+                continue
+            if py.resolve() == test_path:
+                continue
+            enclosing = [
+                function
+                for function in functions
+                if function.lineno <= node.lineno <= function.end_lineno
+            ]
+            owner = min(
+                enclosing,
+                key=lambda function: function.end_lineno - function.lineno,
+            )
+            production_calls.append(
+                (str(py.relative_to(backend_root)), owner.name)
+            )
+
+    assert production_calls == [
+        ("agents/authorization_kernel.py", "authorize_action")
+    ]
+
+
+def test_authorization_decision_has_no_external_producer() -> None:
+    """Only the kernel may construct the guard-consumable decision type."""
+    backend_root = pathlib.Path(__file__).resolve().parents[1]
+    producers: list[str] = []
+
+    for py in backend_root.rglob("*.py"):
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name):
+                callee = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                callee = node.func.attr
+            else:
+                continue
+            if callee == "AuthorizationDecision":
+                producers.append(str(py.relative_to(backend_root)))
+
+    assert producers == ["agents/authorization_kernel.py"]
 
 
 # ── Kernel reachability guard ────────────────────────────────────────────
@@ -403,7 +577,7 @@ def test_kernel_reachable_only_via_action_guard() -> None:
     the dispatch guard in ``backend/agents/action_guard.py`` (T7-0). Beyond
     the kernel module, the guard module, and their two test files, no backend
     file may reference the kernel tokens. T7a/T7b wire the adapters to the
-    GUARD; G6 switches the guard to the canonical path; T11 flips enforce.
+    GUARD; a later shadow stage uses the telemetry path; T11 flips enforce.
 
     This guard fails loudly if a direct kernel caller sneaks in — the
     frozen design forbids it.
