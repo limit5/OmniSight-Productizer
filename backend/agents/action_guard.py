@@ -294,3 +294,43 @@ def guard_tool_dispatch(
         )
 
     return outcome
+
+
+_CANONICAL_BOOTSTRAP_OK = False
+
+
+def _bootstrap_canonicalizers() -> None:
+    """Populate and freeze canonicalizers once per guard-module import.
+
+    Fail-isolated: any ordinary exception (including a leaf import,
+    registration, freeze, or logging failure) disables canonical telemetry
+    without breaking guard import or process startup. Process workers derive
+    the same registry independently. Nothing reads the registry until G6.3,
+    so name-path guard decisions remain unchanged.
+    """
+    global _CANONICAL_BOOTSTRAP_OK
+    try:
+        from backend.agents import action_canonicalize
+        from backend.agents.canonicalize_code_write_file import (
+            register_code_write_file_canonicalizers,
+        )
+
+        register_code_write_file_canonicalizers()
+        action_canonicalize.freeze_registry()
+        _CANONICAL_BOOTSTRAP_OK = True
+    except Exception as exc:  # noqa: BLE001 — guard import is fail-isolated
+        _CANONICAL_BOOTSTRAP_OK = False
+        try:
+            logger.warning(
+                "canonicalizer_bootstrap_failed; canonical telemetry "
+                "disabled: %r",
+                exc,
+            )
+        except Exception:  # noqa: BLE001 — logging cannot break import
+            pass
+
+
+try:
+    _bootstrap_canonicalizers()
+except Exception:  # noqa: BLE001 — last-resort module-import containment
+    _CANONICAL_BOOTSTRAP_OK = False

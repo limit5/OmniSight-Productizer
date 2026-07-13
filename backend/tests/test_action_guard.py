@@ -9,13 +9,25 @@ resolution / startup matrix validation / metrics lockstep / dormancy.
 
 from __future__ import annotations
 
+import ast
+import inspect
+import os
 import pathlib
 import re
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
 from backend import metrics
-from backend.agents import action_guard, execution_context, tool_registry
+from backend.agents import (
+    action_canonicalize,
+    action_guard,
+    canonicalize_code_write_file,
+    execution_context,
+    tool_registry,
+)
 from backend.agents.action_guard import (
     ADAPTER_NAMESPACES,
     FAMILY_VOCAB,
@@ -48,6 +60,17 @@ def _clean_mode_matrix(monkeypatch: pytest.MonkeyPatch):
     yield
 
 
+@pytest.fixture
+def _restore_bootstrap_state():
+    prior = action_canonicalize._snapshot_state_for_tests()
+    prior_ok = action_guard._CANONICAL_BOOTSTRAP_OK
+    try:
+        yield
+    finally:
+        action_canonicalize._restore_state_for_tests(prior)
+        action_guard._CANONICAL_BOOTSTRAP_OK = prior_ok
+
+
 def _set_matrix(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("OMNISIGHT_ACTION_GUARD_MODE", value)
     reload_mode_matrix_for_tests()
@@ -76,6 +99,175 @@ def _guard(
         raw_args={},
         execution_context=ctx,
     )
+
+
+# ── Import-time canonicalizer bootstrap ──────────────────────────────────
+def test_canonicalizer_bootstrap_populates_and_freezes(
+    _restore_bootstrap_state,
+) -> None:
+    action_canonicalize.reset_for_tests()
+
+    action_guard._bootstrap_canonicalizers()
+
+    assert action_guard._CANONICAL_BOOTSTRAP_OK is True
+    assert action_canonicalize.is_registered(
+        "runner_sdk", "Write", "v1"
+    )
+    assert action_canonicalize.is_registered(
+        "runner_sdk", "str_replace_based_edit_tool", "v1"
+    )
+    assert action_canonicalize.is_frozen()
+
+
+def test_canonicalizer_bootstrap_is_idempotent(
+    _restore_bootstrap_state,
+) -> None:
+    action_canonicalize.reset_for_tests()
+
+    action_guard._bootstrap_canonicalizers()
+    action_guard._bootstrap_canonicalizers()
+
+    assert action_guard._CANONICAL_BOOTSTRAP_OK is True
+    assert action_canonicalize.is_frozen()
+
+
+def test_canonicalizer_bootstrap_swallows_registration_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_bootstrap_state,
+) -> None:
+    action_canonicalize.reset_for_tests()
+
+    def _raise_registration_failure() -> None:
+        raise RuntimeError("registration failed")
+
+    monkeypatch.setattr(
+        canonicalize_code_write_file,
+        "register_code_write_file_canonicalizers",
+        _raise_registration_failure,
+    )
+
+    action_guard._bootstrap_canonicalizers()
+
+    assert action_guard._CANONICAL_BOOTSTRAP_OK is False
+    out = guard_tool_dispatch(
+        adapter_namespace="chat",
+        tool_name="read_file",
+        raw_args={},
+        execution_context=None,
+    )
+    assert isinstance(out, GuardOutcome)
+
+
+def test_canonicalizer_bootstrap_swallows_freeze_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_bootstrap_state,
+) -> None:
+    action_canonicalize.reset_for_tests()
+
+    def _raise_freeze_failure() -> None:
+        raise RuntimeError("freeze failed")
+
+    monkeypatch.setattr(
+        action_canonicalize,
+        "freeze_registry",
+        _raise_freeze_failure,
+    )
+
+    action_guard._bootstrap_canonicalizers()
+
+    assert action_guard._CANONICAL_BOOTSTRAP_OK is False
+    out = guard_tool_dispatch(
+        adapter_namespace="chat",
+        tool_name="read_file",
+        raw_args={},
+        execution_context=None,
+    )
+    assert isinstance(out, GuardOutcome)
+
+
+def test_canonicalizer_bootstrap_swallows_logging_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    _restore_bootstrap_state,
+) -> None:
+    action_canonicalize.reset_for_tests()
+
+    def _raise_registration_failure() -> None:
+        raise RuntimeError("registration failed")
+
+    def _raise_logging_failure(*_args, **_kwargs) -> None:
+        raise RuntimeError("logging failed")
+
+    monkeypatch.setattr(
+        canonicalize_code_write_file,
+        "register_code_write_file_canonicalizers",
+        _raise_registration_failure,
+    )
+    monkeypatch.setattr(
+        action_guard.logger,
+        "warning",
+        _raise_logging_failure,
+    )
+
+    action_guard._bootstrap_canonicalizers()
+
+    assert action_guard._CANONICAL_BOOTSTRAP_OK is False
+
+
+def test_canonicalizer_bootstrap_module_call_is_contained() -> None:
+    tree = ast.parse(inspect.getsource(action_guard))
+    bootstrap_guards = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Try)
+        and any(
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Name)
+            and statement.value.func.id == "_bootstrap_canonicalizers"
+            for statement in node.body
+        )
+    ]
+
+    assert len(bootstrap_guards) == 1
+
+
+def test_guard_import_survives_leaf_import_failure() -> None:
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    env_test = repo_root / ".env.test"
+    script = textwrap.dedent(
+        '''
+        import sys
+        LEAF = "backend.agents.canonicalize_code_write_file"
+        assert LEAF not in sys.modules
+        class _BlockLeaf:
+            def find_spec(self, name, path=None, target=None):
+                if name == LEAF:
+                    raise ImportError("blocked for fail-isolation test")
+                return None
+        sys.meta_path.insert(0, _BlockLeaf())
+        import backend.agents.action_guard as ag
+        assert ag._CANONICAL_BOOTSTRAP_OK is False, ag._CANONICAL_BOOTSTRAP_OK
+        out = ag.guard_tool_dispatch(
+            adapter_namespace="chat",
+            tool_name="read_file",
+            raw_args={},
+            execution_context=None,
+        )
+        assert out is not None
+        print("BOOTSTRAP_ISOLATION_OK")
+        '''
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(repo_root),
+        env={**os.environ, "OMNISIGHT_DOTENV_FILE": str(env_test)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "BOOTSTRAP_ISOLATION_OK" in result.stdout
 
 
 # ── Vocabulary sanity ────────────────────────────────────────────────────
