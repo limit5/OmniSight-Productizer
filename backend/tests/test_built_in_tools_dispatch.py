@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -101,6 +102,83 @@ def test_text_editor_view_supports_view_range(
     # Lines outside the requested range must not bleed in.
     assert "1\tline0" not in out
     assert "6\tline5" not in out
+
+
+def test_text_editor_view_is_read_only_against_base_and_wrapped_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from backend.agents import static_analysis_gate
+    from backend.agents.tool_dispatcher import (
+        StructuredToolError,
+        TextEditorHandler,
+    )
+
+    target = tmp_path / "f.py"
+    target.write_text("original\n", encoding="utf-8")
+    subdir = tmp_path / "d"
+    subdir.mkdir()
+
+    def _snapshot_tree() -> dict[Path, bytes]:
+        return {
+            path: path.read_bytes()
+            for path in tmp_path.rglob("*")
+            if path.is_file()
+        }
+
+    before = _snapshot_tree()
+    base = TextEditorHandler(worktree_root=tmp_path)
+    monkeypatch.setattr(
+        base,
+        "_push_undo",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("view pushed undo")
+        ),
+    )
+    monkeypatch.setattr(
+        static_analysis_gate,
+        "run_static_analysis",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("view ran static analysis")
+        ),
+    )
+    progress = tmp_path / "progress.json"
+    wrapped = static_analysis_gate.wrap_text_editor_with_static_analysis(
+        base,
+        worktree_root=tmp_path,
+        progress_path=progress,
+        runner=lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("view ran a subprocess")
+        ),
+    )
+    ok_payloads: list[dict[str, Any]] = [
+        {"command": "view", "path": "f.py"},
+        {"command": "view", "path": "f.py", "view_range": [1, 1]},
+        {
+            "command": "view",
+            "path": "f.py",
+            "file_text": "X",
+            "old_str": "original",
+            "new_str": "Y",
+            "insert_line": 1,
+            "insert_text": "Z",
+        },
+        {"command": "view", "path": "d"},
+    ]
+    err_payloads: list[dict[str, Any]] = [
+        {"command": "view", "path": "missing.py"}
+    ]
+
+    for handler in (base, wrapped):
+        for payload in ok_payloads:
+            handler(payload)
+        for payload in err_payloads:
+            with pytest.raises(StructuredToolError) as caught:
+                handler(payload)
+            assert caught.value.error_code == "tool_input_invalid"
+
+    assert not progress.exists()
+    assert _snapshot_tree() == before
 
 
 def test_text_editor_create_writes_file_and_pushes_undo(

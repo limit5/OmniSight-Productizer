@@ -28,12 +28,16 @@ import re
 
 import pytest
 
-from backend.agents import execution_context
+from backend.agents import action_canonicalize, execution_context
+from backend.agents.action_canonicalize import CanonicalizationContext
 from backend.agents.authorization_kernel import (
     AuthorizationDecision,
     OperationRequest,
     authorize_action,
     classify_operation,
+)
+from backend.agents.canonicalize_code_write_file import (
+    register_code_write_file_canonicalizers,
 )
 from backend.agents.tool_registry import OperationDescriptor, resolve
 from backend.auth import User
@@ -351,6 +355,44 @@ def test_classify_operation_records_provenance_snapshot_ids() -> None:
     )
     assert d.provenance_snapshot_ids == ("snap-1", "snap-2")
     assert isinstance(d.provenance_snapshot_ids, tuple)
+
+
+def test_view_canonical_verdict_diverges_from_name_verdict() -> None:
+    snap = action_canonicalize._registry_snapshot()
+    try:
+        register_code_write_file_canonicalizers()
+        ctx = _ctx_machine()
+        workspace_context = CanonicalizationContext(
+            workspace_id="w",
+            workspace_root="/w",
+            adapter_namespace="runner_sdk",
+        )
+        prepared = action_canonicalize.canonicalize(
+            workspace_context,
+            "runner_sdk",
+            "str_replace_based_edit_tool",
+            "v1",
+            {"command": "view", "path": "src/x.py"},
+        )
+
+        canonical_decision = classify_operation(
+            ctx, prepared.operation_descriptor
+        )
+        name_decision = authorize_action(
+            ctx,
+            OperationRequest(
+                "runner_sdk",
+                "str_replace_based_edit_tool",
+                "v1",
+                {"command": "view", "path": "src/x.py"},
+            ),
+        )
+
+        assert canonical_decision.verdict == "allow"
+        assert name_decision.verdict == "requires_grant"
+        assert canonical_decision.verdict != name_decision.verdict
+    finally:
+        action_canonicalize._registry_restore(snap)
 
 
 # ── Kernel reachability guard ────────────────────────────────────────────

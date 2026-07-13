@@ -10,9 +10,15 @@ from backend.agents.action_canonicalize import (
     CanonicalizationError,
     CanonicalizerSpec,
     PreparedAction,
+    Refinement,
     register_canonicalizers_atomic,
 )
-from backend.agents.tool_registry import resolve
+from backend.agents.tool_registry import OperationDescriptor, resolve
+
+
+_VIEW_REFINED_DESCRIPTOR = OperationDescriptor(
+    "str_replace_based_edit_tool", "read_only", "read_only"
+)
 
 
 def _require_str(raw_args: Mapping[str, object], key: str) -> str:
@@ -225,8 +231,13 @@ def _canon_str_replace(
         cmd_args = {"insert_line": insert_line, "insert_text": insert_text}
         summary = f"at line {insert_line}"
 
+    descriptor = (
+        _VIEW_REFINED_DESCRIPTOR
+        if command == "view"
+        else resolve("str_replace_based_edit_tool")
+    )
     return PreparedAction(
-        operation_descriptor=resolve("str_replace_based_edit_tool"),
+        operation_descriptor=descriptor,
         canonical_target=relative_path,
         executable_args={
             "workspace_id": context.workspace_id,
@@ -265,6 +276,23 @@ def register_code_write_file_canonicalizers() -> None:
                 "str_replace_based_edit_tool",
                 "v1",
                 _canon_str_replace,
+                refinements=(
+                    Refinement(
+                        descriptor=_VIEW_REFINED_DESCRIPTOR,
+                        review_note=(
+                            "text-editor `view` is a pure read in the real "
+                            "TextEditorHandler._cmd_view (exists/is_dir/read_text "
+                            "only; never _push_undo/write/unlink) and a pass-through "
+                            "in production wrap_text_editor_with_static_analysis "
+                            "(view not in {create,str_replace,insert}); refining to "
+                            "read_only classifies view allow instead of "
+                            "requires_grant. EFFECT change (not a same-effect family "
+                            "change). Drift-guarded by "
+                            "test_text_editor_view_is_read_only_against_base_and_"
+                            "wrapped_handler."
+                        ),
+                    ),
+                ),
             ),
         ]
     )

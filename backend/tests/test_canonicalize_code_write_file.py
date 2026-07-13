@@ -20,10 +20,11 @@ from backend.agents.action_canonicalize import (
     register_canonicalizer,
 )
 from backend.agents.canonicalize_code_write_file import (
+    _VIEW_REFINED_DESCRIPTOR,
     _canon_sdk_write,
     register_code_write_file_canonicalizers,
 )
-from backend.agents.tool_registry import resolve
+from backend.agents.tool_registry import OperationDescriptor, resolve
 
 
 @pytest.fixture(autouse=True)
@@ -297,8 +298,16 @@ def test_text_editor_commands_return_structured_executable_args(
 
     command = raw_args["command"]
     assert isinstance(command, str)
-    assert prepared.operation_descriptor == resolve("str_replace_based_edit_tool")
-    assert prepared.operation_descriptor.effect == "mutating"
+    if command == "view":
+        assert prepared.operation_descriptor == OperationDescriptor(
+            "str_replace_based_edit_tool", "read_only", "read_only"
+        )
+        assert prepared.operation_descriptor.effect == "read_only"
+    else:
+        assert prepared.operation_descriptor == resolve(
+            "str_replace_based_edit_tool"
+        )
+        assert prepared.operation_descriptor.effect == "mutating"
     assert prepared.canonical_target == "src/main.py"
     assert prepared.executable_args == {
         "workspace_id": "ws-1",
@@ -313,6 +322,22 @@ def test_text_editor_commands_return_structured_executable_args(
         "target": "src/main.py",
         "summary": summary,
     }
+
+
+def test_text_editor_view_refines_to_read_only(tmp_path: pathlib.Path) -> None:
+    register_code_write_file_canonicalizers()
+
+    prepared = canonicalize(
+        _context(tmp_path, "runner_sdk"),
+        "runner_sdk",
+        "str_replace_based_edit_tool",
+        "v1",
+        {"command": "view", "path": "src/main.py"},
+    )
+
+    assert prepared.operation_descriptor == _VIEW_REFINED_DESCRIPTOR
+    assert prepared.operation_descriptor.effect == "read_only"
+    assert prepared.operation_descriptor.family == "read_only"
 
 
 def test_text_editor_undo_edit_fails_closed(tmp_path: pathlib.Path) -> None:
@@ -502,6 +527,12 @@ def test_registration_adds_exact_keys_and_is_idempotent() -> None:
     after = _registry_snapshot()
     assert set(after) - set(before) == expected
     assert after[("runner_sdk", "Write", "v1")].fn is _canon_sdk_write
+    refined_key = ("runner_sdk", "str_replace_based_edit_tool", "v1")
+    assert after[refined_key].refinements == frozenset(
+        {_VIEW_REFINED_DESCRIPTOR}
+    )
+    for key in expected - {refined_key}:
+        assert after[key].refinements == frozenset()
 
     register_code_write_file_canonicalizers()
 
