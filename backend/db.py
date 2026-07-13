@@ -4424,6 +4424,151 @@ async def get_action_grant(
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  Challenge decision lifecycle (U6-0 T9/T10 G4b; PostgreSQL only)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
+# These helpers deliberately require asyncpg's transaction API and
+# ``clock_timestamp()``.  The dormant SQLite development path never decides
+# challenges.  All cross-worker coordination is durable PostgreSQL state; no
+# module-global state is read or written here.
+
+async def confirm_challenge(
+    conn,
+    *,
+    tenant_id: str,
+    challenge_id: str,
+    confirmer_actor: str,
+    confirmer_principal_type: str,
+    confirmer_auth_event_id: str,
+    reason: str,
+    grant_id: str,
+    resume_id: str,
+    grant_expires_at: str | datetime,
+) -> str:
+    """Confirm one live challenge and issue its grant and resume job.
+
+    PostgreSQL only: the pending-state CAS, strict inserts, and live wall clock
+    run in one asyncpg transaction.  Operation identity and recovery policy
+    are copied from the immutable prepared action, never from caller input.
+    """
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "UPDATE challenges SET state = 'confirmed', "
+            "confirmer_actor = $3, confirmer_principal_type = $4, "
+            "confirmer_auth_event_id = $5, "
+            "confirmed_at = clock_timestamp(), confirm_reason = $6 "
+            "WHERE tenant_id = $1 AND challenge_id = $2 "
+            "AND state = 'pending' AND expires_at > clock_timestamp() "
+            "RETURNING action_instance_id",
+            tenant_id,
+            challenge_id,
+            confirmer_actor,
+            confirmer_principal_type,
+            confirmer_auth_event_id,
+            reason,
+        )
+        if row is None:
+            return "not_confirmable"
+        action_instance_id = row["action_instance_id"]
+
+        grant = await conn.fetchrow(
+            """INSERT INTO action_grants
+               (grant_id, tenant_id, challenge_id, action_instance_id,
+                principal_type, actor_id, request_id, model_call_id,
+                adapter_namespace, tool_name, schema_version, family,
+                canonical_target, args_hash, provenance_kind,
+                model_snapshot_id, no_model_input_source,
+                prepared_action_digest, recovery_mode, grant_issuer_source,
+                idempotency_key, state, expires_at)
+               SELECT $1, p.tenant_id, $2, p.action_instance_id,
+                      p.principal_type, p.actor_id, p.request_id,
+                      p.model_call_id, p.adapter_namespace, p.tool_name,
+                      p.schema_version, p.family, p.canonical_target,
+                      p.args_hash, p.provenance_kind, p.model_snapshot_id,
+                      p.no_model_input_source, p.prepared_action_digest,
+                      p.recovery_mode, 'ui_confirm',
+                      CASE WHEN p.recovery_mode = 'sink_idempotency_key'
+                           THEN p.action_instance_id ELSE NULL END,
+                      'pending', $3
+               FROM prepared_actions p
+               WHERE p.tenant_id = $4 AND p.action_instance_id = $5
+               RETURNING grant_id""",
+            grant_id,
+            challenge_id,
+            grant_expires_at,
+            tenant_id,
+            action_instance_id,
+        )
+        if grant is None:
+            raise RuntimeError("confirm_challenge: prepared_action missing")
+
+        resume = await conn.fetchrow(
+            """INSERT INTO resume_jobs
+               (resume_id, tenant_id, grant_id, action_instance_id, state)
+               VALUES ($1, $2, $3, $4, 'queued')
+               RETURNING resume_id""",
+            resume_id,
+            tenant_id,
+            grant_id,
+            action_instance_id,
+        )
+        if resume is None:
+            raise RuntimeError("confirm_challenge: resume enqueue failed")
+        return "confirmed"
+
+
+async def reject_challenge(
+    conn,
+    *,
+    tenant_id: str,
+    challenge_id: str,
+    confirmer_actor: str,
+    confirmer_principal_type: str,
+    confirmer_auth_event_id: str,
+    reason: str,
+) -> str:
+    """Reject one live pending challenge without issuing work (PG-only)."""
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            "UPDATE challenges SET state = 'rejected', "
+            "confirmer_actor = $3, confirmer_principal_type = $4, "
+            "confirmer_auth_event_id = $5, "
+            "confirmed_at = clock_timestamp(), confirm_reason = $6 "
+            "WHERE tenant_id = $1 AND challenge_id = $2 "
+            "AND state = 'pending' AND expires_at > clock_timestamp() "
+            "RETURNING challenge_id",
+            tenant_id,
+            challenge_id,
+            confirmer_actor,
+            confirmer_principal_type,
+            confirmer_auth_event_id,
+            reason,
+        )
+        if row is None:
+            return "not_rejectable"
+        return "rejected"
+
+
+async def expire_stale(conn) -> dict[str, int]:
+    """Expire all pending challenges and grants past wall time (PG-only)."""
+    async with conn.transaction():
+        challenge_tag = await conn.execute(
+            "UPDATE challenges SET state = 'expired' "
+            "WHERE state = 'pending' "
+            "AND expires_at <= clock_timestamp()"
+        )
+        grant_tag = await conn.execute(
+            "UPDATE action_grants SET state = 'expired' "
+            "WHERE state = 'pending' "
+            "AND expires_at <= clock_timestamp()"
+        )
+        return {
+            "challenges": int(challenge_tag.split()[-1]),
+            "grants": int(grant_tag.split()[-1]),
+        }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  Durable resume jobs and execution results (U6-0 T9/T10 G4a-2)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
