@@ -1064,9 +1064,10 @@ END;
 CREATE INDEX IF NOT EXISTS idx_prepared_actions_tenant_digest
     ON prepared_actions(tenant_id, prepared_action_digest);
 
--- U6-0 T9/T10 G4a (OP-2634/OP-2637/OP-2638): dormant grant substrate.
--- PostgreSQL's alembic 0264/0267/0268 schema is authoritative; the SQLite
--- subset keeps the write-once UNIQUE keys, CHECKs, and composite FKs.
+-- U6-0 T9/T10 G4a/G5a-3 (OP-2634/OP-2637/OP-2638/OP-2642): dormant grants.
+-- PostgreSQL's alembic 0264/0267/0268/0270 schema is authoritative; the
+-- SQLite subset keeps the UNIQUE keys, CHECKs, composite FKs, and state-only
+-- post-issue mutation rule.
 CREATE TABLE IF NOT EXISTS challenges (
     challenge_id             TEXT PRIMARY KEY,
     tenant_id                TEXT NOT NULL REFERENCES tenants(id),
@@ -1187,12 +1188,54 @@ CREATE TABLE IF NOT EXISTS action_grants (
     ),
     CHECK (expires_at > created_at)
 );
+CREATE TRIGGER IF NOT EXISTS trg_action_grants_freeze_identity
+BEFORE UPDATE ON action_grants
+WHEN (
+       NEW.grant_id != OLD.grant_id
+    OR NEW.tenant_id != OLD.tenant_id
+    OR NEW.challenge_id != OLD.challenge_id
+    OR NEW.action_instance_id != OLD.action_instance_id
+    OR NEW.principal_type != OLD.principal_type
+    OR NEW.actor_id != OLD.actor_id
+    OR NEW.request_id != OLD.request_id
+    OR NEW.model_call_id != OLD.model_call_id
+    OR NEW.adapter_namespace != OLD.adapter_namespace
+    OR NEW.tool_name != OLD.tool_name
+    OR NEW.schema_version != OLD.schema_version
+    OR NEW.family != OLD.family
+    OR NEW.canonical_target != OLD.canonical_target
+    OR NEW.args_hash != OLD.args_hash
+    OR NEW.provenance_kind != OLD.provenance_kind
+    OR NEW.model_snapshot_id IS NOT OLD.model_snapshot_id
+    OR NEW.no_model_input_source IS NOT OLD.no_model_input_source
+    OR NEW.prepared_action_digest != OLD.prepared_action_digest
+    OR NEW.grant_issuer_source != OLD.grant_issuer_source
+    OR NEW.idempotency_key IS NOT OLD.idempotency_key
+    OR NEW.recovery_mode != OLD.recovery_mode
+    OR NEW.created_at != OLD.created_at
+    OR NEW.expires_at != OLD.expires_at
+)
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'ActionGrantImmutable: only action_grants.state may change post-issue'
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS trg_action_grants_no_delete
+BEFORE DELETE ON action_grants
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'ActionGrantImmutable: action_grants rows are not deletable'
+    );
+END;
 CREATE INDEX IF NOT EXISTS idx_grants_tenant_state
     ON action_grants(tenant_id, state);
 
--- U6-0 T9/T10 G4a (OP-2635/OP-2638): dormant resume/result substrate.
--- PostgreSQL's alembic 0265/0268 schema is authoritative; the SQLite subset
--- keeps the write-once UNIQUE keys, state CHECK, and grant composite FKs.
+-- U6-0 T9/T10 G4a/G5a-3 (OP-2635/OP-2638/OP-2642): resume/results.
+-- PostgreSQL's alembic 0265/0268/0270 schema is authoritative; the SQLite
+-- subset keeps the write-once results, UNIQUE keys, state CHECK, and grant
+-- composite FKs.
 CREATE TABLE IF NOT EXISTS resume_jobs (
     resume_id          TEXT PRIMARY KEY,
     tenant_id          TEXT NOT NULL REFERENCES tenants(id),
@@ -1224,6 +1267,22 @@ CREATE TABLE IF NOT EXISTS execution_results (
     FOREIGN KEY (tenant_id, grant_id)
         REFERENCES action_grants (tenant_id, grant_id)
 );
+CREATE TRIGGER IF NOT EXISTS trg_execution_results_no_update
+BEFORE UPDATE ON execution_results
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'ExecutionResultImmutable: execution_results is write-once'
+    );
+END;
+CREATE TRIGGER IF NOT EXISTS trg_execution_results_no_delete
+BEFORE DELETE ON execution_results
+BEGIN
+    SELECT RAISE(
+        ABORT,
+        'ExecutionResultImmutable: execution_results is write-once'
+    );
+END;
 
 -- U6-0 T9/T10 G5a-2 (OP-2641): append-only execution attempt observations.
 CREATE TABLE IF NOT EXISTS execution_attempts (

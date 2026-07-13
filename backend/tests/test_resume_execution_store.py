@@ -1,4 +1,4 @@
-"""OP-2635/OP-2638 — dormant resume-job and result store tests.
+"""OP-2635/OP-2638/OP-2642 — dormant resume-job/result store tests.
 
 Offline tests exercise the async store helpers against the SQLite ``_SCHEMA``
 subset. The final tests use the standard PG fixture and skip when
@@ -188,6 +188,33 @@ async def test_sqlite_execution_result_is_write_once(sqlite_conn) -> None:
     assert json.loads(stored["result"]) == {"status": "ok", "value": 7}
 
 
+@pytest.mark.parametrize(
+    ("sql", "params"),
+    [
+        (
+            "UPDATE execution_results SET result = ? WHERE grant_id = ?",
+            ('{"status":"changed"}', "grant-result-immutable"),
+        ),
+        (
+            "DELETE FROM execution_results WHERE grant_id = ?",
+            ("grant-result-immutable",),
+        ),
+    ],
+    ids=("update", "delete"),
+)
+@pytest.mark.asyncio
+async def test_sqlite_execution_result_direct_mutation_is_blocked(
+    sqlite_conn,
+    sql: str,
+    params: tuple[str, ...],
+) -> None:
+    execution_result = _execution_result("grant-result-immutable")
+    assert await db.put_execution_result(sqlite_conn, **execution_result) is True
+
+    with pytest.raises(sqlite3.IntegrityError, match="ExecutionResultImmutable"):
+        sqlite_conn.raw.execute(sql, params)
+
+
 @pytest.mark.asyncio
 async def test_store_helpers_reject_empty_tenant_and_primary_keys(
     sqlite_conn,
@@ -217,6 +244,7 @@ async def test_store_helpers_reject_empty_tenant_and_primary_keys(
 def test_sqlite_bootstrap_contains_resume_and_execution_result_tables() -> None:
     conn = sqlite3.connect(":memory:")
     conn.executescript(db._SCHEMA)
+    conn.executescript(db._SCHEMA)
     tables = {
         row[0]
         for row in conn.execute(
@@ -227,7 +255,18 @@ def test_sqlite_bootstrap_contains_resume_and_execution_result_tables() -> None:
     resume_indexes = {
         row[1] for row in conn.execute("PRAGMA index_list(resume_jobs)")
     }
+    result_triggers = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'trigger' AND tbl_name = 'execution_results'"
+        )
+    }
     assert "idx_resume_jobs_tenant_state" in resume_indexes
+    assert {
+        "trg_execution_results_no_update",
+        "trg_execution_results_no_delete",
+    } <= result_triggers
     conn.close()
 
 
@@ -441,3 +480,40 @@ async def test_pg_resume_unique_and_both_stores_are_tenant_scoped(
             action_instance_id=action_instance_id,
         )
     assert exc_info.value.constraint_name == "uq_resume_jobs_tenant_grant"
+
+
+@pytest.mark.parametrize("operation", ("update", "delete"))
+@pytest.mark.asyncio
+async def test_pg_execution_result_direct_mutation_is_blocked(
+    pg_test_conn,
+    operation: str,
+) -> None:
+    suffix = uuid.uuid4().hex
+    tenant_id = f"t-result-immutable-{suffix}"
+    await _seed_tenants(pg_test_conn, tenant_id)
+    grant_id, _ = await _seed_grant(pg_test_conn, suffix, tenant_id)
+    assert await db.put_execution_result(
+        pg_test_conn,
+        grant_id=grant_id,
+        tenant_id=tenant_id,
+        result_json='{"status":"ok"}',
+        ambiguous=False,
+    )
+
+    with pytest.raises(asyncpg.RaiseError, match="ExecutionResultImmutable"):
+        async with pg_test_conn.transaction():
+            if operation == "update":
+                await pg_test_conn.execute(
+                    "UPDATE execution_results SET result = $1::jsonb "
+                    "WHERE grant_id = $2 AND tenant_id = $3",
+                    '{"status":"changed"}',
+                    grant_id,
+                    tenant_id,
+                )
+            else:
+                await pg_test_conn.execute(
+                    "DELETE FROM execution_results "
+                    "WHERE grant_id = $1 AND tenant_id = $2",
+                    grant_id,
+                    tenant_id,
+                )

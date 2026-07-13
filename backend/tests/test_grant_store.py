@@ -1,4 +1,4 @@
-"""OP-2634/OP-2638 — dormant challenge and grant store contract tests.
+"""OP-2634/OP-2638/OP-2642 — dormant challenge/grant contract tests.
 
 Offline tests exercise the async store helpers against the SQLite ``_SCHEMA``
 subset. The final tests use the standard PG fixture and skip when
@@ -157,6 +157,31 @@ async def _seed_grant_raw(
         expires_at,
     )
     return row is not None
+
+
+async def _seed_sqlite_grant_for_immutability(sqlite_conn) -> str:
+    prepared = _prepared_action("act-grant-immutable", "t-grant")
+    challenge_id = "challenge-grant-immutable"
+    grant_id = "grant-immutable"
+    await db.put_prepared_action(sqlite_conn, **prepared)
+    await db.put_challenge(
+        sqlite_conn,
+        challenge_id=challenge_id,
+        tenant_id=prepared["tenant_id"],
+        action_instance_id=prepared["action_instance_id"],
+        expires_at=FUTURE,
+    )
+    assert await _seed_grant_raw(
+        sqlite_conn,
+        grant_id=grant_id,
+        tenant_id=prepared["tenant_id"],
+        challenge_id=challenge_id,
+        action_instance_id=prepared["action_instance_id"],
+        idempotency_key="sink-key-immutable",
+        recovery_mode="sink_idempotency_key",
+        expires_at=FUTURE,
+    )
+    return grant_id
 
 
 @pytest.mark.asyncio
@@ -356,6 +381,79 @@ async def test_sqlite_action_grant_raw_seed_get_roundtrip_within_tenant(
 
 
 @pytest.mark.asyncio
+async def test_sqlite_action_grant_state_only_update_is_allowed(
+    sqlite_conn,
+) -> None:
+    grant_id = await _seed_sqlite_grant_for_immutability(sqlite_conn)
+
+    sqlite_conn.raw.execute(
+        "UPDATE action_grants SET state = 'executing' WHERE grant_id = ?",
+        (grant_id,),
+    )
+
+    row = sqlite_conn.raw.execute(
+        "SELECT state FROM action_grants WHERE grant_id = ?",
+        (grant_id,),
+    ).fetchone()
+    assert row["state"] == "executing"
+
+
+@pytest.mark.parametrize(
+    ("sql", "value"),
+    [
+        (
+            "UPDATE action_grants SET actor_id = ? WHERE grant_id = ?",
+            "changed-actor",
+        ),
+        (
+            "UPDATE action_grants SET recovery_mode = ? WHERE grant_id = ?",
+            "read_after_write",
+        ),
+        (
+            "UPDATE action_grants SET idempotency_key = ? WHERE grant_id = ?",
+            "changed-key",
+        ),
+        (
+            "UPDATE action_grants SET canonical_target = ? WHERE grant_id = ?",
+            "/workspace/changed.txt",
+        ),
+        (
+            "UPDATE action_grants SET args_hash = ? WHERE grant_id = ?",
+            "b" * 64,
+        ),
+    ],
+    ids=(
+        "actor-id",
+        "recovery-mode",
+        "idempotency-key",
+        "canonical-target",
+        "args-hash",
+    ),
+)
+@pytest.mark.asyncio
+async def test_sqlite_action_grant_identity_update_is_blocked(
+    sqlite_conn,
+    sql: str,
+    value: str,
+) -> None:
+    grant_id = await _seed_sqlite_grant_for_immutability(sqlite_conn)
+
+    with pytest.raises(sqlite3.IntegrityError, match="ActionGrantImmutable"):
+        sqlite_conn.raw.execute(sql, (value, grant_id))
+
+
+@pytest.mark.asyncio
+async def test_sqlite_action_grant_delete_is_blocked(sqlite_conn) -> None:
+    grant_id = await _seed_sqlite_grant_for_immutability(sqlite_conn)
+
+    with pytest.raises(sqlite3.IntegrityError, match="ActionGrantImmutable"):
+        sqlite_conn.raw.execute(
+            "DELETE FROM action_grants WHERE grant_id = ?",
+            (grant_id,),
+        )
+
+
+@pytest.mark.asyncio
 async def test_sqlite_cross_tenant_get_returns_none_for_both_tables(
     sqlite_conn,
 ) -> None:
@@ -444,6 +542,7 @@ def test_put_action_grant_bypass_is_removed() -> None:
 def test_sqlite_bootstrap_contains_challenge_and_grant_tables() -> None:
     conn = sqlite3.connect(":memory:")
     conn.executescript(db._SCHEMA)
+    conn.executescript(db._SCHEMA)
     tables = {
         row[0]
         for row in conn.execute(
@@ -457,8 +556,19 @@ def test_sqlite_bootstrap_contains_challenge_and_grant_tables() -> None:
     grant_indexes = {
         row[1] for row in conn.execute("PRAGMA index_list(action_grants)")
     }
+    grant_triggers = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'trigger' AND tbl_name = 'action_grants'"
+        )
+    }
     assert "idx_challenges_tenant_state" in challenge_indexes
     assert "idx_grants_tenant_state" in grant_indexes
+    assert {
+        "trg_action_grants_freeze_identity",
+        "trg_action_grants_no_delete",
+    } <= grant_triggers
     conn.close()
 
 
@@ -652,6 +762,126 @@ def _prepared_action(action_instance_id: str, tenant_id: str, **overrides) -> di
     }
     values.update(overrides)
     return values
+
+
+async def _seed_pg_grant_for_immutability(conn) -> tuple[str, str]:
+    suffix = uuid.uuid4().hex
+    tenant_id = f"t-grant-immutable-{suffix}"
+    prepared = _prepared_action(f"act-{suffix}", tenant_id)
+    challenge_id = f"challenge-{suffix}"
+    grant_id = f"grant-{suffix}"
+    await _seed_tenants(conn, tenant_id)
+    await db.put_prepared_action(conn, **prepared)
+    await db.put_challenge(
+        conn,
+        challenge_id=challenge_id,
+        tenant_id=tenant_id,
+        action_instance_id=prepared["action_instance_id"],
+        expires_at=FUTURE_PG,
+    )
+    assert await _seed_grant_raw(
+        conn,
+        grant_id=grant_id,
+        tenant_id=tenant_id,
+        challenge_id=challenge_id,
+        action_instance_id=prepared["action_instance_id"],
+        idempotency_key="sink-key-immutable",
+        recovery_mode="sink_idempotency_key",
+        expires_at=FUTURE_PG,
+    )
+    return grant_id, tenant_id
+
+
+@pytest.mark.asyncio
+async def test_pg_action_grant_state_only_update_is_allowed(pg_test_conn) -> None:
+    grant_id, tenant_id = await _seed_pg_grant_for_immutability(pg_test_conn)
+
+    result = await pg_test_conn.execute(
+        "UPDATE action_grants SET state = 'executing' "
+        "WHERE grant_id = $1 AND tenant_id = $2",
+        grant_id,
+        tenant_id,
+    )
+
+    assert result == "UPDATE 1"
+    assert (
+        await pg_test_conn.fetchval(
+            "SELECT state FROM action_grants "
+            "WHERE grant_id = $1 AND tenant_id = $2",
+            grant_id,
+            tenant_id,
+        )
+        == "executing"
+    )
+
+
+@pytest.mark.parametrize(
+    ("sql", "value"),
+    [
+        (
+            "UPDATE action_grants SET actor_id = $1 "
+            "WHERE grant_id = $2 AND tenant_id = $3",
+            "changed-actor",
+        ),
+        (
+            "UPDATE action_grants SET recovery_mode = $1 "
+            "WHERE grant_id = $2 AND tenant_id = $3",
+            "read_after_write",
+        ),
+        (
+            "UPDATE action_grants SET idempotency_key = $1 "
+            "WHERE grant_id = $2 AND tenant_id = $3",
+            "changed-key",
+        ),
+        (
+            "UPDATE action_grants SET canonical_target = $1 "
+            "WHERE grant_id = $2 AND tenant_id = $3",
+            "/workspace/changed.txt",
+        ),
+        (
+            "UPDATE action_grants SET args_hash = $1 "
+            "WHERE grant_id = $2 AND tenant_id = $3",
+            "b" * 64,
+        ),
+    ],
+    ids=(
+        "actor-id",
+        "recovery-mode",
+        "idempotency-key",
+        "canonical-target",
+        "args-hash",
+    ),
+)
+@pytest.mark.asyncio
+async def test_pg_action_grant_identity_update_is_blocked(
+    pg_test_conn,
+    sql: str,
+    value: str,
+) -> None:
+    grant_id, tenant_id = await _seed_pg_grant_for_immutability(pg_test_conn)
+
+    with pytest.raises(asyncpg.RaiseError, match="ActionGrantImmutable"):
+        async with pg_test_conn.transaction():
+            await pg_test_conn.execute(
+                sql,
+                value,
+                grant_id,
+                tenant_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_pg_action_grant_delete_is_blocked(pg_test_conn) -> None:
+    grant_id, tenant_id = await _seed_pg_grant_for_immutability(pg_test_conn)
+
+    with pytest.raises(asyncpg.RaiseError, match="ActionGrantImmutable"):
+        async with pg_test_conn.transaction():
+            await pg_test_conn.execute(
+                "DELETE FROM action_grants "
+                "WHERE grant_id = $1 AND tenant_id = $2",
+                grant_id,
+                tenant_id,
+            )
 
 
 @pytest.mark.asyncio
