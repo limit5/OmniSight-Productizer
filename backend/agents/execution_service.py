@@ -1,4 +1,4 @@
-"""U6-0 T9/T10 G5b/G5c dormant PostgreSQL execution service.
+"""U6-0 T9/T10 G5b/G5c/G5d dormant PostgreSQL execution service.
 
 The service owns fresh pooled connections so the pending-to-executing claim is
 committed before the executor can perform an external side effect.  Durable
@@ -35,6 +35,68 @@ class ExecResult:
     grant_next: str | None
     resume_next: str | None
     outcome: ExecOutcome | None
+
+
+async def _execute_and_finalize(
+    pool,
+    *,
+    tenant_id: str,
+    grant_id: str,
+    stored: StoredAction,
+    executor: Executor,
+    attempt_id_factory: Callable[[], str],
+    result_of: Callable[[Applied], str],
+) -> ExecResult:
+    """Execute one stored action and atomically finalize its durable outcome."""
+    try:
+        outcome = await executor(stored)
+    except Exception as exc:
+        outcome = Unknown(str(exc))
+
+    plan = resolve_terminal(outcome, stored.recovery_mode)
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if plan.record_attempt:
+                if isinstance(outcome, DefinitelyNotApplied):
+                    attempt_outcome = "definitely_not_applied"
+                    evidence = outcome.evidence
+                    error = outcome.error
+                elif isinstance(outcome, Unknown):
+                    attempt_outcome = "unknown"
+                    evidence = ""
+                    error = outcome.error
+                else:
+                    attempt_outcome = "applied"
+                    evidence = outcome.evidence
+                    error = ""
+                await db.put_execution_attempt(
+                    conn,
+                    attempt_id=attempt_id_factory(),
+                    tenant_id=tenant_id,
+                    grant_id=grant_id,
+                    outcome=attempt_outcome,
+                    evidence=evidence,
+                    error=error,
+                )
+            if plan.write_result:
+                await db.put_execution_result(
+                    conn,
+                    grant_id=grant_id,
+                    tenant_id=tenant_id,
+                    result_json=result_of(outcome),
+                    ambiguous=False,
+                )
+            if plan.grant_next != "executing":
+                await conn.execute(
+                    "UPDATE action_grants SET state = $3 "
+                    "WHERE tenant_id = $1 AND grant_id = $2 "
+                    "AND state = 'executing'",
+                    tenant_id,
+                    grant_id,
+                    plan.grant_next,
+                )
+
+    return ExecResult("finalized", plan.grant_next, plan.resume_next, outcome)
 
 
 async def claim_and_execute(
@@ -111,55 +173,67 @@ async def claim_and_execute(
                 executable_args=json.loads(row["executable_args"]),
             )
 
-    try:
-        outcome = await executor(stored)
-    except Exception as exc:
-        outcome = Unknown(str(exc))
+    return await _execute_and_finalize(
+        pool,
+        tenant_id=tenant_id,
+        grant_id=grant_id,
+        stored=stored,
+        executor=executor,
+        attempt_id_factory=attempt_id_factory,
+        result_of=result_of,
+    )
 
-    plan = resolve_terminal(outcome, stored.recovery_mode)
+
+async def recover_executing_grant(
+    pool,
+    *,
+    tenant_id: str,
+    grant_id: str,
+    executor: Executor,
+    attempt_id_factory: Callable[[], str],
+    result_of: Callable[[Applied], str],
+) -> ExecResult:
+    """Recover a crashed executing grant when its mode permits replay."""
     async with pool.acquire() as conn:
-        async with conn.transaction():
-            if plan.record_attempt:
-                if isinstance(outcome, DefinitelyNotApplied):
-                    attempt_outcome = "definitely_not_applied"
-                    evidence = outcome.evidence
-                    error = outcome.error
-                elif isinstance(outcome, Unknown):
-                    attempt_outcome = "unknown"
-                    evidence = ""
-                    error = outcome.error
-                else:
-                    attempt_outcome = "applied"
-                    evidence = outcome.evidence
-                    error = ""
-                await db.put_execution_attempt(
-                    conn,
-                    attempt_id=attempt_id_factory(),
-                    tenant_id=tenant_id,
-                    grant_id=grant_id,
-                    outcome=attempt_outcome,
-                    evidence=evidence,
-                    error=error,
-                )
-            if plan.write_result:
-                await db.put_execution_result(
-                    conn,
-                    grant_id=grant_id,
-                    tenant_id=tenant_id,
-                    result_json=result_of(outcome),
-                    ambiguous=False,
-                )
-            if plan.grant_next != "executing":
-                await conn.execute(
-                    "UPDATE action_grants SET state = $3 "
-                    "WHERE tenant_id = $1 AND grant_id = $2 "
-                    "AND state = 'executing'",
-                    tenant_id,
-                    grant_id,
-                    plan.grant_next,
-                )
+        row = await conn.fetchrow(
+            "SELECT g.state, g.recovery_mode, g.action_instance_id, "
+            "g.idempotency_key, g.tenant_id, g.principal_type, "
+            "g.actor_id, p.adapter_namespace, p.tool_name, "
+            "p.schema_version, p.canonical_target, p.executable_args "
+            "FROM action_grants g JOIN prepared_actions p "
+            "ON (p.tenant_id = g.tenant_id "
+            "AND p.action_instance_id = g.action_instance_id) "
+            "WHERE g.tenant_id = $1 AND g.grant_id = $2 "
+            "AND g.state = 'executing'",
+            tenant_id,
+            grant_id,
+        )
+    if row is None:
+        return ExecResult("not_claimable", None, None, None)
 
-    return ExecResult("finalized", plan.grant_next, plan.resume_next, outcome)
+    stored = StoredAction(
+        grant_id=grant_id,
+        idempotency_key=row["idempotency_key"],
+        recovery_mode=row["recovery_mode"],
+        adapter_namespace=row["adapter_namespace"],
+        tool_name=row["tool_name"],
+        schema_version=row["schema_version"],
+        canonical_target=row["canonical_target"],
+        executable_args=json.loads(row["executable_args"]),
+    )
+    if stored.recovery_mode == "sink_idempotency_key":
+        return await _execute_and_finalize(
+            pool,
+            tenant_id=tenant_id,
+            grant_id=grant_id,
+            stored=stored,
+            executor=executor,
+            attempt_id_factory=attempt_id_factory,
+            result_of=result_of,
+        )
+    if stored.recovery_mode in {"read_after_write", "non_replayable"}:
+        return ExecResult("recovery_manual", "manual", "manual", None)
+    raise ValueError(f"unknown recovery mode: {stored.recovery_mode}")
 
 
 async def run_resume_job(
@@ -220,8 +294,27 @@ async def run_resume_job(
             resume_next = "done"
         elif grant_state in {"failed", "expired"}:
             resume_next = "failed"
-        elif grant_state in {"executing", "manual"}:
+        elif grant_state == "manual":
             resume_next = "manual"
+        elif grant_state == "executing":
+            recovered = await recover_executing_grant(
+                pool,
+                tenant_id=leased["tenant_id"],
+                grant_id=leased["grant_id"],
+                executor=executor,
+                attempt_id_factory=attempt_id_factory,
+                result_of=result_of,
+            )
+            if recovered.status == "not_claimable":
+                grant_state = await read_grant_state()
+                if grant_state == "consumed":
+                    resume_next = "done"
+                elif grant_state in {"failed", "expired"}:
+                    resume_next = "failed"
+                else:
+                    resume_next = "manual"
+            else:
+                resume_next = recovered.resume_next or "manual"
         else:
             raise RuntimeError(f"unsupported resume grant state: {grant_state}")
 

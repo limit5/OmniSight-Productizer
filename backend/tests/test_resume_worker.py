@@ -1,4 +1,4 @@
-"""OP-2644 — PostgreSQL-only fenced resume-worker tests.
+"""OP-2644/OP-2645 — PostgreSQL-only fenced resume-worker tests.
 
 Every test uses the standard real-PG pool and unique durable identities.  The
 module skips cleanly when ``OMNI_TEST_PG_URL`` is unset.
@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from backend import db
-from backend.agents.execution_contract import Applied, StoredAction
+from backend.agents.execution_contract import Applied, StoredAction, Unknown
 from backend.agents.execution_service import run_resume_job
 
 
@@ -23,7 +23,11 @@ async def _clear_resume_queue(pool) -> None:
         await conn.execute("DELETE FROM resume_jobs")
 
 
-async def _seed_case(pool) -> dict:
+async def _seed_case(
+    pool,
+    *,
+    recovery_mode: str = "non_replayable",
+) -> dict:
     suffix = uuid.uuid4().hex
     tenant_id = f"t-resume-worker-{suffix}"
     action_instance_id = f"action-{suffix}"
@@ -61,7 +65,7 @@ async def _seed_case(pool) -> dict:
             executable_args_json=json.dumps(executable_args),
             human_rendering_json=json.dumps({"summary": "Write output"}),
             prepared_action_digest="d" * 64,
-            recovery_mode="non_replayable",
+            recovery_mode=recovery_mode,
         ) is True
         assert await db.put_challenge(
             conn,
@@ -84,6 +88,7 @@ async def _seed_case(pool) -> dict:
         ) == "confirmed"
     return {
         "tenant_id": tenant_id,
+        "action_instance_id": action_instance_id,
         "grant_id": grant_id,
         "resume_id": resume_id,
     }
@@ -312,7 +317,53 @@ async def test_run_resume_job_consumed_crash_recovery_does_not_execute(
 
 
 @pytest.mark.asyncio
-async def test_run_resume_job_executing_crash_routes_manual_without_execute(
+async def test_run_resume_job_sink_executing_crash_auto_recovers(
+    pg_test_pool,
+) -> None:
+    await _clear_resume_queue(pg_test_pool)
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE action_grants SET state = 'executing' "
+            "WHERE tenant_id = $1 AND grant_id = $2",
+            case["tenant_id"],
+            case["grant_id"],
+        )
+    calls: list[StoredAction] = []
+
+    async def executor(stored: StoredAction):
+        calls.append(stored)
+        return Applied(result={"receipt": "recovered"}, evidence="sink receipt")
+
+    result = await run_resume_job(
+        pg_test_pool,
+        worker_id="worker-sink-recovery",
+        lease_ttl_seconds=60,
+        executor=executor,
+        authorizer=_allow,
+        attempt_id_factory=lambda: uuid.uuid4().hex,
+        result_of=lambda applied: json.dumps(applied.result),
+    )
+
+    assert result == "done"
+    assert len(calls) == 1
+    assert calls[0].idempotency_key == case["action_instance_id"]
+    assert await _grant_state(pg_test_pool, case) == "consumed"
+    assert await _resume_state(pg_test_pool, case) == "done"
+    async with pg_test_pool.acquire() as conn:
+        assert await conn.fetchval(
+            "SELECT count(*) FROM execution_results "
+            "WHERE tenant_id = $1 AND grant_id = $2",
+            case["tenant_id"],
+            case["grant_id"],
+        ) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_resume_job_non_replayable_executing_crash_routes_manual(
     pg_test_pool,
 ) -> None:
     await _clear_resume_queue(pg_test_pool)
@@ -339,7 +390,89 @@ async def test_run_resume_job_executing_crash_routes_manual_without_execute(
     )
 
     assert result == "manual"
+    assert await _grant_state(pg_test_pool, case) == "executing"
     assert await _resume_state(pg_test_pool, case) == "manual"
+
+
+@pytest.mark.asyncio
+async def test_run_resume_job_read_after_write_executing_crash_routes_manual(
+    pg_test_pool,
+) -> None:
+    await _clear_resume_queue(pg_test_pool)
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="read_after_write",
+    )
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE action_grants SET state = 'executing' "
+            "WHERE tenant_id = $1 AND grant_id = $2",
+            case["tenant_id"],
+            case["grant_id"],
+        )
+
+    async def executor(_stored: StoredAction):
+        pytest.fail("read-after-write recovery must not call the executor")
+
+    result = await run_resume_job(
+        pg_test_pool,
+        worker_id="worker-read-after-write",
+        lease_ttl_seconds=60,
+        executor=executor,
+        authorizer=_allow,
+        attempt_id_factory=lambda: uuid.uuid4().hex,
+        result_of=lambda applied: json.dumps(applied.result),
+    )
+
+    assert result == "manual"
+    assert await _grant_state(pg_test_pool, case) == "executing"
+    assert await _resume_state(pg_test_pool, case) == "manual"
+
+
+@pytest.mark.asyncio
+async def test_run_resume_job_sink_repeated_unknown_stays_executing(
+    pg_test_pool,
+) -> None:
+    await _clear_resume_queue(pg_test_pool)
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE action_grants SET state = 'executing' "
+            "WHERE tenant_id = $1 AND grant_id = $2",
+            case["tenant_id"],
+            case["grant_id"],
+        )
+    calls: list[StoredAction] = []
+
+    async def executor(stored: StoredAction):
+        calls.append(stored)
+        return Unknown(error="response still lost")
+
+    result = await run_resume_job(
+        pg_test_pool,
+        worker_id="worker-sink-unknown",
+        lease_ttl_seconds=60,
+        executor=executor,
+        authorizer=_allow,
+        attempt_id_factory=lambda: uuid.uuid4().hex,
+        result_of=lambda applied: json.dumps(applied.result),
+    )
+
+    assert result == "queued"
+    assert len(calls) == 1
+    assert await _grant_state(pg_test_pool, case) == "executing"
+    assert await _resume_state(pg_test_pool, case) == "queued"
+    async with pg_test_pool.acquire() as conn:
+        attempts = await db.get_execution_attempts(
+            conn,
+            case["grant_id"],
+            tenant_id=case["tenant_id"],
+        )
+    assert len(attempts) == 1
+    assert attempts[0]["outcome"] == "unknown"
 
 
 @pytest.mark.asyncio
