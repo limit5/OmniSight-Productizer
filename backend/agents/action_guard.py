@@ -155,6 +155,16 @@ class GuardOutcome:
     error_reason: str | None = None
 
 
+_FAILSAFE_OUTCOME = GuardOutcome(
+    proceed=False,
+    decision=None,
+    family=_ERROR_FAMILY,
+    mode="enforce",
+    blocked_reason="guard_error",
+    error_reason="guard_failsafe",
+)
+
+
 # blocked_reason is a BOUNDED enum for metric cardinality — never the
 # raw kernel reason f-string (which embeds the family). Any FUTURE
 # kernel deny-reason MUST get its own explicit mapping here; do not let
@@ -186,12 +196,15 @@ def guard_tool_dispatch(
     Stage 1 computes the verdict + proceed; stage 2 emits telemetry.
     Each stage has its own try/except: a stage-1 raise yields a
     well-formed ERROR outcome (fails-closed-IF-enforce), a stage-2 raise
-    never alters the already-computed outcome. No exception escapes.
+    never alters the already-computed outcome. No ordinary Exception escapes
+    (SystemExit/KeyboardInterrupt/GeneratorExit propagate); a total
+    mode-resolution failure returns a fail-closed error outcome.
     """
     # ctx starts None so a stage-1 raise BEFORE the context is built
     # still lets stage 2 label authorization_source="unknown".
     ctx: ExecutionContext | None = None
     decision: AuthorizationDecision | None = None
+    outcome = _FAILSAFE_OUTCOME
 
     # ── Stage 1: verdict + proceed ─────────────────────────────────────
     try:
@@ -242,16 +255,22 @@ def guard_tool_dispatch(
             blocked_reason=blocked_reason,
         )
     except Exception as exc:  # noqa: BLE001 — guard must never raise
-        mode = resolve_mode(adapter_namespace, _ERROR_FAMILY)
-        proceed = mode != "enforce"
-        outcome = GuardOutcome(
-            proceed=proceed,
-            decision=None,
-            family=_ERROR_FAMILY,
-            mode=mode,
-            blocked_reason="guard_error" if not proceed else None,
-            error_reason=repr(exc)[:200],
-        )
+        try:
+            try:
+                mode = resolve_mode(adapter_namespace, _ERROR_FAMILY)
+            except Exception:  # noqa: BLE001 — recovery must fail closed
+                mode = "enforce"
+            proceed = mode != "enforce"
+            outcome = GuardOutcome(
+                proceed=proceed,
+                decision=None,
+                family=_ERROR_FAMILY,
+                mode=mode,
+                blocked_reason="guard_error" if not proceed else None,
+                error_reason=repr(exc)[:200],
+            )
+        except Exception:  # noqa: BLE001 — recovery must never escape
+            outcome = _FAILSAFE_OUTCOME
 
     # ── Stage 2: telemetry (never alters the outcome) ──────────────────
     try:
@@ -286,12 +305,15 @@ def guard_tool_dispatch(
             outcome.error_reason,
         )
     except Exception:  # noqa: BLE001 — telemetry must never alter outcome
-        logger.exception(
-            "action_guard telemetry failed (outcome unchanged) "
-            "adapter=%s tool=%s",
-            adapter_namespace,
-            tool_name,
-        )
+        try:
+            logger.exception(
+                "action_guard telemetry failed (outcome unchanged) "
+                "adapter=%s tool=%s",
+                adapter_namespace,
+                tool_name,
+            )
+        except Exception:  # noqa: BLE001 — failure logging must not escape
+            pass
 
     return outcome
 

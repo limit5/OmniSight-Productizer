@@ -400,6 +400,50 @@ def test_stage1_raise_yields_error_outcome(monkeypatch: pytest.MonkeyPatch) -> N
     assert out2.decision is None
 
 
+def test_stage1_resolve_mode_double_fault_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _raise_stage1(*_a, **_kw):
+        raise RuntimeError("stage 1 boom")
+
+    def _raise_mode_resolution(*_a, **_kw):
+        raise RuntimeError("mode boom")
+
+    monkeypatch.setattr(action_guard, "authorize_action", _raise_stage1)
+    monkeypatch.setattr(action_guard, "resolve_mode", _raise_mode_resolution)
+
+    out = _guard("git_push", ctx=_ctx_bound())
+
+    assert out.proceed is False
+    assert out.mode == "enforce"
+    assert out.family == "__error__"
+    assert out.blocked_reason == "guard_error"
+    assert out.decision is None
+
+
+def test_stage1_hostile_repr_double_fault_returns_failsafe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _HostileReprError(Exception):
+        def __repr__(self) -> str:
+            raise RuntimeError("repr boom")
+
+    def _raise_stage1(*_a, **_kw):
+        raise _HostileReprError("stage 1 boom")
+
+    monkeypatch.setattr(action_guard, "authorize_action", _raise_stage1)
+
+    out = _guard("git_push", ctx=_ctx_bound())
+
+    assert out is action_guard._FAILSAFE_OUTCOME
+    assert out.proceed is False
+    assert out.mode == "enforce"
+    assert out.family == "__error__"
+    assert out.blocked_reason == "guard_error"
+    assert out.error_reason == "guard_failsafe"
+    assert out.decision is None
+
+
 # ── 7. stage-2 raise ⇒ outcome unchanged, no escape ──────────────────────
 def test_stage2_raise_never_alters_outcome(monkeypatch: pytest.MonkeyPatch) -> None:
     baseline = _guard("git_push", ctx=_ctx_bound())
@@ -418,6 +462,33 @@ def test_stage2_raise_never_alters_outcome(monkeypatch: pytest.MonkeyPatch) -> N
     assert out.family == baseline.family
     assert out.mode == baseline.mode
     assert out.error_reason is None
+
+
+def test_stage2_logging_double_fault_preserves_stage1_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = _guard("git_push", ctx=_ctx_bound())
+
+    class _BoomCounter:
+        def labels(self, *_a, **_kw):
+            raise RuntimeError("telemetry boom")
+
+    def _raise_logging_failure(*_a, **_kw) -> None:
+        raise RuntimeError("log boom")
+
+    monkeypatch.setattr(metrics, "action_guard_decision_total", _BoomCounter())
+    monkeypatch.setattr(action_guard.logger, "exception", _raise_logging_failure)
+
+    out = _guard("git_push", ctx=_ctx_bound())
+
+    assert out.proceed == baseline.proceed
+    assert out.decision is not None
+    assert baseline.decision is not None
+    assert out.decision.verdict == baseline.decision.verdict
+    assert out.family == baseline.family
+    assert out.mode == baseline.mode
+    assert out.blocked_reason == baseline.blocked_reason
+    assert out.error_reason == baseline.error_reason
 
 
 # ── 8. call-time fail-closed on unknown keys ─────────────────────────────
