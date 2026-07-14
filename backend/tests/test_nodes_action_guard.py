@@ -273,8 +273,13 @@ class _PepAllow:
 
 
 def _spec_state(tool_name: str, execution_context=None) -> GraphState:
+    arguments = {"path": "x"}
+    if tool_name == _SPEC_MUTATING:
+        # A registered write_file reaches canonical enforcement in G6b-2b;
+        # keep this fixture schema-valid so it tests the mutating verdict.
+        arguments["content"] = "x"
     return GraphState(
-        tool_calls=[ToolCall(tool_name=tool_name, arguments={"path": "x"})],
+        tool_calls=[ToolCall(tool_name=tool_name, arguments=arguments)],
         execution_context=execution_context,
     )
 

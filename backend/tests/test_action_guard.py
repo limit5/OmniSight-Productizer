@@ -573,6 +573,8 @@ def test_action_guard_callers_are_declared() -> None:
         backend_root / "tests" / "test_provenance_chat_plumbing.py",
         backend_root / "tests" / "test_provenance_runner_plumbing.py",
         backend_root / "tests" / "test_action_guard_shadow.py",
+        # G6b-2b exercises the guard's enforce-refinement contract.
+        backend_root / "tests" / "test_action_guard_enforce_refine.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(r"\bguard_tool_dispatch\b")

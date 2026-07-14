@@ -795,7 +795,8 @@ def test_authorize_canonical_has_no_production_caller() -> None:
             if callee == "authorize_canonical":
                 callers.append(str(py.relative_to(backend_root)))
 
-    assert callers == []
+    # G6b-2b: the enforce refine branch is the sole production caller.
+    assert set(callers) <= {"agents/action_guard.py"}
 
 
 def test_authority_issuer_call_sites_are_allowlisted() -> None:

@@ -18,6 +18,7 @@ module is the only legitimate kernel caller.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from collections.abc import Mapping
@@ -57,6 +58,7 @@ GUARD_MODES = frozenset({"shadow", "enforce"})
 _ENV_VAR = "OMNISIGHT_ACTION_GUARD_MODE"
 _ERROR_FAMILY = "__error__"
 
+_MAX_FREEZE_ARGS_BYTES = 262_144
 _SHADOW_MAX_PAYLOAD_CHARS = 262_144  # 256 KiB cap on the synchronous path
 _SHADOW_MAX_ARG_ITEMS = 1024  # bound the O(keys) scan
 _SHADOW_KNOWN_ADAPTERS = frozenset({"chat", "specialist", "runner_sdk", "a2a"})
@@ -196,10 +198,108 @@ def _bounded_blocked_reason(kernel_reason: str) -> str:
         return "unbound_principal"
     if kernel_reason.startswith("mutating_needs_grant:"):
         return "requires_grant"
+    if (
+        kernel_reason.startswith("canonicalization_failed")
+        or kernel_reason == "authorize_canonical_denied"
+    ):
+        return "canonicalization_rejected"
     # Unmapped kernel reason = a mapping gap in THIS module; surface it
     # loudly as guard_error rather than mislabeling the block.
     logger.warning("action_guard: unmapped kernel reason %r", kernel_reason)
     return "guard_error"
+
+
+def _freeze_authorized_args(raw_args):
+    """Return a detached, bounded plain-JSON snapshot or fail closed."""
+    try:
+        blob = json.dumps(
+            raw_args,
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        if len(blob.encode("utf-8")) > _MAX_FREEZE_ARGS_BYTES:
+            return None
+        frozen = json.loads(blob)
+    except (TypeError, ValueError, UnicodeError):
+        return None
+    return frozen if isinstance(frozen, dict) else None
+
+
+def _refine_enforce_outcome(
+    ctx,
+    adapter_namespace,
+    tool_name,
+    schema_version,
+    raw_args,
+    ids,
+    name_decision,
+    mode,
+) -> GuardOutcome:
+    """Re-authorize a refinable enforce dispatch and seal allowed args."""
+    from backend.agents.action_canonicalize import is_registered
+    from backend.agents.authoritative_context_resolver import (
+        resolve_authoritative_workspace,
+    )
+    from backend.agents.authorization_kernel import authorize_canonical
+
+    name_family = name_decision.operation_descriptor.family
+    if not (
+        _CANONICAL_BOOTSTRAP_OK
+        and is_registered(adapter_namespace, tool_name, schema_version)
+    ):
+        return GuardOutcome(
+            proceed=False,
+            decision=name_decision,
+            family=name_family,
+            mode=mode,
+            blocked_reason=_bounded_blocked_reason(name_decision.reason),
+        )
+    frozen = _freeze_authorized_args(raw_args)
+    if frozen is None:
+        return GuardOutcome(
+            proceed=False,
+            decision=name_decision,
+            family=name_family,
+            mode=mode,
+            blocked_reason="canonicalization_rejected",
+        )
+    auth_ws = resolve_authoritative_workspace(
+        ctx,
+        adapter_namespace,
+        tool_name,
+        schema_version,
+    )
+    if auth_ws is None:
+        return GuardOutcome(
+            proceed=False,
+            decision=name_decision,
+            family=name_family,
+            mode=mode,
+            blocked_reason="no_authoritative_context",
+        )
+    workspace_id, workspace_root = auth_ws
+    refined = authorize_canonical(
+        ctx,
+        adapter_namespace=adapter_namespace,
+        tool_name=tool_name,
+        schema_version=schema_version,
+        raw_args=frozen,
+        workspace_id=workspace_id,
+        workspace_root=workspace_root,
+        provenance_snapshot_ids=ids,
+    )
+    proceed = refined.verdict == "allow"
+    return GuardOutcome(
+        proceed=proceed,
+        decision=refined,
+        family=refined.operation_descriptor.family,
+        mode=mode,
+        blocked_reason=(
+            None if proceed else _bounded_blocked_reason(refined.reason)
+        ),
+        sealed_args=frozen if proceed else None,
+    )
 
 
 def _shadow_adapter_label(adapter_namespace: object) -> str:
@@ -367,6 +467,34 @@ def guard_tool_dispatch(
             mode=mode,
             blocked_reason=blocked_reason,
         )
+
+        # G6b-2b: only an explicit enforce entry may refine a name block.
+        # Failures latch that block here and never enter Stage 1 recovery,
+        # which could re-resolve the error family to shadow and fail open.
+        if decision.verdict == "requires_grant" and mode == "enforce":
+            try:
+                if (
+                    _MODE_MATRIX.get((adapter_namespace, family))
+                    == "enforce"
+                ):
+                    outcome = _refine_enforce_outcome(
+                        ctx,
+                        adapter_namespace,
+                        tool_name,
+                        schema_version,
+                        raw_args,
+                        _ids,
+                        decision,
+                        mode,
+                    )
+            except Exception:  # noqa: BLE001 — retain the enforce name block
+                outcome = GuardOutcome(
+                    proceed=False,
+                    decision=decision,
+                    family=family,
+                    mode=mode,
+                    blocked_reason="canonicalization_rejected",
+                )
     except Exception as exc:  # noqa: BLE001 — guard must never raise
         try:
             try:
