@@ -64,7 +64,10 @@ from backend.agents.project_memory import (  # noqa: E402
     render_operator_summary as render_memory_operator_summary,
     render_for_prompt as render_memory_for_prompt,
 )
-from backend.agents.runner_handlers import make_runner_dispatcher  # noqa: E402
+from backend.agents.runner_handlers import (  # noqa: E402
+    make_runner_dispatcher,
+    register_runner_sdk_shadow_roots,
+)
 from backend.agents.skills_loader import (  # noqa: E402
     SkillRegistry,
     load_default_scopes,
@@ -835,6 +838,7 @@ async def main() -> None:
     )
 
     dispatcher = make_runner_dispatcher()
+    register_runner_sdk_shadow_roots()
 
     # Skills: load 3-scope registry, register Skill tool handler on the
     # SAME dispatcher so AnthropicClient's tool loop can resolve it.

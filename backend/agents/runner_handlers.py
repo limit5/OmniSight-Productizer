@@ -18,6 +18,7 @@ Used by ``auto-runner-sdk.py`` to back ``AnthropicClient.run_with_tools``.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -27,6 +28,7 @@ from glob import has_magic
 from pathlib import Path
 from typing import Any
 
+from backend.agents import shadow_root_registry
 from backend.agents.rag import VectorHit, VectorQuery
 from backend.agents.rag_indexer import (
     DEFAULT_TENANT_ID,
@@ -35,6 +37,8 @@ from backend.agents.rag_indexer import (
 )
 from backend.agents.tool_dispatcher import ToolDispatcher
 
+
+logger = logging.getLogger(__name__)
 
 # Project root: env override > ascend from this file (backend/agents/ -> root).
 _THIS = Path(__file__).resolve()
@@ -516,6 +520,47 @@ async def knowledge_retrieval_handler(payload: dict[str, Any]) -> dict[str, Any]
 
 
 # ─── Registration ────────────────────────────────────────────────
+
+
+_RUNNER_SDK_SHADOW_SCHEMA = "v1"
+
+
+def register_runner_sdk_shadow_roots(
+    *,
+    str_replace_root: str | None = None,
+) -> None:
+    """Best-effort register roots for future runner SDK shadow telemetry.
+
+    ``Write`` and ``Edit`` use :data:`BASE_DIR`; the optional built-in
+    text editor uses its per-instance worktree root. Registration and
+    logging failures are isolated so telemetry setup cannot break runner
+    startup. State is intentionally process-local; each launcher process
+    registers its own roots. This helper does not freeze the registry.
+    """
+
+    def _try(tool: str, root: str) -> None:
+        try:
+            shadow_root_registry.register_shadow_root(
+                "runner_sdk",
+                tool,
+                _RUNNER_SDK_SHADOW_SCHEMA,
+                workspace_root=root,
+            )
+        except Exception as exc:  # noqa: BLE001 - startup must continue
+            try:
+                logger.warning(
+                    "shadow_root registration skipped for runner_sdk/%s: %r",
+                    tool,
+                    exc,
+                )
+            except Exception:  # noqa: BLE001 - logging must not break startup
+                pass
+
+    base = str(BASE_DIR)
+    _try("Write", base)
+    _try("Edit", base)
+    if str_replace_root is not None:
+        _try("str_replace_based_edit_tool", str_replace_root)
 
 
 _HANDLERS: dict[str, Any] = {

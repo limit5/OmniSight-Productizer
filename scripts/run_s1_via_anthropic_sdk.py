@@ -140,7 +140,10 @@ from backend.agents.reflection_loop import (
     build_lint_reflection_input,
     build_test_reflection_input,
 )
-from backend.agents.runner_handlers import make_runner_dispatcher
+from backend.agents.runner_handlers import (
+    make_runner_dispatcher,
+    register_runner_sdk_shadow_roots,
+)
 from backend.agents.session_resume import (
     BridgeStaleCriticalError,
     ConcurrentRunnerConflictError,
@@ -1657,10 +1660,13 @@ async def main_async(args: argparse.Namespace) -> int:
         # the dispatcher can locally round-trip text_editor / bash / PTC
         # calls when running outside the hosted sandbox (tests, dry-run
         # parity, future vendor-fallback paths).
-        bind_built_in_tools_with_static_analysis(
+        text_editor, _ = bind_built_in_tools_with_static_analysis(
             dispatcher,
             worktree_root=WORKTREE_PATH,
             progress_path=LINT_PROGRESS_PATH,
+        )
+        register_runner_sdk_shadow_roots(
+            str_replace_root=str(text_editor.worktree_root)
         )
         # OP-851 (C1) — Anthropic Memory Tool. The handler is registered
         # alongside the OP-828 built-ins; the BUILT_IN_TOOLS_SPEC list
