@@ -75,6 +75,21 @@ class _FakeTool:
         return self._result
 
 
+def _seal_guard(monkeypatch, sealed_args: dict | None) -> None:
+    outcome = action_guard.GuardOutcome(
+        proceed=True,
+        decision=None,
+        family="code_write",
+        mode="shadow",
+        sealed_args=sealed_args,
+    )
+    monkeypatch.setattr(
+        nodes,
+        "guard_tool_dispatch",
+        lambda **_kwargs: outcome,
+    )
+
+
 # ── chat: _run_tool_rounds ───────────────────────────────────────────────
 class _Reply:
     def __init__(self, content: str = "", tool_calls: list | None = None) -> None:
@@ -100,11 +115,21 @@ _CHAT_MUTATING = "supervisor_requeue_ticket"
 _CHAT_READ_ONLY = "supervisor_ticket_detail"
 
 
-def _run_chat(monkeypatch, tool: _FakeTool, tool_name: str, *, execution_context=None):
+def _run_chat(
+    monkeypatch,
+    tool: _FakeTool,
+    tool_name: str,
+    *,
+    execution_context=None,
+    tool_args: dict | None = None,
+):
     monkeypatch.setattr(nodes, "TOOL_MAP", {tool_name: tool})
     monkeypatch.setattr(nodes, "emit_pipeline_phase", lambda *a, **k: None)
     monkeypatch.setattr(nodes, "emit_tool_progress", lambda *a, **k: None)
-    first = _Reply(tool_calls=[{"name": tool_name, "args": {"ticket_key": "OP-1"}, "id": "c1"}])
+    live_args = {"ticket_key": "OP-1"} if tool_args is None else tool_args
+    first = _Reply(
+        tool_calls=[{"name": tool_name, "args": live_args, "id": "c1"}]
+    )
     convo: list = ["sys", "user"]
     resp = asyncio.run(
         nodes._run_tool_rounds(
@@ -196,6 +221,36 @@ def test_chat_blocked_write_burns_no_budget(monkeypatch):
     assert not any(p.startswith("[FAILED]") for p in progress), (
         "a blocked write must not consume the write budget"
     )
+
+
+def test_chat_executes_sealed_args_by_identity(monkeypatch):
+    sealed = {"ticket_key": "OP-sealed"}
+    live = {"ticket_key": "OP-live"}
+    _seal_guard(monkeypatch, sealed)
+
+    _, _, tool = _run_chat(
+        monkeypatch,
+        _FakeTool(),
+        _CHAT_MUTATING,
+        tool_args=live,
+    )
+
+    assert tool.calls[0] is sealed
+    assert tool.calls[0] is not live
+
+
+def test_chat_executes_live_args_when_seal_is_none(monkeypatch):
+    live = {"ticket_key": "OP-live"}
+    _seal_guard(monkeypatch, None)
+
+    _, _, tool = _run_chat(
+        monkeypatch,
+        _FakeTool(),
+        _CHAT_MUTATING,
+        tool_args=live,
+    )
+
+    assert tool.calls[0] is live
 
 
 # ── specialist: tool_executor_node ───────────────────────────────────────
@@ -304,6 +359,34 @@ def test_specialist_pep_raise_lets_read_only_proceed(monkeypatch):
     assert update["tool_results"][0].success
 
 
+def test_specialist_executes_sealed_args_by_identity(monkeypatch):
+    sealed = {"path": "sealed"}
+    state = _spec_state(_SPEC_MUTATING)
+    live = state.tool_calls[0].arguments
+    tool = _FakeTool()
+    _patch_spec_common(monkeypatch, tool, _SPEC_MUTATING)
+    _seal_guard(monkeypatch, sealed)
+
+    update = asyncio.run(tool_executor_node(state))
+
+    assert update["tool_results"][0].success
+    assert tool.calls[0] is sealed
+    assert tool.calls[0] is not live
+
+
+def test_specialist_executes_live_args_when_seal_is_none(monkeypatch):
+    state = _spec_state(_SPEC_MUTATING)
+    live = state.tool_calls[0].arguments
+    tool = _FakeTool()
+    _patch_spec_common(monkeypatch, tool, _SPEC_MUTATING)
+    _seal_guard(monkeypatch, None)
+
+    update = asyncio.run(tool_executor_node(state))
+
+    assert update["tool_results"][0].success
+    assert tool.calls[0] is live
+
+
 # ── A2A: external_agent_node (dormant in prod; guarded defensively) ──────
 class _FakeEndpoint:
     agent_name = "demo-agent"
@@ -383,5 +466,33 @@ def test_a2a_no_ctx_dormant_shadow_proceeds(monkeypatch):
     reg = _FakeRegistry()
     node = _a2a_node(reg)
     update = asyncio.run(node(GraphState()))
+    assert reg.invocations
+    assert update["tool_results"][0].success
+
+
+def test_a2a_unexpected_seal_fails_closed_before_endpoint(monkeypatch):
+    monkeypatch.setattr(nodes, "emit_tool_progress", lambda *a, **k: None)
+    _seal_guard(monkeypatch, {"agent_id": "demo-agent"})
+    reg = _FakeRegistry()
+    node = _a2a_node(reg)
+
+    update = asyncio.run(node(GraphState(execution_context=_ctx_human("t-node"))))
+
+    assert not reg.endpoint_calls
+    assert not reg.invocations
+    result = update["tool_results"][0]
+    assert not result.success
+    assert result.output.startswith("[BLOCKED]")
+    assert "unexpected authorization seal" in result.output
+
+
+def test_a2a_none_seal_invokes_normally(monkeypatch):
+    monkeypatch.setattr(nodes, "emit_tool_progress", lambda *a, **k: None)
+    _seal_guard(monkeypatch, None)
+    reg = _FakeRegistry()
+    node = _a2a_node(reg)
+
+    update = asyncio.run(node(GraphState(execution_context=_ctx_human("t-node"))))
+
     assert reg.invocations
     assert update["tool_results"][0].success

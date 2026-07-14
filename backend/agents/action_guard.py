@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -157,6 +158,21 @@ class GuardOutcome:
     mode: str
     blocked_reason: str | None = None
     error_reason: str | None = None
+    # G6b-2a: frozen, plain-JSON, private raw args authorized by the guard.
+    # G6b-2b owns producing the detached snapshot; None keeps this dormant.
+    sealed_args: Mapping[str, object] | None = None
+
+
+def effective_execution_args(outcome: "GuardOutcome", live_args):
+    """Return the exact arguments authorized for a guarded dispatch.
+
+    A non-None seal is the frozen, private raw-args snapshot authorized by
+    the guard and must be executed by identity.  None keeps G6b-2a dormant
+    and returns the live model arguments exactly as before.  The explicit
+    None check preserves an authorized empty mapping.
+    """
+    sealed = outcome.sealed_args
+    return live_args if sealed is None else sealed
 
 
 _FAILSAFE_OUTCOME = GuardOutcome(

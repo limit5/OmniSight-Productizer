@@ -51,7 +51,10 @@ import re
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from backend.agents.action_guard import guard_tool_dispatch
+from backend.agents.action_guard import (
+    effective_execution_args,
+    guard_tool_dispatch,
+)
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.agents.execution_context import ExecutionContext
 from backend.agents.provenance import (
@@ -1233,7 +1236,7 @@ async def tool_executor_node(state: GraphState) -> dict:
                 continue
 
             try:
-                output = await tool_fn.ainvoke(args)
+                output = await tool_fn.ainvoke(effective_execution_args(guard, args))
                 # Compress output to save tokens (covers ALL tools)
                 if not state.rtk_bypass:
                     try:
@@ -1371,6 +1374,17 @@ def external_agent_node_factory(
             return _blocked(
                 f"[BLOCKED] action guard denied {tool_name}: "
                 f"{guard.blocked_reason}"
+            )
+
+        # G6b-2a — a2a is the sole guard site where authorization input
+        # ({"agent_id": ...}) differs from execution input (payload_fn(state)).
+        # The raw-args seal does not apply here; enforce that exemption locally
+        # and fail closed if a future adapter change unexpectedly supplies one.
+        if guard.sealed_args is not None:
+            return _blocked(
+                f"[BLOCKED] {tool_name}: unexpected authorization seal on a2a "
+                f"delegation (sealing binds raw args to execution and does not "
+                f"apply to external-agent calls)"
             )
 
         # Tenant scope: the node closes over its workflow tenant; a caller
@@ -2023,7 +2037,8 @@ async def _run_tool_rounds(
                             write_call_budget -= 1
                         try:
                             out = await asyncio.wait_for(
-                                fn.ainvoke(args), timeout=tool_timeout_s,
+                                fn.ainvoke(effective_execution_args(guard, args)),
+                                timeout=tool_timeout_s,
                             )
                         except asyncio.TimeoutError:
                             out = f"[ERROR] {name} timed out after {tool_timeout_s:.0f}s."

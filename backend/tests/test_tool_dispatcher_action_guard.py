@@ -89,6 +89,24 @@ def _payload(res) -> dict:
     return json.loads(res.content)
 
 
+def _seal_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    sealed_args: dict | None,
+) -> None:
+    outcome = action_guard.GuardOutcome(
+        proceed=True,
+        decision=None,
+        family="code_write",
+        mode="shadow",
+        sealed_args=sealed_args,
+    )
+    monkeypatch.setattr(
+        tool_dispatcher,
+        "guard_tool_dispatch",
+        lambda **_kwargs: outcome,
+    )
+
+
 # ── 1. shadow default: mutating handler runs ─────────────────────────────
 def test_shadow_default_runs_mutating_handler() -> None:
     d, calls = _dispatcher(_MUTATING, "wrote")
@@ -321,3 +339,116 @@ def test_memory_tool_is_classified_memory_write() -> None:
     descriptor = resolve_tool(MEMORY_TOOL_NAME)
     assert descriptor.family == "memory_write"
     assert descriptor.effect == "mutating"
+
+
+# ── 9. sealed authorization args bind every handler path ─────────────────
+def test_async_handler_executes_sealed_args_by_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sealed = {"file_path": "sealed"}
+    live = {"file_path": "live"}
+    _seal_guard(monkeypatch, sealed)
+    d, calls = _dispatcher()
+
+    res = asyncio.run(d.execute("tu-sealed-async", _MUTATING, live))
+
+    assert not res.is_error
+    assert calls[0] is sealed
+    assert calls[0] is not live
+
+
+def test_sync_handler_executes_sealed_args_by_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sealed = {"file_path": "sealed"}
+    live = {"file_path": "live"}
+    calls: list[dict] = []
+
+    def _sync_handler(args: dict) -> str:
+        calls.append(args)
+        return "ok"
+
+    _seal_guard(monkeypatch, sealed)
+    d = ToolDispatcher()
+    d.register(_MUTATING, _sync_handler)
+
+    res = asyncio.run(d.execute("tu-sealed-sync", _MUTATING, live))
+
+    assert not res.is_error
+    assert calls[0] is sealed
+    assert calls[0] is not live
+
+
+def test_async_handler_executes_live_args_when_seal_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = {"file_path": "live"}
+    _seal_guard(monkeypatch, None)
+    d, calls = _dispatcher()
+
+    res = asyncio.run(d.execute("tu-live-async", _MUTATING, live))
+
+    assert not res.is_error
+    assert calls[0] is live
+
+
+def test_sync_handler_executes_live_args_when_seal_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live = {"file_path": "live"}
+    calls: list[dict] = []
+
+    def _sync_handler(args: dict) -> str:
+        calls.append(args)
+        return "ok"
+
+    _seal_guard(monkeypatch, None)
+    d = ToolDispatcher()
+    d.register(_MUTATING, _sync_handler)
+
+    res = asyncio.run(d.execute("tu-live-sync", _MUTATING, live))
+
+    assert not res.is_error
+    assert calls[0] is live
+
+
+def test_handler_error_diagnostics_use_executed_sealed_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sealed = {"file_path": "sealed"}
+    live = {"file_path": "live"}
+    handler_calls: list[dict] = []
+    diagnostic_calls: list[dict] = []
+
+    async def _raising_handler(args: dict) -> str:
+        handler_calls.append(args)
+        raise RuntimeError("handler exploded")
+
+    def _record_diagnostic(
+        _exc: Exception,
+        _tool_name: str,
+        execution_args: dict,
+    ) -> tool_dispatcher.ToolError:
+        diagnostic_calls.append(execution_args)
+        return tool_dispatcher.ToolError(
+            error="tool_raised",
+            error_type="RuntimeError",
+            retryable=False,
+            hint="handler exploded",
+        )
+
+    _seal_guard(monkeypatch, sealed)
+    monkeypatch.setattr(
+        tool_dispatcher,
+        "_tool_error_from_exception",
+        _record_diagnostic,
+    )
+    d = ToolDispatcher()
+    d.register(_MUTATING, _raising_handler)
+
+    res = asyncio.run(d.execute("tu-sealed-error", _MUTATING, live))
+
+    assert res.is_error
+    assert handler_calls[0] is sealed
+    assert diagnostic_calls[0] is sealed
+    assert diagnostic_calls[0] is not live

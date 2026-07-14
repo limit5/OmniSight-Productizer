@@ -49,7 +49,10 @@ from pathlib import Path
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
-from backend.agents.action_guard import guard_tool_dispatch
+from backend.agents.action_guard import (
+    effective_execution_args,
+    guard_tool_dispatch,
+)
 from backend.agents.telemetry.tool_invocation import (
     args_size_bytes,
     emit_tool_invocation,
@@ -345,13 +348,14 @@ class ToolDispatcher:
                     },
                 )
 
+        execution_args = effective_execution_args(outcome, tool_input)
         try:
             if inspect.iscoroutinefunction(handler):
-                raw = await handler(tool_input)
+                raw = await handler(execution_args)
             else:
                 # Run sync handlers in default executor to avoid blocking event loop.
                 raw = await asyncio.get_running_loop().run_in_executor(
-                    None, handler, tool_input
+                    None, handler, execution_args
                 )
         except Exception as e:  # noqa: BLE001 - boundary, must capture all
             logger.exception("Tool %s raised", tool_name)
@@ -364,7 +368,7 @@ class ToolDispatcher:
             )
             return _error_result(
                 tool_use_id=tool_use_id,
-                error=_tool_error_from_exception(e, tool_name, tool_input),
+                error=_tool_error_from_exception(e, tool_name, execution_args),
                 extra={
                     "tool_name": tool_name,
                     "exception_type": type(e).__name__,
