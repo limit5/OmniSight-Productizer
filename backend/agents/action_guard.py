@@ -56,6 +56,10 @@ GUARD_MODES = frozenset({"shadow", "enforce"})
 _ENV_VAR = "OMNISIGHT_ACTION_GUARD_MODE"
 _ERROR_FAMILY = "__error__"
 
+_SHADOW_MAX_PAYLOAD_CHARS = 262_144  # 256 KiB cap on the synchronous path
+_SHADOW_MAX_ARG_ITEMS = 1024  # bound the O(keys) scan
+_SHADOW_KNOWN_ADAPTERS = frozenset({"chat", "specialist", "runner_sdk", "a2a"})
+
 
 def _load_mode_matrix() -> dict[tuple[str, str], str]:
     """Parse ``OMNISIGHT_ACTION_GUARD_MODE`` into the mode matrix.
@@ -182,6 +186,99 @@ def _bounded_blocked_reason(kernel_reason: str) -> str:
     return "guard_error"
 
 
+def _shadow_adapter_label(adapter_namespace: object) -> str:
+    """Normalize to a closed label set so metric cardinality stays bounded."""
+    return (
+        adapter_namespace
+        if isinstance(adapter_namespace, str)
+        and adapter_namespace in _SHADOW_KNOWN_ADAPTERS
+        else "unknown"
+    )
+
+
+def _shadow_payload_too_large(raw_args) -> bool:
+    """Skip unknown shapes, oversized strings, and excessive argument counts."""
+    try:
+        total = 0
+        count = 0
+        for _key, value in raw_args.items():
+            count += 1
+            if count > _SHADOW_MAX_ARG_ITEMS:
+                return True
+            if isinstance(value, str):
+                total += len(value)
+                if total >= _SHADOW_MAX_PAYLOAD_CHARS:
+                    return True
+        return False
+    except Exception:  # noqa: BLE001 — unknown shape skips shadow telemetry
+        return True
+
+
+def _inc_shadow(
+    adapter_namespace: object,
+    coverage: str,
+    refinement: str,
+    would_verdict: str,
+) -> None:
+    metrics.action_guard_shadow_classification_total.labels(
+        adapter=_shadow_adapter_label(adapter_namespace),
+        coverage=coverage,
+        refinement=refinement,
+        would_verdict=would_verdict,
+    ).inc()
+
+
+def _emit_shadow_classification(
+    adapter_namespace,
+    tool_name,
+    schema_version,
+    raw_args,
+    ctx,
+) -> None:
+    """Classify one canonical descriptor for isolated shadow telemetry."""
+    if ctx is None:
+        return
+    if _shadow_payload_too_large(raw_args):
+        _inc_shadow(adapter_namespace, "oversized", "n/a", "n/a")
+        return
+
+    from backend.agents.action_canonicalize import (
+        CoverageStatus,
+        canonicalize_if_registered,
+        classify_refinement,
+    )
+    from backend.agents.authorization_kernel import classify_for_telemetry
+    from backend.agents.shadow_context_resolver import resolve_shadow_context
+    from backend.agents.tool_registry import resolve
+
+    context = resolve_shadow_context(
+        adapter_namespace,
+        tool_name,
+        schema_version,
+    )
+    if context is None:
+        _inc_shadow(adapter_namespace, "no_context", "n/a", "n/a")
+        return
+    coverage = canonicalize_if_registered(
+        context,
+        adapter_namespace,
+        tool_name,
+        schema_version,
+        raw_args,
+    )
+    if coverage.status is CoverageStatus.UNREGISTERED:
+        _inc_shadow(adapter_namespace, "unregistered", "n/a", "n/a")
+        return
+    if coverage.status is CoverageStatus.ERROR:
+        _inc_shadow(adapter_namespace, "error", "n/a", "n/a")
+        return
+    assert coverage.prepared is not None
+    descriptor = coverage.prepared.operation_descriptor
+    refinement = classify_refinement(resolve(tool_name), descriptor)
+    would = classify_for_telemetry(ctx, descriptor).would_verdict
+    _inc_shadow(adapter_namespace, "prepared", refinement, would)
+
+
 def guard_tool_dispatch(
     *,
     adapter_namespace: str,
@@ -191,14 +288,14 @@ def guard_tool_dispatch(
     schema_version: str = "v1",
     turn_provenance: "TurnProvenance | None" = None,
 ) -> GuardOutcome:
-    """Two-stage, telemetry-isolated dispatch guard.
+    """Three-stage, telemetry-isolated dispatch guard.
 
-    Stage 1 computes the verdict + proceed; stage 2 emits telemetry.
+    Stage 1 computes the verdict + proceed; stages 2 and 3 emit telemetry.
     Each stage has its own try/except: a stage-1 raise yields a
-    well-formed ERROR outcome (fails-closed-IF-enforce), a stage-2 raise
-    never alters the already-computed outcome. No ordinary Exception escapes
-    (SystemExit/KeyboardInterrupt/GeneratorExit propagate); a total
-    mode-resolution failure returns a fail-closed error outcome.
+    well-formed ERROR outcome (fails-closed-IF-enforce), while a stage-2
+    or stage-3 raise never alters the already-computed outcome. No ordinary
+    Exception escapes (SystemExit/KeyboardInterrupt/GeneratorExit propagate);
+    a total mode-resolution failure returns a fail-closed error outcome.
     """
     # ctx starts None so a stage-1 raise BEFORE the context is built
     # still lets stage 2 label authorization_source="unknown".
@@ -308,6 +405,27 @@ def guard_tool_dispatch(
         try:
             logger.exception(
                 "action_guard telemetry failed (outcome unchanged) "
+                "adapter=%s tool=%s",
+                adapter_namespace,
+                tool_name,
+            )
+        except Exception:  # noqa: BLE001 — failure logging must not escape
+            pass
+
+    # ── Stage 3: SHADOW canonical telemetry (G6.3b; never alters outcome) ──
+    try:
+        if _CANONICAL_BOOTSTRAP_OK:
+            _emit_shadow_classification(
+                adapter_namespace,
+                tool_name,
+                schema_version,
+                raw_args,
+                ctx,
+            )
+    except Exception:  # noqa: BLE001 — shadow telemetry must never alter outcome
+        try:
+            logger.debug(
+                "action_guard shadow telemetry failed (outcome unchanged) "
                 "adapter=%s tool=%s",
                 adapter_namespace,
                 tool_name,

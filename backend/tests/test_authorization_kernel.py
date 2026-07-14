@@ -589,6 +589,7 @@ def test_kernel_reachable_only_via_action_guard() -> None:
         backend_root / "agents" / "authorization_kernel.py",
         backend_root / "agents" / "action_guard.py",
         backend_root / "tests" / "test_action_guard.py",
+        backend_root / "tests" / "test_action_guard_shadow.py",
         # T7a fault-injection tests patch the guard's kernel entry
         # (monkeypatch target names the token); still no ADAPTER imports
         # the kernel directly.

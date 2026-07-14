@@ -572,6 +572,7 @@ def test_action_guard_callers_are_declared() -> None:
         # G0b plumbing tests record the guard/dispatcher whole-value kwargs.
         backend_root / "tests" / "test_provenance_chat_plumbing.py",
         backend_root / "tests" / "test_provenance_runner_plumbing.py",
+        backend_root / "tests" / "test_action_guard_shadow.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(r"\bguard_tool_dispatch\b")

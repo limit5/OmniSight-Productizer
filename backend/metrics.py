@@ -1073,6 +1073,13 @@ if _AVAILABLE:
         labelnames=("adapter", "reason"),
         registry=REGISTRY,
     )
+    action_guard_shadow_classification_total = Counter(
+        "omnisight_action_guard_shadow_classification_total",
+        "G6.3 shadow canonical telemetry by adapter/coverage/refinement/"
+        "would_verdict (telemetry-only; never authorizes)",
+        labelnames=("adapter", "coverage", "refinement", "would_verdict"),
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -1215,6 +1222,7 @@ else:
     # OP-2603 — U6-0 T7-0 action-guard decision surface
     action_guard_decision_total = _NoOp()  # type: ignore
     action_guard_fail_closed_total = _NoOp()  # type: ignore
+    action_guard_shadow_classification_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1962,6 +1970,7 @@ def reset_for_tests() -> None:
     global memory_liveness_heartbeat
     # OP-2603 — U6-0 T7-0 action-guard decision surface
     global action_guard_decision_total, action_guard_fail_closed_total
+    global action_guard_shadow_classification_total
     memory_quarantine_depth = Gauge(
         "omnisight_memory_quarantine_depth",
         "Learned-item candidates sitting in quarantine awaiting eval",
@@ -2037,5 +2046,12 @@ def reset_for_tests() -> None:
         "omnisight_action_guard_fail_closed_total",
         "Action-guard blocked dispatches",
         labelnames=("adapter", "reason"),
+        registry=REGISTRY,
+    )
+    action_guard_shadow_classification_total = Counter(
+        "omnisight_action_guard_shadow_classification_total",
+        "G6.3 shadow canonical telemetry by adapter/coverage/refinement/"
+        "would_verdict (telemetry-only; never authorizes)",
+        labelnames=("adapter", "coverage", "refinement", "would_verdict"),
         registry=REGISTRY,
     )
