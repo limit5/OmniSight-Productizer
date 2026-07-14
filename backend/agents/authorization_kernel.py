@@ -24,9 +24,12 @@ dataclass; do not clash/shadow it.
 
 The authorizing :func:`classify_operation` entry point requires an opaque,
 process-local capability issued into the kernel's private weak ledger from a
-tool name. A bare or canonical descriptor can reach only
-:func:`classify_for_telemetry`, whose result is deliberately not an
-``AuthorizationDecision`` and cannot authorize guard proceed.
+tool name or a re-derived canonical dispatch. A bare or canonical descriptor
+can reach only :func:`classify_for_telemetry`, whose result is deliberately not
+an ``AuthorizationDecision`` and cannot authorize guard proceed. The dormant
+:func:`authorize_canonical` path can issue only after re-deriving and hardening
+a descriptor from the complete dispatch; it never accepts a descriptor from
+its caller.
 """
 
 from __future__ import annotations
@@ -37,7 +40,11 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from backend.agents.execution_context import ExecutionContext, is_unbound
-from backend.agents.tool_registry import OperationDescriptor, resolve
+from backend.agents.tool_registry import (
+    KNOWN_OPERATION_CLASSES,
+    OperationDescriptor,
+    resolve,
+)
 
 Verdict = Literal["allow", "deny", "requires_grant"]
 
@@ -84,6 +91,34 @@ class _AuthorizedPayload:
     provenance_snapshot_ids: tuple[str, ...]
 
 
+def _harden_descriptor(
+    descriptor: object,
+    dispatch_tool_name: object,
+) -> OperationDescriptor:
+    """Rebuild an exact, known descriptor or fail closed."""
+    if type(descriptor) is not OperationDescriptor:
+        raise ValueError("descriptor_not_operation_descriptor")
+
+    tool_name = descriptor.tool_name
+    effect = descriptor.effect
+    family = descriptor.family
+    if not (
+        type(tool_name) is str
+        and type(effect) is str
+        and type(family) is str
+    ):
+        raise ValueError("descriptor_field_not_str")
+    if type(dispatch_tool_name) is not str or tool_name != dispatch_tool_name:
+        raise ValueError("descriptor_tool_mismatch")
+    if (effect, family) not in KNOWN_OPERATION_CLASSES:
+        raise ValueError("unknown_operation_class")
+    return OperationDescriptor(
+        tool_name=str(tool_name),
+        effect=str(effect),
+        family=str(family),
+    )
+
+
 def _build_authority_boundary():
     ledger: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
     lock = threading.RLock()
@@ -127,6 +162,49 @@ def _build_authority_boundary():
             )
         return operation
 
+    def issue_from_canonical(
+        execution_context: ExecutionContext,
+        adapter_namespace: str,
+        tool_name: str,
+        schema_version: str,
+        raw_args: dict,
+        workspace_id: str,
+        workspace_root: str,
+        provenance_snapshot_ids: tuple[str, ...] = (),
+    ) -> AuthorizedOperation:
+        """Re-derive, harden, and issue from a complete dispatch."""
+        from backend.agents.action_canonicalize import (
+            CanonicalizationContext,
+            canonicalize,
+        )
+
+        context = CanonicalizationContext(
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
+            adapter_namespace=adapter_namespace,
+            tool_name=tool_name,
+            schema_version=schema_version,
+        )
+        prepared = canonicalize(
+            context,
+            adapter_namespace,
+            tool_name,
+            schema_version,
+            raw_args,
+        )
+        hardened = _harden_descriptor(
+            prepared.operation_descriptor,
+            tool_name,
+        )
+        operation = object.__new__(AuthorizedOperation)
+        with lock:
+            ledger[operation] = _AuthorizedPayload(
+                hardened,
+                execution_context,
+                tuple(provenance_snapshot_ids),
+            )
+        return operation
+
     def unwrap(operation) -> _AuthorizedPayload:
         if type(operation) is not AuthorizedOperation:
             raise TypeError("exact AuthorizedOperation required")
@@ -136,12 +214,15 @@ def _build_authority_boundary():
             except KeyError:
                 raise ValueError("unissued AuthorizedOperation") from None
 
-    return AuthorizedOperation, issue_from_name, unwrap
+    return AuthorizedOperation, issue_from_name, issue_from_canonical, unwrap
 
 
-AuthorizedOperation, _issue_from_name, _unwrap_authorized = (
-    _build_authority_boundary()
-)
+(
+    AuthorizedOperation,
+    _issue_from_name,
+    _issue_from_canonical,
+    _unwrap_authorized,
+) = _build_authority_boundary()
 
 
 def _verdict_for(
@@ -232,4 +313,73 @@ def authorize_action(
             request.tool_name,
             provenance_snapshot_ids,
         )
+    )
+
+
+def authorize_canonical(
+    execution_context: ExecutionContext,
+    *,
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+    raw_args: dict,
+    workspace_id: str,
+    workspace_root: str,
+    provenance_snapshot_ids: tuple[str, ...] = (),
+) -> AuthorizationDecision:
+    """Return a dormant grant-capable decision from a canonical dispatch.
+
+    The descriptor is re-derived and hardened inside the authority boundary.
+    Every ordinary failure returns a deny decision; ``BaseException`` values
+    continue to propagate.
+    """
+    try:
+        return classify_operation(
+            _issue_from_canonical(
+                execution_context,
+                adapter_namespace,
+                tool_name,
+                schema_version,
+                raw_args,
+                workspace_id,
+                workspace_root,
+                provenance_snapshot_ids,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - authorization fails closed
+        try:
+            reason = getattr(exc, "reason", "")
+            detail = (
+                f"canonicalization_failed:{reason}"
+                if type(reason) is str and reason
+                else "authorize_canonical_denied"
+            )
+        except Exception:  # noqa: BLE001 - hostile exception fails closed
+            detail = "authorize_canonical_denied"
+        return _deny_decision(
+            execution_context,
+            tool_name,
+            detail,
+            provenance_snapshot_ids,
+        )
+
+
+def _deny_decision(
+    execution_context: ExecutionContext,
+    tool_name: object,
+    reason: str,
+    provenance_snapshot_ids: tuple[str, ...],
+) -> AuthorizationDecision:
+    """Build a fail-closed deny without trusting malformed inputs."""
+    safe_tool = tool_name if type(tool_name) is str else "__error__"
+    try:
+        safe_provenance: tuple[str, ...] = tuple(provenance_snapshot_ids)
+    except Exception:  # noqa: BLE001 - denial itself must not fail open
+        safe_provenance = ()
+    return AuthorizationDecision(
+        verdict="deny",
+        operation_descriptor=resolve(safe_tool),
+        reason=reason,
+        execution_context=execution_context,
+        provenance_snapshot_ids=safe_provenance,
     )

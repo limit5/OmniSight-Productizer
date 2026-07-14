@@ -27,18 +27,32 @@ import dataclasses
 import pathlib
 import pickle
 import re
+from collections.abc import Iterator, Mapping
 
 import pytest
 
-from backend.agents import action_canonicalize, execution_context
-from backend.agents.action_canonicalize import CanonicalizationContext
+from backend.agents import (
+    action_canonicalize,
+    authorization_kernel,
+    execution_context,
+)
+from backend.agents.action_canonicalize import (
+    CanonicalizationContext,
+    PreparedAction,
+    freeze_registry,
+    register_canonicalizer,
+)
 from backend.agents.authorization_kernel import (
     AuthorizedOperation,
     AuthorizationDecision,
     OperationRequest,
     TelemetryVerdict,
+    _deny_decision,
+    _harden_descriptor,
+    _issue_from_canonical,
     _issue_from_name,
     authorize_action,
+    authorize_canonical,
     classify_for_telemetry,
     classify_operation,
 )
@@ -76,6 +90,31 @@ def _req(tool_name: str) -> OperationRequest:
         schema_version="v1",
         raw_args={},
     )
+
+
+@pytest.fixture
+def frozen_code_write_registry() -> Iterator[None]:
+    """Install the reviewed canonicalizers without leaking global state."""
+    prior = action_canonicalize._snapshot_state_for_tests()
+    action_canonicalize.reset_for_tests()
+    try:
+        register_code_write_file_canonicalizers()
+        freeze_registry()
+        yield
+    finally:
+        action_canonicalize._restore_state_for_tests(prior)
+
+
+class _LyingStr(str):
+    """A string subclass that defeats equality-based descriptor checks."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __ne__(self, other: object) -> bool:
+        return False
+
+    __hash__ = str.__hash__
 
 
 # ── AC (a): read_file (read_only) ⇒ allow ────────────────────────────────
@@ -500,8 +539,267 @@ def test_telemetry_verdict_cannot_authorize() -> None:
         _ = telemetry.verdict  # type: ignore[attr-defined]
 
 
+# ── OP-2660 (U6-0 AT-3): authoritative canonical issuer ─────────────
+def test_authorize_canonical_value_path_uses_refined_descriptor(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+) -> None:
+    root = str(tmp_path)
+    bound = _ctx_human()
+
+    view = authorize_canonical(
+        bound,
+        adapter_namespace="runner_sdk",
+        tool_name="str_replace_based_edit_tool",
+        schema_version="v1",
+        raw_args={"command": "view", "path": "src/x.py"},
+        workspace_id="workspace-1",
+        workspace_root=root,
+    )
+    write = authorize_canonical(
+        bound,
+        adapter_namespace="runner_sdk",
+        tool_name="Write",
+        schema_version="v1",
+        raw_args={"file_path": "src/x.py", "content": "new"},
+        workspace_id="workspace-1",
+        workspace_root=root,
+    )
+    unbound_write = authorize_canonical(
+        _ctx_unbound(),
+        adapter_namespace="runner_sdk",
+        tool_name="Write",
+        schema_version="v1",
+        raw_args={"file_path": "src/x.py", "content": "new"},
+        workspace_id="workspace-1",
+        workspace_root=root,
+    )
+    real_replace = authorize_canonical(
+        bound,
+        adapter_namespace="runner_sdk",
+        tool_name="str_replace_based_edit_tool",
+        schema_version="v1",
+        raw_args={
+            "command": "str_replace",
+            "path": "src/x.py",
+            "old_str": "before",
+            "new_str": "after",
+        },
+        workspace_id="workspace-1",
+        workspace_root=root,
+    )
+
+    assert view.verdict == "allow"
+    assert view.operation_descriptor.effect == "read_only"
+    assert write.verdict == "requires_grant"
+    assert write.operation_descriptor.effect == "mutating"
+    assert unbound_write.verdict == "deny"
+    assert real_replace.verdict == "requires_grant"
+    assert real_replace.operation_descriptor.effect == "mutating"
+
+
+def test_canonical_issuer_takes_dispatch_and_no_descriptor_mint_exists() -> None:
+    import inspect
+
+    issuer_signature = inspect.signature(_issue_from_canonical)
+    assert "raw_args" in issuer_signature.parameters
+    assert "descriptor" not in issuer_signature.parameters
+
+    for name, function in inspect.getmembers(
+        authorization_kernel,
+        inspect.isfunction,
+    ):
+        signature = inspect.signature(function)
+        takes_descriptor = any(
+            parameter.name == "descriptor"
+            or "OperationDescriptor" in str(parameter.annotation)
+            for parameter in signature.parameters.values()
+        )
+        returns_capability = "AuthorizedOperation" in str(
+            signature.return_annotation
+        )
+        assert not (takes_descriptor and returns_capability), (
+            f"{name} exposes a descriptor-to-capability mint"
+        )
+
+
+def test_harden_descriptor_rejects_non_descriptor() -> None:
+    with pytest.raises(ValueError, match="descriptor_not_operation_descriptor"):
+        _harden_descriptor(object(), "Write")
+
+
+@pytest.mark.parametrize("field", ["tool_name", "effect", "family"])
+def test_harden_descriptor_rejects_str_subclass_fields(field: str) -> None:
+    values: dict[str, str] = {
+        "tool_name": "Write",
+        "effect": "mutating",
+        "family": "code_write",
+    }
+    values[field] = _LyingStr(values[field])
+    descriptor = OperationDescriptor(**values)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="descriptor_field_not_str"):
+        _harden_descriptor(descriptor, "Write")
+
+
+def test_harden_descriptor_rejects_dispatch_tool_mismatch() -> None:
+    descriptor = OperationDescriptor("Write", "mutating", "code_write")
+    with pytest.raises(ValueError, match="descriptor_tool_mismatch"):
+        _harden_descriptor(descriptor, "Edit")
+
+
+def test_harden_descriptor_rejects_unknown_operation_class() -> None:
+    descriptor = OperationDescriptor(
+        "Write",
+        "read_only",
+        "code_write",
+    )
+    with pytest.raises(ValueError, match="unknown_operation_class"):
+        _harden_descriptor(descriptor, "Write")
+
+
+def test_harden_descriptor_reconstructs_trusted_exact_strings() -> None:
+    descriptor = OperationDescriptor("Write", "mutating", "code_write")
+    hardened = _harden_descriptor(descriptor, "Write")
+
+    assert hardened == descriptor
+    assert hardened is not descriptor
+    assert type(hardened.tool_name) is str
+    assert type(hardened.effect) is str
+    assert type(hardened.family) is str
+
+
+def test_authorize_canonical_path_escape_fails_closed_without_raising(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+) -> None:
+    decision = authorize_canonical(
+        _ctx_human(),
+        adapter_namespace="runner_sdk",
+        tool_name="Write",
+        schema_version="v1",
+        raw_args={"file_path": "../../etc/passwd", "content": "x"},
+        workspace_id="workspace-1",
+        workspace_root=str(tmp_path),
+    )
+
+    assert decision.verdict == "deny"
+    assert decision.reason.startswith("canonicalization_failed:")
+
+
+def test_authorize_canonical_unregistered_fails_closed_without_raising() -> None:
+    decision = authorize_canonical(
+        _ctx_human(),
+        adapter_namespace="unregistered_adapter",
+        tool_name="Write",
+        schema_version="v1",
+        raw_args={"file_path": "src/x.py", "content": "x"},
+        workspace_id="workspace-1",
+        workspace_root="/workspace",
+    )
+
+    assert decision.verdict == "deny"
+    assert decision.reason.startswith("canonicalization_failed:")
+
+
+def test_authorize_canonical_harden_failure_fails_closed_without_raising(
+    tmp_path: pathlib.Path,
+) -> None:
+    def hostile_canonicalizer(
+        context: CanonicalizationContext,
+        raw_args: Mapping[str, object],
+    ) -> PreparedAction:
+        del context, raw_args
+        return PreparedAction(
+            operation_descriptor=OperationDescriptor(
+                _LyingStr("not-Write"),
+                _LyingStr("read_only"),  # type: ignore[arg-type]
+                _LyingStr("read_only"),
+            ),
+            canonical_target="src/x.py",
+            executable_args={},
+            human_rendering={},
+        )
+
+    prior = action_canonicalize._snapshot_state_for_tests()
+    action_canonicalize.reset_for_tests()
+    try:
+        register_canonicalizer(
+            "hostile_adapter",
+            "Write",
+            "v1",
+            hostile_canonicalizer,
+        )
+        freeze_registry()
+        with pytest.raises(ValueError, match="descriptor_field_not_str"):
+            _issue_from_canonical(
+                _ctx_human(),
+                "hostile_adapter",
+                "Write",
+                "v1",
+                {},
+                "workspace-1",
+                str(tmp_path),
+            )
+        decision = authorize_canonical(
+            _ctx_human(),
+            adapter_namespace="hostile_adapter",
+            tool_name="Write",
+            schema_version="v1",
+            raw_args={},
+            workspace_id="workspace-1",
+            workspace_root=str(tmp_path),
+        )
+    finally:
+        action_canonicalize._restore_state_for_tests(prior)
+
+    assert decision.verdict == "deny"
+    assert decision.reason == "authorize_canonical_denied"
+
+
+def test_deny_decision_handles_malformed_tool_and_provenance() -> None:
+    decision = _deny_decision(
+        _ctx_human(),
+        object(),
+        "forced_deny",
+        None,  # type: ignore[arg-type]
+    )
+
+    assert decision.verdict == "deny"
+    assert decision.reason == "forced_deny"
+    assert decision.operation_descriptor.tool_name == "__error__"
+    assert decision.provenance_snapshot_ids == ()
+
+
+def test_authorize_canonical_has_no_production_caller() -> None:
+    backend_root = pathlib.Path(__file__).resolve().parents[1]
+    test_path = pathlib.Path(__file__).resolve()
+    callers: list[str] = []
+
+    for py in backend_root.rglob("*.py"):
+        if py.resolve() == test_path:
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name):
+                callee = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                callee = node.func.attr
+            else:
+                continue
+            if callee == "authorize_canonical":
+                callers.append(str(py.relative_to(backend_root)))
+
+    assert callers == []
+
+
 def test_authority_issuer_call_sites_are_allowlisted() -> None:
-    """Only authorize_action and this test module may mint capabilities."""
+    """Only authorize wrappers and this test module may mint capabilities."""
     backend_root = pathlib.Path(__file__).resolve().parents[1]
     test_path = pathlib.Path(__file__).resolve()
     production_calls: list[tuple[str, str]] = []
@@ -525,7 +823,12 @@ def test_authority_issuer_call_sites_are_allowlisted() -> None:
                 callee = node.func.attr
             else:
                 continue
-            if callee not in {"_issue_from_name", "issue_from_name"}:
+            if callee not in {
+                "_issue_from_name",
+                "issue_from_name",
+                "_issue_from_canonical",
+                "issue_from_canonical",
+            }:
                 continue
             if py.resolve() == test_path:
                 continue
@@ -543,7 +846,8 @@ def test_authority_issuer_call_sites_are_allowlisted() -> None:
             )
 
     assert production_calls == [
-        ("agents/authorization_kernel.py", "authorize_action")
+        ("agents/authorization_kernel.py", "authorize_action"),
+        ("agents/authorization_kernel.py", "authorize_canonical"),
     ]
 
 
@@ -569,7 +873,7 @@ def test_authorization_decision_has_no_external_producer() -> None:
             if callee == "AuthorizationDecision":
                 producers.append(str(py.relative_to(backend_root)))
 
-    assert producers == ["agents/authorization_kernel.py"]
+    assert sorted(set(producers)) == ["agents/authorization_kernel.py"]
 
 
 # ── Kernel reachability guard ────────────────────────────────────────────
