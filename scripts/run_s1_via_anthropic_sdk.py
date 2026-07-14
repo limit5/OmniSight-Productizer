@@ -144,6 +144,9 @@ from backend.agents.runner_handlers import (
     make_runner_dispatcher,
     register_runner_sdk_shadow_roots,
 )
+from backend.agents.shadow_root_registry import (
+    freeze_registry as _freeze_shadow_roots,
+)
 from backend.agents.session_resume import (
     BridgeStaleCriticalError,
     ConcurrentRunnerConflictError,
@@ -1668,6 +1671,10 @@ async def main_async(args: argparse.Namespace) -> int:
         register_runner_sdk_shadow_roots(
             str_replace_root=str(text_editor.worktree_root)
         )
+        try:
+            _freeze_shadow_roots()
+        except Exception:  # noqa: BLE001 — shadow readiness must never break startup
+            pass
         # OP-851 (C1) — Anthropic Memory Tool. The handler is registered
         # alongside the OP-828 built-ins; the BUILT_IN_TOOLS_SPEC list
         # already includes the ``memory_20260120`` entry. If the C1 spike

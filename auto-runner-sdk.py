@@ -68,6 +68,9 @@ from backend.agents.runner_handlers import (  # noqa: E402
     make_runner_dispatcher,
     register_runner_sdk_shadow_roots,
 )
+from backend.agents.shadow_root_registry import (  # noqa: E402
+    freeze_registry as _freeze_shadow_roots,
+)
 from backend.agents.skills_loader import (  # noqa: E402
     SkillRegistry,
     load_default_scopes,
@@ -839,6 +842,10 @@ async def main() -> None:
 
     dispatcher = make_runner_dispatcher()
     register_runner_sdk_shadow_roots()
+    try:
+        _freeze_shadow_roots()
+    except Exception:  # noqa: BLE001 — shadow readiness must never break startup
+        pass
 
     # Skills: load 3-scope registry, register Skill tool handler on the
     # SAME dispatcher so AnthropicClient's tool loop can resolve it.
