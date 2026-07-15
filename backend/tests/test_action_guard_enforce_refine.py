@@ -15,9 +15,21 @@ from backend.agents import (
     canonicalize_code_write_file,
     shadow_root_registry,
 )
+from backend.agents.action_canonicalize import (
+    CanonicalizationContext,
+    PreparedAction,
+)
 from backend.agents.action_guard import GuardOutcome, guard_tool_dispatch
-from backend.agents.execution_context import ExecutionContext, for_service
+from backend.agents.authoritative_context_resolver import (
+    resolve_authoritative_workspace,
+)
+from backend.agents.execution_context import (
+    ExecutionContext,
+    for_service,
+    for_unbound,
+)
 from backend.agents.tool_dispatcher import ToolDispatcher
+from backend.agents.tool_registry import resolve
 
 
 _ADAPTER = "runner_sdk"
@@ -106,6 +118,7 @@ def test_default_shadow_keeps_name_outcome_and_no_seal(tmp_path: Path) -> None:
     assert outcome.mode == "shadow"
     assert outcome.blocked_reason is None
     assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 def test_enforce_view_refines_to_allow_and_seals_frozen_args(
@@ -127,22 +140,43 @@ def test_enforce_view_refines_to_allow_and_seals_frozen_args(
     assert type(outcome.sealed_args) is dict
     assert outcome.sealed_args == raw_args
     assert outcome.sealed_args is not raw_args
+    assert outcome.challenge_prepared is None
 
 
-def test_enforce_mutating_command_remains_blocked_without_seal(
+def test_enforce_mutating_command_carries_bound_challenge_prepared(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     _set_enforce(monkeypatch)
     _publish_root(tmp_path)
+    raw_args = {
+        "command": "str_replace",
+        "path": str(tmp_path / "edit.py"),
+        "old_str": "old",
+        "new_str": "new",
+    }
 
-    outcome = _guard(
-        {
-            "command": "str_replace",
-            "path": str(tmp_path / "edit.py"),
-            "old_str": "old",
-            "new_str": "new",
-        }
+    outcome = _guard(raw_args)
+    auth_ws = resolve_authoritative_workspace(
+        _bound_context(),
+        _ADAPTER,
+        _TOOL,
+        _SCHEMA,
+    )
+    assert auth_ws is not None
+    workspace_id, workspace_root = auth_ws
+    expected = action_canonicalize.canonicalize(
+        CanonicalizationContext(
+            workspace_id=workspace_id,
+            workspace_root=workspace_root,
+            adapter_namespace=_ADAPTER,
+            tool_name=_TOOL,
+            schema_version=_SCHEMA,
+        ),
+        _ADAPTER,
+        _TOOL,
+        _SCHEMA,
+        raw_args,
     )
 
     assert outcome.proceed is False
@@ -152,6 +186,110 @@ def test_enforce_mutating_command_remains_blocked_without_seal(
     assert outcome.mode == "enforce"
     assert outcome.blocked_reason == "requires_grant"
     assert outcome.sealed_args is None
+    assert isinstance(outcome.challenge_prepared, PreparedAction)
+    assert (
+        outcome.challenge_prepared.operation_descriptor
+        is outcome.decision.operation_descriptor
+    )
+    assert outcome.challenge_prepared.operation_descriptor.effect == "mutating"
+    assert (
+        outcome.challenge_prepared.executable_args
+        == expected.executable_args
+    )
+
+
+def test_enforce_unbound_deny_has_no_challenge_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _set_enforce(monkeypatch)
+
+    outcome = guard_tool_dispatch(
+        adapter_namespace=_ADAPTER,
+        tool_name=_TOOL,
+        schema_version=_SCHEMA,
+        raw_args={
+            "command": "str_replace",
+            "path": str(tmp_path / "edit.py"),
+            "old_str": "old",
+            "new_str": "new",
+        },
+        execution_context=for_unbound(),
+    )
+
+    assert outcome.proceed is False
+    assert outcome.decision is not None
+    assert outcome.decision.verdict == "deny"
+    assert outcome.mode == "enforce"
+    assert outcome.blocked_reason == "unbound_principal"
+    assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
+
+
+def test_enforce_requires_grant_seal_failure_stays_blocked_without_carrier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class HostilePreparedAction(PreparedAction):
+        instances = 0
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            type(self).instances += 1
+            object.__setattr__(
+                self,
+                "_raise_payload_reads",
+                not type(self).instances % 2,
+            )
+
+        def __getattribute__(self, name: str):
+            if name in {
+                "canonical_target",
+                "executable_args",
+                "human_rendering",
+            }:
+                try:
+                    hostile = object.__getattribute__(
+                        self,
+                        "_raise_payload_reads",
+                    )
+                except AttributeError:
+                    hostile = False
+                if hostile:
+                    raise RuntimeError("hostile sealed field read")
+            return super().__getattribute__(name)
+
+    def hostile_canonicalizer(
+        context: CanonicalizationContext,
+        raw_args: Mapping[str, object],
+    ) -> PreparedAction:
+        del context, raw_args
+        return HostilePreparedAction(
+            operation_descriptor=resolve(_TOOL),
+            canonical_target="edit.py",
+            executable_args={"command": "str_replace"},
+            human_rendering={"action": "str_replace"},
+        )
+
+    action_canonicalize.reset_for_tests()
+    action_canonicalize.register_canonicalizer(
+        _ADAPTER,
+        _TOOL,
+        _SCHEMA,
+        hostile_canonicalizer,
+    )
+    action_canonicalize.freeze_registry()
+    _set_enforce(monkeypatch)
+    _publish_root(tmp_path)
+
+    outcome = _guard({"command": "str_replace"})
+
+    assert outcome.proceed is False
+    assert outcome.decision is not None
+    assert outcome.decision.verdict == "requires_grant"
+    assert outcome.blocked_reason == "requires_grant"
+    assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 def test_refine_exception_latches_block_and_never_executes_live_args(
@@ -219,6 +357,7 @@ def test_unknown_adapter_enforce_without_explicit_entry_keeps_name_block(
     assert outcome.mode == "enforce"
     assert outcome.blocked_reason == "requires_grant"
     assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 def test_bootstrap_failure_keeps_name_block(
@@ -236,6 +375,7 @@ def test_bootstrap_failure_keeps_name_block(
     assert outcome.family == "code_write"
     assert outcome.blocked_reason == "requires_grant"
     assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 def test_enforce_view_without_authoritative_context_fails_closed(
@@ -251,6 +391,7 @@ def test_enforce_view_without_authoritative_context_fails_closed(
     assert outcome.decision.verdict == "requires_grant"
     assert outcome.blocked_reason == "no_authoritative_context"
     assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 @pytest.mark.parametrize(
@@ -274,6 +415,7 @@ def test_invalid_freeze_input_fails_closed(
     assert outcome.decision.verdict == "requires_grant"
     assert outcome.blocked_reason == "canonicalization_rejected"
     assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 def test_oversized_freeze_input_fails_closed(
@@ -289,6 +431,7 @@ def test_oversized_freeze_input_fails_closed(
     assert outcome.proceed is False
     assert outcome.blocked_reason == "canonicalization_rejected"
     assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 @pytest.mark.parametrize(
@@ -332,11 +475,13 @@ def test_name_allow_and_unknown_deny_skip_refinement(
     assert allowed.decision.verdict == "allow"
     assert allowed.mode == "enforce"
     assert allowed.sealed_args is None
+    assert allowed.challenge_prepared is None
     assert denied.proceed is False
     assert denied.decision is not None
     assert denied.decision.reason == "unknown_tool_default_deny"
     assert denied.mode == "enforce"
     assert denied.sealed_args is None
+    assert denied.challenge_prepared is None
 
 
 def test_refine_exception_never_escapes_guard(
@@ -358,6 +503,7 @@ def test_refine_exception_never_escapes_guard(
     assert outcome.decision.verdict == "requires_grant"
     assert outcome.blocked_reason == "canonicalization_rejected"
     assert outcome.sealed_args is None
+    assert outcome.challenge_prepared is None
 
 
 def test_refine_base_exception_still_propagates(

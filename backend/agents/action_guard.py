@@ -36,6 +36,7 @@ from backend.agents.execution_context import ExecutionContext, for_unbound
 from backend.agents.provenance import audit_ids
 
 if TYPE_CHECKING:
+    from backend.agents.action_canonicalize import PreparedAction
     from backend.agents.provenance import TurnProvenance
 
 logger = logging.getLogger(__name__)
@@ -163,6 +164,9 @@ class GuardOutcome:
     # G6b-2a: frozen, plain-JSON, private raw args authorized by the guard.
     # G6b-2b owns producing the detached snapshot; None keeps this dormant.
     sealed_args: Mapping[str, object] | None = None
+    # GAP-2: sealed one-canonicalization action for an enforce challenge.
+    # GAP-3 persists it; None on every other path keeps the carrier dormant.
+    challenge_prepared: "PreparedAction | None" = None
 
 
 def effective_execution_args(outcome: "GuardOutcome", live_args):
@@ -241,7 +245,7 @@ def _refine_enforce_outcome(
     from backend.agents.authoritative_context_resolver import (
         resolve_authoritative_workspace,
     )
-    from backend.agents.authorization_kernel import authorize_canonical
+    from backend.agents.authorization_kernel import authorize_and_seal
 
     name_family = name_decision.operation_descriptor.family
     if not (
@@ -279,7 +283,7 @@ def _refine_enforce_outcome(
             blocked_reason="no_authoritative_context",
         )
     workspace_id, workspace_root = auth_ws
-    refined = authorize_canonical(
+    refined, sealed_prepared = authorize_and_seal(
         ctx,
         adapter_namespace=adapter_namespace,
         tool_name=tool_name,
@@ -299,6 +303,9 @@ def _refine_enforce_outcome(
             None if proceed else _bounded_blocked_reason(refined.reason)
         ),
         sealed_args=frozen if proceed else None,
+        challenge_prepared=(
+            sealed_prepared if refined.verdict == "requires_grant" else None
+        ),
     )
 
 
