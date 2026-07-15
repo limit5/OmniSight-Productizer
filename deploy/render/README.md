@@ -2,7 +2,7 @@
 
 One-click deploy to [Render](https://render.com):
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer)
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer&path=deploy/render/render.yaml)
 
 The button sends Render's Blueprint wizard at this repo; it auto-detects
 `render.yaml` at the project root, prompts for the unset `sync: false`

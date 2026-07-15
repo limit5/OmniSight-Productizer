@@ -1,6 +1,6 @@
 # OmniSight Productizer — Render Blueprint (L11 #338 #3)
 #
-# One-click deploy: https://render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer
+# One-click deploy: https://render.com/deploy?repo=https://github.com/limit5/OmniSight-Productizer&path=deploy/render/render.yaml
 #
 # Render picks this file up automatically when you click the Deploy button or
 # when you connect the repo via Dashboard → New → Blueprint. Once applied, the
