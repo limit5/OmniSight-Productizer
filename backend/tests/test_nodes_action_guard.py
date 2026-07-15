@@ -18,12 +18,20 @@ here are real registered names (fake handlers, real classification).
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
 from backend.agents import action_guard, nodes
 from backend.agents import execution_context as ec
 from backend.agents.nodes import external_agent_node_factory, tool_executor_node
+from backend.agents.provenance import (
+    A2A_RESULT,
+    Attestation,
+    active_collector,
+    digest,
+    provenance_scope,
+)
 from backend.agents.state import GraphState, ToolCall
 from backend.agents.tool_registry import resolve as resolve_tool
 from backend.auth import User
@@ -436,6 +444,81 @@ def test_a2a_shadow_same_tenant_invokes(monkeypatch):
     update = asyncio.run(node(GraphState(execution_context=_ctx_human("t-node"))))
     assert reg.invocations, "shadow + matching tenant must invoke"
     assert update["tool_results"][0].success
+
+
+def test_a2a_response_records_unattested_provenance(monkeypatch):
+    monkeypatch.setattr(nodes, "emit_tool_progress", lambda *a, **k: None)
+    reg = _FakeRegistry()
+    node = _a2a_node(reg)
+
+    with provenance_scope() as col:
+        update = asyncio.run(
+            node(GraphState(execution_context=_ctx_human("t-node")))
+        )
+
+    assert update["tool_results"][0].success
+    assert len(col._records) == 1
+    record = col._records[0]
+    assert record.source_kind == A2A_RESULT
+    assert record.source_id == "a2a:demo-agent"
+    assert record.attestation == Attestation.UNATTESTED
+    assert record.content_digest == digest(
+        json.dumps({"status": "ok"}, ensure_ascii=False, sort_keys=True)
+    )
+
+
+def test_a2a_response_without_provenance_scope_is_noop(monkeypatch):
+    monkeypatch.setattr(nodes, "emit_tool_progress", lambda *a, **k: None)
+    observed_collectors = []
+    original_record_content = nodes.record_content
+
+    def _observe_collector(collector, *args, **kwargs):  # noqa: ANN001
+        observed_collectors.append(collector)
+        return original_record_content(collector, *args, **kwargs)
+
+    monkeypatch.setattr(nodes, "record_content", _observe_collector)
+    reg = _FakeRegistry()
+    node = _a2a_node(reg)
+
+    assert active_collector() is None
+    update = asyncio.run(node(GraphState(execution_context=_ctx_human("t-node"))))
+
+    expected_output = json.dumps(
+        {"status": "ok"}, ensure_ascii=False, sort_keys=True
+    )
+    assert update["tool_results"][0].output == expected_output
+    assert update["messages"][0].content == expected_output
+    assert observed_collectors == [None]
+    assert active_collector() is None
+
+
+def test_a2a_response_capture_is_behavior_neutral(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        nodes,
+        "emit_tool_progress",
+        lambda *args, **kwargs: events.append((args, kwargs)),
+    )
+    without_scope_reg = _FakeRegistry()
+    without_scope = asyncio.run(
+        _a2a_node(without_scope_reg)(
+            GraphState(execution_context=_ctx_human("t-node"))
+        )
+    )
+    without_scope_events = list(events)
+    events.clear()
+
+    with_scope_reg = _FakeRegistry()
+    with provenance_scope():
+        with_scope = asyncio.run(
+            _a2a_node(with_scope_reg)(
+                GraphState(execution_context=_ctx_human("t-node"))
+            )
+        )
+
+    assert with_scope == without_scope
+    assert events == without_scope_events
+    assert with_scope_reg.invocations == without_scope_reg.invocations
 
 
 def test_a2a_tenant_mismatch_is_explicit_denial_before_endpoint(monkeypatch):

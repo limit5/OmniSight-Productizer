@@ -58,6 +58,7 @@ from backend.agents.action_guard import (
 from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.agents.execution_context import ExecutionContext
 from backend.agents.provenance import (
+    A2A_RESULT,
     CaptureUnavailable,
     RAG_DOC,
     TOOL_RESULT,
@@ -1412,6 +1413,10 @@ def external_agent_node_factory(
             payload_fn = payload_builder or _default_external_agent_payload
             result = await client.invoke(endpoint.agent_name, payload_fn(state))
             output = json.dumps(result.payload, ensure_ascii=False, sort_keys=True)
+            # T5b: capture the external-agent response as UNATTESTED A2A_RESULT provenance — fully external, untrusted
+            # content that enters the graph as a ToolResult. `output` is exactly the serialized payload exposed
+            # downstream; `a2a:{agent}` is the source id. Best-effort: None collector ⇒ no-op; record_content never raises.
+            record_content(active_collector(), A2A_RESULT, f"a2a:{clean_agent_id}", output)
             success = _a2a_payload_success(result.payload)
             emit_tool_progress(
                 tool_name,
