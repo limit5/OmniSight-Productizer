@@ -1,10 +1,13 @@
-"""OP-2620 — chat-path provenance capture plumbing (dormant).
+"""Chat-path provenance capture plumbing.
 
 The LangGraph conversation tool loop seals the model-input frame once per
 response, threads the whole ModelSnapshot to every chat action guard call in
 that round, and records tool results for the next round's frame. Provenance
 remains best-effort: an absent scope or seal failure degrades to
 CaptureUnavailable without breaking the chat turn.
+
+OP-2664 records classification-gated RAG snippets as untrusted input provenance
+without changing the retrieved context or offline answer.
 
 Offline — the LLM/tool fakes mirror ``test_nodes_action_guard.py`` and cache
 resolution mirrors ``test_provenance_runner_plumbing.py``.
@@ -16,18 +19,23 @@ from typing import Any
 
 import pytest
 
-from backend.agents import nodes
+from backend import rag
+from backend.agents import nodes, provenance
 from backend.agents.action_guard import GuardOutcome
 from backend.agents.provenance import (
+    Attestation,
     CaptureUnavailable,
     ModelSnapshot,
+    RAG_DOC,
     TOOL_RESULT,
     ProvenanceCollector,
     ProvenanceSnapshot,
     active_collector,
+    digest,
     provenance_scope,
 )
 from backend.agents.state import GraphState
+from backend.llm_adapter import HumanMessage
 
 
 class _Reply:
@@ -89,6 +97,32 @@ def _tool_reply(call_id: str) -> _Reply:
             {"name": "dummy_tool", "args": {"value": call_id}, "id": call_id}
         ]
     )
+
+
+def _patch_offline_rag(monkeypatch: pytest.MonkeyPatch) -> list[rag.Hit]:
+    hits = [
+        rag.Hit(
+            doc_path="docs/operator-guide.md",
+            title="Operator guide",
+            snippet="Use the guarded operator workflow.",
+            score=2.0,
+        ),
+        rag.Hit(
+            doc_path="docs/recovery.md",
+            title="Recovery",
+            snippet="Verify the rollback before reporting success.",
+            score=1.0,
+        ),
+    ]
+    monkeypatch.setattr(nodes, "_get_llm", lambda **kw: None)
+    monkeypatch.setattr(nodes, "_build_state_summary", lambda: "stable state")
+    monkeypatch.setattr(nodes, "emit_pipeline_phase", lambda *a, **k: None)
+    monkeypatch.setattr(rag, "retrieve", lambda *a, **k: hits)
+    return hits
+
+
+def _rag_state() -> GraphState:
+    return GraphState(messages=[HumanMessage(content="How do I recover?")])
 
 
 @pytest.mark.asyncio
@@ -210,3 +244,73 @@ async def test_chat_pipeline_establishes_and_resets_provenance_scope(
     assert result.content == "ok"
     assert observed["active_during_run"]
     assert active_collector() is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_rag_records_each_retrieved_doc_as_unattested(
+    monkeypatch,
+) -> None:
+    hits = _patch_offline_rag(monkeypatch)
+
+    with provenance_scope() as col:
+        result = await nodes.conversation_node(_rag_state())
+
+    assert result["answer"].startswith("[OFFLINE]")
+    assert len(col._records) == 2
+    for record, hit in zip(col._records, hits, strict=True):
+        assert record.source_kind == RAG_DOC
+        assert record.source_id == hit.doc_path
+        assert record.attestation == Attestation.UNATTESTED
+        assert record.content_digest == digest(hit.snippet)
+
+
+@pytest.mark.asyncio
+async def test_conversation_rag_without_provenance_scope_is_noop(monkeypatch) -> None:
+    hits = _patch_offline_rag(monkeypatch)
+    observed_collectors = []
+    original_record_content = nodes.record_content
+
+    def _observe_collector(collector, *args, **kwargs):  # noqa: ANN001
+        observed_collectors.append(collector)
+        return original_record_content(collector, *args, **kwargs)
+
+    monkeypatch.setattr(nodes, "record_content", _observe_collector)
+
+    assert active_collector() is None
+    result = await nodes.conversation_node(_rag_state())
+
+    assert result["answer"].startswith("[OFFLINE]")
+    assert observed_collectors == [None] * len(hits)
+    assert active_collector() is None
+
+
+@pytest.mark.asyncio
+async def test_conversation_rag_capture_is_behavior_neutral(monkeypatch) -> None:
+    hits = _patch_offline_rag(monkeypatch)
+    expected_block = rag.format_hits_for_prompt(hits)
+
+    without_scope = await nodes.conversation_node(_rag_state())
+    with provenance_scope():
+        with_scope = await nodes.conversation_node(_rag_state())
+
+    assert expected_block in without_scope["answer"]
+    assert with_scope["answer"] == without_scope["answer"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_rag_capture_failure_is_latched_and_turn_completes(
+    monkeypatch,
+) -> None:
+    hits = _patch_offline_rag(monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("injected RAG record failure")
+
+    monkeypatch.setattr(provenance, "untrusted_record", _boom)
+
+    with provenance_scope() as col:
+        result = await nodes.conversation_node(_rag_state())
+
+    assert rag.format_hits_for_prompt(hits) in result["answer"]
+    assert col._failed is True
+    assert "record_error" in col._omissions

@@ -59,6 +59,7 @@ from backend.agents.cognee_integration import build_repo_map_via_cognee
 from backend.agents.execution_context import ExecutionContext
 from backend.agents.provenance import (
     CaptureUnavailable,
+    RAG_DOC,
     TOOL_RESULT,
     SnapshotCache,
     TurnProvenance,
@@ -2194,6 +2195,14 @@ async def conversation_node(state: GraphState) -> dict:
         ) if last_user_text else []
         if hits:
             retrieved_block = _rag.format_hits_for_prompt(hits)
+            # T5b: capture each classification-gated retrieved doc as
+            # UNATTESTED provenance — fs corpus (not a DB row). doc_path is
+            # the source id; snippet is the exact LLM-exposed window above.
+            # Best-effort: no active scope is a no-op; record_content never
+            # raises.
+            _rag_pcol = active_collector()
+            for _hit in hits:
+                record_content(_rag_pcol, RAG_DOC, _hit.doc_path, _hit.snippet)
     except Exception as _rag_exc:
         logger.debug("RAG retrieve skipped (%s) — proceeding without context", _rag_exc)
 
