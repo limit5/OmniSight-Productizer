@@ -35,7 +35,12 @@ from sse_starlette.sse import EventSourceResponse
 from backend import auth as _au
 from backend.agents import execution_context as _ec
 from backend.agents.graph import run_graph
-from backend.agents.provenance import provenance_scope
+from backend.agents.provenance import (
+    CHAT_HISTORY,
+    active_collector,
+    provenance_scope,
+    record_content,
+)
 from backend.db_pool import get_conn
 from backend.events import emit_chat_message, emit_pipeline_phase, emit_session_titled
 from backend.models import (
@@ -162,6 +167,22 @@ async def _run_pipeline(
         emit_pipeline_phase("start", f"Processing: {user_msg[:80]}")
         add_system_log(f"Command received: {user_msg[:60]}", "info")
         with provenance_scope():
+            # T5b: capture prior-turn session memory (untrusted prior-conversation content injected into the graph) as
+            # CHAT_HISTORY provenance. No stable per-message id ⇒ a synthetic position:role source id.
+            # ⚠ The loop runs BEFORE run_graph, so it must be STRUCTURALLY incapable of raising (a raise would skip
+            # run_graph = a behavior change). Two layers: (1) a per-element guard skips a malformed pair (keeping the
+            # well-formed ones); (2) an OUTER try/except swallows ANY residual pathological failure (e.g. a raising
+            # __str__ on _role in the f-string — unreachable from PG TEXT, belt-and-suspenders) so capture NEVER aborts
+            # the turn. record_content is itself best-effort (None ⇒ no-op; latches, never re-raises).
+            _sess_pcol = active_collector()
+            try:
+                for _idx, _pair in enumerate(prior_messages or ()):
+                    if not (isinstance(_pair, (tuple, list)) and len(_pair) == 2):
+                        continue
+                    _role, _content = _pair
+                    record_content(_sess_pcol, CHAT_HISTORY, f"session:{_idx}:{_role}", _content)
+            except Exception:  # noqa: BLE001 — best-effort capture must never break the chat turn
+                pass
             result = await run_graph(
                 user_msg, prior_messages=prior_messages, model_name=model_name,
                 execution_context=execution_context,

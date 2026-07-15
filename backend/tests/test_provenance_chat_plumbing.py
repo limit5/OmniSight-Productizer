@@ -15,6 +15,7 @@ resolution mirrors ``test_provenance_runner_plumbing.py``.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from backend.agents.action_guard import GuardOutcome
 from backend.agents.provenance import (
     Attestation,
     CaptureUnavailable,
+    CHAT_HISTORY,
     ModelSnapshot,
     RAG_DOC,
     TOOL_RESULT,
@@ -36,6 +38,7 @@ from backend.agents.provenance import (
 )
 from backend.agents.state import GraphState
 from backend.llm_adapter import HumanMessage
+from backend.models import MessageRole
 
 
 class _Reply:
@@ -244,6 +247,205 @@ async def test_chat_pipeline_establishes_and_resets_provenance_scope(
     assert result.content == "ok"
     assert observed["active_during_run"]
     assert active_collector() is None
+
+
+@pytest.mark.asyncio
+async def test_chat_pipeline_records_session_history_as_unattested(
+    monkeypatch,
+) -> None:
+    from backend.routers import chat as chat_router
+
+    observed: dict[str, Any] = {}
+
+    async def _stub(user_msg: str, **kwargs) -> GraphState:
+        del kwargs
+        collector = active_collector()
+        assert collector is not None
+        observed["records"] = list(collector._records)
+        return GraphState(
+            user_command=user_msg,
+            routed_to="general",
+            answer="ok",
+        )
+
+    monkeypatch.setattr(chat_router, "run_graph", _stub)
+    monkeypatch.setattr(chat_router, "emit_pipeline_phase", lambda *a, **k: None)
+    monkeypatch.setattr(chat_router, "add_system_log", lambda *a, **k: None)
+
+    result = await chat_router._run_pipeline(
+        "hello",
+        prior_messages=[("user", "hi"), ("assistant", "prev answer")],
+    )
+
+    assert result.content == "ok"
+    records = observed["records"]
+    assert len(records) == 2
+    assert [record.source_kind for record in records] == [CHAT_HISTORY] * 2
+    assert [record.source_id for record in records] == [
+        "session:0:user",
+        "session:1:assistant",
+    ]
+    assert [record.attestation for record in records] == [
+        Attestation.UNATTESTED,
+        Attestation.UNATTESTED,
+    ]
+    assert [record.content_digest for record in records] == [
+        digest("hi"),
+        digest("prev answer"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prior_messages", [None, []], ids=["none", "empty"])
+async def test_chat_pipeline_empty_session_history_records_nothing_and_runs_graph(
+    monkeypatch,
+    prior_messages,
+) -> None:
+    from backend.routers import chat as chat_router
+
+    observed: dict[str, Any] = {"runs": 0}
+
+    async def _stub(user_msg: str, **kwargs) -> GraphState:
+        del kwargs
+        observed["runs"] += 1
+        collector = active_collector()
+        assert collector is not None
+        observed["records"] = list(collector._records)
+        return GraphState(
+            user_command=user_msg,
+            routed_to="general",
+            answer="ok",
+        )
+
+    monkeypatch.setattr(chat_router, "run_graph", _stub)
+    monkeypatch.setattr(chat_router, "emit_pipeline_phase", lambda *a, **k: None)
+    monkeypatch.setattr(chat_router, "add_system_log", lambda *a, **k: None)
+
+    result = await chat_router._run_pipeline(
+        "hello", prior_messages=prior_messages,
+    )
+
+    assert result.content == "ok"
+    assert observed["runs"] == 1
+    assert observed["records"] == []
+
+
+@pytest.mark.asyncio
+async def test_chat_pipeline_session_capture_without_scope_is_noop(
+    monkeypatch,
+) -> None:
+    from backend.routers import chat as chat_router
+
+    observed: dict[str, Any] = {"collectors": [], "runs": 0}
+    original_record_content = chat_router.record_content
+
+    def _observe_collector(collector, *args, **kwargs):  # noqa: ANN001
+        observed["collectors"].append(collector)
+        return original_record_content(collector, *args, **kwargs)
+
+    async def _stub(user_msg: str, **kwargs) -> GraphState:
+        del kwargs
+        observed["runs"] += 1
+        assert active_collector() is None
+        return GraphState(
+            user_command=user_msg,
+            routed_to="general",
+            answer="ok",
+        )
+
+    monkeypatch.setattr(chat_router, "provenance_scope", lambda: nullcontext())
+    monkeypatch.setattr(chat_router, "record_content", _observe_collector)
+    monkeypatch.setattr(chat_router, "run_graph", _stub)
+    monkeypatch.setattr(chat_router, "emit_pipeline_phase", lambda *a, **k: None)
+    monkeypatch.setattr(chat_router, "add_system_log", lambda *a, **k: None)
+
+    assert active_collector() is None
+    result = await chat_router._run_pipeline(
+        "hello", prior_messages=[("user", "hi"), ("assistant", "previous")],
+    )
+
+    assert result.content == "ok"
+    assert observed["runs"] == 1
+    assert observed["collectors"] == [None, None]
+    assert active_collector() is None
+
+
+@pytest.mark.asyncio
+async def test_chat_pipeline_malformed_session_history_is_skipped_and_turn_completes(
+    monkeypatch,
+) -> None:
+    from backend.routers import chat as chat_router
+
+    class _RaisingRole:
+        def __str__(self) -> str:
+            raise RuntimeError("injected role formatting failure")
+
+    observed: dict[str, Any] = {"runs": 0}
+
+    async def _stub(user_msg: str, **kwargs) -> GraphState:
+        del kwargs
+        observed["runs"] += 1
+        collector = active_collector()
+        assert collector is not None
+        observed["records"] = list(collector._records)
+        return GraphState(
+            user_command=user_msg,
+            routed_to="general",
+            answer="ok",
+        )
+
+    prior_messages = [
+        ("user", "first"),
+        ("only-one",),
+        "malformed",
+        ("assistant", "second"),
+        (_RaisingRole(), "unreachable"),
+    ]
+    monkeypatch.setattr(chat_router, "run_graph", _stub)
+    monkeypatch.setattr(chat_router, "emit_pipeline_phase", lambda *a, **k: None)
+    monkeypatch.setattr(chat_router, "add_system_log", lambda *a, **k: None)
+
+    result = await chat_router._run_pipeline(
+        "hello", prior_messages=prior_messages,
+    )
+
+    assert result.content == "ok"
+    assert observed["runs"] == 1
+    assert [record.source_id for record in observed["records"]] == [
+        "session:0:user",
+        "session:3:assistant",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_chat_pipeline_session_capture_is_behavior_neutral(
+    monkeypatch,
+) -> None:
+    from backend.routers import chat as chat_router
+
+    prior_messages = [("user", "hi"), ("assistant", "previous")]
+    observed: dict[str, Any] = {}
+
+    async def _stub(user_msg: str, **kwargs) -> GraphState:
+        observed["prior_messages"] = kwargs["prior_messages"]
+        return GraphState(
+            user_command=user_msg,
+            routed_to="general",
+            answer="unchanged answer",
+        )
+
+    monkeypatch.setattr(chat_router, "run_graph", _stub)
+    monkeypatch.setattr(chat_router, "emit_pipeline_phase", lambda *a, **k: None)
+    monkeypatch.setattr(chat_router, "add_system_log", lambda *a, **k: None)
+
+    result = await chat_router._run_pipeline(
+        "hello", prior_messages=prior_messages,
+    )
+
+    assert observed["prior_messages"] is prior_messages
+    assert result.role == MessageRole.orchestrator
+    assert result.content == "unchanged answer"
+    assert result.suggestion is None
 
 
 @pytest.mark.asyncio
