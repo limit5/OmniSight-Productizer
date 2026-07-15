@@ -37,7 +37,7 @@ from __future__ import annotations
 import threading
 import weakref
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from backend.agents.execution_context import ExecutionContext, is_unbound
 from backend.agents.tool_registry import (
@@ -45,6 +45,9 @@ from backend.agents.tool_registry import (
     OperationDescriptor,
     resolve,
 )
+
+if TYPE_CHECKING:
+    from backend.agents.action_canonicalize import PreparedAction
 
 Verdict = Literal["allow", "deny", "requires_grant"]
 
@@ -89,6 +92,7 @@ class _AuthorizedPayload:
     descriptor: OperationDescriptor
     execution_context: ExecutionContext
     provenance_snapshot_ids: tuple[str, ...]
+    sealed_prepared: "PreparedAction | None" = None
 
 
 def _harden_descriptor(
@@ -175,6 +179,7 @@ def _build_authority_boundary():
         """Re-derive, harden, and issue from a complete dispatch."""
         from backend.agents.action_canonicalize import (
             CanonicalizationContext,
+            PreparedAction,
             canonicalize,
         )
 
@@ -196,12 +201,25 @@ def _build_authority_boundary():
             prepared.operation_descriptor,
             tool_name,
         )
+        # GAP-1: seal the one-canonicalization content with the hardened
+        # descriptor. Sealing reads more fields than the decision path, so it
+        # must never affect that path when a hostile field read fails.
+        try:
+            sealed = PreparedAction(
+                operation_descriptor=hardened,
+                canonical_target=prepared.canonical_target,
+                executable_args=prepared.executable_args,
+                human_rendering=prepared.human_rendering,
+            )
+        except Exception:  # noqa: BLE001 - sealing never affects the decision
+            sealed = None
         operation = object.__new__(AuthorizedOperation)
         with lock:
             ledger[operation] = _AuthorizedPayload(
                 hardened,
                 execution_context,
                 tuple(provenance_snapshot_ids),
+                sealed,
             )
         return operation
 
@@ -361,6 +379,57 @@ def authorize_canonical(
             tool_name,
             detail,
             provenance_snapshot_ids,
+        )
+
+
+def authorize_and_seal(
+    execution_context: ExecutionContext,
+    *,
+    adapter_namespace: str,
+    tool_name: str,
+    schema_version: str,
+    raw_args: dict,
+    workspace_id: str,
+    workspace_root: str,
+    provenance_snapshot_ids: tuple[str, ...] = (),
+) -> "tuple[AuthorizationDecision, PreparedAction | None]":
+    """Authorize a refined canonical operation and return its sealed snapshot.
+
+    The one-canonicalization snapshot is for durable GAP-3 persistence.
+    FAIL-CLOSED: any ordinary failure returns ``(deny, None)``, and a deny
+    verdict never exposes a seal. The seal carries canonicalization content
+    only; the caller adds operation identity, the arguments hash, and the
+    prepared-action digest in GAP-3.
+    """
+    try:
+        op = _issue_from_canonical(
+            execution_context,
+            adapter_namespace,
+            tool_name,
+            schema_version,
+            raw_args,
+            workspace_id,
+            workspace_root,
+            tuple(provenance_snapshot_ids),
+        )
+        decision = classify_operation(op)
+        sealed = _unwrap_authorized(op).sealed_prepared
+        return decision, (sealed if decision.verdict != "deny" else None)
+    except Exception as exc:  # noqa: BLE001 - authorization fails closed
+        reason = getattr(exc, "reason", "")
+        detail = (
+            f"canonicalization_failed:{reason}"
+            if type(reason) is str and reason
+            else "authorize_canonical_denied"
+        )
+        return (
+            _deny_decision(
+                execution_context,
+                tool_name,
+                detail,
+                provenance_snapshot_ids,
+            ),
+            None,
         )
 
 

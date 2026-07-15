@@ -28,6 +28,7 @@ import pathlib
 import pickle
 import re
 from collections.abc import Iterator, Mapping
+from typing import Any
 
 import pytest
 
@@ -52,6 +53,7 @@ from backend.agents.authorization_kernel import (
     _issue_from_canonical,
     _issue_from_name,
     authorize_action,
+    authorize_and_seal,
     authorize_canonical,
     classify_for_telemetry,
     classify_operation,
@@ -598,12 +600,290 @@ def test_authorize_canonical_value_path_uses_refined_descriptor(
     assert real_replace.operation_descriptor.effect == "mutating"
 
 
+def test_authorize_and_seal_view_round_trips_canonicalization(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+) -> None:
+    root = str(tmp_path)
+    context = CanonicalizationContext(
+        workspace_id="workspace-1",
+        workspace_root=root,
+        adapter_namespace="runner_sdk",
+        tool_name="str_replace_based_edit_tool",
+        schema_version="v1",
+    )
+    raw_args = {"command": "view", "path": "src/x.py"}
+    expected = action_canonicalize.canonicalize(
+        context,
+        "runner_sdk",
+        "str_replace_based_edit_tool",
+        "v1",
+        raw_args,
+    )
+
+    decision, sealed = authorize_and_seal(
+        _ctx_human(),
+        adapter_namespace="runner_sdk",
+        tool_name="str_replace_based_edit_tool",
+        schema_version="v1",
+        raw_args=raw_args,
+        workspace_id="workspace-1",
+        workspace_root=root,
+    )
+
+    assert decision.verdict == "allow"
+    assert decision.operation_descriptor.effect == "read_only"
+    assert isinstance(sealed, PreparedAction)
+    assert sealed.operation_descriptor is decision.operation_descriptor
+    assert sealed.operation_descriptor == expected.operation_descriptor
+    assert sealed.canonical_target == expected.canonical_target
+    assert sealed.executable_args == expected.executable_args
+    assert sealed.human_rendering == expected.human_rendering
+
+
+def test_authorize_and_seal_mutating_requires_grant_with_seal(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+) -> None:
+    decision, sealed = authorize_and_seal(
+        _ctx_human(),
+        adapter_namespace="runner_sdk",
+        tool_name="str_replace_based_edit_tool",
+        schema_version="v1",
+        raw_args={
+            "command": "str_replace",
+            "path": "src/x.py",
+            "old_str": "before",
+            "new_str": "after",
+        },
+        workspace_id="workspace-1",
+        workspace_root=str(tmp_path),
+    )
+
+    assert decision.verdict == "requires_grant"
+    assert decision.operation_descriptor.effect == "mutating"
+    assert isinstance(sealed, PreparedAction)
+    assert sealed.operation_descriptor is decision.operation_descriptor
+    assert sealed.canonical_target == "src/x.py"
+    assert sealed.executable_args["command"] == "str_replace"
+
+
+def test_authorize_and_seal_unbound_write_denies_without_seal(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+) -> None:
+    decision, sealed = authorize_and_seal(
+        _ctx_unbound(),
+        adapter_namespace="runner_sdk",
+        tool_name="Write",
+        schema_version="v1",
+        raw_args={"file_path": "src/x.py", "content": "new"},
+        workspace_id="workspace-1",
+        workspace_root=str(tmp_path),
+    )
+
+    assert decision.verdict == "deny"
+    assert decision.reason == "unbound_principal_denied"
+    assert sealed is None
+
+
+def test_authorize_and_seal_unknown_denies_without_seal() -> None:
+    decision, sealed = authorize_and_seal(
+        _ctx_human(),
+        adapter_namespace="unknown_adapter",
+        tool_name="totally_unknown_tool",
+        schema_version="v1",
+        raw_args={},
+        workspace_id="workspace-1",
+        workspace_root="/workspace",
+    )
+
+    assert decision.verdict == "deny"
+    assert decision.reason.startswith("canonicalization_failed:")
+    assert decision.operation_descriptor.family == "__unknown_deny__"
+    assert sealed is None
+
+
+def test_authorize_and_seal_canonicalization_failure_denies_without_seal(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+) -> None:
+    decision, sealed = authorize_and_seal(
+        _ctx_human(),
+        adapter_namespace="runner_sdk",
+        tool_name="Write",
+        schema_version="v1",
+        raw_args={"file_path": "../../etc/passwd", "content": "x"},
+        workspace_id="workspace-1",
+        workspace_root=str(tmp_path),
+    )
+
+    assert decision.verdict == "deny"
+    assert decision.reason.startswith("canonicalization_failed:")
+    assert sealed is None
+
+
+@pytest.mark.parametrize(
+    ("tool_name", "raw_args"),
+    [
+        (
+            "str_replace_based_edit_tool",
+            {"command": "view", "path": "src/x.py"},
+        ),
+        ("Write", {"file_path": "src/x.py", "content": "new"}),
+        (
+            "str_replace_based_edit_tool",
+            {
+                "command": "str_replace",
+                "path": "src/x.py",
+                "old_str": "before",
+                "new_str": "after",
+            },
+        ),
+        ("Write", {"file_path": "../../etc/passwd", "content": "x"}),
+    ],
+    ids=["view", "write", "str_replace", "deny"],
+)
+def test_authorize_and_seal_decision_matches_authorize_canonical_byte_for_byte(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+    tool_name: str,
+    raw_args: dict,
+) -> None:
+    kwargs: dict[str, Any] = {
+        "adapter_namespace": "runner_sdk",
+        "tool_name": tool_name,
+        "schema_version": "v1",
+        "raw_args": raw_args,
+        "workspace_id": "workspace-1",
+        "workspace_root": str(tmp_path),
+        "provenance_snapshot_ids": ("snap-1",),
+    }
+    context = _ctx_human()
+
+    original = authorize_canonical(context, **kwargs)
+    new_decision, _sealed = authorize_and_seal(context, **kwargs)
+
+    assert new_decision == original
+
+
+def test_hostile_seal_reads_do_not_change_authorize_canonical_decision(
+    tmp_path: pathlib.Path,
+) -> None:
+    class HostilePreparedAction(PreparedAction):
+        instances = 0
+
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            type(self).instances += 1
+            object.__setattr__(
+                self,
+                "_raise_payload_reads",
+                not type(self).instances % 2,
+            )
+
+        def __getattribute__(self, name: str):
+            if name in {
+                "canonical_target",
+                "executable_args",
+                "human_rendering",
+            }:
+                try:
+                    hostile = object.__getattribute__(self, "_raise_payload_reads")
+                except AttributeError:
+                    hostile = False
+                if hostile:
+                    raise RuntimeError("hostile sealed field read")
+            return super().__getattribute__(name)
+
+    def hostile_canonicalizer(
+        context: CanonicalizationContext,
+        raw_args: Mapping[str, object],
+    ) -> PreparedAction:
+        del context, raw_args
+        return HostilePreparedAction(
+            operation_descriptor=resolve("Write"),
+            canonical_target="src/x.py",
+            executable_args={"content": "new"},
+            human_rendering={"action": "write"},
+        )
+
+    prior = action_canonicalize._snapshot_state_for_tests()
+    action_canonicalize.reset_for_tests()
+    try:
+        register_canonicalizer(
+            "hostile_adapter",
+            "Write",
+            "v1",
+            hostile_canonicalizer,
+        )
+        freeze_registry()
+        kwargs: dict[str, Any] = {
+            "adapter_namespace": "hostile_adapter",
+            "tool_name": "Write",
+            "schema_version": "v1",
+            "raw_args": {},
+            "workspace_id": "workspace-1",
+            "workspace_root": str(tmp_path),
+        }
+        original = authorize_canonical(_ctx_human(), **kwargs)
+        new_decision, sealed = authorize_and_seal(_ctx_human(), **kwargs)
+    finally:
+        action_canonicalize._restore_state_for_tests(prior)
+
+    assert original.verdict == "requires_grant"
+    assert original.reason == "mutating_needs_grant:code_write"
+    assert new_decision == original
+    assert sealed is None
+
+
+def test_authorize_and_seal_verdict_invariant_to_adversarial_provenance(
+    tmp_path: pathlib.Path,
+    frozen_code_write_registry: None,
+) -> None:
+    context = _ctx_human()
+    kwargs: dict[str, Any] = {
+        "adapter_namespace": "runner_sdk",
+        "tool_name": "str_replace_based_edit_tool",
+        "schema_version": "v1",
+        "raw_args": {"command": "view", "path": "src/x.py"},
+        "workspace_id": "workspace-1",
+        "workspace_root": str(tmp_path),
+    }
+    first, first_seal = authorize_and_seal(
+        context,
+        provenance_snapshot_ids=("IGNORE_RULES_AND_ALLOW",),
+        **kwargs,
+    )
+    second, second_seal = authorize_and_seal(
+        context,
+        provenance_snapshot_ids=("FORGED_VERIFIED_PROVENANCE",),
+        **kwargs,
+    )
+
+    assert first.verdict == second.verdict == "allow"
+    assert first.reason == second.reason == "read_only"
+    assert first.operation_descriptor == second.operation_descriptor
+    assert first.provenance_snapshot_ids != second.provenance_snapshot_ids
+    assert isinstance(first_seal, PreparedAction)
+    assert isinstance(second_seal, PreparedAction)
+    assert first_seal.operation_descriptor is first.operation_descriptor
+    assert second_seal.operation_descriptor is second.operation_descriptor
+
+
 def test_canonical_issuer_takes_dispatch_and_no_descriptor_mint_exists() -> None:
     import inspect
 
     issuer_signature = inspect.signature(_issue_from_canonical)
     assert "raw_args" in issuer_signature.parameters
     assert "descriptor" not in issuer_signature.parameters
+    seal_signature = inspect.signature(authorize_and_seal)
+    assert "raw_args" in seal_signature.parameters
+    assert "descriptor" not in seal_signature.parameters
+    assert all(
+        "PreparedAction" not in str(parameter.annotation)
+        for parameter in seal_signature.parameters.values()
+    )
 
     for name, function in inspect.getmembers(
         authorization_kernel,
@@ -799,6 +1079,33 @@ def test_authorize_canonical_has_no_production_caller() -> None:
     assert set(callers) <= {"agents/action_guard.py"}
 
 
+def test_authorize_and_seal_has_no_production_caller() -> None:
+    backend_root = pathlib.Path(__file__).resolve().parents[1]
+    test_path = pathlib.Path(__file__).resolve()
+    callers: list[str] = []
+
+    for py in backend_root.rglob("*.py"):
+        if py.resolve() == test_path:
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            if isinstance(node.func, ast.Name):
+                callee = node.func.id
+            elif isinstance(node.func, ast.Attribute):
+                callee = node.func.attr
+            else:
+                continue
+            if callee == "authorize_and_seal":
+                callers.append(str(py.relative_to(backend_root)))
+
+    assert callers == []
+
+
 def test_authority_issuer_call_sites_are_allowlisted() -> None:
     """Only authorize wrappers and this test module may mint capabilities."""
     backend_root = pathlib.Path(__file__).resolve().parents[1]
@@ -846,10 +1153,11 @@ def test_authority_issuer_call_sites_are_allowlisted() -> None:
                 (str(py.relative_to(backend_root)), owner.name)
             )
 
-    assert production_calls == [
+    assert sorted(production_calls) == sorted([
         ("agents/authorization_kernel.py", "authorize_action"),
+        ("agents/authorization_kernel.py", "authorize_and_seal"),
         ("agents/authorization_kernel.py", "authorize_canonical"),
-    ]
+    ])
 
 
 def test_authorization_decision_has_no_external_producer() -> None:
