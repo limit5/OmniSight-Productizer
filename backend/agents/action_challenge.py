@@ -1,8 +1,10 @@
-"""U6-0 T9/T10 challenge creation with provenance binding (dormant).
+"""U6-0 T9/T10 challenge creation with provenance binding.
 
 The helper seals a prepared action and a complete model snapshot into durable
 PostgreSQL state.  It has no mutable module-global state; cross-worker retry
 coordination is provided by deterministic identities and database constraints.
+It is wired only to the runner dispatch and remains inert while the runner SDK
+action-guard mode matrix has no enforce entry.
 """
 
 from __future__ import annotations

@@ -167,6 +167,8 @@ class GuardOutcome:
     # GAP-2: sealed one-canonicalization action for an enforce challenge.
     # GAP-3 persists it; None on every other path keeps the carrier dormant.
     challenge_prepared: "PreparedAction | None" = None
+    adapter_namespace: str = ""
+    schema_version: str = ""
 
 
 def effective_execution_args(outcome: "GuardOutcome", live_args):
@@ -258,6 +260,8 @@ def _refine_enforce_outcome(
             family=name_family,
             mode=mode,
             blocked_reason=_bounded_blocked_reason(name_decision.reason),
+            adapter_namespace=adapter_namespace,
+            schema_version=schema_version,
         )
     frozen = _freeze_authorized_args(raw_args)
     if frozen is None:
@@ -267,6 +271,8 @@ def _refine_enforce_outcome(
             family=name_family,
             mode=mode,
             blocked_reason="canonicalization_rejected",
+            adapter_namespace=adapter_namespace,
+            schema_version=schema_version,
         )
     auth_ws = resolve_authoritative_workspace(
         ctx,
@@ -281,6 +287,8 @@ def _refine_enforce_outcome(
             family=name_family,
             mode=mode,
             blocked_reason="no_authoritative_context",
+            adapter_namespace=adapter_namespace,
+            schema_version=schema_version,
         )
     workspace_id, workspace_root = auth_ws
     refined, sealed_prepared = authorize_and_seal(
@@ -306,6 +314,8 @@ def _refine_enforce_outcome(
         challenge_prepared=(
             sealed_prepared if refined.verdict == "requires_grant" else None
         ),
+        adapter_namespace=adapter_namespace,
+        schema_version=schema_version,
     )
 
 
@@ -473,6 +483,8 @@ def guard_tool_dispatch(
             family=family,
             mode=mode,
             blocked_reason=blocked_reason,
+            adapter_namespace=adapter_namespace,
+            schema_version=schema_version,
         )
 
         # G6b-2b: only an explicit enforce entry may refine a name block.
@@ -501,6 +513,8 @@ def guard_tool_dispatch(
                     family=family,
                     mode=mode,
                     blocked_reason="canonicalization_rejected",
+                    adapter_namespace=adapter_namespace,
+                    schema_version=schema_version,
                 )
     except Exception as exc:  # noqa: BLE001 — guard must never raise
         try:
@@ -516,6 +530,8 @@ def guard_tool_dispatch(
                 mode=mode,
                 blocked_reason="guard_error" if not proceed else None,
                 error_reason=repr(exc)[:200],
+                adapter_namespace=adapter_namespace,
+                schema_version=schema_version,
             )
         except Exception:  # noqa: BLE001 — recovery must never escape
             outcome = _FAILSAFE_OUTCOME

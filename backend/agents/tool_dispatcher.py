@@ -65,6 +65,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+CHALLENGE_CREATE_TIMEOUT_S = 5.0
+
 
 HandlerSync = Callable[[dict[str, Any]], Any]
 HandlerAsync = Callable[[dict[str, Any]], Awaitable[Any]]
@@ -216,8 +218,8 @@ class ToolDispatcher:
         as ``authorization_source="unbound"`` in the guard metric.
 
         ``turn_provenance`` (U6-0 G0b) is a pure passthrough to the guard,
-        which derives the existing INV-3 audit ids. The whole value remains
-        dormant until the later grant-binding leaf consumes it.
+        which derives the existing INV-3 audit ids. On a challengeable enforce
+        block, the same sealed turn is bound into the persisted challenge.
         """
         started_at = time.perf_counter()
         input_size = args_size_bytes(tool_input)
@@ -260,22 +262,56 @@ class ToolDispatcher:
                 input_size,
                 agent_id=self._current_agent_id,
             )
+            challenge_id = None
+            challenge_prepared = outcome.challenge_prepared
+            if (
+                challenge_prepared is not None
+                and outcome.adapter_namespace
+                and outcome.schema_version
+                and outcome.decision is not None
+            ):
+                tool_for_identity = (
+                    challenge_prepared.operation_descriptor.tool_name
+                )
+                if tool_for_identity:
+                    try:
+                        from backend.db_pool import get_pool
+                        import backend.agents.action_challenge as action_challenge
+
+                        challenge_id = await asyncio.wait_for(
+                            action_challenge.create_challenge_from_block(
+                                get_pool(),
+                                challenge_prepared,
+                                outcome.decision.execution_context,
+                                turn_provenance,
+                                adapter_namespace=outcome.adapter_namespace,
+                                tool_name=tool_for_identity,
+                                schema_version=outcome.schema_version,
+                            ),
+                            timeout=CHALLENGE_CREATE_TIMEOUT_S,
+                        )
+                    except Exception:  # noqa: BLE001 — best-effort persistence
+                        challenge_id = None
+            hint = (
+                f"action guard denied {tool_name}: {outcome.blocked_reason}"
+            )
+            extra = {
+                "tool_name": tool_name,
+                "blocked_reason": outcome.blocked_reason,
+                "mode": outcome.mode,
+            }
+            if challenge_id is not None:
+                hint = f"{hint}; pending approval, challenge={challenge_id}"
+                extra["challenge_id"] = challenge_id
             return _error_result(
                 tool_use_id=tool_use_id,
                 error=ToolError(
                     error="action_guard_denied",
                     error_type="ActionGuardDenied",
                     retryable=False,
-                    hint=(
-                        f"action guard denied {tool_name}: "
-                        f"{outcome.blocked_reason}"
-                    ),
+                    hint=hint,
                 ),
-                extra={
-                    "tool_name": tool_name,
-                    "blocked_reason": outcome.blocked_reason,
-                    "mode": outcome.mode,
-                },
+                extra=extra,
             )
 
         if (

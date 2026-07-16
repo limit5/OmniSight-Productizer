@@ -466,8 +466,8 @@ async def test_pg_different_manifest_replay_fails_closed(
     ) == 0
 
 
-def test_dormant_create_challenge_has_no_production_caller() -> None:
-    offenders: list[str] = []
+def test_create_challenge_caller_is_only_the_runner_dispatch() -> None:
+    callers: list[str] = []
     for py in BACKEND_ROOT.rglob("*.py"):
         rel = py.relative_to(BACKEND_ROOT)
         if rel == Path("agents/action_challenge.py"):
@@ -475,6 +475,6 @@ def test_dormant_create_challenge_has_no_production_caller() -> None:
         if rel.parts[0] == "tests" or rel.parts[:2] == ("alembic", "versions"):
             continue
         if "create_challenge_from_block" in py.read_text(errors="ignore"):
-            offenders.append(str(rel))
+            callers.append(str(rel))
 
-    assert offenders == [], f"dormant-ship violated by: {offenders}"
+    assert sorted(callers) == ["agents/tool_dispatcher.py"]

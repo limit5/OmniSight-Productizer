@@ -17,14 +17,18 @@ import pathlib
 
 import pytest
 
-from backend.agents import action_guard, tool_dispatcher
+from backend import db_pool
+from backend.agents import action_challenge, action_guard, provenance, tool_dispatcher
 from backend.agents import execution_context as ec
+from backend.agents.action_canonicalize import PreparedAction
+from backend.agents.authorization_kernel import AuthorizationDecision
 from backend.agents.circuit_breaker import CircuitBreaker
 from backend.agents.context_reset import DetectorAwareDispatcher
 from backend.agents.loop_detector import LoopDetector
 from backend.agents.memory_tool_handler import MEMORY_TOOL_NAME
 from backend.agents.tool_call_wrapper import invoke_tool, reset_circuits_for_tests
 from backend.agents.tool_dispatcher import ToolDispatcher
+from backend.agents.tool_registry import OperationDescriptor
 from backend.agents.tool_registry import resolve as resolve_tool
 from backend.agents.tool_wrapper import ToolWrapper
 
@@ -87,6 +91,50 @@ def _dispatcher(tool_name: str = _MUTATING, result: str = "ok"):
 
 def _payload(res) -> dict:
     return json.loads(res.content)
+
+
+def _prepared() -> PreparedAction:
+    return PreparedAction(
+        operation_descriptor=OperationDescriptor(
+            tool_name=_MUTATING,
+            effect="mutating",
+            family="code_write",
+        ),
+        canonical_target="/workspace/output.txt",
+        executable_args={"file_path": "/workspace/output.txt"},
+        human_rendering={"summary": "Write output.txt"},
+    )
+
+
+def _decision(prepared: PreparedAction) -> AuthorizationDecision:
+    return AuthorizationDecision(
+        verdict="requires_grant",
+        operation_descriptor=prepared.operation_descriptor,
+        reason="mutating_needs_grant:code_write",
+        execution_context=_ctx_service(),
+    )
+
+
+def _turn_provenance() -> provenance.ModelSnapshot:
+    return provenance.ModelSnapshot(
+        provenance._build_snapshot(
+            (),
+            completeness="complete",
+            omissions=(),
+            snapshot_id="psnap-runner-challenge",
+        )
+    )
+
+
+def _install_blocked_guard(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: action_guard.GuardOutcome,
+) -> None:
+    monkeypatch.setattr(
+        tool_dispatcher,
+        "guard_tool_dispatch",
+        lambda **_kwargs: outcome,
+    )
 
 
 def _seal_guard(
@@ -452,3 +500,237 @@ def test_handler_error_diagnostics_use_executed_sealed_args(
     assert handler_calls[0] is sealed
     assert diagnostic_calls[0] is sealed
     assert diagnostic_calls[0] is not live
+
+
+# ── 10. blocked runner challenge creation ────────────────────────────────
+def test_guard_outcome_echoes_coordinates_and_failsafe_stays_empty() -> None:
+    outcome = action_guard.guard_tool_dispatch(
+        adapter_namespace="runner_sdk",
+        tool_name=_MUTATING,
+        schema_version="v1",
+        raw_args={},
+        execution_context=_ctx_service(),
+    )
+
+    assert outcome.mode == "shadow"
+    assert outcome.adapter_namespace == "runner_sdk"
+    assert outcome.schema_version == "v1"
+    assert action_guard._FAILSAFE_OUTCOME.challenge_prepared is None
+    assert action_guard._FAILSAFE_OUTCOME.adapter_namespace == ""
+    assert action_guard._FAILSAFE_OUTCOME.schema_version == ""
+
+
+def test_runner_shadow_block_is_byte_identical_without_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcome = action_guard.GuardOutcome(
+        proceed=False,
+        decision=None,
+        family="code_write",
+        mode="shadow",
+        blocked_reason="requires_grant",
+    )
+    _install_blocked_guard(monkeypatch, outcome)
+    monkeypatch.setattr(
+        db_pool,
+        "get_pool",
+        lambda: pytest.fail("shadow block must not access the pool"),
+    )
+    d, calls = _dispatcher()
+
+    result = asyncio.run(d.execute("tu-shadow-block", _MUTATING, {}))
+
+    assert calls == []
+    assert result.is_error is True
+    assert result.content == (
+        '{"error": "action_guard_denied", '
+        '"error_type": "ActionGuardDenied", "retryable": false, '
+        '"hint": "action guard denied Write: requires_grant", '
+        '"suggested_tool": null, "suggested_args": null, '
+        '"tool_name": "Write", "blocked_reason": "requires_grant", '
+        '"mode": "shadow"}'
+    )
+    assert "challenge_id" not in _payload(result)
+
+
+def test_runner_enforce_challenge_surfaces_id_and_threads_sealed_args(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared()
+    decision = _decision(prepared)
+    turn_provenance = _turn_provenance()
+    outcome = action_guard.GuardOutcome(
+        proceed=False,
+        decision=decision,
+        family="code_write",
+        mode="enforce",
+        blocked_reason="requires_grant",
+        challenge_prepared=prepared,
+        adapter_namespace="runner_sdk",
+        schema_version="v1",
+    )
+    _install_blocked_guard(monkeypatch, outcome)
+    pool = object()
+    monkeypatch.setattr(db_pool, "get_pool", lambda: pool)
+    recorded: dict[str, object] = {}
+
+    async def _create(*args, **kwargs):
+        recorded["args"] = args
+        recorded["kwargs"] = kwargs
+        return "chal-XYZ"
+
+    monkeypatch.setattr(
+        action_challenge,
+        "create_challenge_from_block",
+        _create,
+    )
+    d, calls = _dispatcher()
+
+    result = asyncio.run(
+        d.execute(
+            "tu-enforce-challenge",
+            _MUTATING,
+            {},
+            turn_provenance=turn_provenance,
+        )
+    )
+
+    payload = _payload(result)
+    assert calls == []
+    assert result.is_error is True
+    assert payload["challenge_id"] == "chal-XYZ"
+    assert "pending approval, challenge=chal-XYZ" in payload["hint"]
+    assert payload["retryable"] is False
+    args = recorded["args"]
+    assert isinstance(args, tuple)
+    assert args[0] is pool
+    assert args[1] is prepared
+    assert args[2] is decision.execution_context
+    assert args[3] is turn_provenance
+    assert recorded["kwargs"] == {
+        "adapter_namespace": "runner_sdk",
+        "tool_name": prepared.operation_descriptor.tool_name,
+        "schema_version": "v1",
+    }
+
+
+def test_runner_challenge_get_pool_failure_returns_bare_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared()
+    outcome = action_guard.GuardOutcome(
+        proceed=False,
+        decision=_decision(prepared),
+        family="code_write",
+        mode="enforce",
+        blocked_reason="requires_grant",
+        challenge_prepared=prepared,
+        adapter_namespace="runner_sdk",
+        schema_version="v1",
+    )
+    _install_blocked_guard(monkeypatch, outcome)
+
+    def _raise_get_pool():
+        raise RuntimeError("pool is not initialized")
+
+    monkeypatch.setattr(db_pool, "get_pool", _raise_get_pool)
+    monkeypatch.setattr(
+        action_challenge,
+        "create_challenge_from_block",
+        lambda *_args, **_kwargs: pytest.fail("helper must not run"),
+    )
+    d, calls = _dispatcher()
+
+    result = asyncio.run(d.execute("tu-pool-failure", _MUTATING, {}))
+
+    payload = _payload(result)
+    assert calls == []
+    assert result.is_error is True
+    assert payload["hint"] == "action guard denied Write: requires_grant"
+    assert "challenge_id" not in payload
+
+
+def test_runner_challenge_timeout_returns_bare_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared = _prepared()
+    outcome = action_guard.GuardOutcome(
+        proceed=False,
+        decision=_decision(prepared),
+        family="code_write",
+        mode="enforce",
+        blocked_reason="requires_grant",
+        challenge_prepared=prepared,
+        adapter_namespace="runner_sdk",
+        schema_version="v1",
+    )
+    _install_blocked_guard(monkeypatch, outcome)
+    monkeypatch.setattr(db_pool, "get_pool", object)
+    monkeypatch.setattr(tool_dispatcher, "CHALLENGE_CREATE_TIMEOUT_S", 0.001)
+
+    async def _slow_create(*_args, **_kwargs):
+        await asyncio.sleep(1)
+        return "chal-too-late"
+
+    monkeypatch.setattr(
+        action_challenge,
+        "create_challenge_from_block",
+        _slow_create,
+    )
+    d, calls = _dispatcher()
+
+    result = asyncio.run(d.execute("tu-timeout", _MUTATING, {}))
+
+    payload = _payload(result)
+    assert calls == []
+    assert result.is_error is True
+    assert payload["hint"] == "action guard denied Write: requires_grant"
+    assert "challenge_id" not in payload
+
+
+@pytest.mark.parametrize(
+    ("adapter_namespace", "schema_version", "with_decision"),
+    [
+        ("", "v1", True),
+        ("runner_sdk", "", True),
+        ("runner_sdk", "v1", False),
+    ],
+    ids=("empty-adapter", "empty-schema", "missing-decision"),
+)
+def test_runner_challenge_missing_invariant_skips_creation(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter_namespace: str,
+    schema_version: str,
+    with_decision: bool,
+) -> None:
+    prepared = _prepared()
+    outcome = action_guard.GuardOutcome(
+        proceed=False,
+        decision=_decision(prepared) if with_decision else None,
+        family="code_write",
+        mode="enforce",
+        blocked_reason="requires_grant",
+        challenge_prepared=prepared,
+        adapter_namespace=adapter_namespace,
+        schema_version=schema_version,
+    )
+    _install_blocked_guard(monkeypatch, outcome)
+    monkeypatch.setattr(
+        db_pool,
+        "get_pool",
+        lambda: pytest.fail("incomplete carrier must not access the pool"),
+    )
+    monkeypatch.setattr(
+        action_challenge,
+        "create_challenge_from_block",
+        lambda *_args, **_kwargs: pytest.fail("helper must not run"),
+    )
+    d, calls = _dispatcher()
+
+    result = asyncio.run(d.execute("tu-missing-invariant", _MUTATING, {}))
+
+    payload = _payload(result)
+    assert calls == []
+    assert result.is_error is True
+    assert payload["hint"] == "action guard denied Write: requires_grant"
+    assert "challenge_id" not in payload
