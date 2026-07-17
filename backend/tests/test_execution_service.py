@@ -153,8 +153,23 @@ async def _result(pool, case: dict) -> dict | None:
         )
 
 
+async def _past_date_grant(pool, case: dict) -> None:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL session_replication_role = 'replica'")
+            await conn.execute(
+                "UPDATE action_grants "
+                "SET created_at = clock_timestamp() - interval '2 hours', "
+                "expires_at = clock_timestamp() - interval '1 hour' "
+                "WHERE tenant_id = $1 AND grant_id = $2",
+                case["tenant_id"],
+                case["grant_id"],
+            )
+            await conn.execute("SET LOCAL session_replication_role = 'origin'")
+
+
 @pytest.mark.asyncio
-async def test_applied_consumes_grant_and_writes_result(pg_test_pool) -> None:
+async def test_live_grant_executes_and_finalizes_unchanged(pg_test_pool) -> None:
     case = await _seed_case(pg_test_pool)
     outcome = Applied(result={"receipt": "ok"}, evidence="sink receipt")
 
@@ -168,6 +183,119 @@ async def test_applied_consumes_grant_and_writes_result(pg_test_pool) -> None:
     assert await _state(pg_test_pool, case) == "consumed"
     stored_result = await _result(pg_test_pool, case)
     assert json.loads(stored_result["result"]) == {"receipt": "ok"}
+
+
+@pytest.mark.asyncio
+async def test_already_expired_grant_terminalizes_without_execution(
+    pg_test_pool,
+) -> None:
+    case = await _seed_case(pg_test_pool)
+    await _past_date_grant(pg_test_pool, case)
+    authorizer_calls: list[dict] = []
+
+    async def authorizer(identity) -> bool:
+        authorizer_calls.append(dict(identity))
+        return True
+
+    result, calls = await _execute(
+        pg_test_pool,
+        case,
+        Applied(result={"unexpected": True}, evidence="unexpected"),
+        authorizer=authorizer,
+    )
+
+    assert result.status == "expired"
+    assert result.grant_next == "expired"
+    assert result.resume_next == "failed"
+    assert result.outcome is None
+    assert authorizer_calls == []
+    assert calls == []
+    assert await _state(pg_test_pool, case) == "expired"
+    assert await _attempts(pg_test_pool, case) == []
+    assert await _result(pg_test_pool, case) is None
+
+
+@pytest.mark.asyncio
+async def test_grant_expiring_during_authorization_is_not_executed(
+    pg_test_pool,
+) -> None:
+    case = await _seed_case(pg_test_pool)
+    async with pg_test_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL session_replication_role = 'replica'")
+            expires_at = await conn.fetchval(
+                "UPDATE action_grants "
+                "SET expires_at = clock_timestamp() + interval '2 seconds' "
+                "WHERE tenant_id = $1 AND grant_id = $2 "
+                "RETURNING expires_at",
+                case["tenant_id"],
+                case["grant_id"],
+            )
+            await conn.execute("SET LOCAL session_replication_role = 'origin'")
+
+    async def cross_deadline(_identity) -> bool:
+        async with pg_test_pool.acquire() as conn:
+            assert await conn.fetchval(
+                "SELECT clock_timestamp() < $1::timestamptz",
+                expires_at,
+            )
+            await conn.execute(
+                "SELECT pg_sleep((GREATEST(0, EXTRACT(EPOCH FROM "
+                "($1::timestamptz - clock_timestamp()))) + 0.05)"
+                "::double precision)",
+                expires_at,
+            )
+            assert await conn.fetchval(
+                "SELECT clock_timestamp() >= $1::timestamptz",
+                expires_at,
+            )
+        return True
+
+    result, calls = await _execute(
+        pg_test_pool,
+        case,
+        Applied(result={"unexpected": True}, evidence="unexpected"),
+        authorizer=cross_deadline,
+    )
+
+    assert result.status == "expired"
+    assert result.grant_next == "expired"
+    assert result.resume_next == "failed"
+    assert result.outcome is None
+    assert calls == []
+    assert await _state(pg_test_pool, case) == "expired"
+    assert await _attempts(pg_test_pool, case) == []
+    assert await _result(pg_test_pool, case) is None
+
+
+@pytest.mark.asyncio
+async def test_claim_expiry_boundary_uses_complementary_db_clock_predicates(
+    pg_test_pool,
+) -> None:
+    past = await _seed_case(pg_test_pool)
+    future = await _seed_case(pg_test_pool)
+    await _past_date_grant(pg_test_pool, past)
+
+    async with pg_test_pool.acquire() as conn:
+        past_boundary = await conn.fetchrow(
+            "SELECT expires_at <= clock_timestamp() AS expired, "
+            "expires_at > clock_timestamp() AS live "
+            "FROM action_grants "
+            "WHERE tenant_id = $1 AND grant_id = $2",
+            past["tenant_id"],
+            past["grant_id"],
+        )
+        future_boundary = await conn.fetchrow(
+            "SELECT expires_at <= clock_timestamp() AS expired, "
+            "expires_at > clock_timestamp() AS live "
+            "FROM action_grants "
+            "WHERE tenant_id = $1 AND grant_id = $2",
+            future["tenant_id"],
+            future["grant_id"],
+        )
+
+    assert tuple(past_boundary.values()) == (True, False)
+    assert tuple(future_boundary.values()) == (False, True)
 
 
 @pytest.mark.asyncio
@@ -240,14 +368,20 @@ async def test_policy_denial_fails_grant_without_executor(pg_test_pool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_consumed_grant_is_not_claimable(pg_test_pool) -> None:
+@pytest.mark.parametrize("decided_state", ["executing", "consumed", "expired"])
+async def test_already_decided_grant_is_not_claimable(
+    pg_test_pool,
+    decided_state: str,
+) -> None:
     case = await _seed_case(pg_test_pool)
     async with pg_test_pool.acquire() as conn:
         await conn.execute(
-            "UPDATE action_grants SET state = 'consumed' "
-            "WHERE tenant_id = $1 AND grant_id = $2",
+            "UPDATE action_grants SET state = $3 "
+            "WHERE tenant_id = $1 AND grant_id = $2 "
+            "AND state = 'pending'",
             case["tenant_id"],
             case["grant_id"],
+            decided_state,
         )
 
     result, calls = await _execute(
@@ -258,6 +392,8 @@ async def test_consumed_grant_is_not_claimable(pg_test_pool) -> None:
 
     assert result.status == "not_claimable"
     assert result.grant_next is None
+    assert result.resume_next is None
+    assert result.outcome is None
     assert calls == []
 
 

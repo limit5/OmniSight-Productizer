@@ -110,6 +110,11 @@ def test_frozen_transition_validators_and_terminal_out_edges() -> None:
         assert RESUME_TRANSITIONS[terminal] == frozenset()
 
 
+def test_pending_to_expired_is_valid_claim_terminalization_transition() -> None:
+    assert is_valid_grant_transition("pending", "expired")
+    assert not is_valid_grant_transition("executing", "expired")
+
+
 def test_stored_action_and_contract_records_are_frozen() -> None:
     stored_action = StoredAction(
         grant_id="grant-1",

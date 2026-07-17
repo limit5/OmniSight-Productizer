@@ -118,6 +118,21 @@ async def _grant_state(pool, case: dict) -> str:
         )
 
 
+async def _past_date_grant(pool, case: dict) -> None:
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SET LOCAL session_replication_role = 'replica'")
+            await conn.execute(
+                "UPDATE action_grants "
+                "SET created_at = clock_timestamp() - interval '2 hours', "
+                "expires_at = clock_timestamp() - interval '1 hour' "
+                "WHERE tenant_id = $1 AND grant_id = $2",
+                case["tenant_id"],
+                case["grant_id"],
+            )
+            await conn.execute("SET LOCAL session_replication_role = 'origin'")
+
+
 @pytest.mark.asyncio
 async def test_lease_queued_job_claims_and_bumps_epoch(pg_test_pool) -> None:
     await _clear_resume_queue(pg_test_pool)
@@ -283,6 +298,46 @@ async def test_run_resume_job_applied_happy_path_finishes_done(
             case["tenant_id"],
             case["grant_id"],
         ) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_resume_job_expired_grant_finishes_failed_without_execution(
+    pg_test_pool,
+) -> None:
+    await _clear_resume_queue(pg_test_pool)
+    case = await _seed_case(pg_test_pool)
+    await _past_date_grant(pg_test_pool, case)
+    calls: list[StoredAction] = []
+
+    async def executor(stored: StoredAction):
+        calls.append(stored)
+        return Applied(result={"unexpected": True}, evidence="unexpected")
+
+    result = await run_resume_job(
+        pg_test_pool,
+        worker_id="worker-expired",
+        lease_ttl_seconds=60,
+        executor=executor,
+        authorizer=_allow,
+        attempt_id_factory=lambda: uuid.uuid4().hex,
+        result_of=lambda applied: json.dumps(applied.result),
+    )
+
+    assert result == "failed"
+    assert calls == []
+    assert await _grant_state(pg_test_pool, case) == "expired"
+    assert await _resume_state(pg_test_pool, case) == "failed"
+    async with pg_test_pool.acquire() as conn:
+        assert await db.get_execution_attempts(
+            conn,
+            case["grant_id"],
+            tenant_id=case["tenant_id"],
+        ) == []
+        assert await db.get_execution_result(
+            conn,
+            case["grant_id"],
+            tenant_id=case["tenant_id"],
+        ) is None
 
 
 @pytest.mark.asyncio

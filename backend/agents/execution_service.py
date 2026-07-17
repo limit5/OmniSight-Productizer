@@ -118,8 +118,9 @@ async def claim_and_execute(
     async with pool.acquire() as conn:
         async with conn.transaction():
             row = await conn.fetchrow(
-                "SELECT g.state, g.recovery_mode, g.action_instance_id, "
-                "g.idempotency_key, g.tenant_id, g.principal_type, "
+                "SELECT g.state, g.expires_at, g.recovery_mode, "
+                "g.action_instance_id, g.idempotency_key, g.tenant_id, "
+                "g.principal_type, "
                 "g.actor_id, p.adapter_namespace, p.tool_name, "
                 "p.schema_version, p.canonical_target, p.executable_args "
                 "FROM action_grants g JOIN prepared_actions p "
@@ -134,6 +135,19 @@ async def claim_and_execute(
                 return ExecResult("not_found", None, None, None)
             if row["state"] != "pending":
                 return ExecResult("not_claimable", None, None, None)
+
+            # Claim expiry and GAP-6's pending-only sweep intentionally overlap
+            # and are mutually idempotent; do not deduplicate them.
+            expired = await conn.fetchval(
+                "UPDATE action_grants SET state = 'expired' "
+                "WHERE tenant_id = $1 AND grant_id = $2 "
+                "AND state = 'pending' "
+                "AND expires_at <= clock_timestamp() RETURNING grant_id",
+                tenant_id,
+                grant_id,
+            )
+            if expired is not None:
+                return ExecResult("expired", "expired", "failed", None)
 
             allowed = await authorizer({
                 "tenant_id": row["tenant_id"],
@@ -152,14 +166,25 @@ async def claim_and_execute(
                 )
                 return ExecResult("policy_denied", "failed", "failed", None)
 
-            claimed = await conn.execute(
+            claimed = await conn.fetchval(
                 "UPDATE action_grants SET state = 'executing' "
                 "WHERE tenant_id = $1 AND grant_id = $2 "
-                "AND state = 'pending'",
+                "AND state = 'pending' "
+                "AND expires_at > clock_timestamp() RETURNING grant_id",
                 tenant_id,
                 grant_id,
             )
-            if claimed.split()[-1] != "1":
+            if claimed is None:
+                expired = await conn.fetchval(
+                    "UPDATE action_grants SET state = 'expired' "
+                    "WHERE tenant_id = $1 AND grant_id = $2 "
+                    "AND state = 'pending' "
+                    "AND expires_at <= clock_timestamp() RETURNING grant_id",
+                    tenant_id,
+                    grant_id,
+                )
+                if expired is not None:
+                    return ExecResult("expired", "expired", "failed", None)
                 return ExecResult("not_claimable", None, None, None)
 
             stored = StoredAction(
