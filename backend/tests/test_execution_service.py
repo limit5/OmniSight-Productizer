@@ -14,13 +14,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from backend import db
+from backend.agents import execution_gate
 from backend.agents.execution_contract import (
     Applied,
     DefinitelyNotApplied,
     StoredAction,
     Unknown,
 )
-from backend.agents.execution_service import claim_and_execute
+from backend.agents.execution_service import (
+    claim_and_execute,
+    recover_executing_grant,
+)
 
 
 async def _seed_case(
@@ -28,9 +32,11 @@ async def _seed_case(
     *,
     recovery_mode: str = "non_replayable",
     executable_args: dict | None = None,
+    tenant_id: str | None = None,
 ) -> dict:
     suffix = uuid.uuid4().hex
-    tenant_id = f"t-execution-service-{suffix}"
+    create_tenant = tenant_id is None
+    tenant_id = tenant_id or f"t-execution-service-{suffix}"
     action_instance_id = f"action-{suffix}"
     challenge_id = f"challenge-{suffix}"
     grant_id = f"grant-{suffix}"
@@ -62,11 +68,13 @@ async def _seed_case(
         "recovery_mode": recovery_mode,
     }
     async with pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO tenants (id, name, plan) VALUES ($1, $2, 'free')",
-            tenant_id,
-            tenant_id,
-        )
+        if create_tenant:
+            await conn.execute(
+                "INSERT INTO tenants (id, name, plan) "
+                "VALUES ($1, $2, 'free')",
+                tenant_id,
+                tenant_id,
+            )
         assert await db.put_prepared_action(conn, **prepared) is True
         assert await db.put_challenge(
             conn,
@@ -98,6 +106,64 @@ async def _seed_case(
 
 async def _allow(_identity) -> bool:
     return True
+
+
+async def _set_executing_and_claim_lease(
+    pool,
+    case: dict,
+    *,
+    worker_id: str = "worker-recovery",
+) -> dict:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE action_grants SET state = 'executing' "
+            "WHERE tenant_id = $1 AND grant_id = $2 "
+            "AND state = 'pending'",
+            case["tenant_id"],
+            case["grant_id"],
+        )
+        leased = await conn.fetchrow(
+            "UPDATE resume_jobs SET state = 'claimed', lease_owner = $3, "
+            "lease_epoch = lease_epoch + 1, "
+            "lease_expires_at = clock_timestamp() + interval '1 minute' "
+            "WHERE tenant_id = $1 AND resume_id = $2 "
+            "RETURNING resume_id, tenant_id, grant_id, lease_owner, "
+            "lease_epoch",
+            case["tenant_id"],
+            case["resume_id"],
+            worker_id,
+        )
+    assert leased is not None
+    return dict(leased)
+
+
+async def _recover(
+    pool,
+    case: dict,
+    lease: dict,
+    outcome,
+    *,
+    authorizer=_allow,
+):
+    calls: list[StoredAction] = []
+
+    async def executor(stored: StoredAction):
+        calls.append(stored)
+        return outcome
+
+    result = await recover_executing_grant(
+        pool,
+        tenant_id=case["tenant_id"],
+        grant_id=case["grant_id"],
+        executor=executor,
+        authorizer=authorizer,
+        resume_id=lease["resume_id"],
+        lease_owner=lease["lease_owner"],
+        lease_epoch=lease["lease_epoch"],
+        attempt_id_factory=lambda: uuid.uuid4().hex,
+        result_of=lambda applied: json.dumps(applied.result),
+    )
+    return result, calls
 
 
 async def _execute(
@@ -505,3 +571,235 @@ async def test_executor_receives_only_server_stored_action_args(
     assert len(calls) == 1
     assert isinstance(calls[0], StoredAction)
     assert calls[0].executable_args == expected_args
+
+
+@pytest.mark.asyncio
+async def test_recovery_denied_current_lease_routes_manual_without_execution(
+    pg_test_pool,
+    monkeypatch,
+) -> None:
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    lease = await _set_executing_and_claim_lease(pg_test_pool, case)
+    monkeypatch.delenv("OMNISIGHT_U6_EXECUTE", raising=False)
+
+    result, calls = await _recover(
+        pg_test_pool,
+        case,
+        lease,
+        Applied(result={"unexpected": True}, evidence="unexpected"),
+        authorizer=execution_gate.authorizer,
+    )
+
+    assert result.status == "recovery_manual"
+    assert result.grant_next == "manual"
+    assert result.resume_next == "manual"
+    assert result.outcome is None
+    assert calls == []
+    assert await _state(pg_test_pool, case) == "executing"
+    assert await _attempts(pg_test_pool, case) == []
+    assert await _result(pg_test_pool, case) is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_stale_lease_is_not_claimable_before_authorization(
+    pg_test_pool,
+) -> None:
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    stale = await _set_executing_and_claim_lease(pg_test_pool, case)
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE resume_jobs SET lease_epoch = lease_epoch + 1 "
+            "WHERE tenant_id = $1 AND resume_id = $2",
+            case["tenant_id"],
+            case["resume_id"],
+        )
+    identities: list[dict] = []
+
+    async def deny(identity) -> bool:
+        identities.append(dict(identity))
+        return False
+
+    result, calls = await _recover(
+        pg_test_pool,
+        case,
+        stale,
+        Applied(result={"unexpected": True}, evidence="unexpected"),
+        authorizer=deny,
+    )
+
+    assert result.status == "not_claimable"
+    assert result.grant_next is None
+    assert result.resume_next is None
+    assert identities == []
+    assert calls == []
+    assert await _state(pg_test_pool, case) == "executing"
+
+
+@pytest.mark.asyncio
+async def test_recovery_lease_for_different_grant_is_not_claimable(
+    pg_test_pool,
+) -> None:
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    other = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+        tenant_id=case["tenant_id"],
+    )
+    await _set_executing_and_claim_lease(pg_test_pool, case)
+    other_lease = await _set_executing_and_claim_lease(
+        pg_test_pool,
+        other,
+        worker_id="worker-other-grant",
+    )
+
+    result, calls = await _recover(
+        pg_test_pool,
+        case,
+        other_lease,
+        Applied(result={"unexpected": True}, evidence="unexpected"),
+    )
+
+    assert result.status == "not_claimable"
+    assert calls == []
+    assert await _state(pg_test_pool, case) == "executing"
+
+
+@pytest.mark.asyncio
+async def test_recovery_concurrent_consumed_grant_is_not_claimable(
+    pg_test_pool,
+) -> None:
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    lease = await _set_executing_and_claim_lease(pg_test_pool, case)
+
+    async def unexpected_authorizer(_identity) -> bool:
+        pytest.fail("consumed recovery must not authorize")
+
+    async with pg_test_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "UPDATE action_grants SET state = 'consumed' "
+                "WHERE tenant_id = $1 AND grant_id = $2 "
+                "AND state = 'executing'",
+                case["tenant_id"],
+                case["grant_id"],
+            )
+            recovery_task = asyncio.create_task(_recover(
+                pg_test_pool,
+                case,
+                lease,
+                Applied(result={"unexpected": True}, evidence="unexpected"),
+                authorizer=unexpected_authorizer,
+            ))
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(
+                    asyncio.shield(recovery_task),
+                    timeout=0.1,
+                )
+
+    result, calls = await recovery_task
+
+    assert result.status == "not_claimable"
+    assert calls == []
+    assert await _state(pg_test_pool, case) == "consumed"
+
+
+@pytest.mark.asyncio
+async def test_recovery_allowed_current_lease_replays_and_finalizes(
+    pg_test_pool,
+) -> None:
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    lease = await _set_executing_and_claim_lease(pg_test_pool, case)
+    outcome = Applied(result={"receipt": "recovered"}, evidence="sink receipt")
+
+    result, calls = await _recover(
+        pg_test_pool,
+        case,
+        lease,
+        outcome,
+    )
+
+    assert result.status == "finalized"
+    assert result.grant_next == "consumed"
+    assert result.resume_next == "done"
+    assert result.outcome == outcome
+    assert len(calls) == 1
+    assert calls[0].idempotency_key == case["prepared"]["action_instance_id"]
+    assert await _state(pg_test_pool, case) == "consumed"
+    stored_result = await _result(pg_test_pool, case)
+    assert json.loads(stored_result["result"]) == {"receipt": "recovered"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovery_mode", ["non_replayable", "read_after_write"])
+async def test_recovery_manual_modes_keep_executing_without_authorization(
+    pg_test_pool,
+    recovery_mode: str,
+) -> None:
+    case = await _seed_case(pg_test_pool, recovery_mode=recovery_mode)
+    lease = await _set_executing_and_claim_lease(pg_test_pool, case)
+
+    async def unexpected_authorizer(_identity) -> bool:
+        pytest.fail("manual recovery mode must not authorize")
+
+    result, calls = await _recover(
+        pg_test_pool,
+        case,
+        lease,
+        Applied(result={"unexpected": True}, evidence="unexpected"),
+        authorizer=unexpected_authorizer,
+    )
+
+    assert result.status == "recovery_manual"
+    assert result.grant_next == "manual"
+    assert result.resume_next == "manual"
+    assert calls == []
+    assert await _state(pg_test_pool, case) == "executing"
+
+
+@pytest.mark.asyncio
+async def test_recovery_passes_durable_identity_to_authorizer(
+    pg_test_pool,
+) -> None:
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    lease = await _set_executing_and_claim_lease(pg_test_pool, case)
+    identities: list[dict] = []
+
+    async def allow(identity) -> bool:
+        identities.append(dict(identity))
+        return True
+
+    result, calls = await _recover(
+        pg_test_pool,
+        case,
+        lease,
+        Applied(result={"receipt": "ok"}, evidence="sink receipt"),
+        authorizer=allow,
+    )
+
+    assert result.status == "finalized"
+    assert len(calls) == 1
+    assert identities == [{
+        "tenant_id": case["tenant_id"],
+        "principal_type": case["prepared"]["principal_type"],
+        "actor_id": case["prepared"]["actor_id"],
+        "adapter_namespace": case["prepared"]["adapter_namespace"],
+        "tool_name": case["prepared"]["tool_name"],
+    }]

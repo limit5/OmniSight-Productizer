@@ -215,50 +215,98 @@ async def recover_executing_grant(
     tenant_id: str,
     grant_id: str,
     executor: Executor,
+    authorizer: Authorizer,
+    resume_id: str,
+    lease_owner: str,
+    lease_epoch: int,
     attempt_id_factory: Callable[[], str],
     result_of: Callable[[Applied], str],
 ) -> ExecResult:
-    """Recover a crashed executing grant when its mode permits replay."""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT g.state, g.recovery_mode, g.action_instance_id, "
-            "g.idempotency_key, g.tenant_id, g.principal_type, "
-            "g.actor_id, p.adapter_namespace, p.tool_name, "
-            "p.schema_version, p.canonical_target, p.executable_args "
-            "FROM action_grants g JOIN prepared_actions p "
-            "ON (p.tenant_id = g.tenant_id "
-            "AND p.action_instance_id = g.action_instance_id) "
-            "WHERE g.tenant_id = $1 AND g.grant_id = $2 "
-            "AND g.state = 'executing'",
-            tenant_id,
-            grant_id,
-        )
-    if row is None:
-        return ExecResult("not_claimable", None, None, None)
+    """Admit recovery under grant and lease locks, then replay post-commit.
 
-    stored = StoredAction(
+    Only sink-idempotent recovery executes. Its durable key bounds the residual
+    if the admitted lease expires during the external executor call.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Lock order is grant then resume; no worker takes the reverse.
+            row = await conn.fetchrow(
+                "SELECT g.state, g.recovery_mode, g.action_instance_id, "
+                "g.idempotency_key, g.tenant_id, g.principal_type, "
+                "g.actor_id, p.adapter_namespace, p.tool_name, "
+                "p.schema_version, p.canonical_target, p.executable_args "
+                "FROM action_grants g JOIN prepared_actions p "
+                "ON (p.tenant_id = g.tenant_id "
+                "AND p.action_instance_id = g.action_instance_id) "
+                "WHERE g.tenant_id = $1 AND g.grant_id = $2 "
+                "AND g.state = 'executing' FOR UPDATE OF g",
+                tenant_id,
+                grant_id,
+            )
+            if row is None:
+                return ExecResult("not_claimable", None, None, None)
+
+            # SKIP LOCKED reclaim either skips this admitted row or wins first,
+            # making this read observe the bumped epoch after its lock wait.
+            lease_ok = await conn.fetchval(
+                "SELECT 1 FROM resume_jobs "
+                "WHERE resume_id = $1 AND tenant_id = $2 "
+                "AND grant_id = $3 AND lease_owner = $4 "
+                "AND lease_epoch = $5 AND state = 'claimed' FOR UPDATE",
+                resume_id,
+                tenant_id,
+                grant_id,
+                lease_owner,
+                lease_epoch,
+            )
+            if lease_ok is None:
+                return ExecResult("not_claimable", None, None, None)
+
+            stored = StoredAction(
+                grant_id=grant_id,
+                idempotency_key=row["idempotency_key"],
+                recovery_mode=row["recovery_mode"],
+                adapter_namespace=row["adapter_namespace"],
+                tool_name=row["tool_name"],
+                schema_version=row["schema_version"],
+                canonical_target=row["canonical_target"],
+                executable_args=json.loads(row["executable_args"]),
+            )
+            if stored.recovery_mode in {
+                "read_after_write",
+                "non_replayable",
+            }:
+                return ExecResult("recovery_manual", "manual", "manual", None)
+            if stored.recovery_mode == "sink_idempotency_key":
+                allowed = await authorizer({
+                    "tenant_id": row["tenant_id"],
+                    "principal_type": row["principal_type"],
+                    "actor_id": row["actor_id"],
+                    "adapter_namespace": row["adapter_namespace"],
+                    "tool_name": row["tool_name"],
+                })
+                if not allowed:
+                    # Pause the resume for a human; the grant stays executing.
+                    return ExecResult(
+                        "recovery_manual",
+                        "manual",
+                        "manual",
+                        None,
+                    )
+            else:
+                raise ValueError(
+                    f"unknown recovery mode: {stored.recovery_mode}"
+                )
+
+    return await _execute_and_finalize(
+        pool,
+        tenant_id=tenant_id,
         grant_id=grant_id,
-        idempotency_key=row["idempotency_key"],
-        recovery_mode=row["recovery_mode"],
-        adapter_namespace=row["adapter_namespace"],
-        tool_name=row["tool_name"],
-        schema_version=row["schema_version"],
-        canonical_target=row["canonical_target"],
-        executable_args=json.loads(row["executable_args"]),
+        stored=stored,
+        executor=executor,
+        attempt_id_factory=attempt_id_factory,
+        result_of=result_of,
     )
-    if stored.recovery_mode == "sink_idempotency_key":
-        return await _execute_and_finalize(
-            pool,
-            tenant_id=tenant_id,
-            grant_id=grant_id,
-            stored=stored,
-            executor=executor,
-            attempt_id_factory=attempt_id_factory,
-            result_of=result_of,
-        )
-    if stored.recovery_mode in {"read_after_write", "non_replayable"}:
-        return ExecResult("recovery_manual", "manual", "manual", None)
-    raise ValueError(f"unknown recovery mode: {stored.recovery_mode}")
 
 
 async def run_resume_job(
@@ -327,6 +375,10 @@ async def run_resume_job(
                 tenant_id=leased["tenant_id"],
                 grant_id=leased["grant_id"],
                 executor=executor,
+                authorizer=authorizer,
+                resume_id=leased["resume_id"],
+                lease_owner=leased["lease_owner"],
+                lease_epoch=leased["lease_epoch"],
                 attempt_id_factory=attempt_id_factory,
                 result_of=result_of,
             )

@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from backend import db
+from backend.agents import execution_gate
 from backend.agents.execution_contract import Applied, StoredAction, Unknown
 from backend.agents.execution_service import run_resume_job
 
@@ -415,6 +416,57 @@ async def test_run_resume_job_sink_executing_crash_auto_recovers(
             case["tenant_id"],
             case["grant_id"],
         ) == 1
+
+
+@pytest.mark.asyncio
+async def test_run_resume_job_default_denied_sink_recovery_finalizes_manual(
+    pg_test_pool,
+    monkeypatch,
+) -> None:
+    await _clear_resume_queue(pg_test_pool)
+    case = await _seed_case(
+        pg_test_pool,
+        recovery_mode="sink_idempotency_key",
+    )
+    async with pg_test_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE action_grants SET state = 'executing' "
+            "WHERE tenant_id = $1 AND grant_id = $2",
+            case["tenant_id"],
+            case["grant_id"],
+        )
+    monkeypatch.delenv("OMNISIGHT_U6_EXECUTE", raising=False)
+    calls: list[StoredAction] = []
+
+    async def executor(stored: StoredAction):
+        calls.append(stored)
+        return Applied(result={"unexpected": True}, evidence="unexpected")
+
+    result = await run_resume_job(
+        pg_test_pool,
+        worker_id="worker-default-denied-recovery",
+        lease_ttl_seconds=60,
+        executor=executor,
+        authorizer=execution_gate.authorizer,
+        attempt_id_factory=lambda: uuid.uuid4().hex,
+        result_of=lambda applied: json.dumps(applied.result),
+    )
+
+    assert result == "manual"
+    assert calls == []
+    assert await _grant_state(pg_test_pool, case) == "executing"
+    assert await _resume_state(pg_test_pool, case) == "manual"
+    async with pg_test_pool.acquire() as conn:
+        assert await db.get_execution_attempts(
+            conn,
+            case["grant_id"],
+            tenant_id=case["tenant_id"],
+        ) == []
+        assert await db.get_execution_result(
+            conn,
+            case["grant_id"],
+            tenant_id=case["tenant_id"],
+        ) is None
 
 
 @pytest.mark.asyncio
