@@ -61,26 +61,20 @@ async def _execute(
     *,
     dispatch: bool = False,
 ) -> ExecOutcome:
-    """Execute with a fresh caller-owned root fd and prove all executor fds close."""
+    """Execute with a fresh resolver root fd the EXECUTOR now owns and closes; prove no fd (incl the root) leaks."""
     before = _fd_count()
-    caller_fds: list[int] = []
 
     def resolve_root_fd(workspace_id: str) -> int:
         assert workspace_id == "workspace-1"
-        fd = os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
-        caller_fds.append(fd)
-        return fd
+        return os.open(str(root), os.O_RDONLY | os.O_DIRECTORY)
 
     factory = (
         workspace_write.make_dispatch_executor
         if dispatch
         else workspace_write.make_workspace_write_executor
     )
-    try:
-        outcome = await factory(resolve_root_fd)(stored)
-    finally:
-        for fd in caller_fds:
-            os.close(fd)
+    outcome = await factory(resolve_root_fd)(stored)
+    # The executor now owns the resolver's root fd: after it returns, every fd it opened AND the root fd are closed.
     assert _fd_count() == before
     return outcome
 
@@ -764,6 +758,23 @@ async def test_no_fd_leak_across_applied_dna_and_unknown_outcomes(
 
     monkeypatch.setattr(workspace_write.os, "open", ambiguous_open)
     await _execute(tmp_path, _stored(relative_path="unknown.txt"))
+
+
+@pytest.mark.asyncio
+async def test_repeated_executions_do_not_leak_the_resolver_root_fd(
+    tmp_path: pathlib.Path,
+) -> None:
+    # Regression: the executor OWNS the resolver's root fd (opened fresh per call) and must close it every time, or a
+    # real resolver would leak one directory fd per execution (EMFILE). Drive many executions and assert fd stability.
+    def resolve_root_fd(workspace_id: str) -> int:
+        return os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+
+    executor = workspace_write.make_workspace_write_executor(resolve_root_fd)
+    before = len(os.listdir("/proc/self/fd"))
+    for i in range(64):
+        outcome = await executor(_stored(relative_path="leak-%d.txt" % i, content="x"))
+        assert isinstance(outcome, Applied)
+    assert len(os.listdir("/proc/self/fd")) == before
 
 
 @pytest.mark.asyncio

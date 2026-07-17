@@ -139,7 +139,10 @@ async def _write(stored: StoredAction, resolve_root_fd: WorkspaceRootFdResolver)
     data = content.encode("utf-8")
     *dirs, basename = parts
 
-    my_fds: list = []       # only fds WE open (never the caller-owned root_fd); closed once in finally
+    # We OWN the resolver's root fd: the resolver opens a fresh fd per call and transfers it here, and nothing else
+    # closes it.  Tracking it in my_fds is what prevents a per-execution directory-fd leak (EMFILE) once a real resolver
+    # is wired.  It is closed exactly once in the finally (never removed from my_fds), like every walk fd.
+    my_fds: list = [root_fd]
     try:
         try:
             root_dev = os.fstat(root_fd).st_dev
