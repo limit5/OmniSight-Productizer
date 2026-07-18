@@ -106,7 +106,7 @@ from backend.agents.anthropic_native_client import (
     TokenUsage,
 )
 from backend.agents import runner_tenant
-from backend.agents.execution_context import ExecutionContext, for_service
+from backend.agents.execution_context import ExecutionContext, for_server_runner
 from backend.agents.context_reset import (
     DetectorAwareDispatcher,
     run_with_resets,
@@ -334,12 +334,15 @@ def _build_runner_execution_context(
     request_id is fresh per invocation — unrelated attempts must not share
     a grant-binding dimension — prefixed with the ticket key for trace.
     """
-    return for_service(
-        service_name=_RUNNER_SERVICE_NAME,
+    # U6-0 B-autoauth (AA-1): the trusted (source, actor_id) pair is
+    # factory-owned — for_server_runner hardcodes it (see
+    # execution_context._SERVER_RUNNER_IDENTITIES), so no caller can smuggle in
+    # an arbitrary trusted source.
+    return for_server_runner(
+        runner_kind="jira",
         tenant_id=runner_tenant.OMNISIGHT_SELF_TENANT,
         request_id=f"{ticket_key}:{request_id_factory()}",
         roles=(),
-        authorization_source="jira_runner",
     )
 
 

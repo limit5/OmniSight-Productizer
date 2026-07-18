@@ -43,7 +43,7 @@ from backend.agents.anthropic_native_client import (  # noqa: E402
     RunResult,
 )
 from backend.agents import runner_tenant  # noqa: E402
-from backend.agents.execution_context import for_service  # noqa: E402
+from backend.agents.execution_context import for_server_runner  # noqa: E402
 from backend.agents.cost_guard import (  # noqa: E402
     CostActual,
     CostGuard,
@@ -649,12 +649,13 @@ async def run_one_item(
     # U6-0 P-ID-C (dormant): server-derived runner principal, fresh
     # request_id PER ITEM (not process-wide) so unrelated items never
     # share a grant-binding dimension. Sub-agents inherit via P-ID-B.
-    client.execution_context = for_service(
-        service_name=_RUNNER_SERVICE_NAME,
+    # U6-0 B-autoauth (AA-1): factory-owned trusted (source, actor_id) pair —
+    # for_server_runner hardcodes it (see execution_context._SERVER_RUNNER_IDENTITIES).
+    client.execution_context = for_server_runner(
+        runner_kind="todo",
         tenant_id=runner_tenant.OMNISIGHT_SELF_TENANT,
         request_id=uuid.uuid4().hex,
         roles=(),
-        authorization_source="todo_runner",
     )
 
     started = time.time()

@@ -87,6 +87,52 @@ def for_service(
     )
 
 
+# U6-0 B-autoauth (AA-1): the closed set of SERVER-LAUNCHED runner identities.
+# The (authorization_source, actor_id) pair is FACTORY-OWNED (hardcoded here) —
+# a caller selects ONLY the closed ``runner_kind`` token, never the trusted
+# strings. ``auto_auth_policy`` gate-2 trusts EXACTLY these pairs (it imports
+# SERVER_RUNNER_TRUSTED_PAIRS — single source of truth, no drift), and a drift
+# test asserts the trusted source literals appear in backend/ production ONLY
+# in this module.
+_SERVER_RUNNER_IDENTITIES: dict[str, tuple[str, str]] = {
+    # runner_kind: (authorization_source, actor_id / service_name)
+    "jira": ("jira_runner", "s1-jira-runner"),
+    "todo": ("todo_runner", "todo-runner"),
+}
+SERVER_RUNNER_TRUSTED_PAIRS = frozenset(_SERVER_RUNNER_IDENTITIES.values())
+
+
+def for_server_runner(
+    *,
+    runner_kind: str,
+    tenant_id: str,
+    request_id: str,
+    roles: Iterable[str] = (),
+) -> ExecutionContext:
+    """Server-launched runner principal with a FACTORY-OWNED trusted identity.
+
+    Unlike ``for_service`` (which passes the caller's ``authorization_source``
+    and ``service_name`` through verbatim), this HARDCODES both the trusted
+    ``authorization_source`` and the ``actor_id`` as a pair keyed on the closed
+    ``runner_kind`` — so no caller can smuggle in an arbitrary trusted source.
+    The U6 auto-auth server-principal gate trusts exactly these pairs.
+    """
+    try:
+        source, service = _SERVER_RUNNER_IDENTITIES[runner_kind]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"unknown server runner_kind: {runner_kind!r}") from exc
+    return ExecutionContext(
+        principal_type="service",
+        tenant_id=tenant_id,
+        actor_id=service,
+        roles=tuple(roles),
+        session_id=None,
+        request_id=request_id,
+        message_id=None,
+        authorization_source=source,
+    )
+
+
 def for_machine(
     *,
     service_name: str,

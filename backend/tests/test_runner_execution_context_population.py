@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from backend.agents import runner_tenant
-from backend.agents.execution_context import ExecutionContext, for_service
+from backend.agents.execution_context import ExecutionContext, for_server_runner
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -104,13 +104,13 @@ def test_run_s1_dry_run_client_accepts_execution_context() -> None:
 
 def _build_todo_runner_context() -> ExecutionContext:
     # Mirrors the run_one_item set-site in auto-runner-sdk.py exactly
-    # (the script is not importable — hyphenated module name).
-    return for_service(
-        service_name="todo-runner",
+    # (the script is not importable — hyphenated module name). AA-1: the
+    # set-site now uses the factory-owned for_server_runner("todo").
+    return for_server_runner(
+        runner_kind="todo",
         tenant_id=runner_tenant.OMNISIGHT_SELF_TENANT,
         request_id=uuid.uuid4().hex,
         roles=(),
-        authorization_source="todo_runner",
     )
 
 
@@ -136,8 +136,14 @@ def test_auto_runner_source_pins_constants_at_set_site() -> None:
     # server constants so a drift (e.g. t-default, model-derived actor)
     # cannot land silently.
     src = (REPO_ROOT / "auto-runner-sdk.py").read_text(encoding="utf-8")
+    # AA-1: the trusted (source, actor_id) pair is now FACTORY-OWNED via
+    # for_server_runner("todo") — a stronger pin than a call-site string, so a
+    # drift (t-default, model-derived actor, smuggled source) cannot land.
     assert '_RUNNER_SERVICE_NAME = "todo-runner"' in src
+    assert "for_server_runner(" in src
+    assert 'runner_kind="todo"' in src
     assert "tenant_id=runner_tenant.OMNISIGHT_SELF_TENANT" in src
-    assert 'authorization_source="todo_runner"' in src
     assert "request_id=uuid.uuid4().hex" in src
+    # The trusted source string is no longer a free literal at the set-site.
+    assert 'authorization_source="todo_runner"' not in src
     assert '"t-default"' not in src
