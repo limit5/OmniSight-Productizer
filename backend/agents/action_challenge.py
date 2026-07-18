@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from backend.agents import action_grant
+from backend.agents import auto_auth_policy
 from backend.agents.action_canonicalize import PreparedAction
 from backend.agents.execution_context import ExecutionContext, is_unbound
 from backend.agents.provenance import (
@@ -24,6 +25,12 @@ from backend.agents.provenance import (
 
 
 CHALLENGE_TTL_SECONDS = 3600
+
+# U6-0 B-autoauth (AA-3): the synthetic server confirmer recorded on an
+# auto-granted challenge (never a human/model identity).
+_AUTO_AUTH_ACTOR = "u6-auto-auth"
+_AUTO_AUTH_PRINCIPAL_TYPE = "service"
+_AUTO_AUTH_REASON = "server_auto_auth: workspace-contained code_write"
 
 
 async def create_challenge_from_block(
@@ -94,7 +101,34 @@ async def create_challenge_from_block(
         if await repo.get(snap.snapshot_id, tenant_id=ctx.tenant_id) is None:
             return None
 
+        # U6-0 B-autoauth (AA-3): server-side auto-authorization (default OFF).
+        # PURE decision (no DB), computed before the txn: only a server-launched
+        # runner writing a workspace-contained, inert file with clean provenance
+        # is auto-granted; everything else falls through to the human challenge.
+        auto_grant = False
+        if auto_auth_policy.auto_auth_enabled():
+            from backend.agents.authoritative_context_resolver import (
+                resolve_authoritative_workspace,
+            )
+
+            auth_ws = resolve_authoritative_workspace(
+                ctx, adapter_namespace, tool_name, schema_version
+            )
+            if auth_ws is not None:
+                workspace_id, workspace_root = auth_ws
+                auto_grant = (
+                    auto_auth_policy.evaluate_auto_auth(
+                        execution_context=ctx,
+                        prepared_action=challenge_prepared,
+                        workspace_id=workspace_id,
+                        workspace_root=workspace_root,
+                        snapshot=turn_provenance,
+                    )
+                    is auto_auth_policy.AutoAuthVerdict.AUTO_GRANT
+                )
+
         db = importlib.import_module("backend.db")
+        created = False
         async with pool.acquire() as conn:
             async with conn.transaction():
                 await db.put_prepared_action(
@@ -120,14 +154,30 @@ async def create_challenge_from_block(
                     prepared_action_digest=digest,
                     recovery_mode="non_replayable",
                 )
-                created = await db.put_challenge(
-                    conn,
-                    challenge_id=challenge_id,
-                    tenant_id=ctx.tenant_id,
-                    action_instance_id=action_instance_id,
-                    expires_at=expires_at,
-                )
-            if created:
+                if auto_grant:
+                    await db.auto_grant_from_prepared(
+                        conn,
+                        tenant_id=ctx.tenant_id,
+                        action_instance_id=action_instance_id,
+                        challenge_id=challenge_id,
+                        grant_id="grant-" + digest,
+                        resume_id="resume-" + digest,
+                        confirmer_actor=_AUTO_AUTH_ACTOR,
+                        confirmer_principal_type=_AUTO_AUTH_PRINCIPAL_TYPE,
+                        confirmer_auth_event_id="server_auto_grant:" + digest,
+                        reason=_AUTO_AUTH_REASON,
+                        grant_expires_at=expires_at,
+                        challenge_expires_at=expires_at,
+                    )
+                else:
+                    created = await db.put_challenge(
+                        conn,
+                        challenge_id=challenge_id,
+                        tenant_id=ctx.tenant_id,
+                        action_instance_id=action_instance_id,
+                        expires_at=expires_at,
+                    )
+            if auto_grant or created:
                 return challenge_id
             row = await db.get_challenge(
                 conn,

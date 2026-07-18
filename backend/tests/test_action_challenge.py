@@ -16,7 +16,12 @@ from pathlib import Path
 import pytest
 
 from backend import db
-from backend.agents import action_challenge, provenance
+from backend.agents import (
+    action_challenge,
+    authoritative_context_resolver,
+    auto_auth_policy,
+    provenance,
+)
 from backend.agents.action_canonicalize import PreparedAction
 from backend.agents.execution_context import ExecutionContext, for_unbound
 from backend.agents.provenance import (
@@ -478,3 +483,114 @@ def test_create_challenge_caller_is_only_the_runner_dispatch() -> None:
             callers.append(str(rel))
 
     assert sorted(callers) == ["agents/tool_dispatcher.py"]
+
+
+# ── U6-0 B-autoauth (AA-3) — flag-gated branch into auto-grant vs challenge ──
+_WS = ("ws:t-challenge:runner_sdk:" + "a" * 64, "/root/ws")
+
+
+async def _run_autoauth(monkeypatch, *, flag_on, verdict, workspace):
+    challenge_calls: list[dict] = []
+    autogrant_calls: list[dict] = []
+
+    async def _fake_put_prepared_action(_conn, **kwargs):
+        return True
+
+    async def _fake_put_challenge(_conn, **kwargs):
+        challenge_calls.append(kwargs)
+        return True
+
+    async def _fake_auto_grant(_conn, **kwargs):
+        autogrant_calls.append(kwargs)
+        return "auto_granted"
+
+    monkeypatch.setattr(action_challenge, "PgSnapshotRepository", _PassRepository)
+    monkeypatch.setattr(db, "put_prepared_action", _fake_put_prepared_action)
+    monkeypatch.setattr(db, "put_challenge", _fake_put_challenge)
+    monkeypatch.setattr(db, "auto_grant_from_prepared", _fake_auto_grant)
+    if flag_on:
+        monkeypatch.setenv("OMNISIGHT_U6_AUTO_AUTH", "1")
+    else:
+        monkeypatch.delenv("OMNISIGHT_U6_AUTO_AUTH", raising=False)
+    monkeypatch.setattr(
+        authoritative_context_resolver,
+        "resolve_authoritative_workspace",
+        lambda *a, **k: workspace,
+    )
+    if verdict is not None:
+        monkeypatch.setattr(auto_auth_policy, "evaluate_auto_auth", lambda **k: verdict)
+
+    result = await action_challenge.create_challenge_from_block(
+        _Pool(_RecordingConn()),
+        _prepared(),
+        _ctx(),
+        ModelSnapshot(_snapshot()),
+        adapter_namespace="runner_sdk",
+        tool_name="write_file",
+        schema_version="v1",
+    )
+    return challenge_calls, autogrant_calls, result
+
+
+@pytest.mark.asyncio
+async def test_autoauth_flag_off_creates_pending_challenge(monkeypatch) -> None:
+    # Default OFF: even a would-be AUTO_GRANT verdict is never consulted; the
+    # existing pending-challenge path runs (byte-identical to today).
+    challenge_calls, autogrant_calls, result = await _run_autoauth(
+        monkeypatch,
+        flag_on=False,
+        verdict=auto_auth_policy.AutoAuthVerdict.AUTO_GRANT,
+        workspace=_WS,
+    )
+    assert len(challenge_calls) == 1
+    assert autogrant_calls == []
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_autoauth_grant_verdict_issues_auto_grant(monkeypatch) -> None:
+    challenge_calls, autogrant_calls, result = await _run_autoauth(
+        monkeypatch,
+        flag_on=True,
+        verdict=auto_auth_policy.AutoAuthVerdict.AUTO_GRANT,
+        workspace=_WS,
+    )
+    assert len(autogrant_calls) == 1
+    assert challenge_calls == []
+    # The synthetic confirmer is server-owned (never a human/model identity).
+    assert autogrant_calls[0]["confirmer_actor"] == "u6-auto-auth"
+    assert autogrant_calls[0]["confirmer_principal_type"] == "service"
+    assert result is not None
+
+
+@pytest.mark.asyncio
+async def test_autoauth_human_verdict_creates_pending_challenge(monkeypatch) -> None:
+    challenge_calls, autogrant_calls, _ = await _run_autoauth(
+        monkeypatch,
+        flag_on=True,
+        verdict=auto_auth_policy.AutoAuthVerdict.HUMAN_CHALLENGE,
+        workspace=_WS,
+    )
+    assert len(challenge_calls) == 1
+    assert autogrant_calls == []
+
+
+@pytest.mark.asyncio
+async def test_autoauth_no_authoritative_workspace_creates_pending_challenge(
+    monkeypatch,
+) -> None:
+    # No server-resolved workspace ⇒ the predicate is never consulted and the
+    # human-challenge path runs (fail-safe).
+    evaluated = {"n": 0}
+
+    def _spy(**_kwargs):
+        evaluated["n"] += 1
+        return auto_auth_policy.AutoAuthVerdict.AUTO_GRANT
+
+    monkeypatch.setattr(auto_auth_policy, "evaluate_auto_auth", _spy)
+    challenge_calls, autogrant_calls, _ = await _run_autoauth(
+        monkeypatch, flag_on=True, verdict=None, workspace=None
+    )
+    assert len(challenge_calls) == 1
+    assert autogrant_calls == []
+    assert evaluated["n"] == 0
