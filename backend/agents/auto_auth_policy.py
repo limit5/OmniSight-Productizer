@@ -48,8 +48,8 @@ _ENABLE_ENV = "OMNISIGHT_U6_AUTO_AUTH"
 
 def auto_auth_enabled() -> bool:
     """The auto-auth master switch (default OFF; read by the CALLER, not the
-    predicate — keeps ``evaluate_auto_auth`` pure over its inputs). Same posture
-    as ``execution_gate``/``resume_loop``/``expiry_sweeper``."""
+    predicate — keeps ``evaluate_auto_auth`` pure over its inputs). Same
+    default-OFF posture as the other U6 execution-side gates."""
     return os.environ.get(_ENABLE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
