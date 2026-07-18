@@ -94,8 +94,9 @@ def test_resolve_web_search_registered_name_is_read_only() -> None:
     assert resolve("web_search").family == "__unknown_deny__"
 
 
-def test_resolve_git_push_is_code_write() -> None:
-    assert resolve("git_push").family == "code_write"
+def test_resolve_git_push_is_vcs_write() -> None:
+    # B-split: git/VCS tools carry external side effects -> their own family (NOT the workspace-contained code_write).
+    assert resolve("git_push").family == "vcs_write"
 
 
 def test_resolve_save_solution_is_memory_write() -> None:
@@ -122,14 +123,15 @@ def test_resolve_sdk_agent_is_delegation() -> None:
 
 # ── FAIL-CLOSED single-name multi-op (bash family) ──────────────────────
 @pytest.mark.parametrize("name", ["run_bash", "Bash", "bash"])
-def test_resolve_bash_family_is_mutating_code_write(name: str) -> None:
+def test_resolve_bash_family_is_mutating_shell_exec(name: str) -> None:
     """run_bash / Bash / bash could each execute a read-only OR a
-    write shell command — conservatively classified ``mutating`` /
-    ``code_write``. Per-operation refinement is deferred to T6.
+    write shell command — conservatively classified ``mutating``. B-split moves them to their OWN family
+    ``shell_exec`` (arbitrary command execution is NOT workspace-contained; it must never share code_write's
+    containment reasoning / auto-grant path).
     """
     desc = resolve(name)
     assert desc.effect == "mutating"
-    assert desc.family == "code_write"
+    assert desc.family == "shell_exec"
 
 
 # ── Descriptor shape invariants ─────────────────────────────────────────
@@ -178,6 +180,8 @@ def test_every_metadata_family_is_in_declared_set() -> None:
     valid = {
         "read_only",
         "code_write",
+        "shell_exec",
+        "vcs_write",
         "gerrit_write",
         "ticket_write",
         "task_write",

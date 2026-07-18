@@ -122,9 +122,9 @@ def _adversarial(root: Path):
     outside_rel = str(root / ".." / ".." / "etc" / "passwd")
     big = "x" * (300_000)
     return [
-        # Bash has NO canonicalizer -> name-only mutating -> blocked; even mimicking a "view" command cannot refine it.
-        ("bash_plain", "Bash", {"command": "ls"}),
-        ("bash_mimics_view", "Bash", {"command": "view", "path": inside}),
+        # (Bash/run_bash are now the shell_exec family, and git_push/create_pr are vcs_write -- NOT code_write -- so
+        #  under runner_sdk:code_write=enforce they stay shadow and PROCEED; that is covered by the scope test below,
+        #  not here. This corpus governs ONLY the code_write file-write family.)
         # str_replace evasions: undo_edit / unknown / case / whitespace commands must NOT reach the view refinement.
         ("sr_undo_edit", "str_replace_based_edit_tool", {"command": "undo_edit", "path": inside}),
         ("sr_unknown_cmd", "str_replace_based_edit_tool", {"command": "delete", "path": inside}),
@@ -247,12 +247,13 @@ def test_unbound_principal_denies_view_and_mutation(tmp_path: Path) -> None:
 
 
 def test_enforce_scope_is_code_write_only_not_adapter_wide(tmp_path: Path) -> None:
-    # SCOPE CAVEAT (documented, intentional): runner_sdk:code_write=enforce governs ONLY the code_write family.
-    # Other runner_sdk mutating families (memory_write, delegation, task_write, ...) stay SHADOW under this key and
-    # still PROCEED -- they are governed only when THEIR family is separately flipped (T11 is family-by-family). This
-    # test pins that the flip is narrow, so it is never mistaken for adapter-wide coverage.
+    # SCOPE CAVEAT (documented, intentional): runner_sdk:code_write=enforce governs ONLY the code_write family, which
+    # (post B-split) is FILE-WRITES ONLY. Other runner_sdk mutating families stay SHADOW under this key and still
+    # PROCEED -- governed only when THEIR family is separately flipped (T11 is family-by-family). Critically this
+    # includes shell_exec (Bash/run_bash = arbitrary exec) and vcs_write (git_push/create_pr = external), which the
+    # runner needs and which must NOT be swept up by the code_write flip. This pins the flip is narrow.
     _publish_roots(tmp_path)
-    for tool in ("memory", "Agent", "create_task"):
+    for tool in ("memory", "Agent", "create_task", "Bash", "run_bash", "git_push", "create_pr"):
         outcome = _guard(tmp_path, tool, {"anything": "x"})
         assert outcome.proceed is True, f"{tool} should stay shadow (not enforced by the code_write key)"
         assert outcome.mode == "shadow", tool

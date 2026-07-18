@@ -307,8 +307,21 @@ def test_mutating_bound_ctx_default_shadow_observes_and_proceeds() -> None:
 
 # ── 3. mutating + bound ctx, enforce entry ⇒ block ───────────────────────
 def test_mutating_bound_ctx_enforce_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_matrix(monkeypatch, "chat:code_write=enforce")
+    _set_matrix(monkeypatch, "chat:vcs_write=enforce")   # git_push is the vcs_write family post B-split
     out = _guard("git_push", ctx=_ctx_bound())
+    assert out.proceed is False
+    assert out.mode == "enforce"
+    assert out.decision is not None
+    assert out.decision.verdict == "requires_grant"
+    assert out.blocked_reason == "requires_grant"
+
+
+def test_shell_exec_bound_ctx_enforce_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    # B-split: Bash is the shell_exec family (arbitrary exec) — independently
+    # enforceable, and the code_write flip must NOT be what governs it. This
+    # pins that flipping shell_exec (not code_write) is what blocks a shell.
+    _set_matrix(monkeypatch, "chat:shell_exec=enforce")
+    out = _guard("Bash", ctx=_ctx_bound())
     assert out.proceed is False
     assert out.mode == "enforce"
     assert out.decision is not None
@@ -347,7 +360,7 @@ def test_missing_ctx_falls_back_to_unbound(monkeypatch: pytest.MonkeyPatch) -> N
     assert out.proceed is True
     assert out.blocked_reason is None
 
-    _set_matrix(monkeypatch, "chat:code_write=enforce")
+    _set_matrix(monkeypatch, "chat:vcs_write=enforce")   # git_push is the vcs_write family post B-split
     out2 = _guard("git_push", ctx=None)
     assert out2.proceed is False
     assert out2.blocked_reason == "unbound_principal"

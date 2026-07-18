@@ -187,7 +187,7 @@ def test_memory_tool_resolves_to_memory_write() -> None:
     assert desc.family == "memory_write"
 
 
-def test_code_execution_resolves_to_code_write() -> None:
+def test_code_execution_resolves_to_shell_exec() -> None:
     """This classifies the DISPATCHER-REGISTERED emulation of
     ``code_execution`` (``tool_dispatcher.ptc_sandbox_handler``). The
     LIVE ``code_execution_20260120`` runs PROVIDER-SIDE inside
@@ -196,7 +196,7 @@ def test_code_execution_resolves_to_code_write() -> None:
     """
     desc = resolve("code_execution")
     assert desc.effect == "mutating"
-    assert desc.family == "code_write"
+    assert desc.family == "shell_exec"      # B-split: arbitrary exec is not workspace-contained -> its own family
 
 
 def test_knowledge_retrieval_is_read_only() -> None:

@@ -62,7 +62,9 @@ class OperationDescriptor:
 # bypassable through a skill). The classification here is what the
 # kernel will consult.
 _READ_ONLY = "read_only"
-_CODE_WRITE = "code_write"
+_CODE_WRITE = "code_write"      # file-write ONLY (workspace-contained): write_file/patch_file/write_yaml/Write/Edit/str_replace
+_SHELL_EXEC = "shell_exec"      # arbitrary command execution (NOT contained): run_bash/Bash/bash/code_execution
+_VCS_WRITE = "vcs_write"        # version-control / external side effect: git_add/commit/checkout_branch/push/create_pr/add_remote
 _GERRIT_WRITE = "gerrit_write"
 _TICKET_WRITE = "ticket_write"
 _TASK_WRITE = "task_write"
@@ -109,17 +111,17 @@ TOOL_METADATA: dict[str, OperationDescriptor] = {
     "git_diff_staged": _op("git_diff_staged", "read_only", _READ_ONLY),
     "git_branch": _op("git_branch", "read_only", _READ_ONLY),
     "git_remote_list": _op("git_remote_list", "read_only", _READ_ONLY),
-    "git_add": _op("git_add", "mutating", _CODE_WRITE),
-    "git_commit": _op("git_commit", "mutating", _CODE_WRITE),
-    "git_checkout_branch": _op("git_checkout_branch", "mutating", _CODE_WRITE),
-    "git_push": _op("git_push", "mutating", _CODE_WRITE),
-    "create_pr": _op("create_pr", "mutating", _CODE_WRITE),
-    "git_add_remote": _op("git_add_remote", "mutating", _CODE_WRITE),
+    "git_add": _op("git_add", "mutating", _VCS_WRITE),
+    "git_commit": _op("git_commit", "mutating", _VCS_WRITE),
+    "git_checkout_branch": _op("git_checkout_branch", "mutating", _VCS_WRITE),
+    "git_push": _op("git_push", "mutating", _VCS_WRITE),
+    "create_pr": _op("create_pr", "mutating", _VCS_WRITE),
+    "git_add_remote": _op("git_add_remote", "mutating", _VCS_WRITE),
 
     # ── BASH_TOOLS — FAIL-CLOSED (single-name multi-op) ─────────────
     # run_bash is a shell entry point: could read OR write. Classified
     # ``mutating`` conservatively; per-operation refinement is a T6 job.
-    "run_bash": _op("run_bash", "mutating", _CODE_WRITE),
+    "run_bash": _op("run_bash", "mutating", _SHELL_EXEC),
 
     # ── REVIEW_TOOLS (Gerrit, mixed: read + write) ──────────────────
     "gerrit_get_diff": _op("gerrit_get_diff", "read_only", _READ_ONLY),
@@ -196,8 +198,8 @@ TOOL_METADATA: dict[str, OperationDescriptor] = {
     # dispatcher alias for Edit; classify identically.
     "str_replace_based_edit_tool": _op("str_replace_based_edit_tool", "mutating", _CODE_WRITE),
     # Bash / bash — FAIL-CLOSED single-name multi-op (see run_bash note).
-    "Bash": _op("Bash", "mutating", _CODE_WRITE),
-    "bash": _op("bash", "mutating", _CODE_WRITE),
+    "Bash": _op("Bash", "mutating", _SHELL_EXEC),
+    "bash": _op("bash", "mutating", _SHELL_EXEC),
     "Agent": _op("Agent", "mutating", _DELEGATION),
     # Skill runs a manifest-pinned, hash-verified ``*.skill`` executable
     # as a subprocess with the full parent environment
@@ -225,8 +227,9 @@ TOOL_METADATA: dict[str, OperationDescriptor] = {
     # runs PROVIDER-SIDE inside Anthropic's PTC sandbox and never
     # reaches this dispatcher. Provider-side containment is P-PROV
     # (NOT this ticket); this classification only governs the local
-    # emulation name so an enforce flip treats it as ``code_write``.
-    "code_execution": _op("code_execution", "mutating", _CODE_WRITE),
+    # emulation name so an enforce flip treats it as ``shell_exec``
+    # (arbitrary local exec — NOT the workspace-contained code_write).
+    "code_execution": _op("code_execution", "mutating", _SHELL_EXEC),
 
     # ── OP-851 Memory Tool (bind_memory_tool → MEMORY_TOOL_NAME="memory") ──
     # Fail-closed name-level: memory tool exposes read (``view``) AND

@@ -132,13 +132,13 @@ def test_read_only_tool_is_allowed() -> None:
     assert d.execution_context is ctx_h
 
 
-# ── AC (b): git_push (code_write) ⇒ requires_grant ───────────────────────
-def test_git_push_requires_grant_with_code_write_family_in_reason() -> None:
+# ── AC (b): git_push (vcs_write) ⇒ requires_grant ───────────────────────
+def test_git_push_requires_grant_with_vcs_write_family_in_reason() -> None:
     d = authorize_action(_ctx_human(), _req("git_push"))
     assert d.verdict == "requires_grant"
-    assert "code_write" in d.reason
-    assert d.reason == "mutating_needs_grant:code_write"
-    assert d.operation_descriptor.family == "code_write"
+    assert "vcs_write" in d.reason
+    assert d.reason == "mutating_needs_grant:vcs_write"
+    assert d.operation_descriptor.family == "vcs_write"
     assert d.operation_descriptor.effect == "mutating"
 
 
@@ -190,7 +190,7 @@ def test_machine_principal_mutating_still_requires_grant_never_allow() -> None:
     d = authorize_action(ctx_m, _req("git_push"))
     assert d.verdict == "requires_grant"
     assert d.verdict != "allow"
-    assert d.reason == "mutating_needs_grant:code_write"
+    assert d.reason == "mutating_needs_grant:vcs_write"
     assert d.execution_context.principal_type == "machine"
 
 
@@ -325,7 +325,7 @@ def test_bound_principals_mutating_still_requires_grant_regression() -> None:
         assert d.verdict == "requires_grant", (
             f"{ctx.principal_type} should still be requires_grant, got {d.verdict}"
         )
-        assert d.reason == "mutating_needs_grant:code_write"
+        assert d.reason == "mutating_needs_grant:vcs_write"
 
 
 # ── OP-2626 (U6-0 G2c): canonical descriptor classification ─────────
@@ -360,7 +360,7 @@ def test_classify_operation_mutating_bound_requires_grant() -> None:
 
     decision = classify_operation(_issue_from_name(ctx, "git_push"))
     assert decision.verdict == "requires_grant"
-    assert decision.reason == "mutating_needs_grant:code_write"
+    assert decision.reason == "mutating_needs_grant:vcs_write"
     assert decision.operation_descriptor is resolve("git_push")
 
 
