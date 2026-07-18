@@ -279,14 +279,20 @@ async def test_expire_stale_updates_only_own_pending_past_rows(
         "challenge_id",
         past_challenge["challenge_id"],
     )
-    assert await _confirm(pg_test_conn, past_grant) == "confirmed"
+    # past_grant is born already-due: the 0270 identity-freeze trigger forbids UPDATEing a grant's expires_at, so it
+    # must be set at CONFIRM time (not mutated after). Confirm it with grant_expires_at = a fresh clock_timestamp(); the
+    # fixture's outer transaction makes the grant's created_at (= now() = transaction-start time) precede it, so
+    # ck_grants_expiry (expires_at > created_at) holds, while the still-later sweep clock_timestamp() makes it due.
+    past_grant_expiry = await pg_test_conn.fetchval("SELECT clock_timestamp()")
+    assert await _confirm(pg_test_conn, past_grant, grant_expires_at=past_grant_expiry) == "confirmed"
     assert await _confirm(pg_test_conn, future_grant) == "confirmed"
-    await _move_expiry_to_past(
-        pg_test_conn,
-        "action_grants",
-        "grant_id",
+    due = await pg_test_conn.fetchrow(
+        "SELECT created_at, expires_at, clock_timestamp() AS now "
+        "FROM action_grants WHERE grant_id = $1",
         past_grant["grant_id"],
     )
+    assert due["created_at"] < due["expires_at"]   # ck_grants_expiry holds (created_at = the outer-txn now())
+    assert due["expires_at"] <= due["now"]         # already past wall time -> the next sweep will expire it
 
     counts = await db.expire_stale(pg_test_conn)
 
