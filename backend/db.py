@@ -1147,7 +1147,7 @@ CREATE TABLE IF NOT EXISTS action_grants (
     no_model_input_source   TEXT,
     prepared_action_digest  TEXT NOT NULL,
     grant_issuer_source     TEXT NOT NULL
-                            CHECK (grant_issuer_source IN ('ui_confirm', 'slash_command')),
+                            CHECK (grant_issuer_source IN ('ui_confirm', 'slash_command', 'server_auto_grant')),
     idempotency_key         TEXT,
     recovery_mode           TEXT NOT NULL DEFAULT 'non_replayable'
                             CHECK (recovery_mode IN ('non_replayable', 'sink_idempotency_key', 'read_after_write')),
@@ -4598,6 +4598,124 @@ async def confirm_challenge(
         if resume is None:
             raise RuntimeError("confirm_challenge: resume enqueue failed")
         return "confirmed"
+
+
+async def auto_grant_from_prepared(
+    conn,
+    *,
+    tenant_id: str,
+    action_instance_id: str,
+    challenge_id: str,
+    grant_id: str,
+    resume_id: str,
+    confirmer_actor: str,
+    confirmer_principal_type: str,
+    confirmer_auth_event_id: str,
+    reason: str,
+    grant_expires_at: str | datetime,
+    challenge_expires_at: str | datetime,
+) -> str:
+    """U6-0 B-autoauth (AA-2): server-side auto-authorization grant.
+
+    Create an ALREADY-CONFIRMED challenge (synthetic server confirmer), issue its
+    grant with ``grant_issuer_source='server_auto_grant'``, and enqueue the
+    resume job — one PostgreSQL transaction.  Operation identity, target, args,
+    and recovery policy are COPIED from the immutable ``prepared_actions`` row
+    (``SELECT p.*``), NEVER from caller/model input; the caller supplies only the
+    synthetic confirmer + fresh ids.  This is an INTEGRITY property (no identity
+    substitution), NOT content safety — the auto-auth policy (AA-1) is what
+    decides the action is safe to grant.  A near-clone of ``put_challenge`` +
+    ``confirm_challenge`` (no new trust surface).  PostgreSQL only.
+    """
+    if not (
+        tenant_id
+        and action_instance_id
+        and challenge_id
+        and grant_id
+        and resume_id
+    ):
+        raise ValueError(
+            "tenant_id/action_instance_id/challenge_id/grant_id/resume_id "
+            "must be non-empty"
+        )
+    if not reason:
+        raise ValueError("reason must be non-empty")
+    async with conn.transaction():
+        chal = await conn.fetchrow(
+            """INSERT INTO challenges
+               (challenge_id, tenant_id, action_instance_id, principal_type,
+                actor_id, request_id, model_call_id, adapter_namespace, tool_name,
+                schema_version, family, canonical_target, args_hash,
+                provenance_kind, model_snapshot_id, no_model_input_source,
+                prepared_action_digest, confirmer_actor, confirmer_principal_type,
+                confirmed_at, confirmer_auth_event_id, confirm_reason, state,
+                expires_at)
+               SELECT $1, p.tenant_id, p.action_instance_id, p.principal_type,
+                      p.actor_id, p.request_id, p.model_call_id,
+                      p.adapter_namespace, p.tool_name, p.schema_version, p.family,
+                      p.canonical_target, p.args_hash, p.provenance_kind,
+                      p.model_snapshot_id, p.no_model_input_source,
+                      p.prepared_action_digest, $5, $6, clock_timestamp(), $7, $8,
+                      'confirmed', $4
+               FROM prepared_actions p
+               WHERE p.tenant_id = $2 AND p.action_instance_id = $3
+               RETURNING challenge_id""",
+            challenge_id,
+            tenant_id,
+            action_instance_id,
+            challenge_expires_at,
+            confirmer_actor,
+            confirmer_principal_type,
+            confirmer_auth_event_id,
+            reason,
+        )
+        if chal is None:
+            raise RuntimeError("auto_grant_from_prepared: prepared_action missing")
+
+        grant = await conn.fetchrow(
+            """INSERT INTO action_grants
+               (grant_id, tenant_id, challenge_id, action_instance_id,
+                principal_type, actor_id, request_id, model_call_id,
+                adapter_namespace, tool_name, schema_version, family,
+                canonical_target, args_hash, provenance_kind,
+                model_snapshot_id, no_model_input_source,
+                prepared_action_digest, recovery_mode, grant_issuer_source,
+                idempotency_key, state, expires_at)
+               SELECT $1, p.tenant_id, $2, p.action_instance_id,
+                      p.principal_type, p.actor_id, p.request_id,
+                      p.model_call_id, p.adapter_namespace, p.tool_name,
+                      p.schema_version, p.family, p.canonical_target,
+                      p.args_hash, p.provenance_kind, p.model_snapshot_id,
+                      p.no_model_input_source, p.prepared_action_digest,
+                      p.recovery_mode, 'server_auto_grant',
+                      CASE WHEN p.recovery_mode = 'sink_idempotency_key'
+                           THEN p.action_instance_id ELSE NULL END,
+                      'pending', $3
+               FROM prepared_actions p
+               WHERE p.tenant_id = $4 AND p.action_instance_id = $5
+               RETURNING grant_id""",
+            grant_id,
+            challenge_id,
+            grant_expires_at,
+            tenant_id,
+            action_instance_id,
+        )
+        if grant is None:
+            raise RuntimeError("auto_grant_from_prepared: prepared_action missing (grant)")
+
+        resume = await conn.fetchrow(
+            """INSERT INTO resume_jobs
+               (resume_id, tenant_id, grant_id, action_instance_id, state)
+               VALUES ($1, $2, $3, $4, 'queued')
+               RETURNING resume_id""",
+            resume_id,
+            tenant_id,
+            grant_id,
+            action_instance_id,
+        )
+        if resume is None:
+            raise RuntimeError("auto_grant_from_prepared: resume enqueue failed")
+        return "auto_granted"
 
 
 async def reject_challenge(
