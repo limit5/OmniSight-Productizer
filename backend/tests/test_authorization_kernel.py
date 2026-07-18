@@ -1162,11 +1162,20 @@ def test_authority_issuer_call_sites_are_allowlisted() -> None:
 
 
 def test_authorization_decision_has_no_external_producer() -> None:
-    """Only the kernel may construct the guard-consumable decision type."""
+    """Only the kernel may construct the guard-consumable decision type.
+
+    Scope: PRODUCTION (non-test) backend code. The invariant guards against a
+    non-kernel PRODUCTION component FORGING a decision the guard would consume.
+    Test fixtures legitimately construct fake decisions to drive downstream
+    handlers (e.g. the T7b dispatcher challenge-surfacing path); those never
+    run in production and are excluded from the scan.
+    """
     backend_root = pathlib.Path(__file__).resolve().parents[1]
     producers: list[str] = []
 
     for py in backend_root.rglob("*.py"):
+        if py.relative_to(backend_root).parts[0] == "tests":
+            continue
         try:
             tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
         except (OSError, UnicodeDecodeError, SyntaxError):
@@ -1208,6 +1217,13 @@ def test_kernel_reachable_only_via_action_guard() -> None:
         # (monkeypatch target names the token); still no ADAPTER imports
         # the kernel directly.
         backend_root / "tests" / "test_nodes_action_guard.py",
+        # T7b dispatcher-wiring test imports AuthorizationDecision as a
+        # fixture TYPE; the T11 code_write corpus monkeypatches
+        # action_guard.authorize_action to force a double-fault. Both name a
+        # kernel token from a TEST fixture — same category as the T7a
+        # fault-injection test above, NOT an adapter→kernel import.
+        backend_root / "tests" / "test_tool_dispatcher_action_guard.py",
+        backend_root / "tests" / "test_t11_code_write_enforce_corpus.py",
         # U6-0 T5a: NOT adapter→kernel imports. provenance.py's DOCSTRING
         # explains the anti-forge invariant (names authorize_action; the
         # module is a stdlib-only leaf — the import-direction test proves

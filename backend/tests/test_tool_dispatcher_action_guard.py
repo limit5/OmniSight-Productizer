@@ -36,14 +36,25 @@ from backend.agents.tool_wrapper import ToolWrapper
 # ── shared fixtures ──────────────────────────────────────────────────────
 @pytest.fixture(autouse=True)
 def _clean_guard_matrix(monkeypatch: pytest.MonkeyPatch):
-    """Each test starts AND ends on the default all-shadow matrix.
+    """Each test starts AND ends on the default all-shadow matrix + a clean
+    (un-bootstrapped) canonical refinement state.
 
     pytest's monkeypatch restores the ENV at teardown but NOT the
-    already-reloaded module-global matrix — reload on both edges.
+    already-reloaded module-global matrix — reload on both edges. Likewise
+    ``_CANONICAL_BOOTSTRAP_OK`` is a process-global that another test file may
+    have latched True; pin it to the import default (False) for the test body so
+    the real-guard enforce blocks here deterministically surface the NAME-level
+    ``requires_grant`` — NOT the refinement's ``no_authoritative_context``,
+    which depends on a bootstrapped registry + a published workspace this
+    dispatcher-wiring suite intentionally does not set up. Restore the incoming
+    value at teardown so we leave the global exactly as found.
     """
     monkeypatch.delenv("OMNISIGHT_ACTION_GUARD_MODE", raising=False)
     action_guard.reload_mode_matrix_for_tests()
+    _saved_bootstrap = action_guard._CANONICAL_BOOTSTRAP_OK
+    action_guard._CANONICAL_BOOTSTRAP_OK = False
     yield
+    action_guard._CANONICAL_BOOTSTRAP_OK = _saved_bootstrap
     monkeypatch.delenv("OMNISIGHT_ACTION_GUARD_MODE", raising=False)
     action_guard.reload_mode_matrix_for_tests()
 
@@ -177,6 +188,10 @@ def test_enforce_blocks_mutating_handler_not_called(
     assert res.is_error
     payload = _payload(res)
     assert payload["error"] == "action_guard_denied"
+    # Deterministic name-level enforce block: the autouse fixture pins the
+    # canonical bootstrap flag OFF, so refinement is not entered and the block
+    # surfaces as requires_grant (see _clean_guard_matrix). The refinement's
+    # no_authoritative_context branch is covered by the T11 enforce corpus.
     assert payload["blocked_reason"] == "requires_grant"
     assert payload["mode"] == "enforce"
     assert payload["retryable"] is False
@@ -217,6 +232,10 @@ def test_missing_ctx_shadow_proceeds() -> None:
 def test_bound_service_ctx_enforce_blocks_requires_grant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The autouse fixture pins the canonical bootstrap flag OFF, so a bound
+    # service ctx under enforce deterministically blocks at the name level with
+    # requires_grant (refinement — which would need a bootstrapped registry +
+    # a published workspace — is not entered in this dispatcher-wiring suite).
     d, calls = _dispatcher()
     _enforce(monkeypatch, "runner_sdk", _MUTATING)
     res = asyncio.run(

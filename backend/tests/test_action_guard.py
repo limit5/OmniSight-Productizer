@@ -575,6 +575,9 @@ def test_action_guard_callers_are_declared() -> None:
         backend_root / "tests" / "test_action_guard_shadow.py",
         # G6b-2b exercises the guard's enforce-refinement contract.
         backend_root / "tests" / "test_action_guard_enforce_refine.py",
+        # T11 code_write false-allow corpus drives the full guard under
+        # runner_sdk:code_write=enforce (the enforce-flip evidence artifact).
+        backend_root / "tests" / "test_t11_code_write_enforce_corpus.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(r"\bguard_tool_dispatch\b")

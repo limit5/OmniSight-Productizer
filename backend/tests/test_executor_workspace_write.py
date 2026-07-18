@@ -864,6 +864,10 @@ def test_executor_module_is_dormant_and_has_no_gate_dependency() -> None:
         "executor_" + "workspace_write",
     )
     references: list[str] = []
+    # resume_loop.py (default-OFF, OMNISIGHT_U6_RESUME_LOOP_ENABLED) calls
+    # make_dispatch_executor to assemble the supervised loop (GAP-5c-loop-C);
+    # it is the sole production reference and keeps the executor dormant-by-gate.
+    allowed = {"resume_loop.py"}
     for path in (repo_root / "backend").rglob("*.py"):
         resolved = path.resolve()
         relative = resolved.relative_to(repo_root)
@@ -872,6 +876,8 @@ def test_executor_module_is_dormant_and_has_no_gate_dependency() -> None:
         if "tests" in relative.parts or ".venv" in relative.parts:
             continue
         if relative.parts[:3] == ("backend", "alembic", "versions"):
+            continue
+        if resolved.name in allowed:
             continue
         production_source = resolved.read_text(encoding="utf-8")
         if any(name in production_source for name in defining_names):

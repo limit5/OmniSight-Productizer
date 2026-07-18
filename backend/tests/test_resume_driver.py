@@ -257,14 +257,23 @@ async def test_busy_daemon_yields_and_is_bounded_by_predicate() -> None:
 
 def test_module_is_dormant_with_no_production_caller() -> None:
     root = pathlib.Path(__file__).resolve().parents[1]
+    # GAP-5c-loop-C wired the execution machinery into the default-OFF
+    # supervised loop. resume_loop.py (OMNISIGHT_U6_RESUME_LOOP_ENABLED,
+    # default false) is the sole real caller of drive_resume_jobs;
+    # expiry_sweeper.py only cross-references it in a docstring. Both keep the
+    # driver dormant-by-gate. Any OTHER production caller is a wiring smell.
+    allowed = {"resume_driver.py", "resume_loop.py", "expiry_sweeper.py"}
     offenders: list[str] = []
     for path in root.rglob("*.py"):
         parts = path.parts
         if "tests" in parts or "versions" in parts:
             continue
-        if path.name == "resume_driver.py":
+        if path.name in allowed:
             continue
         text = path.read_text(encoding="utf-8")
         if "drive_resume_jobs" in text or "resume_driver" in text:
             offenders.append(str(path))
-    assert offenders == [], f"resume_driver must have no production caller yet: {offenders}"
+    assert offenders == [], (
+        f"resume_driver reachable only via the default-OFF loop; "
+        f"unexpected caller: {offenders}"
+    )

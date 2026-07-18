@@ -293,6 +293,11 @@ async def test_default_deny_resume_loop_fails_without_calling_executor(
 def test_execution_gate_has_no_production_caller() -> None:
     backend_root = Path(__file__).resolve().parents[1]
     defining_module = backend_root / "agents" / "execution_gate.py"
+    # resume_loop.py (default-OFF, OMNISIGHT_U6_RESUME_LOOP_ENABLED) wires the
+    # gate's authorizer/mint/result_of into the supervised loop (GAP-5c-loop-C);
+    # workspace_root_resolver.py only cites it as a docstring precedent. Both
+    # keep the gate dormant-by-gate. Any OTHER caller is a wiring smell.
+    allowed = {"resume_loop.py", "workspace_root_resolver.py"}
     offenders: list[str] = []
 
     for py in backend_root.rglob("*.py"):
@@ -301,7 +306,12 @@ def test_execution_gate_has_no_production_caller() -> None:
             continue
         if rel.parts[0] == "tests" or rel.parts[:2] == ("alembic", "versions"):
             continue
+        if py.name in allowed:
+            continue
         if "execution_gate" in py.read_text(encoding="utf-8", errors="ignore"):
             offenders.append(str(rel))
 
-    assert offenders == [], f"execution_gate must be dormant: {offenders}"
+    assert offenders == [], (
+        f"execution_gate reachable only via the default-OFF loop; "
+        f"unexpected caller: {offenders}"
+    )

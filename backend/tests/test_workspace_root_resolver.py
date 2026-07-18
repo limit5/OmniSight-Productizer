@@ -212,13 +212,20 @@ def test_no_fd_leak_on_none_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: pat
 
 def test_module_is_dormant_with_no_production_caller() -> None:
     root = pathlib.Path(__file__).resolve().parents[1]
+    # resume_loop.py (default-OFF, OMNISIGHT_U6_RESUME_LOOP_ENABLED) imports
+    # resolve_root_fd to build the dispatch executor (GAP-5c-loop-C); it is the
+    # sole production caller and keeps the resolver dormant-by-gate.
+    allowed = {"workspace_root_resolver.py", "resume_loop.py"}
     offenders: list[str] = []
     for path in root.rglob("*.py"):
         parts = path.parts
         if "tests" in parts or "versions" in parts:
             continue
-        if path.name == "workspace_root_resolver.py":
+        if path.name in allowed:
             continue
         if "workspace_root_resolver" in path.read_text(encoding="utf-8"):
             offenders.append(str(path))
-    assert offenders == [], f"workspace_root_resolver must have no production caller yet: {offenders}"
+    assert offenders == [], (
+        f"workspace_root_resolver reachable only via the default-OFF loop; "
+        f"unexpected caller: {offenders}"
+    )
