@@ -461,6 +461,11 @@ async def lifespan(app: FastAPI):
     # serve cached values without per-request vendor calls.
     from backend import llm_balance_refresher as _lbr
     balance_task = asyncio.create_task(_lbr.run_refresh_loop())
+    # U6-0 GAP-6b: DB-derived U6 observability. Default-OFF (OMNISIGHT_U6_METRICS_ENABLED); the loop returns immediately
+    # when disabled (so this task is inert and never looks up the pool on a SQLite/no-DSN start). Read-only aggregation
+    # over the shared U6 tables -> gauges; it touches no governed producer and cannot perturb the governed path.
+    from backend.agents import u6_metrics_refresh as _u6m
+    u6_metrics_task = asyncio.create_task(_u6m.run_u6_metrics_refresh_loop())
     # MP.W16.2: subscription account expiry monitor. Reuses provider
     # adapter health checks and emits best-effort alerts when a CLI
     # subscription is inactive, expired, or inside the warning window.
@@ -557,6 +562,7 @@ async def lifespan(app: FastAPI):
     for t in (
         pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task,
         iq_task, ft_task, md_task, balance_task, subscription_monitor_task,
+        u6_metrics_task,
         cmek_revoke_task, drf_task, quota_task, drafts_gc_task,
         workspace_gc_task, host_metrics_task, host_ringbuf_task,
         delivery_task,

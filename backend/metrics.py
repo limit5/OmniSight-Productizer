@@ -1081,6 +1081,68 @@ if _AVAILABLE:
         registry=REGISTRY,
     )
 
+    # ── U6-0 GAP-6b: DB-derived observability ───────────────────
+    # Set by the read-only refresh loop (backend.agents.u6_metrics_refresh) from the shared U6 tables -- cross-process
+    # correct (a standalone sweeper/resume-loop's durable state IS reflected).  The *_count Gauges are point-in-time
+    # SNAPSHOTS: never rate() them; rate() only u6_metrics_refresh_total.
+    u6_challenge_count = Gauge(
+        "omnisight_u6_challenge_count",
+        "U6 challenges by state (DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_grant_count = Gauge(
+        "omnisight_u6_grant_count",
+        "U6 action grants by state (DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_resume_count = Gauge(
+        "omnisight_u6_resume_count",
+        "U6 resume jobs by state (DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_execution_results_count = Gauge(
+        "omnisight_u6_execution_results_count",
+        "U6 execution_results rows (append-only; DB-derived snapshot)",
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_execution_attempts_count = Gauge(
+        "omnisight_u6_execution_attempts_count",
+        "U6 execution_attempts rows (append-only; DB-derived snapshot)",
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_oldest_pending_challenge_age_seconds = Gauge(
+        "omnisight_u6_oldest_pending_challenge_age_seconds",
+        "Age of the oldest pending U6 challenge in seconds (0 when none; DB-derived)",
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_oldest_pending_grant_age_seconds = Gauge(
+        "omnisight_u6_oldest_pending_grant_age_seconds",
+        "Age of the oldest pending U6 grant in seconds (0 when none; DB-derived)",
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_metrics_last_success_timestamp_seconds = Gauge(
+        "omnisight_u6_metrics_last_success_timestamp_seconds",
+        "Unix time of the last fully-successful U6 metrics refresh (freshness signal)",
+        multiprocess_mode="livemostrecent",  # last successful refresh wins across workers
+        registry=REGISTRY,
+    )
+    u6_metrics_refresh_total = Counter(
+        "omnisight_u6_metrics_refresh_total",
+        "U6 metrics-refresh loop ticks by outcome (ok / error)",
+        labelnames=("outcome",),
+        registry=REGISTRY,
+    )
+
 else:
     # No-op stubs so callers don't have to guard every increment.
     class _NoOp:
@@ -1223,6 +1285,12 @@ else:
     action_guard_decision_total = _NoOp()  # type: ignore
     action_guard_fail_closed_total = _NoOp()  # type: ignore
     action_guard_shadow_classification_total = _NoOp()  # type: ignore
+    u6_challenge_count = u6_grant_count = u6_resume_count = _NoOp()  # type: ignore
+    u6_execution_results_count = u6_execution_attempts_count = _NoOp()  # type: ignore
+    u6_oldest_pending_challenge_age_seconds = _NoOp()  # type: ignore
+    u6_oldest_pending_grant_age_seconds = _NoOp()  # type: ignore
+    u6_metrics_last_success_timestamp_seconds = _NoOp()  # type: ignore
+    u6_metrics_refresh_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -1971,6 +2039,11 @@ def reset_for_tests() -> None:
     # OP-2603 — U6-0 T7-0 action-guard decision surface
     global action_guard_decision_total, action_guard_fail_closed_total
     global action_guard_shadow_classification_total
+    # U6-0 GAP-6b — DB-derived observability
+    global u6_challenge_count, u6_grant_count, u6_resume_count
+    global u6_execution_results_count, u6_execution_attempts_count
+    global u6_oldest_pending_challenge_age_seconds, u6_oldest_pending_grant_age_seconds
+    global u6_metrics_last_success_timestamp_seconds, u6_metrics_refresh_total
     memory_quarantine_depth = Gauge(
         "omnisight_memory_quarantine_depth",
         "Learned-item candidates sitting in quarantine awaiting eval",
@@ -2053,5 +2126,62 @@ def reset_for_tests() -> None:
         "G6.3 shadow canonical telemetry by adapter/coverage/refinement/"
         "would_verdict (telemetry-only; never authorizes)",
         labelnames=("adapter", "coverage", "refinement", "would_verdict"),
+        registry=REGISTRY,
+    )
+    u6_challenge_count = Gauge(
+        "omnisight_u6_challenge_count",
+        "U6 challenges by state (DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_grant_count = Gauge(
+        "omnisight_u6_grant_count",
+        "U6 action grants by state (DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_resume_count = Gauge(
+        "omnisight_u6_resume_count",
+        "U6 resume jobs by state (DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_execution_results_count = Gauge(
+        "omnisight_u6_execution_results_count",
+        "U6 execution_results rows (append-only; DB-derived snapshot)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_execution_attempts_count = Gauge(
+        "omnisight_u6_execution_attempts_count",
+        "U6 execution_attempts rows (append-only; DB-derived snapshot)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_oldest_pending_challenge_age_seconds = Gauge(
+        "omnisight_u6_oldest_pending_challenge_age_seconds",
+        "Age of the oldest pending U6 challenge in seconds (0 when none; DB-derived)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_oldest_pending_grant_age_seconds = Gauge(
+        "omnisight_u6_oldest_pending_grant_age_seconds",
+        "Age of the oldest pending U6 grant in seconds (0 when none; DB-derived)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_metrics_last_success_timestamp_seconds = Gauge(
+        "omnisight_u6_metrics_last_success_timestamp_seconds",
+        "Unix time of the last fully-successful U6 metrics refresh (freshness signal)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_metrics_refresh_total = Counter(
+        "omnisight_u6_metrics_refresh_total",
+        "U6 metrics-refresh loop ticks by outcome (ok / error)",
+        labelnames=("outcome",),
         registry=REGISTRY,
     )
