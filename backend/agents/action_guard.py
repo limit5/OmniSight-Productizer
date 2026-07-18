@@ -410,6 +410,49 @@ def _emit_shadow_classification(
     refinement = classify_refinement(resolve(tool_name), descriptor)
     would = classify_for_telemetry(ctx, descriptor).would_verdict
     _inc_shadow(adapter_namespace, "prepared", refinement, would)
+    _observe_auto_auth_rate(
+        adapter_namespace, tool_name, schema_version, ctx, coverage.prepared, descriptor
+    )
+
+
+def _observe_auto_auth_rate(
+    adapter_namespace, tool_name, schema_version, ctx, prepared, descriptor
+) -> None:
+    """SRC-M (observe-only, default OFF): LOG the would-auto-grant verdict +
+    reason for a code_write shadow op, to MEASURE the auto-grant rate before any
+    enforce flip. Authorizes NOTHING; own try/except so it never alters the guard
+    outcome or breaks the shadow telemetry."""
+    try:
+        from backend.agents import auto_auth_policy
+
+        if (
+            descriptor.family != "code_write"
+            or not auto_auth_policy.auto_auth_observe_enabled()
+        ):
+            return
+        from backend.agents.authoritative_context_resolver import (
+            resolve_authoritative_workspace,
+        )
+
+        auth_ws = resolve_authoritative_workspace(
+            ctx, adapter_namespace, tool_name, schema_version
+        )
+        wid, wroot = auth_ws if auth_ws is not None else ("", "")
+        would, reason = auto_auth_policy.observe_auto_auth(
+            execution_context=ctx,
+            prepared_action=prepared,
+            workspace_id=wid,
+            workspace_root=wroot,
+        )
+        logger.info(
+            "u6_autoauth_observe adapter=%s tool=%s would_grant=%s reason=%s",
+            adapter_namespace,
+            tool_name,
+            would,
+            reason,
+        )
+    except Exception:  # noqa: BLE001 — observe-only must never break shadow telemetry
+        pass
 
 
 def guard_tool_dispatch(

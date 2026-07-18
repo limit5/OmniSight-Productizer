@@ -22,7 +22,9 @@ from backend.agents.action_canonicalize import PreparedAction
 from backend.agents.auto_auth_policy import (
     AutoAuthVerdict,
     auto_auth_enabled,
+    auto_auth_observe_enabled,
     evaluate_auto_auth,
+    observe_auto_auth,
 )
 from backend.agents.execution_context import (
     SERVER_RUNNER_TRUSTED_PAIRS,
@@ -427,3 +429,79 @@ def test_trusted_source_literals_only_in_execution_context() -> None:
         f"(backend/ production + the runner scripts route through "
         f"for_server_runner); unexpected: {offenders}"
     )
+
+
+# ── SRC-M: observe-only auto-grant-rate diagnostic ───────────────────────
+def _observe(tmp_path, *, tool: str = "Write", target: str = "backend/pkg/mod.py", ctx=None):
+    wid, wroot = _workspace(tmp_path)
+    return observe_auto_auth(
+        execution_context=_ctx() if ctx is None else ctx,
+        prepared_action=_prepared(tool=tool, target=target),
+        workspace_id=wid,
+        workspace_root=wroot,
+    )
+
+
+def test_observe_flag_default_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OMNISIGHT_U6_AUTOAUTH_OBSERVE", raising=False)
+    assert auto_auth_observe_enabled() is False
+
+
+@pytest.mark.parametrize("val", ["1", "true", "On", "yes"])
+def test_observe_flag_on(monkeypatch: pytest.MonkeyPatch, val: str) -> None:
+    monkeypatch.setenv("OMNISIGHT_U6_AUTOAUTH_OBSERVE", val)
+    assert auto_auth_observe_enabled() is True
+
+
+def test_observe_inert_write_would_grant(tmp_path) -> None:
+    assert _observe(tmp_path, tool="Write", target="backend/x.py") == (
+        True,
+        "would_grant_sans_provenance",
+    )
+
+
+def test_observe_edit_is_tool_not_allowlisted(tmp_path) -> None:
+    # The decisive Edit-vs-str_replace datum: plain Edit is code_write but NOT
+    # on the auto-grant allowlist.
+    assert _observe(tmp_path, tool="Edit", target="backend/x.py") == (
+        False,
+        "tool_not_allowlisted",
+    )
+
+
+def test_observe_str_replace_would_grant(tmp_path) -> None:
+    assert _observe(tmp_path, tool="str_replace_based_edit_tool", target="backend/x.py") == (
+        True,
+        "would_grant_sans_provenance",
+    )
+
+
+@pytest.mark.parametrize("tool", ["git_push", "Bash", "read_file"])
+def test_observe_non_code_write_family(tmp_path, tool: str) -> None:
+    assert _observe(tmp_path, tool=tool)[1] == "not_code_write_family"
+
+
+@pytest.mark.parametrize("target", ["conftest.py", ".git/hooks/pre-commit", "pyproject.toml", ".gitlab-ci.yml"])
+def test_observe_denylisted_path(tmp_path, target: str) -> None:
+    assert _observe(tmp_path, tool="Write", target=target) == (False, "denylisted_path")
+
+
+def test_observe_non_server_principal(tmp_path) -> None:
+    ctx = for_human(
+        user=User(id="u1", email="u@x", name="U", role="operator"),
+        tenant_id=_TENANT, session_id="s", request_id="r", message_id="m",
+        authorization_source="chat",
+    )
+    assert _observe(tmp_path, ctx=ctx) == (False, "not_server_principal")
+
+
+def test_observe_escaping_target_not_workspace_bound(tmp_path) -> None:
+    assert _observe(tmp_path, target="../outside.py") == (False, "not_workspace_bound")
+
+
+def test_observe_never_raises_on_garbage() -> None:
+    would, reason = observe_auto_auth(
+        execution_context=None, prepared_action=object(),
+        workspace_id=None, workspace_root=None,
+    )
+    assert would is False and reason == "not_server_principal"

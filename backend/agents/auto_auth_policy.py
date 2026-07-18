@@ -44,6 +44,7 @@ from backend.agents.execution_context import (
 )
 
 _ENABLE_ENV = "OMNISIGHT_U6_AUTO_AUTH"
+_OBSERVE_ENV = "OMNISIGHT_U6_AUTOAUTH_OBSERVE"
 
 
 def auto_auth_enabled() -> bool:
@@ -51,6 +52,15 @@ def auto_auth_enabled() -> bool:
     predicate — keeps ``evaluate_auto_auth`` pure over its inputs). Same
     default-OFF posture as the other U6 execution-side gates."""
     return os.environ.get(_ENABLE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def auto_auth_observe_enabled() -> bool:
+    """SRC-M observe-only switch (default OFF). When on, the SHADOW classification
+    path evaluates the non-provenance auto-auth gates for code_write ops and LOGS
+    the would-grant verdict + reason — to MEASURE the real auto-grant rate (esp.
+    Edit-vs-str_replace and the denylist share) BEFORE any enforce flip. It
+    authorizes NOTHING and has no side effect beyond a log line."""
+    return os.environ.get(_OBSERVE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 class AutoAuthVerdict(Enum):
@@ -308,3 +318,44 @@ def evaluate_auto_auth(
         return AutoAuthVerdict.AUTO_GRANT
     except Exception:  # noqa: BLE001 — ANY doubt fails closed to a human challenge
         return AutoAuthVerdict.HUMAN_CHALLENGE
+
+
+def observe_auto_auth(
+    *,
+    execution_context: object,
+    prepared_action: object,
+    workspace_id: object,
+    workspace_root: object,
+) -> tuple[bool, str]:
+    """OBSERVE-ONLY diagnostic for the SRC-M auto-grant-rate measurement.
+
+    Runs the NON-provenance gates (2-6, 8) and returns
+    ``(would_auto_grant_sans_provenance, reason)``. ``True`` means every gate
+    EXCEPT the provenance gate (7) passes — the shadow classification path has no
+    sealed snapshot, so provenance is NOT evaluated here (measured separately).
+    The reason distinguishes ``tool_not_allowlisted`` (the Edit question) from
+    ``denylisted_path`` (CI/build/config) from ``not_workspace_bound`` etc., so
+    the measurement shows WHY the non-auto-granted share is blocked. Pure,
+    fail-closed; authorizes NOTHING (never returns an AutoAuthVerdict).
+    """
+    try:
+        if not _gate_server_principal(execution_context):
+            return (False, "not_server_principal")
+        desc = getattr(prepared_action, "operation_descriptor", None)
+        if (
+            getattr(desc, "effect", None) != "mutating"
+            or getattr(desc, "family", None) != _AUTO_GRANTABLE_FAMILY
+        ):
+            return (False, "not_code_write_family")
+        if getattr(desc, "tool_name", None) not in _AUTO_GRANTABLE_TOOLS:
+            return (False, "tool_not_allowlisted")
+        rel = _gate_workspace_bound(
+            execution_context, prepared_action, workspace_id, workspace_root
+        )
+        if rel is None:
+            return (False, "not_workspace_bound")
+        if not _gate_inert_path(rel):
+            return (False, "denylisted_path")
+        return (True, "would_grant_sans_provenance")
+    except Exception:  # noqa: BLE001 — observe-only; never raise into the guard
+        return (False, "observe_error")
