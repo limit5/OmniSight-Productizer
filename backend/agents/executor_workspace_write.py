@@ -24,8 +24,8 @@ from backend.agents.execution_contract import ExecOutcome
 from backend.agents.execution_contract import StoredAction
 from backend.agents.execution_contract import Unknown
 
-# workspace_id -> an OPEN O_DIRECTORY fd for the workspace root (a true capability), or None.  Injected; the executor
-# never closes it (the caller owns it) and never re-resolves the root path.  Default is fail-closed.
+# workspace_id -> a FRESH OPEN O_DIRECTORY fd for the workspace root (a true capability), or None.  Injected; the
+# resolver opens a new fd per call and the executor OWNS + closes it (via my_fds) exactly once.  Default fail-closed.
 WorkspaceRootFdResolver = Callable[[str], "int | None"]
 
 _WRITE_KEY = ("runner_sdk", "Write", "v1")      # the ONLY key routed to the real writer; all else -> inline noop
@@ -130,14 +130,19 @@ async def _write(stored: StoredAction, resolve_root_fd: WorkspaceRootFdResolver)
         return _dna("invalid_args:relative_path")
     if not isinstance(content, str):
         return _dna("invalid_args:content")
+    try:
+        data = content.encode("utf-8")
+    except UnicodeEncodeError:
+        return _dna("invalid_args:content")     # a lone-surrogate / unencodable content is provably un-writable
     parts = _components(relative_path)
     if parts is None:
         return _dna("unsafe_relative_path")
+    *dirs, basename = parts
+    # Acquire the resolver fd LAST -- after all potentially-raising prep -- so nothing can raise between acquisition and
+    # the my_fds ownership below (which closes it).  Otherwise a raising content.encode() would leak the root fd.
     root_fd = resolve_root_fd(workspace_id)
     if not isinstance(root_fd, int) or root_fd < 0:
         return _dna("no_workspace_root")
-    data = content.encode("utf-8")
-    *dirs, basename = parts
 
     # We OWN the resolver's root fd: the resolver opens a fresh fd per call and transfers it here, and nothing else
     # closes it.  Tracking it in my_fds is what prevents a per-execution directory-fd leak (EMFILE) once a real resolver

@@ -778,6 +778,23 @@ async def test_repeated_executions_do_not_leak_the_resolver_root_fd(
 
 
 @pytest.mark.asyncio
+async def test_unencodable_surrogate_content_is_dna_without_leaking_the_root_fd(
+    tmp_path: pathlib.Path,
+) -> None:
+    # Regression: a lone-surrogate content ("\ud800") raises UnicodeEncodeError. The encode now runs BEFORE the resolver
+    # fd is acquired, so it returns DNA and no fd is opened -> no leak (previously the fd was opened then leaked).
+    def resolve_root_fd(workspace_id: str) -> int:
+        return os.open(str(tmp_path), os.O_RDONLY | os.O_DIRECTORY)
+
+    executor = workspace_write.make_workspace_write_executor(resolve_root_fd)
+    before = len(os.listdir("/proc/self/fd"))
+    for _ in range(32):
+        outcome = await executor(_stored(relative_path="surrogate.txt", content="\ud800"))
+        _assert_dna(outcome, "invalid_args:content")
+    assert len(os.listdir("/proc/self/fd")) == before
+
+
+@pytest.mark.asyncio
 async def test_dispatch_routes_only_runner_sdk_write_v1_and_noops_everything_else(
     tmp_path: pathlib.Path,
 ) -> None:
