@@ -1,19 +1,18 @@
 # Phase U6 — Sora 3-Tier Persistent Memory (design **v2**, post-audit fold)
 
 - **Date**: 2026-07-11
-- **Status**: DRAFT-v2 (RE-AUDITED → **NOT frozen; v3 required**). v1 got a 3-way audit (codex NO-GO +
-  safety/correctness GO-WITH-CHANGES). v2 folded all of it + settled §D1 (crypto-shred) / §D2 (defer L2).
-  The v2 RE-AUDIT (codex + safety-lens) came back **BOTH NO-GO**, converging on 4 NEW-mechanism blockers —
-  see `audits/2026-07-11-phase-u6-v2-reaudit.md`. Verdict: v2 is the right architecture but writes its
-  boundaries as deferred PROMISES, not frozen contracts. **v3 must** (RB1) replace the free-text fact
-  triple with a CLOSED per-key attribute registry (authority non-representable, not "non-behavioral");
-  (RB2) freeze an envelope-encryption + `ACTIVE→ERASING→ERASED` state machine covering BOTH L2+L3 and every
-  plaintext sink (snapshot rendered_bundle, loader cache, eval prompt, source hashes, WAL/replica/provider);
-  (RB3) add a `memory_safety` eval_kind + per-user eval/approval/publication adapter + an authorization-
-  invariance negative control run through the real action guard; (RB4) freeze a fail-closed action-capability
-  guard + run-state provenance and CHOOSE the `save_solution` remediation (a LIVE default-ON prod loop
-  today). Plus: prohibit L2→L3 in v1, numeric §6 thresholds, and reorder §8 so containment + action-guard
-  precede any new memory surface. Strategic fork pending with the user (full-march vs. bank-containment).
+- **Status**: **FROZEN v3 (2026-07-19)** — freeze fold in §11. v1 → 3-way audit; v2 folded it + settled
+  §D1 (crypto-shred) / §D2 (defer L2); the v2 re-audit (both NO-GO) found the architecture RIGHT but its
+  boundaries written as deferred PROMISES (RB1-RB4). The **2026-07-19 freeze-gate re-audit** (run against the
+  now-BUILT U6-0 kernel) returned **architecturally FREEZE-READY**: every structural claim grounds in code,
+  all 6 original BLOCKERs stay closed, and the deepest invariants have real substrate — the INV-3 provenance
+  seam (`guard_tool_dispatch(turn_provenance)` → `audit_ids` → `authorize_action`) exists today, the
+  action-influence negative control is EXECUTABLE against the live deterministic guard, the eval gate keys on
+  `decision` (not `eval_kind`) so a `memory_safety` suite needs NO fork, crypto-shred rides on shipped
+  KMS/envelope infra, and the RLS-absence claim (0021 has tenant cols but no policies) is verified. **Freeze
+  resolution (§11)**: strategic fork = **full-march** (user, 2026-07-19); RB1-RB4 downgraded from re-open
+  blockers to the per-increment DoDs of the increments that build them; + two guard-rails. Build per §8, each
+  increment design→audit→build→merge DORMANT (like the kernel).
 - **Supersedes**: `2026-07-11-phase-u6-sora-3tier-persistent-memory-design.md` (v1 — kept as the audited
   artifact; do not build from it).
 - **Reads-with**: `2026-07-10-phase-u4-a0-contract-freeze.md`, the user's
@@ -282,3 +281,43 @@ Settle §9 → one re-audit of THIS v2 (codex pass, verify no BLOCKER re-opened)
 decompose per §8 → per-increment blind-test → file → review → +2. The audit did its job: it caught a
 structural eval-gate collision, a legal erasure conflict, and a capability hole that v1 would have shipped.
 Trust the process.
+
+---
+
+## 11. Freeze fold (v3 — 2026-07-19, post freeze-gate re-audit)
+The freeze-gate re-audit (against the now-built U6-0 kernel) returned **architecture FREEZE-READY**. This
+stamps the freeze by resolving the v2 header's open items — each RBn is DOWNGRADED from a re-open blocker to
+the DoD of the increment that builds it (same discipline as the kernel: freeze the contract, tighten the
+specifics per-increment with its own audit).
+- **Strategic fork → FULL-MARCH** (user, 2026-07-19: "implement all 3 legs fully"): build the L2/L3 memory
+  feature, not bank-containment-only. The kernel already provides the capability boundary (memory-can't-
+  authorize); the legs build the feature on top of it.
+- **RB1 (closed attribute registry) → U6-1 DoD**: U6-1 freezes a CLOSED predicate enum + per-`fact_type`
+  value-type lattice + the EXACT rendered-byte grammar; the write path may NOT extend the enum. "Authority
+  non-representable" is guaranteed by the closed registry + the §2.A action guard (a rendered string can
+  never become policy) — NOT by the triage classifier.
+- **RB2 (envelope state machine + every sink) → U6-0b DoD**: U6-0b freezes the per-user KEK wrap topology +
+  an `ACTIVE→ERASING→ERASED` state machine; the unrecoverability negative test covers EVERY plaintext sink —
+  rows, snapshot `rendered_bundle`, loader cache, eval fixtures, `source_span`/message-hash provenance,
+  WAL/replica/provider. (L3 is NOT the U4 append-only ledger.) Reuses the shipped `backend/security/` KMS +
+  per-tenant envelope infra, re-keyed per-user.
+- **RB3 (memory-safety eval adapter + invariance control) → U6-5 DoD**: add a `memory_safety` eval_kind
+  (bounded CHECK extension of `memory_eval_runs`) + a per-user eval/approval/publication adapter; the
+  action-influence negative control asserts a scripted decision through the REAL guard
+  (`guard_tool_dispatch`/`authorize_action`) is byte-identical WITH vs. WITHOUT the candidate fact injected —
+  authored in U6-5, validated against U6-7's guard (not a stub).
+- **RB4 (fail-closed guard + run-state) → U6-7 DoD**: U6-7 (a) wires the memory source-kinds (L2/L3/episodic)
+  into the authority-downgrade set (INV-2 — today `_HIGH_INJECTION_SOURCES={A2A_RESULT,MCP_RESULT}` only),
+  and (b) adds a NET-NEW run-state field distinguishing request-local intent from a memory-sourced standing
+  policy (INV-4 — there is NO existing field to lean on; this is new code, not a wiring-up). U6-7 is the
+  load-bearing safety increment.
+- **Guard-rail**: U6-6 (publish/revoke UX) ships with `OMNISIGHT_SORA_L3_READ` **OFF**; **U6-7 is the ONLY
+  increment that turns memory injection on.** Nothing reaches the prompt before the guard exists.
+- **save_solution remediation (RB4)**: the WRITE tool is already quarantined out of the model loadout
+  (`EPISODIC_TOOLS=[search_past_solutions]`). U6-0 documents the residual read path
+  (`search_past_solutions` → global tenant-less `episodic_memory`) as the existing-surface to route through
+  the governed quarantine or explicitly scope (per §2.A) — no longer a live default-ON model-callable write.
+
+Highest-risk increments (extra audit attention during build): **U6-7** (guard + INV-4 run-state), **U6-1**
+(closed registry — a later "just add one predicate" is a boundary breach), **U6-0b/U6-4** (crypto-shred: every
+sink + true destroy-key). FROZEN — build U6-0 first.
