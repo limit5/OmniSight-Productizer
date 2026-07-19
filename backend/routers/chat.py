@@ -41,6 +41,10 @@ from backend.agents.provenance import (
     provenance_scope,
     record_content,
 )
+from backend.agents.u6_request_intent import (
+    declare_for_human_turn_or_none,
+    request_intent_scope,
+)
 from backend.db_pool import get_conn
 from backend.events import emit_chat_message, emit_pipeline_phase, emit_session_titled
 from backend.models import (
@@ -567,10 +571,15 @@ async def chat(
         message_id=user_message.id,
         authorization_source="chat",
     )
-    reply = await _run_pipeline(
-        body.message, prior_messages=prior, model_name=body.model,
-        execution_context=exec_ctx,
-    )
+    # U6-7 (INV-4): a live human turn is the ONLY channel that declares
+    # request-local intent; the run-state is bound to THIS request_id and
+    # read observationally by the action guard. Total helper — a declare
+    # fault yields an intent-less (fail-closed) scope, never a broken turn.
+    with request_intent_scope(declare_for_human_turn_or_none(exec_ctx)):
+        reply = await _run_pipeline(
+            body.message, prior_messages=prior, model_name=body.model,
+            execution_context=exec_ctx,
+        )
     await _persist_and_emit(conn, reply, user_id=user.id, session_id=session_id)
     return ChatResponse(message=reply)
 
@@ -622,10 +631,12 @@ async def chat_stream(
             message_id=user_msg.id,
             authorization_source="chat",
         )
-        reply = await _run_pipeline(
-            body.message, prior_messages=prior, model_name=body.model,
-            execution_context=exec_ctx,
-        )
+        # U6-7 (INV-4): same request-local-intent scope as the /message path.
+        with request_intent_scope(declare_for_human_turn_or_none(exec_ctx)):
+            reply = await _run_pipeline(
+                body.message, prior_messages=prior, model_name=body.model,
+                execution_context=exec_ctx,
+            )
 
     await _persist_and_emit(conn, user_msg, user_id=user.id, session_id=session_id)
     await _persist_and_emit(conn, reply, user_id=user.id, session_id=session_id)

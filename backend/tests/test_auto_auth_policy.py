@@ -323,19 +323,32 @@ def test_partial_snapshot_challenges(tmp_path) -> None:
     assert _eval(tmp_path, snapshot=_snapshot(completeness="partial")) is AutoAuthVerdict.HUMAN_CHALLENGE
 
 
-@pytest.mark.parametrize("src", [prov.A2A_RESULT, prov.MCP_RESULT])
+# U6-7 (INV-2, frozen §11 RB4a): the downgrade set = external high-injection
+# sources (A2A/MCP) + EVERY persistent-memory source-kind — a memory-influenced
+# turn is never silently auto-granted.
+@pytest.mark.parametrize(
+    "src",
+    [
+        prov.A2A_RESULT, prov.MCP_RESULT,
+        prov.EPISODIC, prov.CHAT_HISTORY, prov.RAG_DOC, prov.RUNNER_MEMORY_FILE,
+    ],
+)
 def test_high_injection_source_challenges(tmp_path, src: str) -> None:
     assert _eval(tmp_path, snapshot=_snapshot(records=(_rec(src),))) is AutoAuthVerdict.HUMAN_CHALLENGE
 
 
 def test_high_injection_source_among_permitted_still_challenges(tmp_path) -> None:
+    # READ_FILE is permitted; MCP (external) and EPISODIC (memory, since U6-7)
+    # each independently force the challenge.
     snap = _snapshot(records=(_rec(prov.READ_FILE), _rec(prov.MCP_RESULT), _rec(prov.EPISODIC)))
     assert _eval(tmp_path, snapshot=snap) is AutoAuthVerdict.HUMAN_CHALLENGE
 
 
 @pytest.mark.parametrize(
     "src",
-    [prov.READ_FILE, prov.EPISODIC, prov.RAG_DOC, prov.TOOL_RESULT, prov.CHAT_HISTORY, prov.RUNNER_MEMORY_FILE, prov.STALE_REFRESH],
+    # Post-U6-7 the permitted remainder is the runner's own same-turn working
+    # set only (not a persistent or external injection channel).
+    [prov.READ_FILE, prov.TOOL_RESULT, prov.STALE_REFRESH],
 )
 def test_permitted_source_still_auto_grants(tmp_path, src: str) -> None:
     assert _eval(tmp_path, snapshot=_snapshot(records=(_rec(src),))) is AutoAuthVerdict.AUTO_GRANT

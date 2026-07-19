@@ -584,3 +584,85 @@ def test_a2a_none_seal_invokes_normally(monkeypatch):
 
     assert reg.invocations
     assert update["tool_results"][0].success
+
+
+# ── U6-7 (INV-4): GuardOutcome.request_local_intent — observational only ──
+def test_guard_outcome_intent_false_without_declared_scope():
+    """No declared run-state ⇒ False on the outcome — and the verdict/proceed
+    are exactly what they would be anyway (observational field)."""
+    out = action_guard.guard_tool_dispatch(
+        adapter_namespace="chat", tool_name="create_task", raw_args={},
+        execution_context=_ctx_human(),
+    )
+    assert out.request_local_intent is False
+    assert out.proceed is True  # default all-shadow matrix
+
+
+def test_guard_outcome_intent_true_only_for_the_declaring_request():
+    from backend.agents import u6_request_intent as ri
+
+    ctx = _ctx_human()
+    with ri.request_intent_scope(ri.declare_request_local_intent(ctx)):
+        same = action_guard.guard_tool_dispatch(
+            adapter_namespace="chat", tool_name="create_task", raw_args={},
+            execution_context=ctx,
+        )
+        other = ec.for_human(
+            user=User(id="u1", email="u@x", name="U", role="operator"),
+            tenant_id="t-default", session_id="s1",
+            request_id="r2-other", message_id="m1", authorization_source="chat",
+        )
+        cross = action_guard.guard_tool_dispatch(
+            adapter_namespace="chat", tool_name="create_task", raw_args={},
+            execution_context=other,
+        )
+    assert same.request_local_intent is True
+    assert cross.request_local_intent is False  # request-LOCAL, never standing
+
+
+def test_guard_outcome_intent_never_moves_the_verdict(monkeypatch):
+    """With vs without intent, the verdict/proceed/blocked_reason are
+    byte-identical — INV-4's field distinguishes, it does not authorize."""
+    from backend.agents import u6_request_intent as ri
+
+    _enforce(monkeypatch, "chat", "create_task")
+    ctx = _ctx_human()
+    without = action_guard.guard_tool_dispatch(
+        adapter_namespace="chat", tool_name="create_task", raw_args={},
+        execution_context=ctx,
+    )
+    with ri.request_intent_scope(ri.declare_request_local_intent(ctx)):
+        with_intent = action_guard.guard_tool_dispatch(
+            adapter_namespace="chat", tool_name="create_task", raw_args={},
+            execution_context=ctx,
+        )
+    assert (without.proceed, without.blocked_reason) == (
+        with_intent.proceed, with_intent.blocked_reason,
+    )
+    assert without.decision.verdict == with_intent.decision.verdict
+    assert without.request_local_intent is False
+    assert with_intent.request_local_intent is True
+
+
+def test_guard_outcome_intent_false_for_unbound_and_error_paths(monkeypatch):
+    from backend.agents import u6_request_intent as ri
+
+    ctx = _ctx_human()
+    with ri.request_intent_scope(ri.declare_request_local_intent(ctx)):
+        # unbound principal (ctx=None) can never satisfy intent
+        unbound = action_guard.guard_tool_dispatch(
+            adapter_namespace="chat", tool_name="create_task", raw_args={},
+            execution_context=None,
+        )
+        # stage-1 raise ⇒ failsafe/error outcome keeps the fail-closed default
+        monkeypatch.setattr(
+            action_guard, "authorize_action",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("kernel boom")),
+        )
+        errored = action_guard.guard_tool_dispatch(
+            adapter_namespace="chat", tool_name="create_task", raw_args={},
+            execution_context=ctx,
+        )
+    assert unbound.request_local_intent is False
+    assert errored.request_local_intent is False
+    assert errored.error_reason is not None

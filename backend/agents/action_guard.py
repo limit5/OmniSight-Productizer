@@ -22,7 +22,7 @@ import json
 import logging
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from backend import metrics
@@ -169,6 +169,13 @@ class GuardOutcome:
     challenge_prepared: "PreparedAction | None" = None
     adapter_namespace: str = ""
     schema_version: str = ""
+    # U6-7 (INV-4, frozen §11 RB4b): does the ACTIVE run-state prove the
+    # dispatch principal's request-local intent (the human asked THIS
+    # request)? OBSERVATIONAL in U6-7 — never moves proceed/verdict; a
+    # memory-sourced "standing policy" can never make it True (the intent
+    # run-state is only constructible from a bound human context and is
+    # request_id-bound). False on every error/failsafe path (fail-closed).
+    request_local_intent: bool = False
 
 
 def effective_execution_args(outcome: "GuardOutcome", live_args):
@@ -213,6 +220,23 @@ def _bounded_blocked_reason(kernel_reason: str) -> str:
     # loudly as guard_error rather than mislabeling the block.
     logger.warning("action_guard: unmapped kernel reason %r", kernel_reason)
     return "guard_error"
+
+
+def _request_local_intent_state(ctx) -> bool:
+    """U6-7 (INV-4): read the request-local-intent run-state for *ctx*.
+
+    TOTAL (False on any doubt/import failure) and PURELY observational —
+    callers annotate the outcome with it after the verdict is computed, so
+    it can never move proceed/verdict in this increment. The run-state is
+    only constructible from a bound HUMAN context and is request_id-bound,
+    so memory/model content can never flip it True (test-pinned in
+    ``test_u6_memory_capability_contract.py``)."""
+    try:
+        from backend.agents.u6_request_intent import current_intent_satisfied
+
+        return current_intent_satisfied(ctx)
+    except Exception:  # noqa: BLE001 — absence of intent is the fail-closed default
+        return False
 
 
 def _freeze_authorized_args(raw_args):
@@ -559,6 +583,17 @@ def guard_tool_dispatch(
                     adapter_namespace=adapter_namespace,
                     schema_version=schema_version,
                 )
+
+        # U6-7 (INV-4): annotate with the request-local-intent run-state —
+        # computed AFTER the verdict/proceed so it can never influence them;
+        # isolated so annotation can never alter an already-computed outcome.
+        try:
+            outcome = replace(
+                outcome,
+                request_local_intent=_request_local_intent_state(ctx),
+            )
+        except Exception:  # noqa: BLE001 — keep the computed outcome as-is
+            pass
     except Exception as exc:  # noqa: BLE001 — guard must never raise
         try:
             try:

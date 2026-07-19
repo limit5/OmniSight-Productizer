@@ -147,15 +147,32 @@ def _norm_component(component: str) -> str:
     c = c.rstrip(". ")
     return c.casefold()
 
-# ── Gate 7: highest-injection-authority sources. Their PRESENCE in the sealed
-# turn provenance forces a human challenge even for a contained write (external
-# agent / external tool content — the least-controlled injection surface). This
-# gate can ONLY narrow (never grants); it is a risk-reducer, not a proof. Other
-# source-kinds (episodic/rag/read_file/tool_result/chat/runner_memory) are
-# PERMITTED — their poison→executable-target vector is closed by gate 6, and
-# their poison→inert-file vector is blast-radius contained; forcing a challenge
-# on them would challenge every real turn and kill the feature. ──
-_HIGH_INJECTION_SOURCES = frozenset({_prov.A2A_RESULT, _prov.MCP_RESULT})
+# ── Gate 7: authority-downgrade sources. Their PRESENCE in the sealed turn
+# provenance forces a human challenge even for a contained write. This gate can
+# ONLY narrow (never grants); it is a risk-reducer, not a proof. Two classes:
+#
+#   1. External high-injection surfaces (A2A / MCP results) — the
+#      least-controlled content, downgraded since AA-1.
+#   2. PERSISTENT-MEMORY source-kinds (episodic / chat-history / rag /
+#      runner-memory-file — the L2/L3/episodic injection classes). U6-7 wired
+#      these per the frozen design §11 RB4a / INV-2: a memory-influenced turn
+#      can NEVER be silently auto-granted — memory must not (even indirectly)
+#      raise the automation level of a side effect. This SUPERSEDES the AA-1
+#      stance that permitted them for grant-rate reasons; the tradeoff is now
+#      an ACTIVATION-phase question (runner turns that carry episodic/rag
+#      prefetch provenance will fall to the human-challenge lane — the SRC-M
+#      observe data + the enable checklist own re-widening, which would be a
+#      reviewed INV-2 exception, not a default).
+#
+# Still PERMITTED: read_file / tool_result / stale_refresh — the runner's own
+# same-turn working set, not a persistent or external injection channel; their
+# poison→executable-target vector is closed by gate 6. ──
+_MEMORY_SOURCE_KINDS = frozenset(
+    {_prov.EPISODIC, _prov.CHAT_HISTORY, _prov.RAG_DOC, _prov.RUNNER_MEMORY_FILE}
+)
+_HIGH_INJECTION_SOURCES = (
+    frozenset({_prov.A2A_RESULT, _prov.MCP_RESULT}) | _MEMORY_SOURCE_KINDS
+)
 
 _HEX = frozenset("0123456789abcdef")
 

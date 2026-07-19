@@ -2104,6 +2104,35 @@ async def _run_tool_rounds(
     return resp
 
 
+async def _append_l3_user_memory(persona: str, execution_context) -> str:
+    """U6-7 (frozen §11 RB4a): append the scoped user's L3 memory block to the
+    conversation system prompt, BELOW every security/guideline section (lowest
+    authority — the loader fences it as inert data under a nonce datamark).
+
+    Gated on ``OMNISIGHT_SORA_L3_READ`` (default OFF ⇒ *persona* is returned
+    unchanged, byte-identical prompt). TOTAL: the loader never raises and this
+    wrapper double-guards (a memory-layer fault must never break the chat
+    turn); it degrades to no-injection, which is the fail-closed direction.
+    The loader records INV-3 provenance for every injected fact itself."""
+    try:
+        from backend.agents.u6_l3_reader import load_l3_prompt_block
+
+        l3 = await load_l3_prompt_block(execution_context)
+        if l3.status == "loaded" and l3.block:
+            return f"{persona}\n\n{l3.block}"
+    except Exception as exc:  # noqa: BLE001 — memory layer must never break chat
+        # Last line of defense: must be structurally raise-free (a hostile
+        # __repr__ could raise), so log only the exception TYPE name and
+        # shield the log call itself.
+        try:
+            logger.warning(
+                "u6_l3_read wrapper degraded error_type=%s", type(exc).__name__
+            )
+        except Exception:  # noqa: BLE001 — never break the chat turn
+            pass
+    return persona
+
+
 async def conversation_node(state: GraphState) -> dict:
     """Answer general questions without tool execution.
 
@@ -2354,6 +2383,11 @@ async def conversation_node(state: GraphState) -> dict:
         "Simplified. A variant-ambiguous greeting like 「你好」 still gets a "
         "Traditional-Chinese reply."
     )
+
+    # U6-7: per-user L3 memory as fenced DATA at the BOTTOM of the system
+    # prompt (below the security prelude AND the guidelines — lowest
+    # authority). Flag-gated OFF by default ⇒ byte-identical persona.
+    persona = await _append_l3_user_memory(persona, state.execution_context)
 
     sys_prompt = SystemMessage(content=INJECTION_GUARD_PRELUDE + "\n\n" + persona)
 
