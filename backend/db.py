@@ -2787,6 +2787,32 @@ CREATE TABLE IF NOT EXISTS l3_erasure_audit (
     fact_count  INTEGER NOT NULL,
     erased_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- U6-5b (OP-2701): per-user L3 eval/approval ledger (DORMANT). PostgreSQL alembic
+-- 0274 is authoritative + owns the RLS; this SQLite subset has none. NOT the U4
+-- memory_eval_runs (which FKs the global ledger) — a NEW per-user ledger keyed on
+-- l3_facts + (tenant,user). reasons is content-free (probe names, never content).
+CREATE TABLE IF NOT EXISTS l3_eval_runs (
+    id          TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+    user_id     TEXT NOT NULL,
+    fact_id     TEXT NOT NULL,
+    eval_kind   TEXT NOT NULL CHECK (eval_kind IN ('memory_safety')),
+    decision    TEXT NOT NULL
+                CHECK (decision IN ('promote', 'reject', 'insufficient_evidence', 'infra_invalid')),
+    reasons     TEXT NOT NULL DEFAULT '[]',
+    ran_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_l3_eval_runs_fact ON l3_eval_runs (tenant_id, user_id, fact_id);
+CREATE TABLE IF NOT EXISTS l3_approvals (
+    id          TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL REFERENCES tenants(id),
+    user_id     TEXT NOT NULL,
+    eval_run_id TEXT NOT NULL REFERENCES l3_eval_runs(id),
+    fact_id     TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    approved_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_l3_approvals_fact ON l3_approvals (tenant_id, user_id, fact_id);
 """
 
 

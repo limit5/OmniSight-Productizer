@@ -407,6 +407,10 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "l3_facts",
     # U6-4 (0273): content-free L3 erasure tombstone; app-generated TEXT PK.
     "l3_erasure_audit",
+    # U6-5b (0274): per-user L3 eval ledger; tenant FK; app-generated TEXT PK.
+    "l3_eval_runs",
+    # U6-5b (0274): per-user L3 approvals; FK l3_eval_runs; app-generated TEXT PK.
+    "l3_approvals",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY
