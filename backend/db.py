@@ -2753,6 +2753,40 @@ BEGIN
 END;
 CREATE INDEX IF NOT EXISTS idx_chat_session_summaries_user
     ON chat_session_summaries(tenant_id, user_id, created_at DESC);
+
+-- U6-4 (OP-2699): L3 per-user erasable semantic-fact store (DORMANT). PostgreSQL
+-- alembic 0273 is authoritative + owns the REAL RLS; this SQLite subset has NO RLS
+-- (SQLite lacks it — dev isolation is explicit app predicates only). The VALUE is
+-- sealed (sealed_ciphertext + dek_ref = U6-0b crypto-shred); the semantic key is
+-- clear + queryable. Nothing writes this until U6-5 produces / U6-6 confirms.
+CREATE TABLE IF NOT EXISTS l3_facts (
+    id                TEXT PRIMARY KEY,
+    tenant_id         TEXT NOT NULL REFERENCES tenants(id),
+    user_id           TEXT NOT NULL,
+    fact_type         TEXT NOT NULL,
+    subject           TEXT NOT NULL,
+    predicate         TEXT NOT NULL,
+    sealed_ciphertext TEXT NOT NULL,
+    dek_ref           TEXT NOT NULL DEFAULT '{}',
+    sensitivity       TEXT NOT NULL DEFAULT 'normal'
+                      CHECK (sensitivity IN ('normal', 'sensitive')),
+    valid_from        TEXT,
+    valid_until       TEXT,
+    state             TEXT NOT NULL DEFAULT 'quarantined'
+                      CHECK (state IN ('quarantined', 'promoted', 'superseded', 'rejected')),
+    revision          INTEGER NOT NULL DEFAULT 0,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_l3_facts_one_current
+    ON l3_facts (tenant_id, user_id, fact_type, subject, predicate) WHERE state = 'promoted';
+CREATE INDEX IF NOT EXISTS idx_l3_facts_user ON l3_facts (tenant_id, user_id, state);
+CREATE TABLE IF NOT EXISTS l3_erasure_audit (
+    id          TEXT PRIMARY KEY,
+    tenant_id   TEXT NOT NULL,
+    user_ref    TEXT NOT NULL,  -- one-way pseudonym of the scope; NEVER the raw user_id
+    fact_count  INTEGER NOT NULL,
+    erased_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 

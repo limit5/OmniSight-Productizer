@@ -402,6 +402,11 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     # U6-2b (0272): L2 session summaries; tenant FK; app-generated TEXT PK
     # (``csum-*``) — not identity. Replays after tenants.
     "chat_session_summaries",
+    # U6-4 (0273): L3 per-user sealed facts; tenant FK; app-generated TEXT PK
+    # (``l3f-*``) — not identity. RLS is PG-only (SQLite subset has none).
+    "l3_facts",
+    # U6-4 (0273): content-free L3 erasure tombstone; app-generated TEXT PK.
+    "l3_erasure_audit",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY
