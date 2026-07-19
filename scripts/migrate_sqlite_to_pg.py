@@ -399,6 +399,9 @@ TABLES_IN_ORDER: tuple[str, ...] = (
     "resume_jobs",
     # U6-0 G4a-2 (0265): tenant FK; app-generated TEXT PK (not identity).
     "execution_results",
+    # U6-2b (0272): L2 session summaries; tenant FK; app-generated TEXT PK
+    # (``csum-*``) — not identity. Replays after tenants.
+    "chat_session_summaries",
 )
 
 #: Tables whose ``id`` is an INTEGER auto-id on SQLite and an IDENTITY

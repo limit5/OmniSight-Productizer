@@ -2722,6 +2722,37 @@ CREATE TABLE IF NOT EXISTS prod_deploy_audit (
 );
 CREATE INDEX IF NOT EXISTS idx_prod_deploy_audit_status_started
     ON prod_deploy_audit(status, started_at DESC);
+
+-- U6-2b (OP-2697): L2 episodic session-summary store (DORMANT — write-only, NOT
+-- injected in v1, §2.C). PostgreSQL alembic 0272 is authoritative; this SQLite
+-- subset keeps the exactly-once UNIQUE key + the write-once (never in-place
+-- mutate) trigger. summary_outcome/source_message_hashes are jsonb on PG, json
+-- TEXT on SQLite. Nothing writes this until the U6-8 scheduler wires the writer.
+CREATE TABLE IF NOT EXISTS chat_session_summaries (
+    id                     TEXT PRIMARY KEY,
+    tenant_id              TEXT NOT NULL REFERENCES tenants(id),
+    user_id                TEXT NOT NULL,
+    session_id             TEXT NOT NULL,
+    source_watermark       TEXT NOT NULL,
+    source_message_hashes  TEXT NOT NULL DEFAULT '[]',
+    summary_outcome        TEXT NOT NULL DEFAULT '{}',
+    token_count            INTEGER NOT NULL DEFAULT 0,
+    model_fingerprint      TEXT NOT NULL DEFAULT '',
+    classifier_version     INTEGER NOT NULL DEFAULT 0,
+    renderer_version       INTEGER NOT NULL DEFAULT 0,
+    revision               INTEGER NOT NULL DEFAULT 0,
+    session_end_reason     TEXT NOT NULL
+                           CHECK (session_end_reason IN ('inactivity_timeout', 'explicit_close')),
+    created_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (tenant_id, user_id, session_id, source_watermark)
+);
+CREATE TRIGGER IF NOT EXISTS trg_chat_session_summaries_no_update
+BEFORE UPDATE ON chat_session_summaries
+BEGIN
+    SELECT RAISE(ABORT, 'ChatSessionSummaryImmutable: write-once; late turns get a new revision');
+END;
+CREATE INDEX IF NOT EXISTS idx_chat_session_summaries_user
+    ON chat_session_summaries(tenant_id, user_id, created_at DESC);
 """
 
 
@@ -4504,6 +4535,133 @@ async def get_action_grant(
         tenant_id,
     )
     return dict(row) if row is not None else None
+
+
+# ── U6-2b: L2 chat_session_summaries store (DORMANT, PG-native) ───────────────
+_SUMMARY_COLS = (
+    "id, tenant_id, user_id, session_id, source_watermark, source_message_hashes, "
+    "summary_outcome, token_count, model_fingerprint, classifier_version, "
+    "renderer_version, revision, session_end_reason, created_at"
+)
+_SESSION_END_REASONS = ("inactivity_timeout", "explicit_close")
+
+
+async def insert_session_summary(
+    conn,
+    *,
+    summary_id: str,
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+    source_watermark: str,
+    source_message_hashes: list,
+    summary_outcome: dict,
+    token_count: int,
+    model_fingerprint: str,
+    classifier_version: int,
+    renderer_version: int,
+    revision: int,
+    session_end_reason: str,
+) -> bool:
+    """Insert one L2 session summary keyed by the exactly-once job key
+    ``(tenant_id, user_id, session_id, source_watermark)``. Returns True if
+    inserted, False if that key already exists (idempotent — a re-run of the same
+    watermark is a no-op). Never mutates an existing row (late turns take a new
+    watermark = a new revision)."""
+    if not (summary_id and tenant_id and user_id and session_id and source_watermark):
+        raise ValueError(
+            "summary_id, tenant_id, user_id, session_id, source_watermark must be non-empty"
+        )
+    if session_end_reason not in _SESSION_END_REASONS:
+        raise ValueError(f"invalid session_end_reason: {session_end_reason!r}")
+    row = await conn.fetchrow(
+        """INSERT INTO chat_session_summaries
+           (id, tenant_id, user_id, session_id, source_watermark,
+            source_message_hashes, summary_outcome, token_count, model_fingerprint,
+            classifier_version, renderer_version, revision, session_end_reason)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13)
+           ON CONFLICT (tenant_id, user_id, session_id, source_watermark) DO NOTHING
+           RETURNING id""",
+        summary_id,
+        tenant_id,
+        user_id,
+        session_id,
+        source_watermark,
+        json.dumps(source_message_hashes),
+        json.dumps(summary_outcome),
+        int(token_count),
+        model_fingerprint,
+        int(classifier_version),
+        int(renderer_version),
+        int(revision),
+        session_end_reason,
+    )
+    return row is not None
+
+
+async def get_session_summary(
+    conn,
+    *,
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+    source_watermark: str,
+) -> dict | None:
+    """Return one summary by its exactly-once key, tenant+user scoped; fail closed."""
+    if not (tenant_id and user_id):
+        raise ValueError("tenant_id and user_id must be non-empty")
+    row = await conn.fetchrow(
+        f"SELECT {_SUMMARY_COLS} FROM chat_session_summaries "
+        "WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3 AND source_watermark = $4",
+        tenant_id,
+        user_id,
+        session_id,
+        source_watermark,
+    )
+    return dict(row) if row is not None else None
+
+
+async def list_session_summaries(
+    conn,
+    *,
+    tenant_id: str,
+    user_id: str,
+    limit: int = 50,
+) -> list[dict]:
+    """List a user's summaries (newest first) — the UI 'what we did last time'
+    surface. Tenant+user scoped; never crosses users."""
+    if not (tenant_id and user_id):
+        raise ValueError("tenant_id and user_id must be non-empty")
+    rows = await conn.fetch(
+        f"SELECT {_SUMMARY_COLS} FROM chat_session_summaries "
+        "WHERE tenant_id = $1 AND user_id = $2 "
+        "ORDER BY created_at DESC, revision DESC LIMIT $3",
+        tenant_id,
+        user_id,
+        max(1, int(limit)),
+    )
+    return [dict(r) for r in rows]
+
+
+async def latest_revision_for_session(
+    conn,
+    *,
+    tenant_id: str,
+    user_id: str,
+    session_id: str,
+) -> int:
+    """The highest revision written for a session, or -1 if none — the writer
+    assigns ``latest + 1`` when a late turn produces a new watermark."""
+    if not (tenant_id and user_id and session_id):
+        raise ValueError("tenant_id, user_id, session_id must be non-empty")
+    row = await conn.fetchrow(
+        "SELECT COALESCE(MAX(revision), -1) AS r FROM chat_session_summaries "
+        "WHERE tenant_id = $1 AND user_id = $2 AND session_id = $3",
+        tenant_id,
+        user_id,
+        session_id,
+    )
+    return int(row["r"]) if row is not None else -1
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
