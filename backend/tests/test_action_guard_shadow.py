@@ -426,6 +426,11 @@ def test_shadow_helpers_have_closed_call_allowlist_and_forbidden_tokens() -> Non
         "_inc_shadow",
         "_shadow_payload_too_large",
         "_shadow_adapter_label",
+        # SRC-M (OP-2690): observe-only auto-auth rate hook wired into the
+        # shadow stage — logs a would-grant verdict, authorizes nothing (its
+        # own body never touches the forbidden kernel/execution tokens; it
+        # merged without extending this closed list — GREEN-BASE-2 repair).
+        "_observe_auto_auth_rate",
         "labels",
         "inc",
         "items",

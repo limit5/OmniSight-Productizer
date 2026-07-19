@@ -1232,6 +1232,22 @@ def test_kernel_reachable_only_via_action_guard() -> None:
         # provenance content. Both legitimate references, not offenders.
         backend_root / "agents" / "provenance.py",
         backend_root / "tests" / "test_provenance.py",
+        # U6 leg-1 (GREEN-BASE-2 repair — these merged without extending this
+        # scan, lesson (a) recurrence). All three reference the kernel to PROVE
+        # invariants, never to gate a dispatch:
+        # - u6_memory_safety_eval.py (U6-5a, PRODUCTION): the RB3 negative
+        #   control — calls authorize_action WITH vs WITHOUT a candidate fact
+        #   injected and compares verdicts (a regression detector against
+        #   INV-1). It never uses a verdict to authorize/deny a real dispatch,
+        #   so it is not an adapter→kernel caller in the forbidden sense.
+        # - test_u6_memory_capability_contract.py (U6-0): pins INV-1..4 against
+        #   the real kernel — same category as test_provenance.py above.
+        # - test_u6_l3_producer.py (U6-5a): drives the producer pipeline whose
+        #   safety eval transitively names the kernel; the test asserts
+        #   promote/reject behavior, adding no new kernel entry point.
+        backend_root / "agents" / "u6_memory_safety_eval.py",
+        backend_root / "tests" / "test_u6_memory_capability_contract.py",
+        backend_root / "tests" / "test_u6_l3_producer.py",
         pathlib.Path(__file__).resolve(),
     }
     pattern = re.compile(
