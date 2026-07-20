@@ -32,13 +32,16 @@ Endpoints (all scoped to the authenticated user):
 from __future__ import annotations
 
 import logging
+import uuid
 
 import asyncpg
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from backend import auth as _au
 from backend.agents import execution_context as _ec
-from backend.agents.u6_fact_schema import render_fact
+from backend.agents.u6_fact_schema import FactType, Sensitivity, render_fact
+from backend.agents.u6_l3_producer import produce_quarantine_and_record
 from backend.agents.u6_l3_confirm import (
     L3ConfirmError,
     confirm_and_publish,
@@ -68,8 +71,6 @@ def _scope_and_ctx(user: _au.User) -> tuple[MemoryScope, _ec.ExecutionContext]:
     """Build BOTH the scope and the human ctx from the authenticated session
     ONLY — the client never supplies tenant/user identity. request_id is fresh
     per call; message_id is None (not a chat turn)."""
-    import uuid
-
     scope = MemoryScope(tenant_id=user.tenant_id, user_id=user.id)
     ctx = _ec.for_human(
         user=user,
@@ -80,6 +81,19 @@ def _scope_and_ctx(user: _au.User) -> tuple[MemoryScope, _ec.ExecutionContext]:
         authorization_source="memories_ui",
     )
     return scope, ctx
+
+
+class ProposeMemoryBody(BaseModel):
+    """A user-EXPLICIT candidate proposal. The user states their OWN
+    preference/profile/project fact; the MODEL is deliberately NOT in this
+    write path (no distiller in v1 — that keeps the poisoning surface a human
+    action). The body carries only DATA fields; identity is server-side and
+    ``source_span`` is server-set (never client text)."""
+
+    fact_type: str = Field(max_length=32)
+    predicate: str = Field(max_length=64)
+    value: str = Field(max_length=64)
+    declared_sensitivity: str = Field(default="normal", max_length=16)
 
 
 def _fact_view(sf: StoredFact) -> dict:
@@ -129,6 +143,47 @@ async def list_pending_memories(
             continue
         out.append({**_fact_view(sf), "eval_run_id": eval_run_id})
     return {"pending": out}
+
+
+@router.post("/propose")
+async def propose_memory(
+    body: ProposeMemoryBody,
+    user: _au.User = Depends(_au.require_operator),
+    conn: asyncpg.Connection = Depends(get_conn),
+) -> dict:
+    """Propose a candidate from the user's OWN explicit statement. Runs the
+    FULL producer gate (triage → closed-schema → memory-safety eval) and lands
+    QUARANTINED (never live) with its promote eval recorded — the user then
+    reviews it under /pending and confirms. A rejected candidate returns 422
+    with the gate reason; nothing is stored. The model is NOT in this path."""
+    scope, _ctx = _scope_and_ctx(user)
+    try:
+        fact_type = FactType(body.fact_type)
+        sensitivity = Sensitivity(body.declared_sensitivity)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"invalid enum: {exc}") from exc
+    # source_span is SERVER-SET (bounded grammar), never client free text.
+    source_span = f"memories_ui:{uuid.uuid4().hex[:16]}"
+    outcome, fact_id, _eval = await produce_quarantine_and_record(
+        conn, scope,
+        fact_type=fact_type,
+        subject="user",
+        predicate=body.predicate,
+        value=body.value,
+        source_span=source_span,
+        declared_sensitivity=sensitivity,
+    )
+    if not outcome.accepted or fact_id is None:
+        # A gate rejected it — 422 with the reason (triage/schema/safety). The
+        # reason is a bounded gate label, never echoed user content.
+        raise HTTPException(status_code=422, detail=f"rejected: {outcome.reason}")
+    logger.info("u6_memories propose tenant=%s fact=%s", scope.tenant_id, fact_id)
+    return {
+        "proposed": True,
+        "fact_id": fact_id,
+        "rendered": render_fact(outcome.fact),
+        "status": "quarantined",
+    }
 
 
 @router.post("/{fact_id}/confirm")

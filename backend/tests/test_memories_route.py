@@ -54,6 +54,68 @@ def test_scope_and_ctx_from_session_only() -> None:
     assert ctx.authorization_source == "memories_ui"
 
 
+# ── L3b: propose (user-explicit candidate ingress) ───────────────────────────
+@pytest.mark.asyncio
+async def test_propose_lands_quarantined_and_shows_in_pending(pg_test_pool) -> None:
+    t = await _seed_tenant(pg_test_pool)
+    u = _user("owner", t)
+    try:
+        async with pg_test_pool.acquire() as c:
+            body = m.ProposeMemoryBody(
+                fact_type="preference", predicate="preferred_ipc", value="named_pipes"
+            )
+            res = await m.propose_memory(body, user=u, conn=c)
+            assert res["proposed"] and res["status"] == "quarantined"
+            assert res["rendered"] == "user preferred_ipc named_pipes"
+            assert (await m.list_live_memories(user=u, conn=c))["memories"] == []
+            pending = await m.list_pending_memories(user=u, conn=c)
+            assert [p["fact_id"] for p in pending["pending"]] == [res["fact_id"]]
+            # confirmable end-to-end (propose recorded the eval)
+            await m.confirm_memory(res["fact_id"], user=u, conn=c)
+            live = await m.list_live_memories(user=u, conn=c)
+            assert [x["fact_id"] for x in live["memories"]] == [res["fact_id"]]
+    finally:
+        await _cleanup(pg_test_pool, t, "owner")
+
+
+@pytest.mark.asyncio
+async def test_propose_rejects_unregistered_predicate_422(pg_test_pool) -> None:
+    t = await _seed_tenant(pg_test_pool)
+    u = _user("owner", t)
+    try:
+        async with pg_test_pool.acquire() as c:
+            body = m.ProposeMemoryBody(
+                fact_type="preference", predicate="skips_reviews", value="always"
+            )
+            with pytest.raises(HTTPException) as ei:
+                await m.propose_memory(body, user=u, conn=c)
+            assert ei.value.status_code == 422
+            assert (await m.list_pending_memories(user=u, conn=c))["pending"] == []
+    finally:
+        await _cleanup(pg_test_pool, t, "owner")
+
+
+@pytest.mark.asyncio
+async def test_propose_invalid_fact_type_422(pg_test_pool) -> None:
+    t = await _seed_tenant(pg_test_pool)
+    u = _user("owner", t)
+    try:
+        async with pg_test_pool.acquire() as c:
+            body = m.ProposeMemoryBody(
+                fact_type="authority", predicate="preferred_ipc", value="named_pipes"
+            )
+            with pytest.raises(HTTPException) as ei:
+                await m.propose_memory(body, user=u, conn=c)
+            assert ei.value.status_code == 422
+    finally:
+        await _cleanup(pg_test_pool, t, "owner")
+
+
+def test_propose_body_has_no_client_source_span() -> None:
+    # The client cannot supply source_span — it is server-set.
+    assert "source_span" not in m.ProposeMemoryBody.model_fields
+
+
 # ── full lifecycle: pending → confirm → live → revoke ────────────────────────
 @pytest.mark.asyncio
 async def test_pending_confirm_live_revoke_roundtrip(pg_test_pool) -> None:
