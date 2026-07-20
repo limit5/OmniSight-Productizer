@@ -300,6 +300,19 @@ async def gerrit_webhook(
     if len(raw_body) > 1_048_576:
         return JSONResponse(status_code=413, content={"detail": "Payload too large"})
 
+    # GREEN-BASE-4: HMAC signature verification (was specced by the p0
+    # TestGerritWebhookSignatureVerifier tests but never wired into the
+    # handler — an unsigned/forged event could reach _on_change_merged /
+    # the agent-spawn path). Enforced ONLY when a webhook secret is
+    # configured (settings.gerrit_webhook_secret, from git_accounts); with
+    # no secret the endpoint stays open exactly as before (dev default).
+    # ⚠ ACTIVATION: a prod deployment that has the secret set will now
+    # REQUIRE Gerrit to send a valid X-Gerrit-Signature = hex HMAC-SHA256
+    # of the raw body — verify the Gerrit side signs before relying on it.
+    secret = settings.gerrit_webhook_secret
+    if secret and not _verify_gerrit_signature(request, raw_body, secret):
+        return JSONResponse(status_code=401, content={"detail": "Invalid signature"})
+
     try:
         body = json.loads(raw_body)
     except Exception:
@@ -323,6 +336,17 @@ async def gerrit_webhook(
         logger.debug("Ignoring Gerrit event: %s", event_type)
 
     return {"status": "ok", "event": event_type}
+
+
+def _verify_gerrit_signature(request: Request, raw_body: bytes, secret: str) -> bool:
+    """Constant-time HMAC-SHA256 check of the ``X-Gerrit-Signature`` header
+    against the raw body (bare lowercase hex — the exact primitive the tests'
+    ``_sign`` helper uses). A missing header fails closed."""
+    signature = request.headers.get("X-Gerrit-Signature", "")
+    if not signature:
+        return False
+    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(signature, expected)
 
 
 async def _on_patchset_created(
@@ -875,7 +899,7 @@ async def _daemon_apply_resolution_push(
     # Fetch the PS ref. NN = change_number's last 2 digits (Gerrit refs
     # layout); zero-pad for change numbers ending in a single digit.
     nn = str(change_number)[-2:].zfill(2)
-    ps_ref = f"refs/changes/{nn}/{change_number}/"
+    ps_ref = f"refs/changes/{nn}/{change_number}/"  # noqa: F841 — documents the ref layout; the fetch below uses the revision
     # We don't know the PS number from the daemon-side call site here
     # (the merger pipeline uses the revision instead), so fetch by the
     # exact revision via a wildcard refspec. Simpler: rely on the fact
@@ -1573,7 +1597,7 @@ async def _package_merged_artifacts(change_id: str, subject: str) -> None:
     import tarfile
     import uuid as _uuid
     from datetime import datetime
-    from pathlib import Path
+    from pathlib import Path  # noqa: F401 — used in the list[Path] local annotation below
 
     try:
         from backend.routers.artifacts import get_artifacts_root

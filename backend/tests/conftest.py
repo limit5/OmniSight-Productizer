@@ -546,6 +546,41 @@ def _reset_bootstrap_gate_between_tests():
     _boot._gate_cache_reset()
 
 
+@pytest.fixture(autouse=True)
+def _heal_event_bus_method_shadow_leak():
+    """GREEN-BASE-4 — neutralise the ``monkeypatch.setattr(events.bus, ...)``
+    instance-attribute leak on the ``events.bus`` singleton.
+
+    ``events.bus`` is a module-global ``EventBus()``. When a test does
+    ``monkeypatch.setattr(events.bus, "publish", fake)`` and ``publish`` is a
+    CLASS method (inherited, not an instance attr), monkeypatch's teardown
+    restores it by *setting the captured bound method back as an INSTANCE
+    attribute* rather than deleting it — leaving ``publish`` in the instance
+    ``__dict__``. That instance attr then SHADOWS the class method for every
+    later test, so a subsequent test that patches ``bus.__class__.publish``
+    (e.g. ``TestSseEmission``) never sees its patch fire. Three test files do
+    the instance-level setattr (circuit_breaker / notification_red_card /
+    send_notification), so any of them silently pollutes downstream tests.
+
+    Fix: after each test, drop any instance-``__dict__`` entry whose name is a
+    CALLABLE class attribute (the monkeypatch-leak signature) — this removes a
+    leaked method shadow while leaving legitimate instance state (subscribers,
+    queues, set in ``__init__``, whose names don't match class methods) intact.
+    """
+    yield
+    try:
+        from backend import events
+        b = events.bus
+        cls = type(b)
+        for name in list(vars(b)):
+            if callable(getattr(cls, name, None)):
+                # a leaked shadow of a class method — delete so the class
+                # attribute (or a later test's class-level patch) is visible.
+                del b.__dict__[name]
+    except Exception:  # noqa: BLE001 — a cleanup helper must never fail a test
+        pass
+
+
 # ─── Phase-3-Runtime-v2 SP-1.2 — PostgreSQL test fixtures ───────────────
 #
 # These fixtures back the asyncpg-native test suite we'll build out in
@@ -675,7 +710,7 @@ def pg_test_alembic_upgraded(pg_test_dsn: str) -> str:
 
 try:
     import pytest_asyncio
-    import asyncpg
+    import asyncpg  # noqa: F401 — availability probe (sets _ASYNCPG_AVAILABLE)
     _ASYNCPG_AVAILABLE = True
 except ImportError:  # pragma: no cover — asyncpg is required in prod
     _ASYNCPG_AVAILABLE = False

@@ -148,8 +148,17 @@ async def test_notify_publishes_red_card_on_bus(monkeypatch) -> None:
             captured.append(payload)
 
     def _close_task(coro):
+        # GREEN-BASE-4: notify() now dispatches via _create_dispatch_task,
+        # which calls .add_done_callback() on the create_task() result for
+        # metering. Return a Task-like stub (not None) so the metering wrapper
+        # doesn't AttributeError; still skip actually running the coro.
         coro.close()
-        return None
+
+        class _NoopTask:
+            def add_done_callback(self, _cb):
+                return None
+
+        return _NoopTask()
 
     monkeypatch.setattr("backend.db.insert_notification", _no_db)
     monkeypatch.setattr(bus, "publish", _capture)

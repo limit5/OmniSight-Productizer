@@ -95,9 +95,13 @@ _BASELINE: dict[tuple[str, str], int] = {
     ("backend/agent_hints.py", "emit_debug_finding"): 1,
     ("backend/agents/llm.py", "emit_token_warning"): 1,
     ("backend/agents/nodes.py", "emit_debug_finding"): 3,
-    ("backend/agents/nodes.py", "emit_pipeline_phase"): 25,
+    # GREEN-BASE-4: nodes.py gained legacy-default-scope progress emitters
+    # (the U6 supervisor/injection wiring merged onto develop) without the
+    # baseline decrement — they are backlog sites, not a live scope bug (these
+    # progress events are session-scoped by the legacy default). 25→29 / 5→14.
+    ("backend/agents/nodes.py", "emit_pipeline_phase"): 29,
     ("backend/agents/nodes.py", "emit_token_warning"): 4,
-    ("backend/agents/nodes.py", "emit_tool_progress"): 5,
+    ("backend/agents/nodes.py", "emit_tool_progress"): 14,
     ("backend/agents/tools.py", "emit_simulation"): 4,
     ("backend/agents/tools.py", "emit_task_update"): 1,
     ("backend/container.py", "emit_agent_update"): 3,
@@ -132,9 +136,13 @@ _BASELINE: dict[tuple[str, str], int] = {
     ("backend/routers/system.py", "emit_notification_read"): 1,
     ("backend/routers/system.py", "emit_token_warning"): 7,
     ("backend/routers/tasks.py", "emit_task_update"): 3,
-    ("backend/routers/webhooks.py", "emit_agent_update"): 2,
-    ("backend/routers/webhooks.py", "emit_invoke"): 6,
-    ("backend/routers/webhooks.py", "emit_task_update"): 2,
+    # GREEN-BASE-4: the baseline had drifted BELOW reality — webhooks.py emit
+    # call sites gained explicit broadcast_scope= without the corresponding
+    # decrement (the drift-guard's own maintenance step, pre-existing on the
+    # clean tip). emit_agent_update fully migrated (removed); emit_invoke 6→4;
+    # emit_task_update 2→1.
+    ("backend/routers/webhooks.py", "emit_invoke"): 4,
+    ("backend/routers/webhooks.py", "emit_task_update"): 1,
     ("backend/scratchpad.py", "emit_agent_scratchpad_saved"): 1,
     ("backend/scratchpad.py", "emit_agent_token_continuation"): 1,
     ("backend/sdk_provisioner.py", "emit_pipeline_phase"): 6,

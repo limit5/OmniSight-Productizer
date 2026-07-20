@@ -3387,7 +3387,14 @@ async def insert_notification(conn, data: dict) -> None:
         data.get("action_label"),
         1 if data.get("auto_resolved") else 0,
         data.get("severity"),
-        1 if data.get("is_red_card") else 0,
+        # GREEN-BASE-4: is_red_card is BOOLEAN on PG (migration 0191) but
+        # INTEGER on the SQLite dev schema (the CREATE TABLE above). asyncpg is
+        # strict — an int for a BOOLEAN param raises DataError, so EVERY
+        # notify() silently failed to persist on PG (notify() best-efforts the
+        # insert). A Python bool is correct for BOTH backends (bool ⊂ int on
+        # SQLite). ``read``/``auto_resolved`` stay int — they are INTEGER on
+        # both. (Read-back already normalises via ``bool(...)``.)
+        bool(data.get("is_red_card")),
     )
 
 
