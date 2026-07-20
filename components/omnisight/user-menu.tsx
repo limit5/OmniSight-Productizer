@@ -12,6 +12,7 @@
 import { useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
 import {
+  Brain,
   Key,
   Layers,
   LogOut,
@@ -105,6 +106,16 @@ export function UserMenu() {
           >
             <Layers size={12} />
             Platforms
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => { setOpen(false); router.push("/settings/memory") }}
+            className="w-full flex items-center gap-2 px-2 py-1.5 rounded hover:bg-[var(--secondary)] text-[var(--foreground)]"
+            data-testid="menu-memory"
+          >
+            <Brain size={12} />
+            Sora's Memory
           </button>
           <button
             type="button"

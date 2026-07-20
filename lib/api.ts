@@ -8816,3 +8816,91 @@ export async function translateMeeting(
     `/meetings/${_mid(id)}/translate?target_lang=${encodeURIComponent(targetLang)}`,
     { method: "POST" })
 }
+
+// ─── U6-6 L3c — Sora persistent memory (/memories consent surface) ───
+// The per-user L3 semantic-memory lane (frozen design §2.F): list live +
+// pending candidates, propose a new fact (user-explicit; the model is NOT
+// in the write path), one-at-a-time confirm (sensitive facts need the
+// explicit acknowledgment — backend enforces 428 without it), revoke, and
+// the crypto-shred erase-all. Identity is entirely server-side (session);
+// these calls never carry tenant/user fields.
+
+export interface MemoryFactView {
+  fact_id: string
+  /** The EXACT rendered bytes the injector would use (`subject predicate value`). */
+  rendered: string
+  fact_type: "preference" | "profile" | "project_context" | string
+  predicate: string
+  sensitivity: "normal" | "sensitive" | string
+  source_span: string
+  valid_from: string | null
+  valid_until: string | null
+  revision: number
+}
+
+export interface PendingMemoryView extends MemoryFactView {
+  eval_run_id: string
+}
+
+/** The CLOSED predicate registry (mirror of backend u6_fact_schema._REGISTRY —
+ * the SERVER is the boundary; this list is a UI convenience. Drift shows up
+ * as a 422 from /memories/propose, never a silent acceptance). */
+export const MEMORY_PREDICATES: Record<string, string[]> = {
+  preference: ["preferred_ipc", "preferred_language", "preferred_editor"],
+  profile: ["timezone", "ui_language"],
+  project_context: ["build_standard", "default_branch"],
+}
+
+export async function listMemories(): Promise<{ memories: MemoryFactView[] }> {
+  return request<{ memories: MemoryFactView[] }>("/memories")
+}
+
+export async function listPendingMemories(): Promise<{ pending: PendingMemoryView[] }> {
+  return request<{ pending: PendingMemoryView[] }>("/memories/pending")
+}
+
+export async function proposeMemory(input: {
+  fact_type: string
+  predicate: string
+  value: string
+  declared_sensitivity?: "normal" | "sensitive"
+}): Promise<{ proposed: boolean; fact_id: string; rendered: string; status: string }> {
+  return request("/memories/propose", {
+    method: "POST",
+    body: JSON.stringify({
+      fact_type: input.fact_type,
+      predicate: input.predicate,
+      value: input.value,
+      declared_sensitivity: input.declared_sensitivity ?? "normal",
+    }),
+  })
+}
+
+export async function confirmMemory(
+  factId: string, opts: { acknowledgeSensitive?: boolean } = {},
+): Promise<{ confirmed: boolean; fact_id: string; revision: number }> {
+  return request(`/memories/${encodeURIComponent(factId)}/confirm`, {
+    method: "POST",
+    body: JSON.stringify({ acknowledge_sensitive: opts.acknowledgeSensitive ?? false }),
+  })
+}
+
+export async function revokeMemory(
+  factId: string,
+): Promise<{ revoked: boolean; fact_id: string }> {
+  return request(`/memories/${encodeURIComponent(factId)}/revoke`, { method: "POST" })
+}
+
+/** Discard a QUARANTINED candidate you chose not to confirm (reject + shred).
+ * Distinct from revoke (which unpublishes an already-live fact). */
+export async function discardMemory(
+  factId: string,
+): Promise<{ discarded: boolean; fact_id: string }> {
+  return request(`/memories/${encodeURIComponent(factId)}/discard`, { method: "POST" })
+}
+
+export async function eraseAllMemories(): Promise<{
+  erased: boolean; facts: number; eval_runs: number; approvals: number
+}> {
+  return request("/memories/erase", { method: "POST" })
+}

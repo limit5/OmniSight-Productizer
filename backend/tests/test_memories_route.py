@@ -116,6 +116,87 @@ def test_propose_body_has_no_client_source_span() -> None:
     assert "source_span" not in m.ProposeMemoryBody.model_fields
 
 
+@pytest.mark.asyncio
+async def test_discard_rejects_pending_candidate(pg_test_pool) -> None:
+    # The /pending discard control: a quarantined candidate the user chose not
+    # to confirm is rejected (+ key-shred), leaving pending, never reaching live.
+    t = await _seed_tenant(pg_test_pool)
+    u = _user("owner", t)
+    try:
+        async with pg_test_pool.acquire() as c:
+            body = m.ProposeMemoryBody(
+                fact_type="preference", predicate="preferred_ipc", value="named_pipes"
+            )
+            res = await m.propose_memory(body, user=u, conn=c)
+            fid = res["fact_id"]
+            out = await m.discard_memory(fid, user=u, conn=c)
+            assert out["discarded"] and out["fact_id"] == fid
+            assert (await m.list_pending_memories(user=u, conn=c))["pending"] == []
+            assert (await m.list_live_memories(user=u, conn=c))["memories"] == []
+            # a second discard (or a live/absent id) → 404, never 500
+            with pytest.raises(HTTPException) as ei:
+                await m.discard_memory(fid, user=u, conn=c)
+            assert ei.value.status_code == 404
+    finally:
+        await _cleanup(pg_test_pool, t, "owner")
+
+
+# ── L3c: §2.F server-side gates (rate limit + sensitive ack) ─────────────────
+@pytest.mark.asyncio
+async def test_write_limit_dependency_429_when_limiter_denies(monkeypatch) -> None:
+    class _DenyLimiter:
+        def allow(self, *, key, capacity, window_seconds):
+            assert key.startswith("mem:write:")
+            return False, 42.0
+
+    import backend.rate_limit as rl
+
+    monkeypatch.setattr(rl, "get_limiter", lambda: _DenyLimiter())
+    with pytest.raises(HTTPException) as ei:
+        await m._memories_write_limit(user=_user("u", "t"))
+    assert ei.value.status_code == 429
+    assert ei.value.headers["Retry-After"] == "42"
+
+
+@pytest.mark.asyncio
+async def test_write_limit_dependency_passes_user_through(monkeypatch) -> None:
+    class _AllowLimiter:
+        def allow(self, *, key, capacity, window_seconds):
+            return True, 0.0
+
+    import backend.rate_limit as rl
+
+    monkeypatch.setattr(rl, "get_limiter", lambda: _AllowLimiter())
+    u = _user("u", "t")
+    assert await m._memories_write_limit(user=u) is u
+
+
+@pytest.mark.asyncio
+async def test_sensitive_confirm_requires_explicit_ack(pg_test_pool) -> None:
+    t = await _seed_tenant(pg_test_pool)
+    u = _user("owner", t)
+    try:
+        async with pg_test_pool.acquire() as c:
+            body = m.ProposeMemoryBody(
+                fact_type="preference", predicate="preferred_ipc",
+                value="named_pipes", declared_sensitivity="sensitive",
+            )
+            res = await m.propose_memory(body, user=u, conn=c)
+            fid = res["fact_id"]
+            # no ack → 428 Precondition Required; still quarantined
+            with pytest.raises(HTTPException) as ei:
+                await m.confirm_memory(fid, user=u, conn=c)
+            assert ei.value.status_code == 428
+            assert (await m.list_live_memories(user=u, conn=c))["memories"] == []
+            # explicit ack → confirmed
+            ok = await m.confirm_memory(
+                fid, body=m.ConfirmMemoryBody(acknowledge_sensitive=True), user=u, conn=c
+            )
+            assert ok["confirmed"]
+    finally:
+        await _cleanup(pg_test_pool, t, "owner")
+
+
 # ── full lifecycle: pending → confirm → live → revoke ────────────────────────
 @pytest.mark.asyncio
 async def test_pending_confirm_live_revoke_roundtrip(pg_test_pool) -> None:
@@ -168,10 +249,12 @@ async def test_another_user_cannot_see_or_confirm(pg_test_pool) -> None:
 
 
 @pytest.mark.asyncio
-async def test_double_confirm_is_409_not_500(pg_test_pool) -> None:
-    # A second confirm (double-click / retry): the promote eval still resolves,
-    # but promote_fact raises L3StoreError on the already-promoted state — must
-    # surface as 409, never an uncaught 500 (audit MAJOR-1).
+async def test_double_confirm_is_client_error_not_500(pg_test_pool) -> None:
+    # A second confirm (double-click / retry) must be a CLIENT error, never an
+    # uncaught 500 (audit MAJOR-1). Deterministically it's now 404 (the fact
+    # left the quarantined set, so the L3c candidate lookup refuses first); a
+    # mid-flight race that passes the lookup but loses at promote_fact still
+    # lands in the 409 handler.
     t = await _seed_tenant(pg_test_pool)
     u = _user("owner", t)
     try:
@@ -181,7 +264,7 @@ async def test_double_confirm_is_409_not_500(pg_test_pool) -> None:
             assert first["confirmed"]
             with pytest.raises(HTTPException) as ei:
                 await m.confirm_memory(fid, user=u, conn=c)
-            assert ei.value.status_code == 409
+            assert ei.value.status_code in (404, 409)
     finally:
         await _cleanup(pg_test_pool, t, "owner")
 

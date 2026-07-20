@@ -98,6 +98,24 @@ async def revoke_fact(conn, ctx: ExecutionContext, scope: MemoryScope, fact_id: 
     return row is not None
 
 
+async def discard_fact(conn, ctx: ExecutionContext, scope: MemoryScope, fact_id: str) -> bool:
+    """Discard a QUARANTINED candidate the user chose not to confirm — reject it
+    (+ crypto-shred its key, mirroring the U6-8 TTL-decay posture: a never-
+    confirmed candidate keeps no live key). Human-owner gated. Returns True if a
+    quarantined row was rejected. This is the /pending discard control; ``revoke``
+    is for already-promoted (live) facts."""
+    assert_human_owner(ctx, scope)
+    async with conn.transaction():
+        await conn.execute("SELECT set_config('app.tenant_id', $1, true)", scope.tenant_id)
+        await conn.execute("SELECT set_config('app.user_id', $1, true)", scope.user_id)
+        row = await conn.fetchrow(
+            "UPDATE l3_facts SET state = 'rejected', dek_ref = '{}'::jsonb "
+            "WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND state = 'quarantined' RETURNING id",
+            fact_id, scope.tenant_id, scope.user_id,
+        )
+    return row is not None
+
+
 @dataclass(frozen=True, slots=True)
 class EraseResult:
     facts: int
