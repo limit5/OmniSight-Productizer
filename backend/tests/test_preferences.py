@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from types import SimpleNamespace
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
@@ -99,10 +100,14 @@ def test_set_preference_property_round_trips_key_value(
 ) -> None:
     writes = _patch_preference_writes(monkeypatch)
 
+    # GREEN-BASE-3: the route gained a ``request`` param (user-agent read);
+    # a headers-only stub satisfies it for the direct-call property test.
+    _req = SimpleNamespace(headers={})
     response = _run(
         prefs.set_preference(
             key,
             prefs.PrefBody(value=value),
+            _req,
             user=_user(),
         )
     )

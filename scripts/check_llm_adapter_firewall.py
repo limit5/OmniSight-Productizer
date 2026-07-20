@@ -38,6 +38,24 @@ ADAPTER_REL_PATH = Path("backend") / "llm_adapter.py"
 # through the adapter.
 ADAPTER_TEST_REL_PATH = Path("backend") / "tests" / "test_llm_adapter.py"
 
+# GREEN-BASE-3: files with a DOCUMENTED reason to touch the real SDK.
+# Each entry needs its rationale here — this list is a reviewed boundary.
+#   - test_fx_3_4_sdk_supply_chain_compat.py: the FX.3.4 supply-chain
+#     compat test exists to probe the REAL pinned `langchain_anthropic`
+#     surface (version/attr drift detection); routing it through the
+#     adapter would blind exactly what it verifies.
+_EXEMPT_REL_PATHS = frozenset(
+    {
+        Path("backend") / "tests" / "test_fx_3_4_sdk_supply_chain_compat.py",
+    }
+)
+
+# GREEN-BASE-3: frozen replay/fixture corpora under backend/ are DATA,
+# not live source — they deliberately preserve historical code shapes
+# (including pre-adapter imports) so replay tests stay byte-faithful.
+# The firewall governs live first-party source only.
+_SKIP_REL_PREFIXES = (Path("backend") / "tests" / "fixtures",)
+
 
 def _is_forbidden_import(module: str) -> bool:
     """True if `module` is a langchain* / langgraph* import path."""
@@ -121,6 +139,13 @@ def check(root: Path) -> int:
             continue
         # Skip vendored / cache / venv paths — those are not our source.
         if any(part in _SKIP_DIR_PARTS for part in py_file.parts):
+            continue
+        rel = py_file.relative_to(root)
+        # Frozen fixture corpora are data, not live source (see above).
+        if any(rel.is_relative_to(p) for p in _SKIP_REL_PREFIXES):
+            continue
+        # Documented per-file exemptions (see rationale at the definition).
+        if rel in _EXEMPT_REL_PATHS:
             continue
 
         violations = _scan_file(py_file)

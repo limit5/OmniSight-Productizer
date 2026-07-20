@@ -63,7 +63,11 @@ async def test_clarify_ignores_memory_record_failure(monkeypatch: pytest.MonkeyP
     async def fail_record(**_kwargs: object) -> None:
         raise RuntimeError("memory offline")
 
-    async def fake_annotate(raw_text: str, conflicts: list[_ip.SpecConflict]) -> None:
+    async def fake_annotate(
+        raw_text: str, conflicts: list[_ip.SpecConflict], **_identity
+    ) -> None:
+        # GREEN-BASE-3: the production call site now threads identity kwargs
+        # (owner_user_id/tenant_id); this fake records the content args only.
         annotated.append((raw_text, conflicts))
 
     monkeypatch.setattr(intent_router._ip, "apply_clarification", fake_apply)

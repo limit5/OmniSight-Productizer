@@ -742,7 +742,7 @@ def review_patchset(
 
     if invoke is None:
         from backend.llm_adapter import invoke_chat as _invoke_chat
-        from langchain_core.messages import HumanMessage
+        from backend.llm_adapter import HumanMessage  # N4: via adapter
 
         def _default_invoke(messages: Any, *, model: str) -> str:
             return _invoke_chat(

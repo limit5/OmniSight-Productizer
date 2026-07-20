@@ -136,9 +136,9 @@ def test_sharedkv_incr_independent_fields():
 
 
 def test_fallback_increments_counter_and_returns_response():
-    from langchain_core.messages import HumanMessage
-    # Use _fresh_kv to reset the shared namespace bucket.
-    kv = _fresh_kv()
+    from backend.llm_adapter import HumanMessage
+    # Reset the shared namespace bucket (return value unused here).
+    _fresh_kv()
 
     bare_llm = MagicMock()
     bare_llm.invoke.return_value = MagicMock(content="pure chat reply")
@@ -162,7 +162,7 @@ def test_fallback_increments_counter_and_returns_response():
 
 
 def test_fallback_logs_warning(caplog):
-    from langchain_core.messages import HumanMessage
+    from backend.llm_adapter import HumanMessage
     _fresh_kv()  # reset namespace
 
     bare_llm = MagicMock()
@@ -183,7 +183,7 @@ def test_fallback_logs_warning(caplog):
 
 
 def test_fallback_returns_empty_when_bare_chat_also_fails():
-    from langchain_core.messages import HumanMessage
+    from backend.llm_adapter import HumanMessage
     _fresh_kv()  # reset namespace
 
     bare_llm = MagicMock()
@@ -209,7 +209,7 @@ def test_fallback_returns_empty_when_bare_chat_also_fails():
 
 
 def _make_tool():
-    from langchain_core.tools import tool as lc_tool
+    from backend.llm_adapter import tool as lc_tool
 
     @lc_tool
     def dummy_tool(query: str) -> str:
@@ -229,7 +229,7 @@ def _reset_kv():
 
 def test_tool_call_ollama_daemon_error_falls_back(monkeypatch):
     """ChatOllama.invoke raises ConnectionError → fallback, counter incremented."""
-    from langchain_core.messages import HumanMessage
+    from backend.llm_adapter import HumanMessage
     tool = _make_tool()
 
     ollama = _FakeChatOllama(raises=ConnectionError("daemon offline"), text="chat reply")
@@ -264,7 +264,7 @@ def test_tool_call_ollama_daemon_error_falls_back(monkeypatch):
 
 def test_tool_call_ollama_unsupported_falls_back(monkeypatch):
     """ChatOllama.invoke raises with 'not support' → unsupported counter."""
-    from langchain_core.messages import HumanMessage
+    from backend.llm_adapter import HumanMessage
     tool = _make_tool()
 
     ollama = _FakeChatOllama(
@@ -296,7 +296,7 @@ def test_tool_call_ollama_unsupported_falls_back(monkeypatch):
 
 def test_tool_call_ollama_parse_error_falls_back(monkeypatch):
     """tool_calls block raises during parsing → parse_error counter."""
-    from langchain_core.messages import HumanMessage
+    from backend.llm_adapter import HumanMessage
     tool = _make_tool()
 
     # Return a response where tool_calls is iterable but blows up mid-iteration.
@@ -342,7 +342,7 @@ def test_tool_call_ollama_parse_error_falls_back(monkeypatch):
 
 def test_tool_call_non_ollama_reraises(monkeypatch):
     """Non-Ollama exceptions are NOT swallowed — they propagate normally."""
-    from langchain_core.messages import HumanMessage
+    from backend.llm_adapter import HumanMessage
     tool = _make_tool()
 
     class ChatOpenAI:

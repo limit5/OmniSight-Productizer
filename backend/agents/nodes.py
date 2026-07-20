@@ -2406,7 +2406,7 @@ async def conversation_node(state: GraphState) -> dict:
                 # Build a copy of messages with the last user message
                 # replaced by the hardened version. Don't mutate state
                 # — LangGraph's add_messages reducer would re-merge.
-                from langchain_core.messages import HumanMessage
+                from backend.llm_adapter import HumanMessage  # N4: via adapter
                 new_messages = list(state.messages)
                 new_messages[last_idx] = HumanMessage(content=wrapped)
                 send_messages = new_messages

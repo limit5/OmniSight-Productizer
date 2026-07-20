@@ -2624,7 +2624,7 @@ async def _generate_coach_message(action: dict) -> str:
     try:
         from backend.agents.nodes import _get_llm
         from backend.security import INJECTION_GUARD_PRELUDE, redact
-        from langchain_core.messages import HumanMessage, SystemMessage
+        from backend.llm_adapter import HumanMessage, SystemMessage  # N4: via adapter
         llm = _get_llm(bind_tools_for=None)
         if not llm:
             return fallback

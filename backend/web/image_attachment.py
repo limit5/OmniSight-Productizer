@@ -626,7 +626,7 @@ def generate_layout_spec_for_image(
             # for binding them to the LLM (different vendors have
             # different image-content shapes).  This keeps the helper
             # vendor-agnostic.
-            from langchain_core.messages import HumanMessage, SystemMessage
+            from backend.llm_adapter import HumanMessage, SystemMessage  # N4: via adapter
 
             messages = [
                 SystemMessage(content=VISION_LLM_SYSTEM_PROMPT),

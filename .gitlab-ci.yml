@@ -37,6 +37,25 @@ fast-gate:
   stage: gate
   image: node:20.17-bookworm
   timeout: 30m
+  # GREEN-BASE-3: a PG service so the impact-selected suite can init the
+  # shared asyncpg pool. Without it, any WIDE impact set (a change to a
+  # broadly-imported module like nodes/metrics) selects tests that use the
+  # `client` fixture → `db_pool.get_pool()` → RuntimeError before init_pool,
+  # a ~46-test cascade that has silently reddened develop's advisory gate.
+  # pgvector image (the audit-verified one — plain postgres:16 can't
+  # `CREATE EXTENSION vector` at migration 0193). DB named `omnisight_staging`
+  # so it is a recognised NON-prod database for the env-contract, and
+  # OMNISIGHT_CI_MODE=1 takes the in-test carveout. Migrated to head in
+  # before_script; OMNI_TEST_PG_URL is what conftest's fixtures read.
+  services:
+    - name: pgvector/pgvector:pg16
+      alias: pg-test
+  variables:
+    POSTGRES_USER: omni_test
+    POSTGRES_PASSWORD: omni_test_pw
+    POSTGRES_DB: omnisight_staging
+    OMNISIGHT_CI_MODE: "1"
+    OMNI_TEST_PG_URL: "postgresql://omni_test:omni_test_pw@pg-test:5432/omnisight_staging"
   before_script:
     - set -euo pipefail
     - apt-get update
@@ -96,6 +115,23 @@ fast-gate:
       # and `import backend` fails (ModuleNotFoundError). `-m` restores the
       # repo root to sys.path while leaving rootdir/configfile (and thus
       # backend/pytest.ini's markers + asyncio config) untouched.
+      # GREEN-BASE-3: only the test-running policies need PG — wait for the
+      # service + migrate it to head so the `client` fixture (which inits the
+      # pool but never migrates) sees a HEAD schema. Gated here (not in
+      # before_script) so a frontend-only / lint-only / skip change never
+      # fails on a PG hiccup or pays the migration cost. A connect/migration
+      # failure fails LOUDLY here, not as an opaque per-test pool cascade.
+      case "$POLICY" in
+        affected|full)
+          PGCHECK='import sys,psycopg2; psycopg2.connect(host="pg-test",port=5432,user="omni_test",password="omni_test_pw",dbname="omnisight_staging",connect_timeout=3).close()'
+          for i in $(seq 1 30); do
+            if backend/.venv/bin/python -c "$PGCHECK" 2>/dev/null; then echo "pg-test ready"; break; fi
+            echo "waiting for pg-test ($i/30)"; sleep 2
+            if [ "$i" = 30 ]; then echo "pg-test never became ready"; exit 1; fi
+          done
+          ( cd backend && SQLALCHEMY_URL="postgresql+psycopg2://omni_test:omni_test_pw@pg-test:5432/omnisight_staging" .venv/bin/alembic -c alembic.ini upgrade head )
+          ;;
+      esac
       case "$POLICY" in
         affected)
           test -n "$TEST_FILES"
