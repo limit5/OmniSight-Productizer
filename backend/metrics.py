@@ -1142,6 +1142,53 @@ if _AVAILABLE:
         labelnames=("outcome",),
         registry=REGISTRY,
     )
+    # U6-8 — memory-tier liveness (DB-derived by the same refresh loop; the
+    # anti-hollow monitor: a flag-ON writer that never writes shows as a
+    # frozen summaries count + an ever-growing last-summary age).
+    u6_l2_summaries_count = Gauge(
+        "omnisight_u6_l2_summaries_count",
+        "L2 chat_session_summaries rows (DB-derived snapshot)",
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_l2_last_summary_age_seconds = Gauge(
+        "omnisight_u6_l2_last_summary_age_seconds",
+        "Age of the NEWEST L2 summary in seconds (0 when none — read WITH the count gauge; DB-derived)",
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_l3_fact_count = Gauge(
+        "omnisight_u6_l3_fact_count",
+        "L3 facts by state (quarantined=confirm-pending depth; DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    u6_l3_expired_promoted_backlog = Gauge(
+        "omnisight_u6_l3_expired_promoted_backlog",
+        "PROMOTED L3 facts past valid_until awaiting decay (a growing value = the sweep is dead/0-rows; DB-derived)",
+        multiprocess_mode="livemostrecent",  # whole-DB snapshot from the single refresh loop; last live write wins
+        registry=REGISTRY,
+    )
+    # U6-8 — memory-scheduler loop (runs IN the API process ⇒ scrape-visible).
+    u6_l3_decay_total = Counter(
+        "omnisight_u6_l3_decay_total",
+        "U6-8 decay transitions by kind (expired / quarantine_ttl)",
+        labelnames=("kind",),
+        registry=REGISTRY,
+    )
+    u6_memory_scheduler_ticks_total = Counter(
+        "omnisight_u6_memory_scheduler_ticks_total",
+        "U6-8 memory-scheduler loop ticks by outcome (ok / error)",
+        labelnames=("outcome",),
+        registry=REGISTRY,
+    )
+    u6_l2_summaries_written_total = Counter(
+        "omnisight_u6_l2_summaries_written_total",
+        "U6-8 scheduler session-summary write attempts by result (written / duplicate / error)",
+        labelnames=("result",),
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -1291,6 +1338,10 @@ else:
     u6_oldest_pending_grant_age_seconds = _NoOp()  # type: ignore
     u6_metrics_last_success_timestamp_seconds = _NoOp()  # type: ignore
     u6_metrics_refresh_total = _NoOp()  # type: ignore
+    u6_l2_summaries_count = u6_l2_last_summary_age_seconds = _NoOp()  # type: ignore
+    u6_l3_fact_count = u6_l3_expired_promoted_backlog = _NoOp()  # type: ignore
+    u6_memory_scheduler_ticks_total = u6_l2_summaries_written_total = _NoOp()  # type: ignore
+    u6_l3_decay_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
@@ -2044,6 +2095,9 @@ def reset_for_tests() -> None:
     global u6_execution_results_count, u6_execution_attempts_count
     global u6_oldest_pending_challenge_age_seconds, u6_oldest_pending_grant_age_seconds
     global u6_metrics_last_success_timestamp_seconds, u6_metrics_refresh_total
+    global u6_l2_summaries_count, u6_l2_last_summary_age_seconds, u6_l3_fact_count
+    global u6_l3_expired_promoted_backlog, u6_l3_decay_total
+    global u6_memory_scheduler_ticks_total, u6_l2_summaries_written_total
     memory_quarantine_depth = Gauge(
         "omnisight_memory_quarantine_depth",
         "Learned-item candidates sitting in quarantine awaiting eval",
@@ -2183,5 +2237,48 @@ def reset_for_tests() -> None:
         "omnisight_u6_metrics_refresh_total",
         "U6 metrics-refresh loop ticks by outcome (ok / error)",
         labelnames=("outcome",),
+        registry=REGISTRY,
+    )
+    u6_l2_summaries_count = Gauge(
+        "omnisight_u6_l2_summaries_count",
+        "L2 chat_session_summaries rows (DB-derived snapshot)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_l2_last_summary_age_seconds = Gauge(
+        "omnisight_u6_l2_last_summary_age_seconds",
+        "Age of the NEWEST L2 summary in seconds (0 when none — read WITH the count gauge; DB-derived)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_l3_fact_count = Gauge(
+        "omnisight_u6_l3_fact_count",
+        "L3 facts by state (quarantined=confirm-pending depth; DB-derived snapshot)",
+        labelnames=("state",),
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_l3_expired_promoted_backlog = Gauge(
+        "omnisight_u6_l3_expired_promoted_backlog",
+        "PROMOTED L3 facts past valid_until awaiting decay (a growing value = the sweep is dead/0-rows; DB-derived)",
+        multiprocess_mode="livemostrecent",
+        registry=REGISTRY,
+    )
+    u6_l3_decay_total = Counter(
+        "omnisight_u6_l3_decay_total",
+        "U6-8 decay transitions by kind (expired / quarantine_ttl)",
+        labelnames=("kind",),
+        registry=REGISTRY,
+    )
+    u6_memory_scheduler_ticks_total = Counter(
+        "omnisight_u6_memory_scheduler_ticks_total",
+        "U6-8 memory-scheduler loop ticks by outcome (ok / error)",
+        labelnames=("outcome",),
+        registry=REGISTRY,
+    )
+    u6_l2_summaries_written_total = Counter(
+        "omnisight_u6_l2_summaries_written_total",
+        "U6-8 scheduler session-summary write attempts by result (written / duplicate / error)",
+        labelnames=("result",),
         registry=REGISTRY,
     )

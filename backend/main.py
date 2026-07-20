@@ -466,6 +466,13 @@ async def lifespan(app: FastAPI):
     # over the shared U6 tables -> gauges; it touches no governed producer and cannot perturb the governed path.
     from backend.agents import u6_metrics_refresh as _u6m
     u6_metrics_task = asyncio.create_task(_u6m.run_u6_metrics_refresh_loop())
+    # U6-8: memory scheduler (session-end L2 summarize + l3_facts decay).
+    # Default-OFF (OMNISIGHT_SORA_MEMORY_SCHEDULER); the loop returns
+    # immediately when disabled — inert task, no pool lookup on SQLite/no-DSN
+    # startups. The summarize arm is ADDITIONALLY gated on OMNISIGHT_U6_L2_WRITE
+    # (§7 layered kill switches); decay is content-free state transitions only.
+    from backend.agents import u6_memory_scheduler as _u6sched
+    u6_scheduler_task = asyncio.create_task(_u6sched.run_memory_scheduler_loop())
     # MP.W16.2: subscription account expiry monitor. Reuses provider
     # adapter health checks and emits best-effort alerts when a CLI
     # subscription is inactive, expired, or inside the warning window.
@@ -562,7 +569,7 @@ async def lifespan(app: FastAPI):
     for t in (
         pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task,
         iq_task, ft_task, md_task, balance_task, subscription_monitor_task,
-        u6_metrics_task,
+        u6_metrics_task, u6_scheduler_task,
         cmek_revoke_task, drf_task, quota_task, drafts_gc_task,
         workspace_gc_task, host_metrics_task, host_ringbuf_task,
         delivery_task,

@@ -275,6 +275,42 @@ def test_no_active_collector_is_fine(monkeypatch) -> None:
     assert out.status == "loaded"  # record_content(None, …) is a no-op
 
 
+# ── validity window enforced at the READ boundary (U6-8 audit F3) ────────
+def _dated_fact(valid_until: str) -> Fact:
+    return Fact(
+        fact_type=FactType.PREFERENCE, subject="user", predicate="preferred_ipc",
+        value="named_pipes", source_span="chat:s1:m1",
+        valid_from="2020-01-01", valid_until=valid_until,
+    )
+
+
+def test_expired_promoted_fact_is_never_injected(monkeypatch) -> None:
+    # Even with NO decay sweep running, a promoted fact past valid_until must
+    # not reach the prompt — the reader owns the validity window.
+    monkeypatch.setenv(_FLAG, "1")
+    out = _load(_human_ctx(), _FakeConn(rows=[_sealed_row(_dated_fact("2020-12-31"), "l3f-old")]))
+    assert out.status == "empty_expected"
+    assert out.block == "" and out.fact_ids == ()
+
+
+def test_only_unexpired_facts_inject_in_a_mixed_set(monkeypatch) -> None:
+    monkeypatch.setenv(_FLAG, "1")
+    rows = [
+        _sealed_row(_dated_fact("2020-12-31"), "l3f-old"),
+        _sealed_row(_dated_fact("9999-12-31"), "l3f-live"),
+    ]
+    out = _load(_human_ctx(), _FakeConn(rows=rows))
+    assert out.status == "loaded"
+    assert out.fact_ids == ("l3f-live",)
+    assert "named_pipes" in out.block
+
+
+def test_open_ended_facts_unaffected(monkeypatch) -> None:
+    monkeypatch.setenv(_FLAG, "1")  # valid_until=None ⇒ no expiry
+    out = _load(_human_ctx(), _FakeConn(rows=[_sealed_row(_fact(), "l3f-1")]))
+    assert out.status == "loaded" and out.fact_ids == ("l3f-1",)
+
+
 # ── outcome record invariants ────────────────────────────────────────────
 def test_block_only_on_loaded() -> None:
     with pytest.raises(ValueError):

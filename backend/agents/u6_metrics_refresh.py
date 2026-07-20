@@ -33,6 +33,8 @@ _ENABLE_ENV = "OMNISIGHT_U6_METRICS_ENABLED"
 _CHALLENGE_STATES = ("pending", "confirmed", "rejected", "expired")
 _GRANT_STATES = ("pending", "executing", "consumed", "expired", "failed", "manual")
 _RESUME_STATES = ("queued", "claimed", "done", "failed", "manual")
+# U6-8 memory tier (0273 l3_facts CHECK). quarantined = the confirm-pending depth.
+_L3_FACT_STATES = ("quarantined", "promoted", "superseded", "rejected")
 
 
 def u6_metrics_enabled() -> bool:
@@ -61,6 +63,32 @@ async def _oldest_pending_age(conn, table: str, gauge) -> None:
     gauge.set(max(0.0, float(age)))
 
 
+async def _newest_row_age(conn, table: str, gauge) -> None:
+    """U6-8 liveness: age (s) of the NEWEST row, 0 when the table is empty.
+
+    0-when-none is ambiguous with just-written BY ITSELF -- always read this
+    gauge together with the matching *_count gauge (count 0 disambiguates the
+    hollow never-written state from a fresh write)."""
+    age = await conn.fetchval(
+        f"SELECT COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(created_at))), 0) "  # noqa: S608 -- const table
+        f"FROM {table}"
+    )
+    gauge.set(max(0.0, float(age)))
+
+
+async def _expired_promoted_backlog(conn, gauge) -> None:
+    """U6-8 decay liveness: PROMOTED facts past valid_until that the sweep has
+    NOT yet superseded.  A growing value = the decay arm is dead / silently
+    0-rows (e.g. post-de-superuser RLS); readers stay safe regardless (the
+    U6-7 loader excludes expired facts at read time) -- this gauge exists so
+    the dead sweep is VISIBLE, not because expiry enforcement depends on it."""
+    n = await conn.fetchval(
+        "SELECT count(*) FROM l3_facts WHERE state = 'promoted' "
+        "AND valid_until IS NOT NULL AND valid_until < to_char(now(), 'YYYY-MM-DD')"
+    )
+    gauge.set(int(n))
+
+
 async def refresh_u6_metrics_once(pool) -> str:
     """Read-only: refresh every U6 gauge.  Returns 'ok' if ALL aggregations succeeded, else 'error'.
 
@@ -77,6 +105,13 @@ async def refresh_u6_metrics_once(pool) -> str:
             lambda: _row_count(conn, "execution_attempts", metrics.u6_execution_attempts_count),
             lambda: _oldest_pending_age(conn, "challenges", metrics.u6_oldest_pending_challenge_age_seconds),
             lambda: _oldest_pending_age(conn, "action_grants", metrics.u6_oldest_pending_grant_age_seconds),
+            # U6-8 memory-tier liveness (the external anti-hollow monitor):
+            # DB-derived, so a standalone/hollow producer is visible here
+            # regardless of which process it runs in.
+            lambda: _row_count(conn, "chat_session_summaries", metrics.u6_l2_summaries_count),
+            lambda: _newest_row_age(conn, "chat_session_summaries", metrics.u6_l2_last_summary_age_seconds),
+            lambda: _count_by_state(conn, "l3_facts", metrics.u6_l3_fact_count, _L3_FACT_STATES),
+            lambda: _expired_promoted_backlog(conn, metrics.u6_l3_expired_promoted_backlog),
         ):
             try:
                 await coro()

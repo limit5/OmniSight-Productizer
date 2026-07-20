@@ -23,6 +23,9 @@ LOUD status —
                         ``empty_degraded`` is hollow and visibly so.
 
 Safety composition (each layer already merged + audited):
+  - the injectable set = PROMOTED facts whose validity window is OPEN — a
+    fact past ``valid_until`` is excluded AT READ TIME (the U6-8 decay sweep
+    is hygiene on top, never the enforcement);
   - facts reaching the renderer are re-validated against the CLOSED U6-1a
     schema; ``render_fact`` emits one inert ``subject predicate value`` line
     (whitespace-free fields ⇒ single-line, exactly 3 tokens — structurally
@@ -43,6 +46,7 @@ from __future__ import annotations
 import logging
 import secrets
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from backend.agents.execution_context import ExecutionContext, is_unbound
 from backend.agents.provenance import EPISODIC, active_collector, record_content
@@ -125,6 +129,16 @@ def _scope_for(ctx: object) -> MemoryScope | None:
 
 async def _read_block(conn, scope: MemoryScope, nonce: str | None) -> L3PromptBlock:
     facts = await list_facts(conn, scope, state="promoted")
+    # Validity window is enforced HERE, at the read boundary (U6-8 audit F3):
+    # a promoted fact past valid_until is NOT injectable even if the decay
+    # sweep (an optional, separately-gated hygiene job) hasn't run. The U6-1a
+    # grammar guarantees zero-padded ISO dates ⇒ string compare is
+    # chronological; UTC to match every other timestamp in the system.
+    today = datetime.now(timezone.utc).date().isoformat()
+    facts = [
+        sf for sf in facts
+        if sf.fact.valid_until is None or sf.fact.valid_until >= today
+    ]
     if not facts:
         logger.debug("u6_l3_read status=empty_expected tenant=%s", scope.tenant_id)
         return L3PromptBlock(status="empty_expected")

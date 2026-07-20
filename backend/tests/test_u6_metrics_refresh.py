@@ -159,3 +159,44 @@ async def test_refresh_reflects_the_db_state(pg_test_pool) -> None:
             n = int(await conn.fetchval(f"SELECT count(*) FROM {table}"))
             assert metrics.REGISTRY.get_sample_value(gauge_name) == n
     assert metrics.REGISTRY.get_sample_value("omnisight_u6_metrics_last_success_timestamp_seconds") > 0
+
+
+# ── U6-8: memory-tier liveness aggregations ──────────────────────────────
+class _MemoryTierConn:
+    """Success-shaped fake: distinct values per memory-tier query so each new
+    gauge's wiring is independently visible."""
+
+    async def fetch(self, sql, *_a):
+        if "l3_facts" in sql:
+            return [{"state": "promoted", "n": 3}, {"state": "quarantined", "n": 2}]
+        return []  # challenges/action_grants/resume_jobs: empty -> zero labels
+
+    async def fetchval(self, sql, *_a):
+        if "chat_session_summaries" in sql and "EPOCH" in sql:
+            return 12.5
+        if "chat_session_summaries" in sql:
+            return 4
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_sets_memory_tier_liveness_gauges() -> None:
+    metrics.reset_for_tests()
+    outcome = await u6_metrics_refresh.refresh_u6_metrics_once(_FakePool(_MemoryTierConn()))
+    assert outcome == "ok"
+    get = metrics.REGISTRY.get_sample_value
+    assert get("omnisight_u6_l2_summaries_count") == 4
+    assert get("omnisight_u6_l2_last_summary_age_seconds") == 12.5
+    assert get("omnisight_u6_l3_fact_count", {"state": "promoted"}) == 3
+    assert get("omnisight_u6_l3_fact_count", {"state": "quarantined"}) == 2
+    # EVERY closed label is written (0 when absent) — no phantom "no data"
+    assert get("omnisight_u6_l3_fact_count", {"state": "superseded"}) == 0
+    assert get("omnisight_u6_l3_fact_count", {"state": "rejected"}) == 0
+
+
+def test_l3_fact_states_pin_the_0273_check() -> None:
+    # The closed label set must mirror the 0273 l3_facts CHECK (and the
+    # u6_l3_store._STATES vocabulary) — drift fails loudly here.
+    from backend.agents.u6_l3_store import _STATES
+
+    assert u6_metrics_refresh._L3_FACT_STATES == _STATES

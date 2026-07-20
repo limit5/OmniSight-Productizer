@@ -205,7 +205,9 @@ def _assert_all_gauges_annotated():
               if isinstance(obj, m.Gauge)}
     # Shape guard: if this ever drops, the module-introspection sweep is
     # no longer seeing the real registry block.
-    assert len(gauges) == 48, f"expected 48 module-level Gauges, got {len(gauges)}"
+    # 48 -> 52: U6-8 added 4 memory-tier liveness gauges (l2 summaries
+    # count/age, l3 fact-by-state, l3 expired-promoted backlog).
+    assert len(gauges) == 52, f"expected 52 module-level Gauges, got {len(gauges)}"
     offenders = {name: g._multiprocess_mode for name, g in gauges.items()
                  if g._multiprocess_mode == "all"}
     assert not offenders, (

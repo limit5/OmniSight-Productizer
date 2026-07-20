@@ -237,6 +237,12 @@ Plus the operational counters (`write_total{tier,result}`, `write_refused_total{
 ## 7. Kill switches (closes MINOR 17)
 Independent, all default OFF: `OMNISIGHT_SORA_L2_WRITE`, `…_L3_WRITE`, `…_L3_READ`, `…_MEMORY_SCHEDULER`.
 L2 can be disabled without touching confirmed L3, and vice versa.
+> **Erratum (U6-8 audit F8) — as-built flag names:** the L2 write flag shipped as
+> `OMNISIGHT_U6_L2_WRITE` (U6-2b), not `OMNISIGHT_SORA_L2_WRITE`; the read flag is
+> `OMNISIGHT_SORA_L3_READ` (U6-6) and the scheduler flag is
+> `OMNISIGHT_SORA_MEMORY_SCHEDULER` (U6-8) as designed. Enabling the scheduler's
+> anti-hollow liveness gauges additionally requires `OMNISIGHT_U6_METRICS_ENABLED`
+> (the shared DB-derived refresh loop) — the enable runbook must flip both.
 
 ---
 
