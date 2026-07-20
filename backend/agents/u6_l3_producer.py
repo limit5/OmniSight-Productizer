@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from backend.agents.u6_fact_schema import Fact, FactType, FactValidationError, Sensitivity
 from backend.agents.u6_fact_triage import triage_proposal
+from backend.agents.u6_l3_eval_adapter import record_eval
 from backend.agents.u6_l3_store import insert_fact
 from backend.agents.u6_memory_safety_eval import MemorySafetyDecision, evaluate_memory_safety
 from backend.agents.u6_memory_scope import MemoryScope
@@ -93,3 +94,32 @@ async def produce_and_quarantine(
         return outcome, None
     fact_id = await insert_fact(conn, scope, outcome.fact)
     return outcome, fact_id
+
+
+async def produce_quarantine_and_record(
+    conn,
+    scope: MemoryScope,
+    *,
+    fact_type: FactType,
+    subject: str,
+    predicate: str,
+    value: str,
+    source_span: str,
+    declared_sensitivity: Sensitivity = Sensitivity.NORMAL,
+) -> tuple[ProduceOutcome, str | None, str | None]:
+    """Produce + quarantine + PERSIST the safety eval to the U6-5b ledger.
+
+    Returns ``(outcome, fact_id, eval_run_id)``. The eval_run_id is the missing
+    link the U6-6 confirm path binds an approval to: ``confirm_and_publish``
+    requires a persisted ``promote`` eval run, and the U6-5b eval-gate rejects
+    an approval that is not. A rejected candidate returns ``(outcome, None,
+    None)`` — nothing is inserted or recorded. The already-computed
+    ``outcome.safety`` decision is what gets recorded (no re-eval)."""
+    outcome, fact_id = await produce_and_quarantine(
+        conn, scope, fact_type=fact_type, subject=subject, predicate=predicate,
+        value=value, source_span=source_span, declared_sensitivity=declared_sensitivity,
+    )
+    if fact_id is None or outcome.safety is None:
+        return outcome, None, None
+    eval_run_id = await record_eval(conn, scope, fact_id=fact_id, decision=outcome.safety)
+    return outcome, fact_id, eval_run_id

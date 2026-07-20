@@ -126,6 +126,8 @@ async def test_produce_and_quarantine_lands_quarantined(pg_test_pool) -> None:
     finally:
         async with pg_test_pool.acquire() as c:
             await erase_user(c, MemoryScope(t, "u"))
+            from backend.agents.u6_l3_eval_adapter import erase_user_evals as _eue
+            await _eue(c, MemoryScope(t, "u"))  # tenant FK on l3_eval_runs
             await c.execute("DELETE FROM l3_erasure_audit WHERE tenant_id=$1", t)
             await c.execute("DELETE FROM tenants WHERE id=$1", t)
 
@@ -138,6 +140,51 @@ async def test_rejected_candidate_is_not_inserted(pg_test_pool) -> None:
         async with pg_test_pool.acquire() as c:
             outcome, fid = await produce_and_quarantine(c, scope, **_draft(value="none", predicate="preferred_editor"))
             assert outcome.accepted is False and fid is None
+            assert await list_facts(c, scope, state="quarantined") == []
+    finally:
+        async with pg_test_pool.acquire() as c:
+            await c.execute("DELETE FROM tenants WHERE id=$1", t)
+
+
+# ── L3a: produce_quarantine_and_record persists the promote eval (U6-6 link) ──
+@pytest.mark.asyncio
+async def test_produce_quarantine_and_record_persists_promote_eval(pg_test_pool) -> None:
+    from backend.agents.u6_l3_producer import produce_quarantine_and_record
+    from backend.agents.u6_l3_eval_adapter import get_eval_run, latest_promote_eval_for_fact
+    from backend.agents.u6_l3_store import erase_user
+
+    t = await _seed_tenant(pg_test_pool)
+    scope = MemoryScope(t, "u")
+    try:
+        async with pg_test_pool.acquire() as c:
+            outcome, fid, eid = await produce_quarantine_and_record(c, scope, **_draft())
+            assert outcome.accepted and fid is not None and eid is not None
+            run = await get_eval_run(c, scope, eid)
+            assert run is not None
+            assert run["decision"] == "promote" and run["fact_id"] == fid
+            # the pending-list resolver finds exactly this eval for the fact
+            assert await latest_promote_eval_for_fact(c, scope, fid) == eid
+    finally:
+        async with pg_test_pool.acquire() as c:
+            await erase_user(c, MemoryScope(t, "u"))
+            from backend.agents.u6_l3_eval_adapter import erase_user_evals as _eue
+            await _eue(c, MemoryScope(t, "u"))  # tenant FK on l3_eval_runs
+            await c.execute("DELETE FROM l3_erasure_audit WHERE tenant_id=$1", t)
+            await c.execute("DELETE FROM tenants WHERE id=$1", t)
+
+
+@pytest.mark.asyncio
+async def test_produce_quarantine_and_record_rejects_without_recording(pg_test_pool) -> None:
+    from backend.agents.u6_l3_producer import produce_quarantine_and_record
+
+    t = await _seed_tenant(pg_test_pool)
+    scope = MemoryScope(t, "u")
+    try:
+        async with pg_test_pool.acquire() as c:
+            outcome, fid, eid = await produce_quarantine_and_record(
+                c, scope, **_draft(value="none", predicate="preferred_editor")
+            )
+            assert outcome.accepted is False and fid is None and eid is None
             assert await list_facts(c, scope, state="quarantined") == []
     finally:
         async with pg_test_pool.acquire() as c:

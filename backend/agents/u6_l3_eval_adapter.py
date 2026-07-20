@@ -100,6 +100,23 @@ async def record_approval(
     return approval_id
 
 
+async def latest_promote_eval_for_fact(conn, scope: MemoryScope, fact_id: str) -> str | None:
+    """The id of the most recent ``promote`` eval run for ``fact_id`` in scope,
+    or None. The U6-6 confirm UX uses it to bind an approval to a fact's
+    passing safety eval without the client ever supplying an eval id."""
+    if not fact_id:
+        return None
+    async with conn.transaction():
+        await _enter_scope(conn, scope)
+        row = await conn.fetchrow(
+            "SELECT id FROM l3_eval_runs "
+            "WHERE fact_id = $1 AND tenant_id = $2 AND user_id = $3 "
+            "AND decision = 'promote' ORDER BY ran_at DESC LIMIT 1",
+            fact_id, scope.tenant_id, scope.user_id,
+        )
+    return row["id"] if row is not None else None
+
+
 async def get_eval_run(conn, scope: MemoryScope, eval_run_id: str) -> dict | None:
     async with conn.transaction():
         await _enter_scope(conn, scope)

@@ -1610,6 +1610,11 @@ from backend.routers import release_approval as _release_approval_router  # OP-7
 app.include_router(_release_approval_router.router)
 from backend.routers import deploy_audit as _deploy_audit_router  # OP-779 D18 change-management audit log
 app.include_router(_deploy_audit_router.router)
+# U6-6 — the /memories L3 user-lane (confirm / revoke / hard-erase). Identity
+# is built SERVER-SIDE from the authenticated session; listing is always
+# allowed, injection stays gated on OMNISIGHT_SORA_L3_READ (U6-7).
+from backend.routers import memories as _memories_router
+_include_versioned_router(_memories_router.router)
 # OP-778 deployment dashboard backend API
 from backend.routers import release_dashboard as _release_dashboard_router
 app.include_router(_release_dashboard_router.router)
