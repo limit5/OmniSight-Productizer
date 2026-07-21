@@ -123,16 +123,45 @@ async def record_memory_approval(
 
     if (version_row["renderer_version"] or "") != RENDERER_VERSION:
         raise ApprovalValidationError("stale_renderer")
-    # 4. DB: an approval may only ever bind a promote-decision eval run
-    #    of the SAME version (freeze F3).
+    # 4. DB (β-3b relaxation, audit F4/F7): the bound run must be the
+    #    IN-REPO leg (never the holdout), decision ∈ {promote,
+    #    insufficient_evidence}, ZERO neg-control catches — and BOTH
+    #    branches require a clean HOLDOUT sibling (the answer-key attack
+    #    rides promote; no holdout configured ⇒ nothing is approvable).
     eval_row = await conn.fetchrow(
-        "SELECT ran_at, live_set_hash FROM memory_eval_runs "
-        "WHERE id = $1 AND version_id = $2 AND decision = 'promote'",
+        "SELECT ran_at, live_set_hash, decision, stat_summary "
+        "FROM memory_eval_runs WHERE id = $1 AND version_id = $2",
         eval_run_id,
         version_id,
     )
-    if eval_row is None:
-        raise ApprovalValidationError("eval_run_not_promote")
+    if eval_row is None or (eval_row["decision"] or "") not in (
+        "promote", "insufficient_evidence",
+    ):
+        raise ApprovalValidationError("eval_run_not_approvable")
+    stats = eval_row["stat_summary"]
+    if isinstance(stats, str):
+        try:
+            stats = json.loads(stats)
+        except ValueError:
+            stats = {}
+    stats = stats if isinstance(stats, dict) else {}
+    if stats.get("holdout") is True or stats.get("holdout") == "true":
+        raise ApprovalValidationError("cannot_bind_holdout_run")
+    if stats.get("neg_control_catches"):
+        raise ApprovalValidationError("bound_run_has_catches")
+    holdout_ok = await conn.fetchrow(
+        "SELECT 1 FROM memory_eval_runs h "
+        "WHERE h.version_id = $1 "
+        "AND h.stat_summary->>'holdout' = 'true' "
+        "AND h.decision IN ('promote', 'insufficient_evidence') "
+        "AND h.ran_at >= $2 "
+        "AND (h.stat_summary->'neg_control_catches' IS NULL "
+        "     OR h.stat_summary->'neg_control_catches' = '[]'::jsonb) "
+        "LIMIT 1",
+        version_id, eval_row["ran_at"],
+    )
+    if holdout_ok is None:
+        raise ApprovalValidationError("holdout_missing")
     # 5. β-3a bearer-token semantics (gate-audit F5): a promote run is NOT
     #    a forever-token. Code-gate checks (append-only table, autocommit;
     #    the DB-invariant hardening lands with β-3b's migration).
@@ -142,6 +171,7 @@ async def record_memory_approval(
     later = await conn.fetchrow(
         "SELECT 1 FROM memory_eval_runs "
         "WHERE version_id = $1 AND (ran_at > $2 OR (ran_at = $2 AND id <> $3)) "
+        "AND COALESCE(stat_summary->>'holdout','') <> 'true' "  # β-3b F4
         "LIMIT 1",
         version_id, bound_ran_at, eval_run_id,
     )

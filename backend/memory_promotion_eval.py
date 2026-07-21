@@ -272,6 +272,7 @@ async def _write_infra_invalid_run(
     now: str,
     prompt_assembly_fp: str | None,
     samples_per_case: int,
+    holdout: bool = False,
 ) -> None:
     """Persist an ``infra_invalid`` eval-run row + emit the fail-closed
     metric. NO case rows are written on this terminal — a broken run is
@@ -280,6 +281,8 @@ async def _write_infra_invalid_run(
     if prompt_assembly_fp is not None:
         stat_summary["prompt_assembly_fingerprint"] = prompt_assembly_fp
     stat_summary["samples_per_case"] = samples_per_case
+    if holdout:
+        stat_summary["holdout"] = True  # β-3b F2: infra rows self-describe too
     await conn.execute(
         "INSERT INTO memory_eval_runs "
         "(id, version_id, eval_kind, suite_sha256, live_set_hash, "
@@ -313,6 +316,7 @@ async def run_plan_triage_eval(
     samples_per_case: int = 3,
     token_budget: int = 50_000,
     per_question_timeout_s: float = 30.0,
+    holdout: bool = False,
 ) -> EvalOutcome:
     """Run the plan-triage eval and persist the ledger row(s).
 
@@ -358,6 +362,7 @@ async def run_plan_triage_eval(
             now=now,
             prompt_assembly_fp=None,
             samples_per_case=samples_per_case,
+            holdout=holdout,
         )
         return EvalOutcome(
             decision="infra_invalid",
@@ -389,6 +394,7 @@ async def run_plan_triage_eval(
             now=now,
             prompt_assembly_fp=None,
             samples_per_case=samples_per_case,
+            holdout=holdout,
         )
         return EvalOutcome(
             decision="infra_invalid",
@@ -428,6 +434,7 @@ async def run_plan_triage_eval(
             now=now,
             prompt_assembly_fp=prompt_assembly_fp,
             samples_per_case=samples_per_case,
+            holdout=holdout,
         )
         return EvalOutcome(
             decision="infra_invalid",
@@ -556,6 +563,11 @@ async def run_plan_triage_eval(
         # is build_stat_summary's 4-key RETURN + the card projection; the
         # stored jsonb already carries auxiliary keys (detail/fingerprint).
         stat_summary["neg_control_catches"] = neg_control_catches
+    if holdout:
+        # β-3b (audit F2): the ledger is append-only (no post-hoc UPDATE) —
+        # the holdout leg self-describes at INSERT. Only the scheduler
+        # passes this kwarg; the 0277 gates key on it.
+        stat_summary["holdout"] = True
 
     await conn.execute(
         "INSERT INTO memory_eval_runs "

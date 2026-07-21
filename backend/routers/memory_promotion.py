@@ -108,13 +108,23 @@ SELECT v.id AS version_id, v.kind, v.audience, v.tenant_id, v.name,
        left(v.rendered_payload, 400) AS rendered_preview,
        r.id AS eval_run_id, r.decision, r.suite_sha256, r.model_fingerprint,
        r.live_set_hash, r.stat_summary, r.ran_at,
-       COALESCE(e.kinds, '{}') AS evidence_kinds
+       COALESCE(e.kinds, '{}') AS evidence_kinds,
+       h.h_id, h.h_decision, h.h_stats, h.h_ran_at
 FROM learned_item_versions v
 JOIN LATERAL (
     SELECT * FROM memory_eval_runs r
      WHERE r.version_id = v.id
+       AND COALESCE(r.stat_summary->>'holdout','') <> 'true'
      ORDER BY r.ran_at DESC, r.id DESC LIMIT 1
 ) r ON true
+LEFT JOIN LATERAL (
+    SELECT h.id AS h_id, h.decision AS h_decision,
+           h.stat_summary AS h_stats, h.ran_at AS h_ran_at
+      FROM memory_eval_runs h
+     WHERE h.version_id = v.id
+       AND h.stat_summary->>'holdout' = 'true'
+     ORDER BY h.ran_at DESC, h.id DESC LIMIT 1
+) h ON true
 LEFT JOIN LATERAL (
     SELECT array_agg(DISTINCT le.ground_truth_kind) AS kinds
       FROM learned_item_evidence le WHERE le.version_id = v.id
@@ -189,6 +199,16 @@ async def list_pending_memory_promotions(
                 "ran_at": str(d["ran_at"]),
             },
             "evidence_kinds": list(d["evidence_kinds"] or []),
+            # β-3b F5: the holdout leg rendered beside the bindable run —
+            # the human SEES which holdout row backs the relaxation.
+            "holdout": (
+                {
+                    "eval_run_id": str(d["h_id"]),
+                    **_card_verdict(d["h_decision"], d["h_stats"]),
+                    "ran_at": str(d["h_ran_at"]),
+                }
+                if d.get("h_id") is not None else None
+            ),
         })
     return {"items": items, "limit": limit, "offset": offset}
 

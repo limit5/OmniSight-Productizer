@@ -230,6 +230,43 @@ async def evaluate_version(conn, version: dict, *, now: str, ask_state: dict) ->
         ),
     )
 
+    # β-3b (audit F3/F4): the HOLDOUT leg — its OWN strictly-later `now`
+    # (a shared tick-`now` would tie ran_at and fail the bind gates closed),
+    # marked holdout=True at INSERT. Pure VETO leg: the approval still binds
+    # the in-repo run; a holdout reject blocks via later-reject; a clean
+    # holdout row is what the 0277 relaxation requires (BOTH branches — the
+    # answer-key attack rides promote, audit F7).
+    hd = ask_state.get("holdout_dir")
+    if hd is not None and outcome.decision in ("promote", "insufficient_evidence"):
+        try:
+            h_outcome = await run_plan_triage_eval(
+                conn,
+                version_id=str(version["id"]),
+                rendered_payload=version.get("rendered_payload") or "",
+                rendered_payload_sha256=version.get("rendered_payload_sha256") or "",
+                ask_fn=ask_state.get("ask_fn"),
+                client=ask_state["client"],
+                manifest_path=hd / "manifest.yml",
+                base_dir=hd,
+                live_set_hash=live_set_hash,
+                now=datetime.now(timezone.utc).isoformat(),
+                token_budget=_env_int(
+                    _TOKEN_BUDGET_ENV, _DEFAULT_TOKEN_BUDGET, minimum=10_000,
+                ),
+                holdout=True,
+            )
+            _log.info(
+                "memory_promotion_eval holdout leg: version %s -> %s",
+                version.get("id"), h_outcome.decision,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — veto leg failure is loud, not fatal
+            _log.warning(
+                "memory_promotion_eval holdout leg failed for %s",
+                version.get("id"), exc_info=True,
+            )
+
     # Gate F2: promote is an ANOMALY under the calibrated battery (positives
     # baseline-pass ⇒ improvement headroom ≈ 0). Alarm, never celebrate.
     if outcome.decision == "promote":
@@ -284,7 +321,7 @@ def _build_ask_state() -> dict:
     state: dict = {"client": client, "ask_fn": None, "neg_case_ids": (),
                    "preflight": "ok"}
     try:
-        from backend.eval_suite_manifest import load_verified_suites
+        from backend.eval_suite_manifest import load_verified_suites  # noqa: F811
 
         verified = load_verified_suites(
             manifest_path=_MANIFEST_PATH, base_dir=_SUITE_DIR,
@@ -298,6 +335,24 @@ def _build_ask_state() -> dict:
         _log.error("memory_promotion_eval PREFLIGHT: suite load failed", exc_info=True)
         state["preflight"] = "bad_suite"
         return state
+    # β-3b (audit F1): a configured-but-unloadable holdout aborts the tick;
+    # unset ⇒ leg skipped (and the 0277 relaxation can never fire).
+    from backend.eval_suite_manifest import resolve_holdout_dir
+
+    hd = resolve_holdout_dir()
+    if hd is not None:
+        try:
+            load_verified_suites(
+                manifest_path=hd / "manifest.yml", base_dir=hd,
+            )
+        except Exception:  # noqa: BLE001
+            _log.error(
+                "memory_promotion_eval PREFLIGHT: holdout suite load failed",
+                exc_info=True,
+            )
+            state["preflight"] = "bad_suite"
+            return state
+    state["holdout_dir"] = hd
     try:
         state["ask_fn"] = build_ask_fn(client)
     except Exception:  # noqa: BLE001 — provider import/config error
@@ -328,7 +383,8 @@ _SCAN_SQL = (
     "           AND r.decision = 'infra_invalid' "
     "           AND r.ran_at > now() - make_interval(secs => $2)) "
     "  AND (SELECT count(*) FROM memory_eval_runs r "
-    "        WHERE r.version_id = v.id) < $3 "
+    "        WHERE r.version_id = v.id "
+    "          AND COALESCE(r.stat_summary->>'holdout','') <> 'true') < $3 "
     "ORDER BY v.created_at ASC LIMIT $1"
 )
 

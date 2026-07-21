@@ -49,19 +49,26 @@ class _ApprovalConn:
     def __init__(
         self, *, renderer="u4r2", ran_at="2026-07-20T00:00:00+00:00",
         run_hash="a" * 64, later=False, later_reject=False,
+        decision="insufficient_evidence", stats="{}", holdout_ok=True,
     ) -> None:
         self._renderer = renderer
         self._ran_at = ran_at
         self._run_hash = run_hash
         self._later = later
         self._later_reject = later_reject
+        self._decision = decision
+        self._stats = stats
+        self._holdout_ok = holdout_ok
         self.inserted = False
 
     async def fetchrow(self, sql, *args):
         if "renderer_version FROM learned_item_versions" in sql:
             return {"renderer_version": self._renderer}
-        if "ran_at, live_set_hash FROM memory_eval_runs" in sql:
-            return {"ran_at": self._ran_at, "live_set_hash": self._run_hash}
+        if "ran_at, live_set_hash, decision, stat_summary" in sql:
+            return {"ran_at": self._ran_at, "live_set_hash": self._run_hash,
+                    "decision": self._decision, "stat_summary": self._stats}
+        if "h.stat_summary->>'holdout' = 'true'" in sql:
+            return {"?": 1} if self._holdout_ok else None
         if "ran_at > $2" in sql:
             return {"?": 1} if self._later else None
         if "decision = 'reject'" in sql:
@@ -153,3 +160,46 @@ def test_prompt_loader_sink_and_ambient_record(monkeypatch):
     assert any(
         getattr(r, "source_kind", None) == prov.LEARNED_ITEM for r in recorded
     )
+
+
+# ── β-3b relaxation matrix ──────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_approval_rejects_missing_holdout():
+    """No clean holdout sibling ⇒ nothing approvable (fail-closed unlock)."""
+    with pytest.raises(ApprovalValidationError, match="holdout_missing"):
+        await _approve(_ApprovalConn(holdout_ok=False))
+
+
+@pytest.mark.asyncio
+async def test_approval_rejects_binding_the_holdout_leg():
+    with pytest.raises(ApprovalValidationError, match="cannot_bind_holdout_run"):
+        await _approve(_ApprovalConn(stats='{"holdout": true}'))
+
+
+@pytest.mark.asyncio
+async def test_approval_rejects_bound_run_with_catches():
+    with pytest.raises(ApprovalValidationError, match="bound_run_has_catches"):
+        await _approve(_ApprovalConn(stats='{"neg_control_catches": ["s::nc01"]}'))
+
+
+@pytest.mark.asyncio
+async def test_approval_rejects_non_approvable_decision():
+    with pytest.raises(ApprovalValidationError, match="eval_run_not_approvable"):
+        await _approve(_ApprovalConn(decision="reject"))
+
+
+@pytest.mark.asyncio
+async def test_promote_branch_also_requires_holdout():
+    """Audit F7: the answer-key attack rides promote — no single-leg pass."""
+    with pytest.raises(ApprovalValidationError, match="holdout_missing"):
+        await _approve(_ApprovalConn(decision="promote", holdout_ok=False))
+
+
+def test_holdout_kwarg_marks_stat_summary():
+    """The executor self-describes the holdout leg at INSERT (append-only
+    ledger — no post-hoc UPDATE possible)."""
+    import inspect
+    from backend.memory_promotion_eval import run_plan_triage_eval
+
+    assert "holdout" in inspect.signature(run_plan_triage_eval).parameters
