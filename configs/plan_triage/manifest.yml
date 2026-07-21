@@ -1,0 +1,15 @@
+# β-2 (leg-2) — strict promotion-eval suite manifest (plan_triage).
+#
+# Consumed ONLY by backend/eval_suite_manifest.py via
+# backend/agents/memory_promotion_scheduler.py. sha256 is COMPUTED FROM
+# THE SHARD BYTES (hashlib.sha256(path.read_bytes()).hexdigest()) —
+# never hand-typed. Any shard edit without a manifest bump fails the
+# strict loader LOUDLY with hash_mismatch (and the pin test in
+# backend/tests/test_plan_triage_suite.py).
+
+schema_version: 1
+suites:
+  - path: runner-plan-triage.yaml
+    sha256: 5ee325d063cd4c674a68de476a03eb16bb0cbb099cf8740e134c75eb329744eb
+    min_cases: 30
+    min_neg_controls: 14

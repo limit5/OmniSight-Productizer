@@ -185,7 +185,9 @@ async def reverted_later(conn, ticket_key: str) -> bool:
     ORIGINAL candidate row clean — but the revert row lands in the SAME ledger
     carrying the SAME owning ticket key (``extract_ticket_keys_from_subject``
     matches ``[OP-N]`` inside the quoted ``Revert "…"`` subject). One indexed
-    EXISTS closes the leak at gate time; β-2 re-runs it at promotion."""
+    EXISTS closes the leak at gate time; the β-2 promotion-eval scheduler
+    re-runs it at EVAL time (approval/publication-time re-checks are β-3 —
+    the residual L6 window spans eval→publication until then)."""
     row = await conn.fetchval(
         "SELECT EXISTS(SELECT 1 FROM curator_merge_candidates "
         "WHERE ticket_key = $1 AND revert_state = 'reverted')",
@@ -221,7 +223,8 @@ async def fetch_artifacts(candidate: dict) -> "dict | None":
     is unavailable (missing HTTP creds / fetch failure) — the caller falls
     back to the minimal record (label ``llm_error``); a JIRA failure degrades
     to subject-only ticket text (labels=None ⇒ gate still applies its ledger
-    arms; β-2's ``reverify_for_promotion`` re-checks labels at promotion)."""
+    arms; label/evidence re-verification at approval/publication time is a
+    β-3 wiring of ``make_reverify_hook``)."""
     from backend.agents import mcp_gerrit
 
     ctx = await mcp_gerrit.fetch_merged_change_context(int(candidate["gerrit_change"]))

@@ -482,6 +482,13 @@ async def lifespan(app: FastAPI):
     # OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED stays OFF).
     from backend.agents import worker_loop_curator as _wcur
     worker_curator_task = asyncio.create_task(_wcur.run_worker_curator_loop())
+    # β-2 (leg-2): memory promotion eval — quarantined learned-item versions
+    # → plan-triage WITH-vs-WITHOUT eval → memory_eval_runs decision rows
+    # (the 0259 gate's first producer). Default-OFF
+    # (OMNISIGHT_MEMORY_PROMOTION_EVAL); publication still requires the β-3
+    # HUMAN approval; the loader kill-switch stays OFF.
+    from backend.agents import memory_promotion_scheduler as _mpe
+    promotion_eval_task = asyncio.create_task(_mpe.run_promotion_eval_loop())
     # MP.W16.2: subscription account expiry monitor. Reuses provider
     # adapter health checks and emits best-effort alerts when a CLI
     # subscription is inactive, expired, or inside the warning window.
@@ -579,6 +586,7 @@ async def lifespan(app: FastAPI):
         pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task,
         iq_task, ft_task, md_task, balance_task, subscription_monitor_task,
         u6_metrics_task, u6_scheduler_task, worker_curator_task,
+        promotion_eval_task,
         cmek_revoke_task, drf_task, quota_task, drafts_gc_task,
         workspace_gc_task, host_metrics_task, host_ringbuf_task,
         delivery_task,

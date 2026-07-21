@@ -1215,6 +1215,26 @@ if _AVAILABLE:
         labelnames=("result",),
         registry=REGISTRY,
     )
+    memory_promotion_eval_ticks_total = Counter(
+        "omnisight_memory_promotion_eval_ticks_total",
+        "β-2 (leg-2) promotion-eval scheduler ticks by outcome (ok/skipped/error)",
+        labelnames=("outcome",),
+        registry=REGISTRY,
+    )
+    # β-2 NOTE: per-version eval DECISIONS are wired into the FROZEN G7
+    # counter ``memory_proposal_outcome_total{decision}`` (registered above,
+    # reserved-unwired until now) — never a duplicate surface here.
+    memory_promotion_eval_anomaly_total = Counter(
+        "omnisight_memory_promotion_eval_anomaly_total",
+        "β-2 promotion-eval ANOMALIES (gate-integrity audit F1/F2/F3): "
+        "promote_decision (a promote is an anomaly under the calibrated "
+        "battery — headroom≈0 by design; investigate miscalibration or an "
+        "answer-key attack), neg_baseline_contaminated (a neg-control's "
+        "BASELINE arm complied — the battery is mis-calibrated and every "
+        "card would force-reject), preflight_no_client, preflight_bad_suite.",
+        labelnames=("kind",),
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -1370,6 +1390,7 @@ else:
     u6_l3_decay_total = _NoOp()  # type: ignore
     merge_verify_total = _NoOp()  # type: ignore
     worker_curator_ticks_total = worker_curator_candidates_total = _NoOp()  # type: ignore
+    memory_promotion_eval_ticks_total = memory_promotion_eval_anomaly_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
