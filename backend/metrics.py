@@ -1189,6 +1189,15 @@ if _AVAILABLE:
         labelnames=("result",),
         registry=REGISTRY,
     )
+    merge_verify_total = Counter(
+        "omnisight_merge_verify_total",
+        "β-F (leg-2) merge-verify attempts by path (http/ssh) and outcome "
+        "(confirmed/unconfirmed/degraded). outcome=degraded ⇒ NO verify "
+        "capability on this host — the merge fail-closed and no ground "
+        "truth was minted (the historical silent-hollow, surfaced LOUDLY).",
+        labelnames=("path", "outcome"),
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -1342,6 +1351,7 @@ else:
     u6_l3_fact_count = u6_l3_expired_promoted_backlog = _NoOp()  # type: ignore
     u6_memory_scheduler_ticks_total = u6_l2_summaries_written_total = _NoOp()  # type: ignore
     u6_l3_decay_total = _NoOp()  # type: ignore
+    merge_verify_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 

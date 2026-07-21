@@ -1458,6 +1458,11 @@ async def _on_comment_added(event: dict) -> None:
 _L3_MAX_INFLIGHT = 2
 _l3_inflight: set[int] = set()
 
+# β-F: one-shot warning when merge ingest is unauthenticated. Ground truth
+# is still independently re-derived (forgery-safe), so an unset secret is an
+# operational recommendation, not a correctness hole — but surface it once.
+_gerrit_unauth_ingest_warned = False
+
 
 async def _on_change_merged(event: dict) -> None:
     """A change was merged — trigger replication to external repos."""
@@ -1467,6 +1472,20 @@ async def _on_change_merged(event: dict) -> None:
 
     logger.info("Change merged: %s — %s", change_id, subject)
     emit_invoke("merged", f"Change {change_id} merged: {subject}")
+
+    # β-F: the verified-merge ground-truth path re-derives the +2 from Gerrit
+    # itself, so a forged event cannot inject a trusted solution. But an unset
+    # webhook secret lets any caller trigger that (bounded) verify traffic —
+    # warn once so an operator sets gerrit_webhook_secret on serving.
+    global _gerrit_unauth_ingest_warned
+    if not settings.gerrit_webhook_secret and not _gerrit_unauth_ingest_warned:
+        _gerrit_unauth_ingest_warned = True
+        logger.warning(
+            "Gerrit webhook secret unset — merge ingest is UNAUTHENTICATED. "
+            "Ground truth is still independently re-derived from Gerrit "
+            "(forgery-safe), but set gerrit_webhook_secret so only Gerrit can "
+            "trigger verify traffic (β-F)."
+        )
 
     # L1 notification: merge + replication
     from backend.notifications import notify
@@ -1689,20 +1708,51 @@ async def _save_merged_solution_to_l3(
     background task.
     """
     try:
-        from backend import audit, db
+        from backend import audit, db, metrics
         from backend.agents import mcp_gerrit, runner_tenant
 
-        # Independent verify — sync SSH, keep it off the event loop.
-        vm = await asyncio.get_running_loop().run_in_executor(
-            None,
-            lambda: mcp_gerrit.verify_merged_change(
+        # β-F: HTTP-first, SSH-fallback. The event supplies only the QUERY
+        # TARGET; the canonical subject + NON-BOT +2 are re-derived from
+        # Gerrit itself (the event is never trusted as content). Prefer the
+        # serving-safe REST verify when a scoped Gerrit HTTP account is
+        # configured; else use the SSH bot key (present on the runner host).
+        if mcp_gerrit.http_verify_available():
+            verify_path = "http"
+            vm = await mcp_gerrit.verify_merged_change_http(
                 change_number=change_number,
                 project=project,
                 expected_change_id=event_change_id,
                 expected_revision=event_revision,
-            ),
-        )
+            )
+        else:
+            verify_path = "ssh"
+            # Independent verify — sync SSH, keep it off the event loop.
+            vm = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: mcp_gerrit.verify_merged_change(
+                    change_number=change_number,
+                    project=project,
+                    expected_change_id=event_change_id,
+                    expected_revision=event_revision,
+                ),
+            )
         if vm is None:
+            # A None is either an authoritative "unconfirmed" OR — when this
+            # host has NO verify capability at all (no HTTP account and no
+            # SSH key) — the historical silent-hollow. Surface the latter
+            # LOUDLY so a keyless serving replica never drops merges in
+            # silence again.
+            cap = mcp_gerrit.verify_capability()
+            metrics.merge_verify_total.labels(
+                path=verify_path,
+                outcome=("degraded" if cap == "degraded" else "unconfirmed"),
+            ).inc()
+            if cap == "degraded":
+                logger.error(
+                    "L3 merge-verify DEGRADED on this host (no Gerrit HTTP "
+                    "account and no SSH bot key) — change %s dropped, no "
+                    "ground truth minted", change_number,
+                )
             await audit.log(
                 action="security.merge_unconfirmed",
                 entity_kind="gerrit_change",
@@ -1710,9 +1760,12 @@ async def _save_merged_solution_to_l3(
                 after={
                     "project": project,
                     "reason": "verify_merged_change_returned_none",
+                    "verify_path": verify_path,
+                    "capability": cap,
                 },
             )
             return
+        metrics.merge_verify_total.labels(path=verify_path, outcome="confirmed").inc()
 
         # Canonical content ONLY — never the webhook subject. Atomic +
         # idempotent (T8-B1): source/authority/verified are hard-set
@@ -1732,6 +1785,34 @@ async def _save_merged_solution_to_l3(
                 "L3: verified merge solution saved (change %s, %s)",
                 change_number, vm.change_id,
             )
+            # β-F: capture the (ticket ↔ merged change) link for the
+            # worker-loop curator — ONLY on this real, non-replay insert
+            # (a replay must not re-arm distilled=FALSE). Best-effort: a
+            # ledger hiccup must never fail the episodic write above.
+            try:
+                from backend.agents.gerrit_jira_bridge import (
+                    extract_ticket_keys_from_subject,
+                )
+                _subj = vm.canonical_subject or ""
+                _keys = extract_ticket_keys_from_subject(_subj)
+                async with get_pool().acquire() as _lc:
+                    await db.insert_curator_merge_candidate(_lc, {
+                        "id": f"cmc-{uuid.uuid4().hex[:12]}",
+                        "ticket_key": _keys[0] if _keys else None,
+                        "gerrit_change": change_number,
+                        "change_id": vm.change_id,
+                        "canonical_subject": _subj,
+                        "plus2_reviewer": vm.plus2_reviewer or None,
+                        "revert_state": (
+                            "reverted" if _subj.startswith('Revert "') else "none"
+                        ),
+                        "tenant_id": runner_tenant.OMNISIGHT_SELF_TENANT,
+                    })
+            except Exception as _lexc:
+                logger.warning(
+                    "curator candidate ledger write failed for change %s "
+                    "(non-critical): %s", change_number, _lexc,
+                )
         else:
             # ON CONFLICT DO NOTHING — a replayed/duplicate event dedup'd.
             logger.info(

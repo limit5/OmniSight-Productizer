@@ -4064,6 +4064,34 @@ async def insert_verified_merge_solution(conn, data: dict) -> bool:
     return inserted
 
 
+async def insert_curator_merge_candidate(conn, data: dict) -> bool:
+    """Insert ONE ground-truth merge candidate for the worker-loop curator
+    (β-F leg-2). Called from the verified-merge path ONLY on a real,
+    non-replay episodic insert, so the (ticket ↔ change) link is captured
+    exactly once. Idempotent via ``uq_curator_merge_candidate_change``
+    (alembic 0275): ``ON CONFLICT (gerrit_change) DO NOTHING RETURNING id``
+    returns a row on a real insert and nothing on a replay. Returns True iff
+    a row landed. PG-only substrate; the curator runs on the serving/PG path.
+    """
+    row = await conn.fetchrow(
+        """INSERT INTO curator_merge_candidates
+           (id, ticket_key, gerrit_change, change_id, canonical_subject,
+            plus2_reviewer, revert_state, tenant_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (gerrit_change) DO NOTHING
+           RETURNING id""",
+        data["id"],
+        data.get("ticket_key"),
+        int(data["gerrit_change"]),
+        data["change_id"],
+        data.get("canonical_subject", ""),
+        data.get("plus2_reviewer"),
+        data.get("revert_state", "none"),
+        data.get("tenant_id") or "omnisight-self",
+    )
+    return row is not None
+
+
 async def rebuild_episodic_fts(conn) -> int:
     """Reindex the episodic_memory GIN index on the tsvector column.
 

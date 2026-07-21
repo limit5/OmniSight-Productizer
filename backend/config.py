@@ -294,6 +294,15 @@ class Settings(BaseSettings):
     gerrit_ssh_host: str = ""  # SSH host for push + CLI, e.g. "gerrit.sora.services"
     gerrit_ssh_port: int = 29418  # Gerrit SSH port (default 29418)
     gerrit_project: str = ""  # Project path, e.g. "project/omnisight-core"
+    # ── β-F (leg-2): serving-safe REST verify (no SSH shell key on serving) ──
+    # A scoped, read-only Gerrit HTTP account lets the serving backend
+    # re-derive a merged change's canonical identity + NON-BOT +2 over
+    # HTTPS (``verify_merged_change_http``), instead of the SSH bot key
+    # that only exists on the runner host. Empty ⇒ HTTP verify is
+    # unavailable and callers fall back to the SSH path (which fail-closes
+    # off the runner host — the silent-hollow this closes).
+    gerrit_http_user: str = ""      # Gerrit HTTP account username (REST /a/ auth)
+    gerrit_http_password: str = ""  # Gerrit HTTP password (scoped read-only)
     gerrit_replication_targets: str = ""  # Comma-separated remote names for post-merge push
     # Multi-instance Gerrit (JSON list of {url, ssh_host, ssh_port, project, webhook_secret})
     gerrit_instances: str = ""
@@ -1180,6 +1189,7 @@ LEGACY_CREDENTIAL_FIELDS: dict[str, str] = {
     "gerrit_project":            "git_accounts(platform='gerrit').project",
     "gerrit_instances":          "one git_accounts(platform='gerrit') row per instance",
     "gerrit_webhook_secret":     "git_accounts(platform='gerrit').encrypted_webhook_secret",
+    "gerrit_http_password":      "git_accounts(platform='gerrit').encrypted_http_password",
     # JIRA
     "notification_jira_url":     "git_accounts(platform='jira').instance_url",
     "notification_jira_token":   "git_accounts(platform='jira').encrypted_token",

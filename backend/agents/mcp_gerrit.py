@@ -331,6 +331,7 @@ class VerifiedMerge:
     revision: str
     project: str
     branch: str
+    plus2_reviewer: str = ""  # NON-BOT +2 approver (review_span.by); "" if unknown
 
 
 def verify_merged_change(
@@ -400,28 +401,31 @@ def verify_merged_change(
     if expected_revision and revision != expected_revision:
         return None
 
-    # Merge + human-review gate. Build the shape derive_ground_truths wants
-    # from the RAW row (get_review flattens approvals; the deriver reads
-    # currentPatchSet.approvals). change_ref MUST be the bare number — a
-    # "gerrit:" prefix is rejected by normalize_change_ref (silent no-op).
+    # Merge + NON-BOT-review gate. Build the shape derive_ground_truths
+    # wants from the RAW row (the deriver reads currentPatchSet.approvals).
+    # change_ref MUST be the bare number — a "gerrit:" prefix is rejected by
+    # normalize_change_ref (silent no-op). Keep the tuple so we can carry the
+    # NON-BOT approver identity into the VerifiedMerge (β-F ledger evidence).
     gerrit_change = {
         "status": row.get("status"),
         "currentPatchSet": {"approvals": current_ps.get("approvals") or []},
     }
     try:
-        kinds = {
-            t.kind
-            for t in _prov.derive_ground_truths(
-                change_ref=str(change_number),
-                gerrit_change=gerrit_change,
-                jira_labels=None,
-                now=_dt.datetime.now(_dt.timezone.utc).isoformat(),
-            )
-        }
+        _truths = _prov.derive_ground_truths(
+            change_ref=str(change_number),
+            gerrit_change=gerrit_change,
+            jira_labels=None,
+            now=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+        )
     except _prov.ProvenanceUnconfirmable:
         return None
-    if not {"merged", "review_plus2"} <= kinds:
+    if not {"merged", "review_plus2"} <= {t.kind for t in _truths}:
         return None
+    reviewer = next(
+        (str((t.evidence_span or {}).get("by") or "")
+         for t in _truths if t.kind == "review_plus2"),
+        "",
+    )
 
     return VerifiedMerge(
         change_number=change_number,
@@ -430,7 +434,209 @@ def verify_merged_change(
         revision=revision,
         project=GERRIT_PROJECT_PATH,
         branch=str(row.get("branch") or ""),
+        plus2_reviewer=reviewer,
     )
+
+
+# Gerrit prefixes every REST JSON body with an XSSI guard line so a
+# `<script>` include can't execute the payload; strip it before decode.
+_GERRIT_XSSI_PREFIX = ")]}'"
+
+
+def _parse_gerrit_rest_json(text: str) -> Any:
+    """Strip Gerrit's XSSI guard prefix and decode the REST JSON body."""
+    body = text.lstrip()
+    if body.startswith(_GERRIT_XSSI_PREFIX):
+        body = body[len(_GERRIT_XSSI_PREFIX):]
+    return json.loads(body)
+
+
+def _rest_labels_to_approvals(labels: dict | None) -> list[dict]:
+    """Adapt Gerrit REST ``DETAILED_LABELS`` → the raw
+    ``currentPatchSet.approvals`` shape that
+    :func:`learned_item_provenance.derive_ground_truths` consumes.
+
+    This is a pure SHAPE adapter — the NON-BOT +2 decision stays in the
+    one deriver (never re-implemented here). REST ``labels[<name>].all[]``
+    entries carry ``value`` (int) + a top-level ``username``/``name``/
+    ``_account_id``; the deriver reads ``approval.type`` + ``approval.value``
+    (str-ok) + ``approval.by.{username,name}``.
+    """
+    approvals: list[dict] = []
+    for label_name, label_body in (labels or {}).items():
+        if not isinstance(label_body, dict):
+            continue
+        for entry in label_body.get("all") or []:
+            if not isinstance(entry, dict) or "value" not in entry:
+                continue
+            approvals.append({
+                "type": label_name,
+                "value": entry.get("value"),
+                "by": {
+                    "username": entry.get("username") or "",
+                    "name": entry.get("name") or "",
+                },
+            })
+    return approvals
+
+
+async def verify_merged_change_http(
+    *,
+    change_number: int,
+    project: str,
+    expected_change_id: str = "",
+    expected_revision: str = "",
+    timeout_s: float = DEFAULT_TIMEOUT_SECS,
+) -> "VerifiedMerge | None":
+    """Serving-safe sibling of :func:`verify_merged_change` (β-F / leg-2).
+
+    Re-derives a merged change's Gerrit-CANONICAL identity + content over
+    the AUTHENTICATED REST API (``GET /a/changes/?o=CURRENT_REVISION&``
+    ``o=DETAILED_LABELS``) using a scoped read-only HTTP account, instead
+    of the SSH bot key that only exists on the runner host. This lets the
+    serving backend confirm merges without the shell key — closing the
+    silent fail-closed hole where ``verify_merged_change`` (SSH) raises on
+    a keyless replica and drops every merge with only a warning.
+
+    Identical fail-closed contract, and — critically — the SAME NON-BOT
+    ``Code-Review>=2`` decision via ``derive_ground_truths`` (the REST
+    payload is only RESHAPED, never re-judged). Returns None (never
+    raises) on: missing HTTP creds (⇒ caller falls back to SSH), an
+    out-of-bounds number, a project other than the configured allowlist,
+    zero/more-than-one rows, a non-MERGED status, a missing non-bot +2,
+    an identity mismatch, or any transport/parse error.
+    """
+    import datetime as _dt
+
+    import httpx
+
+    from backend import learned_item_provenance as _prov
+    from backend.config import settings
+
+    # Bounded numeric + project allowlist from CONFIG, never the webhook.
+    if not isinstance(change_number, int) or change_number <= 0 or change_number > _MAX_CHANGE_NUMBER:
+        return None
+    if project != GERRIT_PROJECT_PATH:
+        return None
+
+    base = (settings.gerrit_url or "").rstrip("/")
+    user = settings.gerrit_http_user or ""
+    password = settings.gerrit_http_password or ""
+    if not (base and user and password):
+        # HTTP verify unavailable on this deploy — signal the caller to
+        # fall back to the SSH path (where the key exists).
+        return None
+
+    params = {
+        "q": f"change:{change_number} project:{GERRIT_PROJECT_PATH}",
+        "o": ["CURRENT_REVISION", "DETAILED_LABELS"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.get(
+                f"{base}/a/changes/",
+                params=params,
+                auth=httpx.BasicAuth(user, password),
+            )
+        if resp.status_code != 200:
+            return None
+        rows = _parse_gerrit_rest_json(resp.text)
+    except Exception:  # noqa: BLE001 — verify must never raise
+        return None
+
+    # Exactly one row — 0 or >1 is ambiguous, fail closed.
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+
+    # Bind identity to the AUTHENTICATED row, never the webhook body.
+    try:
+        if int(row.get("_number")) != change_number:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if str(row.get("project") or "") != GERRIT_PROJECT_PATH:
+        return None
+    row_change_id = str(row.get("change_id") or "")
+    revision = str(row.get("current_revision") or "")
+    if expected_change_id and row_change_id != expected_change_id:
+        return None
+    if expected_revision and revision != expected_revision:
+        return None
+
+    # Merge + NON-BOT-review gate — SAME deriver as the SSH path (the REST
+    # DETAILED_LABELS payload is only RESHAPED into the approvals list, never
+    # re-judged). NOTE (β-F residual, foundation-audit BLOCKER-3): the
+    # non-bot test in derive_ground_truths is a USERNAME heuristic; the real
+    # `non-ai-reviewer` GROUP check (which DETAILED_LABELS + a group lookup
+    # could add) is a tracked follow-up upgrade — the one place this could
+    # be STRONGER than the SSH path.
+    gerrit_change = {
+        "status": row.get("status"),
+        "currentPatchSet": {
+            "approvals": _rest_labels_to_approvals(row.get("labels")),
+        },
+    }
+    try:
+        _truths = _prov.derive_ground_truths(
+            change_ref=str(change_number),
+            gerrit_change=gerrit_change,
+            jira_labels=None,
+            now=_dt.datetime.now(_dt.timezone.utc).isoformat(),
+        )
+    except _prov.ProvenanceUnconfirmable:
+        return None
+    if not {"merged", "review_plus2"} <= {t.kind for t in _truths}:
+        return None
+    reviewer = next(
+        (str((t.evidence_span or {}).get("by") or "")
+         for t in _truths if t.kind == "review_plus2"),
+        "",
+    )
+
+    return VerifiedMerge(
+        change_number=change_number,
+        change_id=row_change_id,
+        canonical_subject=str(row.get("subject") or ""),
+        revision=revision,
+        project=GERRIT_PROJECT_PATH,
+        branch=str(row.get("branch") or ""),
+        plus2_reviewer=reviewer,
+    )
+
+
+def http_verify_available() -> bool:
+    """True when a scoped read-only Gerrit HTTP account is configured, so
+    :func:`verify_merged_change_http` can run on a serving replica (no SSH
+    shell key required)."""
+    from backend.config import settings
+
+    return bool(
+        (settings.gerrit_url or "")
+        and (settings.gerrit_http_user or "")
+        and (settings.gerrit_http_password or "")
+    )
+
+
+def verify_capability() -> str:
+    """Which merge-verify path is usable on THIS host: ``http`` | ``ssh`` |
+    ``degraded``.
+
+    ``degraded`` means neither the REST HTTP account nor the SSH bot key is
+    present — every merge verification will fail-closed and NO ground truth
+    can be minted here. β-F surfaces this LOUDLY (the ``merge_verify_total``
+    ``path=degraded`` counter + an audit log) instead of the historical
+    silent warning-log drop.
+    """
+    if http_verify_available():
+        return "http"
+    try:
+        _bot, key = _gerrit_auth_for_instance("subscription-claude")
+        if key.exists():
+            return "ssh"
+    except Exception:  # noqa: BLE001 — capability probe must never raise
+        pass
+    return "degraded"
 
 
 def has_open_ps_for_ticket(
