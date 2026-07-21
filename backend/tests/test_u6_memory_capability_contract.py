@@ -25,8 +25,12 @@ from backend.agents.authorization_kernel import OperationRequest, authorize_acti
 from backend.agents.provenance import ModelSnapshot, ProvenanceCollector, SnapshotCache
 
 # The persistent-memory source-kinds the U6 legs will inject (L2/L3/episodic).
+# β-3a (OP-2715 leg-2 graph injection): LEARNED_ITEM added — a REVIEWED INV-2
+# boundary change (this pin exists so exactly such an add fails loudly and
+# gets cited; kernel-safety audit F4).
 _MEMORY_SOURCE_KINDS = frozenset(
-    {prov.EPISODIC, prov.CHAT_HISTORY, prov.RAG_DOC, prov.RUNNER_MEMORY_FILE}
+    {prov.EPISODIC, prov.CHAT_HISTORY, prov.RAG_DOC, prov.RUNNER_MEMORY_FILE,
+     prov.LEARNED_ITEM}
 )
 
 

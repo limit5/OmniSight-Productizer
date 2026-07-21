@@ -64,6 +64,9 @@ READ_FILE = "read_file"
 MCP_RESULT = "mcp_result"
 A2A_RESULT = "a2a_result"
 STALE_REFRESH = "stale_refresh"
+# β-3a (leg-2): published learned-item cards injected into a prompt. A
+# MEMORY kind — auto-auth downgrades on it (INV-2), same as EPISODIC.
+LEARNED_ITEM = "learned_item"
 
 SOURCE_KINDS = frozenset({
     EPISODIC,
@@ -75,6 +78,7 @@ SOURCE_KINDS = frozenset({
     MCP_RESULT,
     A2A_RESULT,
     STALE_REFRESH,
+    LEARNED_ITEM,
 })
 
 

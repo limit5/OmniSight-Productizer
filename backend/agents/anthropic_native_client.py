@@ -595,6 +595,7 @@ class AnthropicClient:
         ) = "log",
         mcp_servers: list[dict[str, Any]] | None = None,
         execution_context: "ExecutionContext | None" = None,
+        injected_provenance: list[tuple[str, str, str]] | None = None,
     ) -> RunResult:
         """Execute multi-turn tool-use loop until `stop_reason="end_turn"`.
 
@@ -724,6 +725,15 @@ class AnthropicClient:
             # accumulates across iterations WITHIN this invocation — the
             # message list is itself cumulative — and seal() never resets it.
             with provenance_scope() as _pcol:
+                # β-3a (kernel-audit F1): pre-injected prompt content — e.g.
+                # published LEARNED_ITEM cards spliced into `system` by the
+                # caller — is sealed into THIS invocation's collector FIRST,
+                # so it precedes every per-iteration seal and the guard's
+                # snapshot provably carries it (the prompt_loader ambient
+                # record cannot reach this nested scope). Mirrors the
+                # STALE_REFRESH idiom below.
+                for _kind, _sid, _content in injected_provenance or ():
+                    record_content(_pcol, _kind, _sid, _content)
                 while iterations < max_iterations:
                     iterations += 1
                     refreshed = self._maybe_inject_stale_refresh(

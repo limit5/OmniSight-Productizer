@@ -961,8 +961,18 @@ def build_system_prompt(
     last_vite_error_banner: str = "",
     repo_map_preamble: str = "",
     tenant_id: str | None = None,
+    learned_provenance_sink: "list | None" = None,
 ) -> str:
     """Assemble the full system prompt from model rules + role skill + task skill + handoff.
+
+    β-3a: when ``learned_provenance_sink`` is provided and a learned-item
+    block is spliced, ``(LEARNED_ITEM, source_id, content)`` tuples are
+    appended to it — the CALLER must thread them into
+    ``run_with_tools(injected_provenance=...)`` so the guard's
+    per-invocation collector carries them (kernel-audit F1: an ambient
+    record cannot reach that nested scope; the ambient record below is
+    defense-in-depth only). An unwired caller is FAIL-CLOSED: no
+    provenance ⇒ no grant eligibility ⇒ the challenge stays human.
 
     Two-phase skill loading (B15 #350):
 
@@ -1216,6 +1226,21 @@ def build_system_prompt(
     )
     if learned_block:
         sections.append(learned_block)
+        # β-3a: seal the injected card as MEMORY provenance. The sink feeds
+        # the caller's run_with_tools scope (the guard's snapshot); the
+        # ambient record is defense-in-depth for request-scope collectors.
+        from backend.agents.provenance import (
+            LEARNED_ITEM,
+            active_collector,
+            record_content,
+        )
+
+        _lp_sid = f"learned:{tenant_id or 'global'}"
+        if learned_provenance_sink is not None:
+            learned_provenance_sink.append((LEARNED_ITEM, _lp_sid, learned_block))
+        _amb = active_collector()
+        if _amb is not None:
+            record_content(_amb, LEARNED_ITEM, _lp_sid, learned_block)
 
     assembled = "\n\n---\n\n".join(sections)
 

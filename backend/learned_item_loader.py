@@ -41,11 +41,26 @@ from backend.prompt_loader import (
 # ━━ Kill-switch (same local truthy parse as the C1 boundary) ━━━━━━━━━
 
 _KILL_SWITCH_ENV = "OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED"
+# β-3a: the READ side gets its OWN default-OFF flag (audit MINOR-6/M3 —
+# one env must not couple publish-enable to prompt-injection-enable).
+# Reading requires BOTH switches; the write/publish side keeps the
+# original env alone. The read-OFF short-circuit reuses the FROZEN G7
+# result label ``kill_switch_off`` (a new label would change the frozen
+# metric surface); which switch is off is disambiguated by the
+# ``memory_enabled`` gauge (publish switch) + logs.
+_READ_ENV = "OMNISIGHT_LEARNED_ITEM_READ"
 _TRUTHY = frozenset({"1", "true", "yes"})
 
 
 def _promotion_enabled() -> bool:
     return os.environ.get(_KILL_SWITCH_ENV, "").strip().lower() in _TRUTHY
+
+
+def _read_enabled() -> bool:
+    return (
+        _promotion_enabled()
+        and os.environ.get(_READ_ENV, "").strip().lower() in _TRUTHY
+    )
 
 
 # ━━ Module cache ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -154,7 +169,9 @@ def get_learned_items_block(
     kill_switch_off}`` (the G7 frozen label shape). NO DB access — a
     missing cache entry while the switch is ON is the hollow signature
     (``empty_degraded``, loud)."""
-    if not _promotion_enabled():
+    # β-3a: reading requires BOTH the publish kill-switch AND the separate
+    # OMNISIGHT_LEARNED_ITEM_READ flag (read-OFF reuses the frozen label).
+    if not _read_enabled():
         return _finish("", "kill_switch_off")
     scope_keys = ["global:-"]
     if tenant_id is not None:

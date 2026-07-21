@@ -263,7 +263,7 @@ class TestHappySubmit:
         assert row[3] == "t-1"
         # Rendered fields come from A2's validate_and_render.
         assert row[4].startswith("----- BEGIN UNTRUSTED LEARNED-ITEM DATA")
-        assert row[5] == "u4r1"
+        assert row[5] == "u4r2"
         assert len(row[6]) == 64
         assert row[7] == "retrieved"
         assert row[8] == "k8s-lesson"
@@ -380,6 +380,7 @@ class TestFullChainIntegration:
         self, conn, monkeypatch,
     ) -> None:
         monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+        monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_READ", "1")
         loader._reset_for_tests()
         adapter = _SqliteAdapterConn(conn)
         # 1. producer submits the quarantined row.
@@ -673,6 +674,9 @@ class TestDormantShip:
             "learned_item_producer.py",
             "skill_distiller.py",
             "skills_extractor.py",
+            # β-0 (leg-2): the worker-loop curator is a WIRED governed
+            # producer caller (submit_quarantined_version).
+            "agents/worker_loop_curator.py",
         }
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):

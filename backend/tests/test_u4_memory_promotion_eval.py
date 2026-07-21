@@ -873,7 +873,10 @@ class TestDormantShip:
     def test_no_nontest_module_references_the_new_module(self) -> None:
         # Membership form (F-math precedent): the only backend module
         # allowed to contain the sentinel string is this file itself.
-        own = {"memory_promotion_eval.py"}
+        # β-2/β-3a: the dormant premise ended — the scheduler is the WIRED
+        # eval driver and metrics carries its label docs.
+        own = {"memory_promotion_eval.py",
+               "metrics.py", "agents/memory_promotion_scheduler.py"}
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):
             rel = py.relative_to(BACKEND_ROOT)
@@ -882,7 +885,7 @@ class TestDormantShip:
                 parts[:2] == ("alembic", "versions")
             ):
                 continue
-            if len(parts) == 1 and parts[0] in own:
+            if str(rel) in own or (len(parts) == 1 and parts[0] in own):
                 continue
             if "memory_promotion_eval" in py.read_text(errors="ignore"):
                 offenders.append(str(rel))

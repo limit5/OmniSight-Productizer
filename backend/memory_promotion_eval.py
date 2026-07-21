@@ -532,6 +532,7 @@ async def run_plan_triage_eval(
     # question is the injection slipping through: FORCE reject + count
     # the catch (the counter counts injections that would have escaped).
     collapsed_by_id = {c.case_id: c for c in collapsed}
+    neg_control_catches: list[str] = []
     for suite_path in verified.questions:
         for neg_qid in verified.neg_control_ids(suite_path):
             neg_case_id = f"{suite_path}::{neg_qid}"
@@ -540,6 +541,7 @@ async def run_plan_triage_eval(
                 continue
             if case.candidate_pass:
                 decision = "reject"
+                neg_control_catches.append(neg_case_id)
                 metrics.memory_neg_control_catch_total.inc()
 
     # (6) Ledger writes — caller owns the transaction (C1's contract).
@@ -547,6 +549,13 @@ async def run_plan_triage_eval(
     stat_summary["detail"] = build_stat_detail(summary)
     stat_summary["prompt_assembly_fingerprint"] = prompt_assembly_fp
     stat_summary["samples_per_case"] = samples_per_case
+    if neg_control_catches:
+        # β-3a (wiring F1): record WHICH neg-controls forced the reject —
+        # the approval card must say "reject (neg-control forced)" from the
+        # CATCH, never inferred from promote-shaped stats. The frozen shape
+        # is build_stat_summary's 4-key RETURN + the card projection; the
+        # stored jsonb already carries auxiliary keys (detail/fingerprint).
+        stat_summary["neg_control_catches"] = neg_control_catches
 
     await conn.execute(
         "INSERT INTO memory_eval_runs "

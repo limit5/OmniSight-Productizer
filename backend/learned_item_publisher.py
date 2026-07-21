@@ -306,6 +306,7 @@ async def publish_learned_item_version(
     approval_id: str,
     actor: str,
     supersedes_version_id: str | None = None,
+    reverify: "Any | None" = None,
 ) -> PublishResult:
     """Atomic advisory-locked publish (freeze G3/G4/V3.4).
 
@@ -314,9 +315,30 @@ async def publish_learned_item_version(
     so ledger events and the snapshot row land together or not at all.
     Predecessor retirement is EXPLICIT via ``supersedes_version_id``
     (no name-matching auto-discovery — linkage is the caller's call).
+
+    β-3a ``reverify``: an async callable ``(version_id, conn, now)`` (the
+    ``make_reverify_hook`` shape) re-deriving the version's evidence
+    ground truths at publish time (L6 closure). ⚠ It performs NETWORK
+    I/O — callers MUST invoke publish with the reverify OUTSIDE any open
+    transaction, or run the hook themselves pre-txn and pass None: the
+    pool kills idle-in-transaction sessions at 60s (wiring BLOCKER-1
+    precedent). A falsy/raising reverify ⇒ ``reverify_failed`` (loud).
     """
     if not _promotion_enabled():
         raise PublicationDenied("kill_switch_off")
+    if reverify is not None:
+        # FIRST — before the advisory lock, so a slow Gerrit/JIRA
+        # round-trip never extends the lock hold.
+        import datetime as _dt
+
+        try:
+            ok = await reverify(
+                version_id, conn, _dt.datetime.now(_dt.timezone.utc).isoformat()
+            )
+        except Exception as exc:  # noqa: BLE001 — fail closed, loudly
+            raise PublishValidationError(f"reverify_failed:{exc}") from exc
+        if not ok:
+            raise PublishValidationError("reverify_failed:ground_truth")
     version = await _read_version(conn, version_id)
     scope_key = publication_scope_key(
         version["audience"], version["tenant_id"]

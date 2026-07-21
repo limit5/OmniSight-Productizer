@@ -168,7 +168,8 @@ def _norm_component(component: str) -> str:
 # same-turn working set, not a persistent or external injection channel; their
 # poison→executable-target vector is closed by gate 6. ──
 _MEMORY_SOURCE_KINDS = frozenset(
-    {_prov.EPISODIC, _prov.CHAT_HISTORY, _prov.RAG_DOC, _prov.RUNNER_MEMORY_FILE}
+    {_prov.EPISODIC, _prov.CHAT_HISTORY, _prov.RAG_DOC, _prov.RUNNER_MEMORY_FILE,
+     _prov.LEARNED_ITEM}  # β-3a: published learned-item cards (INV-2)
 )
 _HIGH_INJECTION_SOURCES = (
     frozenset({_prov.A2A_RESULT, _prov.MCP_RESULT}) | _MEMORY_SOURCE_KINDS

@@ -90,6 +90,8 @@ def conn(m0258, m0259):
 @pytest.fixture()
 def enabled(monkeypatch):
     monkeypatch.setenv(KILL_SWITCH_ENV, "1")
+    # β-3a: reading now ALSO requires the separate read flag.
+    monkeypatch.setenv("OMNISIGHT_LEARNED_ITEM_READ", "1")
 
 
 @pytest.fixture(autouse=True)
