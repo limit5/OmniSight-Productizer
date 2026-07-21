@@ -1198,6 +1198,19 @@ if _AVAILABLE:
         labelnames=("path", "outcome"),
         registry=REGISTRY,
     )
+    worker_curator_ticks_total = Counter(
+        "omnisight_worker_curator_ticks_total",
+        "β-0 (leg-2) worker-loop curator ticks by outcome (ok / skipped / error)",
+        labelnames=("outcome",),
+        registry=REGISTRY,
+    )
+    worker_curator_candidates_total = Counter(
+        "omnisight_worker_curator_candidates_total",
+        "β-0 (leg-2) ground-truth candidates processed by result "
+        "(submitted / dup / error) — quarantined learned-item versions written",
+        labelnames=("result",),
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -1352,6 +1365,7 @@ else:
     u6_memory_scheduler_ticks_total = u6_l2_summaries_written_total = _NoOp()  # type: ignore
     u6_l3_decay_total = _NoOp()  # type: ignore
     merge_verify_total = _NoOp()  # type: ignore
+    worker_curator_ticks_total = worker_curator_candidates_total = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 

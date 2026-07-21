@@ -473,6 +473,15 @@ async def lifespan(app: FastAPI):
     # (§7 layered kill switches); decay is content-free state transitions only.
     from backend.agents import u6_memory_scheduler as _u6sched
     u6_scheduler_task = asyncio.create_task(_u6sched.run_memory_scheduler_loop())
+    # β-0 (leg-2): worker-loop curator — distils MERGED runner-ticket ground
+    # truth (curator_merge_candidates, written by β-F's verified-merge path)
+    # into QUARANTINED learned-item versions. Default-OFF
+    # (OMNISIGHT_WORKER_CURATOR); the loop returns immediately when disabled
+    # (0 ticks, no pool lookup on SQLite/no-DSN startups). Write-only + ZERO
+    # model surface in β-0; nothing reaches a prompt (the loader kill-switch
+    # OMNISIGHT_LEARNED_ITEM_PROMOTION_ENABLED stays OFF).
+    from backend.agents import worker_loop_curator as _wcur
+    worker_curator_task = asyncio.create_task(_wcur.run_worker_curator_loop())
     # MP.W16.2: subscription account expiry monitor. Reuses provider
     # adapter health checks and emits best-effort alerts when a CLI
     # subscription is inactive, expired, or inside the warning window.
@@ -569,7 +578,7 @@ async def lifespan(app: FastAPI):
     for t in (
         pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task,
         iq_task, ft_task, md_task, balance_task, subscription_monitor_task,
-        u6_metrics_task, u6_scheduler_task,
+        u6_metrics_task, u6_scheduler_task, worker_curator_task,
         cmek_revoke_task, drf_task, quota_task, drafts_gc_task,
         workspace_gc_task, host_metrics_task, host_ringbuf_task,
         delivery_task,
