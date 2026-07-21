@@ -1464,6 +1464,13 @@ _l3_inflight: set[int] = set()
 _gerrit_unauth_ingest_warned = False
 
 
+def _revert_subject_re():
+    """β-1: the SINGLE revert-subject shape (distiller-owned) — seeding and
+    gating must agree on what a revert looks like."""
+    from backend.agents.worker_loop_distiller import _REVERT_SUBJECT_RE
+    return _REVERT_SUBJECT_RE
+
+
 async def _on_change_merged(event: dict) -> None:
     """A change was merged — trigger replication to external repos."""
     change = event.get("change", {})
@@ -1803,8 +1810,14 @@ async def _save_merged_solution_to_l3(
                         "change_id": vm.change_id,
                         "canonical_subject": _subj,
                         "plus2_reviewer": vm.plus2_reviewer or None,
+                        "patchset_count": vm.patchset_count,
+                        # β-1: revert-shaped subjects incl. the repo's
+                        # [OP-N]-prefixed convention and Revert^N chains
+                        # (the distiller gate re-checks with the commit
+                        # body's "This reverts commit" mark too).
                         "revert_state": (
-                            "reverted" if _subj.startswith('Revert "') else "none"
+                            "reverted"
+                            if _revert_subject_re().match(_subj) else "none"
                         ),
                         "tenant_id": runner_tenant.OMNISIGHT_SELF_TENANT,
                     })

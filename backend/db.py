@@ -4073,11 +4073,12 @@ async def insert_curator_merge_candidate(conn, data: dict) -> bool:
     returns a row on a real insert and nothing on a replay. Returns True iff
     a row landed. PG-only substrate; the curator runs on the serving/PG path.
     """
+    ps_count = data.get("patchset_count")
     row = await conn.fetchrow(
         """INSERT INTO curator_merge_candidates
            (id, ticket_key, gerrit_change, change_id, canonical_subject,
-            plus2_reviewer, revert_state, tenant_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            plus2_reviewer, revert_state, tenant_id, patchset_count)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            ON CONFLICT (gerrit_change) DO NOTHING
            RETURNING id""",
         data["id"],
@@ -4088,6 +4089,7 @@ async def insert_curator_merge_candidate(conn, data: dict) -> bool:
         data.get("plus2_reviewer"),
         data.get("revert_state", "none"),
         data.get("tenant_id") or "omnisight-self",
+        int(ps_count) if ps_count is not None else None,
     )
     return row is not None
 

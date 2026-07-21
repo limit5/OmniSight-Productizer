@@ -1206,8 +1206,12 @@ if _AVAILABLE:
     )
     worker_curator_candidates_total = Counter(
         "omnisight_worker_curator_candidates_total",
-        "β-0 (leg-2) ground-truth candidates processed by result "
-        "(submitted / dup / error) — quarantined learned-item versions written",
+        "leg-2 ground-truth candidates by result. Submit outcomes: submitted/"
+        "dup/error/deferred (β-0). β-1 LLM-lane outcomes (separate dimension, "
+        "same candidate can carry one of each): distilled_llm / gate_skip_* "
+        "(revert, reverted_later, trivial, null_patchset, labels_unknown) / "
+        "llm_fallback (no cheap model) / llm_error / llm_reject / llm_deferred "
+        "(budget — row stays undistilled)",
         labelnames=("result",),
         registry=REGISTRY,
     )

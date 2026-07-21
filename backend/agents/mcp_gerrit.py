@@ -332,6 +332,9 @@ class VerifiedMerge:
     project: str
     branch: str
     plus2_reviewer: str = ""  # NON-BOT +2 approver (review_span.by); "" if unknown
+    # β-1: current patchset NUMBER (== patchset count) — the hard-ticket
+    # gate's struggle signal. None when the payload lacks it.
+    patchset_count: "int | None" = None
 
 
 def verify_merged_change(
@@ -426,6 +429,12 @@ def verify_merged_change(
          for t in _truths if t.kind == "review_plus2"),
         "",
     )
+    # β-1: currentPatchSet.number == patchset count (gerrit query sends it
+    # as a string; same coercion idiom as gerrit_jira_bridge).
+    try:
+        ps_count = int(current_ps.get("number"))
+    except (TypeError, ValueError):
+        ps_count = None
 
     return VerifiedMerge(
         change_number=change_number,
@@ -435,6 +444,7 @@ def verify_merged_change(
         project=GERRIT_PROJECT_PATH,
         branch=str(row.get("branch") or ""),
         plus2_reviewer=reviewer,
+        patchset_count=ps_count,
     )
 
 
@@ -593,6 +603,14 @@ async def verify_merged_change_http(
          for t in _truths if t.kind == "review_plus2"),
         "",
     )
+    # β-1: under o=CURRENT_REVISION the row carries revisions[<sha>]._number —
+    # the current revision's _number IS the patchset count.
+    try:
+        ps_count = int(
+            ((row.get("revisions") or {}).get(revision) or {}).get("_number")
+        )
+    except (TypeError, ValueError):
+        ps_count = None
 
     return VerifiedMerge(
         change_number=change_number,
@@ -602,7 +620,70 @@ async def verify_merged_change_http(
         project=GERRIT_PROJECT_PATH,
         branch=str(row.get("branch") or ""),
         plus2_reviewer=reviewer,
+        patchset_count=ps_count,
     )
+
+
+async def fetch_merged_change_context(
+    change_number: int,
+    *,
+    timeout_s: float = DEFAULT_TIMEOUT_SECS,
+) -> "dict | None":
+    """β-1 read-only REST context for the worker-loop distiller: the merged
+    change's commit message + changed-file list + patchset count.
+
+    Same scoped HTTP auth as :func:`verify_merged_change_http` (one query,
+    ``o=CURRENT_REVISION&o=CURRENT_COMMIT&o=CURRENT_FILES``). Returns None on
+    ANY failure — missing creds, non-200, 0/многие rows, parse error — the
+    distiller then falls back to the deterministic minimal record. This is
+    CONTEXT for a quarantined draft, not a trust decision: the trust gate
+    stays in verify (non-bot +2), which already ran at ledger-write time.
+    """
+    import httpx
+
+    from backend.config import settings
+
+    if not isinstance(change_number, int) or change_number <= 0 or change_number > _MAX_CHANGE_NUMBER:
+        return None
+    base = (settings.gerrit_url or "").rstrip("/")
+    user = settings.gerrit_http_user or ""
+    password = settings.gerrit_http_password or ""
+    if not (base and user and password):
+        return None
+
+    params = {
+        "q": f"change:{change_number} project:{GERRIT_PROJECT_PATH}",
+        "o": ["CURRENT_REVISION", "CURRENT_COMMIT", "CURRENT_FILES"],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.get(
+                f"{base}/a/changes/",
+                params=params,
+                auth=httpx.BasicAuth(user, password),
+            )
+        if resp.status_code != 200:
+            return None
+        rows = _parse_gerrit_rest_json(resp.text)
+    except Exception:  # noqa: BLE001 — context fetch must never raise
+        return None
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return None
+    row = rows[0]
+    current = str(row.get("current_revision") or "")
+    rev = (row.get("revisions") or {}).get(current) or {}
+    commit = rev.get("commit") or {}
+    files = rev.get("files") or {}
+    try:
+        ps_count = int(rev.get("_number"))
+    except (TypeError, ValueError):
+        ps_count = None
+    return {
+        "commit_message": str(commit.get("message") or ""),
+        # Magic paths (/COMMIT_MSG, /MERGE_LIST) start with "/" — drop them.
+        "files": sorted(f for f in files if isinstance(f, str) and not f.startswith("/")),
+        "patchset_count": ps_count,
+    }
 
 
 def http_verify_available() -> bool:

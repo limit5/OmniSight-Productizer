@@ -23,6 +23,7 @@ async def test_insert_candidate_round_trips(pg_test_conn) -> None:
         "canonical_subject": "[OP-2462] fix the thing",
         "revert_state": "none",
         "tenant_id": "omnisight-self",
+        "patchset_count": 7,
     })
     assert ok is True
 
@@ -35,6 +36,7 @@ async def test_insert_candidate_round_trips(pg_test_conn) -> None:
     assert rows[0]["revert_state"] == "none"
     assert rows[0]["distilled"] is False
     assert rows[0]["distilled_at"] is None
+    assert rows[0]["patchset_count"] == 7  # β-1 struggle signal (NULL ok for legacy)
 
 
 @pytest.mark.asyncio

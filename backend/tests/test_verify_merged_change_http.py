@@ -33,6 +33,7 @@ def _merged_row(**over) -> dict:
         "subject": "[OP-2462] fix the thing",
         "status": "MERGED",
         "current_revision": "abcdef1234567890",
+        "revisions": {"abcdef1234567890": {"_number": 5}},
         "labels": {
             "Code-Review": {"all": [{"value": 2, "username": "sora", "name": "Sora"}]},
             "Verified": {"all": [{"value": 1, "username": "ci-bot"}]},
@@ -93,6 +94,7 @@ async def test_happy_path_returns_canonical_identity(monkeypatch, http_creds):
     assert vm.branch == "develop"
     assert vm.project == _PROJECT
     assert vm.plus2_reviewer == "sora"  # NON-BOT approver carried for ledger evidence
+    assert vm.patchset_count == 5  # β-1: revisions[current]._number == patchset count
     # Requested the detailed-labels + current-revision options against /a/changes/.
     assert cap["url"].endswith("/a/changes/")
     assert cap["params"]["o"] == ["CURRENT_REVISION", "DETAILED_LABELS"]
@@ -187,6 +189,44 @@ def test_rest_labels_to_approvals_shape():
 def test_parse_gerrit_rest_json_strips_xssi():
     assert mcp_gerrit._parse_gerrit_rest_json(")]}'\n[1,2]") == [1, 2]
     assert mcp_gerrit._parse_gerrit_rest_json('[{"a":1}]') == [{"a": 1}]
+
+
+@pytest.mark.asyncio
+async def test_missing_revisions_yields_none_patchset_count(monkeypatch, http_creds):
+    row = _merged_row()
+    del row["revisions"]
+    _install_fake_httpx(monkeypatch, resp=_FakeResp(text=_rest_body([row])))
+    vm = await mcp_gerrit.verify_merged_change_http(change_number=4242, project=_PROJECT)
+    assert vm is not None
+    assert vm.patchset_count is None  # degrade, never invent
+
+
+def test_ssh_verify_carries_patchset_count(monkeypatch):
+    """SSH path parity: currentPatchSet.number (a string in gerrit query
+    output) surfaces as VerifiedMerge.patchset_count."""
+    monkeypatch.setattr(mcp_gerrit, "GERRIT_PROJECT_PATH", _PROJECT)
+    monkeypatch.setattr(
+        mcp_gerrit, "_ssh_argv", lambda *a, **k: ["true"],
+    )
+    row = json.dumps({
+        "number": "4242", "project": _PROJECT, "branch": "develop",
+        "id": "I1234567890abcdef1234567890abcdef12345678",
+        "subject": "[OP-2462] fix the thing", "status": "MERGED",
+        "currentPatchSet": {
+            "revision": "abcdef1234567890", "number": "7",
+            "approvals": [
+                {"type": "Code-Review", "value": "2", "by": {"username": "sora"}}
+            ],
+        },
+    })
+    stats = json.dumps({"type": "stats", "rowCount": 1})
+    monkeypatch.setattr(
+        mcp_gerrit, "_run_gerrit_query", lambda *a, **k: row + "\n" + stats + "\n",
+    )
+    vm = mcp_gerrit.verify_merged_change(change_number=4242, project=_PROJECT)
+    assert vm is not None
+    assert vm.patchset_count == 7
+    assert vm.plus2_reviewer == "sora"
 
 
 # ── β-F capability selection (webhook HTTP-first / SSH-fallback / degraded) ──
