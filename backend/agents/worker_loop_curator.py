@@ -243,7 +243,7 @@ async def _distill_candidate(
         "SET distilled = TRUE, distilled_at = clock_timestamp() WHERE id = $1",
         candidate["id"],
     )
-    return "submitted" if result.created else "dup"
+    return ("submitted" if result.created else "dup"), llm_label
 
 
 async def run_worker_curator_once(pool) -> dict:

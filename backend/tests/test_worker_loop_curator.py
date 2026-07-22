@@ -384,3 +384,69 @@ async def test_curator_second_pass_is_idempotent(pg_test_conn):
     assert first["submitted"] == 1
     assert second["scanned"] == 0
     assert second["submitted"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created,want_submit", [(True, "submitted"), (False, "dup")])
+async def test_distill_candidate_success_path_returns_two_tuple(
+    monkeypatch, created, want_submit,
+):
+    """Arity regression (staging 2026-07-23): the SUCCESS return was a bare
+    string, so the caller's ``submit_label, llm_label = …`` unpacked its
+    CHARACTERS ("dup" → 3 values) AFTER submit+mark committed — data landed,
+    counters all fell into ``error``. Lock the (submit_label, llm_label)
+    contract on the path no non-PG test previously walked."""
+
+    class _Result:
+        pass
+
+    _Result.created = created
+
+    async def _fake_submit(_conn, **_kw):
+        return _Result()
+
+    class _MarkConn:
+        def __init__(self):
+            self.updates = 0
+
+        async def execute(self, sql, *_a):
+            assert "SET distilled = TRUE" in sql
+            self.updates += 1
+
+    monkeypatch.setattr(wc, "submit_quarantined_version", _fake_submit)
+    conn = _MarkConn()
+    out = await wc._distill_candidate(
+        conn, {"id": "c1", "ticket_key": "OP-1", "gerrit_change": 1,
+               "canonical_subject": "s", "revert_state": "none"},
+        now="2026-07-23T00:00:00+00:00", llm_state=None,
+    )
+    assert out == (want_submit, None)
+    assert conn.updates == 1
+
+
+@pytest.mark.asyncio
+async def test_distill_candidate_llm_success_returns_two_tuple(monkeypatch):
+    """Same arity lock for the LLM-draft success path: label rides slot 2."""
+
+    class _Result:
+        created = True
+
+    async def _fake_submit(_conn, **kw):
+        assert kw["created_by"] == "ground_truth_curator_llm"
+        return _Result()
+
+    async def _draft(_conn, _cand, _state):
+        return {"scope": "s", "procedure_steps": ["x"]}, "distilled_llm", None
+
+    class _MarkConn:
+        async def execute(self, sql, *_a):
+            assert "SET distilled = TRUE" in sql
+
+    monkeypatch.setattr(wc, "submit_quarantined_version", _fake_submit)
+    monkeypatch.setattr(wc, "_try_llm_draft", _draft)
+    out = await wc._distill_candidate(
+        _MarkConn(), {"id": "c2", "ticket_key": "OP-2", "gerrit_change": 2,
+                      "canonical_subject": "s", "revert_state": "none"},
+        now="2026-07-23T00:00:00+00:00", llm_state={"enabled": True},
+    )
+    assert out == ("submitted", "distilled_llm")
