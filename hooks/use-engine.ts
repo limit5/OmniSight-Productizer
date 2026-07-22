@@ -108,6 +108,13 @@ function mapTask(t: api.ApiTask): Task {
   }
 }
 
+// OP-2724: how many trailing messages the ``chat.message`` SSE handler
+// scans for an originator echo (same role + content under a different
+// id). Small on purpose — wide enough to survive interleaved pipeline/
+// tool lines between the REST append and the broadcast, narrow enough
+// that identical content re-sent in a later turn still renders.
+const CHAT_ECHO_DEDUP_WINDOW = 10
+
 function mapChatMessage(m: api.ApiChatMessage): OrchestratorMessage {
   return {
     id: m.id,
@@ -785,9 +792,15 @@ export function useEngine() {
             //
             // Self-filter on data.user_id since ``_broadcast_scope=
             // 'user'`` is advisory until Q.4 (#298). Idempotency: the
-            // originator's own ``sendChat()`` already appended the
-            // reply locally (via the REST response body) so we dedup
-            // by ``id`` to avoid showing the same line twice.
+            // originator's own ``sendCommand()`` already appended the
+            // reply locally (via the REST/stream response body), but
+            // under a DIFFERENT id than the broadcast carries — so the
+            // id check alone misses the originator's own echo
+            // (OP-2724: duplicate reply lines). Until the two payloads
+            // share the persisted row id, a broadcast whose
+            // (role, content) matches a recently rendered line is
+            // dropped as an echo; content NOT rendered locally still
+            // appends (the cross-device feature).
             const d = event.data
             const incomingUserId = (d.user_id as string) || ""
             // When auth is in open mode, user_id may be "anonymous" and
@@ -799,12 +812,24 @@ export function useEngine() {
             const ts = (d.ts as string) || (d.timestamp as string) || new Date().toISOString()
             setMessages(prev => {
               if (prev.find(m => m.id === d.id)) return prev
+              // OP-2724 originator-echo dedup: bounded recency window
+              // (not whole history) so a user legitimately re-sending
+              // the same text in a later turn still renders.
+              const incomingContent = (d.content as string) || ""
+              if (
+                incomingContent &&
+                prev
+                  .slice(-CHAT_ECHO_DEDUP_WINDOW)
+                  .some(m => m.role === role && m.content === incomingContent)
+              ) {
+                return prev
+              }
               const sugg = (d as Record<string, unknown>).suggestion as
                 { id: string; type: string; title: string; description: string; task_id?: string; agent_id?: string; agent_type?: string; priority?: string; status?: string } | undefined
               const msg: OrchestratorMessage = {
                 id: d.id as string,
                 role,
-                content: (d.content as string) || "",
+                content: incomingContent,
                 timestamp: ts,
                 suggestion: sugg
                   ? {
