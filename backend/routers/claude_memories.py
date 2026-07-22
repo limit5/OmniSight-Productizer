@@ -180,3 +180,202 @@ async def ingest_claude_memories(
     for r in results:
         metrics.claude_memory_ingest_total.labels(action=r["action"]).inc()
     return {"results": results}
+
+
+# ━━ γ-1: human publish gate + review lane (lint at publish time) ━━━━━━━━━━━
+
+_PUBLISH_CAP_PER_HOUR = 30
+_publish_window: list[float] = []
+
+
+def _rate_ok() -> bool:
+    import time as _t
+
+    now = _t.time()
+    _publish_window[:] = [x for x in _publish_window if now - x < 3600.0]
+    if len(_publish_window) >= _PUBLISH_CAP_PER_HOUR:
+        return False
+    _publish_window.append(now)
+    return True
+
+
+class PublishBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version_id: str
+    body_sha256: str
+
+
+class RevokeMemoryBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+
+
+@router.get("/claude-memories/pending")
+async def pending_claude_memories(
+    limit: int = 50,
+    user: _au.User = Depends(_au.require_admin),
+) -> dict[str, Any]:
+    """γ-1 review lane: quarantined heads + DIFF vs the published revision
+    (integrity-audit MAJOR-3: never a keyhole preview — edits show a real
+    diff; new slugs show the size-capped body head)."""
+    from backend.learned_item_approval import assert_human_principal
+
+    assert_human_principal(user)
+    from backend.db_pool import get_pool  # lazy
+
+    limit = max(1, min(int(limit), 200))
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT s.slug, s.state, s.rank, s.hook, s.lint, "
+            "       h.id AS head_id, h.revision AS head_rev, h.title, "
+            "       h.mem_type, h.body AS head_body, h.body_sha256 AS head_sha, "
+            "       p.body AS pub_body, p.revision AS pub_rev "
+            "FROM claude_memory_state s "
+            "JOIN claude_memory_versions h ON h.id = s.head_version_id "
+            "LEFT JOIN claude_memory_versions p ON p.id = s.published_version_id "
+            "WHERE s.project_id = $1 AND s.state = 'quarantined' "
+            "ORDER BY s.rank ASC NULLS LAST, s.slug ASC LIMIT $2",
+            _PROJECT_ID, limit,
+        )
+    import difflib
+
+    items = []
+    for r in rows:
+        d = dict(r)
+        if d["pub_body"] is not None:
+            diff = "\n".join(difflib.unified_diff(
+                d["pub_body"].splitlines(), d["head_body"].splitlines(),
+                fromfile=f"published(rev{d['pub_rev']})",
+                tofile=f"head(rev{d['head_rev']})", lineterm="",
+            ))[:20000]
+            preview = None
+        else:
+            diff = None
+            preview = d["head_body"][:20000]
+        items.append({
+            "slug": d["slug"], "title": d["title"], "mem_type": d["mem_type"],
+            "rank": d["rank"], "hook": d["hook"],
+            "head_version_id": str(d["head_id"]), "head_revision": d["head_rev"],
+            "head_sha256": d["head_sha"], "lint": d["lint"],
+            "diff_vs_published": diff, "new_body_preview": preview,
+        })
+    return {"items": items}
+
+
+@router.post("/claude-memories/{slug}/publish")
+async def publish_claude_memory(
+    slug: str,
+    body: PublishBody,
+    user: _au.User = Depends(_au.require_admin),
+) -> dict[str, Any]:
+    """γ-1 HUMAN publish: binds the EXACT (version, sha) the human reviewed
+    (post-approval body change = different sha = 409); fresh lint at publish
+    time (blocking must be empty — the 0279 trigger backstops); previous
+    published revision → superseded event, same txn."""
+    from backend.learned_item_approval import assert_human_principal
+
+    assert_human_principal(user)
+    if not _rate_ok():
+        raise HTTPException(status_code=429, detail="publish_rate_capped")
+    from backend.db_pool import get_pool  # lazy
+
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT s.head_version_id, s.published_version_id, s.state, "
+                "       h.body, h.body_sha256, h.revision "
+                "FROM claude_memory_state s "
+                "JOIN claude_memory_versions h ON h.id = s.head_version_id "
+                "WHERE s.project_id = $1 AND s.slug = $2 FOR UPDATE OF s",
+                _PROJECT_ID, slug,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="unknown_slug")
+            if str(row["head_version_id"]) != body.version_id:
+                raise HTTPException(status_code=409, detail="not_head_version")
+            if row["body_sha256"] != body.body_sha256:
+                raise HTTPException(status_code=409, detail="sha_mismatch")
+            from backend.claude_memory_lint import lint_body
+
+            slugs = {
+                r["slug"] for r in await conn.fetch(
+                    "SELECT slug FROM claude_memory_state WHERE project_id = $1",
+                    _PROJECT_ID,
+                )
+            }
+            lint = lint_body(row["body"], known_slugs=slugs)
+            if lint["blocking"]:
+                await conn.execute(
+                    "UPDATE claude_memory_state SET lint = $3, updated_at = now() "
+                    "WHERE project_id = $1 AND slug = $2",
+                    _PROJECT_ID, slug, json.dumps(lint),
+                )
+                raise HTTPException(
+                    status_code=422, detail={"blocking": lint["blocking"]},
+                )
+            prev = row["published_version_id"]
+            await conn.execute(
+                "UPDATE claude_memory_state SET state = 'published', "
+                "published_version_id = $3, lint = $4, updated_at = now() "
+                "WHERE project_id = $1 AND slug = $2",
+                _PROJECT_ID, slug, body.version_id, json.dumps(lint),
+            )
+            await conn.execute(
+                "INSERT INTO claude_memory_transition_events "
+                "(id, project_id, slug, version_id, from_state, to_state, actor, reason) "
+                "VALUES ($1,$2,$3,$4,$5,'published',$6,$7)",
+                str(uuid.uuid4()), _PROJECT_ID, slug, body.version_id,
+                row["state"], user.email, f"human publish rev{row['revision']}",
+            )
+            if prev is not None and str(prev) != body.version_id:
+                await conn.execute(
+                    "INSERT INTO claude_memory_transition_events "
+                    "(id, project_id, slug, version_id, from_state, to_state, actor, reason) "
+                    "VALUES ($1,$2,$3,$4,'published','superseded',$5,$6)",
+                    str(uuid.uuid4()), _PROJECT_ID, slug, str(prev),
+                    user.email, f"superseded by rev{row['revision']}",
+                )
+    return {"published": slug, "version_id": body.version_id,
+            "advisory": lint["advisory"]}
+
+
+@router.post("/claude-memories/{slug}/revoke")
+async def revoke_claude_memory(
+    slug: str,
+    body: RevokeMemoryBody,
+    user: _au.User = Depends(_au.require_admin),
+) -> dict[str, Any]:
+    """γ-1 HUMAN revoke: the removal lane — a revoked slug is excluded from
+    γ-2 regeneration entirely."""
+    from backend.learned_item_approval import assert_human_principal
+
+    assert_human_principal(user)
+    if not (body.reason or "").strip():
+        raise HTTPException(status_code=422, detail="reason_required")
+    from backend.db_pool import get_pool  # lazy
+
+    async with get_pool().acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT state, head_version_id FROM claude_memory_state "
+                "WHERE project_id = $1 AND slug = $2 FOR UPDATE",
+                _PROJECT_ID, slug,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="unknown_slug")
+            await conn.execute(
+                "UPDATE claude_memory_state SET state = 'revoked', "
+                "updated_at = now() WHERE project_id = $1 AND slug = $2",
+                _PROJECT_ID, slug,
+            )
+            await conn.execute(
+                "INSERT INTO claude_memory_transition_events "
+                "(id, project_id, slug, version_id, from_state, to_state, actor, reason) "
+                "VALUES ($1,$2,$3,$4,$5,'revoked',$6,$7)",
+                str(uuid.uuid4()), _PROJECT_ID, slug,
+                str(row["head_version_id"]), row["state"], user.email,
+                body.reason.strip()[:1000],
+            )
+    return {"revoked": slug}
