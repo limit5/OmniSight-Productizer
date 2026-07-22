@@ -465,3 +465,48 @@ async def pin_claude_memory_export(
             row["manifest"], f"pin:claude-code:{user.id}",
         )
     return {"pinned": body.export_sha256}
+
+
+# ━━ γ-3: the cross-principal bridge (human-initiated, per-slug) ━━━━━━━━━━━━
+
+@router.post("/claude-memories/{slug}/bridge")
+async def bridge_claude_memory(
+    slug: str,
+    user: _au.User = Depends(_au.require_admin),
+) -> dict[str, Any]:
+    """γ-3: distill ONE published feedback memory into a QUARANTINED worker
+    lesson (kind=lesson) through the full leg-2 chain. HUMAN-initiated LLM
+    spend — no loop, no flag; feedback-type + published-state required."""
+    from backend.learned_item_approval import assert_human_principal
+
+    assert_human_principal(user)
+    from backend.db_pool import get_pool  # lazy
+
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT s.state, v.title, v.body, v.mem_type "
+            "FROM claude_memory_state s "
+            "JOIN claude_memory_versions v ON v.id = s.published_version_id "
+            "WHERE s.project_id = $1 AND s.slug = $2",
+            _PROJECT_ID, slug,
+        )
+        if row is None or row["state"] != "published":
+            raise HTTPException(status_code=409, detail="not_published")
+        if row["mem_type"] != "feedback":
+            raise HTTPException(status_code=422, detail="not_feedback_type")
+        from datetime import datetime, timezone
+
+        from backend.claude_memory_bridge import bridge_feedback_to_lesson
+
+        version_id, status, payload = await bridge_feedback_to_lesson(
+            conn, slug=slug, title=row["title"], body=row["body"],
+            now=datetime.now(timezone.utc).isoformat(),
+        )
+        if status in ("no_cheap_model", "llm_error"):
+            raise HTTPException(status_code=503, detail=status)
+        if status in ("draft_rejected", "validation_rejected"):
+            raise HTTPException(status_code=422, detail={
+                "status": status, "payload": payload,
+            })
+    return {"status": status, "lesson_version_id": version_id,
+            "payload": payload}
