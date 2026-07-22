@@ -29,7 +29,7 @@ descriptive u4r2) → citations → human-only utility → revocation proposals.
 - **No holdout ⇒ nothing is ever approvable/publishable** (0277 fail-closed).
 
 ## Step 2 — staging calibration run (before ANY flag)
-- Pin the eval model (defaults: `anthropic` / `claude-haiku-4-20250506`);
+- Pin the eval model (defaults: `anthropic` / `claude-haiku-4-5-20251001`);
   set `llm_temperature=0` for the calibration window if feasible.
 - Run the battery baselines (both suites): ALL neg-controls must
   baseline-REFUSE and ALL positives must baseline-PASS on the pinned model.
