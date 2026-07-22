@@ -1074,6 +1074,37 @@ PROJECT_STATE_API_TOKEN_ENV = "OMNISIGHT_RUNNER_API_TOKEN"
 PROJECT_STATE_SKIP_LABEL = "project-state:skip"
 
 
+
+def _fetch_learned_items_block(ticket_key: str) -> str:
+    """β-3c: GET /api/v1/learned-items/block — human-approved published
+    cards for this tenant. Empty string on ANY failure or when
+    OMNISIGHT_RUNNER_LEARNED_ITEMS is off; result label logged on EVERY
+    pickup (audit #6: hollow serving must be visible from runner logs)."""
+    if os.environ.get("OMNISIGHT_RUNNER_LEARNED_ITEMS", "").strip().lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return ""
+    try:
+        import json as _json
+        import urllib.request as _rq
+
+        base = os.environ.get("OMNISIGHT_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
+        token = os.environ.get("OMNISIGHT_RUNNER_API_TOKEN", "")
+        req = _rq.Request(
+            f"{base}/api/v1/learned-items/block?tenant=omnisight-self",
+            headers={"Authorization": f"Bearer {token}"} if token else {},
+        )
+        with _rq.urlopen(req, timeout=3) as resp:
+            data = _json.loads(resp.read().decode("utf-8", "replace"))
+        result = str(data.get("result") or "?")
+        print(f"[runner] learned_items.result={result} ticket={ticket_key}",
+              file=sys.stderr)
+        block = str(data.get("block") or "")
+        return ("\n\n" + block + "\n") if block else ""
+    except Exception as exc:  # noqa: BLE001 — degrade silently
+        print(f"[runner] learned_items.result=fetch_error err={exc}", file=sys.stderr)
+        return ""
+
 def _fetch_project_state(key: str) -> dict | None:
     """Call ``GET /api/v1/project-state?ticket=<key>`` with a hard 3 s timeout.
 
@@ -1676,6 +1707,10 @@ def _build_prompt(
     # OP-905 (F7) — inject cross-task awareness payload from the
     # /api/v1/project-state aggregator. Gated by the feature flag + skip
     # label; any fetch failure degrades silently to an empty block.
+    # β-3c: human-approved learned-item block (fetch-over-HTTP, degrade
+    # silently to empty; spliced VERBATIM — never re-fenced, the A2 bytes
+    # are nonce-fenced + escaped server-side). Runner-side flag default OFF.
+    learned_block = _fetch_learned_items_block(ticket_key)
     ps_block = _build_project_state_block(key, list(labels))
 
     # OP-956 — when the ticket carries the `runner:no-commits-expected`
@@ -1804,7 +1839,7 @@ If you find that completing this ticket requires touching an out-of-area
 domain, halt, write a discovered-dependency note to your report file (see
 below) and exit WITHOUT committing — the runner surfaces your note and reverts
 the ticket per docs/sop/jira-ticket-conventions.md §11.
-{capabilities_block}{fg_block}{links_block}{ps_block}{ops_only_block}{reflection_block}{character_block}{lessons_block}{antipattern_block}
+{capabilities_block}{fg_block}{links_block}{ps_block}{learned_block}{ops_only_block}{reflection_block}{character_block}{lessons_block}{antipattern_block}
 {docrules_block}# Acceptance Criteria verification + reporting (REQUIRED before exit)
 
 You run inside a sandbox with NO JIRA credentials — you CANNOT call

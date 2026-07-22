@@ -489,6 +489,12 @@ async def lifespan(app: FastAPI):
     # HUMAN approval; the loader kill-switch stays OFF.
     from backend.agents import memory_promotion_scheduler as _mpe
     promotion_eval_task = asyncio.create_task(_mpe.run_promotion_eval_loop())
+    # β-3c: PER-WORKER learned-item cache refresh (cmek idiom — the loader
+    # cache is per-process; a leader-gated refresh would leave every other
+    # worker serving empty_degraded forever). Inert while the read flag is
+    # OFF; polls the flag.
+    from backend import learned_item_refresh as _lir
+    learned_refresh_task = asyncio.create_task(_lir.run_learned_item_refresh_loop())
     # MP.W16.2: subscription account expiry monitor. Reuses provider
     # adapter health checks and emits best-effort alerts when a CLI
     # subscription is inactive, expired, or inside the warning window.
@@ -586,7 +592,7 @@ async def lifespan(app: FastAPI):
         pubsub_task, watchdog_task, sweep_task, dlq_task, digest_task,
         iq_task, ft_task, md_task, balance_task, subscription_monitor_task,
         u6_metrics_task, u6_scheduler_task, worker_curator_task,
-        promotion_eval_task,
+        promotion_eval_task, learned_refresh_task,
         cmek_revoke_task, drf_task, quota_task, drafts_gc_task,
         workspace_gc_task, host_metrics_task, host_ringbuf_task,
         delivery_task,
@@ -1511,6 +1517,7 @@ from backend.routers import decisions as _decisions_router  # Phase 47A
 _include_versioned_router(_decisions_router.router)
 from backend.routers import memory_promotion as _memory_promotion_router  # OP-2568 U4-D
 _include_versioned_router(_memory_promotion_router.router)
+_include_versioned_router(_learned_items_router.router)
 from backend.routers import memory as _memory_router  # Phase 63-E
 _include_versioned_router(_memory_router.router)
 from backend.routers import intent as _intent_router  # Phase 68-C

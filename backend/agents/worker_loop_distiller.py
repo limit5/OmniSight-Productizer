@@ -464,3 +464,26 @@ async def draft_record(
     except Exception:  # noqa: BLE001 — any grammar/shape reject
         return None, "llm_reject"
     return payload, "distilled_llm"
+
+
+async def reverted_later_by_change(conn, gerrit_change: int) -> bool:
+    """β-3c (β-1 audit F9): ticketless originals — join a revert row to its
+    ORIGINAL via the QUOTED SUBJECT (Gerrit's generated revert subject quotes
+    the original subject; ``Revert^N`` chains resolve through the previous
+    revert row's stored subject). ``strpos``, not LIKE — no wildcard-escape
+    trap. Duplicate-subject false positives over-exclude = safe direction."""
+    row = await conn.fetchrow(
+        "SELECT canonical_subject FROM curator_merge_candidates "
+        "WHERE gerrit_change = $1",
+        int(gerrit_change),
+    )
+    subject = (row or {}).get("canonical_subject") if row else None
+    if not subject:
+        return False
+    hit = await conn.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM curator_merge_candidates "
+        "WHERE revert_state = 'reverted' "
+        "AND strpos(canonical_subject, 'Revert \"' || $1 || '\"') > 0)",
+        subject,
+    )
+    return bool(hit)

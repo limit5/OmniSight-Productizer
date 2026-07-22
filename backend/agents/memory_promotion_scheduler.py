@@ -203,6 +203,22 @@ async def evaluate_version(conn, version: dict, *, now: str, ask_state: dict) ->
     # same-ticket ledger join before any LLM spend. (Approval/publication-time
     # re-checks are β-3.)
     ticket = ticket_from_version_name(version.get("name") or "")
+    name = (version.get("name") or "").strip()
+    if not ticket and name.startswith("ground-truth:change-"):
+        # β-3c: ticketless originals (β-1 audit F9) — subject-quote join.
+        from backend.agents.worker_loop_distiller import reverted_later_by_change
+
+        try:
+            change_no = int(name.rsplit("-", 1)[1])
+        except ValueError:
+            change_no = 0
+        if change_no and await reverted_later_by_change(conn, change_no):
+            await _write_terminal_run(
+                conn, version_id=str(version["id"]), decision="reject",
+                reason="reverted_later", live_set_hash=live_set_hash, now=now,
+                extra={"gerrit_change": change_no},
+            )
+            return "reject"
     if ticket:
         from backend.agents.worker_loop_distiller import reverted_later
 

@@ -661,7 +661,10 @@ class TestPromptLoaderIntegration:
 
 class TestDormantShip:
     def test_no_external_loader_reference(self) -> None:
-        own = {"learned_item_loader.py", "prompt_loader.py"}
+        own = {"learned_item_loader.py", "prompt_loader.py",
+               # β-3c: the WIRED per-worker refresh loop + the runner
+               # endpoint (dormant premise ended; dual-flag gated).
+               "learned_item_refresh.py", "routers/learned_items.py"}
         offenders: list[str] = []
         for py in BACKEND_ROOT.rglob("*.py"):
             rel = py.relative_to(BACKEND_ROOT)

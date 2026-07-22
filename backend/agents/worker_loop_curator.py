@@ -137,6 +137,10 @@ async def _try_llm_draft(
     # change for this ticket disqualifies the original fix as a "success".
     if ticket_key and await distiller.reverted_later(conn, ticket_key):
         return None, "gate_skip_reverted_later", None
+    if not ticket_key and await distiller.reverted_later_by_change(
+        conn, candidate["gerrit_change"],
+    ):  # β-3c: ticketless originals (β-1 audit F9)
+        return None, "gate_skip_reverted_later", None
     if llm_state["left"] <= 0 or time.monotonic() > llm_state.get("deadline", 0.0):
         # Tick cap / tick deadline hit (audit MAJOR-4: bound the conn+lock
         # hold across network). DEFER — leave the row UNDISTILLED so a later
