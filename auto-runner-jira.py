@@ -1711,7 +1711,7 @@ def _build_prompt(
     # β-3c: human-approved learned-item block (fetch-over-HTTP, degrade
     # silently to empty; spliced VERBATIM — never re-fenced, the A2 bytes
     # are nonce-fenced + escaped server-side). Runner-side flag default OFF.
-    learned_block = _fetch_learned_items_block(ticket_key)
+    learned_block = _fetch_learned_items_block(key)
     ps_block = _build_project_state_block(key, list(labels))
 
     # OP-956 — when the ticket carries the `runner:no-commits-expected`
