@@ -1235,6 +1235,19 @@ if _AVAILABLE:
         labelnames=("kind",),
         registry=REGISTRY,
     )
+    claude_memory_ingest_total = Counter(
+        "omnisight_claude_memory_ingest_total",
+        "γ-0 (leg-3) Claude-memory ingest by action "
+        "(created/revised/unchanged/rejected)",
+        labelnames=("action",),
+        registry=REGISTRY,
+    )
+    claude_memory_drift_gauge = Gauge(
+        "omnisight_claude_memory_drift",
+        "γ-0 (leg-3) anti-hollow: |store files| - |claude_memory_state rows| "
+        "(nonzero after a full ingest = drift; set by the ingest CLI)",
+        registry=REGISTRY,
+    )
 
 else:
     # No-op stubs so callers don't have to guard every increment.
@@ -1391,6 +1404,7 @@ else:
     merge_verify_total = _NoOp()  # type: ignore
     worker_curator_ticks_total = worker_curator_candidates_total = _NoOp()  # type: ignore
     memory_promotion_eval_ticks_total = memory_promotion_eval_anomaly_total = _NoOp()  # type: ignore
+    claude_memory_ingest_total = claude_memory_drift_gauge = _NoOp()  # type: ignore
     REGISTRY = None  # type: ignore
 
 
