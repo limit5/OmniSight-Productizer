@@ -228,3 +228,50 @@ async def approve_memory_promotion(
             return await handle_approve(user, conn, version_id, body)
         except ApprovalValidationError as exc:
             raise HTTPException(status_code=422, detail=exc.reason)
+
+
+class RevokeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str
+
+
+@router.post("/memory-promotions/{version_id}/revoke")
+async def revoke_memory_promotion(
+    version_id: str,
+    body: RevokeBody,
+    user: _au.User = Depends(_au.require_admin),
+) -> dict[str, Any]:
+    """β-4 (audit F5): HUMAN-ONLY revocation of a published card. The
+    publisher function existed with zero callers; this is its sanctioned
+    exposure. G6 symmetry: global-audience cards need super_admin. The
+    utility rollup only ever FILES A PROPOSAL — a human lands here."""
+    assert_human_principal(user)
+    if not (body.reason or "").strip():
+        raise HTTPException(status_code=422, detail="reason_required")
+    from backend.db_pool import get_pool  # lazy
+
+    async with get_pool().acquire() as conn:
+        audience = await get_version_audience(conn, version_id)
+        if audience == "global" and not _au.role_at_least(user.role, "super_admin"):
+            raise HTTPException(
+                status_code=403,
+                detail="global-audience revocation requires super_admin",
+            )
+        from backend.learned_item_publisher import (
+            PublicationDenied,
+            PublishValidationError,
+            revoke_learned_item_version,
+        )
+
+        try:
+            async with conn.transaction():
+                await revoke_learned_item_version(
+                    conn, version_id=version_id,
+                    revoked_by=user.email, reason=body.reason.strip(),
+                )
+        except PublishValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        except PublicationDenied as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+    return {"revoked": version_id}

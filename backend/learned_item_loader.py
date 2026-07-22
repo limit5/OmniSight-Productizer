@@ -162,7 +162,8 @@ def _finish(block: str, result: str) -> tuple[str, str]:
 
 
 def get_learned_items_block(
-    *, tenant_id: str | None, context: str
+    *, tenant_id: str | None, context: str,
+    served_sink: "list | None" = None,
 ) -> tuple[str, str]:
     """PURE-SYNC, cache-only read. Returns ``(block_text, result)`` with
     ``result ∈ {non_empty, empty_expected, empty_degraded,
@@ -240,4 +241,9 @@ def get_learned_items_block(
     # A2's stored bytes inject VERBATIM — never re-render, never
     # re-fence.
     block = "\n\n".join([_PREAMBLE] + [payload for _, payload in chosen])
+    # β-4 (audit C1): the caller-supplied sink receives the SERVED version
+    # ids (chosen order) — the citation writer needs them; a 3-tuple return
+    # would churn 27 call sites for the same information.
+    if served_sink is not None:
+        served_sink.extend(vid for vid, _ in chosen)
     return _finish(block, "non_empty")

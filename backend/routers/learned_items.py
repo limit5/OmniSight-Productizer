@@ -25,15 +25,45 @@ from backend import auth as _au
 router = APIRouter(tags=["learned-items"])
 
 
+_TICKET_RE = __import__("re").compile(r"^[A-Z][A-Z0-9_]*-\d+$")
+
+
 @router.get("/learned-items/block")
 async def learned_items_block(
     tenant: str | None = None,
     context: str = "",
+    ticket: str | None = None,
     user: _au.User = Depends(_au.current_user),
 ) -> dict[str, Any]:
     from backend.learned_item_loader import get_learned_items_block
 
+    served: list = []
     block, result = get_learned_items_block(
-        tenant_id=(tenant or None), context=context or "",
+        tenant_id=(tenant or None), context=context or "", served_sink=served,
     )
+    # β-4 (audit C1/F2): SERVER-observed citation — best-effort, NEVER fails
+    # the 200 (a DB blip must not cost the runner its injection). Hit =
+    # server-observed (cited_by = authenticated principal); ticket =
+    # runner-supplied semi-trusted (shape-validated); OUTCOME stays fully
+    # trusted (the join source is the Gerrit-verified ledger).
+    if result == "non_empty" and served and ticket and _TICKET_RE.match(ticket):
+        try:
+            import uuid as _uuid
+
+            from backend.db_pool import get_pool
+
+            async with get_pool().acquire() as conn:
+                for vid in served:
+                    await conn.execute(
+                        "INSERT INTO learned_item_citations "
+                        "(id, version_id, ticket_key, cited_by) "
+                        "VALUES ($1, $2, $3, $4) "
+                        "ON CONFLICT (version_id, ticket_key) DO NOTHING",
+                        str(_uuid.uuid4()), vid, ticket, str(user.id),
+                    )
+        except Exception:  # noqa: BLE001 — loud metric, silent to the caller
+            from backend import metrics
+
+            metrics.memory_failclosed_total.labels(
+                reason="citation_write").inc()
     return {"block": block, "result": result}

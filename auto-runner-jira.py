@@ -1091,7 +1091,8 @@ def _fetch_learned_items_block(ticket_key: str) -> str:
         base = os.environ.get("OMNISIGHT_BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
         token = os.environ.get("OMNISIGHT_RUNNER_API_TOKEN", "")
         req = _rq.Request(
-            f"{base}/api/v1/learned-items/block?tenant=omnisight-self",
+            f"{base}/api/v1/learned-items/block?tenant=omnisight-self"
+            + (f"&ticket={ticket_key}" if ticket_key else ""),
             headers={"Authorization": f"Bearer {token}"} if token else {},
         )
         with _rq.urlopen(req, timeout=3) as resp:

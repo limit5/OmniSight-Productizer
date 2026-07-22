@@ -457,6 +457,16 @@ async def run_promotion_eval_once(pool) -> dict:
                         "memory_promotion_eval: version %s failed",
                         version.get("id"), exc_info=True,
                     )
+            # β-4 (audit C4/F6): leader-gated utility rollup — DB write ⇒
+            # single-writer correct (do NOT copy the per-worker refresh
+            # idiom); own default-OFF flag; cheap SQL only.
+            if utility_rollup_enabled():
+                try:
+                    await run_utility_rollup(conn)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — rollup failure never fails the tick
+                    _log.warning("utility rollup failed", exc_info=True)
         finally:
             try:
                 await conn.execute(
@@ -517,3 +527,92 @@ async def run_promotion_eval_loop(
         ticks += 1
         await sleep(interval_s)
     return ticks
+
+
+# ━━ β-4: utility rollup + decay proposal (leader-gated, cheap SQL only) ━━━━
+
+_UTILITY_ENV = "OMNISIGHT_MEMORY_UTILITY_ROLLUP"
+_UTILITY_WINDOW_ENV = "OMNISIGHT_MEMORY_UTILITY_WINDOW_DAYS"
+_DEFAULT_UTILITY_WINDOW_DAYS = 14
+_UTILITY_FLOOR_ENV = "OMNISIGHT_MEMORY_UTILITY_FLOOR"
+_DEFAULT_UTILITY_FLOOR = 0.2
+_UTILITY_MIN_HITS_ENV = "OMNISIGHT_MEMORY_UTILITY_MIN_HITS"
+_DEFAULT_UTILITY_MIN_HITS = 3
+
+_ROLLUP_SQL = (
+    "WITH mature AS ("
+    "  SELECT c.version_id,"
+    "         EXISTS (SELECT 1 FROM curator_merge_candidates m"
+    "                  WHERE m.ticket_key = c.ticket_key"
+    "                    AND m.revert_state = 'none'"
+    "                    AND m.merged_at >= c.cited_at"
+    "                    AND m.merged_at <  c.cited_at + make_interval(days => $1)"
+    "         ) AS success"
+    "    FROM learned_item_citations c"
+    "   WHERE c.cited_at <= now() - make_interval(days => $1)"
+    ") "
+    "INSERT INTO learned_item_utility"
+    "       (version_id, hits, successes, window_days, baseline_rate, updated_at) "
+    "SELECT version_id, COUNT(*), COUNT(*) FILTER (WHERE success), $1,"
+    "       (SELECT AVG(success::int)::float8 FROM mature), now()"
+    "  FROM mature GROUP BY version_id "
+    "ON CONFLICT (version_id) DO UPDATE SET"
+    "    hits = EXCLUDED.hits, successes = EXCLUDED.successes,"
+    "    window_days = EXCLUDED.window_days,"
+    "    baseline_rate = EXCLUDED.baseline_rate, updated_at = EXCLUDED.updated_at"
+)
+
+
+def utility_rollup_enabled() -> bool:
+    return os.environ.get(_UTILITY_ENV, "").strip().lower() in _TRUTHY
+
+
+async def run_utility_rollup(conn) -> int:
+    """β-4 (audit C2/C3/C4): recompute the HUMAN-ONLY utility rollup, then
+    file a DB revocation PROPOSAL (0256 proposed_actions — never an external
+    write; memory never authorizes a side effect) for published versions
+    whose mature success-rate sits below the floor. Idempotent full
+    recompute; dedup = one pending proposal per version."""
+    window = _env_int(_UTILITY_WINDOW_ENV, _DEFAULT_UTILITY_WINDOW_DAYS, minimum=1)
+    await conn.execute(_ROLLUP_SQL, window)
+    floor = _env_float(_UTILITY_FLOOR_ENV, _DEFAULT_UTILITY_FLOOR, minimum=0.0)
+    min_hits = _env_int(_UTILITY_MIN_HITS_ENV, _DEFAULT_UTILITY_MIN_HITS, minimum=1)
+    rows = await conn.fetch(
+        "SELECT u.version_id, u.hits, u.successes FROM learned_item_utility u "
+        "WHERE u.hits >= $1 AND u.successes::float8 / u.hits < $2 "
+        "AND EXISTS (SELECT 1 FROM memory_publications p "
+        "            WHERE p.version_id = u.version_id AND p.state = 'published') "
+        "AND NOT EXISTS (SELECT 1 FROM proposed_actions a "
+        "            WHERE a.action_kind = 'memory_revoke_proposal' "
+        "              AND a.params::text LIKE '%' || u.version_id::text || '%' "
+        "              AND a.status = 'pending')",
+        min_hits, floor,
+    )
+    filed = 0
+    for row in rows:
+        from backend import db as _db
+
+        await _db.insert_proposed_action(conn, {
+            "id": str(uuid.uuid4()),
+            "action_kind": "memory_revoke_proposal",
+            "params": json.dumps({"version_id": str(row["version_id"])}),
+            "title": "Learned-item underperforming: propose revocation",
+            "preview": (
+                f"version {row['version_id']}: {row['successes']}/{row['hits']} "
+                f"mature citations succeeded (floor {floor}). Human decides via "
+                "POST /memory-promotions/{id}/revoke - no auto-unpublish."
+            ),
+            "blast_radius": "one published learned-item card",
+            "proposed_by": "memory_utility_rollup",
+            "proposed_at": _time_now(),
+        })
+        filed += 1
+    if filed:
+        _log.warning("utility rollup filed %d revocation proposal(s)", filed)
+    return filed
+
+
+def _time_now() -> float:
+    import time as _t
+
+    return _t.time()
