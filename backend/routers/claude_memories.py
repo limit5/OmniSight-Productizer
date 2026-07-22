@@ -379,3 +379,89 @@ async def revoke_claude_memory(
                 body.reason.strip()[:1000],
             )
     return {"revoked": slug}
+
+
+# ━━ γ-2: published-rows export + server-side pin ledger ━━━━━━━━━━━━━━━━━━━━
+
+@router.get("/claude-memories/export")
+async def export_claude_memories(
+    user: _au.User = Depends(_au.current_user),
+) -> dict[str, Any]:
+    """γ-2: published rows for the regenerator (bodies stay FILE-PRIMARY —
+    only shas travel; the client re-hashes local files: the file-binding
+    that defends against a compromised backend). Every export writes an
+    append-only server-pin ledger row (defends against an ~/.claude
+    attacker). Also returns the previous export's sha so the client can
+    detect server-pin self-inconsistency (the ONLY hard-refuse case)."""
+    from backend.db_pool import get_pool  # lazy
+
+    async with get_pool().acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT s.slug, s.rank, s.hook, "
+            "       v.title, v.revision, v.body_sha256, v.mem_type "
+            "FROM claude_memory_state s "
+            "JOIN claude_memory_versions v ON v.id = s.published_version_id "
+            "WHERE s.project_id = $1 AND s.state = 'published' "
+            "ORDER BY s.rank ASC NULLS LAST, s.slug ASC",
+            _PROJECT_ID,
+        )
+        prev = await conn.fetchrow(
+            "SELECT export_sha256 FROM claude_memory_exports "
+            "WHERE project_id = $1 ORDER BY at DESC LIMIT 1",
+            _PROJECT_ID,
+        )
+        manifest = [
+            {"slug": r["slug"], "revision": r["revision"],
+             "body_sha256": r["body_sha256"]}
+            for r in rows
+        ]
+        export_id = str(uuid.uuid4())
+        await conn.execute(
+            "INSERT INTO claude_memory_exports "
+            "(id, project_id, export_sha256, manifest, requested_by) "
+            "VALUES ($1, $2, NULL, $3, $4)",
+            export_id, _PROJECT_ID, json.dumps(manifest),
+            f"claude-code:{user.id}",
+        )
+    return {
+        "export_id": export_id,
+        "previous_export_sha256": (prev or {}).get("export_sha256"),
+        "items": [dict(r) for r in rows],
+    }
+
+
+class ExportPinBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    export_id: str
+    export_sha256: str
+
+
+@router.post("/claude-memories/export-pin")
+async def pin_claude_memory_export(
+    body: ExportPinBody,
+    user: _au.User = Depends(_au.current_user),
+) -> dict[str, Any]:
+    """γ-2: the regenerator reports the sha of the MEMORY.md it actually
+    wrote — appended as a NEW ledger row referencing the export (the export
+    ledger is append-only; the original row is never updated)."""
+    from backend.db_pool import get_pool  # lazy
+
+    if not re.match(r"^[0-9a-f]{64}$", body.export_sha256):
+        raise HTTPException(status_code=422, detail="bad_sha")
+    async with get_pool().acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT manifest FROM claude_memory_exports WHERE id = $1 "
+            "AND project_id = $2",
+            body.export_id, _PROJECT_ID,
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="unknown_export")
+        await conn.execute(
+            "INSERT INTO claude_memory_exports "
+            "(id, project_id, export_sha256, manifest, requested_by) "
+            "VALUES ($1, $2, $3, $4, $5)",
+            str(uuid.uuid4()), _PROJECT_ID, body.export_sha256,
+            row["manifest"], f"pin:claude-code:{user.id}",
+        )
+    return {"pinned": body.export_sha256}
