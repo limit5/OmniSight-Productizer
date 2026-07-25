@@ -162,6 +162,32 @@ DLP_SCANNER="$REPO/scripts/backup_dlp_scan.py"
 command -v python3 >/dev/null || \
   die "python3 missing; DLP scanner cannot run; aborting BEFORE plaintext extract"
 
+# OP-2729 — reviewed-body digest allowlist for content-reviewed columns
+# (claude_memory_versions.body). It lives OUTSIDE this checkout on purpose: prod
+# runs from a release-PINNED tree, so keeping reviewed digests in a tracked file
+# would dirty it on every review — and a dirty tree hard-fails deploy-prod.sh AND
+# emergency digest rollback. Bind-mounted read-only into the ephemeral scan
+# container; absent means nothing is approved and the gate keeps blocking, which
+# is the correct default (absent evidence of review is not review).
+# ${HOME:-} not $HOME: this script runs under `set -u`, and the drift-guard test
+# invokes it with a scrubbed environment. An unset HOME must degrade to "no
+# allowlist" (fail-closed), never to an unbound-variable abort before the preflight.
+DLP_REVIEWED_BODIES="${OMNISIGHT_DLP_REVIEWED_BODIES_HOST:-${HOME:-}/.config/omnisight/backup-dlp-reviewed-bodies.txt}"
+DLP_REVIEWED_MOUNT=()
+if [[ -r "$DLP_REVIEWED_BODIES" ]]; then
+  # Target a writable in-container path: the backend rootfs is READ-ONLY, so a
+  # bind whose mountpoint does not already exist fails at container init. /tmp is
+  # a tmpfs. Deliberately NOT /etc/omnisight — that path is already bound to the
+  # deploy overlay directory, and putting operator review state inside
+  # deploy-managed state is the invisible coupling this whole change exists to avoid.
+  DLP_REVIEWED_MOUNT=(
+    --volume "$DLP_REVIEWED_BODIES:/tmp/omnisight-dlp-reviewed-bodies.txt:ro"
+    --env "OMNISIGHT_DLP_REVIEWED_BODIES=/tmp/omnisight-dlp-reviewed-bodies.txt"
+  )
+else
+  warn "no reviewed-body allowlist at $DLP_REVIEWED_BODIES — content-reviewed columns will block (fail-closed)"
+fi
+
 COMPOSE_FILE="$REPO/docker-compose.prod.yml"
 PG_CONTAINER="${OMNISIGHT_PG_CONTAINER:-omnisight-pg-primary}"
 
@@ -204,6 +230,7 @@ if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>
   # still returns a non-zero exit → hard fail → shred (never a silent pass).
   if ! docker compose -f "$COMPOSE_FILE" run --rm --no-deps \
         --volume "$DLP_SCANNER:/app/scripts/backup_dlp_scan.py:ro" \
+        ${DLP_REVIEWED_MOUNT[@]+"${DLP_REVIEWED_MOUNT[@]}"} \
         --entrypoint python3 backend-a \
         /app/scripts/backup_dlp_scan.py --postgres-tmp-db "$TMP_DB"; then
     _cleanup_tmp_db; trap - EXIT

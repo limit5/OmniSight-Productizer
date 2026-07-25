@@ -15,11 +15,13 @@ the backup file contents and shares no mutable in-memory state.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -105,6 +107,72 @@ EXPECTED_DLP_LABEL_COLUMNS: set[tuple[str, str, str]] = {
 }
 
 
+# OP-2729 — content-reviewed release for prose-bearing columns.
+#
+# `claude_memory_versions.body` holds operator engineering notes that by design
+# DISCUSS this stack's own topology (`pg-primary`, `ai_cache`, throwaway loopback
+# test DSNs). A content-pattern scan cannot distinguish "discusses X" from "leaks
+# X" — architecture anti-pattern #11 at the data layer — so from the 2026-07-23
+# leg-3 ingest onward this column blocked the nightly encrypted backup outright.
+#
+# Three rounds of adversarial review rejected every pattern-based fix. The error
+# was always the same shape: a gate that says "release unless my patterns detect a
+# credential" is only as sound as its detector is COMPLETE, and no regex set is
+# complete over free-form prose (`postgresql+asyncpg://` and `redis://:pw@` fire
+# only the hostname label; `secret_filter` has no password-assignment rule at all;
+# `.pgpass`, JSON, YAML, `curl -u`, `-p<pw>` and line-split URIs all escape).
+#
+# So release is keyed on a human having reviewed the EXACT body, identified by
+# sha256. Completeness stops being a requirement: any edit is a new digest and
+# therefore a new review. The digest is computed over the value actually scanned —
+# the row's own `body_sha256` column is never trusted.
+DIGEST_REVIEWED_COLUMNS: set[tuple[str, str]] = {
+    ("claude_memory_versions", "body"),
+}
+
+# Only these labels may ever be released by a content review. Strong-format secret
+# labels (anthropic, github_pat, aws_secret, private_key_block, jwt, ...) block even
+# on a reviewed body: a human can miss an `sk-ant-` in a 264 KB note, a regex cannot.
+# This bounds the residual risk of the design, which is reviewer error.
+DIGEST_RELEASABLE_LABELS: frozenset[str] = frozenset(
+    {"pg_internal", "ai_internal", "database_url"}
+)
+
+# The allowlist lives OUTSIDE the release artefact on purpose: prod runs from a
+# release-pinned checkout, so keeping reviewed digests in this file would mean
+# dirtying that checkout on every review — which hard-fails `deploy-prod.sh` and
+# emergency digest rollback. `backup_prod_db.sh` bind-mounts the host file in.
+REVIEWED_DIGESTS_ENV = "OMNISIGHT_DLP_REVIEWED_BODIES"
+DEFAULT_REVIEWED_DIGESTS_PATH = "/etc/omnisight/backup-dlp-reviewed-bodies.txt"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_reviewed_digests_cache: frozenset[str] | None = None
+
+
+def reviewed_body_digests() -> frozenset[str]:
+    """sha256 digests of bodies a human has reviewed and approved.
+
+    A missing or unreadable file yields an EMPTY set, i.e. nothing is released and
+    the gate keeps blocking. Absent evidence of review is never treated as review.
+    """
+    global _reviewed_digests_cache
+    if _reviewed_digests_cache is None:
+        path = Path(os.environ.get(REVIEWED_DIGESTS_ENV, DEFAULT_REVIEWED_DIGESTS_PATH))
+        digests: set[str] = set()
+        try:
+            for raw in path.read_text(encoding="utf-8").splitlines():
+                token = raw.split("#", 1)[0].strip().lower()
+                if _SHA256_RE.match(token):
+                    digests.add(token)
+        except OSError:
+            digests = set()
+        _reviewed_digests_cache = frozenset(digests)
+    return _reviewed_digests_cache
+
+
+def body_digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _blocking_labels(table: str, column: str, labels: list[str]) -> list[str]:
     """Filter redact() labels down to the ones that should BLOCK the backup:
     drops the over-broad ``high_entropy_token`` and the narrowly-reviewed
@@ -125,6 +193,14 @@ class BackupDLPFinding:
     column: str
     rowid: int | str  # SQLite rowid (int) or Postgres ctid (str)
     labels: list[str]
+    # sha256 of the cell body, populated only for DIGEST_REVIEWED_COLUMNS so the
+    # operator can review and approve exact content. A digest of reviewed prose is
+    # not a secret; raw values are still never carried.
+    body_digest: str = ""
+    # Review aids for the operator, computed only for DIGEST_REVIEWED_COLUMNS.
+    # These NEVER gate anything (see the three rejected pattern-based designs);
+    # they exist to point a reviewer at the parts of a body worth reading twice.
+    review_hints: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -204,6 +280,13 @@ def _classify_cell(table: str, column: str, value: Any) -> list[str] | None:
         if (table, column) in EXPECTED_HIGH_ENTROPY_COLUMNS:
             # Reviewed-and-known-safe column (legacy allowlist).
             return None
+        if (table.strip().lower(), column.strip().lower()) in DIGEST_REVIEWED_COLUMNS and all(
+            label in DIGEST_RELEASABLE_LABELS for label in blocking
+        ):
+            # Content-reviewed release (OP-2729): this exact body was read and
+            # approved by a human. Any edit changes the digest and blocks again.
+            if body_digest(value) in reviewed_body_digests():
+                return None
         return blocking
     # No blocking label fired, but a secret-NAMED column with any plaintext
     # value still fails — value-pattern misses don't excuse a column that is
@@ -211,6 +294,47 @@ def _classify_cell(table: str, column: str, value: Any) -> list[str] | None:
     if _is_sensitive_plaintext_column(column):
         return ["sensitive_column_plaintext"]
     return None
+
+
+# Review aids, NOT a gate. Deliberately broader than `secret_filter` so they flag
+# the shapes it provably misses: any scheme including +driver suffixes, any
+# userinfo including an empty username, and password-ish assignments. A hint means
+# "read this part before approving", never "block".
+_HINT_CRED_URI = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s/@]*:[^\s@]*@[^\s)'\"]+", re.I)
+_HINT_LOOPBACK = re.compile(r"@(localhost|127\.0\.0\.1|\[?::1\]?)[:/]", re.I)
+_HINT_ASSIGN = re.compile(
+    r"(?:PGPASSWORD|password|passwd|pwd|passphrase|secret|token|api[_-]?key)"
+    r"\s*[:=]\s*['\"`]?(\S{8,})",
+    re.I,
+)
+_HINT_PRIVKEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
+
+
+def review_hints(value: str) -> list[str]:
+    hints: list[str] = []
+    non_loopback = [m.group(0) for m in _HINT_CRED_URI.finditer(value) if not _HINT_LOOPBACK.search(m.group(0))]
+    if non_loopback:
+        hints.append(f"non-loopback-credential-uri x{len(non_loopback)}")
+    assigns = _HINT_ASSIGN.findall(value)
+    if assigns:
+        hints.append(f"password-like-assignment x{len(assigns)}")
+    if _HINT_PRIVKEY.search(value):
+        hints.append("PRIVATE-KEY-BLOCK")
+    return hints
+
+
+def _finding_digest(table: str, column: str, value: Any) -> str:
+    """Digest carried on findings in content-reviewed columns, so the operator can
+    approve exact content. Empty elsewhere — no reason to hash what is not reviewable."""
+    if (table.strip().lower(), column.strip().lower()) not in DIGEST_REVIEWED_COLUMNS:
+        return ""
+    return body_digest(value) if isinstance(value, str) else ""
+
+
+def _finding_hints(table: str, column: str, value: Any) -> list[str]:
+    if (table.strip().lower(), column.strip().lower()) not in DIGEST_REVIEWED_COLUMNS:
+        return []
+    return review_hints(value) if isinstance(value, str) else []
 
 
 def _iter_user_tables(conn: sqlite3.Connection) -> Iterable[str]:
@@ -282,6 +406,8 @@ def scan_backup_db(db_path: Path | str) -> BackupDLPReport:
                                 column=column,
                                 rowid=rowid,
                                 labels=labels,
+                                body_digest=_finding_digest(table, column, row[column]),
+                                review_hints=_finding_hints(table, column, row[column]),
                             )
                         )
     except sqlite3.Error as exc:
@@ -401,7 +527,12 @@ def scan_postgres_db(database_url: str) -> BackupDLPReport:
                     if labels:
                         findings.append(
                             BackupDLPFinding(
-                                table=table, column=column, rowid=rowid, labels=labels
+                                table=table,
+                                column=column,
+                                rowid=rowid,
+                                labels=labels,
+                                body_digest=_finding_digest(table, column, value),
+                                review_hints=_finding_hints(table, column, value),
                             )
                         )
     except Exception as exc:
@@ -432,6 +563,15 @@ def _main(argv: list[str] | None = None) -> int:
         ),
     )
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--emit-reviewed-digests",
+        action="store_true",
+        help=(
+            "Review aid (OP-2729): after scanning, print a ready-to-paste allowlist "
+            "block for blocking findings in content-reviewed columns, annotated with "
+            "hints. Printing is NOT approval — read each body before pasting."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.postgres_tmp_db:
@@ -456,6 +596,32 @@ def _main(argv: list[str] | None = None) -> int:
         report = scan_backup_db(args.db_path)
     else:
         parser.error("provide a SQLite db_path, --postgres-url, or --postgres-tmp-db")
+    if args.emit_reviewed_digests:
+        candidates = [
+            f for f in report.findings
+            if f.body_digest and all(x in DIGEST_RELEASABLE_LABELS for x in f.labels)
+        ]
+        blocked_by_strong = [f for f in report.findings if f.body_digest and f not in candidates]
+        print("# OP-2729 reviewed-body allowlist — REVIEW EACH BODY BEFORE PASTING.")
+        print("# Printing a digest is not approval. A hint means read that part twice;")
+        print("# no hint does not mean safe, only that these particular shapes are absent.")
+        print(f"# generated from: {report.db_path}")
+        seen: set[str] = set()
+        for finding in candidates:
+            if finding.body_digest in seen:
+                continue
+            seen.add(finding.body_digest)
+            note = f"{finding.table}.{finding.column} rowid={finding.rowid} labels={','.join(finding.labels)}"
+            if finding.review_hints:
+                note += f"  HINTS: {'; '.join(finding.review_hints)}"
+            print(f"{finding.body_digest}  # {note}")
+        print(f"# {len(seen)} candidate digest(s); {len(blocked_by_strong)} finding(s) carry a "
+              "non-releasable label and CANNOT be approved this way.")
+        for finding in blocked_by_strong:
+            print(f"#   NOT-RELEASABLE {finding.table}.{finding.column} rowid={finding.rowid} "
+                  f"labels={','.join(finding.labels)}", file=sys.stderr)
+        return 0 if report.passed else 1
+
     if args.json:
         print(json.dumps(report.to_dict(), sort_keys=True))
     elif report.passed:

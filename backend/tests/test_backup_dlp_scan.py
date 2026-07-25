@@ -427,3 +427,102 @@ def test_backup_prod_db_pg_scan_uses_tmp_db_flag_not_rsplit() -> None:
     # the fragile rsplit-based URL build must be gone from executable code
     assert "rsplit" not in code_only
     assert "OMNISIGHT_DLP_TMP_DB" not in code_only
+
+
+# ---------------------------------------------------------------------------
+# OP-2729 — content-reviewed release for claude_memory_versions.body
+#
+# Three rounds of adversarial review rejected every pattern-based design; the
+# shapes below are the ones that killed them, kept here as regression tests.
+# ---------------------------------------------------------------------------
+
+REVIEWED_TABLE = "claude_memory_versions"
+REVIEWED_COLUMN = "body"
+
+# Real corpus shape: prose that DISCUSSES this stack's topology.
+_PROSE = "Deploy note: restart omnisight-pg-primary before the ai_cache warm-up.\n"
+# The two DSN forms that fire ONLY the internal-host label, because secret_filter's
+# database_url pattern needs a bare scheme and a non-empty user.
+_ASYNCPG = "DSN: postgresql+asyncpg://omnisight:REALPW@pg-primary:5432/omnisight\n"
+_REDIS_EMPTY_USER = "cache: redis://:REALPW@ai_cache:6379/0\n"
+
+
+def _use_allowlist(monkeypatch, tmp_path, bodies: list[str], *, write_file: bool = True) -> Path:
+    path = tmp_path / "reviewed.txt"
+    if write_file:
+        lines = ["# reviewed 2026-07-25", ""]
+        lines += [backup_dlp_scan.body_digest(b) for b in bodies]
+        lines.append("not-a-digest")
+        path.write_text("\n".join(lines), encoding="utf-8")
+    monkeypatch.setenv(backup_dlp_scan.REVIEWED_DIGESTS_ENV, str(path))
+    monkeypatch.setattr(backup_dlp_scan, "_reviewed_digests_cache", None)
+    return path
+
+
+def test_reviewed_body_is_released(tmp_path, monkeypatch) -> None:
+    _use_allowlist(monkeypatch, tmp_path, [_PROSE])
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _PROSE) is None
+
+
+def test_unreviewed_body_still_blocks(tmp_path, monkeypatch) -> None:
+    """One character of drift is a different body, hence a different review."""
+    _use_allowlist(monkeypatch, tmp_path, [_PROSE])
+    edited = _PROSE + "."
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, edited) is not None
+
+
+def test_missing_allowlist_file_blocks_everything(tmp_path, monkeypatch) -> None:
+    """Absent evidence of review is never treated as review."""
+    _use_allowlist(monkeypatch, tmp_path, [_PROSE], write_file=False)
+    assert backup_dlp_scan.reviewed_body_digests() == frozenset()
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _PROSE) is not None
+
+
+def test_review_does_not_release_a_strong_format_secret(tmp_path, monkeypatch) -> None:
+    """A human can miss an sk-ant- in a 264 KB note; the regex cannot. Reviewing a
+    body must not release a label outside DIGEST_RELEASABLE_LABELS."""
+    body = _PROSE + "key: sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAA\n"
+    _use_allowlist(monkeypatch, tmp_path, [body])
+    labels = backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, body)
+    assert labels is not None and "anthropic" in labels
+
+
+def test_review_is_scoped_to_the_reviewed_column(tmp_path, monkeypatch) -> None:
+    _use_allowlist(monkeypatch, tmp_path, [_PROSE])
+    assert backup_dlp_scan._classify_cell("some_other_table", "body", _PROSE) is not None
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, "description", _PROSE) is not None
+
+
+def test_driver_suffixed_and_empty_user_dsns_block_when_unreviewed(tmp_path, monkeypatch) -> None:
+    """The round-2 blocker: these fire ONLY the internal-host label, so any design
+    that released that label unconditionally leaked a live credential."""
+    _use_allowlist(monkeypatch, tmp_path, [_PROSE])
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _ASYNCPG) == ["pg_internal"]
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _REDIS_EMPTY_USER) == ["ai_internal"]
+    # and the credential is invisible to every other label — the internal-host
+    # label is the ONLY thing standing between it and the backup
+    from backend.security.secret_filter import redact
+    assert redact(_ASYNCPG)[1] == ["pg_internal"]
+
+
+def test_allowlist_parser_ignores_comments_and_junk(tmp_path, monkeypatch) -> None:
+    path = _use_allowlist(monkeypatch, tmp_path, [_PROSE])
+    digests = backup_dlp_scan.reviewed_body_digests()
+    assert digests == frozenset({backup_dlp_scan.body_digest(_PROSE)})
+    assert "not-a-digest" in path.read_text(encoding="utf-8")
+
+
+def test_review_hints_flag_the_shapes_the_classifier_misses() -> None:
+    hints = backup_dlp_scan.review_hints(_ASYNCPG)
+    assert any("non-loopback-credential-uri" in h for h in hints)
+    # a loopback throwaway DSN is not worth flagging
+    assert backup_dlp_scan.review_hints("postgresql://u6test:u6test@localhost:5455/u6test") == []
+    assert "PRIVATE-KEY-BLOCK" in backup_dlp_scan.review_hints("-----BEGIN OPENSSH PRIVATE KEY-----")
+
+
+def test_hints_never_gate(tmp_path, monkeypatch) -> None:
+    """A body carrying a hint-worthy shape is still released once reviewed — hints
+    inform the reviewer, they do not decide."""
+    _use_allowlist(monkeypatch, tmp_path, [_ASYNCPG])
+    assert backup_dlp_scan.review_hints(_ASYNCPG)  # hint present
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _ASYNCPG) is None
