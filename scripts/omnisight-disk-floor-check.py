@@ -77,6 +77,16 @@ def evidence() -> str:
 
 
 def main() -> int:
+    # Drain any alerts that could not reach JIRA earlier. This runs every 15 minutes
+    # regardless of disk level, so a transient outage of the destination (observed for
+    # real on 2026-07-25: Atlassian returned HTTP 500 mid-test) delays an alert rather
+    # than losing it. Without a periodic drain the spool would only empty when the NEXT
+    # failure happened to occur — i.e. exactly when it is least acceptable to be late.
+    try:
+        alert.flush_spool(*alert._jira_config())
+    except Exception:  # noqa: BLE001 - draining is best-effort, never the point of failure
+        pass
+
     try:
         pct = current_pct()
     except Exception as exc:  # noqa: BLE001

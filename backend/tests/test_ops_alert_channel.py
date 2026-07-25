@@ -132,3 +132,43 @@ def test_metric_with_no_series_is_an_alert(monkeypatch, calls):
     monkeypatch.setattr(floor_mod, "current_pct", lambda: None)
     assert floor_mod.main() == 0
     assert ("host-disk-probe", "Medium") in calls
+
+
+# ---------------------------------------------------------------------------
+# OP-2733 — spool drain. The docstring claimed the spool was "flushed on the next
+# invocation" while no flush existed; a real Atlassian HTTP 500 during a DR-drill
+# alert test turned that documented-but-absent behaviour into a lost alert.
+# ---------------------------------------------------------------------------
+
+
+def test_spool_is_drained_and_survivors_are_kept(state, monkeypatch):
+    (state / "spool.jsonl").write_text(
+        json.dumps({"ts": "t0", "unit": "unit-a", "reason": "http 500"}) + "\n"
+        + json.dumps({"ts": "t1", "unit": "unit-b", "reason": "http 500"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(notify_mod, "_find_open_issue", lambda *a: None)
+
+    created = []
+
+    def _create(site, project, auth, unit, slug, props, log, priority="High", summary=None):
+        if unit == "unit-b":
+            raise RuntimeError("still unreachable")
+        created.append(unit)
+        return "OP-1"
+
+    monkeypatch.setattr(notify_mod, "_create_issue", _create)
+    assert notify_mod.flush_spool("s", "OP", "auth") == 1
+    assert created == ["unit-a"]
+    # the one that failed again is retained, not silently dropped
+    left = [json.loads(x) for x in (state / "spool.jsonl").read_text().splitlines() if x.strip()]
+    assert [e["unit"] for e in left] == ["unit-b"]
+
+
+def test_flush_is_a_noop_without_a_spool(state):
+    assert notify_mod.flush_spool("s", "OP", "auth") == 0
+
+
+def test_flush_never_raises_on_a_corrupt_spool(state):
+    (state / "spool.jsonl").write_text("{not json\n", encoding="utf-8")
+    assert notify_mod.flush_spool("s", "OP", "auth") == 0

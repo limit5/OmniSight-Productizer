@@ -56,6 +56,7 @@ STATE_DIR = Path(os.environ.get("OMNISIGHT_ALERT_STATE_DIR", str(Path.home() / "
 SPOOL = STATE_DIR / "spool.jsonl"
 RUNLOG = STATE_DIR / "run.log"
 THROTTLE_S = int(os.environ.get("ALERT_THROTTLE_SECONDS", "3600"))
+SPOOL_MAX_REPLAY = int(os.environ.get("ALERT_SPOOL_MAX_REPLAY", "50"))
 LOG_TAIL_LINES = 40
 HTTP_TIMEOUT = 30
 
@@ -245,6 +246,49 @@ def _spool(unit: str, reason: str) -> None:
         fh.write(json.dumps({"ts": datetime.now(timezone.utc).isoformat(), "unit": unit, "reason": reason}) + "\n")
 
 
+def flush_spool(site: str, project: str, auth: str) -> int:
+    """Drain events that could not reach JIRA earlier (OP-2733: proven necessary by a
+    real Atlassian HTTP 500 during the DR-drill alert test).
+
+    Without this the spool is a write-only file and a transient outage of the
+    destination silently loses the alert — the exact failure this channel exists to
+    remove. Entries are thinner than a live alert (they carry only unit/ts/reason,
+    not the log tail) which is stated in the issue text; a thin alert beats none.
+    Anything still failing is kept for the next attempt. Never raises.
+    """
+    if not SPOOL.exists():
+        return 0
+    try:
+        entries = [json.loads(line) for line in SPOOL.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except Exception:  # noqa: BLE001 - a corrupt spool must not break live alerting
+        return 0
+    if not entries:
+        return 0
+    delivered, remaining = 0, []
+    for entry in entries[-SPOOL_MAX_REPLAY:]:
+        unit = entry.get("unit", "unknown")
+        slug = _slug(unit)
+        try:
+            key = _find_open_issue(site, project, auth, slug)
+            detail = (f"Delayed delivery. The alert for {unit} at {entry.get('ts')} could not reach JIRA "
+                      f"at the time ({entry.get('reason', '?')}) and was spooled locally. "
+                      "Context is limited to what the spool retained.")
+            props = {"Description": f"delayed alert for {unit}", "Result": "spooled",
+                     "ExecMainStatus": "-", "NRestarts": "-"}
+            if key is None:
+                _create_issue(site, project, auth, unit, slug, props, detail,
+                              summary=f"[ALERT] {unit} failed on {os.uname().nodename} (delayed)")
+            else:
+                _comment(site, auth, key, unit, props, detail)
+            delivered += 1
+        except Exception:  # noqa: BLE001 - still unreachable; keep it for next time
+            remaining.append(entry)
+    if delivered:
+        SPOOL.write_text("".join(json.dumps(e) + "\n" for e in remaining), encoding="utf-8")
+        _log(f"SPOOL: delivered {delivered} deferred alert(s); {len(remaining)} still pending")
+    return delivered
+
+
 def notify_source(source: str, title: str, detail: str, priority: str = "High") -> int:
     """Generic (non-systemd) alert entry point — same idempotent one-issue-per-source
     semantics as unit failures. Used by the host-disk floor check (OP-2728 AC4), which
@@ -260,6 +304,7 @@ def notify_source(source: str, title: str, detail: str, priority: str = "High") 
         _log(f"ALERT {source}: no JIRA config ({exc}); spooled")
         _spool(source, f"config: {exc}")
         return 0
+    flush_spool(site, project, auth)
     try:
         key = _find_open_issue(site, project, auth, slug)
         if key is None:
@@ -296,6 +341,7 @@ def notify(unit: str) -> int:
         _spool(unit, f"config: {exc}")
         return 0
 
+    flush_spool(site, project, auth)
     try:
         key = _find_open_issue(site, project, auth, slug)
         if key is None:
@@ -321,6 +367,10 @@ def notify(unit: str) -> int:
 def main(argv: list[str]) -> int:
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
+        return 0
+    if argv[0] == "--flush-spool":
+        site, project, auth = _jira_config()
+        print(f"delivered {flush_spool(site, project, auth)} deferred alert(s)")
         return 0
     if argv[0] == "--self-test":
         site, project, auth = _jira_config()

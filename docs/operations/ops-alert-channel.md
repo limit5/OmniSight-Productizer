@@ -76,6 +76,15 @@ silence it exists to prevent.
 and lost signal. If JIRA is unreachable the event is spooled to
 `~/.local/state/omnisight-alerts/spool.jsonl`. The template unit has no `OnFailure=` of its own.
 
+**The spool is drained, not just written.** Every alert drains it first, and
+`omnisight-disk-floor.timer` drains it every 15 minutes even when nothing has failed — otherwise
+the spool would only empty when the *next* failure happened to occur, which is precisely when
+being late is least acceptable. `omnisight-alert-notify.py --flush-spool` drains it by hand. A
+delayed issue is marked `(delayed)` and says so in its body, because it carries only what the
+spool retained, not a live log tail. This was not theoretical: on 2026-07-25 a DR-drill alert test
+hit a real Atlassian `HTTP 500` (`PSQLException` on `nextval('jiraissue_id_seq')`), the channel
+spooled instead of failing, and the retry delivered it.
+
 **The disk floor is not a Prometheus alerting rule — on purpose.** Prod's `rule_files` is an
 *explicit single-entry list* (`/etc/prometheus/obs-rules/project_state_health.yml`) inside
 `configs/prometheus.yml`, and that whole tree is the release-pinned checkout. It is **not a

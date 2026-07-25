@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily OmniSight DR drill (OP-2733)
+
+[Timer]
+# 04:30 — well clear of the 02:17 backup, so a drill never races a live pg_dump.
+OnCalendar=*-*-* 04:30:00
+RandomizedDelaySec=300
+Persistent=false
+Unit=omnisight-dr-drill.service
+
+[Install]
+WantedBy=timers.target

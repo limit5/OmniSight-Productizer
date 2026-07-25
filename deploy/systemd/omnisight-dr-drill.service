@@ -1,0 +1,17 @@
+# OP-2733 — DR drill for the CURRENT backup lane (PostgreSQL + gpg AES-256).
+#
+# NOT scripts/dr_drill.sh: that one and backup_selftest.py are SQLite-era and
+# contain zero references to postgres/pg_restore/gpg, so scheduling them would
+# yield a permanently green drill that proves nothing about the artefacts
+# actually being produced. Verified 2026-07-25: the 24 encrypted artefacts had
+# never once been restore-tested.
+[Unit]
+Description=OmniSight DR drill — decrypt + restore a real encrypted backup (OP-2733)
+After=network-online.target docker.service
+Wants=network-online.target
+OnFailure=omnisight-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-dr-drill-pg.sh
+TimeoutStartSec=1800
