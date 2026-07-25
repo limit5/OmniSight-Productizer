@@ -1,0 +1,16 @@
+# OP-2728 — OnFailure -> JIRA alert channel.
+#
+# Wire with:  OnFailure=omnisight-alert@%n.service
+# %n expands to the FAILING unit's full name, which becomes this template's
+# instance (%i), e.g. omnisight-alert@omnisight-prod-backup.service.service
+#
+# Deliberately has NO OnFailure= of its own: an alert handler that alerts on its
+# own failure is a loop. The script also always exits 0 for the same reason —
+# unreachable JIRA spools to ~/.local/state/omnisight-alerts/spool.jsonl.
+[Unit]
+Description=OmniSight failure alert -> JIRA for %i (OP-2728)
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-alert-notify.py %i
+TimeoutStartSec=120

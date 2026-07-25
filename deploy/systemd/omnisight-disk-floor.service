@@ -1,0 +1,16 @@
+# OP-2728 AC4 / OP-2734 — host free-space floor -> JIRA alert channel.
+#
+# Deliberately NOT a Prometheus alerting rule: prod's rule_files is an explicit
+# single-entry list inside the RELEASE-PINNED checkout, so an operator-owned rule
+# could only be added by dirtying that checkout (hard-blocks deploy AND emergency
+# rollback) or by masking the release's own prometheus.yml. See the script header.
+[Unit]
+Description=OmniSight host disk free-space floor check (OP-2728 AC4)
+After=network-online.target
+Wants=network-online.target
+OnFailure=omnisight-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-disk-floor-check.py
+TimeoutStartSec=300

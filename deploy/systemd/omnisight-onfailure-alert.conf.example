@@ -1,0 +1,4 @@
+# OP-2728: this unit previously had NO OnFailure= at all, which is why its
+# failures were silent (prod-backup: 3 nights; coordinator pair: 5 days).
+[Unit]
+OnFailure=omnisight-alert@%n.service

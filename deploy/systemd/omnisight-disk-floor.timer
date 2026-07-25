@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the OmniSight host disk floor check every 15 minutes (OP-2728 AC4)
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=omnisight-disk-floor.service
+
+[Install]
+WantedBy=timers.target
