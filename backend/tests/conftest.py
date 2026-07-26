@@ -604,6 +604,87 @@ def _heal_event_bus_method_shadow_leak():
 #   canonical entry point from SP-1.2 onward.
 
 
+# --------------------------------------------------------------------------
+# OP-2733 / SP-5 — refuse to run the suite against the production cluster.
+#
+# WHY THIS IS NOT PARANOIA. On this host the production HA pair PUBLISHES to
+# the loopback interface: omnisight-pg-primary -> 0.0.0.0:5432 (the DEFAULT
+# PostgreSQL port) and omnisight-pg-standby -> 0.0.0.0:5433. So the most
+# natural DSN anyone would type by hand --
+#     postgresql://omnisight@localhost/omnisight
+# -- is production. Meanwhile ~110 test modules read OMNI_TEST_PG_URL, 42 of
+# them straight from os.environ rather than through the fixture, and
+# ``pg_test_alembic_upgraded`` runs ``alembic upgrade head`` against whatever it
+# finds. One wrong export therefore means DDL plus writes on the shared
+# postgres-ha cluster, replicated to the standby, from an ordinary `pytest`.
+#
+# The check runs in pytest_configure, before collection, so it catches the 42
+# direct readers too -- a fixture-level guard would not.
+_PROD_PG_HOSTS = frozenset({
+    "pg-primary", "pg-standby", "omnisight-pg-primary", "omnisight-pg-standby",
+})
+_PROD_PG_DATABASES = frozenset({"omnisight"})
+_LOOPBACK_HOSTS = frozenset({"", "localhost", "127.0.0.1", "::1"})
+# ports the prod cluster publishes on this host; a loopback DSN on one of these
+# reaches production even when the database name looks innocuous.
+_PROD_PUBLISHED_PORTS = frozenset({5432, 5433})
+_ALLOW_PROD_ENV = "OMNI_TEST_PG_ALLOW_PROD"
+
+
+def _production_dsn_reason(raw: str) -> str:
+    """Return why *raw* looks like production, or "" if it does not."""
+    if not raw.strip():
+        return ""
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(raw.strip())
+    except ValueError:
+        return ""
+    if not parts.scheme.lower().startswith("postgres"):
+        # Not a postgres URL at all — urlsplit happily parses "not a url" with the
+        # whole string as .path, which would otherwise look like a database name.
+        return ""
+    host = (parts.hostname or "").lower()
+    db = (parts.path or "").lstrip("/").split("?", 1)[0]
+    if not host and not db:
+        # Nothing to judge — a DSN with neither a host nor a database is
+        # malformed. Let the normal connection machinery produce its own error
+        # rather than reporting a confusing "this is production" for junk.
+        # (`postgresql:///omnisight` still has a db and is still refused.)
+        return ""
+    if host in _PROD_PG_HOSTS:
+        return f"host {host!r} is the production postgres-ha cluster"
+    if db in _PROD_PG_DATABASES:
+        return f"database {db!r} is the production database"
+    if host in _LOOPBACK_HOSTS and (parts.port or 5432) in _PROD_PUBLISHED_PORTS:
+        return (
+            f"loopback port {parts.port or 5432} is published by the production "
+            "cluster on this host"
+        )
+    return ""
+
+
+def _assert_test_dsn_not_production(raw: str) -> None:
+    reason = _production_dsn_reason(raw)
+    if not reason:
+        return
+    if os.environ.get(_ALLOW_PROD_ENV, "").strip() in {"1", "true", "yes"}:
+        return
+    raise pytest.UsageError(
+        f"OMNI_TEST_PG_URL points at PRODUCTION: {reason}. Refusing to run — the "
+        "suite runs `alembic upgrade head` and writes test fixtures, which on the "
+        "shared postgres-ha cluster would replicate to the standby. Point it at a "
+        "throwaway PG (see backend/tests/README.md). If you genuinely mean it, set "
+        f"{_ALLOW_PROD_ENV}=1."
+    )
+
+
+def pytest_configure(config) -> None:  # noqa: ARG001 - pytest hook signature
+    """Fail the session before collection if the test DSN is production."""
+    _assert_test_dsn_not_production(os.environ.get("OMNI_TEST_PG_URL", ""))
+
+
 def _omni_test_pg_dsn_normalised() -> str:
     """Return `OMNI_TEST_PG_URL` as a libpq DSN (no driver suffix).
 
@@ -616,6 +697,7 @@ def _omni_test_pg_dsn_normalised() -> str:
     raw = os.environ.get("OMNI_TEST_PG_URL", "").strip()
     if not raw:
         return ""
+    _assert_test_dsn_not_production(raw)
     for prefix in ("postgresql+psycopg2://", "postgresql+asyncpg://"):
         if raw.startswith(prefix):
             return "postgresql://" + raw[len(prefix):]
