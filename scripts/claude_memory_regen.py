@@ -73,15 +73,62 @@ def _local_body_sha(store: Path, slug: str) -> str | None:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+# OP-2729 — MEMORY.md is unconditional system context for every Claude Code
+# session in this project, and `_INDEX_RE` in claude_memory_ingest.py re-parses
+# each of its lines as an index entry. So a line break inside an interpolated
+# field does not merely look untidy: it MANUFACTURES A SECOND INDEX ENTRY that
+# survives the next reconcile ingest. Reproduced before the fix — a `\n` in
+# `hook` produced a second line that `_INDEX_RE` matched.
+#
+# `hook` reaches here straight from the API (`now_touch` rewrites it on an
+# already-published row with no lint, no version and no transition event), and
+# `title` is interpolated too, so BOTH are injection surfaces. Sanitise at this
+# choke point rather than at the ingest boundary: every field that lands in the
+# rendered line passes through here, so one guard covers them all.
+_MIN_HOOK_B = 24
+
+
+def _one_line(value: str) -> str:
+    """Collapse anything that could break a line into a single space.
+
+    Uses ``str.splitlines()`` as the authority rather than a hand-written
+    character class: it splits on exactly what Python (and therefore the
+    ingest-side ``re.M`` parser and every text reader in this pipeline)
+    considers a line boundary — \n \r \r\n \v \f \x1c-\x1e \x85 and the
+    unicode separators U+2028/U+2029.
+    """
+    return " ".join(" ".join((value or "").splitlines()).split()).strip()
+
+
+def _clip_bytes(value: str, budget: int) -> str:
+    """Clip to *budget* UTF-8 bytes on a character boundary, preferring a word
+    break, with an ellipsis when anything was removed."""
+    if budget <= 0:
+        return ""
+    raw = value.encode("utf-8")
+    if len(raw) <= budget:
+        return value
+    clipped = raw[: max(0, budget - 3)].decode("utf-8", "ignore")
+    cut = clipped.rfind(" ")
+    return (clipped[:cut] if cut > 20 else clipped) + "…"
+
+
 def _render_line(title: str, slug: str, hook: str) -> str:
-    prefix = f"- [{title}]({slug}.md) — "
-    budget = _LINE_B - len(prefix.encode("utf-8"))
-    h = (hook or "").strip()
-    if len(h.encode("utf-8")) > budget:
-        clipped = h.encode("utf-8")[: max(0, budget - 3)].decode("utf-8", "ignore")
-        cut = clipped.rfind(" ")
-        h = (clipped[:cut] if cut > 20 else clipped) + "…"
-    return prefix + h
+    """One index line, guaranteed single-line and within ``_LINE_B`` bytes.
+
+    The old version clipped only ``hook``, so a long ``title`` blew the cap
+    outright — a 250-character title rendered 268 bytes against a 200-byte
+    budget. The title is now clipped first, against the space left once the
+    fixed markup, the slug and a minimum hook are accounted for.
+    """
+    t, sl, h = _one_line(title), _one_line(slug), _one_line(hook)
+    fixed = len(f"- []({sl}.md) — ".encode("utf-8"))
+    t = _clip_bytes(t, max(0, _LINE_B - fixed - _MIN_HOOK_B))
+    prefix = f"- [{t}]({sl}.md) — "
+    line = prefix + _clip_bytes(h, _LINE_B - len(prefix.encode("utf-8")))
+    # Belt and braces: the postcondition this function exists to guarantee.
+    assert "\n" not in line and "\r" not in line, "rendered line must be single-line"
+    return line
 
 
 def regenerate(store: Path, *, base: str, token: str, dry_run: bool) -> int:
