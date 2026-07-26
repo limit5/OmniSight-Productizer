@@ -28,8 +28,18 @@ On a real artefact, end to end:
 4. the restored database is sane: table count ≥ `DR_MIN_TABLES` (100), an `alembic_version` row is
    present, and `audit_log` is non-empty.
 
-It also warns when the newest encrypted artefact is older than `DR_MAX_AGE_DAYS` (3) — an
-independent staleness signal that would have caught the 2026-07-23 backup outage on its own.
+5. the newest encrypted artefact is **not stale** (`DR_MAX_AGE_DAYS`, default 3).
+
+Staleness is a **failure, not a warning**. The first version of this script logged a warning and
+then exited 0, because the final `die` is gated on `FAILURES` and the warning never incremented it.
+That turned a dead backup lane into a green light: prod backups had been failing since 2026-07-23
+and the drill reported "passed" every night against a four-day-old artefact. A monitored gate that
+reports OK while not doing its job is worse than a red one — it consumes the attention that would
+otherwise have found the problem. Pinned by `backend/tests/test_dr_drill_staleness_contract.py`.
+
+Note the two verdicts are independent and both are reported: a run can say `RESTORE VERIFIED` for
+the artefact it could test *and* fail on staleness. That is the useful shape — "the backup I have
+is good, but there hasn't been a new one in four days".
 
 ## Result of record — 2026-07-25
 
@@ -63,6 +73,10 @@ copy existed, and today it does not. Tracked with the lane policy on OP-2731.
 
 ## Running it
 
+Artefact selection sorts by **mtime** (`ls -1t`), not by name. `ls -1 | sort` only coincides with
+chronological order while every artefact is `manual-YYYYMMDD-HHMMSS.dump.gpg`; a hostname prefix or
+ISO dashes would silently make the drill test the wrong file *and* compute staleness from it.
+
 ```sh
 omnisight-dr-drill-pg.sh            # newest artefact (what the timer runs)
 omnisight-dr-drill-pg.sh --oldest   # oldest — catches passphrase/format drift over time
@@ -71,6 +85,21 @@ omnisight-dr-drill-pg.sh --both
 
 Scheduled daily at 04:30 by `omnisight-dr-drill.timer`, deliberately clear of the 02:17 backup so a
 drill never races a live `pg_dump`. Failure routes to the JIRA alert channel (OP-2728).
+
+## Accepted residual: the restore target is the production primary
+
+The drill restores into a throwaway database **inside `omnisight-pg-primary`**, which is the shared
+`postgres-ha` cluster, and that WAL replicates to `omnisight-pg-standby`. This was raised in review
+as a co-tenant concern. Decision: **accepted and documented, not retargeted.**
+
+Reasoning: `backup_prod_db.sh` already does exactly this every night for its DLP scan, so the drill
+adds a second daily restore rather than a novel pattern; the prod database is **44 MB**, so the
+transient footprint and the extra WAL are negligible; and retargeting to a throwaway container
+(e.g. the existing `u6-g4b-testpg`) would make a production-integrity check depend on a container
+that is not part of this project's compose and can disappear without notice.
+
+**Revisit if the prod database grows past a few GB**, at which point a dedicated restore target
+becomes worth its dependency.
 
 ## Safety properties
 
