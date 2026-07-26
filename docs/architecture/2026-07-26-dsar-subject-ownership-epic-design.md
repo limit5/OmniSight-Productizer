@@ -192,9 +192,12 @@ records**; coordinate tenant deletion through the same state machine.
 Worse, a row-level `BEFORE` trigger sees the *pre-update* row, so the `erasing→erased` transition on
 `users` reads `erasing` and rejects itself. Checking only `NEW` lets an ordinary writer escape by
 detaching or rebinding an erased subject; checking `OLD`+`NEW` blocks legitimate phase-2 work. ⟹
-per-reference `OLD`+`NEW` rules, an explicit allowed-transition set, and a **narrowly privileged
-erasure procedure or DB role**. Explicitly **not** a caller-settable GUC as the bypass: the
-application role is superuser, so a GUC bypass is forgeable by anything already inside the process.
+per-reference `OLD`+`NEW` rules and an explicit allowed-transition set. Round 3 also proposed a
+**narrowly privileged erasure procedure or DB role**; **§4c supersedes that** — the application role
+is `rolsuper = t, rolbypassrls = t`, so `SET ROLE` is freely available and a privileged role is no
+less forgeable than the caller-settable GUC that was already rejected for the same reason. The
+barrier is semantic instead: it permits writes that reduce the subject's footprint. Left here as the
+round-3 record; read §4c for what is actually designed.
 
 **Phase 1 will time out, not drain (MEDIUM).** `FOR SHARE` blocks the users-row `UPDATE`, so a long
 writer makes phase 1 hit the pool's 10-second `lock_timeout` (`db_pool.py:33-39`) rather than
