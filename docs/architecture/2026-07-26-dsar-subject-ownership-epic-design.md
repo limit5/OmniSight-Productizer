@@ -1,7 +1,7 @@
 # EPIC design — DSAR subject-ownership, human gating, and the memory tiers
 
 **Date:** 2026-07-26 · **Origin:** OP-2729 SP-1, re-scoped after a 3-way audit ·
-**Scope label:** `scope:failed-units-2026-07-25` · **Revision:** v5 (rounds 1-3 folded; operator decisions recorded; the two remaining engineering defects designed) · **Status: A+B+H1+UI filed (OP-2745/2746/2748/2749); C→G designed below, unreviewed**
+**Scope label:** `scope:failed-units-2026-07-25` · **Revision:** v6 (rounds 1-3 folded; operator decisions recorded; the two remaining engineering defects designed, then reviewed → 4 HIGH + 2 MEDIUM folded) · **Status: A+B+H1+UI filed (OP-2745/2746/2748/2749); C→G designed below, unreviewed**
 
 ## 1. Problem
 
@@ -221,16 +221,38 @@ erasure receipt is destroyed by a later tenant deletion.** The record that prove
 happened cannot survive the disappearance of the subject it is about — which is precisely the case
 it exists for.
 
-**Design.** A DSAR receipt is a *regulatory record about a subject who may no longer exist*, so it
-must not be a child of that subject:
+**Design (v6, after targeted review).** A DSAR receipt is a *regulatory record about a subject who
+may no longer exist*, so it must not be a child of that subject — and neither may the **barrier
+state**, which has the same defect one level up: `users.erasure_state` is deleted by tenant deletion,
+so after a tenant is removed nothing can be consulted and nothing proves the erasure happened.
 
-- drop the two `ON DELETE CASCADE` foreign keys; keep `tenant_id`/`user_id` as historical text.
-  (`SET NULL` is not available — both are `NOT NULL` — and `RESTRICT` would make an open DSAR block
-  tenant deletion forever.)
-- add a guard so a subject in `erasing` cannot be tenant-deleted mid-flight: tenant deletion either
-  waits for the state machine or refuses with a message naming the open request.
-- the receipt keeps a copy of what it needs to be readable after the fact (tenant name, subject
-  pseudonym), because the joins it used to rely on will be gone.
+- **A non-cascading subject registry** holds the erasure state and the pseudonymous tombstone, and
+  outlives both parents. The receipt and the frozen scopes live with it. Dropping the two
+  `ON DELETE CASCADE` FKs is part of this, but is not sufficient on its own.
+  (`SET NULL` is unavailable — both columns are `NOT NULL` — and `RESTRICT` would let an open DSAR
+  block tenant deletion forever.)
+- **Creation-time integrity moves into the code path**: a `BEFORE INSERT` check that the referenced
+  tenant/user exists, taking `FOR KEY SHARE`, replacing what the FK used to guarantee; the historical
+  ids and the snapshot fields are then immutable.
+- **Tenant deletion must interlock at initiation, not at the users phase.** Verified: the phase loop
+  runs `acquire()` then `conn.execute()` per phase with **no enclosing `conn.transaction()`**
+  (`admin_tenants.py:1222-1229`), so every phase autocommits and users are deleted near the end
+  (`:1091-1097`). A guard that fires at `DELETE FROM users` would therefore abort *after* the earlier
+  phases had already committed — a worse state than either outcome. Instead: durable tenant lifecycle
+  state, and both tenant-delete initiation and DSAR phase 1 take the **same transaction-scoped
+  advisory lock in a fixed order (tenant lifecycle → user)** and atomically claim either
+  `tenant = deleting` or `subject = erasing`; the claim commits *before* any child DML. A loser
+  refuses or queues — it never waits while holding locks. The guard covers **every nonterminal DSAR
+  state**, not just `erasing`.
+- **Every nonterminal request is finished or cancelled with a recorded reason** when a tenant is
+  deleted, so no orphan is left as a poison job for a worker whose state is gone.
+- **Retention applies to this record too.** Decision ③ says a retained category with no expiry rule
+  is a defect — and the first draft of this very section retained raw tenant/user ids indefinitely.
+  So: terminal receipts and frozen scopes carry an explicit `retention_until` and are purged at it,
+  and identity is stored as a keyed pseudonym wherever the raw value is not required.
+- **Not currently reachable, recorded anyway:** the registry also rejects reuse of an erased id.
+  Both insert paths mint `u-{uuid4().hex[:10]}` (`auth.py:495`, `tenant_invites.py:1583`), so an id
+  cannot be chosen by a caller today; this is a cheap invariant to hold, not a live hole.
 
 ### (ii) The barrier must not be a privileged role or a GUC
 
@@ -244,24 +266,54 @@ role is `rolsuper = t, rolbypassrls = t`, so `SET ROLE` is available to any code
 
 **Design — make the rule semantic rather than privileged.** The barrier is on `INSERT`/`UPDATE`
 only, and erasure is overwhelmingly `DELETE`, which is unbarriered by construction. What remains is
-a small, enumerable exception surface, and it has a property worth exploiting: every legitimate
-phase-2 write *reduces* the subject's footprint.
+a small exception surface with a property worth exploiting: every legitimate phase-2 write *reduces*
+the subject's footprint.
 
-- **Allow** an `UPDATE` whose effect is to remove the subject reference — `NEW.<subject_col> IS NULL
-  AND OLD.<subject_col> = <subject>`. That is exactly `detach` (`projects.created_by = NULL`).
-- **Allow** the redaction of the retained `users` row, and the `erasure_state` transitions, by an
-  explicit allowed-transition set checked on `OLD`→`NEW`.
-- **Block** everything else: any `INSERT` naming a non-`active` subject, and any `UPDATE` that
-  maintains or adds a reference to one.
+**One conjunctive predicate over the whole row — not three rules OR-ed together.** This was the
+review's sharpest correction and it is right: a natural `detach_ok OR redaction_ok OR transition_ok`
+admits a single statement that performs the allowed `erasing→erased` transition *while also* setting
+`enabled = 1`, keeping credentials, or adding a fresh reference. The rule is therefore stated over
+`OLD` and `NEW` together:
 
-No role, no GUC, nothing to forge: the trigger permits writes that shrink the subject's footprint
-and refuses writes that sustain it. A writer cannot escape by detaching-then-rebinding, because the
-rebinding `UPDATE` sets `NEW.<subject_col>` non-NULL against a non-`active` subject and is refused.
+- extract every subject reference from `OLD` and from `NEW`;
+- **require** that any non-`active` subject present in `OLD` is absent from `NEW` everywhere, and
+  that any newly introduced subject is `active`;
+- permit `erasing→erased` **only** when the complete canonical redacted user shape holds
+  (`privacy.py:345-349` — disabled, credential-free) **and** every non-allowlisted column is
+  unchanged.
+
+So `detach` passes because it removes the reference; a rebind fails because it introduces a
+reference to a non-`active` subject; and a combined statement fails because the predicate is
+conjunctive over the whole row rather than satisfied by its best-looking clause.
+
+**The guarantee is narrower than "no reference survives", and saying so is part of the design.**
+Verified: `challenges.confirmer_actor` stores `user.email`, not an id
+(`action_challenges.py:156,200`), and `episodic_memory.solution` embeds `"operator": operator_email`
+inside a JSON blob (`intent_memory.py:108-113`). A trigger reading canonical scalar columns cannot
+see either — and once redaction rewrites the email, neither can anything else: the reference can no
+longer be joined back to a subject at all. **The trigger guarantees canonical structured references
+and nothing more.** Everything else must be handled by normalising the reference into a real column
+or association row, by an explicit generated reference column derived from the JSON, or by
+pseudonymising the retained value. Free prose cannot be guaranteed by any trigger and the design
+will not pretend otherwise. Story C's per-table reference manifest is where this contract is
+written down, per reference, including which ones are *out* of the guarantee.
 
 **Still open, and honestly so:** phase 1 hits the pool's 10-second `lock_timeout` rather than
-draining a long writer, so it needs bounded retry from the durable worker; and the added `users`-PK
+draining a long writer, so it needs bounded retry from the durable worker; the added `users`-PK
 lookup on every barriered write needs benchmarking on the chat and bulk-scheduler paths before
-rollout.
+rollout; and `INSERT … ON CONFLICT DO UPDATE` is not an intrinsic bypass **provided both the INSERT
+and the UPDATE trigger paths apply** — the existing upsert at `db.py:5398-5405` becomes a
+regression test rather than an assumption.
+
+### Test and drift-guard fallout of dropping the FKs
+
+Reads are unaffected — DSAR queries are direct `WHERE user_id` with no parent join
+(`privacy.py:179-183`) — but three things assert the current shape and must change *with* the
+migration, not after it: the cascade/FK assertions in
+`test_alembic_0064_dsar_requests.py:247-254,310-318`, the migration-ordering assumption at `:370-374`,
+and the tenant-delete drift guard at `test_admin_tenants_delete.py:298-323`, which today recognises
+only "explicitly deleted" or "cascading child" and needs a third classification: **retained
+regulatory record**.
 
 ## 5. Codex review round 1 — folded in
 
@@ -327,3 +379,38 @@ inventory drift, and are not over-engineering.
 independently shippable and urgent. C→G are not ready — they carry a CRITICAL durability finding, an
 unresolved trigger-privilege design, and two product/legal decisions (the backup boundary, and who
 may obtain meeting content). They stay in design.
+
+## 9. Round 4 — targeted review of §4c only (2026-07-26)
+
+Scoped deliberately: the whole-document question had converged, so this round judged **only** the
+two new designs. Verdict **SOUND-WITH-CHANGES** — 4 HIGH, 2 MEDIUM, all folded into §4c above.
+
+What it changed, in order of how much:
+
+1. **The barrier state has the same defect as the receipt.** I fixed the receipt's durability and
+   left `users.erasure_state` — the thing the trigger consults — as a row that tenant deletion
+   deletes. Fixing a durability bug in one record while leaving its enforcement state cascading is
+   half a fix. → non-cascading subject registry.
+2. **Three allowances OR-ed together are not a barrier.** One statement can satisfy the permitted
+   `erasing→erased` transition *and* re-enable the account in the same UPDATE. → one conjunctive
+   predicate over `OLD`+`NEW`, with an unchanged-columns requirement.
+3. **The guarantee had to shrink.** `challenges.confirmer_actor` holds an email and
+   `episodic_memory.solution` holds one inside JSON — a canonical-column trigger cannot see either,
+   and after redaction neither can anything else. The design now *states* its boundary rather than
+   implying total coverage.
+4. **The tenant-delete guard was in the wrong place.** The phase loop has no enclosing transaction,
+   so a guard at the users phase aborts after earlier phases have already committed. → interlock at
+   initiation under a shared, fixed-order advisory lock.
+5. **Decision ③ caught this document.** §7b had just recorded that a retained category without an
+   expiry rule is a defect; §4c then retained raw ids indefinitely. → `retention_until` + keyed
+   pseudonyms.
+6. **Dropping the FKs is not free** — it invalidates cascade tests, a migration-ordering assumption
+   and the tenant-delete drift guard, which needs a third classification.
+
+Two things it confirmed rather than changed: §1a's corrected RLS framing is right (protective-in-
+future, not effective against a `rolsuper`/`rolbypassrls` app role), and `ON CONFLICT DO UPDATE` is
+not an intrinsic bypass so long as both trigger paths apply — now a regression test, not an
+assumption.
+
+**Status after round 4:** C→G are designed and reviewed once. They are not yet filed; the next step
+is a ticket split against this §4c, not another design round.
