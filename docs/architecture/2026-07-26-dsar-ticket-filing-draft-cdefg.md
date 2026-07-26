@@ -1,7 +1,7 @@
 # Ticket-filing draft — DSAR stories C … G
 
 **Date:** 2026-07-26 · **Design:** `2026-07-26-dsar-subject-ownership-epic-design.md` (v6) ·
-**META:** OP-2747 · **Scope label:** `scope:failed-units-2026-07-25` · **Draft revision:** v3
+**META:** OP-2747 · **Scope label:** `scope:failed-units-2026-07-25` · **Draft revision:** v5
 
 A, B, H are filed (OP-2745, OP-2746, OP-2749). This draft covers the rest.
 
@@ -45,9 +45,21 @@ un-pickable, so `agent:auto` is safe. File order matters and `--class` is requir
 body, which the OP-1124 auto-injector also maintains (`file_jira_ticket.py:276-287`) — not as a
 `mutex:` label.
 
-**Everything in this chain ships default-OFF**, including E's worker and G2's processor. ACT is the
-single enable step. A ticket that changes behaviour the moment it merges is a defect in this chain,
-not a feature.
+**What ships OFF, and what does not — stated per ticket, not as a blanket rule.** v3 said
+"everything ships default-OFF", which was too broad and contradicted E's own requirement that no
+path still writes `completed`.
+
+- **OFF until ACT:** D-c's barrier enforcement, and E's and G2's *workers*. Their failure mode is
+  blocking or retrying legitimate work, so they need a gate.
+- **ON at merge:** D-b's tenant-delete interlock, and E's erasure coverage and status honesty. These
+  fix a live compliance defect and their failure mode is *erasing more* or *refusing an unsafe
+  tenant delete* — the intended direction. Gating them would ship code that knowingly keeps lying in
+  the receipt.
+
+**D-b's interlock in particular must be ON**, because it is the counterpart of an **irreversible FK
+drop**. Landing the drop with the interlock disabled creates exactly the uncoordinated window the
+interlock exists to close — nonterminal poison records retained across a tenant deletion with
+nothing to stop it.
 
 ---
 
@@ -156,7 +168,7 @@ declared disposition (normalise / generated column / pseudonymise) — not a lis
 ## Ticket D-a — `[OP][db][privacy] Subject registry and tenant-lifecycle schema (additive, inert)`
 
 **Story** · `tier:X` · `type:feature` · areas **backend, db, tests** · priority High
-**blocked by** C · `mutex:privacy-manifest`
+**blocked by** C · `mutex_with` D-c ↔ F (description body)
 **Spec-ref** design §4c(i), §4b constraint 1
 
 ### Goal
@@ -182,8 +194,9 @@ its rollback window are defined together.
 
 ### Shared-cluster safety (mandatory, `postgres-ha` is shared with co-tenant projects)
 Additive DDL only: no table rewrite, no volatile default on an existing table, `CREATE INDEX
-CONCURRENTLY`, a short `lock_timeout` on every DDL statement, and **batched** backfill. Any FK added
-here is `NOT VALID`, validated separately.
+CONCURRENTLY`, and a short `lock_timeout` on every DDL statement. Any FK added here is `NOT VALID`,
+validated separately. **No backfill of any kind** — D-a's tables ship empty (batching is D-b's
+concern, where the backfill lives).
 
 ### Out of scope / MUST NOT
 **MUST NOT** drop the `dsar_requests` FKs (that is D-b). **MUST NOT** add triggers of any kind.
@@ -213,6 +226,13 @@ a shared table.
 `dsar_requests` cascades on **both** `tenants(id)` and `users(id)` (`0064_dsar_requests.py:95-106`),
 so a completed erasure receipt is destroyed by a later tenant deletion — the record that proves the
 erasure cannot survive the disappearance of the subject it is about.
+
+**Frozen scopes are part of this ticket.** The design requires the subject's scopes to be frozen
+**atomically in phase 1** — `users.tenant_id ∪ memberships` — captured *before* membership rows are
+deleted, otherwise phase 2 loses the secondary tenants and leaves data behind in them. v3 left this
+unowned. It belongs here because it is the durable-record half, and it needs its own AC: a subject
+with **more than one membership** must have every scope frozen and later erased. Without a
+multi-membership test an implementation passes while silently covering only the primary tenant.
 
 **Cutover, not a flag-day.** D-b owns the backfill into D-a's empty tables, via **dual-write with
 the old FK-backed representation retained through a stated rollback window**. Rollback disables the
@@ -265,9 +285,12 @@ retention purges be unbounded deletes.
    `dsar_required_pg`, zero skipped.
 4. **Exercised** — the decisive test: **concurrent** tenant-delete and DSAR phase 1 — exactly one
    wins, the loser refuses or queues, **no partially deleted tenant remains**, and the receipt
-   survives tenant deletion. Also: the three reversed pre-existing assertions land in this same
-   change, not left failing.
-5. **Go-Live** — the application changes ship **default-OFF**; retention purge is batched with a
+   survives tenant deletion, **with the interlock in its shipped (enabled) state, not force-enabled
+   by the test**. Plus a **multi-membership subject**: every scope in `users.tenant_id ∪ memberships`
+   is frozen in phase 1 and is still readable after the membership rows are gone. Also: the three
+   reversed pre-existing assertions land in this same change, not left failing.
+5. **Go-Live** — the interlock ships **enabled** (see the per-ticket ON/OFF rule; it is the
+   counterpart of an irreversible FK drop). Retention purge is batched with a
    bounded per-run ceiling, and the ceiling is stated. The rollback procedure is written down and
    exercised on the clone **before** merge, including the explicit statement that FK restoration is
    not part of it.
@@ -277,7 +300,7 @@ retention purges be unbounded deletes.
 ## Ticket D-c — `[OP][db][privacy] The write barrier: one conjunctive rule, installed disabled`
 
 **Story** · `tier:X` · `type:feature` · areas **backend, db, tests, security** · priority High
-**blocked by** D-b · `mutex:privacy-manifest` · **Spec-ref** design §4c(ii), §9 findings 2-3
+**blocked by** D-b · `mutex_with` D-c ↔ F (description body) · **Spec-ref** design §4c(ii), §9 findings 2-3
 
 ### Goal
 Stop concurrent writers re-creating what erasure just deleted.
@@ -395,17 +418,20 @@ Drive erasure from C's manifest under D-c's barrier, covering **five** tables th
 erasure survives today: `episodic_memory`, `chat_session_summaries` (which has **no delete path
 anywhere in `backend/` outside tests**), `l3_facts`, `l3_eval_runs`, `l3_approvals`.
 
-**Memory tiers are erased via `u6_l3_store.erase_user` / `erase_user_evals`, not a plain `DELETE`** —
+**Memory tiers are erased via `u6_l3_store.erase_user` / `u6_l3_eval_adapter.erase_user_evals`, not a plain `DELETE`** —
 for the **scoped-delete predicate** and the **pseudonymous tombstone** (`u6_l3_store.py:196-219`,
 tombstone INSERT at `:216-219`).
 
-On the `dek_ref` overwrite: keep it, and describe it accurately. The code already does
-(`u6_l3_store.py:198-203`) — *"the shred COMPLETES only once the dek_ref is gone from every copy
-(backups/WAL/PITR/replicas) within the retention RPO — a purge SLA the ops layer owns; txn commit
-alone does not scrub a WAL/dead-tuple pre-image."* So it is the **first step of a shred, not a
-completed one**: real, but not self-sufficient. **The receipt must not claim unrecoverability at
-commit time** — which is precisely decision ②, and it makes the retention RPO a required field of
-G2's backup disposition rather than an ops detail nobody wrote down.
+On the `dek_ref` overwrite: **E neither relies on it nor removes it.** The code's own note is the
+accurate description (`u6_l3_store.py:198-203`) — *"the shred COMPLETES only once the dek_ref is
+gone from every copy (backups/WAL/PITR/replicas) within the retention RPO — a purge SLA the ops
+layer owns; txn commit alone does not scrub a WAL/dead-tuple pre-image."* Since the row is deleted
+in the same transaction, the pre-update value survives in the pre-image either way, so the overwrite
+does **not** make the key unrecoverable and **must not be cited as doing so**. Whether to drop it as
+redundant WAL work on the shared cluster is a separate optimisation with its own review — **not
+E's** — and is listed under follow-ups. **The receipt must not claim unrecoverability at commit
+time** (decision ②), which makes the retention RPO a required field of G2's backup disposition
+rather than an ops detail nobody wrote down.
 
 `hard_erase_user` is **not** reused: it asserts `assert_human_owner(ctx, scope)` and the router has
 no `ExecutionContext`; its human gate is OP-2746's.
@@ -446,10 +472,15 @@ rely on RLS for scoping: the app role is `rolbypassrls = t`, so an RLS-scoped de
 
 ### Acceptance
 1. **Code** — a manifest rule with an erasure action and no implementation fails the suite;
-   no code path writes `completed` (asserted on **behaviour** — run the erasure and check the
-   resulting status — **and** by a source check that strips comments and strings first, because a
-   naive grep matches the comment explaining the rule).
-2. **Deploy** — additive enum value; no destructive migration.
+   no code path writes `completed`. Assert it **two ways**, because each alone is defeatable:
+   (a) **behaviourally** — run the erasure and assert the resulting status is exactly
+   `processor_purge_pending`; (b) **on source** — strip **comments only** and search the remaining
+   code for a `completed` status write. v3 said to strip comments *and strings*, which deletes the
+   very literal the check exists to find — the check could then never fire. Exclude test files from
+   (b), not string literals.
+2. **Deploy** — a **`CHECK`-constraint migration on a shared table**, not an enum addition:
+   `status` is `TEXT` with a `CHECK` (`0064_dsar_requests.py:89-106`). Short `lock_timeout`, timed on
+   a production-shape clone, with a written validation and rollback plan.
 3. **Integration** — `backend/.venv/bin/pytest backend/tests/test_erasure_manifest_coverage.py
    backend/tests/test_dsar_access.py -q`, `dsar_required_pg`, zero skipped.
 4. **Exercised** — seed one target row in **each of the five tables**, plus a **same-tenant control**
@@ -470,7 +501,7 @@ rely on RLS for scoping: the app role is `rolbypassrls = t`, so an RLS-scoped de
 ## Ticket F — `[OP][backend][privacy] Access and portability with enumerated coverage`
 
 **Story** · `tier:X` · `type:bug` · areas **backend, tests, security** · priority Medium
-**blocked by** OP-2746 **and** C — **not** E · `mutex:privacy-manifest`
+**blocked by** OP-2746 **and** C — **not** E · `mutex_with` D-c ↔ F (description body)
 **Spec-ref** design §4 story F
 
 ### Goal
@@ -516,7 +547,7 @@ use a tenant-wide memory query for a per-subject response.
 
 ## Ticket G2 — `[OP][backend][privacy] Processor and backup boundary: the receipt stops overclaiming`
 
-**Story** · `tier:X` · `type:bug` · areas **backend, tests, docs, security** · priority High
+**Story** · `tier:X` · `type:bug` · areas **backend, db, tests, docs, security** · priority High
 **blocked by** E · **Spec-ref** design §4 story G, §7b decisions ② and ③
 
 ### Goal
@@ -578,8 +609,12 @@ IdP calls in tests. **MUST NOT** run unbounded retention deletes.
 **blocked by** D-c, E, G2 · **Spec-ref** design §4b constraint 3
 
 ### Goal
-Everything above ships **default-OFF**. This ticket is the single, separately reviewable moment when
-enforcement is turned on, after the whole chain exists. It runs the real end-to-end erasure on a
+This ticket is the single, separately reviewable moment when the **gated** parts are turned on,
+after the whole chain exists: **D-c's barrier enforcement, and E's and G2's workers.** It is *not*
+"everything above" — D-b's interlock and E's erasure coverage and status honesty are ON at merge by
+the per-ticket rule at the top of this draft, because gating them would ship code that knowingly
+keeps lying in the receipt, and because D-b's interlock is the counterpart of an irreversible FK
+drop. It runs the real end-to-end erasure on a
 production-shape clone, audits runtime trigger state, confirms no trigger-suppression is in use on
 the write paths, and only then enables.
 
@@ -593,6 +628,23 @@ the write paths, and only then enables.
    met; co-tenant write paths sampled for latency regression before and after.
 
 ---
+
+## Follow-ups this chain deliberately defers
+
+- **Drop the `dek_ref` pre-delete overwrite in `u6_l3_store.erase_user`.** The row is deleted in the
+  same transaction, so the pre-update value survives in the pre-image either way and the overwrite
+  buys no recoverability — it is redundant WAL work on a shared cluster. It is **not** E's to
+  remove: `erase_user` is memory-subsystem code with other callers, and changing its behaviour is a
+  separate review from widening DSAR coverage. E's obligation is only to stop *citing* it as a
+  shred, which it does.
+
+  *Recorded disagreement:* review round 4 held this open, reading design §1a as requiring removal
+  inside E. §1a describes what the overwrite does and does not achieve; it does not prescribe who
+  removes it, and folding a shared-module behaviour change into E would widen a compliance fix into
+  an optimisation with a different blast radius. Filed as a follow-up instead — if a reviewer
+  disagrees at filing time, this is the paragraph to argue with.
+
+- **De-superuser the application role** — see below.
 
 ## What is deliberately NOT in this chain
 
