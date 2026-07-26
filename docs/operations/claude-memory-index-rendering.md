@@ -49,6 +49,29 @@ MEMORY.md (`sha f34f63f726931519`, 37 lines, 7240 B). Legitimate content is unto
 pathological cases change. 25 tests pin the behaviour, including every line-break form above and
 the multibyte clipping.
 
+## Refusing a bad export (the floors)
+
+Regeneration rewrites MEMORY.md, so a bad export is an index-destruction event. Two floors, both
+evaluated **before** the dry-run return so an operator sees the verdict without committing:
+
+| floor | refuses when | exit |
+|---|---|---|
+| empty render | 0 index lines would be written — the old code produced a bare-header MEMORY.md and returned **0** | 3 |
+| shrink ratchet | fewer than 50% of the entries currently on disk survive, unless `--allow-shrink` | 3 |
+
+These are orthogonal to the pre-existing HARD-REFUSE, which measures **drift** (server rows vs disk
+bodies) and whose threshold `max(3, len(items) // 4)` is computed over the export itself — so a
+shrinking export shrinks its own guard, and a server that simply returns fewer rows produces no
+drift at all and sails through.
+
+**A large shrink is not itself a bug.** Regeneration emits PUBLISHED rows only, so while publish
+coverage is low it legitimately renders far fewer lines than the hand-maintained index — today,
+37 against 174. That is exactly why the floor is a ratchet with an explicit opt-out rather than a
+hard error: it encodes the standing "hold the regen switch until coverage is decent" decision into
+the tool instead of relying on someone remembering it. Verified against the live store: without the
+flag it refuses with `would shrink the index from 174 to 37 entries (< 50% retained)` and exit 3;
+with `--allow-shrink` it proceeds.
+
 ## What this does NOT fix
 
 The write path that lets `hook` be rewritten on a published row without review is a separate

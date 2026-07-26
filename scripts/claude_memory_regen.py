@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import os
 import sys
 import urllib.request
@@ -86,6 +87,25 @@ def _local_body_sha(store: Path, slug: str) -> str | None:
 # choke point rather than at the ingest boundary: every field that lands in the
 # rendered line passes through here, so one guard covers them all.
 _MIN_HOOK_B = 24
+# OP-2729 — floors that make a bad export REFUSE instead of silently shrinking the
+# operator's index. The pre-existing HARD-REFUSE measures DRIFT only, and its
+# threshold `max(3, len(items) // 4)` is computed over the export ITSELF — so a
+# shrinking export shrinks its own guard and can never catch "the server returned
+# far fewer rows than reality". These floors are orthogonal to it.
+_MIN_RETAIN_RATIO = 0.5
+_INDEX_LINE_RE = re.compile(r"^- \[.+\]\([^)]+\.md\) — ", re.M)
+
+
+def _count_index_lines(path: Path) -> int:
+    """Index entries in the CURRENT MEMORY.md, or 0 if absent/unreadable.
+
+    Counted with the shape the ingest side parses, so the header and any stray
+    prose cannot inflate the baseline.
+    """
+    try:
+        return len(_INDEX_LINE_RE.findall(path.read_text(encoding="utf-8")))
+    except OSError:
+        return 0
 
 
 def _one_line(value: str) -> str:
@@ -131,7 +151,8 @@ def _render_line(title: str, slug: str, hook: str) -> str:
     return line
 
 
-def regenerate(store: Path, *, base: str, token: str, dry_run: bool) -> int:
+def regenerate(store: Path, *, base: str, token: str, dry_run: bool,
+               allow_shrink: bool = False) -> int:
     # 1. Two-writer race guard: reconcile-first, never refuse (audit B2).
     pin_path = store / _PIN_NAME
     idx_path = store / "MEMORY.md"
@@ -190,6 +211,28 @@ def regenerate(store: Path, *, base: str, token: str, dry_run: bool) -> int:
     sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
     print(f"[regen] {len(kept)} lines kept, {len(dropped)} dropped, "
           f"{total}B, sha {sha[:16]}…")
+    # Floor 1: an empty render must never be written. Without this the script
+    # produces a header-only MEMORY.md and returns 0 — the operator's index
+    # silently replaced by nothing, reported as success.
+    if not kept:
+        print("[regen] HARD-REFUSE: the render is EMPTY (0 index lines). Writing "
+              "it would replace MEMORY.md with a bare header. Check the export, "
+              "the token scope and the store path.", file=sys.stderr)
+        return 3
+
+    # Floor 2: a shrink ratchet against what is already on disk. The drift check
+    # cannot see this case — it compares server rows to disk BODIES, and a server
+    # that simply returns FEWER rows produces no drift at all.
+    previous = _count_index_lines(idx_path)
+    if previous and len(kept) < previous * _MIN_RETAIN_RATIO and not allow_shrink:
+        print(f"[regen] HARD-REFUSE: would shrink the index from {previous} to "
+              f"{len(kept)} entries (< {_MIN_RETAIN_RATIO:.0%} retained). "
+              "Regeneration emits PUBLISHED rows only, so this is expected while "
+              "coverage is still low — which makes it a deliberate operator "
+              "decision, not a default. Re-run with --allow-shrink when you mean it.",
+              file=sys.stderr)
+        return 3
+
     if dry_run:
         return 0
 
@@ -206,13 +249,20 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--store", type=Path, default=_DEFAULT_STORE)
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument(
+        "--allow-shrink",
+        action="store_true",
+        help="permit a regeneration that keeps under half of the current "
+             "index size (see the ratchet in regenerate())",
+    )
     args = ap.parse_args()
     base = os.environ.get("OMNISIGHT_BACKEND_URL", "http://127.0.0.1:8000")
     token = os.environ.get("OMNISIGHT_CLAUDE_MEMORY_TOKEN", "")
     if not args.dry_run and not token.startswith("omni_"):
         print("OMNISIGHT_CLAUDE_MEMORY_TOKEN (omni_...) required", file=sys.stderr)
         return 2
-    return regenerate(args.store, base=base, token=token, dry_run=args.dry_run)
+    return regenerate(args.store, base=base, token=token,
+                      dry_run=args.dry_run, allow_shrink=args.allow_shrink)
 
 
 if __name__ == "__main__":
