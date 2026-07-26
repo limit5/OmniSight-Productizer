@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily off-site backup freshness probe (OP-2731)
+
+[Timer]
+# 06:10 local — after lane C's 11:00 CST upload has had a full day, and clear
+# of A (02:17), B/C (11:00) and the DR drill (04:30) so a red probe never just
+# means "a lane is mid-run".
+OnCalendar=*-*-* 06:10:00
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
