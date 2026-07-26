@@ -254,9 +254,25 @@ When completing a task:
   - If a generalisable lesson emerged: create a new file
     `docs/sop/lessons/L-OP-<ticket>-<slug>.md` using the front-matter
     template at `docs/sop/lessons/_TEMPLATE.md`. Run
-    `scripts/build_lessons_index.py` to regenerate
-    the aggregated lesson index (generated from `docs/sop/lessons/`,
-    not hand-edited).
+    `scripts/build_lessons_index.py` to **validate** it.
+
+    The aggregated index it used to generate was retired when lessons
+    moved to per-file (OP-745): `docs/sop/lessons-learned.md` no longer
+    exists, and the script now writes nothing — `build_lessons_index()`
+    validates and *returns* a rendering that no caller persists. So
+    there is no index artefact to commit alongside a new lesson.
+
+    What it still enforces, and what a new lesson must satisfy:
+      - front-matter keys `id`, `ticket`, `title`, `date`, `tags`
+      - all four sections `**Situation**`, `**Fix**`, `**Verification**`,
+        `**Generalisation**` — matched as literal `**Name**`, so a
+        decorated heading such as `**Generalisation — root cause**`
+        does NOT satisfy it
+    Either omission raises and the run fails.
+
+    (`INDEX_PATH` still exists in the script, but only because the
+    one-shot `scripts/migrate_lessons_to_per_file.py` imports it. It is
+    not written by anything.)
   - If a cross-ticket / cross-Phase retrospective is warranted: open
     docs/retrospectives/YYYY-MM-DD-<slug>.md and link from META ticket
 HANDOFF.md is FROZEN as of 2026-05-06. Do not append.
