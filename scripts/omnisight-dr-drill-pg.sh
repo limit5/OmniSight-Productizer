@@ -63,13 +63,18 @@ set -a; . "$ENV_FILE"; set +a
 command -v gpg >/dev/null || die "gpg missing"
 docker exec "$PG_CONTAINER" pg_isready -U "$PG_USER" >/dev/null 2>&1 || die "$PG_CONTAINER not ready"
 
-mapfile -t ALL < <(ls -1 "$BACKUP_DIR"/*.dump.gpg 2>/dev/null | sort)
+# Sort by MTIME, not by name. `ls -1 | sort` is lexicographic and only coincides
+# with chronological while every artefact is `manual-YYYYMMDD-HHMMSS.dump.gpg`; a
+# hostname prefix or ISO dashes would silently make the drill test the wrong file
+# AND compute staleness from it. -t is newest-first, so ALL[0] is newest.
+mapfile -t ALL < <(ls -1t "$BACKUP_DIR"/*.dump.gpg 2>/dev/null)
 [[ ${#ALL[@]} -gt 0 ]] || die "no .dump.gpg artefacts in $BACKUP_DIR"
 
+NEWEST="${ALL[0]}"; OLDEST="${ALL[-1]}"   # ls -1t => newest first
 case "$WHICH" in
-  newest) TARGETS=("${ALL[-1]}") ;;
-  oldest) TARGETS=("${ALL[0]}") ;;
-  both)   TARGETS=("${ALL[0]}" "${ALL[-1]}") ;;
+  newest) TARGETS=("$NEWEST") ;;
+  oldest) TARGETS=("$OLDEST") ;;
+  both)   TARGETS=("$OLDEST" "$NEWEST") ;;
 esac
 
 SCRATCH="$(mktemp -d /tmp/omnisight-dr-drill.XXXXXX)"; chmod 700 "$SCRATCH"
@@ -127,10 +132,20 @@ for ARTEFACT in "${TARGETS[@]}"; do
   TMPDB=""; CONTAINER_DUMP=""
 done
 
-NEWEST_AGE_D=$(( ( $(date +%s) - $(stat -c %Y "${ALL[-1]}") ) / 86400 ))
+# A drill that restores a four-day-old artefact and reports "passed" is worse than
+# no drill: it converts a dead backup lane into a green light. Staleness is a
+# FAILURE, not a warning — it must reach the operator through the unit's
+# OnFailure= alert (OP-2728), which a log line never does. This was a real defect
+# in the first version of this script: prod backups had been failing since
+# 2026-07-23 while this exited 0 every night.
+NEWEST_AGE_D=$(( ( $(date +%s) - $(stat -c %Y "$NEWEST") ) / 86400 ))
 log "newest artefact is ${NEWEST_AGE_D}d old"
-[[ "$NEWEST_AGE_D" -le "${DR_MAX_AGE_DAYS:-3}" ]] \
-  || log "    [WARN] newest artefact stale (> ${DR_MAX_AGE_DAYS:-3}d) — is the backup lane failing?"
+if [[ "$NEWEST_AGE_D" -gt "${DR_MAX_AGE_DAYS:-3}" ]]; then
+  log "    [FAIL] newest artefact ${NEWEST_AGE_D}d old (> ${DR_MAX_AGE_DAYS:-3}d)"
+  log "           the backup lane is not producing — this is not a drill defect"
+  FAILURES=$((FAILURES+1))
+fi
 
-[[ "$FAILURES" -eq 0 ]] || die "$FAILURES of ${#TARGETS[@]} drill(s) FAILED"
+[[ "$FAILURES" -eq 0 ]] \
+  || die "$FAILURES failure(s); drilled=${#TARGETS[@]}, newest ${NEWEST_AGE_D}d old"
 log "DR drill passed"
