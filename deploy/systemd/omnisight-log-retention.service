@@ -1,0 +1,11 @@
+# OP-2734 — bound the append-mode log sinks. Not the cause of the 2026-07-20
+# ENOSPC (2-3 GB against 1007 GB) but unbounded growth is its own defect, and the
+# coordinator decision-log had reached 1.4 GB.
+[Unit]
+Description=OmniSight log retention (logrotate copytruncate + decision-log prune)
+OnFailure=omnisight-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-log-retention.sh
+TimeoutStartSec=600
