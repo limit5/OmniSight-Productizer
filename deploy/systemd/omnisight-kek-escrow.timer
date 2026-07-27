@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily prod KEK escrow (OP-2760)
+
+[Timer]
+# 02:40 — after lane A's 02:17 so the escrow sits alongside a fresh artefact,
+# and clear of the 04:30 DR drill.
+OnCalendar=*-*-* 02:40:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
