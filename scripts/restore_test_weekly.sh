@@ -49,7 +49,12 @@ fail_restore() {
 }
 
 latest_daily() {
-  find "$BACKUP_DIR" -type f -name 'daily-*.dump.gz' -printf '%T@ %p\n' 2>/dev/null \
+  # OP-2731 F1: lane C now encrypts before upload, so the artefact is
+  # .dump.gz.gpg. Both names are matched during the cutover; the encrypted one
+  # wins on mtime once it exists. Matching only the old name would have made
+  # this test silently select an ever-older artefact and keep passing.
+  find "$BACKUP_DIR" -type f \( -name 'daily-*.dump.gz.gpg' -o -name 'daily-*.dump.gz' \) \
+    -printf '%T@ %p\n' 2>/dev/null \
     | sort -nr | awk 'NR==1 {print substr($0, index($0,$2))}'
 }
 
@@ -62,6 +67,7 @@ fi
 [[ -n "$RESTORE_DB_URL" ]] || fail_restore "OMNISIGHT_RESTORE_TEST_DATABASE_URL is required"
 [[ "$RESTORE_DB_URL" != "$SOURCE_DB_URL" ]] || fail_restore "restore target must be isolated from source"
 command -v gzip >/dev/null || fail_restore "gzip is required"
+command -v gpg >/dev/null || fail_restore "gpg is required (lane C artefacts are encrypted)"
 command -v pg_restore >/dev/null || fail_restore "pg_restore is required"
 command -v psql >/dev/null || fail_restore "psql is required"
 
@@ -74,7 +80,21 @@ BACKUP="$(latest_daily)"
 START="$(date +%s)"
 TMP_DUMP="$(mktemp "${TMPDIR:-/tmp}/op887-restore.XXXXXX.dump")"
 trap 'rm -f "$TMP_DUMP"' EXIT
-gzip -dc "$BACKUP" > "$TMP_DUMP"
+# OP-2731 F1 restore order: checksum -> gpg -> gunzip -> pg_restore. The
+# checksum is verified above and now covers the ENCRYPTED bytes, which is the
+# only digest that can be re-derived from the uploaded object: gpg symmetric
+# output is non-deterministic, so a pre-encryption digest is unverifiable
+# forever.
+if [[ "$BACKUP" == *.gpg ]]; then
+  [[ -n "${OMNISIGHT_BACKUP_PASSPHRASE:-}" ]] \
+    || fail_restore "OMNISIGHT_BACKUP_PASSPHRASE is required to decrypt $BACKUP"
+  printf '%s' "$OMNISIGHT_BACKUP_PASSPHRASE" \
+    | gpg --batch --quiet --pinentry-mode loopback --passphrase-fd 0 --decrypt "$BACKUP" \
+    | gzip -dc > "$TMP_DUMP" \
+    || fail_restore "decrypt+gunzip failed for $BACKUP"
+else
+  gzip -dc "$BACKUP" > "$TMP_DUMP"
+fi
 
 psql "$RESTORE_DB_URL" -v ON_ERROR_STOP=1 -c 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;'
 pg_restore --dbname="$RESTORE_DB_URL" --clean --if-exists --no-owner --no-privileges "$TMP_DUMP"

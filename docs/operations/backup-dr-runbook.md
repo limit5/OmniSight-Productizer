@@ -143,7 +143,16 @@ the catalog code to `/var/log/omnisight/backup-*.log`.
 5. Decompress the dump and restore:
 
    ```bash
-   gzip -dc daily-YYYYmmddTHHMMSSZ.dump.gz > restore.dump
+   # OP-2731 F1: lane C artefacts are gpg-encrypted as of 2026-07-27, and the
+   # .sha256 now covers the ENCRYPTED bytes. Verify, then decrypt, then gunzip.
+   sha256sum --check daily-YYYYmmddTHHMMSSZ.dump.gz.gpg.sha256
+   printf '%s' "$OMNISIGHT_BACKUP_PASSPHRASE" \\
+     | gpg --batch --pinentry-mode loopback --passphrase-fd 0 \\
+           --decrypt daily-YYYYmmddTHHMMSSZ.dump.gz.gpg \\
+     | gzip -dc > restore.dump
+   # The passphrase comes from ~/.config/omnisight/backup-dr.env, NOT from
+   # ~/.config/omnisight/backup-passphrase -- see OP-2762, they differ and the
+   # latter is referenced by nothing.
    pg_restore --dbname="$RESTORED_DATABASE_URL" --clean --if-exists --no-owner --no-privileges restore.dump
    ```
 

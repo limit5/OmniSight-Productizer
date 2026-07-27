@@ -6,9 +6,10 @@ OnFailure=omnisight-alert@%n.service
 [Service]
 Type=oneshot
 # Stage is deliberately pinned here rather than defaulted in the script: an
-# absent stage FAILS. Tighten to s2_encrypted with F1 and s3_attested with P1,
-# in the same commit as the capability each depends on.
-Environment=OMNISIGHT_BACKUP_FRESHNESS_STAGE=s1_payload_digest
+# absent stage FAILS. Moved to s2_encrypted WITH F1 (lane C now uploads
+# .dump.gz.gpg); s2 accepts both payload names so the probe does not go red on
+# the changeover night. Tighten to s3_attested with P1, in that same commit.
+Environment=OMNISIGHT_BACKUP_FRESHNESS_STAGE=s2_encrypted
 Environment=OMNISIGHT_BACKUP_MAX_AGE_DAYS=2
 ExecStart=/home/user/.local/bin/omnisight-backup-freshness.py
 StandardOutput=append:/home/user/work/sora/logs/backup/freshness.log

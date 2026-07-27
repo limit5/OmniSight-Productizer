@@ -87,7 +87,23 @@ upload_offsite_immutable() {
   command -v aws >/dev/null || die "aws CLI missing; cannot upload immutable off-site backup"
   [[ "$OMNISIGHT_BACKUP_S3_URI" == s3://* ]] || die "OMNISIGHT_BACKUP_S3_URI must start with s3://"
 
-  local retain_days="${OMNISIGHT_BACKUP_S3_RETAIN_DAYS:-365}"
+  # OP-2731 F4. This defaulted to 365 days of COMPLIANCE, which is a live trap
+  # now that Object Lock is enabled on the bucket (GOVERNANCE/30d, 2026-07-27):
+  # COMPLIANCE cannot be shortened or bypassed by ANYONE, including the account
+  # root, so a single run would have pinned objects as undeletable for a year
+  # against a 30-day lifecycle -- and against the 30-day retention this project
+  # committed to in OP-2747 decision 3, where a retained category with no
+  # working expiry is a defect.
+  #
+  # GOVERNANCE is the reversible control and still blocks the realistic threat,
+  # because the backup IAM user is explicitly denied BypassGovernanceRetention.
+  local retain_days="${OMNISIGHT_BACKUP_S3_RETAIN_DAYS:-30}"
+  local lock_mode="${OMNISIGHT_BACKUP_S3_LOCK_MODE:-GOVERNANCE}"
+  if [[ "$lock_mode" == "COMPLIANCE" ]]; then
+    log "[WARN] COMPLIANCE object-lock requested for ${retain_days}d — this is \
+IRREVERSIBLE and unbypassable by anyone including root. Ensure it does not exceed \
+the bucket lifecycle, or objects become permanently undeletable."
+  fi
   [[ "$retain_days" =~ ^[1-9][0-9]*$ ]] || die "OMNISIGHT_BACKUP_S3_RETAIN_DAYS must be a positive integer"
   local storage_class="${OMNISIGHT_BACKUP_S3_STORAGE_CLASS:-GLACIER_IR}"
   local retain_until
@@ -118,7 +134,7 @@ upload_offsite_immutable() {
     --key "$key" \
     --body "$src" \
     --storage-class "$storage_class" \
-    --object-lock-mode COMPLIANCE \
+    --object-lock-mode "$lock_mode" \
     --object-lock-retain-until-date "$retain_until" \
     "${sse_args[@]}" >/dev/null || die "immutable off-site backup upload failed"
   ok "off-site immutable backup: s3://${bucket}/${key} (storage=${storage_class}, retain-until=${retain_until})"

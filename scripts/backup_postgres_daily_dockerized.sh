@@ -48,12 +48,21 @@ S3_PREFIX="${BASH_REMATCH[3]:-}"
 
 mkdir -p "$BACKUP_DIR"
 TS="$(date -u '+%Y%m%dT%H%M%SZ')"
-DUMP_FILE="$BACKUP_DIR/${LABEL}-${TS}.dump.gz"
+PLAIN_FILE="$BACKUP_DIR/${LABEL}-${TS}.dump.gz"
+DUMP_FILE="${PLAIN_FILE}.gpg"
 SHA_FILE="${DUMP_FILE}.sha256"
+UPLOADED_MARK="$BACKUP_DIR/.uploaded-${TS}"
+# Registered BEFORE the plaintext can exist, so an abort cannot orphan an
+# unencrypted production dump on disk.
+trap 'shred -u "$PLAIN_FILE" 2>/dev/null || rm -f "$PLAIN_FILE" 2>/dev/null || true' EXIT INT TERM
 
 # --- 1. pg_dump via docker exec into pg-primary container ---
 log "pg_dump → $DUMP_FILE  (container=$PG_CONTAINER, db=$PG_DB)"
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
+  # A zero-work exit 0 does not trip OnFailure=, so under a timer DRY_RUN is
+  # indistinguishable from a working backup. Allowed by hand, never by systemd.
+  [[ -n "${INVOCATION_ID:-}" ]] && die "DRY_RUN is refused under systemd: it exits 0 \
+without producing a backup, which reads as success to every monitor we have"
   log "DRY RUN: skipping pg_dump + upload"
   exit 0
 fi
@@ -61,10 +70,29 @@ fi
 docker exec "$PG_CONTAINER" pg_dump \
   -U "$PG_USER" -d "$PG_DB" \
   --format=custom --no-owner --no-privileges \
-  | gzip -9 > "$DUMP_FILE"
+  | gzip -9 > "$PLAIN_FILE"
+chmod 600 "$PLAIN_FILE"
 
+# OP-2731 F1. This lane is the ONLY one whose artefact leaves the host, and it
+# shipped with --sse AES256 alone: server-side encryption, transparent to any
+# principal holding s3:GetObject. A DLP content gate gets the rows a regex can
+# match; encryption gets all 45 MB. So the artefact is encrypted here, with the
+# same non-interactive pattern lane A uses.
+[[ -n "${OMNISIGHT_BACKUP_PASSPHRASE:-}" ]] || die "OMNISIGHT_BACKUP_PASSPHRASE is \
+required: this lane no longer uploads plaintext. Add backup-dr.env as an EnvironmentFile."
+printf '%s' "$OMNISIGHT_BACKUP_PASSPHRASE" | gpg --batch --yes --quiet \
+  --pinentry-mode loopback --passphrase-fd 0 \
+  --symmetric --cipher-algo AES256 --output "$DUMP_FILE" "$PLAIN_FILE" \
+  || die "gpg encryption failed"
 chmod 600 "$DUMP_FILE"
-sha256sum "$DUMP_FILE" > "$SHA_FILE"
+shred -u "$PLAIN_FILE" 2>/dev/null || rm -f "$PLAIN_FILE"
+
+# The digest MUST cover the bytes that are actually uploaded. gpg symmetric
+# output is non-deterministic (fresh session key + IV), so a digest taken before
+# encryption can never be re-derived from the object and silently becomes
+# unverifiable. Portable basename too: the previous sidecar embedded an absolute
+# host path, so `sha256sum --check` broke on any rename or relocation.
+( cd "$(dirname "$DUMP_FILE")" && sha256sum "$(basename "$DUMP_FILE")" ) > "$SHA_FILE"
 chmod 600 "$SHA_FILE"
 
 SIZE_MB=$(du -m "$DUMP_FILE" | cut -f1)
@@ -74,35 +102,97 @@ log "dump size: ${SIZE_MB} MB"
 S3_KEY="${S3_PREFIX:+$S3_PREFIX/}${LABEL}/$(basename "$DUMP_FILE")"
 log "upload → s3://$S3_BUCKET/$S3_KEY"
 
-# Mount $BACKUP_DIR + pass AWS creds via env. SSE-S3 server-side encryption.
-docker run --rm \
-  -v "$BACKUP_DIR:/data:ro" \
-  -e AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-  -e AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-  -e AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
-  amazon/aws-cli s3 cp \
-    "/data/$(basename "$DUMP_FILE")" \
-    "s3://$S3_BUCKET/$S3_KEY" \
-    --sse AES256 \
-  || die "S3 upload failed"
+# OP-2731 F2, three changes from the previous form:
+#  - mount ONLY the approved file, not the whole backup directory. A later
+#    passing run used to re-expose every earlier artefact to a container holding
+#    AWS credentials.
+#  - pin the CLI image by digest. `amazon/aws-cli` is a mutable tag, pulled
+#    nightly, and it is handed our credentials.
+#  - pass the secret through a 0600 file, not `-e NAME="$VALUE"`. The old form
+#    put it in /proc/<pid>/cmdline and `ps`. Note --env-file is NOT sufficient
+#    either: docker stores the resolved value in the container's Config.Env,
+#    readable via `docker inspect` for its lifetime. So the file is mounted and
+#    only its PATH is passed.
+AWSCLI_IMAGE="${OMNISIGHT_AWSCLI_IMAGE:-amazon/aws-cli@sha256:276a192679356eba79a14009edfaff1254dd9cf41536156b8c0284ae63d80f8c}"
+AWS_CRED_FILE="$(mktemp)"; chmod 600 "$AWS_CRED_FILE"
+trap 'shred -u "$PLAIN_FILE" 2>/dev/null || rm -f "$PLAIN_FILE" 2>/dev/null || true; \
+      shred -u "$AWS_CRED_FILE" 2>/dev/null || rm -f "$AWS_CRED_FILE" 2>/dev/null || true' EXIT INT TERM
+cat > "$AWS_CRED_FILE" <<CREDEOF
+[default]
+aws_access_key_id = $AWS_ACCESS_KEY_ID
+aws_secret_access_key = $AWS_SECRET_ACCESS_KEY
+CREDEOF
 
-# Upload .sha256 sidecar
-docker run --rm \
-  -v "$BACKUP_DIR:/data:ro" \
-  -e AWS_ACCESS_KEY_ID="$AWS_ACCESS_KEY_ID" \
-  -e AWS_SECRET_ACCESS_KEY="$AWS_SECRET_ACCESS_KEY" \
-  -e AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
-  amazon/aws-cli s3 cp \
-    "/data/$(basename "$SHA_FILE")" \
-    "s3://$S3_BUCKET/${S3_KEY}.sha256" \
-    --sse AES256 \
-  || log "WARN: SHA sidecar upload failed (dump itself uploaded OK)"
+s3cp() {  # $1 = local file, $2 = s3 key
+  docker run --rm \
+    -v "$1:/data/$(basename "$1"):ro" \
+    -v "$AWS_CRED_FILE:/root/.aws/credentials:ro" \
+    -e AWS_DEFAULT_REGION="$AWS_DEFAULT_REGION" \
+    "$AWSCLI_IMAGE" s3 cp "/data/$(basename "$1")" "s3://$S3_BUCKET/$2" --sse AES256
+}
+
+s3cp "$DUMP_FILE" "$S3_KEY" || die "S3 upload failed"
+
+# The sidecar is not optional. It used to be WARN-only, which left objects
+# off-site with no way to verify them AND did not trip OnFailure=. A payload
+# without its digest is not a restorable cohort.
+s3cp "$SHA_FILE" "${S3_KEY}.sha256" || die "SHA sidecar upload failed — the payload \
+is off-site without a verifiable digest; treating the whole cohort as failed"
+
+# Cohort marker: written only once EVERY member is off-site. Pruning keys off
+# this, never off age alone.
+: > "$UPLOADED_MARK"
 
 log "upload OK: s3://$S3_BUCKET/$S3_KEY"
 
-# --- 3. Local retention pruning (drop files older than RETENTION_DAYS) ---
-log "pruning local files older than $RETENTION_DAYS days"
-find "$BACKUP_DIR" -maxdepth 1 -type f \( -name "${LABEL}-*.dump.gz" -o -name "${LABEL}-*.dump.gz.sha256" \) \
-  -mtime "+$RETENTION_DAYS" -print -delete | sed 's|^|  pruned: |'
+# --- 3. Local retention pruning — COHORT-ATOMIC (OP-2731 F3) ---
+# Age alone must never trigger deletion. Two ways that bites:
+#  - a cohort whose payload uploaded but whose digest did not is not restorable
+#    off-host; deleting the local copy leaves nothing anywhere.
+#  - a DLP block or upload outage lasting longer than RETENTION_DAYS would
+#    silently destroy the local copies of every day that never reached S3.
+# So retention age is a FLOOR on deletion, never a trigger: a cohort is pruned
+# only if its .uploaded marker exists AND it is old enough. Anything else is
+# retained regardless of age, and grows disk until the existing disk-floor
+# check (warn 85% / crit 92%) says so — a loud disk warning rather than the
+# silent loss of the last copy.
+log "pruning complete, uploaded cohorts older than $RETENTION_DAYS days"
+retained=0
+while IFS= read -r mark; do
+  [[ -n "$mark" ]] || continue
+  cts="${mark##*/.uploaded-}"
+  if [[ $(find "$mark" -mtime "+$RETENTION_DAYS" -print 2>/dev/null) ]]; then
+    rm -f "$BACKUP_DIR/${LABEL}-${cts}.dump.gz.gpg" \
+          "$BACKUP_DIR/${LABEL}-${cts}.dump.gz.gpg.sha256" "$mark" \
+      && log "  pruned cohort $cts"
+  fi
+done < <(find "$BACKUP_DIR" -maxdepth 1 -name '.uploaded-*' 2>/dev/null)
+# Legacy reconciliation. Artefacts written BEFORE F1 are plaintext .dump.gz with
+# the old naming and no .uploaded marker, so the cohort rule above would retain
+# them forever -- 20 plaintext production dumps sitting on disk indefinitely,
+# which is strictly worse than the behaviour being replaced. They were written
+# under the old age-only contract and were uploaded under it, so they are pruned
+# under it. Matching *.dump.gz WITHOUT .gpg is deliberate: the encrypted name
+# must never be caught by this branch.
+while IFS= read -r old; do
+  [[ -n "$old" ]] || continue
+  rm -f "$old" "${old}.sha256" && log "  pruned legacy plaintext $(basename "$old")"
+done < <(find "$BACKUP_DIR" -maxdepth 1 -type f -name '*.dump.gz' \
+           ! -name '*.gpg' -mtime "+$RETENTION_DAYS" 2>/dev/null)
+# Deliberately label-AGNOSTIC ('*.dump.gz', not "${LABEL}-*"). The old rule only
+# ever pruned the label it was currently running as, so the two
+# evening-first-20260518 dumps from the lane's activation were matched by
+# nothing and sat as plaintext production dumps for 70 days. Any unencrypted
+# dump in this directory past retention should go, whichever label wrote it --
+# that is the class, not the instance. Every removal is logged by name.
+
+# Startup reconciliation: report cohorts with no marker. Traps cannot cover
+# SIGKILL or power loss, so an interrupted run can leave one behind.
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  b="$(basename "$f")"; cts="${b#${LABEL}-}"; cts="${cts%%.dump.gz.gpg}"
+  [[ -e "$BACKUP_DIR/.uploaded-${cts}" ]] || { retained=$((retained+1)); }
+done < <(find "$BACKUP_DIR" -maxdepth 1 -name "${LABEL}-*.dump.gz.gpg" 2>/dev/null)
+[[ "$retained" -gt 0 ]] && log "  $retained cohort(s) retained: never confirmed off-site"
 
 log "done"
