@@ -2,13 +2,19 @@
 Description=OmniSight off-site backup freshness probe — newest COMPLETE cohort (OP-2731)
 Documentation=https://soraapp.atlassian.net/browse/OP-2731
 OnFailure=omnisight-alert@%n.service
+# Both this unit and its timer's Persistent=true mean a missed run fires at
+# BOOT. Everything here shells out to docker, so without ordering it would run
+# before the daemon is up, fail, and raise a spurious JIRA alert -- turning the
+# alerting built in OP-2728 into noise. Mirrors omnisight-prod-backup.service.
+After=network-online.target docker.service
+Wants=network-online.target
+
 
 [Service]
 Type=oneshot
 # Stage is deliberately pinned here rather than defaulted in the script: an
-# absent stage FAILS. Moved to s2_encrypted WITH F1 (lane C now uploads
-# .dump.gz.gpg); s2 accepts both payload names so the probe does not go red on
-# the changeover night. Tighten to s3_attested with P1, in that same commit.
+# absent stage FAILS. Tighten to s2_encrypted with F1 and s3_attested with P1,
+# in the same commit as the capability each depends on.
 Environment=OMNISIGHT_BACKUP_FRESHNESS_STAGE=s2_encrypted
 Environment=OMNISIGHT_BACKUP_MAX_AGE_DAYS=2
 ExecStart=/home/user/.local/bin/omnisight-backup-freshness.py
