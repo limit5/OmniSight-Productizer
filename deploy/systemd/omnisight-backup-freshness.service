@@ -15,7 +15,7 @@ Type=oneshot
 # Stage is deliberately pinned here rather than defaulted in the script: an
 # absent stage FAILS. Tighten to s2_encrypted with F1 and s3_attested with P1,
 # in the same commit as the capability each depends on.
-Environment=OMNISIGHT_BACKUP_FRESHNESS_STAGE=s2_encrypted
+Environment=OMNISIGHT_BACKUP_FRESHNESS_STAGE=s3_attested
 Environment=OMNISIGHT_BACKUP_MAX_AGE_DAYS=2
 ExecStart=/home/user/.local/bin/omnisight-backup-freshness.py
 StandardOutput=append:/home/user/work/sora/logs/backup/freshness.log

@@ -30,6 +30,8 @@ RETENTION_DAYS="${OMNISIGHT_BACKUP_RETENTION_DAYS:-14}"
 PG_CONTAINER="${PG_CONTAINER:-omnisight-pg-primary}"
 PG_USER="${PG_USER:-omnisight}"
 PG_DB="${PG_DB:-omnisight}"
+PROD_REPO="${OMNISIGHT_PROD_REPO:-/home/user/omnisight-prod}"
+DLP_MIN_TABLES="${DLP_MIN_TABLES:-100}"
 
 log() { printf '[%s] %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }
@@ -72,6 +74,70 @@ docker exec "$PG_CONTAINER" pg_dump \
   --format=custom --no-owner --no-privileges \
   | gzip -9 > "$PLAIN_FILE"
 chmod 600 "$PLAIN_FILE"
+
+# ── OP-2731 P1: the DLP gate on UPLOAD ELIGIBILITY ───────────────────────────
+# The claim this makes is deliberately narrow: "only an artefact carrying a
+# successful policy attestation is upload-eligible." NOT "nothing unscanned
+# leaves the host" -- the scanner covers public BASE TABLEs and a text-type
+# allowlist, and has documented false negatives (OP-2730). Overclaiming here is
+# how a gate gets trusted past its evidence.
+#
+# The gate governs EGRESS, never EXISTENCE. A content verdict must never be able
+# to stop a backup being made: the encrypted artefact below is produced either
+# way. A block costs off-site freshness, not the backup.
+DLP_VERDICT="not-run"; DLP_TABLES=0
+SCANNER="$PROD_REPO/scripts/backup_dlp_scan.py"
+REVIEWED="${OMNISIGHT_DLP_REVIEWED_BODIES_HOST:-${HOME:-}/.config/omnisight/backup-dlp-reviewed-bodies.txt}"
+[[ -r "$SCANNER" ]] || die "DLP scanner missing at $SCANNER"
+# Mirrors lane A's FX.7.10 preflight: an unreadable allowlist must be a loud
+# deploy bug, not silently demoted into a normal-looking scan block.
+[[ -r "$REVIEWED" ]] || die "reviewed-body allowlist unreadable at $REVIEWED"
+
+if docker compose -f "$PROD_REPO/docker-compose.prod.yml" ps --services --filter status=running 2>/dev/null | grep -qx backend-a; then
+  TMP_DB="omnisight_c_dlp_${TS}_$$"
+  _drop_tmp() { docker exec "$PG_CONTAINER" dropdb -U "$PG_USER" --if-exists "$TMP_DB" >/dev/null 2>&1 || true; }
+  if docker exec "$PG_CONTAINER" createdb -U "$PG_USER" "$TMP_DB" >/dev/null 2>&1 &&
+     gzip -dc "$PLAIN_FILE" | docker exec -i "$PG_CONTAINER" pg_restore -U "$PG_USER" -d "$TMP_DB" \
+       --no-owner --no-privileges --exit-on-error >/dev/null 2>&1; then
+    # --exit-on-error above is not decoration: without it a partially restored
+    # dump scans clean simply because fewer tables exist, and a subset passing
+    # reads identically to the whole thing passing.
+    DLP_TABLES="$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$TMP_DB" -tAc \
+      "select count(*) from information_schema.tables where table_schema='public' and table_type='BASE TABLE'" 2>/dev/null || echo 0)"
+    if [[ "${DLP_TABLES:-0}" -lt "${DLP_MIN_TABLES:-100}" ]]; then
+      DLP_VERDICT="unusable"
+      log "[WARN] restored only $DLP_TABLES tables (< ${DLP_MIN_TABLES:-100}) — refusing to treat a partial restore as a clean scan"
+    else
+      # OMNISIGHT_DATABASE_URL is UNSET for this call on purpose. This lane's
+      # EnvironmentFile defines it as ...@127.0.0.1, and compose ${} resolves
+      # from the process environment BEFORE the project .env -- so inheriting it
+      # would tell the container to reach the database at itself, failing every
+      # night under the message "DLP scan failed". Lane A only works because its
+      # env file carries nothing but the passphrase.
+      if env -u OMNISIGHT_DATABASE_URL docker compose -f "$PROD_REPO/docker-compose.prod.yml" \
+            run --rm --no-deps \
+            --volume "$SCANNER:/app/scripts/backup_dlp_scan.py:ro" \
+            --volume "$REVIEWED:/tmp/omnisight-dlp-reviewed-bodies.txt:ro" \
+            --env "OMNISIGHT_DLP_REVIEWED_BODIES=/tmp/omnisight-dlp-reviewed-bodies.txt" \
+            --entrypoint python3 backend-a \
+            /app/scripts/backup_dlp_scan.py --postgres-tmp-db "$TMP_DB" >/dev/null 2>&1; then
+        DLP_VERDICT="pass"
+      else
+        DLP_VERDICT="blocked"
+      fi
+    fi
+  else
+    DLP_VERDICT="unusable"
+  fi
+  _drop_tmp
+else
+  # Scanner unavailability is NOT a content verdict and must not be reported as
+  # one. Lane A dies here; copying that would stop off-site upload during
+  # exactly the incident class where an off-site copy matters most.
+  DLP_VERDICT="unusable"
+  log "[WARN] backend-a not running — cannot scan; upload will be withheld, artefact kept locally"
+fi
+log "DLP verdict: $DLP_VERDICT (tables=$DLP_TABLES)"
 
 # OP-2731 F1. This lane is the ONLY one whose artefact leaves the host, and it
 # shipped with --sse AES256 alone: server-side encryption, transparent to any
@@ -131,11 +197,39 @@ s3cp() {  # $1 = local file, $2 = s3 key
     "$AWSCLI_IMAGE" s3 cp "/data/$(basename "$1")" "s3://$S3_BUCKET/$2" --sse AES256
 }
 
+# THE GATE. Everything above ran regardless of verdict; only egress is
+# conditional. A withheld upload exits non-zero so OnFailure= fires, and the
+# encrypted artefact stays on disk -- cohort-atomic pruning will not remove it,
+# because its .uploaded marker is never written.
+if [[ "$DLP_VERDICT" != "pass" ]]; then
+  log "[FAIL] upload WITHHELD: DLP verdict '$DLP_VERDICT'."
+  log "       The encrypted artefact is retained locally at $DUMP_FILE."
+  log "       'blocked' = a content finding; 'unusable' = the scanner could not"
+  log "       run, which is NOT a content verdict and must not be read as one."
+  exit 1
+fi
+
+# The attestation is what "upload-eligible" actually means. An exit code is not
+# a durable record, so it binds the things a later reader would need to check:
+# the digest of the exact bytes uploaded, the scanner and allowlist that judged
+# them, and how much of the database was actually restored to be judged.
+ATTEST_FILE="${DUMP_FILE}.attestation.json"
+printf '{"artefact":"%s","sha256":"%s","verdict":"%s","restored_tables":%s,"scanner_sha256":"%s","allowlist_sha256":"%s","scanned_at":"%s"}\n' \
+  "$(basename "$DUMP_FILE")" \
+  "$(cut -d' ' -f1 < "$SHA_FILE")" \
+  "$DLP_VERDICT" "${DLP_TABLES:-0}" \
+  "$(sha256sum "$SCANNER" | cut -d' ' -f1)" \
+  "$(sha256sum "$REVIEWED" | cut -d' ' -f1)" \
+  "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$ATTEST_FILE"
+chmod 600 "$ATTEST_FILE"
+
 s3cp "$DUMP_FILE" "$S3_KEY" || die "S3 upload failed"
 
 # The sidecar is not optional. It used to be WARN-only, which left objects
 # off-site with no way to verify them AND did not trip OnFailure=. A payload
 # without its digest is not a restorable cohort.
+s3cp "$ATTEST_FILE" "${S3_KEY}.attestation.json" || die "attestation upload failed — \
+the payload would be off-site with no record of what judged it"
 s3cp "$SHA_FILE" "${S3_KEY}.sha256" || die "SHA sidecar upload failed — the payload \
 is off-site without a verifiable digest; treating the whole cohort as failed"
 
@@ -163,7 +257,8 @@ while IFS= read -r mark; do
   cts="${mark##*/.uploaded-}"
   if [[ $(find "$mark" -mtime "+$RETENTION_DAYS" -print 2>/dev/null) ]]; then
     rm -f "$BACKUP_DIR/${LABEL}-${cts}.dump.gz.gpg" \
-          "$BACKUP_DIR/${LABEL}-${cts}.dump.gz.gpg.sha256" "$mark" \
+          "$BACKUP_DIR/${LABEL}-${cts}.dump.gz.gpg.sha256" \
+          "$BACKUP_DIR/${LABEL}-${cts}.dump.gz.gpg.attestation.json" "$mark" \
       && log "  pruned cohort $cts"
   fi
 done < <(find "$BACKUP_DIR" -maxdepth 1 -name '.uploaded-*' 2>/dev/null)
