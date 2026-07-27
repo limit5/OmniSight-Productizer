@@ -1,0 +1,14 @@
+[Unit]
+Description=Escrow the prod KEK to an off-host-only recipient, then verify (OP-2760)
+Documentation=https://soraapp.atlassian.net/browse/OP-2760
+OnFailure=omnisight-alert@%n.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-kek-escrow.sh
+# The routine check runs in the SAME unit so "escrow silently stopped" and
+# "escrow ran but is addressed to a key nobody holds" both surface as a unit
+# failure rather than needing a second thing to be watched.
+ExecStart=/home/user/.local/bin/omnisight-kek-escrow-check.sh
+StandardOutput=append:/home/user/work/sora/logs/backup/kek-escrow.log
+StandardError=append:/home/user/work/sora/logs/backup/kek-escrow.log
