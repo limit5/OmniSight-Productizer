@@ -124,6 +124,35 @@ for ARTEFACT in "${TARGETS[@]}"; do
   [[ "$TABLES" -ge "$MIN_TABLES" ]] || { log "    [FAIL] only $TABLES tables (< $MIN_TABLES)"; OK=0; }
   [[ -n "$HEAD" ]] || { log "    [FAIL] no alembic_version row"; OK=0; }
   [[ "$AUDIT" -gt 0 ]] || { log "    [FAIL] audit_log empty"; OK=0; }
+
+  # OP-2760: none of the assertions above touches an ENCRYPTED column, so this
+  # drill reported green for months against artefacts whose every credential was
+  # permanently unreadable -- the KEK lives on a docker volume no lane captured.
+  #
+  # This host cannot prove decryptability itself: it holds only the public half
+  # of the escrow key, deliberately (see docs/operations/kek-escrow.md). So the
+  # routine assertion is that an escrow artefact EXISTS, is recent, and is
+  # addressed to the recipient we expect. That catches the realistic silent
+  # failure -- escrow quietly stopping -- and is honest about its limit.
+  #
+  # It is NOT proof of recoverability. That needs the off-host private key and
+  # is an operator rehearsal. A drill that borrowed the live key to "prove" a
+  # restore would pass every night while measuring the wrong system, since the
+  # disaster being modelled is one where this host is gone.
+  if [[ -x "$HOME/.local/bin/omnisight-kek-escrow-check.sh" ]]; then
+    if "$HOME/.local/bin/omnisight-kek-escrow-check.sh" >/dev/null 2>&1; then
+      log "    KEK escrow present + addressed correctly (routine; NOT proof of recoverability)"
+    else
+      log "    [FAIL] KEK escrow missing/stale/misaddressed — a restore from this artefact"
+      log "           would yield UNREADABLE credentials (OP-2760)"
+      OK=0
+    fi
+  else
+    log "    [FAIL] omnisight-kek-escrow-check.sh not installed — cannot assert the"
+    log "           restored credentials would be decryptable (OP-2760)"
+    OK=0
+  fi
+
   [[ "$OK" -eq 1 ]] && log "    RESTORE VERIFIED" || FAILURES=$((FAILURES+1))
 
   docker exec "$PG_CONTAINER" dropdb -U "$PG_USER" --if-exists "$TMPDB" >/dev/null 2>&1 || true
