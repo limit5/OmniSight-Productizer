@@ -135,7 +135,18 @@ DIGEST_REVIEWED_COLUMNS: set[tuple[str, str]] = {
 # on a reviewed body: a human can miss an `sk-ant-` in a 264 KB note, a regex cannot.
 # This bounds the residual risk of the design, which is reviewer error.
 DIGEST_RELEASABLE_LABELS: frozenset[str] = frozenset(
-    {"pg_internal", "ai_internal", "database_url"}
+    # OP-2730 adds url_userinfo. Without it, widening secret_filter to see
+    # credentials outside the DB scheme list would have blocked the nightly
+    # encrypted backup on this column the moment it landed -- including on
+    # bodies a human had ALREADY reviewed, because a reviewed digest is only
+    # honoured for labels in this set. Measured before the change: 6 rows carry
+    # credential-shaped URIs, 2 of them already reviewed.
+    #
+    # Releasable-by-digest is not the same as harmless: it means a human looked
+    # at this exact body and accepted it. For these rows that review is on
+    # record in OP-2730 -- every credential in them was triaged against its real
+    # endpoint and found dead.
+    {"pg_internal", "ai_internal", "database_url", "url_userinfo"}
 )
 
 # The allowlist lives OUTSIDE the release artefact on purpose: prod runs from a

@@ -84,6 +84,34 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         ),
         "[REDACTED:database_url]",
     ),
+    # Credentials in the userinfo position of ANY URI scheme (OP-2730).
+    #
+    # The database_url rule above is scheme-locked, so it never saw the forms
+    # that actually turned up in the corpus: `https://oauth2:<tok>@gitlab`,
+    # `http://oauth2:<tok>@gitlab` (plain HTTP), `https://USER:<tok>@github.com`,
+    # `turn://user:<pw>@host`. A push token in a git remote is every bit as
+    # live as a database password; the scheme it rides on is irrelevant.
+    #
+    # MUST stay AFTER database_url: redact() applies patterns sequentially, so
+    # DB URLs are replaced first and keep their more specific label. This rule
+    # then sees already-redacted text and cannot re-match them.
+    #
+    # Placeholders are deliberately NOT flagged. Documentation and runbooks are
+    # full of `scheme://user:<token>@host`, and a gate that fires on those is a
+    # gate people learn to route around -- which is worse than the narrow rule
+    # it replaced. The evasion this "allows" is writing a real secret wrapped in
+    # angle brackets, which is not a thing that happens.
+    (
+        "url_userinfo",
+        re.compile(
+            r"\b[a-z][a-z0-9+.\-]*://"
+            r"[^:\s/@]+:"
+            r"(?!<[^@\s]*>@)(?!TOKEN@)(?!PASSWORD@)(?!REDACTED@)"
+            r"[^@\s]+@[^\s)'\"`]+",
+            re.I,
+        ),
+        "[REDACTED:url_userinfo]",
+    ),
     # Generic Bearer (any header value > 20 chars after "Bearer ")
     ("bearer", re.compile(r"\bBearer\s+[A-Za-z0-9_.\-]{20,}", re.I), "Bearer [REDACTED:token]"),
     # JWT (3 base64 segments separated by dots, starting with eyJ)
