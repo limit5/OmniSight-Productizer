@@ -40,8 +40,10 @@ PRUNE=30
 # live PG. --sqlite forces the legacy SQLite path (dev / single-file installs).
 SQLITE_MODE=false
 
+REQUIRE_EXCLUSIVE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --require-exclusive) REQUIRE_EXCLUSIVE=true; shift;;
     --label) LABEL="$2"; shift 2;;
     --prune) PRUNE="$2"; shift 2;;
     --sqlite) SQLITE_MODE=true; shift;;
@@ -100,7 +102,7 @@ upload_offsite_immutable() {
   local retain_days="${OMNISIGHT_BACKUP_S3_RETAIN_DAYS:-30}"
   local lock_mode="${OMNISIGHT_BACKUP_S3_LOCK_MODE:-GOVERNANCE}"
   if [[ "$lock_mode" == "COMPLIANCE" ]]; then
-    log "[WARN] COMPLIANCE object-lock requested for ${retain_days}d — this is \
+    warn "COMPLIANCE object-lock requested for ${retain_days}d — this is \
 IRREVERSIBLE and unbypassable by anyone including root. Ensure it does not exceed \
 the bucket lifecycle, or objects become permanently undeletable."
   fi
@@ -204,6 +206,43 @@ else
   warn "no reviewed-body allowlist at $DLP_REVIEWED_BODIES — content-reviewed columns will block (fail-closed)"
 fi
 
+# ── OP-2732: advisory exclusion, deliberately NOT the guard the ticket asked for
+# The ticket wanted a hard guard against "a second concurrent run while the
+# 02:17 timer instance is active". That scenario cannot happen through systemd:
+# the unit is Type=oneshot, and a start issued while it is activating is MERGED
+# into the running job -- ExecStart never runs twice.
+#
+# What a hard guard WOULD hit is deploy-prod.sh, which calls this script
+# directly, outside systemd, as its pre-deploy backup. A deploy overlapping the
+# backup window would have that backup refused, aborting the deploy -- and the
+# documented escape hatch is --skip-backup, i.e. deploy with NO backup. A change
+# made for data safety would have opened a path to deploying without any.
+#
+# So: flock on a dedicated fd. Kernel state, no on-disk residue, nothing to
+# reap -- unlike a pidfile or mkdir lock, which survive a kill and then block
+# every future run silently. Measured on this host: a mkdir lock whose holder
+# is SIGKILLed stays held forever; the flock is released.
+#
+# Measured caveat, stated because it is real: flock is released when the fd is
+# closed, and CHILDREN INHERIT IT. Killing only the parent while a child still
+# holds fd 9 leaves the lock held. That is safe on the systemd path -- the unit
+# is KillMode=control-group with FinalKillSignal=9, so the whole cgroup dies
+# together -- but a hand-run killed with a bare `kill -9 <pid>` can leave it
+# stuck until the stray child exits.
+#
+# Which is exactly why this is NON-FATAL by default: a stuck lock then costs a
+# warning, not a backup. --require-exclusive makes it fatal and is available for
+# a caller that genuinely needs mutual exclusion; nothing passes it today, and
+# deploy-prod.sh must never pass it (see above).
+LOCK_FILE="${XDG_RUNTIME_DIR:-/tmp}/omnisight-prod-backup.lock"
+exec 9>"$LOCK_FILE" || true
+if ! flock -n 9 2>/dev/null; then
+  if [[ "$REQUIRE_EXCLUSIVE" == true ]]; then
+    die "another backup holds $LOCK_FILE and --require-exclusive was given"
+  fi
+  warn "another backup appears to be running ($LOCK_FILE); proceeding anyway"
+fi
+
 COMPOSE_FILE="$REPO/docker-compose.prod.yml"
 PG_CONTAINER="${OMNISIGHT_PG_CONTAINER:-omnisight-pg-primary}"
 
@@ -214,6 +253,50 @@ PG_CONTAINER="${OMNISIGHT_PG_CONTAINER:-omnisight-pg-primary}"
 # is MVCC-consistent. The mandatory DLP scan runs against a THROWAWAY DB
 # restored from the dump (proving the very artifact we encrypt is clean), via
 # backend-a (psycopg2 + db_ha network); the temp DB is always dropped.
+# ── OP-2732: one cleanup handler, armed before anything can exist ────────────
+# The old shape armed a trap only AFTER the plaintext was written, and dropped
+# only the temp DB -- so a failure between creation and encryption orphaned a
+# full PLAINTEXT production dump. Worse, `> "$PLAIN"` creates the file before
+# pg_dump even runs, so `|| die "pg_dump failed"` left a partial plaintext with
+# no trap armed at all.
+#
+# Both variables are initialised above the branch, so the PG path and the legacy
+# SQLite path (which had NO trap whatsoever) are covered by construction and
+# there is no creation-to-arming window left to reason about.
+#
+# EXIT only, deliberately. bash already runs an EXIT trap on SIGTERM, and the
+# unit's timeout path is SIGTERM + 90s grace before SIGKILL, so EXIT covers it.
+# Adding INT/TERM to a handler that does not itself exit makes the script RESUME
+# after its own cleanup and run the handler twice -- and a signal arriving after
+# the shred would exit 0 on a terminated run, suppressing the OnFailure alert
+# this lane exists to have. SIGKILL is unfixable in userspace either way.
+#
+# Never `trap - EXIT`: each variable is nulled as its resource is destroyed, so
+# the handler stays armed through the gpg stage and degrades to a no-op.
+PLAIN=""
+TMP_DB=""
+_cleanup() {
+  local rc=$?
+  if [[ -n "$TMP_DB" ]]; then
+    # Name-SHAPE assertion, never a pattern sweep: a LIKE 'omnisight%' orphan
+    # sweep would match the live production database.
+    if [[ "$TMP_DB" =~ ^omnisight_backup_dlp_[0-9] ]]; then
+      # Killing `docker exec` does not signal the process inside the container,
+      # so a pg_restore may still hold the temp DB and dropdb would fail with
+      # "being accessed by other users" -- silently, behind `|| true`.
+      docker exec "$PG_CONTAINER" psql -U "${PG_USER:-omnisight}" -d postgres -tAc \
+        "select pg_terminate_backend(pid) from pg_stat_activity where datname='$TMP_DB'" >/dev/null 2>&1 || true
+      docker exec "$PG_CONTAINER" dropdb -U "${PG_USER:-omnisight}" --if-exists "$TMP_DB" >/dev/null 2>&1 || true
+    fi
+  fi
+  if [[ -n "$PLAIN" && -e "$PLAIN" ]]; then
+    shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
+  fi
+  rm -f "/tmp/gpg-err.$$" 2>/dev/null || true
+  return $rc
+}
+trap _cleanup EXIT
+
 if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
   ok "PG mode: pg_dump live PostgreSQL via $PG_CONTAINER"
   docker compose -f "$COMPOSE_FILE" ps --services --filter status=running 2>/dev/null | grep -qx backend-a \
@@ -225,10 +308,16 @@ if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>
   ( umask 077; docker exec "$PG_CONTAINER" pg_dump -U "$PG_USER" -d "$PG_DB" \
       --format=custom --no-owner --no-privileges > "$PLAIN" ) || die "pg_dump failed"
   chmod 600 "$PLAIN"
+  # A post-write integrity assertion INSTEAD of a free-space preflight. The
+  # database is ~45 MB against 231 GB free, so any preflight threshold sits
+  # orders of magnitude below the noise floor, and the disk-floor check already
+  # alarms at 85/92% every 15 minutes. A preflight would only add a third way to
+  # REFUSE a backup that would have succeeded. This cannot: it catches ENOSPC
+  # truncation and every other corruption mode, on the bytes actually written.
+  [[ -s "$PLAIN" ]] || die "pg_dump produced an empty file"
+  head -c 5 "$PLAIN" | grep -q PGDMP || die "dump lacks the PGDMP header — truncated or corrupt"
   # Restore into a throwaway DB inside pg-primary, scan it, always drop it.
   TMP_DB="omnisight_backup_dlp_${TS}_$$"
-  _cleanup_tmp_db() { docker exec "$PG_CONTAINER" dropdb -U "$PG_USER" --if-exists "$TMP_DB" >/dev/null 2>&1 || true; }
-  trap _cleanup_tmp_db EXIT
   docker exec "$PG_CONTAINER" createdb -U "$PG_USER" "$TMP_DB" || die "DLP temp DB create failed"
   docker exec -i "$PG_CONTAINER" pg_restore -U "$PG_USER" -d "$TMP_DB" \
       --no-owner --no-privileges < "$PLAIN" || die "DLP temp DB restore failed"
@@ -249,11 +338,10 @@ if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>
         ${DLP_REVIEWED_MOUNT[@]+"${DLP_REVIEWED_MOUNT[@]}"} \
         --entrypoint python3 backend-a \
         /app/scripts/backup_dlp_scan.py --postgres-tmp-db "$TMP_DB"; then
-    _cleanup_tmp_db; trap - EXIT
-    shred -u "$PLAIN" 2>/dev/null || rm -f "$PLAIN"
+    _cleanup; TMP_DB=""; PLAIN=""
     die "backup DLP scan failed; plaintext pg_dump shredded"
   fi
-  _cleanup_tmp_db; trap - EXIT
+  _cleanup; TMP_DB=""
   ok "backup DLP scan passed (PG; scanned a restored temp copy of the dump)"
 else
   # ── Legacy SQLite path: only with explicit --sqlite (dev / single-file). ──
