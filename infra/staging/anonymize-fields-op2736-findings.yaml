@@ -1,0 +1,68 @@
+# OP-2736 findings — reproduced 2026-07-28 against a LIVE prod --schema-only dump.
+#
+# The guard was never wrong and the anonymiser was never broken. The run simply
+# never reached them: a container-name drift failed the prereq 75/75 times, so
+# the prod->staging PII-anonymisation contract has never once executed.
+#
+# 36 uncovered columns — exactly the figure filed on 2026-07-25, reproduced
+# independently rather than inherited.
+#
+# My first pass said 51 and attributed the difference to schema growth. That was
+# wrong: I had failed to parse the already-declared columns (`tables:` is a list
+# of table objects, not a map), so 15 covered columns counted as uncovered. The
+# ticket's number was right and my explanation for disagreeing with it was
+# invented. Recorded because a confident wrong number is worse than no number.
+#
+# Roughly half are FALSE POSITIVES: `.*token.*` matches usage COUNTERS, and
+# `.*password.*` matches users.must_change_password, a boolean flag. They are
+# separated below by SQL TYPE, which is objective — an integer or boolean
+# cannot carry a secret — so the reasoning is auditable rather than a judgement
+# about a column name.
+#
+# ⚠ OPERATOR DECISION, deliberately not taken here: `.*token.*` is over-broad
+# and will re-flag every new usage counter. Narrowing it would stop the guard
+# crying wolf, and a gate that cries wolf is one people learn to wave through.
+# But narrowing a PII pattern is a data-protection decision, not a cleanup.
+
+non_pii_numeric:   # cleared by TYPE, never by name
+  - batch_results.cache_creation_tokens    # integer
+  - batch_results.cache_read_tokens    # integer
+  - batch_results.input_tokens    # integer
+  - batch_results.output_tokens    # integer
+  - billing_usage_events.cache_create_tokens    # integer
+  - billing_usage_events.cache_read_tokens    # integer
+  - billing_usage_events.input_tokens    # integer
+  - billing_usage_events.output_tokens    # integer
+  - chat_session_summaries.token_count    # integer
+  - cost_estimates.cache_creation_tokens_actual    # integer
+  - cost_estimates.cache_read_tokens_actual    # integer
+  - cost_estimates.input_tokens_actual    # integer
+  - cost_estimates.input_tokens_estimated    # integer
+  - cost_estimates.output_tokens_actual    # integer
+  - cost_estimates.output_tokens_estimated    # integer
+  - iq_runs.tokens_used    # integer
+  - projects.llm_budget_tokens    # integer
+  - provider_quota_state.rolling_5h_tokens    # bigint
+  - provider_quota_state.weekly_tokens    # bigint
+  - provider_usage_event.tokens    # bigint
+  - spend_thresholds.token_rate_limit    # integer
+  - token_usage.cache_create_tokens    # integer
+  - token_usage.cache_read_tokens    # integer
+  - token_usage.input_tokens    # integer
+  - token_usage.output_tokens    # integer
+  - token_usage.total_tokens    # integer
+  - users.must_change_password    # integer
+
+# Secret-shaped and still undeclared. Listed rather than silently defaulted:
+# picking a strategy for a credential column is precisely the judgement the
+# guard exists to force a human to make.
+undeclared_secrets:
+  - api_keys.last_used_ip    # text
+  - catalog_subscriptions.auth_secret_ref    # text
+  - dag_plans.claim_token    # text
+  - oauth_tokens.access_token_enc    # text
+  - oauth_tokens.refresh_token_enc    # text
+  - password_history.password_hash    # text
+  - runner_claims.fencing_token    # text
+  - session_revocations.token    # text
+  - tenant_secrets.secret_type    # text
