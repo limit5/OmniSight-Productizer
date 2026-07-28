@@ -253,7 +253,13 @@ def test_backup_prod_db_uploads_immutable_s3_with_encryption() -> None:
     assert "aws s3api put-object" in text
     assert "--server-side-encryption AES256" in text
     assert "--server-side-encryption aws:kms" in text
-    assert "--object-lock-mode COMPLIANCE" in text
+    # OP-2731 F4 made the lock mode a variable defaulting to GOVERNANCE.
+    # COMPLIANCE is unbypassable by ANYONE including the account root, so a
+    # hardcoded 365-day COMPLIANCE upload would have pinned objects as
+    # undeletable for a year against a 30-day bucket lifecycle. The pin now
+    # asserts the variable IS used and that the safe default is what ships.
+    assert '--object-lock-mode "$lock_mode"' in text
+    assert 'lock_mode="${OMNISIGHT_BACKUP_S3_LOCK_MODE:-GOVERNANCE}"' in text
     assert "--object-lock-retain-until-date" in text
     assert "--storage-class \"$storage_class\"" in text
     assert "GLACIER_IR" in text
@@ -494,15 +500,28 @@ def test_review_is_scoped_to_the_reviewed_column(tmp_path, monkeypatch) -> None:
 
 
 def test_driver_suffixed_and_empty_user_dsns_block_when_unreviewed(tmp_path, monkeypatch) -> None:
-    """The round-2 blocker: these fire ONLY the internal-host label, so any design
-    that released that label unconditionally leaked a live credential."""
+    """Was the round-2 blocker: these fired ONLY the internal-host label, so any
+    design that released that label unconditionally leaked a live credential.
+
+    OP-2730 closed both halves of that gap, and this test now pins the FIX
+    rather than the weakness. Keeping the original reasoning visible because it
+    is the reason the labels matter: relying on a host-name coincidence to catch
+    a live password is not a control, it is luck that held.
+
+    - driver-suffixed DSNs (postgresql+asyncpg) were missed because the scheme
+      list was bare-scheme only
+    - EMPTY-user DSNs (redis://:PASSWORD@host) were missed because the userinfo
+      pattern required a non-empty user
+
+    Both are now caught by a real credential label. If either assertion ever
+    reverts to an internal-host label, the gap is back.
+    """
     _use_allowlist(monkeypatch, tmp_path, [_PROSE])
-    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _ASYNCPG) == ["pg_internal"]
-    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _REDIS_EMPTY_USER) == ["ai_internal"]
-    # and the credential is invisible to every other label — the internal-host
-    # label is the ONLY thing standing between it and the backup
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _ASYNCPG) == ["database_url"]
+    assert backup_dlp_scan._classify_cell(REVIEWED_TABLE, REVIEWED_COLUMN, _REDIS_EMPTY_USER) == ["database_url"]
     from backend.security.secret_filter import redact
-    assert redact(_ASYNCPG)[1] == ["pg_internal"]
+    assert redact(_ASYNCPG)[1] == ["database_url"]
+    assert redact(_REDIS_EMPTY_USER)[1] == ["database_url"]
 
 
 def test_allowlist_parser_ignores_comments_and_junk(tmp_path, monkeypatch) -> None:

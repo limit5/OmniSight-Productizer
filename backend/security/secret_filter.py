@@ -78,8 +78,16 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     (
         "database_url",
         re.compile(
-            r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis)://"
-            r"[^:\s/@]+:[^@\s]+@[^\s)'\"]+",
+            # OP-2730 follow-up: accept SQLAlchemy-style driver suffixes
+            # (postgresql+asyncpg, mysql+pymysql, ...). Without this the
+            # generic url_userinfo rule added below swallows them and a DSN
+            # loses its specific label -- caught by
+            # test_driver_suffixed_and_empty_user_dsns_block_when_unreviewed,
+            # which this had regressed.
+            r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb|redis)(?:\+[a-z0-9_]+)?://"
+            # user may be EMPTY: redis://:PASSWORD@host is a real and common form,
+            # and it was previously caught only by a host-name coincidence.
+            r"[^:\s/@]*:[^@\s]+@[^\s)'\"]+",
             re.I,
         ),
         "[REDACTED:database_url]",
@@ -105,7 +113,7 @@ _SECRET_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
         "url_userinfo",
         re.compile(
             r"\b[a-z][a-z0-9+.\-]*://"
-            r"[^:\s/@]+:"
+            r"[^:\s/@]*:"
             r"(?!<[^@\s]*>@)(?!TOKEN@)(?!PASSWORD@)(?!REDACTED@)"
             r"[^@\s]+@[^\s)'\"`]+",
             re.I,
