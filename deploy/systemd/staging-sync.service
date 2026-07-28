@@ -1,3 +1,31 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# RETIRED 2026-07-29 (OP-2737). Do not re-enable without reading this.
+#
+# This lane never once succeeded: 10,093 x staging_sync_failed_revert and 0 x
+# staging_synced since 2026-05-12, firing every 10 minutes and alerting on each.
+#
+# It was NOT simply broken. Its premise does not match how anything here works:
+#
+#   - it triggers on "develop moved", but a deploy needs an IMAGE, and CI builds
+#     one only when CANDIDATE_SHA is set on an api/web pipeline (.gitlab-ci.yml
+#     rules) -- i.e. when a human deliberately cuts a candidate. Measured
+#     2026-07-29: 0 of the last 15 develop tips had an image.
+#   - fixing the other two defects (the bare-hex --image-tag against CI's
+#     sha-<40hex>, and the root-owned /var/lib/omnisight/staging state dir) would
+#     have converted 10,093 confusing failures into 10,093 clean
+#     "image not found" failures. The lane would still never succeed.
+#   - staging is not a continuously-tracking environment. It is brought up
+#     deliberately to test large version bumps, which is also exactly when a
+#     candidate image exists -- so an automatic deploy at that moment would race
+#     the person setting it up rather than help them.
+#
+# Retiring the TRIGGER, not the TOOL: scripts/staging_deploy.sh stays and is the
+# supported way to deploy staging by hand. See
+# docs/operations/staging-deploy-by-hand.md.
+#
+# If staging ever becomes a continuously-tracking environment, the event to
+# subscribe to is "a candidate image was published", never "develop moved".
+# ═══════════════════════════════════════════════════════════════════════════
 ; [OP-973] AUDIT-19c — continuous develop -> staging sync.
 ;
 ; Wraps scripts/sync_staging_to_develop.sh: every tick (see
@@ -59,7 +87,10 @@ Description=OmniSight continuous develop -> staging sync (OP-973)
 Documentation=https://soraapp.atlassian.net/browse/OP-973
 After=network-online.target omnisight-staging-compose.service
 Wants=network-online.target
-OnFailure=staging-gate-alert.service
+# OP-2737: OnFailure removed with retirement. staging-gate-alert.service
+# itself is SHARED (canary, smoke, pg-snapshot, deployment-audit) and is
+# deliberately left in place -- only this lane's reference is dropped.
+# OnFailure=staging-gate-alert.service
 StartLimitIntervalSec=1800
 StartLimitBurst=5
 

@@ -1,3 +1,9 @@
+# RETIRED 2026-07-29 (OP-2737) — see staging-sync.service for the reasoning.
+#
+# Re-enable trap, recorded because it is not obvious: Persistent= is inert here
+# (monotonic timer, no OnCalendar), but OnBootSec=2min on a host that has been
+# up for weeks means enabling this timer IS a deployment, firing almost at once
+# -- onto a staging that is usually mid-test when anyone is looking at it.
 ; [OP-973] AUDIT-19c — 10-minute trigger for staging-sync.service.
 ;
 ; Cadence: every 10 min — deliberately the same as staging-gate-canary.timer
