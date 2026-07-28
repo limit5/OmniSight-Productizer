@@ -1810,6 +1810,26 @@ def _default_cold_start_gateway(
         agent_class=config.jira_agent_class,
         bot_account_ids=config.cold_start_bot_account_ids,
     )
+    # OP-2735 defect 1. The kill switch was read ONLY in run_once(), which is
+    # reached after startup() has already completed — so with ACTING=1 the
+    # 4-phase cold start had already performed real `systemctl --user start`,
+    # real JIRA mention_operator / clear_assignee / remove_label, and re-run
+    # interrupted actions, all before the switch was ever consulted. A control
+    # documented as "observe-only, zero mutation" that mutates on the path to
+    # being read is worse than no control: it is trusted precisely when it is
+    # not in force.
+    #
+    # Consulting it here can only ever make the selection MORE restrictive —
+    # it can turn a live gateway into a shadow one, never the reverse — so it
+    # cannot widen anything. The runtime check in run_once() stays, so the
+    # switch still takes effect mid-flight without a restart; this closes the
+    # startup window it never covered.
+    if acting and _env_flag(ACTING_KILL_ENV):
+        logger.warning(
+            "[pipeline_coordinator] acting kill-switch active at startup; "
+            "cold start uses the SHADOW gateway"
+        )
+        return ShadowColdStartGateway(live)
     return live if acting else ShadowColdStartGateway(live)
 
 

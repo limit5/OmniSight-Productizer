@@ -13,7 +13,12 @@ Description=OmniSight release pipeline coordinator watchdog (OP-1547 / ADR-0021)
 Documentation=https://soraapp.atlassian.net/browse/OP-1547
 Documentation=file:///home/user/sora-bridge/docs/adr/ADR-0021-release-pipeline-coordinator.md
 After=network-online.target pipeline-coordinator.service
-Wants=network-online.target pipeline-coordinator.service
+# OP-2735 defect 4: this listed pipeline-coordinator.service, so
+# `systemctl --user start pipeline-coordinator-watchdog` STARTED THE DAEMON IT
+# SUPERVISES -- there was no way to bring the watchdog up first and observe. A
+# supervisor that boots its own subject is not supervising it. After= is kept
+# for ordering; the coordinator is enabled in its own right.
+Wants=network-online.target
 StartLimitIntervalSec=300
 StartLimitBurst=3
 
@@ -22,10 +27,27 @@ Type=simple
 WorkingDirectory=/home/user/sora-bridge
 Environment=PYTHONPATH=/home/user/sora-bridge
 Environment=PYTHONUNBUFFERED=1
-Environment=OMNISIGHT_COORDINATOR_HEARTBEAT=/home/user/.config/omnisight/coordinator/heartbeat
+# OP-2735 defect 4: three names existed for one thing -- this unit set
+# OMNISIGHT_COORDINATOR_HEARTBEAT, the watchdog module reads
+# ..._HEARTBEAT_PATH, and pipeline_coordinator.py reads NEITHER (it derives
+# <config_dir>/heartbeat). The unit now uses the name the code it runs reads.
+Environment=OMNISIGHT_COORDINATOR_HEARTBEAT_PATH=/home/user/.config/omnisight/coordinator/heartbeat
 Environment=OMNISIGHT_COORDINATOR_WATCHDOG_POLL_SECONDS=30
 Environment=OMNISIGHT_COORDINATOR_WATCHDOG_STALE_SECONDS=90
-ExecStart=/usr/bin/bash -lc 'set -euo pipefail; heartbeat="$${OMNISIGHT_COORDINATOR_HEARTBEAT}"; poll="$${OMNISIGHT_COORDINATOR_WATCHDOG_POLL_SECONDS}"; stale="$${OMNISIGHT_COORDINATOR_WATCHDOG_STALE_SECONDS}"; while true; do now="$$(date +%%s)"; if [ -e "$$heartbeat" ]; then mtime="$$(stat -c %%Y "$$heartbeat" 2>/dev/null || echo 0)"; age="$$((now - mtime))"; else age="$$stale"; fi; if [ "$$age" -ge "$$stale" ]; then echo "coordinator heartbeat stale: path=$$heartbeat age=$$age stale=$$stale; restarting pipeline-coordinator.service"; systemctl --user restart pipeline-coordinator.service; fi; sleep "$$poll"; done'
+# OP-2735 defect 3: this was a one-line `bash -lc` loop under `set -euo
+# pipefail`. When its `systemctl --user restart` returned non-zero under a
+# start-limit -- exactly when the coordinator was in trouble -- the watchdog
+# exited in ~21ms. It also evaluated the heartbeat on its FIRST iteration
+# before any sleep, so starting it against a stale heartbeat fired an immediate
+# restart. backend/agents/pipeline_coordinator_watchdog.py already existed,
+# UNUSED, with a fakeable restart seam, failed-restart escalation, a re-die
+# window and 40 passing tests. Run that instead of a worse inline reimplementation.
+# Interpreter and tree deliberately match pipeline-coordinator.service
+# (/usr/bin/python3 from WorkingDirectory=/home/user/sora-bridge). Pointing the
+# watchdog at a different tree than the daemon it supervises is how you end up
+# supervising code that is not running -- the same "which checkout does this
+# execute" ambiguity that broke the S3 backup lane earlier in this sweep.
+ExecStart=/usr/bin/python3 -m backend.agents.pipeline_coordinator_watchdog
 Restart=on-failure
 RestartSec=15
 TimeoutStartSec=30
