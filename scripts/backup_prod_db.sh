@@ -295,6 +295,16 @@ _cleanup() {
   rm -f "/tmp/gpg-err.$$" 2>/dev/null || true
   return $rc
 }
+# Narrow counterpart to _cleanup for the success path, where the temp DB is
+# finished with but the plaintext is still needed by the gpg stage.
+_drop_tmp_db() {
+  [[ -n "$TMP_DB" ]] || return 0
+  [[ "$TMP_DB" =~ ^omnisight_backup_dlp_[0-9] ]] || return 0
+  docker exec "$PG_CONTAINER" psql -U "${PG_USER:-omnisight}" -d postgres -tAc \
+    "select pg_terminate_backend(pid) from pg_stat_activity where datname='$TMP_DB'" >/dev/null 2>&1 || true
+  docker exec "$PG_CONTAINER" dropdb -U "${PG_USER:-omnisight}" --if-exists "$TMP_DB" >/dev/null 2>&1 || true
+  TMP_DB=""
+}
 trap _cleanup EXIT
 
 if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>&1; then
@@ -338,10 +348,15 @@ if [[ "$SQLITE_MODE" == false ]] && docker inspect "$PG_CONTAINER" >/dev/null 2>
         ${DLP_REVIEWED_MOUNT[@]+"${DLP_REVIEWED_MOUNT[@]}"} \
         --entrypoint python3 backend-a \
         /app/scripts/backup_dlp_scan.py --postgres-tmp-db "$TMP_DB"; then
+    # DLP block: both resources must go, and the handler already does exactly
+    # that. Null afterwards so the EXIT handler degrades to a no-op.
     _cleanup; TMP_DB=""; PLAIN=""
     die "backup DLP scan failed; plaintext pg_dump shredded"
   fi
-  _cleanup; TMP_DB=""
+  # Drop ONLY the temp DB here. Calling the full handler would also shred the
+  # plaintext, which gpg still needs -- that mistake broke this lane on its
+  # first real run and is why this path is narrow and explicit.
+  _drop_tmp_db
   ok "backup DLP scan passed (PG; scanned a restored temp copy of the dump)"
 else
   # ── Legacy SQLite path: only with explicit --sqlite (dev / single-file). ──
