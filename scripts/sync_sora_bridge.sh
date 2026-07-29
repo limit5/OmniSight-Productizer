@@ -214,23 +214,62 @@ cd "$BRIDGE_DIR"
 # ── 2. Skip if working tree is dirty ───────────────────────────────
 # Operator debug edits (live patches, prints, ad-hoc instrumentation)
 # live in the working tree. We MUST NOT clobber them. Skip + warn.
+# OP-2739. This block used to exit 0 unconditionally on a dirty tree, on the
+# reasoning that "a dirty tree is intentional operator state, not a sync
+# failure". That is true for an afternoon of debugging. It is not true after
+# two months: the tree was found 240 commits behind with two stray modified
+# files, and this unit had reported Result=success EVERY DAY throughout, and was
+# listed expected=yes in the deployment-audit manifest.
+#
+# A monitored gate that reports OK while structurally unable to do its job is
+# worse than a red one -- it consumes the attention that would have found the
+# problem. Same defect class as the never-delivering alert path and the
+# never-succeeding timers elsewhere in this sweep.
+#
+# So the skip is kept for the benign case and becomes a FAILURE once the tree
+# has drifted past a bound. The measurement now happens BEFORE the decision,
+# which it could not before: the dirty check ran ahead of the fetch, so the
+# script had no idea how far behind it was when it chose to report success.
+DIRTY=false
 if ! git diff --quiet || ! git diff --cached --quiet; then
-    _log sync_skipped_dirty path "$BRIDGE_DIR"
-    # A dirty tree is intentional operator state, not a sync failure.
-    # Reset consecutive_failures so a long debug session doesn't tip
-    # the script into spurious P0 alerts.
-    _reset_failure
-    _state_write "$CONSECUTIVE_FAILURES" "$RESTARTS" "$LAST_SHA" "$LAST_ALERT_AT"
-    exit 0
+    DIRTY=true
 fi
 
-# ── 3. Fetch ───────────────────────────────────────────────────────
+# Fetch first so drift is knowable. Read-only; safe on a dirty tree.
 if ! git fetch --quiet "$BRIDGE_REMOTE" "$BRIDGE_BRANCH" 2>/tmp/.sync_sora_bridge.fetch.err; then
     _record_failure "fetch_failed" "$(tr -d '\n' </tmp/.sync_sora_bridge.fetch.err | head -c 240)"
     rm -f /tmp/.sync_sora_bridge.fetch.err
     exit 3
 fi
 rm -f /tmp/.sync_sora_bridge.fetch.err
+DRIFT="$(git rev-list --count "HEAD..$BRIDGE_REMOTE/$BRIDGE_BRANCH" 2>/dev/null || echo 0)"
+MAX_DRIFT="${SYNC_SORA_BRIDGE_MAX_DRIFT:-25}"
+
+if [[ "$DIRTY" == true ]]; then
+    if [[ "$DRIFT" -eq 0 ]]; then
+        # Genuinely nothing to do: dirty, but not behind. Benign.
+        _log sync_skipped_dirty path "$BRIDGE_DIR" drift 0
+        _reset_failure
+        _state_write "$CONSECUTIVE_FAILURES" "$RESTARTS" "$LAST_SHA" "$LAST_ALERT_AT"
+        exit 0
+    fi
+    if [[ "$DRIFT" -gt "$MAX_DRIFT" ]]; then
+        # The case that was lying. Daemons execute from this tree.
+        _record_failure "dirty_and_stale" \
+            "dirty worktree AND $DRIFT commits behind $BRIDGE_REMOTE/$BRIDGE_BRANCH (max $MAX_DRIFT); \
+sync has been structurally unable to run. Reconcile the tree -- commit, revert, or move the changes out."
+        exit 4
+    fi
+    # Short debug session: skip, but say how far behind it is rather than
+    # reporting a bare success.
+    _log sync_skipped_dirty path "$BRIDGE_DIR" drift "$DRIFT"
+    _reset_failure
+    _state_write "$CONSECUTIVE_FAILURES" "$RESTARTS" "$LAST_SHA" "$LAST_ALERT_AT"
+    exit 0
+fi
+
+# ── 3. Fetch already done above (OP-2739: drift must be known before the
+#      dirty decision, not after it).
 
 LOCAL_SHA="$(git rev-parse HEAD 2>/dev/null || echo "")"
 REMOTE_SHA="$(git rev-parse "$BRIDGE_REMOTE/$BRIDGE_BRANCH" 2>/dev/null || echo "")"
