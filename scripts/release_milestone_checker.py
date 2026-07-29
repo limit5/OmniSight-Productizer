@@ -542,6 +542,46 @@ def check_latest_status(
             "develop_tip": revision,
         }
         return GateStatus(False, "missing status", evidence)
+    # OP-2738: a canary record stamps the Gerrit revision it was RUN FOR, but
+    # probes whatever image staging is actually pinned to. Those are different
+    # identities, and the record carries both -- `revision` and the served
+    # `bundle_id`/digests. Matching on `revision` alone admits both failure
+    # directions:
+    #
+    #   false-RED   the develop tip is a merge commit while the stamp is the
+    #               merged patchset, so nothing matches and the gate is
+    #               unsatisfiable for a reason nobody can read off the output.
+    #   false-GREEN on a fast-forward the stamped patchset EQUALS the tip, so a
+    #               commit that was never deployed to staging satisfies the gate.
+    #
+    # The false-GREEN is the dangerous one: promote_image_bundle is digest-bound
+    # and would catch it, but auto_promote_develop_to_main.sh is a second
+    # consumer that does not go through that check.
+    #
+    # This is now permanent rather than transient: staging-sync was retired
+    # (OP-2737) because its trigger and its precondition could not both hold, so
+    # staging stays deliberately pinned and will not track develop again.
+    served = str(record.get("bundle_id") or "")
+    if served and revision and revision[:8] not in served:
+        # Say WHY it cannot be satisfied instead of reporting a bare red. An
+        # unexplained red on a gate that can never go green teaches people to
+        # override the gate, which is worse than the gate not existing.
+        evidence = {
+            "gate": gate,
+            "code": "staging_pinned_elsewhere",
+            "develop_tip": revision,
+            "served_bundle_id": served,
+            "backend_digest": record.get("backend_digest"),
+            "detail": (
+                "staging serves a pinned bundle that does not correspond to the "
+                "queried revision, so this gate cannot be satisfied by it. This "
+                "is expected while staging is hand-deployed (OP-2737); deploy "
+                "the candidate to staging and re-run the canary, or treat the "
+                "gate as maintenance. NOT a silent pass."
+            ),
+        }
+        return GateStatus(False, "staging pinned elsewhere", evidence)
+
     status = str(record.get("status") or "").lower()
     if status not in GREEN_STATUSES:
         evidence = {
