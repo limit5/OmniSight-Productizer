@@ -1,0 +1,110 @@
+PRE-REBOOT SNAPSHOT — 2026-08-06T03:37:02Z
+Compare against this after the reboot; anything that does not come back is the finding.
+
+=== running containers (name / status) ===
+ai_cache	Up 7 weeks
+ai_tunnel	Up 7 weeks
+ct-caddy	Up 35 hours (healthy)
+ct-postgres	Up 35 hours (healthy)
+eq-pg	Up 5 weeks
+eq-redis	Up 5 weeks
+omnisight-cognee	Up 7 weeks (healthy)
+omnisight-dev-backend-a-1	Up 5 weeks (healthy)
+omnisight-dev-postgres-1	Up 7 weeks (healthy)
+omnisight-fate-api-blue-1	Up 13 hours
+omnisight-fate-api-green-1	Up 20 hours
+omnisight-fate-caddy-1	Up 3 days
+omnisight-fate-postgres-1	Up 3 days (healthy)
+omnisight-fate-redis-1	Up 3 days (healthy)
+omnisight-fate-web-blue-1	Up 13 hours
+omnisight-fate-web-green-1	Up 20 hours
+omnisight-neo4j	Up 6 weeks
+omnisight-pg-primary	Up 7 weeks (healthy)
+omnisight-pg-standby	Up 7 weeks (healthy)
+omnisight-productizer-backend-a-1	Up 2 weeks (healthy)
+omnisight-productizer-backend-b-1	Up 2 weeks (healthy)
+omnisight-productizer-caddy-1	Up 4 weeks (healthy)
+omnisight-productizer-cloudflared-1	Up 7 weeks
+omnisight-productizer-docker-socket-proxy-1	Up 7 weeks (healthy)
+omnisight-productizer-frontend-1	Up 2 weeks (healthy)
+omnisight-productizer-grafana-1	Up 7 weeks
+omnisight-productizer-omnisight-installer-1	Up 5 weeks (healthy)
+omnisight-productizer-prometheus-1	Up 3 weeks (healthy)
+omnisight-staging-backend-a-1	Up 2 weeks (unhealthy)
+omnisight-staging-backend-b-1	Up 2 weeks (healthy)
+omnisight-staging-caddy-1	Up 2 weeks (healthy)
+omnisight-staging-docker-socket-proxy-1	Up 3 weeks (healthy)
+omnisight-staging-frontend-1	Up 2 weeks (healthy)
+omnisight-staging-postgres-1	Up 3 weeks (healthy)
+omnisight-tcm-cloudflared	Up 4 weeks
+omnisight-tcm-db-1	Up 4 weeks (healthy)
+omnisight-tcm-server-1	Up 13 days (healthy)
+omnisight-tcm-web-1	Up 13 days (healthy)
+pitch-static	Up 7 weeks
+portainer_agent	Up 6 days
+tcm_pool	Up 4 weeks
+u6-g4b-testpg	Up 3 weeks
+
+=== active user units ===
+  at-spi-dbus-bus.service
+  cloudflared-earthquake.service
+  cloudflared-emp.service
+  dbus.service
+  earthquake-backend.service
+  gerrit-jira-bridge.service
+  gitlab-runner-vmnda.service
+  gpg-agent.service
+  neo4j.service
+  omnisight-slo-monitor.service
+  pipeline-coordinator-watchdog.service
+  pipeline-coordinator.service
+  runner-claude@1.service
+  runner-claude@2.service
+  runner-codex@1.service
+  runner-codex@2.service
+  runner-gemini@1.service
+  runner-grok@1.service
+  xdg-desktop-portal.service
+  xdg-document-portal.service
+  xdg-permission-store.service
+
+=== enabled timers and next fire ===
+Thu 2026-08-06 11:37:23 CST            20s Thu 2026-08-06 11:27:22 CST     9min ago runner-supervisor.timer            runner-supervisor.service
+Thu 2026-08-06 11:37:23 CST            20s Thu 2026-08-06 11:27:22 CST     9min ago staging-gate-canary.timer          staging-gate-canary.service
+Thu 2026-08-06 11:37:32 CST            30s Thu 2026-08-06 11:32:32 CST 4min 29s ago gerrit-jira-bridge-watchdog.timer  gerrit-jira-bridge-watchdog.service
+Thu 2026-08-06 11:37:32 CST            30s Thu 2026-08-06 11:32:32 CST 4min 29s ago omnisight-main-sync.timer          omnisight-main-sync.service
+Thu 2026-08-06 11:37:32 CST            30s Thu 2026-08-06 11:32:32 CST 4min 29s ago release-milestone-checker.timer    release-milestone-checker.service
+Thu 2026-08-06 11:37:32 CST            30s Thu 2026-08-06 11:32:32 CST 4min 29s ago sora-bridge-sync.timer             sora-bridge-sync.service
+Thu 2026-08-06 11:37:53 CST            50s Thu 2026-08-06 11:35:52 CST  1min 9s ago conf-gitlab-sync.timer             conf-gitlab-sync.service
+Thu 2026-08-06 11:37:53 CST            50s Thu 2026-08-06 11:35:52 CST  1min 9s ago omnisight-ui-gitlab-sync.timer     omnisight-ui-gitlab-sync.service
+Thu 2026-08-06 11:37:53 CST            50s Thu 2026-08-06 11:35:52 CST  1min 9s ago pos-kiosk-gitlab-sync.timer        pos-kiosk-gitlab-sync.service
+Thu 2026-08-06 11:37:53 CST            50s Thu 2026-08-06 11:35:52 CST  1min 9s ago uvc-gitlab-sync.timer              uvc-gitlab-sync.service
+Thu 2026-08-06 11:46:35 CST           9min Thu 2026-08-06 11:31:35 CST     5min ago omnisight-disk-floor.timer         omnisight-disk-floor.service
+Thu 2026-08-06 11:47:12 CST          10min Thu 2026-08-06 11:36:32 CST      29s ago runner-orphan-reaper.timer         runner-orphan-reaper.service
+Thu 2026-08-06 19:00:32 CST             7h Wed 2026-08-05 19:00:22 CST      16h ago launchpadlib-cache-clean.timer     launchpadlib-cache-clean.service
+Thu 2026-08-06 19:02:33 CST             7h Wed 2026-08-05 19:02:22 CST      16h ago omnisight-docs-build.timer         omnisight-docs-build.service
+Fri 2026-08-07 02:17:00 CST            14h Thu 2026-08-06 02:17:06 CST       9h ago omnisight-prod-backup.timer        omnisight-prod-backup.service
+Fri 2026-08-07 02:40:58 CST            15h Thu 2026-08-06 02:41:45 CST       8h ago omnisight-kek-escrow.timer         omnisight-kek-escrow.service
+Fri 2026-08-07 04:34:08 CST            16h Thu 2026-08-06 04:33:48 CST       7h ago omnisight-dr-drill.timer           omnisight-dr-drill.service
+Fri 2026-08-07 05:18:23 CST            17h Thu 2026-08-06 05:16:49 CST       6h ago omnisight-log-retention.timer      omnisight-log-retention.service
+Fri 2026-08-07 06:10:19 CST            18h Thu 2026-08-06 06:11:53 CST 5h 25min ago omnisight-backup-freshness.timer   omnisight-backup-freshness.service
+Fri 2026-08-07 07:00:00 CST            19h Thu 2026-08-06 07:00:40 CST 4h 36min ago deployment-audit.timer             deployment-audit.service
+Fri 2026-08-07 11:00:00 CST            23h Thu 2026-08-06 11:00:53 CST    36min ago gitlab-cr-monitor.timer            gitlab-cr-monitor.service
+Fri 2026-08-07 11:00:00 CST            23h Thu 2026-08-06 11:00:53 CST    36min ago omnisight-pgdump-local-daily.timer omnisight-pgdump-local-daily.service
+Fri 2026-08-07 11:00:00 CST            23h Thu 2026-08-06 11:00:53 CST    36min ago omnisight-pgdump-s3-daily.timer    omnisight-pgdump-s3-daily.service
+Tue 2026-09-01 16:00:00 CST 3 weeks 5 days Sat 2026-08-01 16:00:28 CST   4 days ago agent-drift-monthly.timer          agent-drift-monthly.service
+
+24 timers listed.
+
+=== failed units BEFORE reboot (expected to persist) ===
+● agent-drift-monthly.service    loaded failed failed OmniSight monthly agent drift report (OP-909)
+● deployment-audit.service       loaded failed failed OmniSight deployment audit baseline (OP-1016)
+● gitlab-cr-monitor.service      loaded failed failed OmniSight GitLab Container Registry daily liveness check (OP-1514)
+● omnisight-dev-compose.service  loaded failed failed OmniSight dev stack (docker compose up -d --wait) — OP-1645
+● omnisight-prod-backup.service  loaded failed failed OmniSight prod Postgres backup (pg_dump + gpg, user-level)
+● sora-bridge-sync.service       loaded failed failed Sync /home/user/sora-bridge with origin/develop (OP-798)
+● uvc-gitlab-sync.service        loaded failed failed Stopgap Gerrit→GitLab mirror for uvc-uac-app
+● xdg-desktop-portal-gtk.service loaded failed failed Portal service (GTK/GNOME implementation)
+
+=== disk ===
+/dev/sdd       1007G  812G  144G  85% /
