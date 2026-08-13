@@ -1,0 +1,11 @@
+# 2026-08-13 incident follow-up: up{backend-a}==0 sat in Prometheus for 7 days
+# with no alert path. This polls Prometheus and routes breaches into the one
+# proven channel (exit 1 -> OnFailure -> JIRA, OP-2728 idempotent issues).
+[Unit]
+Description=OmniSight prod replica up-check (Prometheus -> JIRA alert)
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-replica-up-check.py
+TimeoutStartSec=180
+OnFailure=omnisight-alert@%n.service

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run prod replica up-check every 5 min (10 min after boot)
+
+[Timer]
+# OnBootSec must outlast normal stack convergence (~3-4 min incl image pulls)
+# or every reboot files a false replica-down alert.
+OnBootSec=10min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run container reconcile 5 min after boot, then every 15 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+RandomizedDelaySec=30
+# deliberately NOT Persistent: a missed tick must not fire a catch-up storm;
+# the next periodic tick covers it.
+
+[Install]
+WantedBy=timers.target
