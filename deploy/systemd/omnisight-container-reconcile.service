@@ -1,0 +1,13 @@
+# 2026-08-13 incident follow-up: detect + repair netless-sandbox containers
+# (WSL unclean shutdown -> dockerd libnetwork store loss -> a container starts
+# with zero endpoints and crash-loops forever; restart never rebuilds them).
+# Auto-recreates ONLY allowlisted omnisight compose services; everything else
+# report-only. Exit 1 on any finding => JIRA via the OP-2728 alert channel.
+[Unit]
+Description=OmniSight container reconcile — netless/unhealthy fleet self-heal
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-container-reconcile.py
+TimeoutStartSec=420
+OnFailure=omnisight-alert@%n.service
