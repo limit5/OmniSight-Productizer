@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the public-endpoint probe every 5 min (8 min after boot)
+
+[Timer]
+# boot delay must outlast stack + tunnel convergence to avoid boot false alarms
+OnBootSec=8min
+OnUnitActiveSec=5min
+RandomizedDelaySec=20
+
+[Install]
+WantedBy=timers.target

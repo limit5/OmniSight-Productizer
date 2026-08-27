@@ -19,6 +19,12 @@ Policy (deliberately conservative — "non-destructive supervisor" doctrine):
 Exit 1 whenever ANYTHING was found (even if successfully remediated) so the
 wrapping unit's OnFailure=omnisight-alert@%n.service files/comments the JIRA
 alert (OP-2728 channel) carrying this journal as context. Exit 0 = fleet clean.
+
+v2 (2026-08-27) — two blind spots exposed by the 3-week tunnel outage:
+  exited-but-expected (allowlisted project, restart-policy always/unless-stopped,
+  non-zero exit, not a compose one-off, dead >30min)   -> report-only
+  SYSTEM-scope failed units (the 08-13 sweep only read --user; the failed
+  system unit that owned the tunnel went unseen)        -> report-only
 """
 
 import fcntl
@@ -56,19 +62,23 @@ def docker_ready():
 
 
 def inspect_all():
-    ids = sh(["docker", "ps", "-q"], 30).stdout.split()
+    ids = sh(["docker", "ps", "-aq"], 30).stdout.split()
     if not ids:
         return []
     out = sh(["docker", "inspect"] + ids, 60)
     return json.loads(out.stdout) if out.returncode == 0 else []
 
 
-def started_age_s(c):
+def _age_s(iso):
     try:
-        t = c["State"]["StartedAt"].split(".")[0] + "+00:00"
+        t = iso.split(".")[0] + "+00:00"
         return (datetime.now(timezone.utc) - datetime.fromisoformat(t)).total_seconds()
     except Exception:
         return 0
+
+
+def started_age_s(c):
+    return _age_s(c["State"]["StartedAt"])
 
 
 def recreate(c, name):
@@ -140,6 +150,29 @@ def main():
         elif status == "running" and health == "unhealthy" and started_age_s(c) > UNHEALTHY_GRACE_S:
             findings += 1
             print(f"WARN {name}: unhealthy for >{UNHEALTHY_GRACE_S}s — report-only")
+        elif (
+            status == "exited"
+            and c["State"].get("ExitCode", 0) != 0
+            and c["HostConfig"]["RestartPolicy"].get("Name") in ("unless-stopped", "always")
+            and proj in ALLOW_PROJECTS
+            and lab.get("com.docker.compose.oneoff", "False") != "True"
+            and _age_s(c["State"].get("FinishedAt", "")) > 1800
+        ):
+            # the cloudflared signature: restart-policy says "should be up",
+            # it crashed, and nothing brought it back. Human decides (an
+            # operator `docker stop` also lands here — that's why report-only).
+            findings += 1
+            print(f"WARN {name}: exited({c['State'].get('ExitCode')}) but restart-policy="
+                  f"{c['HostConfig']['RestartPolicy'].get('Name')} (project={proj}) — expected running; report-only")
+
+    # v2: SYSTEM-scope failed units (the user-scope-only sweep missed the
+    # failed system unit that owned the prod tunnel for 3 weeks).
+    SYSTEM_IGNORE = {"dmesg.service"}
+    for line in sh(["systemctl", "--failed", "--no-legend", "--plain"], 20).stdout.splitlines():
+        parts = line.split()
+        if parts and parts[0].endswith((".service", ".timer", ".socket")) and parts[0] not in SYSTEM_IGNORE:
+            findings += 1
+            print(f"WARN system unit FAILED: {parts[0]} — report-only")
 
     if findings == 0:
         print("fleet clean")

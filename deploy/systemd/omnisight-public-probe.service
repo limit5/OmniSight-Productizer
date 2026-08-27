@@ -1,0 +1,11 @@
+# 2026-08-27: the tunnel was down 3 weeks with every local check green.
+# Probe the real public URL through the Cloudflare edge; route breaches
+# into the proven JIRA channel (OP-2728).
+[Unit]
+Description=OmniSight public-endpoint probe (CF edge -> tunnel -> origin)
+
+[Service]
+Type=oneshot
+ExecStart=/home/user/.local/bin/omnisight-public-probe.py
+TimeoutStartSec=240
+OnFailure=omnisight-alert@%n.service

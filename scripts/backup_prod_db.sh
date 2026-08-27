@@ -440,7 +440,10 @@ upload_offsite_immutable "$FINAL"
 # matching our label prefix (both short-lived .db and final .db.gpg).
 KEEP_DIR_COUNT="$( { ls -1t "$BKP_DIR"/${LABEL}-*.db* "$BKP_DIR"/${LABEL}-*.dump* 2>/dev/null || true; } | wc -l )"
 if (( KEEP_DIR_COUNT > PRUNE )); then
-  ls -1t "$BKP_DIR"/${LABEL}-*.db* "$BKP_DIR"/${LABEL}-*.dump* 2>/dev/null | tail -n +$((PRUNE + 1)) | while read -r f; do
+  # Same `|| true` guard as KEEP_DIR_COUNT above: in PG mode the *.db* glob
+  # never matches, ls exits 2, and under `set -Eeuo pipefail` that killed the
+  # whole script the first night the count gate opened (2026-08-27, file #31).
+  { ls -1t "$BKP_DIR"/${LABEL}-*.db* "$BKP_DIR"/${LABEL}-*.dump* 2>/dev/null || true; } | tail -n +$((PRUNE + 1)) | while read -r f; do
     shred -u "$f" 2>/dev/null || rm -f "$f"
   done
   ok "pruned backups older than the newest $PRUNE"

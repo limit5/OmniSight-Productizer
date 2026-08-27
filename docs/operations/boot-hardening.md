@@ -57,3 +57,26 @@ OMNISIGHT_EXPECTED_UP='omnisight-backend=backend-a:8000,ghost:1' \
 - Ports on this host cross WSL-distro boundaries: see
   `docs/sop/lessons/L-OP-2768-wsl-shared-netns-port-owner.md` before hunting a
   mystery listener.
+
+## Fifth piece — public-endpoint probe + reconciler v2 (OP-2770, 2026-08-27)
+
+Added after the prod cloudflared tunnel sat dead for **three weeks**
+(`ai.sora-dev.app` → CF 530 since 08-06) while every local check stayed green:
+the tunnel's owner was the *system-scope* `omnisight-compose-prod.service`
+(OP-1717, `--profile tunnel`), which failed at the 08-13 boot — and the 08-13
+sweep only read `systemctl --user --failed`.
+
+| piece | files | what it does |
+|---|---|---|
+| public probe | `scripts/omnisight-public-probe.py`, `deploy/systemd/omnisight-public-probe.{service,timer}` | every 5 min GET the real public URL through the CF edge (`OMNISIGHT_PUBLIC_PROBES`, default homepage=200 — `/readyz` is deliberately not public); 3 retries then exit 1 ⇒ JIRA. 530 = tunnel down, 404/502 = origin routing. |
+| reconciler v2 | same `omnisight-container-reconcile.py` | two report-only detectors: **exited-but-expected** (allowlisted project + restart-policy always/unless-stopped + non-zero exit + not compose-oneoff + dead >30 min — the cloudflared signature) and **SYSTEM-scope failed units** (ignore-list: `dmesg.service`). |
+
+Install: copy the probe script + units per the recipe above; the reconciler is
+the same file. Verify: `systemctl --user start omnisight-public-probe` →
+journal shows `ok https://… -> 200`.
+
+Also fixed under OP-2770: `scripts/backup_prod_db.sh` prune pipeline — the
+`*.db*` glob never matches in PG mode, `ls` exits 2, and `set -Eeuo pipefail`
+killed the script the first night the prune gate opened (backup + prune had
+succeeded; only the exit code was poisoned). The pinned prod checkout was
+hand-patched the same day; this repo copy is the durable fix.
